@@ -164,6 +164,9 @@ request. The loader refuses the pair instead.
 This version re-routes to one backend. More than one backend and routing rules are not yet
 available.
 
+A remote MCP server re-routes the same way: attach `[[mcp.<name>.backends]]` to a
+`type = "http"` server. See [Backends in the MCP guide](./mcp.md#backends).
+
 ## Credential sources
 
 | `secret.ref` | Read from | When |

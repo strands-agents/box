@@ -469,8 +469,9 @@ impl RunContract {
                         destinations: remote.destinations,
                         protocol: Protocol::Mcp,
                         secret: remote.secret,
-                        // A remote MCP server is never a re-route target; it declares no backend.
-                        backends: Vec::new(),
+                        // A remote MCP server re-routes to its declared backend, exactly as an
+                        // `[egress.<name>]` entry does; an empty list means no re-route.
+                        backends: remote.backends,
                     },
                 )
             })
@@ -1109,7 +1110,9 @@ impl Record {
         &self,
     ) -> Result<Vec<(DestinationPattern, Vec<EgressRoute>)>, BoxError> {
         let mut groups = Vec::new();
-        for entry in self.egress.values() {
+        // A remote MCP server re-routes through the same backend path as an `[egress.<name>]` entry,
+        // so both maps contribute here.
+        for entry in self.egress.values().chain(self.remote_mcp.values()) {
             let routes = entry.backend_credential_routes()?;
             if routes.is_empty() {
                 continue;
@@ -1132,7 +1135,9 @@ impl Record {
         &self,
     ) -> Result<Vec<(DestinationPattern, BackendTarget)>, BoxError> {
         let mut dials = Vec::new();
-        for entry in self.egress.values() {
+        // Both the operator's egress entries and the remote MCP servers re-route through the same
+        // backend dial path.
+        for entry in self.egress.values().chain(self.remote_mcp.values()) {
             dials.extend(entry.backend_dials()?);
         }
         Ok(dials)
@@ -4129,6 +4134,183 @@ command = ["mcp-server-fetch"]
             routes.iter().any(|route| route.host() == host),
             "egress_routes() must include the remote MCP host: {:?}",
             routes.iter().map(EgressRoute::host).collect::<Vec<_>>()
+        );
+    }
+
+    /// A remote MCP server with a backend re-routes exactly as an egress entry does: the backend
+    /// threads into `remote_mcp`, the gateway still classifies the server on the ORIGINAL host, and
+    /// the dial targets the backend. One declaration proves the whole wiring.
+    #[test]
+    fn a_remote_mcp_backend_reroutes_through_the_egress_path() {
+        let record = record_from_config(
+            "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n\
+             [[mcp.github.backends]]\n\
+             url = \"https://abc.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp\"\n\
+             auth.ref = \"aws://bedrock\"\n\
+             auth.aws.service = \"bedrock-agentcore\"\nauth.aws.region = \"us-east-1\"\n",
+        )
+        .expect("a remote MCP server with an aws:// backend is a valid box");
+
+        // The backend threads into the stored remote_mcp entry, not an empty list.
+        let entry = record
+            .remote_mcp
+            .get("github")
+            .expect("the remote MCP server is stored");
+        assert_eq!(entry.backends.len(), 1, "the declared backend is carried");
+
+        // The gateway still classifies the server on the ORIGINAL host: the re-route changes which
+        // bytes leave the box, not which `mcp:call`/`http:request` policy judges. See
+        // docs/design/decisions.md#a-re-route-is-authorized-on-the-original-destination.
+        assert!(
+            record
+                .mcp_servers()
+                .iter()
+                .any(|(h, name)| h == "api.githubcopilot.com" && name == "github"),
+            "mcp_servers() keys the original host: {:?}",
+            record.mcp_servers()
+        );
+
+        // The dial targets the backend, keyed by the original destination.
+        let dials = record.backend_dials().expect("dials build");
+        assert_eq!(dials.len(), 1, "one dial for the one destination");
+        let (pattern, target) = &dials[0];
+        assert_eq!(
+            *pattern,
+            DestinationPattern::parse("api.githubcopilot.com").expect("pattern"),
+            "the dial is keyed by the original destination, not the backend"
+        );
+        assert_eq!(
+            target.host,
+            "abc.gateway.bedrock-agentcore.us-east-1.amazonaws.com"
+        );
+        assert!(target.is_tls(), "an https backend dials TLS");
+        assert_eq!(target.path_prefix, "/mcp", "the url prefix is kept");
+
+        // The backend's aws:// auth opens one box-owned credential vault, keyed by the original
+        // destination so the gateway finds it after the Host rewrite.
+        let credentials = record.backend_credentials().expect("credentials build");
+        assert_eq!(credentials.len(), 1, "one vault for the one re-route");
+        assert_eq!(
+            credentials[0].0,
+            DestinationPattern::parse("api.githubcopilot.com").expect("pattern")
+        );
+    }
+
+    /// A remote MCP server with no `backends` key keeps the direct behaviour: an empty backend list,
+    /// no dial, and no backend credential vault.
+    #[test]
+    fn a_remote_mcp_server_with_no_backend_does_not_reroute() {
+        let record = record_from_config(
+            "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n",
+        )
+        .expect("a remote MCP server with no backend is a valid box");
+        assert!(
+            record.remote_mcp["github"].backends.is_empty(),
+            "an absent backends key is an empty list"
+        );
+        assert!(
+            record.backend_dials().expect("dials build").is_empty(),
+            "no backend, no dial"
+        );
+        assert!(
+            record
+                .backend_credentials()
+                .expect("credentials build")
+                .is_empty(),
+            "no backend, no vault"
+        );
+        assert_eq!(
+            record.version, RECORD_VERSION,
+            "no re-route keeps the ordinary record version"
+        );
+    }
+
+    /// A remote MCP backend stores the existing `BACKEND_RECORD_VERSION`; no new version is minted.
+    #[test]
+    fn a_remote_mcp_backend_stores_the_backend_record_version() {
+        let record = record_from_config(
+            "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n\
+             [[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp\"\n",
+        )
+        .expect("a secretless remote MCP backend is complete");
+        assert_eq!(record.version, BACKEND_RECORD_VERSION);
+    }
+
+    /// The egress backend validation reaches a remote MCP entry through the fan-out, so every backend
+    /// refusal applies to `[mcp.<name>]` as it does to `[egress.<name>]`. One representative of each
+    /// class, routed through the MCP path, proves the wiring (the classes themselves are pinned in
+    /// `egress.rs`).
+    #[test]
+    fn a_remote_mcp_backend_inherits_every_egress_refusal() {
+        let backend = |body: &str| {
+            format!(
+                "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n{body}"
+            )
+        };
+        for (body, needle, why) in [
+            (
+                "[[mcp.github.backends]]\nurl = \"https://a.example.com/mcp\"\n\
+                 [[mcp.github.backends]]\nurl = \"https://b.example.com/mcp\"\n",
+                "at most one backend",
+                "more than one backend",
+            ),
+            (
+                "[[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp?x=1\"\n",
+                "query or fragment",
+                "a url with a query",
+            ),
+            (
+                "secret.ref = \"aws://profile\"\n\
+                 [[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp\"\n",
+                "must be env://",
+                "a signed entry secret beside a backend",
+            ),
+            (
+                "[[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp\"\n\
+                 auth.ref = \"credsd://prod\"\n",
+                "may not be credsd://",
+                "a credsd backend auth",
+            ),
+            (
+                "[[mcp.github.backends]]\nurl = \"http://gw.example.com/mcp\"\n\
+                 auth.ref = \"env://TOKEN\"\n",
+                "needs an https backend",
+                "a backend auth on a plaintext backend",
+            ),
+            (
+                "[[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp\"\n\
+                 auth.ref = \"aws://bedrock\"\n",
+                "aws.service",
+                "an aws:// backend auth with no explicit aws.service/region",
+            ),
+        ] {
+            let error = record_from_config(&backend(body))
+                .err()
+                .unwrap_or_else(|| panic!("{why} must be refused through the MCP path"));
+            assert!(
+                error.to_string().contains(needle),
+                "{why}: the refusal must name {needle:?}: {error}"
+            );
+        }
+    }
+
+    /// The backend-host-cover rule spans the `[egress.*]` + `[mcp.*]` union: an `[egress.<x>]`
+    /// wildcard that covers an `[mcp.<y>]` backend's re-route host is refused, exactly as an
+    /// egress-vs-egress cover is. The covering wildcard is on a NON-DEFAULT port, so the
+    /// port-sensitive overlap check lets it through and the port-blind cross-collection cover loop —
+    /// the one the re-route's host-alone match depends on — is what must catch it.
+    #[test]
+    fn an_egress_wildcard_covering_an_mcp_backend_host_is_refused() {
+        let error = record_from_config(
+            "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n\
+             [[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp\"\n\
+             [egress.wild]\ndestinations = [\"*.githubcopilot.com:8443\"]\n\
+             secret.ref = \"aws://prod\"\n",
+        )
+        .expect_err("an egress wildcard covering an MCP backend's re-route host is refused");
+        assert!(
+            error.to_string().contains("re-routes to a backend"),
+            "the refusal must name the re-route host-cover rule: {error}"
         );
     }
 }
