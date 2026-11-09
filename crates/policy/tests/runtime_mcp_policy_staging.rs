@@ -3526,3 +3526,354 @@ when { context.input.path == "/workspace/secret" };
          grant past its forbid: {call:?}"
     );
 }
+
+/// The same past-call precondition, once over the tool's own action and once over `mcp:call`.
+const PRECONDITION_IN_TWO_FORMS: &str = r#"
+permit(principal, action == Box::Action::"http:request", resource);
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "alpha" };
+permit(principal, action == alpha::Action::"read", resource);
+@id("tool_form")
+forbid(principal, action == alpha::Action::"read", resource)
+when { context.input.path == "/second" }
+when temporal { formerly within 1h ( alpha::Action::"read"::request{ input.path: "/first" } ) };
+@id("call_form")
+forbid(principal, action == Box::Action::"http:request", resource)
+when temporal {
+    formerly within 1h (
+        Box::Action::"mcp:call"::request{ input.server: "alpha", input.method: "tools/call" }
+    )
+};
+"#;
+
+/// One `tools/call` of alpha's `read`, through both gates Box applies.
+fn call_alpha_read(authority: &PolicyEngine, path: &str) -> Decision {
+    let coarse = Request::McpCall {
+        server: "alpha",
+        method: "tools/call",
+        tool: Some("read"),
+        prompt: None,
+        uri: None,
+        arguments: None,
+    };
+    let (decision, _) = authority.decide(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        &coarse,
+    );
+    if !decision.is_allow() {
+        return decision;
+    }
+    authority.refine_tool_call(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        "alpha",
+        "read",
+        &json!({ "path": path }),
+    )
+}
+
+fn allows(authority: &PolicyEngine, request: &Request<'_>) -> bool {
+    authority
+        .decide(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            request,
+        )
+        .0
+        .is_allow()
+}
+
+fn stored_rules(history: &Path) -> Vec<(String, String)> {
+    DurableTemporalEngine::open(history, 10_000)
+        .expect("the store opens")
+        .list()
+        .into_iter()
+        .map(|entry| (entry.token.0, entry.statement))
+        .collect()
+}
+
+fn stage_alpha(authority: &PolicyEngine) {
+    assert_eq!(
+        authority
+            .stage_mcp_schema("alpha", generated("alpha", "read", "path", "string"))
+            .expect("alpha's schema stages"),
+        SchemaStage::Accepted {
+            authority_ready: true,
+        }
+    );
+}
+
+/// Run one: the precondition is met. Returns the stored rules after the run.
+fn first_run_meets_the_precondition(history: &Path) -> Vec<(String, String)> {
+    let first_run = staged_engine(PRECONDITION_IN_TWO_FORMS, history);
+    stage_alpha(&first_run);
+    assert!(allows(&first_run, &http_request()), "no call yet");
+    assert!(call_alpha_read(&first_run, "/first").is_allow());
+    assert!(
+        !call_alpha_read(&first_run, "/second").is_allow(),
+        "tool form, same run"
+    );
+    assert!(!allows(&first_run, &http_request()), "call form, same run");
+    drop(first_run);
+    stored_rules(history)
+}
+
+#[test]
+fn a_rule_that_names_a_tool_keeps_its_history_across_a_restart() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+    let after_first_run = first_run_meets_the_precondition(&history);
+
+    let second_run = staged_engine(PRECONDITION_IN_TWO_FORMS, &history);
+    assert!(
+        matches!(
+            call_alpha_read(&second_run, "/second"),
+            Decision::Deny {
+                reason: DenyReason::PolicyPending,
+                ..
+            }
+        ),
+        "a call to the tool is held until its schema stages"
+    );
+    assert!(
+        !allows(&second_run, &http_request()),
+        "call form, next run, before discovery"
+    );
+    stage_alpha(&second_run);
+    assert!(!allows(&second_run, &http_request()), "call form, next run");
+    let tool_form = call_alpha_read(&second_run, "/second");
+    drop(second_run);
+    let after_second_run = stored_rules(&history);
+    assert!(
+        !tool_form.is_allow(),
+        "tool form, next run: the rule lost its history ({tool_form:?})\n\
+         after run 1: {after_first_run:?}\n\
+         after run 2: {after_second_run:?}"
+    );
+    assert_eq!(
+        after_first_run, after_second_run,
+        "every stored rule kept its token and its text"
+    );
+}
+
+fn tool_form_is_stored(history: &Path) -> bool {
+    stored_rules(history)
+        .iter()
+        .any(|(_, statement)| statement.contains("tool_form"))
+}
+
+#[test]
+fn a_crash_while_tools_are_listing_keeps_the_history() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+    let after_first_run = first_run_meets_the_precondition(&history);
+
+    drop(staged_engine(PRECONDITION_IN_TWO_FORMS, &history));
+    assert_eq!(
+        stored_rules(&history),
+        after_first_run,
+        "an open that never finishes listing deletes nothing"
+    );
+
+    let third_run = staged_engine(PRECONDITION_IN_TWO_FORMS, &history);
+    stage_alpha(&third_run);
+    assert!(!call_alpha_read(&third_run, "/second").is_allow());
+}
+
+#[test]
+fn a_server_that_never_lists_its_tools_unloads_the_kept_rule() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+    first_run_meets_the_precondition(&history);
+
+    let second_run = staged_engine(PRECONDITION_IN_TWO_FORMS, &history);
+    assert_eq!(
+        second_run
+            .finish_mcp_discovery()
+            .expect("discovery finishes"),
+        vec!["alpha".to_string()],
+        "the server the rule waits for is named"
+    );
+    assert!(
+        !call_alpha_read(&second_run, "/first").is_allow(),
+        "the degraded tool is refused"
+    );
+    drop(second_run);
+    assert!(
+        !tool_form_is_stored(&history),
+        "a rule whose server never listed is unloaded"
+    );
+}
+
+#[test]
+fn a_tool_whose_schema_changed_drops_the_rule_it_no_longer_validates() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+    first_run_meets_the_precondition(&history);
+
+    let second_run = staged_engine(PRECONDITION_IN_TWO_FORMS, &history);
+    drop(second_run);
+    assert!(
+        tool_form_is_stored(&history),
+        "the rule is kept while the tools list"
+    );
+    let second_run = staged_engine(PRECONDITION_IN_TWO_FORMS, &history);
+    assert_eq!(
+        second_run
+            .stage_mcp_schema("alpha", generated("alpha", "read", "path", "integer"))
+            .expect("the changed schema stages"),
+        SchemaStage::Accepted {
+            authority_ready: false,
+        }
+    );
+    drop(second_run);
+    assert!(
+        !tool_form_is_stored(&history),
+        "a rule the real schema does not validate is not kept"
+    );
+}
+
+#[test]
+fn a_reload_while_tools_are_listing_keeps_the_history() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+    first_run_meets_the_precondition(&history);
+
+    let second_run = staged_engine(PRECONDITION_IN_TWO_FORMS, &history);
+    assert!(
+        second_run
+            .reload(&[source("staged.dw", PRECONDITION_IN_TWO_FORMS)])
+            .is_err(),
+        "a reload before the tools list is refused and changes nothing"
+    );
+    stage_alpha(&second_run);
+    assert!(!call_alpha_read(&second_run, "/second").is_allow());
+    second_run
+        .reload(&[source("staged.dw", PRECONDITION_IN_TWO_FORMS)])
+        .expect("a reload after the tools list installs");
+    assert!(!call_alpha_read(&second_run, "/second").is_allow());
+}
+
+#[test]
+fn an_edited_tool_rule_starts_with_empty_history() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+    first_run_meets_the_precondition(&history);
+
+    let edited = PRECONDITION_IN_TWO_FORMS.replace("within 1h", "within 2h");
+    drop(staged_engine(&edited, &history));
+    assert!(
+        !stored_rules(&history)
+            .iter()
+            .any(|(_, statement)| statement.contains("tool_form") && statement.contains("2h")),
+        "an edited rule is not installed early under the previous run's schema"
+    );
+    let second_run = staged_engine(&edited, &history);
+    stage_alpha(&second_run);
+    assert!(
+        call_alpha_read(&second_run, "/second").is_allow(),
+        "an edited rule is a different rule"
+    );
+}
+
+#[test]
+fn a_rule_that_decides_a_box_action_from_tool_history_is_not_kept_from_the_previous_run() {
+    let policy = r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "alpha" };
+permit(principal, action == alpha::Action::"read", resource);
+@id("after_first")
+permit(principal, action == Box::Action::"http:request", resource)
+when temporal { formerly within 1h ( alpha::Action::"read"::request{ input.path: "/first" } ) };
+"#;
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+    let first_run = staged_engine(policy, &history);
+    stage_alpha(&first_run);
+    assert!(call_alpha_read(&first_run, "/first").is_allow());
+    assert!(
+        allows(&first_run, &http_request()),
+        "the permit holds in its own run"
+    );
+    drop(first_run);
+
+    let second_run = staged_engine(policy, &history);
+    assert!(
+        !allows(&second_run, &http_request()),
+        "before discovery, the previous run's schema must not decide a Box action"
+    );
+}
+
+/// One `tools/call` through both gates Box applies, with one `path` argument.
+fn call_tool(authority: &PolicyEngine, server: &str, tool: &str, path: &str) -> Decision {
+    let coarse = Request::McpCall {
+        server,
+        method: "tools/call",
+        tool: Some(tool),
+        prompt: None,
+        uri: None,
+        arguments: None,
+    };
+    let (decision, _) = authority.decide(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        &coarse,
+    );
+    if !decision.is_allow() {
+        return decision;
+    }
+    authority.refine_tool_call(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        server,
+        tool,
+        &json!({ "path": path }),
+    )
+}
+
+#[test]
+fn a_rule_that_names_two_servers_keeps_its_history_while_they_list_one_at_a_time() {
+    let policy = r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "alpha" || context.input.server == "beta" };
+permit(principal, action == alpha::Action::"read", resource);
+permit(principal, action == beta::Action::"verify", resource);
+@id("read_after_verify")
+forbid(principal, action == alpha::Action::"read", resource)
+when { context.input.path == "/second" }
+when temporal { formerly within 1h ( beta::Action::"verify"::request{ input.path: "/x" } ) };
+"#;
+    let stage_both = |authority: &PolicyEngine| {
+        authority
+            .stage_mcp_schema("alpha", generated("alpha", "read", "path", "string"))
+            .expect("alpha's schema stages");
+        assert_eq!(
+            authority
+                .stage_mcp_schema("beta", generated("beta", "verify", "path", "string"))
+                .expect("beta's schema stages"),
+            SchemaStage::Accepted {
+                authority_ready: true,
+            }
+        );
+    };
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+
+    let first_run = staged_engine(policy, &history);
+    stage_both(&first_run);
+    assert!(call_tool(&first_run, "beta", "verify", "/x").is_allow());
+    assert!(
+        !call_tool(&first_run, "alpha", "read", "/second").is_allow(),
+        "same run"
+    );
+    drop(first_run);
+
+    let second_run = staged_engine(policy, &history);
+    stage_both(&second_run);
+    let decision = call_tool(&second_run, "alpha", "read", "/second");
+    assert!(
+        !decision.is_allow(),
+        "next run: the rule lost its history when alpha listed first ({decision:?})"
+    );
+}

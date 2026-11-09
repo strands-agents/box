@@ -329,21 +329,52 @@ impl DogwoodEngine {
         canonical_policies: &[String],
         effective_schema: ActionSchema,
     ) -> Result<(), DurableError> {
+        let installed = effective_schema.source.clone();
+        self.commit_staged_under(canonical_policies, &installed, effective_schema)
+    }
+
+    /// Install a staged bundle under `installed_schema` and serve requests from `request_schema`.
+    pub(crate) fn commit_staged_under(
+        &mut self,
+        canonical_policies: &[String],
+        installed_schema: &str,
+        request_schema: ActionSchema,
+    ) -> Result<(), DurableError> {
         let mut engine = self
             .engine
             .lock()
             .map_err(|_| DurableError::Log("dogwood durable engine lock poisoned".to_string()))?;
-        reconcile_staged_policy_set(
-            &mut engine,
-            canonical_policies,
-            effective_schema.source.as_str(),
-        )?;
+        reconcile_staged_policy_set(&mut engine, canonical_policies, installed_schema)?;
         self.rule_ids = rule_ids(&engine);
         drop(engine);
-        self.request_schema = effective_schema.cedar;
-        self.tool_actions = effective_schema.tool_actions;
-        self.tool_inputs = effective_schema.tool_inputs;
+        self.request_schema = request_schema.cedar;
+        self.tool_actions = request_schema.tool_actions;
+        self.tool_inputs = request_schema.tool_inputs;
         Ok(())
+    }
+
+    /// The canonical statement of each stored rule.
+    pub(crate) fn stored_statements(&self) -> Vec<String> {
+        self.engine
+            .lock()
+            .map(|engine| {
+                engine
+                    .list()
+                    .into_iter()
+                    .map(|entry| entry.statement)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Each MCP server namespace the stored action schema declares beyond `base`, with its fragment.
+    pub(crate) fn stored_mcp_schemas(&self, base: &str) -> Vec<(String, String)> {
+        self.engine
+            .lock()
+            .ok()
+            .and_then(|engine| engine.action_schema())
+            .map(|schema| crate::mcp_schema::mcp_schemas_in(&schema, base))
+            .unwrap_or_default()
     }
 
     /// Open with a fault injector on the durable log, for tests that pause the store.
@@ -666,6 +697,8 @@ pub(crate) struct ExpandedPolicy {
     pub(crate) source: String,
     /// The `(namespace, tool)` pairs the head names, read from the parsed scope.
     pub(crate) head_tools: BTreeSet<(String, String)>,
+    /// Whether the head names actions and every one is a per-tool MCP action.
+    pub(crate) decides_only_tools: bool,
 }
 
 /// Parse and macro-expand a source bundle without an action schema.
@@ -687,6 +720,7 @@ pub(crate) fn expand_policy_source(source: &str) -> Result<Vec<ExpandedPolicy>, 
         .map(|policy| ExpandedPolicy {
             source: policy.expanded_source(),
             head_tools: head_tools(&policy.scope()),
+            decides_only_tools: decides_only_tools(&policy.scope()),
         })
         .collect())
 }
@@ -699,6 +733,20 @@ fn head_tools(scope: &dogwood_language::PolicyScope) -> BTreeSet<(String, String
         dogwood_language::ActionConstraint::In(actions) => actions.as_slice(),
     };
     actions.iter().filter_map(mcp_tool_action).collect()
+}
+
+/// Whether a parsed head names actions and every one is a per-tool MCP action.
+fn decides_only_tools(scope: &dogwood_language::PolicyScope) -> bool {
+    match scope.action() {
+        dogwood_language::ActionConstraint::Any => false,
+        dogwood_language::ActionConstraint::Eq(action) => mcp_tool_action(action).is_some(),
+        dogwood_language::ActionConstraint::In(actions) => {
+            !actions.is_empty()
+                && actions
+                    .iter()
+                    .all(|action| mcp_tool_action(action).is_some())
+        }
+    }
 }
 
 /// Parse and macro-expand a source bundle, and run each check on a read of `context.input` that

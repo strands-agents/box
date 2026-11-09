@@ -138,6 +138,17 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `mcp_schema::tests::a_union_argument_accepts_each_member_and_refuses_a_non_member` and
   `tests/runtime_mcp_policy_staging.rs::a_union_argument_is_decided_by_the_policy` and
   `a_datetime_union_member_is_placed_and_its_rule_cannot_be_bypassed`.
+- A per-tool rule keeps its history across a restart only when its head names per-tool actions
+  alone. `commit_discovering` keeps it installed under the server fragments that
+  `mcp_schema::mcp_schemas_in` recovers from the stored action schema. The tools it decides stay
+  held until their schemas stage. A rule with a Box head that reads per-tool history, and a rule
+  whose server never lists in that run, start fresh. Pinned by
+  `tests/runtime_mcp_policy_staging.rs::a_rule_that_names_a_tool_keeps_its_history_across_a_restart`,
+  `::a_rule_that_names_two_servers_keeps_its_history_while_they_list_one_at_a_time`,
+  `::a_rule_that_decides_a_box_action_from_tool_history_is_not_kept_from_the_previous_run`, and
+  `::a_server_that_never_lists_its_tools_unloads_the_kept_rule`. A namespace that this build's
+  base schema declares is never read as a server, which
+  `mcp_schema::tests::a_previous_build_of_the_box_actions_is_not_read_as_a_server` pins.
 - `body_bytes` is the offer on a `::request` and the delivery on a `::response`.
 - Sum an outbound budget over `http:request::response`, as `tests/policies/egress_byte_budget.dw`
   does. One exchange records one such event, at reply time, with the delivered request bytes and
