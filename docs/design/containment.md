@@ -259,25 +259,69 @@ Linux renders nothing for this switch.
 
 ### Linux root sandbox launches
 
-A Linux sandbox workload keeps the launcher's underlying file identity after Box removes its
-capabilities. If root starts the workload, new files and symbolic links in granted directories can
-therefore belong to root in the surrounding OS. A separate privileged program can follow one of
-those links outside the workload's grants.
+Linux accepts sandbox directory write grants from root and non-root launchers.
+Each write grant requires covering read access and passes the protected-path checks.
+Box clears every capability set before the workload starts and retains the filesystem and syscall restrictions.
+Existing-file write grants permit writes to their named files, and `/tmp` provides private writable storage.
 
-Box refuses sandbox directory write grants when the launcher's real or effective user ID is zero. It
-checks the composed grants during validation and again before entering the namespaces. The
-restriction applies to agent, tool, and local-server workloads. Existing-file writes, read-only
-directories, and private `/tmp` storage remain available. Directory writes require a non-root
-launch, including when an outer container presents the launcher as user ID zero. This check uses the
-launcher's current user namespace; it does not resolve arbitrary mappings into ancestor namespaces.
+A Linux sandbox workload keeps the launcher's underlying file identity after Box removes its capabilities.
+A root launch can create root-owned files and symbolic links inside explicitly granted directories.
+The sandbox grants bound the workload's own filesystem access.
+They do not bound a separate program that later acts on those entries with its own authority.
+[A direct write grant can alter inputs another process reads](decisions.md#a-direct-grant-replaces-the-policy-decision).
 
-Shell and Python filesystem requests run in the trusted process under policy and reach checks. They
-do not use sandbox grants, and permitted file creation retains that process's file identity. This
-startup restriction does not protect later privileged consumers of those files.
+*Figure 1: Root-owned output and filesystem reach. A root workload can write to a directory with
+covering read and write grants. Its sandbox still refuses access to a file that no grant exposes.
+A separate program outside Box uses its own permissions when it reads the output or accesses other files.*
 
-macOS retains root file creation inside granted directories. Seatbelt path denials do not establish
-protection against later privileged consumers of those entries. This Linux change does not test or
-change that macOS behavior.
+![Inside the surrounding operating system, a Linux sandbox contains a root workload with cleared capabilities. A write grant connects the workload to root-owned output in a directory with read and write grants. A separate program outside Box later reads that output. A red dashed path shows refused workload reads and writes to a file outside its grants. A separate path lets the other program access that file only if its own permissions allow it.](images/linux-root-write-grants.png)
+
+[Editable diagram source](images/linux-root-write-grants.drawio).
+
+Shell and Python filesystem requests run in the box's trusted process under policy and reach checks.
+Permitted file creation retains that process's file identity.
+Those checks govern the requested operation, not later actions by a separate program.
+
+macOS also retains root file creation inside granted directories.
+Seatbelt path denials govern the sandboxed process's own access.
+
+### Linux filesystem metadata
+
+After execution, Linux workloads can use `statfs` to identify the filesystem behind an absolute path in their sandbox view.
+The result preserves the filesystem type, block and fragment sizes, maximum filename length, and mount flags.
+Box returns zero for capacity, free space, inode counts, filesystem identifiers, and reserved bytes.
+Programs can select database behavior for network filesystems without reading surrounding-OS storage usage.
+Programs that need actual free-space counts cannot obtain them through this query.
+Relative paths return `EOPNOTSUPP`, and `fstatfs` remains denied.
+
+A seccomp notification sends each query to the existing launcher outside the workload's PID namespace.
+The launcher copies the pathname and pins the requesting process's root through a private procfs descriptor.
+It resolves the copied path with `openat2` and `RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS`, then queries the pinned result.
+Ungranted files remain absent, and read-only binds remain read-only.
+The launcher writes only the sanitized bytes with `process_vm_writev`, which rejects read-only output mappings.
+It never asks the kernel to continue the original `statfs` call.
+
+*Figure 1: A filesystem query during Codex startup. Box writes filtered information into Codex's output buffer. A separate status reply completes the paused call.*
+
+![Codex requests filesystem information from Linux. The kernel pauses the call and notifies the Box launcher. The launcher resolves the path within Codex's filesystem view and queries the resolved filesystem. It writes filtered information into Codex's output buffer: filesystem type, block and fragment sizes, filename limit, and mount flags retain their actual values; capacity, free space, file counts, filesystem identifier, and reserved bytes are zero. A separate success reply tells Linux to complete the call. The original statfs call does not run.](images/statfs-query-flow.png)
+
+The [editable diagram](images/statfs-query-flow.drawio) contains the same query flow.
+
+The launcher retains only `CAP_SYS_PTRACE` within this sandbox's private user namespace.
+Its bounding, inheritable, and ambient capability sets are empty, and it sets `no_new_privs` and becomes non-dumpable.
+The kernel's capability checks prevent this authority from accessing process memory in surrounding-OS user namespaces.
+The namespace reaper and workload retain their existing capability removal.
+Program execution establishes the workload's memory in the sandbox user namespace.
+Direct `Containment::apply` callers that continue without execution can retain memory owned by an ancestor user namespace, so the query can be refused.
+Box preserves this refusal rather than weakening process-memory checks.
+Hosts that prohibit process-memory access can also refuse these queries.
+
+The workload installs the notification filter and transfers its listener before its final syscall restrictions and execution.
+A failed handoff prevents execution.
+After a fatal service error, the launcher exits; the reaper's existing parent-death signal terminates the namespace.
+Request validation rejects canceled notifications, but does not make a numeric process identifier an atomic lifetime reference.
+The kernel's user-namespace checks independently restrict memory access, and both trusted launcher processes are excluded as query targets.
+Filesystem lookup and statistics can block in the kernel, which can delay launcher exit handling.
 
 ### Linux file permission changes
 

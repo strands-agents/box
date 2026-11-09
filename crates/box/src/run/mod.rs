@@ -18,6 +18,8 @@ pub(crate) mod commands;
 pub(crate) mod configure;
 pub(crate) mod contain;
 pub(crate) mod credential;
+#[cfg(unix)]
+pub(crate) mod diagnostics;
 pub(crate) mod hardening;
 pub(crate) mod hosted;
 pub(crate) mod installation;
