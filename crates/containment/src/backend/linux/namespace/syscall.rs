@@ -1243,34 +1243,31 @@ mod tests {
         }
     }
 
-    // Commented out on this branch: this test asserts `WORKLOAD_PERMITTED.len() == 112`, but the
-    // table holds 113 entries. #356 ("sanitize statfs for Codex database startup") added the
-    // `statfs` entry to `WORKLOAD_PERMITTED` and did not bump this count, so the test fails on
-    // `main` itself on aarch64 Linux, independent of this PR (the AWS default-chain change does not
-    // touch containment). It is commented out, rather than fixed in place, because the correct count
-    // belongs to the containment owner; the test author (keorel@) has been notified to restore it
-    // with the right number.
-    //
-    // #[test]
-    // fn permit_filter_has_112_workload_entries_and_one_installer_entry() {
-    //     assert_eq!(WORKLOAD_PERMITTED.len(), 112);
-    //     let rules =
-    //         build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-    //     assert_eq!(rules.len(), 115);
-    //     assert!(rules.contains_key(&libc::SYS_seccomp));
-    //     assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
-    //     assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
-    //     assert!(
-    //         !WORKLOAD_PERMITTED
-    //             .iter()
-    //             .any(|entry| entry.number == libc::SYS_seccomp)
-    //     );
-    //     assert!(
-    //         !WORKLOAD_PERMITTED
-    //             .iter()
-    //             .any(|entry| entry.number == libc::SYS_pkey_mprotect)
-    //     );
-    // }
+    // The counts moved from 112/115 to 113/116 because main's #356 ("sanitize statfs for Codex
+    // database startup") added the `statfs` entry to `WORKLOAD_PERMITTED`. #356 did not update this
+    // test, so it fails on main itself (`left: 113, right: 112`); this branch merely surfaced it by
+    // merging main. The counts are corrected here rather than left broken — the four guards below
+    // (`seccomp`/`pkey_mprotect` absent, `setresuid`/`setresgid` arg-scoped) are still right.
+    #[test]
+    fn permit_filter_has_113_workload_entries_and_one_installer_entry() {
+        assert_eq!(WORKLOAD_PERMITTED.len(), 113);
+        let rules =
+            build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
+        assert_eq!(rules.len(), 116);
+        assert!(rules.contains_key(&libc::SYS_seccomp));
+        assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
+        assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
+        assert!(
+            !WORKLOAD_PERMITTED
+                .iter()
+                .any(|entry| entry.number == libc::SYS_seccomp)
+        );
+        assert!(
+            !WORKLOAD_PERMITTED
+                .iter()
+                .any(|entry| entry.number == libc::SYS_pkey_mprotect)
+        );
+    }
 
     #[test]
     fn file_mode_calls_are_restricted_but_the_creation_mask_is_not() {
