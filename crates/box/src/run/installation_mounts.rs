@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use super::InstalledBinary;
 
 #[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 struct Mount {
     id: Option<u64>,
     filesystem: Vec<u8>,

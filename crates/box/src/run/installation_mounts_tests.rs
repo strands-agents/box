@@ -964,9 +964,17 @@ fn namespace_mounts_keep_their_mount_identity_and_point() {
             "18 17 0:4 {kind}:[4026531840] /run/docker/netns/default rw shared:7 - nsfs nsfs rw\n"
         );
         let mounts = parse(table.as_bytes()).unwrap();
-        assert_eq!(mounts.len(), 1);
-        assert_eq!(mounts[0].id, Some(18));
-        assert_eq!(mounts[0].point, Path::new("/run/docker/netns/default"));
+        assert_eq!(
+            mounts,
+            vec![Mount {
+                id: Some(18),
+                filesystem: b"nsfs".to_vec(),
+                device: b"0:4".to_vec(),
+                namespace_device: Some(libc::makedev(0, 4)),
+                root: format!("{kind}:[4026531840]").into(),
+                point: "/run/docker/netns/default".into(),
+            }]
+        );
     }
 }
 
@@ -986,15 +994,7 @@ fn namespace_mounts_do_not_hide_a_protected_file_alias() {
         &parse(table.as_bytes()).unwrap(),
     )
     .unwrap();
-    assert!(
-        names.contains(&alias),
-        "the protected bind alias is still inventoried"
-    );
-    assert!(
-        !names
-            .iter()
-            .any(|name| name.starts_with("/run/docker/netns"))
-    );
+    assert_eq!(names, vec![fixture.installed.clone(), alias]);
 }
 
 #[test]
