@@ -3,7 +3,7 @@
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
-use std::os::fd::{AsRawFd, FromRawFd};
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::net::UnixStream;
 use std::thread::{self, JoinHandle};
 
@@ -23,13 +23,7 @@ pub(crate) struct Diagnostics {
 
 impl Diagnostics {
     pub(crate) fn capture() -> io::Result<Self> {
-        // SAFETY: fcntl duplicates stderr without transferring its ownership.
-        let saved = unsafe { libc::fcntl(libc::STDERR_FILENO, libc::F_DUPFD_CLOEXEC, 3) };
-        if saved == -1 {
-            return Err(io::Error::last_os_error());
-        }
-        // SAFETY: saved is a new, owned descriptor.
-        let original = unsafe { File::from_raw_fd(saved) };
+        let original = File::from(io::stderr().as_fd().try_clone_to_owned()?);
         // SAFETY: stderr remains open.
         let flags = unsafe { libc::fcntl(libc::STDERR_FILENO, libc::F_GETFD) };
         if flags == -1 {
@@ -39,16 +33,13 @@ impl Diagnostics {
         let reader = thread::Builder::new()
             .name("box-diagnostics".into())
             .spawn(move || drain(reader))?;
-        let mut diagnostics = Self {
+        let diagnostics = Self {
             original,
             flags,
             writer,
             reader: Some(reader),
         };
-        if let Err(error) = replace_stderr(diagnostics.writer.as_raw_fd(), flags) {
-            let _ = diagnostics.finish();
-            return Err(error);
-        }
+        replace_stderr(diagnostics.writer.as_raw_fd(), flags)?;
         Ok(diagnostics)
     }
 
@@ -96,19 +87,12 @@ fn replace_stderr(fd: libc::c_int, flags: libc::c_int) -> io::Result<()> {
 
 fn drain(mut reader: impl Read) -> io::Result<Report> {
     let mut bytes = Vec::new();
-    let mut truncated = false;
-    let mut buffer = [0; 8192];
-    loop {
-        let length = match reader.read(&mut buffer) {
-            Ok(0) => return Ok(Report { bytes, truncated }),
-            Ok(length) => length,
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
-        };
-        let keep = length.min(CAPACITY - bytes.len());
-        bytes.extend_from_slice(&buffer[..keep]);
-        truncated |= keep < length;
-    }
+    reader
+        .by_ref()
+        .take(CAPACITY as u64)
+        .read_to_end(&mut bytes)?;
+    let truncated = io::copy(&mut reader, &mut io::sink())? != 0;
+    Ok(Report { bytes, truncated })
 }
 
 #[cfg(test)]
