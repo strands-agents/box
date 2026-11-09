@@ -12,9 +12,22 @@ use crate::record::config::Record;
 use crate::record::config::filesystem::DirectReach;
 use crate::record::layout::{disk_identity, lies_within, open_without_following};
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod aliases;
+
 #[derive(Debug, Default)]
 pub(crate) struct ConfiguredCommands {
     tools: BTreeMap<String, Arc<ConfiguredCommand>>,
+}
+
+/// Why command protection refuses a mutation.
+#[derive(Debug)]
+pub(crate) enum CommandMutationRefusal {
+    CommandOrAncestor,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    HardLinkAlias,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    IncompleteScan(std::io::Error),
 }
 
 #[derive(Debug)]
@@ -26,6 +39,8 @@ pub(crate) struct ConfiguredCommand {
     opened: File,
     identity: (u64, u64),
     loaded: FileState,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    needs_alias_scan: bool,
 }
 
 /// The link count, owner, group, and mode of a command file.
@@ -70,7 +85,9 @@ impl ConfiguredCommands {
                     return Err(refusal(&table, &path, "must be a regular file"));
                 }
                 let loaded = FileState::of(&metadata);
-                if loaded.links > 1 && writable_by_this_user(&opened, &path, loaded) {
+                let writable_links =
+                    loaded.links > 1 && writable_by_this_user(&opened, &path, loaded);
+                if writable_links && !cfg!(any(target_os = "macos", target_os = "linux")) {
                     return Err(refusal(
                         &table,
                         &path,
@@ -95,6 +112,8 @@ impl ConfiguredCommands {
                     opened,
                     identity: (metadata.dev(), metadata.ino()),
                     loaded,
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
+                    needs_alias_scan: writable_links,
                 };
                 command.verify()?;
                 Ok((label.clone(), Arc::new(command)))
@@ -111,8 +130,23 @@ impl ConfiguredCommands {
         self.tools.get(label)
     }
 
-    pub(crate) fn refuses_mutation(&self, path: &Path) -> bool {
-        self.tools.values().any(|command| command.enclosed_by(path))
+    pub(crate) fn mutation_refusal(&self, path: &Path) -> Option<CommandMutationRefusal> {
+        if self.tools.values().any(|command| command.enclosed_by(path)) {
+            return Some(CommandMutationRefusal::CommandOrAncestor);
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let identities = self.mutable_aliases();
+            if !identities.is_empty() {
+                return match aliases::contains(path, &identities) {
+                    Ok(true) => Some(CommandMutationRefusal::HardLinkAlias),
+                    Ok(false) => None,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => Some(CommandMutationRefusal::IncompleteScan(error)),
+                };
+            }
+        }
+        None
     }
 
     pub(crate) fn validate_reach(&self, table: &str, reach: &DirectReach) -> Result<(), BoxError> {
@@ -139,8 +173,40 @@ impl ConfiguredCommands {
                     .into());
                 }
             }
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            if grant.scope != Scope::File {
+                let identities = self.mutable_aliases();
+                if identities.is_empty() {
+                    continue;
+                }
+                let reason = match aliases::contains(&grant.resolved, &identities) {
+                    Ok(false) => continue,
+                    Ok(true) => "contains a hard link to a configured tool command".to_string(),
+                    Err(error) => {
+                        format!("cannot be inspected for configured command hard links: {error}")
+                    }
+                };
+                return Err(ConfigError::Filesystem {
+                    table: table.to_string(),
+                    entry: grant.authored.clone(),
+                    reason: format!(
+                        "this write grant {reason}. Keep configured tools and their hard links \
+                         outside every process's write grants"
+                    ),
+                }
+                .into());
+            }
         }
         Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn mutable_aliases(&self) -> Vec<(u64, u64)> {
+        self.tools
+            .values()
+            .filter(|command| command.needs_alias_scan)
+            .map(|command| command.identity)
+            .collect()
     }
 }
 
@@ -167,7 +233,12 @@ impl ConfiguredCommand {
             if self.loaded.links == 1 {
                 now.links == 1
             } else {
-                now == self.loaded && !writable_by_this_user(&self.opened, &self.path, now)
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                let protected_by_reach = self.needs_alias_scan;
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                let protected_by_reach = false;
+                now == self.loaded
+                    && (protected_by_reach || !writable_by_this_user(&self.opened, &self.path, now))
             }
         });
         if unchanged_names
@@ -404,6 +475,7 @@ mod tests {
             .expect("unrelated build output stays writable");
     }
 
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     #[test]
     fn configured_commands_refuse_preexisting_hard_links_this_user_can_write() {
         let directory = tempfile::tempdir().expect("directory");
@@ -417,6 +489,55 @@ mod tests {
             error.contains("has 2 hard links, and the user that runs Box may be able to write it"),
             "{error}"
         );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn linked_commands_are_admitted_only_outside_every_writable_tree() {
+        let directory = tempfile::tempdir().expect("directory");
+        let home = directory.path().canonicalize().unwrap();
+        let tools = home.join("tools");
+        let work = home.join("work");
+        let nested = work.join("nested");
+        std::fs::create_dir(&tools).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        let command = tools.join("reader");
+        let alias = tools.join("alias");
+        program(&command);
+        std::fs::hard_link(&command, &alias).unwrap();
+        let commands = ConfiguredCommands::load(&record(&command)).expect("linked commands load");
+        commands
+            .validate_reach("[agent]", &reach(&home, &work))
+            .unwrap();
+        commands.get("reader").unwrap().verify().unwrap();
+        std::fs::rename(&alias, nested.join("alias")).unwrap();
+        for table in ["[agent]", "[tool.builder]", "[mcp.server]"] {
+            let error = commands
+                .validate_reach(table, &reach(&home, &work))
+                .expect_err("a nested alias makes the grant unsafe")
+                .to_string();
+            assert!(error.contains(table), "{error}");
+            assert!(error.contains("contains a hard link"), "{error}");
+        }
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn linked_commands_refuse_metadata_and_link_count_changes_before_launch() {
+        let directory = tempfile::tempdir().expect("directory");
+        let command = directory.path().join("reader");
+        let alias = directory.path().join("alias");
+        program(&command);
+        std::fs::hard_link(&command, &alias).unwrap();
+        let commands = ConfiguredCommands::load(&record(&command)).unwrap();
+        let loaded = commands.get("reader").unwrap();
+        loaded.verify().unwrap();
+        std::fs::set_permissions(&alias, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(loaded.verify().is_err(), "changed mode must refuse");
+        std::fs::set_permissions(&alias, std::fs::Permissions::from_mode(0o755)).unwrap();
+        loaded.verify().unwrap();
+        std::fs::hard_link(&alias, directory.path().join("third")).unwrap();
+        assert!(loaded.verify().is_err(), "changed link count must refuse");
     }
 
     /// A root-owned regular file in a system folder with several names and no group or other write.
@@ -673,6 +794,8 @@ mod tests {
                 routes: vec![path.to_path_buf()],
                 identity: (metadata.dev(), metadata.ino()),
                 loaded: loaded.unwrap_or_else(|| FileState::of(&metadata)),
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                needs_alias_scan: false,
                 opened,
             }
         };
@@ -761,12 +884,19 @@ mod tests {
         std::fs::hard_link(&command, &alias).expect("later hard link");
         for mutation in [&command, &route, &alias, &tools, &routes, &home] {
             assert!(
-                commands.refuses_mutation(mutation),
+                matches!(
+                    commands.mutation_refusal(mutation),
+                    Some(CommandMutationRefusal::CommandOrAncestor)
+                ),
                 "{}",
                 mutation.display()
             );
         }
-        assert!(!commands.refuses_mutation(&tools.join("unrelated-output")));
+        assert!(
+            commands
+                .mutation_refusal(&tools.join("unrelated-output"))
+                .is_none()
+        );
         commands
             .get("reader")
             .unwrap()

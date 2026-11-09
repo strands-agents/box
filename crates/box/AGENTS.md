@@ -866,34 +866,44 @@ the verb would report on one directory the caller already named.
   one a plain probe of the same reported path already records, and the refusal message does not
   change, so it reveals nothing new. Closing it needs one `openat` walk with no following.
 
-- **A configured command with more than one hard link rests on the kernel's write check.**
-  `ConfiguredCommands::load` accepts such a command only when `writable_by_this_user` is false.
-  `may_change` is true when root runs Box, when the real or the effective user owns the file, when
-  a group or other write bit is set, or when the kernel's write check (`faccessat2` on the opened
-  descriptor on Linux, `faccessat` on the path elsewhere) does not refuse. Only `EACCES` is a
-  refusal by itself. On macOS, `EPERM` and `EROFS` are refusals when `may_carry_access_list` is
-  false. XNU asks its MAC policies and then the read-only mount before it checks permissions, so
-  neither answer says anything about the file's permissions. System Integrity Protection answers
-  `EPERM` for `/usr/bin`, and so does any Sandbox profile that Box inherits for a path it denies.
-  With System Integrity Protection off (as on GitHub's macOS runners), `/usr/bin` answers `EROFS`.
-  Then the root, owner, and mode checks and the absence of an access-control list decide. Every
-  other answer counts as writable, and on Linux `EPERM` and `EROFS` do too, as in
-  `inode_may_be_writable` in the Linux containment backend.
-  `ConfiguredCommand::verify` requires the startup link count, owner, group, and mode before each
-  launch, and asks the kernel again. At launch, `ContainmentConfig::require_command_identity`
-  records the link count of a command with several names in its own `command_identities` wire
-  list, and a command with one name keeps `require_file_identity`. `identity_requirements` and
-  `write_protections` keep exactly one name, also when a payload states a link count.
-  Measured on macOS 26.7.1: `/usr/bin/git` and 77 other developer tools are one `root:wheel`
-  file with 78 names on the sealed read-only volume, and `faccessat` answers `EPERM`. Under a
-  `sandbox-exec` profile that denies writes to a folder, `faccessat` answers `EPERM` for a file in
-  it that this user owns and can write. `/usr/bin/id`
-  has 3 names. Measured on Linux: `/usr/bin/perl` has 2 names on Ubuntu 24.04, Debian, and Fedora,
-  and is root-owned. A `uv tool install` on Linux hard-links an operator-owned program from uv's
-  cache, so it stays refused.
-  Rejected: no link rule at all, because a folder write grant over another name of an
-  operator-writable file can change its bytes. Rejected: a read-only-mount test alone, because it
-  misses root-owned programs on a writable Linux root.
+- **A configured command with several names must remain outside workload write reach.**
+  The maintainers approved this premise for macOS and Linux: protect configured commands from
+  workload writes. Writes by unrelated host programs remain outside this boundary.
+  `ConfiguredCommands::load` accepts an operator-writable command with multiple hard links and
+  records that it needs alias scans. `validate_reach` checks every process's write grants,
+  including the agent, tools, and local MCP servers. The command, its symbolic-link routes, and
+  their ancestors cannot overlap those grants. Each writable directory must pass a complete
+  scan that finds no hard-link alias, including in subdirectories excluded by `deny`.
+  The scan retains directory descriptors, does not follow symbolic links, and refuses unreadable
+  entries, observable directory changes, or exhausted inspection limits. It is not an atomic
+  snapshot. Each tree has one 30-second inspection budget across recursion and a 128-level depth
+  limit. The budget replaces an uncalibrated 100,000-entry cutoff that rejected large, fast scans.
+  Thirty seconds matches the default Shell allowance; it is not a guarantee for every filesystem.
+  Time checks cannot interrupt a blocked filesystem call, and per-tree budgets do not bound total
+  startup time. Shell and Monty also scan directories involved in brokered mutations, so a move
+  cannot import a command alias into a writable grant.
+  Native containment prevents the workload from creating an alias from a protected command.
+  Seatbelt requires source write authority for hard links and renames on macOS.
+  Linux permits `linkat` within a writable mount; read-only mounts and separate grant mounts
+  prevent importing a protected source. Standard descriptors supplied by the operator retain
+  their authority. Hosted Shell still refuses hard-link creation, and Monty has no such operation.
+  An operator-owned program hard-linked from a package cache, including a Linux `uv` installation,
+  can now pass admission when no alias lies in workload write reach.
+
+  Commands that `writable_by_this_user` rules out as operator-writable need no alias scan.
+  `may_change` remains conservative about root, file ownership, group or other write bits,
+  access-control lists, and inconclusive kernel write checks. On macOS, `EPERM` and `EROFS`
+  count as refusals only with the ownership, mode, and access-list checks; neither alone proves
+  that other names are safe. On Linux, only `EACCES` is a refusal by itself.
+  `ConfiguredCommand::verify` requires the startup identity, link count, owner, group, and mode
+  before each multi-link command launch. It repeats the kernel write check for a command admitted
+  without an alias scan. `ContainmentConfig::require_command_identity` records the link count
+  in `command_identities`; single-name commands retain `require_file_identity`.
+  Other `identity_requirements` and `write_protections` still require one name.
+  A tool grammar has no additional single-name requirement.
+  Rejected: dropping alias checks, because a writable directory can contain another name for
+  the command. Rejected: a read-only-mount test alone, because it misses root-owned programs on
+  a writable Linux root.
   A forwarding stub, such as macOS `/usr/bin/git`, starts a second program that Box does not pin.
   With the Command Line Tools that program is `root:wheel`. With an Xcode.app that the operator
   extracted, the operator owns it. `command[0]` is the documented scope of the protection.

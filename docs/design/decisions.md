@@ -1381,13 +1381,17 @@ a box state directory created after launch, stay residual risks.
 
 A caller can load authority before the sandbox applies, for example a certificate bundle. It passes
 the opened regular file and its canonical path to one of two configuration methods. Both record the
-device and inode, require the file to have one filesystem name, and revalidate path and identity at
-each backend's last safe point. One method also subtracts writes, for a file that sits below a wider
-writable grant; the other grants no access at all, for a file outside every writable grant.
+device and inode and require one filesystem name. They revalidate the path and identity at each
+backend's last safe point. One method also subtracts writes for a file below a wider writable grant.
+The other grants no access for a file outside every writable grant.
 
 A third method pins a configured tool's program. It records the file's link count and requires the
-same count during revalidation. Box accepts a program with several names only when the user running
-Box cannot write it through any name. A backend may make the file non-executable if it cannot preserve both write subtraction and
+same count during revalidation. Box first rules out workload writes through its other names.
+On macOS and Linux, Box can establish this by scanning every process's declared writable
+directories before the workload starts. The broker and each platform's native boundary prevent
+later alias imports.
+
+A backend may make the file non-executable if it cannot preserve both write subtraction and
 write-xor-execute. Callers must not rely on write protection to preserve an execute grant.
 
 <a id="the-deny-only-floors-run-beneath-every-backend"></a>
