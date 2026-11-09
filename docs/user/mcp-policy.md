@@ -189,6 +189,14 @@ when temporal {
 `::request` counts every attempt, including a refused one. `::response` counts calls that reached
 the server.
 
+The count carries over when the box restarts. That's also true of a rule written on a tool's own
+action, such as `github::Action::"create_issue"`, as long as the rule only decides tool calls and
+you didn't edit it. Box keeps that rule while the server lists its tools again. It starts with an
+empty count if you edit it, if the server's new tool list no longer fits it, or if the server
+doesn't list its tools in that run. A rule that decides a Box action, such as `http:request`, and
+counts a tool's calls in `when temporal` starts with an empty count at each run. Write that rule
+over `mcp:call` and its `tool` field, as above, to keep its count.
+
 ## Result
 
 Restart the box. The decision log records each decision with the rule's `@id`. A call the server

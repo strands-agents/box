@@ -212,6 +212,13 @@ stops a restart from resetting a budget. The history follows these rules:
   a history exists but the record says the box has never run.
 - After a policy edit, unchanged history rules keep their state. New or changed rules start with
   empty state.
+- A rule whose head names only per-tool MCP actions keeps its state across a restart, although its
+  schema arrives only when the server lists its tools again. Box keeps it installed under the server
+  schemas the history declares, and holds the calls it decides until they arrive. It starts with
+  empty state when the new tool list doesn't validate it, or when the server doesn't list its tools
+  in that run. A rule whose head names a Box action and whose `when temporal` clause reads a
+  per-tool action starts with empty state at each run. See [discovery serves the schema-independent
+  subset](decisions.md#discovery-serves-the-schema-independent-subset).
 - The engine timestamps each event from the system clock. Callers cannot supply timestamps. If the
   clock steps backwards, timestamps keep moving forward, so rolling the clock back doesn't free a
   budget. The cost is that a restriction can outlast its window a little.
