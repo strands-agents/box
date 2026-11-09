@@ -132,7 +132,8 @@ struct McpConnection {
     /// Server requests forwarded to the client, by id, with the method each one asked.
     server_requests: BTreeMap<String, String>,
     modern_requests: BTreeMap<String, super::protocol_2026_07_28::ModernRequest>,
-    cancelled: std::collections::BTreeSet<String>,
+    /// Cancelled request IDs and their retained string allocations, in bytes.
+    cancelled: BTreeMap<String, usize>,
     pending_inputs: VecDeque<super::protocol_2026_07_28::PendingInputs>,
     /// Final-page replies waiting for their schema, in the order the server sent them.
     held: VecDeque<HeldReply>,
@@ -272,7 +273,7 @@ async fn run_mcp_program(
         lists: BTreeMap::new(),
         server_requests: BTreeMap::new(),
         modern_requests: BTreeMap::new(),
-        cancelled: std::collections::BTreeSet::new(),
+        cancelled: BTreeMap::new(),
         pending_inputs: VecDeque::new(),
         held: VecDeque::new(),
         policy: Arc::clone(&policy),
@@ -1068,7 +1069,7 @@ async fn forward_server_frame(
             "the MCP server returned an unknown response id",
         ));
     }
-    if exchange.connection.cancelled.remove(&key) {
+    if exchange.connection.cancelled.remove(&key).is_some() {
         // The client never sees a cancelled reply, but the server may have run the call.
         let terminal = protocol_2026_07_28::cancelled_reply_is_terminal(&key, &response, exchange);
         if let Some(call) = exchange.connection.decided_calls.remove(&key)

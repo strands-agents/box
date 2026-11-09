@@ -408,6 +408,59 @@ fn a_pending_probe_does_not_prevent_legacy_timeout_fallback() {
 }
 
 #[test]
+fn modern_cancellation_releases_active_capacity_without_recording_a_response() {
+    let (runtime, local) = local_runtime();
+    runtime.block_on(local.run_until(async {
+        let fixture = fixture(&format!(
+            r#"{PERMIT_ALL_MCP}
+            forbid (principal, action == Box::Action::"mcp:call", resource)
+            when {{ context.input has tool && context.input.tool == "Search" }}
+            when temporal {{ formerly within 3600s (Box::Action::"mcp:call"::response{{input.tool: "Search"}}) }};"#
+        ));
+        let log = tempfile::NamedTempFile::new().expect("frame log");
+        let mut command = modern_server(log.path());
+        command[2] = command[2].replace(
+            "case \"$frame\" in",
+            "case \"$frame\" in\n  *'\"method\":\"tools/call\"'*'\"value\":\"wait\"'*) continue ;;",
+        );
+        let (mut program, mut output) = exchange(command, &fixture).await;
+        send(&program, modern_request(1, "tools/list", json!({}))).await;
+        assert!(next_output(&mut output).await["result"]["tools"].is_array());
+        let mut frames = String::new();
+        for id in 2..130 {
+            let call = modern_request(
+                id,
+                "tools/call",
+                json!({"name": "Search", "arguments": {"value": "wait"}}),
+            );
+            let cancel = json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": id}});
+            frames.push_str(&format!("{call}\n{cancel}\n"));
+        }
+        let call = modern_request(
+            130,
+            "tools/call",
+            json!({"name": "Search", "arguments": {"value": "continue"}}),
+        );
+        frames.push_str(&format!("{call}\n"));
+        program.input(frames.into_bytes()).await.unwrap();
+        let response = next_output(&mut output).await;
+        assert_eq!(response["id"], 130, "{response}");
+        assert_eq!(
+            response["result"]["resultType"], "complete",
+            "silent cancellations release capacity and record no response: {response}"
+        );
+        program.stop_and_wait().await.unwrap();
+        assert_eq!(
+            read_log(log.path())
+                .iter()
+                .filter(|frame| frame["method"] == "tools/call")
+                .count(),
+            129
+        );
+    }));
+}
+
+#[test]
 fn modern_cancellation_hides_late_replies_but_still_records_their_response() {
     let (runtime, local) = local_runtime();
     runtime.block_on(local.run_until(async {
@@ -432,8 +485,18 @@ fn modern_cancellation_hides_late_replies_but_still_records_their_response() {
             call["params"]["arguments"] = json!({"value": "wait"});
             send(&program, call.clone()).await;
             send(&program, json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 2}})).await;
+            let mut frames = String::new();
+            for id in 10..137 {
+                let mut pending = call.clone();
+                pending["id"] = json!(id);
+                let cancel = json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": id}});
+                frames.push_str(&format!("{pending}\n{cancel}\n"));
+            }
+            program.input(frames.into_bytes()).await.unwrap();
             send(&program, call).await;
-            assert!(next_output(&mut output).await["error"].is_object(), "cancelled id remains reserved");
+            let refused = next_output(&mut output).await;
+            assert_eq!(refused["id"], 2, "{refused}");
+            assert_eq!(refused["error"]["code"], -32600, "cancelled id remains reserved: {refused}");
             send(&program, modern_request(3, "ping", json!({}))).await;
             assert_eq!(next_output(&mut output).await["id"], 3, "cancelled response never reaches the client");
             send(&program, modern_request(4, "tools/call", json!({"name": "Search", "arguments": {"value": "continue"}}))).await;
@@ -445,9 +508,213 @@ fn modern_cancellation_hides_late_replies_but_still_records_their_response() {
                 assert_eq!(response["result"]["resultType"], "complete", "an incomplete cancelled call records no response: {response}");
             }
             program.stop_and_wait().await.expect("stop the exchange");
-            assert_eq!(read_log(log.path()).iter().filter(|frame| frame["method"] == "tools/call").count(), 1 + usize::from(!counts));
+            assert_eq!(read_log(log.path()).iter().filter(|frame| frame["method"] == "tools/call").count(), 128 + usize::from(!counts));
         }
     }));
+}
+
+#[test]
+fn modern_cancelled_retention_is_bounded_and_late_replies_release_capacity() {
+    let (runtime, local) = local_runtime();
+    runtime.block_on(local.run_until(async {
+        let fixture = fixture(PERMIT_ALL_MCP);
+        let log = tempfile::NamedTempFile::new().expect("frame log");
+        let mut command = modern_server(log.path());
+        command[2] = command[2].replace(
+            "id=$(printf",
+            r#"case "$frame" in
+  *'"method":"notifications/cancelled"'*|*'"wait":true'*) continue ;;
+esac
+id=$(printf"#,
+        );
+        command[2] = command[2].replace(
+            "*'\"method\":\"tools/call\"'*)",
+            r#"*'"method":"ping"'*)
+    case "$frame" in
+      *'"release":true'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete"}}' ;;
+    esac
+    printf '{"jsonrpc":"2.0","id":%s,"result":{"resultType":"complete"}}\n' "$id"; continue ;;
+  *'"method":"tools/call"'*)"#,
+        );
+        let (mut program, mut output) = exchange(command, &fixture).await;
+        send(&program, modern_request(1, "tools/list", json!({}))).await;
+        assert!(next_output(&mut output).await["result"]["tools"].is_array());
+        for batch in 0..8 {
+            let mut frames = String::new();
+            for id in (2 + 128 * batch)..(2 + 128 * (batch + 1)) {
+                let ping = modern_request(id, "ping", json!({"wait": true}));
+                let cancel = json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": id}});
+                frames.push_str(&format!("{ping}\n{cancel}\n"));
+            }
+            let probe_id = 10_000 + batch;
+            let probe = modern_request(probe_id, "ping", json!({}));
+            frames.push_str(&format!("{probe}\n"));
+            program.input(frames.into_bytes()).await.unwrap();
+            let response = next_output(&mut output).await;
+            assert_eq!(response["id"], probe_id, "{response}");
+            assert_eq!(response["result"]["resultType"], "complete", "{response}");
+        }
+        let mut frames = String::new();
+        for id in [1, 2, 20_000] {
+            let cancel = json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": id}});
+            frames.push_str(&format!("{cancel}\n"));
+        }
+        let reuse = modern_request(2, "ping", json!({"wait": true}));
+        let probe = modern_request(11_000, "ping", json!({}));
+        frames.push_str(&format!("{reuse}\n{probe}\n"));
+        program.input(frames.into_bytes()).await.unwrap();
+        let refused = next_output(&mut output).await;
+        assert_eq!(refused["id"], 2, "{refused}");
+        assert_eq!(refused["error"]["code"], -32600, "{refused}");
+        assert!(
+            refused["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("reused"),
+            "the oldest cancelled id stays reserved: {refused}"
+        );
+        assert_eq!(
+            next_output(&mut output).await["id"],
+            11_000,
+            "duplicate and unknown cancellations do not consume capacity"
+        );
+        send(
+            &program,
+            modern_request(11_001, "ping", json!({"release": true})),
+        )
+        .await;
+        assert_eq!(
+            next_output(&mut output).await["id"],
+            11_001,
+            "the oldest late reply stays correlated and hidden"
+        );
+        send(&program, reuse).await;
+        send(
+            &program,
+            json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 2}}),
+        )
+        .await;
+        send(&program, modern_request(11_002, "ping", json!({}))).await;
+        assert_eq!(
+            next_output(&mut output).await["id"],
+            11_002,
+            "a late reply releases its id and one cancelled-request slot"
+        );
+        let overflow = modern_request(1026, "ping", json!({"wait": true}));
+        let cancel = json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 1026}});
+        program
+            .input(format!("{overflow}\n{cancel}\n").into_bytes())
+            .await
+            .unwrap();
+        let failure = tokio::time::timeout(TEST_WAIT_TIMEOUT, program.join())
+            .await
+            .expect("the retention limit closes the exchange")
+            .expect_err("a 1025th retained cancellation must fail");
+        assert_eq!(
+            failure.to_string(),
+            "too many retained cancelled MCP requests; reconnect"
+        );
+    }));
+}
+
+#[test]
+fn modern_cancelled_large_ids_reach_the_byte_limit_before_the_count_limit() {
+    let (runtime, local) = local_runtime();
+    runtime.block_on(local.run_until(async {
+        let fixture = fixture(PERMIT_ALL_MCP);
+        let log = tempfile::NamedTempFile::new().expect("frame log");
+        let replies = tempfile::NamedTempFile::new().expect("late replies");
+        let (mut program, mut output) =
+            exchange(large_id_server(log.path(), replies.path()), &fixture).await;
+        send(&program, modern_request(1, "tools/list", json!({}))).await;
+        assert!(next_output(&mut output).await["result"]["tools"].is_array());
+        let padding = "x".repeat(128 * 1024);
+        for index in 0..64 {
+            let id = format!("{index}-{padding}");
+            if send_large_cancelled_ping(&program, &id).await.is_err() {
+                break;
+            }
+        }
+        let failure = tokio::time::timeout(TEST_WAIT_TIMEOUT, program.join())
+            .await
+            .expect("the byte limit closes the exchange")
+            .expect_err("large cancelled ids must reach the byte limit");
+        assert_eq!(
+            failure.to_string(),
+            "too much retained cancelled MCP request data; reconnect"
+        );
+    }));
+}
+
+#[test]
+fn modern_cancelled_large_ids_release_their_byte_budget_on_late_replies() {
+    let (runtime, local) = local_runtime();
+    runtime.block_on(local.run_until(async {
+        let fixture = fixture(PERMIT_ALL_MCP);
+        let log = tempfile::NamedTempFile::new().expect("frame log");
+        let replies = tempfile::NamedTempFile::new().expect("late replies");
+        let (mut program, mut output) =
+            exchange(large_id_server(log.path(), replies.path()), &fixture).await;
+        send(&program, modern_request(1, "tools/list", json!({}))).await;
+        assert!(next_output(&mut output).await["result"]["tools"].is_array());
+        let padding = "x".repeat(128 * 1024);
+        for batch in 0..8 {
+            let mut late = String::new();
+            for index in 0..8 {
+                let id = format!("{batch}-{index}-{padding}");
+                send_large_cancelled_ping(&program, &id).await.unwrap();
+                let reply =
+                    json!({"jsonrpc": "2.0", "id": id, "result": {"resultType": "complete"}});
+                late.push_str(&format!("{reply}\n"));
+            }
+            std::fs::write(replies.path(), late).unwrap();
+            let probe_id = 2 + batch;
+            send(
+                &program,
+                modern_request(probe_id, "ping", json!({"release": true})),
+            )
+            .await;
+            let response = next_output(&mut output).await;
+            assert_eq!(response["id"], probe_id, "{response}");
+            assert_eq!(
+                response["result"]["resultType"], "complete",
+                "late replies release retained bytes before the next batch: {response}"
+            );
+        }
+        program.stop_and_wait().await.unwrap();
+    }));
+}
+
+fn large_id_server(log: &Path, replies: &Path) -> Vec<String> {
+    let mut command = modern_server(log);
+    command[2] = command[2].replace(
+        "printf '%s\\n' \"$frame\" >> \"$1\"",
+        r#"case "$frame" in
+  *'"method":"notifications/cancelled"'*|*'"wait":true'*) continue ;;
+esac
+printf '%s\n' "$frame" >> "$1""#,
+    );
+    command[2] = command[2].replace(
+        "*'\"method\":\"tools/call\"'*)",
+        r#"*'"method":"ping"'*)
+    case "$frame" in
+      *'"release":true'*) cat "$2" ;;
+    esac
+    printf '{"jsonrpc":"2.0","id":%s,"result":{"resultType":"complete"}}\n' "$id"; continue ;;
+  *'"method":"tools/call"'*)"#,
+    );
+    command.push(replies.to_string_lossy().into_owned());
+    command
+}
+
+async fn send_large_cancelled_ping(program: &McpProgram, id: &str) -> io::Result<()> {
+    let mut ping = modern_request(0, "ping", json!({"wait": true}));
+    ping["id"] = json!(id);
+    let cancel =
+        json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": id}});
+    let frames = format!("{ping}\n{cancel}\n").into_bytes();
+    assert!(frames.len() < 1024 * 1024);
+    program.input(frames).await
 }
 
 #[test]

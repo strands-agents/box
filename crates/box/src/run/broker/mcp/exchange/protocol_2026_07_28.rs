@@ -45,7 +45,8 @@ pub(super) async fn handle_request(
     if exchange.connection.in_flight.contains(&key) {
         return refuse_reused_id(exchange, Some(&id)).await;
     }
-    if exchange.connection.modern_requests.len() >= protocol_2026_07_28::MAXIMUM_PENDING {
+    let active = exchange.connection.modern_requests.len() - exchange.connection.cancelled.len();
+    if active >= protocol_2026_07_28::MAXIMUM_PENDING {
         return refuse(
             exchange,
             request,
@@ -247,10 +248,24 @@ pub(super) fn cancel_request(request: &Value, exchange: &mut Exchange<'_>) -> io
         return Err(invalid_data("MCP cancellation needs a requestId"));
     };
     let key = id_key(id)?;
-    if exchange.connection.modern_requests.contains_key(&key) {
+    if exchange.connection.modern_requests.contains_key(&key)
+        && !exchange.connection.cancelled.contains_key(&key)
+    {
+        if exchange.connection.cancelled.len() >= protocol_2026_07_28::MAXIMUM_CANCELLED {
+            return Err(invalid_data(
+                "too many retained cancelled MCP requests; reconnect",
+            ));
+        }
+        let bytes = key.capacity() + retained_request_bytes(exchange.connection, &key);
+        if exchange.connection.cancelled.values().sum::<usize>() + bytes
+            > protocol_2026_07_28::MAXIMUM_CANCELLED_BYTES
+        {
+            return Err(invalid_data(
+                "too much retained cancelled MCP request data; reconnect",
+            ));
+        }
         // The call stays in `decided_calls`: the server may still run it, so its late reply
         // records the response leg even though the client never sees that reply.
-        exchange.connection.cancelled.insert(key.clone());
         if exchange.connection.lists.remove(&key).is_some() {
             exchange.registry.list_failed(
                 exchange.running.server(),
@@ -258,6 +273,23 @@ pub(super) fn cancel_request(request: &Value, exchange: &mut Exchange<'_>) -> io
                 DiscoveryFailure::CatalogCapture,
             );
         }
+        exchange.connection.cancelled.insert(key, bytes);
     }
     Ok(())
+}
+
+fn retained_request_bytes(connection: &McpConnection, key: &str) -> usize {
+    let mut bytes = connection.in_flight.get(key).map_or(0, String::capacity);
+    if let Some((id, request)) = connection.modern_requests.get_key_value(key) {
+        bytes += id.capacity() + request.method.capacity();
+    }
+    if let Some((id, call)) = connection.decided_calls.get_key_value(key) {
+        bytes += id.capacity() + call.method.capacity();
+        bytes += [call.tool.as_ref(), call.prompt.as_ref(), call.uri.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(String::capacity)
+            .sum::<usize>();
+    }
+    bytes
 }

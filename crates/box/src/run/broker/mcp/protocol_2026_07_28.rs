@@ -10,6 +10,8 @@ use super::jsonrpc::invalid_data;
 
 pub(super) const PROTOCOL_VERSION: &str = "2026-07-28";
 pub(super) const MAXIMUM_PENDING: usize = 64;
+pub(super) const MAXIMUM_CANCELLED: usize = 1024;
+pub(super) const MAXIMUM_CANCELLED_BYTES: usize = 16 * 1024 * 1024;
 const VERSION_KEY: &str = "io.modelcontextprotocol/protocolVersion";
 const CAPABILITIES_KEY: &str = "io.modelcontextprotocol/clientCapabilities";
 const INFO_KEY: &str = "io.modelcontextprotocol/clientInfo";

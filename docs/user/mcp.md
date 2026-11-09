@@ -49,7 +49,7 @@ Some modern calls ask the client for more input, such as a list of roots or an e
 Box first checks the retried call against the catalog and its policy, then checks each answer
 under the requested method's `mcp:call` policy.
 The client must retry on the same connection with the original parameters and the server's exact
-request state. If that connection closes, start the operation again. Box retains up to 64 pending
+request state. If that connection closes, start the operation again. Box retains up to 64 active
 requests and 64 pending continuations per connection, with up to 64 input requests per continuation.
 A new continuation at capacity replaces the oldest one. A matching retry uses its allowance
 even if policy denies it. Restart an operation whose allowance was used or replaced.
@@ -57,6 +57,12 @@ Identical pending calls retain separate retry allowances. A server must return d
 states when parallel calls need distinct identities. Conflicting input IDs or methods for the
 same parameters and state close the connection. Unknown result types from protocol extensions
 are refused.
+
+Cancelling a modern request releases its active slot. Box retains the cancelled request's ID
+until a late reply arrives or the connection closes, so the client cannot reuse that ID meanwhile.
+Box retains up to 1,024 cancelled requests per connection and up to 16 MiB of their request IDs
+and call text. If another cancellation exceeds either limit, Box closes the connection and stops
+the server. Other calls on that connection can be interrupted. Start a new connection to continue.
 
 ## `[mcp.<name>]`, `type = "stdio"`
 
@@ -283,6 +289,8 @@ a placeholder in `NAME`, and the gateway swaps in the real value on each request
 | `Unsupported MCP protocol version` | The request names a modern version Box does not support. The error lists the supported version. |
 | `modern MCP requests cannot use a legacy handshake connection` | The client mixed the modern request protocol with a legacy handshake. Start a new connection using one protocol era. |
 | `MCP input answers do not match a pending server request` | A retry changed its original parameters or request state, used a consumed or evicted continuation, or arrived on another connection. Restart the operation. |
+| `too many retained cancelled MCP requests; reconnect` | Box already retains 1,024 cancelled request IDs without replies. Cancelling another active request closes the connection and stops the server. Start a new connection. |
+| `too much retained cancelled MCP request data; reconnect` | A cancellation exceeds the 16 MiB limit for retained request IDs and call text. Box closes the connection and stops the server. Start a new connection. |
 | `a modern MCP result has an unsupported resultType` | The server returned a result type the broker cannot validate. |
 
 The harness gets these errors when it starts a server, and the box keeps running:

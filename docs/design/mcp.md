@@ -494,15 +494,22 @@ A retry with matching state and valid input IDs consumes one continuation allowa
 policy admission. A denial sends none of the answers to the server. Identical input IDs and methods under the same identity accumulate separate
 allowances. Conflicting input IDs or methods under that identity fail the connection.
 
-The broker bounds both pending modern requests and continuation allowances at 64 per connection.
+The broker bounds both active modern requests and continuation allowances at 64 per connection.
 Identical continuations each count toward this limit. A new continuation at capacity evicts
 the oldest allowance. An evicted retry is refused without closing the connection.
 Each continuation holds at most 64 input IDs, each at most 256 bytes. Continuations do not
 survive a connection closing. A client that reconnects must repeat the initial operation.
-A cancellation retains the request ID until its late reply arrives or the connection closes.
+A cancellation releases an active request slot and retains the request ID until its late reply
+arrives or the connection closes.
 The broker does not forward that reply, but the server may still have run the call, so a
 terminal reply records the call's `mcp:call::response` event. Only an `input_required` reply
-records none. Cancelled requests count toward the pending limit. Cancellation during catalog capture fails that capture. Modern server requests and client responses in the legacy JSON-RPC direction are
+records none. Cancellation alone records no response event.
+The broker retains up to 1,024 cancelled requests separately from the active limit. Their request
+ID copies and call text have a combined allocation limit of 16 MiB.
+It closes the connection and stops the server before another cancellation exceeds either bound.
+It retains each cancelled request's policy record until a reply arrives or the connection closes.
+Repeated cancellations for a retained ID do not consume more capacity.
+Cancellation during catalog capture fails that capture. Modern server requests and client responses in the legacy JSON-RPC direction are
 refused.
 
 An `input_required` result leaves the operation incomplete, so it does not record an
