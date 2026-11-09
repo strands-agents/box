@@ -8,13 +8,14 @@ program = "git"
 
 [effects]
 force_push        = "Replaces commits on a remote ref, or can"
+force_fetch       = "Replaces commits on a local ref with what a remote has"
 delete_remote_ref = "Deletes a ref on the remote"
 rewrite_history   = "Replaces local commits that already exist"
 skip_hooks        = "Bypasses the repository's commit or push hooks"
 discard_changes   = "Removes uncommitted work from the working tree or the index"
 override_config   = "Overrides git configuration for this one command"
 run_program       = "Makes git run a program named on the command line"
-write_file        = "Writes a file named on the command line"
+write_file        = "Writes files at a path named on the command line"
 read_outside_repo = "Reads files that are not in the repository"
 network           = "Contacts a remote repository"
 
@@ -23,11 +24,11 @@ network           = "Contacts a remote repository"
 # so none sets `anywhere`. `--exec-path=<dir>`, `--super-prefix`, `--list-cmds`, `--help`
 # and `--version` are left out on purpose: each makes the line unmodeled.
 [global]
-options.directory          = { flag = ["-C"], value = "required" }
-options.config             = { flag = ["-c"], value = "required", repeated = true, adds = ["override_config"] }
-options.config_env         = { flag = ["--config-env"], value = "required", repeated = true, adds = ["override_config"] }
-options.git_dir            = { flag = ["--git-dir"], value = "required" }
-options.work_tree          = { flag = ["--work-tree"], value = "required" }
+options.directory          = { flag = ["-C"], value = "required", adds = ["write_file", "run_program"] }
+options.config             = { flag = ["-c"], value = "required", repeated = true, adds = ["override_config", "skip_hooks", "run_program"] }
+options.config_env         = { flag = ["--config-env"], value = "required", repeated = true, adds = ["override_config", "skip_hooks", "run_program"] }
+options.git_dir            = { flag = ["--git-dir"], value = "required", adds = ["write_file", "run_program"] }
+options.work_tree          = { flag = ["--work-tree"], value = "required", adds = ["write_file"] }
 options.namespace          = { flag = ["--namespace"], value = "required" }
 options.paginate           = { flag = ["-p", "--paginate"] }
 options.no_pager           = { flag = ["-P", "--no-pager"] }
@@ -72,7 +73,7 @@ options.ipv4               = { flag = ["-4", "--ipv4"] }
 options.ipv6               = { flag = ["-6", "--ipv6"] }
 operands.remote  = {}
 # design form: `like` + `adds`. EXT-5: `when` adds a second pattern rule to the same operand.
-operands.refspec = { like = "+*", adds = ["force_push"], when = [ { like = ":*", adds = ["delete_remote_ref"] } ] }
+operands.refspec = { like = "+*", adds = ["force_push"], when = [ { like = [":*", "+:*"], adds = ["delete_remote_ref"] } ] }
 
 # ---------------------------------------------------------------- commit
 [shell.commit]
@@ -116,8 +117,8 @@ usage = "git [global options] reset [options] [<commit>] [--] [<pathspec>...]"
 options.soft               = { flag = ["--soft"] }
 options.mixed              = { flag = ["--mixed"] }
 options.hard               = { flag = ["--hard"], adds = ["discard_changes"] }
-options.merge              = { flag = ["--merge"] }
-options.keep               = { flag = ["--keep"] }
+options.merge              = { flag = ["--merge"], adds = ["discard_changes"] }
+options.keep               = { flag = ["--keep"], adds = ["discard_changes"] }
 options.patch              = { flag = ["-p", "--patch"] }
 options.intent_to_add      = { flag = ["-N", "--intent-to-add"] }
 options.recurse_submodules = { flag = ["--recurse-submodules"] }
@@ -146,7 +147,7 @@ options.keep_base      = { flag = ["--keep-base"] }
 options.rebase_merges  = { flag = ["-r", "--rebase-merges"], value = "optional" }
 options.update_refs    = { flag = ["--update-refs"] }
 options.merge          = { flag = ["-m", "--merge"] }
-options.strategy       = { flag = ["-s", "--strategy"], value = "required" }
+options.strategy       = { flag = ["-s", "--strategy"], value = "required", adds = ["run_program"] }
 options.strategy_option = { flag = ["-X", "--strategy-option"], value = "required", repeated = true }
 options.gpg_sign       = { flag = ["-S", "--gpg-sign"], value = "optional" }
 options.signoff        = { flag = ["--signoff"] }
@@ -180,7 +181,7 @@ operands.pathspec = {}
 usage = "git [global options] checkout [options] [<target>] [--] [<pathspec>...]"
 options.force               = { flag = ["-f", "--force"], adds = ["discard_changes"] }
 options.create              = { flag = ["-b"], value = "required" }
-options.force_create        = { flag = ["-B"], value = "required", adds = ["discard_changes"] }
+options.force_create        = { flag = ["-B"], value = "required", adds = ["discard_changes", "rewrite_history"] }
 options.orphan              = { flag = ["--orphan"], value = "required" }
 options.detach              = { flag = ["--detach"] }
 options.track               = { flag = ["-t", "--track"], value = "optional" }
@@ -205,7 +206,7 @@ operands.pathspec = { adds = ["discard_changes"] }
 [shell.switch]
 usage = "git [global options] switch [options] [<target>]"
 options.create          = { flag = ["-c", "--create"], value = "required" }
-options.force_create    = { flag = ["-C", "--force-create"], value = "required" }
+options.force_create    = { flag = ["-C", "--force-create"], value = "required", adds = ["rewrite_history"] }
 options.detach          = { flag = ["-d", "--detach"] }
 options.orphan          = { flag = ["--orphan"], value = "required" }
 options.discard_changes = { flag = ["-f", "--force", "--discard-changes"], adds = ["discard_changes"] }
@@ -290,7 +291,7 @@ options.merge_base    = { flag = ["--merge-base"] }
 options.no_index      = { flag = ["--no-index"], adds = ["read_outside_repo"] }
 options.patch         = { flag = ["-p", "-u", "--patch"] }
 options.no_patch      = { flag = ["-s", "--no-patch"] }
-options.unified       = { flag = ["-U", "--unified"], value = "required" }
+options.unified       = { flag = ["-U", "--unified"], value = "optional" }
 options.stat          = { flag = ["--stat"], value = "optional" }
 options.numstat       = { flag = ["--numstat"] }
 options.shortstat     = { flag = ["--shortstat"] }
@@ -353,7 +354,7 @@ options.deepen             = { flag = ["--deepen"], value = "required" }
 options.shallow_since      = { flag = ["--shallow-since"], value = "required" }
 options.unshallow          = { flag = ["--unshallow"] }
 options.dry_run            = { flag = ["--dry-run"] }
-options.force              = { flag = ["-f", "--force"] }
+options.force              = { flag = ["-f", "--force"], adds = ["force_fetch"] }
 options.keep               = { flag = ["-k", "--keep"] }
 options.prune              = { flag = ["-p", "--prune"] }
 options.prune_tags         = { flag = ["-P", "--prune-tags"] }
@@ -372,7 +373,7 @@ options.verbose            = { flag = ["-v", "--verbose"] }
 options.ipv4               = { flag = ["-4", "--ipv4"] }
 options.ipv6               = { flag = ["-6", "--ipv6"] }
 operands.remote  = {}
-operands.refspec = {}
+operands.refspec = { like = "+*:*", adds = ["force_fetch"] }
 
 # ---------------------------------------------------------------- pull
 # pull.rebase in config also makes a pull rebase (L1); the flag is only what the line shows.
@@ -391,7 +392,7 @@ options.edit         = { flag = ["-e", "--edit"] }
 options.no_edit      = { flag = ["--no-edit"] }
 options.autostash    = { flag = ["--autostash"] }
 options.no_verify    = { flag = ["--no-verify"], adds = ["skip_hooks"] }
-options.strategy     = { flag = ["-s", "--strategy"], value = "required" }
+options.strategy     = { flag = ["-s", "--strategy"], value = "required", adds = ["run_program"] }
 options.strategy_option = { flag = ["-X", "--strategy-option"], value = "required", repeated = true }
 options.allow_unrelated_histories = { flag = ["--allow-unrelated-histories"] }
 options.gpg_sign     = { flag = ["-S", "--gpg-sign"], value = "optional" }
@@ -400,7 +401,7 @@ options.all          = { flag = ["--all"] }
 options.tags         = { flag = ["-t", "--tags"] }
 options.no_tags      = { flag = ["--no-tags"] }
 options.prune        = { flag = ["-p", "--prune"] }
-options.force        = { flag = ["-f", "--force"] }
+options.force        = { flag = ["-f", "--force"], adds = ["force_fetch"] }
 options.depth        = { flag = ["--depth"], value = "required" }
 options.unshallow    = { flag = ["--unshallow"] }
 options.dry_run      = { flag = ["--dry-run"] }
@@ -409,4 +410,4 @@ options.recurse_submodules = { flag = ["--recurse-submodules"], value = "optiona
 options.quiet        = { flag = ["-q", "--quiet"] }
 options.verbose      = { flag = ["-v", "--verbose"] }
 operands.remote  = {}
-operands.refspec = {}
+operands.refspec = { like = "+*:*", adds = ["force_fetch"] }

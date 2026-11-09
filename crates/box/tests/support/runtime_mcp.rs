@@ -672,6 +672,12 @@ while True:
         self.spawn_attempt()
     }
 
+    /// Prepare an owning run whose standard streams the test supplies.
+    pub fn command_for_run(&self) -> Command {
+        self.address_the_newest_workspace();
+        self.command()
+    }
+
     pub fn spawn_from_operator_home(&self) -> RunningBox {
         let mut command = self.command();
         command.current_dir(self.home.path());

@@ -279,6 +279,44 @@ macOS retains root file creation inside granted directories. Seatbelt path denia
 protection against later privileged consumers of those entries. This Linux change does not test or
 change that macOS behavior.
 
+### Linux filesystem metadata
+
+After execution, Linux workloads can use `statfs` to identify the filesystem behind an absolute path in their sandbox view.
+The result preserves the filesystem type, block and fragment sizes, maximum filename length, and mount flags.
+Box returns zero for capacity, free space, inode counts, filesystem identifiers, and reserved bytes.
+Programs can select database behavior for network filesystems without reading surrounding-OS storage usage.
+Programs that need actual free-space counts cannot obtain them through this query.
+Relative paths return `EOPNOTSUPP`, and `fstatfs` remains denied.
+
+A seccomp notification sends each query to the existing launcher outside the workload's PID namespace.
+The launcher copies the pathname and pins the requesting process's root through a private procfs descriptor.
+It resolves the copied path with `openat2` and `RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS`, then queries the pinned result.
+Ungranted files remain absent, and read-only binds remain read-only.
+The launcher writes only the sanitized bytes with `process_vm_writev`, which rejects read-only output mappings.
+It never asks the kernel to continue the original `statfs` call.
+
+*Figure 1: A filesystem query during Codex startup. Box writes filtered information into Codex's output buffer. A separate status reply completes the paused call.*
+
+![Codex requests filesystem information from Linux. The kernel pauses the call and notifies the Box launcher. The launcher resolves the path within Codex's filesystem view and queries the resolved filesystem. It writes filtered information into Codex's output buffer: filesystem type, block and fragment sizes, filename limit, and mount flags retain their actual values; capacity, free space, file counts, filesystem identifier, and reserved bytes are zero. A separate success reply tells Linux to complete the call. The original statfs call does not run.](images/statfs-query-flow.png)
+
+The [editable diagram](images/statfs-query-flow.drawio) contains the same query flow.
+
+The launcher retains only `CAP_SYS_PTRACE` within this sandbox's private user namespace.
+Its bounding, inheritable, and ambient capability sets are empty, and it sets `no_new_privs` and becomes non-dumpable.
+The kernel's capability checks prevent this authority from accessing process memory in surrounding-OS user namespaces.
+The namespace reaper and workload retain their existing capability removal.
+Program execution establishes the workload's memory in the sandbox user namespace.
+Direct `Containment::apply` callers that continue without execution can retain memory owned by an ancestor user namespace, so the query can be refused.
+Box preserves this refusal rather than weakening process-memory checks.
+Hosts that prohibit process-memory access can also refuse these queries.
+
+The workload installs the notification filter and transfers its listener before its final syscall restrictions and execution.
+A failed handoff prevents execution.
+After a fatal service error, the launcher exits; the reaper's existing parent-death signal terminates the namespace.
+Request validation rejects canceled notifications, but does not make a numeric process identifier an atomic lifetime reference.
+The kernel's user-namespace checks independently restrict memory access, and both trusted launcher processes are excluded as query targets.
+Filesystem lookup and statistics can block in the kernel, which can delay launcher exit handling.
+
 ### Linux file permission changes
 
 A writable Linux bind shares the underlying file with the surrounding OS. The mount's `nosuid`
@@ -478,21 +516,56 @@ box's trusted process](decisions.md#a-host-binary-runs-in-a-contained-leaf-box).
 
 Box resolves every configured tool command before the workload starts and keeps an open handle to
 its file. Tool selection uses this startup identity, and the launcher checks the identity before
-execution. Box refuses a command file with multiple hard links when the user running Box can write
-it. Another name could expose the same contents to writes. Box accepts multiple names for a file
-that this user cannot write through any name, such as a root-owned system program. The kernel
-refuses writes through each name. Before each launch of a program with multiple names, Box requires
-the same link count, owner, group, and mode, and checks again that this user cannot write the file.
+execution. A hard link is another name for the same file. A write through either name changes the
+command's contents. Box accepts multiple names when ownership and access checks rule out operator
+writes through every name, such as for a root-owned system program.
+
+On macOS and Linux, Box can also accept a command with multiple hard links that the operator can
+write. Before the workload starts, Box scans the declared writable directories of the agent,
+every tool, and every local MCP server, including subdirectories excluded by `deny`.
+The scan must finish without finding a hard-link name for the command. Each tree has one
+30-second inspection budget, shared across its recursive calls, and a depth limit of 128
+directory levels. An unreadable entry, expired budget, or excessive depth prevents startup.
+Box checks elapsed time between filesystem calls and before accepting completion; it cannot
+interrupt a blocked filesystem call. Separate trees receive separate budgets, so this does
+not bound total startup time. The command's own path, its symbolic-link routes, and their
+enclosing directories must remain outside writable grants.
+
+Before each launch, a command with multiple hard links must retain its link count, owner, group,
+and mode. Box also repeats the write-access check for a command admitted through ownership and
+access checks.
+
+[Tool grammars](../user/config.md#toolnamegrammar) do not require a single hard link.
+They bind the executable file and the called name; other names follow the
+[`shell:spawn`](../user/shell.md#shellspawn) rules.
 
 An identity check detects replacement, but an in-place overwrite keeps the same identity. Direct
-writable-grant refusals and the broker's mutation checks protect the program's contents. This
-protection covers the program in element 0 of `[tool.<name>] command`. Libraries, plugins, and
-scripts named only in arguments still follow their own access checks. The file handle does not
-freeze bytes against changes by other processes in the surrounding OS.
+writable-grant refusals and the broker's mutation checks protect the program's contents.
 
-That `shell:spawn` decision is the only policy decision a tool raises for itself. After it, the tool
-makes its own system calls, which its sandbox restricts. Opening a file produces no `fs:*` decision,
-and its children raise no decisions of their own. See [a tool reaches only what its own lists
+On macOS, Seatbelt refuses a new hard link or a rename when its source lies outside the process's
+write grants. Creating a symbolic link does not grant write access to its target.
+
+On Linux, command paths stay on read-only mounts. Distinct writable grant targets use separate
+bind mounts, even when their files share one filesystem. The kernel refuses hard links and
+renames across those mount boundaries. Native programs can create hard links within one writable
+mount. A write through a symbolic link still meets the target mount's restrictions.
+
+For commands admitted through scanning, the broker inspects directories before changing them.
+It refuses the change if a directory contains one of their hard-link names or the scan cannot
+finish within the same inspection limits.
+
+This protection covers the program in element 0 of
+`[tool.<name>] command`. Libraries, plugins, and scripts named only in arguments still follow
+their own access checks. The file handle does not freeze bytes against changes by other processes
+in the surrounding OS.
+
+The interactive agent retains its standard input, output, and error
+descriptors. Explicitly supplying a file or directory through those descriptors can carry access
+outside the sandbox view.
+
+After Box authorizes a tool launch, the tool makes its own system calls, which its sandbox
+restricts. Opening a file produces no `fs:*` decision, and its children raise no decisions of
+their own. See [a tool reaches only what its own lists
 name](decisions.md#a-tool-reaches-only-the-paths-its-own-lists-name).
 
 A tool's sandbox grants more access than the agent's. A toolchain needs to run helpers that cannot
@@ -601,10 +674,13 @@ boundary.
 
 Strands Shell and Monty run in Box's trusted process, outside every sandbox. We run them there so
 one policy engine decides for the whole box. See [the interpreters run in the box's trusted
-process](decisions.md#the-interpreters-run-in-the-trusted-process). Each one asks policy before it
-touches a file, then applies the reachable paths check. This check also refuses changes to
+process](decisions.md#the-interpreters-run-in-the-trusted-process).
+
+Each one asks policy before it touches a file, then applies the reachable paths check. This check also refuses changes to
 configured tool programs and the installed trusted binaries, including changes to their enclosing
-paths. Reads remain subject to policy. These checks are separate from the agent's own grants.
+paths. Before changing a directory, it also scans for hard-link names of commands admitted through
+the startup scan. Reads remain subject to policy. These checks are separate from the agent's own
+grants.
 
 No additional check protects credential paths from the interpreters. A broad `fs:read` permit lets
 Strands Shell read `~/.aws`, even though no grant could give the agent that path. See [credential

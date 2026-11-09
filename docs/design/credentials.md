@@ -28,22 +28,22 @@ policy decides it. This page covers what happens to the credential.
 A route names its destinations and one secret. `secret.ref` selects where the secret comes from. The
 scheme determines how Box reads and uses the secret.
 
-| | `env://NAME` | `aws://PROFILE` |
-|---|---|---|
-| The secret comes from | The variable `NAME` in the environment of `box run` | The static access keys of the AWS profile `PROFILE` |
-| Box reads it | Once, at startup | On each request |
-| A process in the box gets | A placeholder in `NAME` | Placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` |
-| The gateway | Swaps the placeholder for the secret | Signs the request with SigV4 |
-| Where the secret goes | A header, HTTP basic auth, or a query parameter | The SigV4 headers |
-| The response | Every copy of the secret is redacted | Not scanned |
-| The usual failure | A request without the placeholder gets a 403 | The host names no AWS service and region |
+| | `env://NAME` | `aws://PROFILE` | `aws://` (no profile) |
+|---|---|---|---|
+| The secret comes from | The variable `NAME` in the environment of `box run` | The static access keys of the AWS profile `PROFILE` | The AWS SDK default credential provider chain (the host's ambient identity) |
+| Box reads it | Once, at startup | On each request | On each request |
+| A process in the box gets | A placeholder in `NAME` | Placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` | The same placeholder AWS keys |
+| The gateway | Swaps the placeholder for the secret | Signs the request with SigV4 | Signs with SigV4, and warns that it used the ambient identity |
+| Where the secret goes | A header, HTTP basic auth, or a query parameter | The SigV4 headers | The SigV4 headers |
+| The response | Every copy of the secret is redacted | Not scanned | Not scanned |
+| The usual failure | A request without the placeholder gets a 403 | The host names no AWS service and region | The chain resolves no credentials |
 
 An HTTP MCP server, `[mcp.<name>] type = "http"`, takes the same `secret` keys. Its credential uses
 the same route, and everything on this page applies to it as described in [the `[mcp.<name>]`
 table](../user/mcp.md).
 
-Box accepts only these two schemes. A route that names any other scheme is refused when the
-configuration loads. See [a credential the box can't deliver is refused at
+Box accepts only the `env://` and `aws://` schemes. A route that names any other scheme is refused
+when the configuration loads. See [a credential the box can't deliver is refused at
 load](./decisions.md#an-undeliverable-credential-is-refused-at-load).
 
 ## The parts
@@ -134,7 +134,8 @@ flowchart TD
    request goes out only if policy permits it.
 5. The gateway refuses a compressed response to a credentialed request, because it can't scan one.
    For an `env://` route, it replaces each copy of the real secret in the headers and the body with
-   `[REDACTED]`.
+   `[REDACTED]`. It scans body chunks before delivery, retaining a trailing window bounded by the
+   credential length across chunks.
 
 A refusal is an HTTP 403 with the header `x-strands-box-egress: refused`, and a body that says why.
 See [the error table](../user/egress.md#errors-and-exit-codes).

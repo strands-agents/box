@@ -58,6 +58,20 @@ pub(crate) struct Writes {
 }
 
 impl Writes {
+    /// The response outcome, including whether its producer and delivery both finished.
+    pub(crate) fn response_outcome(
+        mut self,
+        start: usize,
+        error: Option<io::ErrorKind>,
+        complete: bool,
+    ) -> EffectOutcome {
+        if !complete {
+            self.flushed = false;
+            return self.outcome(start, Some(error.unwrap_or(io::ErrorKind::UnexpectedEof)));
+        }
+        self.outcome(start, error)
+    }
+
     /// The outcome of a message that starts at `start`, in an exchange that ended with `error`.
     pub(crate) fn outcome(self, start: usize, error: Option<io::ErrorKind>) -> EffectOutcome {
         let accepted_bytes = self.accepted.saturating_sub(start);

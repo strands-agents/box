@@ -158,6 +158,24 @@ needs two `forbid` rules on `net:connect`: one for the metadata hostnames `metad
 and `metadata.azure.internal`, and one for the metadata addresses `169.254.*`, `fd00:ec2::254`, and
 the IPv6 link-local range.
 
+## How responses reach the workload
+
+The gateway streams response bodies as they arrive, using bounded buffers. This includes
+credentialed responses and HTTP MCP results. Header checks finish before delivery starts, and
+credential redaction checks each body chunk before the workload receives it. It retains a
+credential-sized tail between chunks, so a small event can wait for more bytes or clean completion.
+Matches across chunk boundaries are redacted before delivery.
+
+HTTP MCP `tools/list` keeps bounded capture for each page and the existing schema-staging order
+([runtime tool discovery](decisions.md#remote-tool-schemas-are-discovered-at-runtime-in-memory)).
+The default 16 MiB cap still applies to requests and these catalog responses.
+
+One absolute upstream deadline covers request transmission and response receipt, with a default of
+300 seconds. Chunks do not reset it. A later timeout or framing error closes the unfinished response,
+so the workload can receive a processed prefix followed by an error. Box records the request outcome
+when the upstream response completes, fails, or is abandoned, and records delivery completion
+separately.
+
 ## How credentials are added
 
 [How Box keeps credentials out of the box](./credentials.md) covers each source, the request path,
