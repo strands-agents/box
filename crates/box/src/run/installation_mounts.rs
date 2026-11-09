@@ -10,10 +10,12 @@ use std::path::{Path, PathBuf};
 use super::InstalledBinary;
 
 #[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 struct Mount {
     id: Option<u64>,
     filesystem: Vec<u8>,
     device: Vec<u8>,
+    namespace_device: Option<u64>,
     root: PathBuf,
     point: PathBuf,
 }
@@ -129,7 +131,7 @@ fn one_complete_mount(
     let mut matching = None;
     for mount in mounts {
         check()?;
-        if mount.id.is_none() {
+        if mount.id.is_none() || mount.namespace_device == Some(identity.device) {
             return Ok(false);
         }
         if mount.id == Some(identity.id) && matching.replace(mount).is_some() {
@@ -206,10 +208,22 @@ fn names_at_mounts(
     identity: (u64, u64),
     mounts: &[Mount],
 ) -> io::Result<Vec<PathBuf>> {
+    if mounts
+        .iter()
+        .any(|mount| mount.namespace_device == Some(identity.0))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "namespace mount shares a protected executable device",
+        ));
+    }
     let mut seen = HashSet::new();
     let mut aliases = Vec::new();
     for name in names {
-        for source in mounts {
+        for source in mounts
+            .iter()
+            .filter(|mount| mount.namespace_device.is_none())
+        {
             let Ok(relative) = name.strip_prefix(&source.point) else {
                 continue;
             };
@@ -218,7 +232,10 @@ fn names_at_mounts(
             } else {
                 source.root.join(relative)
             };
-            for destination in mounts {
+            for destination in mounts
+                .iter()
+                .filter(|mount| mount.namespace_device.is_none())
+            {
                 if source.device != destination.device {
                     continue;
                 }
@@ -301,16 +318,41 @@ fn parse_with_check(table: &[u8], check: &impl Fn() -> io::Result<()>) -> io::Re
         }
         let root = decode_path(fields[3])?;
         let point = decode_path(fields[4])?;
-        if !root.is_absolute() || !point.is_absolute() {
+        if !point.is_absolute() {
             return Err(invalid());
         }
         let id = std::str::from_utf8(fields[0])
             .ok()
             .and_then(|value| value.parse::<u64>().ok());
+        let namespace_device = if root.is_absolute() {
+            None
+        } else {
+            if fields[separator + 1] != b"nsfs"
+                || !namespace_root(&root)
+                || fields.iter().any(|field| field.is_empty())
+                || !fields[..2].iter().all(|field| {
+                    field.iter().all(u8::is_ascii_digit)
+                        && std::str::from_utf8(field)
+                            .ok()
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .is_some_and(|value| value != 0)
+                })
+            {
+                return Err(invalid());
+            }
+            let number = |part: &[u8]| {
+                std::str::from_utf8(part)
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .ok_or_else(invalid)
+            };
+            Some(libc::makedev(number(device[0])?, number(device[1])?))
+        };
         mounts.push(Mount {
             id,
             filesystem: fields[separator + 1].to_vec(),
             device: fields[2].to_vec(),
+            namespace_device,
             root,
             point,
         });
@@ -320,6 +362,23 @@ fn parse_with_check(table: &[u8], check: &impl Fn() -> io::Result<()>) -> io::Re
     }
     check()?;
     Ok(mounts)
+}
+
+fn namespace_root(root: &Path) -> bool {
+    let Some((kind, inode)) = root
+        .to_str()
+        .and_then(|value| value.strip_suffix(']'))
+        .and_then(|value| value.split_once(":["))
+    else {
+        return false;
+    };
+    !kind.is_empty()
+        && kind
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        && !inode.is_empty()
+        && inode.bytes().all(|byte| byte.is_ascii_digit())
+        && inode.parse::<u64>().is_ok_and(|value| value != 0)
 }
 
 fn decode_path(field: &[u8]) -> io::Result<PathBuf> {

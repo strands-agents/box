@@ -89,6 +89,14 @@ permissions. Other inspection errors and unstable inventories still cause a refu
 also checks verified spellings through the Data volume. Mounted aliases do not increase the hard-link
 count.
 
+Linux namespace mounts hold handles to isolated operating-system resources, not program files.
+Their `nsfs` mount-table roots use tokens such as `net:[4026531840]` instead of filesystem paths.
+Box validates this token and the numeric device identity before excluding the entry from executable-alias lookup.
+A namespace device that matches any protected executable causes the inventory to fail.
+Box retains namespace entries when checking mount IDs and nested mounts for command hard-link protection.
+For either check to succeed, the complete mount table, including namespace entries, must match before and after inspection.
+Ordinary filesystems retain their alias checks; file device IDs alone cannot exclude a mount because layered filesystems can report different devices for a file and its mount.
+
 These programs start containment or route workload operations to Box's checks, so Box protects them
 from workload writes. See [installed Box programs resist workload
 writes](decisions.md#installed-box-programs-resist-workload-writes). Every process's writable grants

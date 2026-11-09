@@ -620,6 +620,9 @@ Box accepts hard links only when it finds every name in the installation directo
 `deps` directory. This includes Cargo's build layout. Before each contained launch, Box checks the
 original file identities and hard-link counts.
 Linux also checks the files through existing mounts. If permission checks hide a possible alias, Box protects that path without inspecting its identity.
+A Linux namespace mount keeps a reference to an isolated operating-system resource, such as a network environment.
+During installation validation, Box accepts valid namespace mount records, including those created by Docker, when their device numbers differ from every protected Box executable.
+Invalid namespace records and other mount-table roots that are not filesystem paths still fail installation validation.
 Unrelated grants remain usable. On macOS, Box checks verified Data-volume spellings.
 A writable grant must exclude these aliases and their enclosing directories.
 

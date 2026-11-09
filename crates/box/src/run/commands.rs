@@ -568,12 +568,12 @@ mod tests {
                         .parse::<u32>()
                         .map_err(|_| "mount device is not numeric")?;
                 }
-                if !Path::new(fields[3]).is_absolute()
+                if (!Path::new(fields[3]).is_absolute() && fields[separator + 1] != "nsfs")
                     || !Path::new(fields[4]).is_absolute()
                     || fields[3].contains('\\')
                     || fields[4].contains('\\')
                 {
-                    return Err("fixture requires absolute, unescaped mount paths; non-path nsfs roots are unsupported".into());
+                    return Err("fixture requires absolute mount points and unescaped filesystem paths or nsfs roots".into());
                 }
                 mounts.push((
                     fields[2],
