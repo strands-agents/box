@@ -50,6 +50,7 @@ fn the_builtin_spawn_gives_the_program_its_invoked_spelling() {
                 args: vec!["-c".to_string(), "printf %s \"$0\"".to_string()],
                 cwd: std::env::temp_dir(),
                 env: Vec::new(),
+                stdin: strands_shell::os::HostStdin::Null,
             },
         ))
         .expect("the program runs");
@@ -57,5 +58,35 @@ fn the_builtin_spawn_gives_the_program_its_invoked_spelling() {
         String::from_utf8_lossy(&outcome.stdout),
         spelling.display().to_string(),
         "the program reads the spelling, not the identity it was execed by",
+    );
+}
+
+/// **The built-in spawn feeds [`HostStdin::Bytes`] to the child**, so a Shell `< file` redirect
+/// that the seam materialised reaches the host binary instead of `/dev/null`.
+#[test]
+fn the_builtin_spawn_feeds_stdin_bytes_to_the_child() {
+    let Some((_, shell_identity)) = on_host_path("sh") else {
+        eprintln!("skipping: no `sh` on the operator's PATH");
+        return;
+    };
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let outcome = rt
+        .block_on(strands_shell::os::builtin_spawn_host(
+            strands_shell::os::HostSpawn {
+                program: shell_identity,
+                invoked: PathBuf::from("sh"),
+                args: vec!["-c".to_string(), "cat".to_string()],
+                cwd: std::env::temp_dir(),
+                env: Vec::new(),
+                stdin: strands_shell::os::HostStdin::Bytes(b"from-redirect\n".to_vec()),
+            },
+        ))
+        .expect("the program runs");
+    assert_eq!(
+        outcome.stdout, b"from-redirect\n",
+        "the child must read the Shell-supplied stdin bytes, not /dev/null"
     );
 }

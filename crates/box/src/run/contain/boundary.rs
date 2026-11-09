@@ -1605,7 +1605,9 @@ mod tests {
                             .await
                             .map(|_| ())
                     } else {
-                        LeafBox::run(boundary, &fixture.root).await.map(|_| ())
+                        LeafBox::run(boundary, &fixture.root, None)
+                            .await
+                            .map(|_| ())
                     }
                 })
                 .await
@@ -1641,7 +1643,7 @@ mod tests {
             );
             let output = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                LeafBox::run(boundary, &fixture.root),
+                LeafBox::run(boundary, &fixture.root, None),
             )
             .await
             .unwrap()
