@@ -21,7 +21,9 @@ spec.loader.exec_module(runner)
 class JobReceiptTests(unittest.TestCase):
     def run_case(self, polling_failure=False, workload_passed=True, polling_timeout=False,
                  diagnostic_timeouts=False, diagnostic_hook=None, job_pending=False, extra_args=(),
-                 dry_run_edit=None, created_edit=None, pod_edit=None, no_pods=False):
+                 dry_run_edit=None, created_edit=None, pod_edit=None, no_pods=False,
+                 dry_run_warning="", failed_create=None, event_failure=False,
+                 pending_job_polls=0, empty_pod_polls=0):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         previous = Path.cwd()
@@ -29,10 +31,11 @@ class JobReceiptTests(unittest.TestCase):
         self.addCleanup(os.chdir, previous)
         pod_spec = {"hostUsers": False, "containers": [{"name": "workload", "securityContext": {
             "procMount": "Unmasked", "seccompProfile": {"type": "Unconfined"}}}]}
-        created = {"metadata": {"name": "box-scripted-test"}, "spec": {"template": {"spec": pod_spec}}}
+        created = {"metadata": {"name": "box-scripted-test", "uid": "job-test-uid"}, "spec": {"template": {"spec": pod_spec}}}
         self.calls = calls = []
         self.stderr = stderr = io.StringIO()
         self.observed_polls = 0
+        self.job_polls = 0
         self.call_timeouts = []
 
         def kubectl(command, **kwargs):
@@ -42,24 +45,30 @@ class JobReceiptTests(unittest.TestCase):
                 preview = json.loads(kwargs["input"])
                 if dry_run_edit:
                     dry_run_edit(preview["spec"]["template"]["spec"])
-                return subprocess.CompletedProcess(command, 0, json.dumps(preview), "")
+                return subprocess.CompletedProcess(command, 0, json.dumps(preview), dry_run_warning)
             if "create" in command:
                 if created_edit:
                     created_edit(created["spec"]["template"]["spec"])
                 return subprocess.CompletedProcess(command, 0, json.dumps(created), "")
+            if "events" in command:
+                if event_failure:
+                    return subprocess.CompletedProcess(command, 1, "", "Forbidden: cannot list events")
+                events = [{"message": failed_create}] if failed_create else []
+                return subprocess.CompletedProcess(command, 0, json.dumps({"items": events}), "")
             if "job" in command:
                 if polling_timeout:
                     raise subprocess.TimeoutExpired(command, kwargs.get("timeout", 99))
                 if polling_failure:
                     return subprocess.CompletedProcess(command, 1, "", "Kubernetes API unavailable")
-                status = {} if job_pending else {"succeeded": 1}
+                self.job_polls += 1
+                status = {} if job_pending or self.job_polls <= pending_job_polls else {"succeeded": 1}
                 return subprocess.CompletedProcess(command, 0, json.dumps({**created, "status": status}), "")
-            if "pods" in command and not polling_failure and not polling_timeout and self.observed_polls == 0:
+            if "pods" in command and not polling_failure and not polling_timeout and not any("logs" in previous for previous in calls):
                 self.observed_polls += 1
                 pod = {"metadata": {"name": "box-pod"}, "spec": json.loads(json.dumps(pod_spec))}
                 if pod_edit:
                     pod_edit(pod["spec"])
-                return subprocess.CompletedProcess(command, 0, json.dumps({"items": [] if no_pods else [pod]}), "")
+                return subprocess.CompletedProcess(command, 0, json.dumps({"items": [] if no_pods or self.observed_polls <= empty_pod_polls else [pod]}), "")
             if "logs" in command:
                 if diagnostic_hook:
                     diagnostic_hook(stderr.getvalue())
@@ -249,6 +258,42 @@ raise SystemExit(module.main())
                     self.assertFalse(Path("evidence").exists())
                 finally:
                     os.chdir(previous)
+
+    def test_pod_admission_rejection_reports_the_job_event_without_waiting(self):
+        message = 'pods "box-pod" is forbidden: violates PodSecurity "baseline": procMount=Unmasked'
+        status, receipt, stderr, calls = self.run_case(no_pods=True, job_pending=True, failed_create=message)
+        self.assertEqual(status, 1)
+        self.assertIn(message, receipt["error"])
+        self.assertTrue(receipt["incomplete"])
+        self.assertIn("Inspect it with:", stderr)
+        event_calls = [call for call in calls if "events" in call]
+        self.assertEqual(len(event_calls), 1)
+        self.assertIn("involvedObject.uid=job-test-uid,reason=FailedCreate", event_calls[0])
+        saved = json.loads(Path("evidence/box-scripted-test/pod-creation-events.json").read_text())
+        self.assertEqual(saved["items"][0]["message"], message)
+        self.assertFalse(any("delete" in call for call in calls))
+
+    def test_dry_run_admission_warnings_reach_the_operator(self):
+        warning = "Warning: would violate PodSecurity baseline"
+        status, _, stderr, _ = self.run_case(dry_run_warning=warning)
+        self.assertEqual(status, 0)
+        self.assertIn(warning, stderr)
+
+    def test_events_permission_failure_is_preserved_and_reported(self):
+        status, receipt, stderr, _ = self.run_case(no_pods=True, event_failure=True)
+        self.assertEqual(status, 1)
+        self.assertIn("Could not inspect Pod creation events", stderr)
+        self.assertIn("Forbidden", Path("evidence/box-scripted-test/pod-creation-events.stderr.txt").read_text())
+        self.assertIn("no Pod configuration", receipt["error"])
+
+    def test_missing_events_permission_does_not_block_a_later_valid_pod(self):
+        with mock.patch.object(runner.time, "sleep"):
+            status, receipt, stderr, calls = self.run_case(
+                pending_job_polls=1, empty_pod_polls=1, event_failure=True)
+        self.assertEqual(status, 0)
+        self.assertTrue(receipt["passed"])
+        self.assertIn("Could not inspect Pod creation events", stderr)
+        self.assertEqual(sum("events" in call for call in calls), 1)
 
     def test_created_job_change_preserves_recovery_evidence(self):
         status, receipt, stderr, _ = self.run_case(created_edit=lambda pod: pod.pop("hostUsers"))

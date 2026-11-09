@@ -113,8 +113,11 @@ def main():
         if required and result.returncode:
             raise RuntimeError(result.stderr.strip() or shlex.join(command) + f' exited {result.returncode}')
         return result
-    preview = json.loads(call('create', '--dry-run=server', '-f', '-', '-o', 'json',
-                              data=json.dumps(job), timeout=COMMAND_TIMEOUT_SECONDS).stdout)
+    preview_result = call('create', '--dry-run=server', '-f', '-', '-o', 'json',
+                          data=json.dumps(job), timeout=COMMAND_TIMEOUT_SECONDS)
+    if preview_result.stderr.strip():
+        print(preview_result.stderr.strip(), file=sys.stderr, flush=True)
+    preview = json.loads(preview_result.stdout)
     require_sandbox_settings(preview.get('spec', {}).get('template', {}).get('spec', {}),
                              'the server dry-run Job; no Job was created')
     created = json.loads(call('create', '-f', '-', '-o', 'json', data=json.dumps(job)).stdout)
@@ -126,6 +129,7 @@ def main():
     deadline = time.monotonic() + JOB_WAIT_SECONDS[args.mode]
     current = created
     polling_error = None
+    event_warning_printed = False
     try:
         require_sandbox_settings(created.get('spec', {}).get('template', {}).get('spec', {}),
                                  'the created Job')
@@ -144,6 +148,25 @@ def main():
             for pod in observed.get('items', []):
                 require_sandbox_settings(pod.get('spec', {}),
                                          'Pod ' + pod.get('metadata', {}).get('name', '<unknown>'))
+            if not observed.get('items'):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError('The deadline expired before Pod creation events could be inspected')
+                events = call('get', 'events', '--field-selector',
+                              'involvedObject.uid=' + created['metadata']['uid'] + ',reason=FailedCreate',
+                              '-o', 'json', required=False, timeout=min(COMMAND_TIMEOUT_SECONDS, remaining))
+                (dest / 'pod-creation-events.json').write_text(events.stdout)
+                if events.returncode:
+                    (dest / 'pod-creation-events.stderr.txt').write_text(events.stderr)
+                    if not event_warning_printed:
+                        print('Could not inspect Pod creation events: ' + events.stderr.strip(),
+                              file=sys.stderr, flush=True)
+                        event_warning_printed = True
+                else:
+                    failures = json.loads(events.stdout).get('items', [])
+                    if failures:
+                        messages = '; '.join(event.get('message') or 'No event message' for event in failures)
+                        raise RuntimeError('The Job controller could not create a Pod: ' + messages)
             status = current.get('status', {})
             if status.get('succeeded') and not observed.get('items'):
                 raise RuntimeError('The Job completed but no Pod configuration could be verified')

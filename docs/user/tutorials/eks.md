@@ -67,8 +67,12 @@ The cluster did not preserve required Box settings in the server dry-run Job; no
   procMount: expected Unmasked; received "Default"
 ```
 
-The script also checks the created Job and its Pods, because Pod admission can differ from Job
-admission. If those checks fail, it saves a failed receipt and prints a recovery command.
+The script prints warnings returned by the dry run. It also checks the created Job and its Pods,
+because Pod admission can differ from Job admission. While no Pods exist, it reads that Job's
+`FailedCreate` events and reports the controller's message, including admission rejections.
+The operator needs permission to list namespace events for this diagnostic. If the event query
+fails, the script prints a warning, saves the error, and continues its bounded wait.
+A configuration mismatch or a failed Pod-creation event produces a failed receipt and a recovery command.
 It leaves the Job available for inspection and cleanup. A Pod might already have started before
 this later check; this diagnostic is not a security boundary. A successful check confirms only
 that the settings were preserved. The workload must still start and pass its checks.
