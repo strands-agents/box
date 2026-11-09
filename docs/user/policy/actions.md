@@ -275,6 +275,15 @@ Bind the same variable to `requestId` in two predicates to require events from t
 Treat the identifier's spelling as opaque.
 Older events that lack this field remain in history, but cannot match a predicate that requires it.
 
+For modern stdio MCP, a valid result that asks for more client input before cancellation is not a
+completed operation and does not record `mcp:call::response`. Each retry is a new request.
+Its terminal result or error records a response with that retry's request ID.
+
+Cancelling an admitted modern stdio `tools/call`, `prompts/get`, or `resources/read` records one
+indeterminate response immediately. A late reply adds no second event, even if it asks for more
+input. When the connection ends, Box stops the server and records its remaining admitted item
+calls as indeterminate outcomes. Each outcome uses the original call's request ID.
+
 To cap how many times the agent tries an action, count `A::request`, which also counts denied
 attempts. Use `A::response` when a later rule needs a recorded outcome. Partial or indeterminate
 outcomes also count; an MCP response does not establish tool success.
@@ -288,7 +297,7 @@ What each caller records as a response:
 | `http:request` | When the upstream response completes, fails, or reaches its deadline, once per exchange | `status`: the upstream's reply status, when received |
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |
 | A tool grammar action, `Tool::<name>::Action::"<action>"` | When a program the Shell started ends | `status`, as on `shell:spawn` |
-| `mcp:call` | For `tools/call`, `prompts/get`, and `resources/read`: when the call completes over stdio, or when the upstream response completes, fails, or reaches its deadline over HTTP | none |
+| `mcp:call` | For `tools/call`, `prompts/get`, and `resources/read`: when the call completes or ends indeterminately over stdio, or when the upstream response completes, fails, or reaches its deadline over HTTP | none |
 
 Each temporal operator carries a window of at most `24h`. A temporal predicate names exactly one
 action, so a budget that spans `fs:read` and `fs:write` is one clause per action.

@@ -181,13 +181,19 @@ the remaining body under the same deadline before recording the outcome.
 Partial or uncertain outcomes still count as `::response`, which does not prove tool success.
 Response delivery adds no second policy event.
 
+For stdio MCP item calls, the broker records terminal outcomes before client delivery.
+A modern cancellation records an indeterminate outcome for an admitted call.
+The broker records the same outcome for admitted calls still pending after it stops the server.
+A valid `input_required` result received before cancellation records no outcome.
+See [MCP call accounting](mcp.md#modern-stdio-requests).
+
 Because a denied attempt is still a `::request`, asking and being refused satisfies a precondition
 keyed on `::request`. Key a precondition on `::response` instead. See [temporal rules are enforced
 against recorded history](decisions.md#temporal-rules-are-enforced-against-recorded-history).
 Counting differs the same way. Each request is appended under the one lock before the next is
 decided, so a `::request` count includes every earlier attempt, and a budget keyed on `::request`
-admits exactly N attempts, even when they arrive together. A `::response` count only sees operations
-that have finished, so several requests in flight at once can each pass before any of them finishes.
+admits exactly N attempts, even when they arrive together. A `::response` count only sees recorded
+outcomes, so several requests in flight at once can each pass before any outcome is recorded.
 
 A `when temporal` clause names one action, with no group, no `or`, and no wildcard, so a budget over
 several actions needs one clause per action. See [a temporal rule names one

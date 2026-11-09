@@ -72,7 +72,7 @@ unless temporal {
 
 const SWITCH_ON: &str = "\n[experimental-features]\ntool-grammars = true\n";
 
-/// A `[tool.git]` whose program is a copy of `true(1)`, named `git`, that the test owns.
+/// A `[tool.git]` whose program is the test's own `git`.
 fn git_tool(home: &Path) -> String {
     let program = git_program(home);
     format!(
@@ -86,13 +86,13 @@ fn tools_directory(home: &Path) -> std::path::PathBuf {
     home.join("tools")
 }
 
-/// The test's own `git`, a copy of `true(1)`, at its canonical path.
+/// The test's own `git`, which always exits 0, at its canonical path.
 fn git_program(home: &Path) -> std::path::PathBuf {
     let directory = tools_directory(home);
     std::fs::create_dir_all(&directory).expect("the tools directory");
     let program = directory.join("git");
     if !program.exists() {
-        std::fs::copy(support::fixture::no_op_program(), &program).expect("a git stand-in");
+        compile_tool(&program, 0);
     }
     program.canonicalize().expect("the git stand-in resolves")
 }
@@ -110,12 +110,12 @@ fn cargo_path(home: &Path) -> std::path::PathBuf {
     tools_directory(home).join("cargo")
 }
 
-/// Make the test's `cargo` a new copy of `program`, and return its canonical path.
-fn install_cargo(home: &Path, program: &str) -> String {
+/// The test's `cargo`, rebuilt with `exit_status`, at its canonical path.
+fn install_cargo(home: &Path, exit_status: i32) -> String {
     std::fs::create_dir_all(tools_directory(home)).expect("the tools directory");
     let path = cargo_path(home);
     let staged = path.with_extension("new");
-    std::fs::copy(program, &staged).expect("a cargo stand-in");
+    compile_tool(&staged, exit_status);
     std::fs::rename(&staged, &path).expect("install the cargo stand-in");
     path.canonicalize()
         .expect("the cargo stand-in resolves")
@@ -123,12 +123,30 @@ fn install_cargo(home: &Path, program: &str) -> String {
         .to_string()
 }
 
-/// `false(1)`, at the path this platform ships it.
-fn failing_program() -> &'static str {
-    ["/usr/bin/false", "/bin/false"]
-        .into_iter()
-        .find(|candidate| Path::new(candidate).is_file())
-        .expect("this platform ships `false` at neither /usr/bin/false nor /bin/false")
+fn compile_tool(path: &Path, exit_status: i32) {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    let mut compiler = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+        .args(["--edition=2024", "--crate-name", "tool_grammar_probe", "-"])
+        .arg("-o")
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the tool probe compiler");
+    compiler
+        .stdin
+        .take()
+        .expect("compiler input")
+        .write_all(format!("fn main() {{ std::process::exit({exit_status}); }}").as_bytes())
+        .expect("write the tool probe source");
+    let output = compiler.wait_with_output().expect("compile the tool probe");
+    assert!(
+        output.status.success(),
+        "tool probe compilation: {output:?}"
+    );
 }
 
 fn stdout(output: &Output) -> String {
@@ -344,7 +362,7 @@ fn a_push_is_denied_until_a_test_exits_0_and_stays_allowed_after_a_restart() {
         return;
     }
     let home = support::fixture::short_temporary_home();
-    let cargo = install_cargo(home.path(), failing_program());
+    let cargo = install_cargo(home.path(), 1);
     let box_ = grammar_box_with(
         home.path(),
         PUSH_AFTER_A_PASSING_TEST,
@@ -368,7 +386,7 @@ fn a_push_is_denied_until_a_test_exits_0_and_stays_allowed_after_a_restart() {
         "the rule denies both pushes: {failed:?}"
     );
 
-    let cargo = install_cargo(home.path(), support::fixture::no_op_program());
+    let cargo = install_cargo(home.path(), 0);
     let passed = box_.bash(&format!(
         r#"zsh -c '{cargo} test; printf "|test=%s" "$?"; {git} push origin; printf "|push=%s" "$?"'"#
     ));

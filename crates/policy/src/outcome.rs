@@ -152,18 +152,7 @@ pub enum Outcome<'a> {
         /// How the operation ended.
         result: FsResult,
     },
-    /// One completed MCP call (`mcp:call::response`).
-    ///
-    /// A call that COMPLETED is a `response`, whatever the server then said — a JSON-RPC error reply
-    /// is still `::response`, exactly as an HTTP 500 is a `Http` `::response` and a non-zero exit is a
-    /// `ShellRun` `::response`. `::error` across this codebase means the box's effect did not occur,
-    /// not that the counterparty was unhappy; a call that never completes simply records nothing.
-    ///
-    /// The response names the same `mcp:call` action whose request was authorized, so a temporal rule
-    /// can `count`/`formerly` over `mcp:call::response`. The per-item identity — `tool` for a
-    /// `tools/call`, `prompt` for a `prompts/get`, `uri` for a `resources/read` — rides the same
-    /// `McpCallInput` fields the request carried, so a rule keyed on any of them joins the two legs
-    /// on identity (mirroring the request leg, which emits all three together).
+    /// One terminal or indeterminate MCP call (`mcp:call::response`).
     Mcp {
         /// The MCP server name, from the operator's file.
         server: &'a str,
