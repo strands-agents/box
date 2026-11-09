@@ -1069,7 +1069,13 @@ async fn forward_server_frame(
         ));
     }
     if exchange.connection.cancelled.remove(&key) {
-        exchange.connection.modern_requests.remove(&key);
+        // The client never sees a cancelled reply, but the server may have run the call.
+        let terminal = protocol_2026_07_28::cancelled_reply_is_terminal(&key, &response, exchange);
+        if let Some(call) = exchange.connection.decided_calls.remove(&key)
+            && terminal
+        {
+            record_response_leg(exchange, &call);
+        }
         return Ok(ProgramAction::Continue);
     }
     let terminal = match protocol_2026_07_28::accept_reply(&key, &response, exchange) {
@@ -1100,23 +1106,27 @@ async fn forward_server_frame(
     let response_leg = exchange.connection.decided_calls.remove(&key);
     // The reply reaches the client before its usage is recorded, so bookkeeping never drops it.
     emit_text(exchange.frames, exchange.program, raw, None).await?;
-    if let Some(call) = response_leg.filter(|_| terminal)
-        && let Err(error) = exchange.connection.policy.record(
-            &exchange.connection.governed,
-            &Principal::agent(),
-            &call.request_id,
-            &Outcome::Mcp {
-                server: exchange.running.server(),
-                method: &call.method,
-                tool: call.tool.as_deref(),
-                prompt: call.prompt.as_deref(),
-                uri: call.uri.as_deref(),
-            },
-        )
-    {
-        eprintln!("[broker] failed to record mcp:call response leg: {error}");
+    if let Some(call) = response_leg.filter(|_| terminal) {
+        record_response_leg(exchange, &call);
     }
     Ok(ProgramAction::Continue)
+}
+
+fn record_response_leg(exchange: &Exchange<'_>, call: &RecordedCall) {
+    if let Err(error) = exchange.connection.policy.record(
+        &exchange.connection.governed,
+        &Principal::agent(),
+        &call.request_id,
+        &Outcome::Mcp {
+            server: exchange.running.server(),
+            method: &call.method,
+            tool: call.tool.as_deref(),
+            prompt: call.prompt.as_deref(),
+            uri: call.uri.as_deref(),
+        },
+    ) {
+        eprintln!("[broker] failed to record mcp:call response leg: {error}");
+    }
 }
 
 /// Capture one `tools/list` reply, and hold the final page until its schema stages.

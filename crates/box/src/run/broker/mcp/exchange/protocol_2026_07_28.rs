@@ -213,6 +213,27 @@ pub(super) fn accept_reply(
     Ok(true)
 }
 
+/// Whether a late reply to a cancelled request ends an operation that may have run.
+///
+/// Only a well-formed `input_required` result proves the operation is incomplete. Any other reply,
+/// including a malformed one, may follow a completed call, so it counts as a response.
+pub(super) fn cancelled_reply_is_terminal(
+    key: &str,
+    response: &Value,
+    exchange: &mut Exchange<'_>,
+) -> bool {
+    exchange
+        .connection
+        .modern_requests
+        .remove(key)
+        .is_none_or(|request| {
+            !matches!(
+                request.validate_reply(response),
+                Ok(ModernReply::InputRequired(_))
+            )
+        })
+}
+
 pub(super) fn cancel_request(request: &Value, exchange: &mut Exchange<'_>) -> io::Result<()> {
     if request["method"] != "notifications/cancelled"
         || (exchange.connection.phase != McpConnectionPhase::PerRequestMetadata
@@ -227,8 +248,9 @@ pub(super) fn cancel_request(request: &Value, exchange: &mut Exchange<'_>) -> io
     };
     let key = id_key(id)?;
     if exchange.connection.modern_requests.contains_key(&key) {
+        // The call stays in `decided_calls`: the server may still run it, so its late reply
+        // records the response leg even though the client never sees that reply.
         exchange.connection.cancelled.insert(key.clone());
-        exchange.connection.decided_calls.remove(&key);
         if exchange.connection.lists.remove(&key).is_some() {
             exchange.registry.list_failed(
                 exchange.running.server(),

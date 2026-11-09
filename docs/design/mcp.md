@@ -481,8 +481,9 @@ the oldest allowance. An evicted retry is refused without closing the connection
 Each continuation holds at most 64 input IDs, each at most 256 bytes. Continuations do not
 survive a connection closing. A client that reconnects must repeat the initial operation.
 A cancellation retains the request ID until its late reply arrives or the connection closes.
-The broker drops that reply without a response event. Cancelled requests count toward the
-pending limit. Cancellation during catalog capture fails that capture. Modern server requests and client responses in the legacy JSON-RPC direction are
+The broker does not forward that reply, but the server may still have run the call, so a
+terminal reply records the call's `mcp:call::response` event. Only an `input_required` reply
+records none. Cancelled requests count toward the pending limit. Cancellation during catalog capture fails that capture. Modern server requests and client responses in the legacy JSON-RPC direction are
 refused.
 
 An `input_required` result leaves the operation incomplete, so it does not record an

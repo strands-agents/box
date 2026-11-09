@@ -408,33 +408,45 @@ fn a_pending_probe_does_not_prevent_legacy_timeout_fallback() {
 }
 
 #[test]
-fn modern_cancellation_ignores_late_replies_and_reserves_the_id() {
+fn modern_cancellation_hides_late_replies_but_still_records_their_response() {
     let (runtime, local) = local_runtime();
     runtime.block_on(local.run_until(async {
-        let fixture = fixture(&format!(r#"{PERMIT_ALL_MCP}
-            forbid (principal, action == Box::Action::"mcp:call", resource)
-            when {{ context.input has tool && context.input.tool == "Search" }}
-            when temporal {{ formerly within 3600s (Box::Action::"mcp:call"::response{{input.tool: "Search"}}) }};"#));
-        let log = tempfile::NamedTempFile::new().expect("frame log");
-        let mut command = modern_server(log.path());
-        command[2] = command[2].replace("case \"$frame\" in", r#"case "$frame" in
+        let late_complete = r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","content":[]}}"#;
+        let late_input = r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"input_required","inputRequests":{"root":{"method":"roots/list"}},"requestState":"opaque"}}"#;
+        for (late_reply, counts) in [(late_complete, true), (late_input, false)] {
+            let fixture = fixture(&format!(r#"{PERMIT_ALL_MCP}
+                forbid (principal, action == Box::Action::"mcp:call", resource)
+                when {{ context.input has tool && context.input.tool == "Search" }}
+                when temporal {{ formerly within 3600s (Box::Action::"mcp:call"::response{{input.tool: "Search"}}) }};"#));
+            let log = tempfile::NamedTempFile::new().expect("frame log");
+            let mut command = modern_server(log.path());
+            // The server ignores the cancellation: it answers the cancelled call late, just
+            // before it answers the ping, so the broker reads the late reply first.
+            command[2] = command[2].replace("case \"$frame\" in", &format!(r#"case "$frame" in
   *'"method":"tools/call"'*'"value":"wait"'*) continue ;;
-  *'"method":"ping"'*) printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","content":[]}}'; continue ;;"#);
-        let (mut program, mut output) = exchange(command, &fixture).await;
-        send(&program, modern_request(1, "tools/list", json!({}))).await;
-        assert!(next_output(&mut output).await["result"]["tools"].is_array());
-        let call = modern_request(2, "tools/call", json!({"name": "Search", "arguments": {"value": "wait"}}));
-        send(&program, call.clone()).await;
-        send(&program, json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 2}})).await;
-        send(&program, call).await;
-        assert!(next_output(&mut output).await["error"].is_object(), "cancelled id remains reserved");
-        send(&program, modern_request(3, "ping", json!({}))).await;
-        send(&program, modern_request(4, "tools/call", json!({"name": "Search", "arguments": {"value": "continue"}}))).await;
-        let response = next_output(&mut output).await;
-        assert_eq!(response["id"], 4, "cancelled response never reaches the client");
-        assert_eq!(response["result"]["resultType"], "complete", "cancelled call never records a response event");
-        program.stop_and_wait().await.expect("stop the exchange");
-        assert_eq!(read_log(log.path()).iter().filter(|frame| frame["method"] == "tools/call").count(), 2);
+  *'"method":"ping"'*) printf '%s\n' '{late_reply}' '{{"jsonrpc":"2.0","id":3,"result":{{"resultType":"complete"}}}}'; continue ;;"#));
+            let (mut program, mut output) = exchange(command, &fixture).await;
+            send(&program, modern_request(1, "tools/list", json!({}))).await;
+            assert!(next_output(&mut output).await["result"]["tools"].is_array());
+            let mut call = input_call(2);
+            call["params"]["arguments"] = json!({"value": "wait"});
+            send(&program, call.clone()).await;
+            send(&program, json!({"jsonrpc": "2.0", "method": "notifications/cancelled", "params": {"requestId": 2}})).await;
+            send(&program, call).await;
+            assert!(next_output(&mut output).await["error"].is_object(), "cancelled id remains reserved");
+            send(&program, modern_request(3, "ping", json!({}))).await;
+            assert_eq!(next_output(&mut output).await["id"], 3, "cancelled response never reaches the client");
+            send(&program, modern_request(4, "tools/call", json!({"name": "Search", "arguments": {"value": "continue"}}))).await;
+            let response = next_output(&mut output).await;
+            assert_eq!(response["id"], 4, "{response}");
+            if counts {
+                assert_eq!(response["error"]["code"], -32001, "a cancelled call that ran records its response: {response}");
+            } else {
+                assert_eq!(response["result"]["resultType"], "complete", "an incomplete cancelled call records no response: {response}");
+            }
+            program.stop_and_wait().await.expect("stop the exchange");
+            assert_eq!(read_log(log.path()).iter().filter(|frame| frame["method"] == "tools/call").count(), 1 + usize::from(!counts));
+        }
     }));
 }
 
