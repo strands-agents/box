@@ -577,6 +577,11 @@ It checks elapsed time between filesystem calls and before accepting a completed
 This budget cannot interrupt a blocked filesystem call, and separate trees receive separate
 budgets. The command and its paths must still pass the writable-grant checks.
 
+Box skips the scan when every name of the command is in the command's own folder, because no
+write grant may reach that folder. Rustup's proxies in `~/.cargo/bin` and npm's `bun.exe` and
+`bunx.exe` are like this. Box counts the names again before it relies on the skip, so a name in
+another folder brings the scan back.
+
 During the run, Strands Shell and Monty refuse changes to these programs and their enclosing paths,
 even when policy permits the operation. For commands admitted through scanning, directory
 changes require a complete scan that finds none of their hard-link names. The same inspection

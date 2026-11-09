@@ -204,13 +204,23 @@ impl ConfiguredCommands {
     fn mutable_aliases(&self) -> Vec<(u64, u64)> {
         self.tools
             .values()
-            .filter(|command| command.needs_alias_scan)
+            .filter(|command| command.needs_alias_scan && !command.every_name_beside())
             .map(|command| command.identity)
             .collect()
     }
 }
 
 impl ConfiguredCommand {
+    /// Whether the command's folder holds every name its open file has now, so no write grant
+    /// holds one: Box refuses a write grant that reaches that folder.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn every_name_beside(&self) -> bool {
+        use std::os::unix::fs::MetadataExt as _;
+        self.opened.metadata().is_ok_and(|metadata| {
+            aliases::every_name_beside(&self.path, self.identity, metadata.nlink())
+        })
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -519,6 +529,53 @@ mod tests {
             assert!(error.contains(table), "{error}");
             assert!(error.contains("contains a hard link"), "{error}");
         }
+    }
+
+    /// **A linked command whose every name shares its folder needs no scan**, as rustup's proxies
+    /// in `~/.cargo/bin` and npm's `bun.exe` and `bunx.exe` do. A write grant that Box cannot
+    /// inspect still passes. A name added in another folder brings the scan back.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_linked_command_whose_names_share_its_folder_skips_the_scan_until_a_name_lands_elsewhere() {
+        let directory = tempfile::tempdir().expect("directory");
+        let home = directory.path().canonicalize().unwrap();
+        let tools = home.join("tools");
+        let work = home.join("work");
+        let locked = work.join("locked");
+        std::fs::create_dir(&tools).unwrap();
+        std::fs::create_dir_all(&locked).unwrap();
+        std::fs::write(locked.join("entry"), "").unwrap();
+        let command = tools.join("reader");
+        program(&command);
+        std::fs::hard_link(&command, tools.join("alias")).unwrap();
+        let commands = ConfiguredCommands::load(&record(&command)).expect("linked commands load");
+        assert!(commands.mutable_aliases().is_empty(), "no scan is needed");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = std::fs::read_dir(&locked).is_err();
+        let skipped = commands.validate_reach("[agent]", &reach(&home, &work));
+        let mutation = commands.mutation_refusal(&work);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if unreadable {
+            skipped.expect("a folder Box cannot read needs no scan");
+            assert!(mutation.is_none(), "a mutation needs no scan");
+        }
+        commands.get("reader").unwrap().verify().unwrap();
+
+        std::fs::hard_link(&command, work.join("elsewhere")).unwrap();
+        assert_eq!(
+            commands.mutable_aliases(),
+            vec![commands.get("reader").unwrap().identity],
+            "a name outside the folder brings the scan back"
+        );
+        let error = commands
+            .validate_reach("[agent]", &reach(&home, &work))
+            .expect_err("the scan finds the new name")
+            .to_string();
+        assert!(error.contains("contains a hard link"), "{error}");
+        assert!(
+            commands.get("reader").unwrap().verify().is_err(),
+            "the added name also changes the link count"
+        );
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]

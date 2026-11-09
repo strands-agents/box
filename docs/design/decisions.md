@@ -1378,7 +1378,9 @@ A third method pins a configured tool's program. It records the file's link coun
 same count during revalidation. Box first rules out workload writes through its other names.
 On macOS and Linux, Box can establish this by scanning every process's declared writable
 directories before the workload starts. The broker and each platform's native boundary prevent
-later alias imports.
+later alias imports. When every name is in the command's own folder, the scan has nothing to find,
+because no write grant may reach that folder, so Box skips it. Box counts the folder's names
+against the file's current link count each time it relies on the skip.
 
 A backend may make the file non-executable if it cannot preserve both write subtraction and
 write-xor-execute. Callers must not rely on write protection to preserve an execute grant.

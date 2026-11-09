@@ -13,6 +13,31 @@ const SCAN_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_DEPTH: usize = 128;
 const DIRECTORY_FLAGS: libc::c_int = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
+/// Whether the folder of `path` holds all `links` names of the file `identity`.
+///
+/// Every name then shares the command's folder, which no write grant may reach, so no write
+/// grant can hold one and the scan has nothing to find.
+pub(super) fn every_name_beside(path: &Path, identity: (u64, u64), links: u64) -> bool {
+    let Some(folder) = path.parent() else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return false;
+    };
+    let mut names = 0_u64;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        if std::fs::symlink_metadata(entry.path())
+            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == identity)
+        {
+            names += 1;
+        }
+    }
+    names == links
+}
+
 /// Inspect existing names without following symbolic links or accepting an incomplete directory walk.
 pub(super) fn contains(path: &Path, identities: &[(u64, u64)]) -> io::Result<bool> {
     contains_before_deadline(
