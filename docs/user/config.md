@@ -577,16 +577,18 @@ This budget cannot interrupt a blocked filesystem call, and separate trees recei
 budgets. The command and its paths must still pass the writable-grant checks.
 
 On Linux, Box can skip this scan for a configured program when it counts every hard-link name
-in the program's own directory and verifies the mount layout for the path being checked.
-The program, its directory, and that path must share one ext4, XFS, or tmpfs mount that exposes
+in the program's own directory and verifies the mount layout for the directory being checked.
+The program and both directories must share one ext4, XFS, or tmpfs mount that exposes
 the filesystem's root (`/`). No other mount may share its device or mount point, or sit at or
 below the program's directory or the checked path. Box reads the mount table before and after
 counting and requires both results to match.
 
-Box repeats this check for each writable directory and each path changed through Strands Shell
-or Monty. Each check has a separate 30-second budget, checked between filesystem calls; it
-cannot interrupt a blocked call. On macOS, or when any condition is unmet, an inspection error
-occurs, or the budget expires, Box uses the recursive scan and its limits instead.
+Box repeats this check for each writable directory and each directory changed through Strands
+Shell or Monty. Files and missing paths use the existing identity checks without this optional
+mount inspection. Each optional inspection has a separate 30-second budget, checked between
+filesystem calls; it cannot interrupt a blocked call. Directory targets use the recursive scan
+and its limits on macOS. Linux also uses that scan if any condition is unmet, an inspection
+error occurs, or the budget expires.
 
 During the run, Strands Shell and Monty refuse changes to these programs and their enclosing paths,
 even when policy permits the operation. For operator-writable programs with multiple hard links,
