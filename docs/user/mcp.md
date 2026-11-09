@@ -80,6 +80,7 @@ server:
 | `npx --version` | The ordinary `npx` program, inside the agent's sandbox. |
 
 If no declared command matches, the alias runs the next ordinary program on the agent's `PATH`.
+When `PATH` is absent or empty, the alias searches `/usr/bin:/bin` instead of the working directory.
 It skips Box's alias directory and retains the agent's existing sandbox grants and environment.
 It receives none of a server's extra sandbox grants or credentials. The program still needs the
 agent's execution and filesystem grants. A mistyped server command takes this same path.

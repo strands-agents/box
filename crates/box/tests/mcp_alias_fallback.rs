@@ -2,6 +2,8 @@
 
 #![cfg(unix)]
 
+use std::cell::RefCell;
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -15,6 +17,8 @@ use serde_json::{Value, json};
 struct Alias {
     home: tempfile::TempDir,
     path: PathBuf,
+    /// The alias's `PATH`; `None` leaves it unset.
+    search_path: RefCell<Option<OsString>>,
 }
 
 impl Alias {
@@ -29,7 +33,19 @@ impl Alias {
         symlink(home.path().join("bin"), home.path().join("bin-link")).unwrap();
         let path = home.path().join("bin").join(program);
         std::fs::copy(env!("CARGO_BIN_EXE_strands-box-sock-alias"), &path).unwrap();
-        Self { home, path }
+        let search_path = std::env::join_paths([
+            home.path().join("bin"),
+            home.path().join("bin/."),
+            home.path().join("bin-link"),
+            home.path().join("links"),
+            PathBuf::from("ordinary"),
+        ])
+        .unwrap();
+        Self {
+            home,
+            path,
+            search_path: RefCell::new(Some(search_path)),
+        }
     }
 
     fn program(&self, text: &str) {
@@ -83,20 +99,11 @@ impl Alias {
             respond(&mut stream, open);
         });
         let mut command = Command::new(&self.path);
+        command.args(arguments).env_clear();
+        if let Some(search_path) = self.search_path.borrow().as_ref() {
+            command.env("PATH", search_path);
+        }
         command
-            .args(arguments)
-            .env_clear()
-            .env(
-                "PATH",
-                std::env::join_paths([
-                    self.home.path().join("bin"),
-                    self.home.path().join("bin/."),
-                    self.home.path().join("bin-link"),
-                    self.home.path().join("links"),
-                    PathBuf::from("ordinary"),
-                ])
-                .unwrap(),
-            )
             .env("FALLBACK_VALUE", "agent value")
             .current_dir(self.home.path())
             .stdin(Stdio::piped())
@@ -193,6 +200,25 @@ fn fallback_reports_missing_and_nonexecutable_programs() {
     )
     .unwrap();
     assert_eq!(alias.invoke(&[], b"", unmatched).status.code(), Some(126));
+}
+
+#[test]
+fn fallback_without_a_path_searches_the_default_path_not_the_working_directory() {
+    // `true` is in `/usr/bin` or `/bin` on every supported host; the planted copy exits 42.
+    let alias = Alias::new("true");
+    let planted = alias.home.path().join("true");
+    std::fs::write(&planted, "#!/bin/sh\necho planted\nexit 42\n").unwrap();
+    std::fs::set_permissions(&planted, std::fs::Permissions::from_mode(0o755)).unwrap();
+    for search_path in [None, Some(OsString::new())] {
+        *alias.search_path.borrow_mut() = search_path.clone();
+        let output = alias.invoke(&[], b"", unmatched);
+        assert_eq!(
+            output.status.code(),
+            Some(0),
+            "PATH {search_path:?}: {output:?}"
+        );
+        assert!(output.stdout.is_empty(), "PATH {search_path:?}: {output:?}");
+    }
 }
 
 #[test]

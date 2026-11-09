@@ -128,7 +128,7 @@ If a declared program has no matching command, the broker returns a distinct non
 The alias then replaces itself with the ordinary program inside the agent's sandbox.
 
 Fallback searches the agent's effective `PATH`, skipping the alias directory and links to its own
-image. It retains the arguments, working directory, composed environment, and standard streams.
+image. An absent or empty `PATH` searches `/usr/bin:/bin`, never the working directory. It retains the arguments, working directory, composed environment, and standard streams.
 The alias reads no standard input before the routing response. It still closes inherited descriptors
 above standard error. Fallback adds no sandbox grants and receives no MCP server credentials.
 Protocol errors, ambiguous matches, and policy denials remain failures.

@@ -28,7 +28,12 @@ pub(super) fn execute(program: &str, arguments: &[String]) -> io::Result<u8> {
     let argv = pointers(&arguments);
     let envp = pointers(&environment);
     let mut refused = false;
-    for directory in std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()) {
+    // An absent or empty PATH searches the default path, as `ProcessConfig::search_path` does, never
+    // the working directory.
+    let search_path = std::env::var_os("PATH")
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "/usr/bin:/bin".into());
+    for directory in std::env::split_paths(&search_path) {
         let directory = if directory.as_os_str().is_empty() {
             Path::new(".")
         } else {
