@@ -64,7 +64,9 @@ impl CredentialCapability {
     /// The SigV4 edits for a re-routed request whose `Host` the gateway has already rewritten to the
     /// backend. `outbound` presents the BACKEND host and the forwarded path, so the backend vault's
     /// signed route (keyed on the backend host) matches and signs over exactly the bytes the backend
-    /// receives. A backend carrying no signing auth matches nothing and returns no edits.
+    /// receives. A backend carrying no signing auth matches nothing and returns no edits. Used only
+    /// by the `tls-intercept` backend signature pass.
+    #[cfg(feature = "tls-intercept")]
     pub(super) fn on_backend_request(&self, outbound: Outbound<'_>) -> Outcome {
         Ok(self.edits_for(outbound)?.0)
     }

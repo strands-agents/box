@@ -13,6 +13,10 @@ pub use host::{is_bindable_host, normalize_host};
 use crate::boundary::HeaderMap;
 use crate::boundary::{InterceptedRequest, InterceptedResponse, Mutation, MutationTarget, Target};
 use crate::error::{ProxyError, Result};
+// `BackendDial` lives in the `tls-intercept`-gated `intercept::mitm` module, and the backend
+// signature pass that uses it runs only there, so keep this socket-free module buildable with
+// `--no-default-features`.
+#[cfg(feature = "tls-intercept")]
 use crate::intercept::mitm::BackendDial;
 
 /// What one capability produced for a request or a response: the edits to apply (empty when it
@@ -87,6 +91,7 @@ impl CapabilitySet {
     /// phantom already stripped, the forwarded body). Returns the mutations to apply to the request —
     /// the caller applies them, so this borrows nothing mutably and composes with a live borrow of
     /// the body. An empty result means no backend signature applies.
+    #[cfg(feature = "tls-intercept")]
     pub fn backend_signature_mutations<'a>(
         &self,
         original: &credentials::Destination<'_>,
