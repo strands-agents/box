@@ -600,6 +600,55 @@ fn a_backend_reroute_still_refuses_a_host_pivot() {
     );
 }
 
+/// A re-routed path carrying an encoded separator (`%2F`) under a backend prefix is refused before
+/// it reaches the backend, because the backend could decode it and escape the prefix.
+#[test]
+fn a_backend_reroute_refuses_an_encoded_separator_in_the_path() {
+    let backend_host = "gw.example.test";
+    let upstream = TlsUpstream::start(backend_host);
+    let port = upstream.port();
+    let original = "api.github.test";
+    let before = upstream.request_count();
+
+    let config = MitmConfig {
+        upstream_ca_pems: vec![upstream.ca_pem()],
+        dns_overrides: vec![(backend_host.to_string(), "127.0.0.1".parse().unwrap())],
+        backends: vec![(
+            pat(original, port),
+            BackendDial {
+                host: backend_host.to_string(),
+                port,
+                tls: true,
+                path_prefix: "/github".to_string(),
+            },
+        )],
+        ..MitmConfig::default()
+    };
+    let emitter = Box::new(RECORDS.with(Clone::clone));
+    let handle = MitmInterceptor::start_with(
+        config,
+        CapabilitySet::default(),
+        FixedPolicy::allowing(&[original]),
+        emitter,
+        None,
+    )
+    .unwrap();
+
+    let mut client = WorkloadClient::connect(proxy_port(&handle), original, port);
+    client.send_request("GET", "/..%2Fslack/secret", &[], b"");
+    let status = client.read_status();
+
+    assert_eq!(
+        status, 403,
+        "an encoded separator under a prefix is refused"
+    );
+    assert_eq!(
+        upstream.request_count(),
+        before,
+        "the refused request never reached the backend"
+    );
+}
+
 // ============================================================================================
 // POSITIVE: chunked request and response bodies cross the real TLS interception path
 // ============================================================================================
@@ -1148,6 +1197,66 @@ fn a_plain_echo_of_the_real_secret_is_redacted() {
     assert!(
         !response.contains("sk_live_REALSECRET") && response.contains("[REDACTED]"),
         "the echoed secret must be redacted: {response:?}"
+    );
+}
+
+/// A backend reply that echoes its OWN token (`gw-token-SECRET`) in a plain JSON body, as a debug or
+/// error body might. Content-Length is the 33-byte body.
+const BACKEND_ECHO_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 33\r\nConnection: close\r\n\r\n{\"echo\":\"Bearer gw-token-SECRET\"}";
+
+/// A streamed response from a backend that echoes the box-owned backend token is redacted, not
+/// returned to the workload. This covers `box_owned` in `Vault::response_redactor`, the streaming
+/// scrubber; without it the backend token leaks back on an echo.
+#[test]
+fn a_backend_echo_of_its_token_is_redacted() {
+    let backend_host = "gw.example.test";
+    let upstream = TlsUpstream::start_with_response(backend_host, BACKEND_ECHO_RESPONSE);
+    let port = upstream.port();
+    let original = "api.github.test";
+
+    // One control on the original destination: the backend vault with a box-owned `env://` token.
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(
+        pat(original, port),
+        backend_store(original, port, "gw-token-SECRET"),
+    )]);
+    let config = MitmConfig {
+        upstream_ca_pems: vec![upstream.ca_pem()],
+        dns_overrides: vec![(backend_host.to_string(), "127.0.0.1".parse().unwrap())],
+        backends: vec![(
+            pat(original, port),
+            BackendDial {
+                host: backend_host.to_string(),
+                port,
+                tls: true,
+                path_prefix: "/github".to_string(),
+            },
+        )],
+        ..MitmConfig::default()
+    };
+    let emitter = Box::new(RECORDS.with(Clone::clone));
+    let handle = MitmInterceptor::start_with(
+        config,
+        controls,
+        FixedPolicy::allowing(&[original]),
+        emitter,
+        None,
+    )
+    .unwrap();
+
+    let mut client = WorkloadClient::connect(proxy_port(&handle), original, port);
+    client.send_request(
+        "GET",
+        "/zen",
+        &[("Authorization", "Bearer strands_box_workloadphantom")],
+        b"",
+    );
+    let response = client.read_response();
+
+    assert!(response.starts_with("HTTP/1.1 200"), "{response:?}");
+    assert!(
+        !response.contains("gw-token-SECRET") && response.contains("[REDACTED]"),
+        "the backend token echoed in the response must be redacted, not returned to the workload: \
+         {response:?}"
     );
 }
 

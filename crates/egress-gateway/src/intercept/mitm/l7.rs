@@ -188,6 +188,22 @@ async fn run_l7_legs(
     // and audit judge) stays the agent's own path, and the credential match already ran on it. An
     // explicitly empty query is preserved through `originally_empty_query`.
     let backend_prefix = backend.map(|dial| dial.path_prefix.as_str()).unwrap_or("");
+    // A backend prefix joins in front of the agent path. An encoded path separator (`%2F`, `%5C`)
+    // survives path canonicalization (which only decodes unreserved octets), so if the backend
+    // decodes it AFTER removing dot-segments, `/..%2Fslack/x` → `/github/..%2Fslack/x` could escape
+    // the prefix and reach another target under the same credential, while policy judged the
+    // pre-decode path. Whether a given backend decodes it is backend-specific and unknown, so a
+    // re-route with a prefix fails closed on either encoding rather than risk the escape.
+    if !backend_prefix.is_empty() {
+        let lower = workload_path.to_ascii_lowercase();
+        if lower.contains("%2f") || lower.contains("%5c") {
+            return Ok(refuse(
+                "a re-routed path under a backend prefix may not carry an encoded separator (%2F \
+                 or %5C): the backend could decode it and escape the prefix",
+                WorkloadResponse::refusal(403, b"request path is not a valid address"),
+            ));
+        }
+    }
     let fwd_target = prefixed_target(backend_prefix, &req.target, originally_empty_query);
     if let Err(error) = revalidate(&method, &fwd_target, &req.headers) {
         return Ok(refuse(
@@ -432,6 +448,7 @@ async fn run_l7_legs(
 /// Run [`run_l7_legs`] for a plain-HTTP request; `origin_target` is its `/path?query`. When `backend`
 /// re-routes the destination, the upstream leg dials the backend (with TLS when the backend scheme is
 /// `https`), and `run_l7_legs` rewrites `Host` to the backend.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_plain(
     upstream: TcpStream,
     backend: Option<&BackendDial>,

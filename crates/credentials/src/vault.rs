@@ -458,8 +458,15 @@ impl Vault {
         Redactions::scan(&res, binding.secret_value())
     }
 
-    /// Create an owned response scrubber, or `None` when no unique opaque binding matches the destination.
+    /// Create an owned response scrubber, or `None` when no box-owned or unique opaque binding
+    /// matches the destination.
     pub fn response_redactor(&self, destination: Destination<'_>) -> Option<ResponseRedactor> {
+        // A box-owned credential (a re-route's backend token) is really attached, so an echo of it in
+        // a streamed response is scrubbed like any opaque secret. Match it first, as `redact_leaks`
+        // does, or a backend that echoes `Authorization` returns the backend token to the workload.
+        if let Some(binding) = Self::first_match(&self.box_owned, &destination) {
+            return Some(ResponseRedactor::new(binding.secret_value()));
+        }
         let binding = self.resolve_opaque(&destination).ok()??;
         Some(ResponseRedactor::new(binding.secret_value()))
     }

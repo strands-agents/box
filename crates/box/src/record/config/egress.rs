@@ -951,6 +951,17 @@ impl EgressEntry {
                     ));
                 }
             }
+            // A destination `secret` beside an http backend is refused. Its strip-phantom route
+            // matches the original destination, so at request time the plaintext-credential floor
+            // (a secret must ride TLS) refuses every request with 403, even though the strip attaches
+            // nothing. Refuse at load so the dead config is visible, as the backend auth above is.
+            if !target.is_tls() && self.secret.is_some() {
+                return refuse(
+                    "a destination secret beside an http backend is refused: the re-routed request \
+                     reaches the backend over plaintext, where the gateway refuses any \
+                     credential-matched request; use an https backend",
+                );
+            }
         }
 
         let Some(secret) = &self.secret else {
@@ -2738,6 +2749,27 @@ mod tests {
             "#,
         )
         .expect("an http backend with no auth loads");
+    }
+
+    /// A destination secret beside an http backend is refused at load: its strip route would trip
+    /// the plaintext-credential floor and 403 every request.
+    #[test]
+    fn a_destination_secret_beside_an_http_backend_is_refused() {
+        let error = load(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com"]
+            secret.ref = "env://GH"
+
+            [[egress.github.backends]]
+            url = "http://gateway-1.example.com"
+            "#,
+        )
+        .expect_err("a destination secret on an http backend is refused");
+        assert!(
+            error.to_string().contains("http backend") && error.to_string().contains("plaintext"),
+            "the refusal names the plaintext http backend: {error}"
+        );
     }
 
     /// `url` is required, and an unknown field inside a backend table is refused by serde.
