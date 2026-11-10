@@ -1818,8 +1818,15 @@ project's own `python3 -m pytest` runs unchanged. Only `python` and `python3` ca
 a tool whose `command` has no fixed arguments, and only by one tool each. Box refuses anything else
 at startup, and the startup line names the file that runs in place of Monty. The cost is that code
 the agent writes runs under the tool's grants with no per-file decision, as a host interpreter
-reached by its absolute path already does. Builtins and functions keep precedence, and the direct
-`python3` alias still runs Monty.
+reached by its absolute path already does. Builtins and functions keep precedence.
+
+The direct `python3` and `python` aliases follow `replaces` too, so a program the agent starts
+without the Shell reaches the same Python. Box writes the replaced names to `bin/.replaced-python`,
+which the agent may read, and an alias whose own name is listed sends its arguments to the Shell as
+one command with each argument single-quoted. The Shell then decides it as a typed `python3`. The
+list selects a route and grants nothing: a workload that changed it could at most reach the Shell or
+Monty, and the broker decides every request on either route. The broker protocol is unchanged, and a
+box with no replaced name has no list and an unchanged boundary.
 
 Without `replaces`, a workload that runs an interpreter by its own absolute path, or runs a virtual
 environment's `python` by absolute path, reaches the host OS's Python under the `[tool.<name>]` table

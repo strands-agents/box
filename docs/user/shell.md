@@ -268,8 +268,13 @@ Startup prints one line for each replaced name, such as ``strands-box: [tool.pyt
 `command -v` name the same file.
 
 Box refuses the configuration when `replaces` names anything but `python` or `python3`, when the
-tool's `command` has fixed arguments, or when two tools replace the same name. The direct `python3`
-and `python` aliases that a harness runs without the Shell still run Monty.
+tool's `command` has fixed arguments, or when two tools replace the same name.
+
+A program the agent starts without the Shell, such as a harness that runs `python3 -m pytest`
+directly, reaches the box's `python3` alias. For a replaced name, the alias sends the command to the
+Shell, so the same tool runs under the same decision. [`limits.shell.timeout`](#limitsshelltimeout)
+then applies, not the direct alias's own Monty limits. Each argument reaches the tool as one word,
+relative paths resolve in the agent's workspace, and the alias forwards no standard input.
 
 Monty decides each file operation a script makes. The host's Python makes its own system calls, so
 code the agent writes runs with everything the tool's lists grant. Keep the tool's `write` list to

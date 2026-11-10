@@ -884,6 +884,33 @@ fn a_tool_that_replaces_python3_runs_for_the_bare_name_with_every_argument() {
 }
 
 #[test]
+fn the_direct_python_alias_runs_the_tool_that_replaces_its_name() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let home = support::fixture::short_temporary_home();
+    let (box_, _, _) = python_box(
+        home.path(),
+        "replaced-alias",
+        "replaces = [\"python3\", \"python\"]\n",
+    );
+
+    // The host's own bash runs these, so `python3` is the box's alias in `bin/`, not the Shell.
+    let module = box_.bash(r#"python3 -m venv .venv; printf "|status=%s" "$?""#);
+    let quoted = box_.bash(r#"python -c "it's a b" ''; printf "|status=%s" "$?""#);
+
+    assert!(
+        stdout(&module).contains("args=-m venv .venv\n|status=0"),
+        "the alias sends `-m` to the replacing tool: {module:?}"
+    );
+    assert!(
+        stdout(&quoted).contains("args=-c it's a b \n|status=0"),
+        "each argument reaches the tool as one word, quotes and empty ones included: {quoted:?}"
+    );
+}
+
+#[test]
 fn a_python_tool_without_replaces_leaves_python3_to_monty() {
     if !namespace_launcher_is_usable() {
         eprintln!("skipping: the namespace launcher is not usable on this host");
@@ -898,9 +925,18 @@ fn a_python_tool_without_replaces_leaves_python3_to_monty() {
     );
 
     let version = in_the_shell(&box_, "python3 --version");
+    let direct = box_.bash(r#"python3 -c "print(6*7)"; printf "|status=%s" "$?""#);
 
     assert!(
         stdout(&version).contains("Monty (Strands-Box Python subset)\n|status=0"),
         "{version:?}"
+    );
+    assert!(
+        stdout(&direct).contains("42\n|status=0"),
+        "the direct alias still runs Monty: {direct:?}"
+    );
+    assert!(
+        !box_.root().join("bin/.replaced-python").exists(),
+        "a box with no replaced name has no list"
     );
 }

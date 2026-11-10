@@ -4,6 +4,7 @@
 //! |---|---|
 //! | `bin/.alias-image` | this box's own copy of the installed alias image, one inode per box |
 //! | `bin/<name>` | one hard link to that image per interpreter name and per MCP server |
+//! | `bin/.replaced-python` | the Python names a tool `replaces`, present only while one does |
 //! | `private/alias-image.stamp` | the SHA-256 of the installed image the copy was taken from |
 
 use std::fs::File;
@@ -87,6 +88,9 @@ fn materialize_opened(
         .into_iter()
         .filter_map(|path| path.file_name().map(std::ffi::OsStr::to_os_string))
         .chain(std::iter::once(std::ffi::OsString::from(ALIAS_IMAGE_FILE)))
+        .chain(std::iter::once(std::ffi::OsString::from(
+            crate::run::broker::protocol::REPLACED_PYTHON_FILE,
+        )))
         .collect();
     if let Ok(entries) = layout.directory_entry_names(&layout.bin_directory()) {
         for entry in entries {
@@ -102,6 +106,29 @@ fn materialize_opened(
     layout.write_private_file(&layout.alias_stamp(), &digest, 0o600)?;
 
     Ok(())
+}
+
+/// Write the Python names a tool replaces beside the aliases, or remove the list when none is.
+///
+/// Every `run` rewrites it from the record before the workload starts, so a Python alias reads the
+/// names of this run. `_owner` is the run lock, as for [`materialize`].
+pub(crate) fn write_replaced_python(
+    layout: &BoxRoot,
+    replaced: &std::collections::BTreeSet<String>,
+    _owner: &Lock,
+) -> Result<(), BoxError> {
+    let path = layout.replaced_python_file();
+    let names: Vec<&str> = replaced
+        .iter()
+        .map(String::as_str)
+        .filter(|name| crate::run::broker::protocol::PYTHON_ALIAS_NAMES.contains(name))
+        .collect();
+    if names.is_empty() {
+        return layout.remove_file(&path);
+    }
+    let mut contents = names.join("\n");
+    contents.push('\n');
+    layout.write_private_file(&path, &contents, 0o444)
 }
 
 /// Whether the placed aliases came from a different installed image than the one on disk now.
@@ -479,6 +506,38 @@ mod tests {
             identity(&layout.alias_image()),
             "the foreign file must be replaced by a link to the box's image"
         );
+    }
+
+    /// **The replaced-Python list holds only replaced Python names, is gone when no tool replaces
+    /// one, and survives a `materialize` that cleans up unknown names.**
+    #[test]
+    fn the_replaced_python_list_follows_the_record_and_survives_materialize() {
+        let (layout, owner, installed, _home) = fixture(b"image one");
+        materialize_from(&layout, &[], &installed, &owner).expect("the aliases are placed");
+        let list = layout.replaced_python_file();
+        let names = |names: &[&str]| -> std::collections::BTreeSet<String> {
+            names.iter().map(|name| (*name).to_string()).collect()
+        };
+
+        write_replaced_python(&layout, &names(&["python3", "python", "curl"]), &owner)
+            .expect("the list is written");
+        assert_eq!(
+            std::fs::read_to_string(&list).expect("the list reads"),
+            "python\npython3\n"
+        );
+        write_replaced_python(&layout, &names(&["python3"]), &owner)
+            .expect("the list is rewritten");
+        assert_eq!(
+            std::fs::read_to_string(&list).expect("the list reads"),
+            "python3\n"
+        );
+
+        materialize_from(&layout, &[], &installed, &owner).expect("the aliases are placed again");
+        assert!(list.exists(), "materialize keeps the list");
+
+        write_replaced_python(&layout, &names(&[]), &owner).expect("the list is removed");
+        assert!(!list.exists(), "no replaced name leaves no list");
+        write_replaced_python(&layout, &names(&[]), &owner).expect("removing it again is a no-op");
     }
 
     /// **A dropped MCP server's alias is removed at the next `materialize`, under the run lock.**

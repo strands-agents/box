@@ -253,6 +253,11 @@ async fn hosted(
         std::io::stderr().lock(),
     )
     .map_err(|source| ConfigError::Disclosure { source })?;
+    crate::run::broker::aliases::write_replaced_python(
+        &locked.root,
+        &locked.record.replaced_commands(),
+        &locked.owned,
+    )?;
     eprintln!("strands-box: starting workload");
     let hosted = HostedBox::open(
         &locked.root,

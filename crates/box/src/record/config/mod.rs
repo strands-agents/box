@@ -1008,6 +1008,14 @@ impl Record {
         Ok(record)
     }
 
+    /// Each Shell command that a `[tool.<name>]` `replaces`, across every tool.
+    pub(crate) fn replaced_commands(&self) -> std::collections::BTreeSet<String> {
+        self.tool
+            .values()
+            .flat_map(|spec| spec.replaces.iter().cloned())
+            .collect()
+    }
+
     /// Every process table, judged on its own shape.
     fn validate_processes(&self) -> Result<(), ConfigError> {
         if let Some(agent) = &self.agent {

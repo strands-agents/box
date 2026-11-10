@@ -29,10 +29,15 @@ const ALIAS_IMAGE_NAME: &str = "strands-box-sock-alias";
 
 /// The socket's path relative to the alias's grandparent directory. The routing lists come from the
 /// module this binary already includes, so there is one definition rather than a copy per consumer.
-use shell_protocol::{BROKER_SOCKET_RELATIVE, PYTHON_ALIAS_NAMES, SHELL_ALIAS_NAMES};
+use shell_protocol::{
+    BROKER_SOCKET_RELATIVE, PYTHON_ALIAS_NAMES, REPLACED_PYTHON_FILE, SHELL_ALIAS_NAMES,
+};
 
 /// The largest positional script the alias will forward as command text.
 const MAX_SCRIPT_BYTES: usize = MAX_FRAME_BYTES / 16;
+
+/// The largest replaced-Python list the alias reads. Box writes at most two short names.
+const MAX_REPLACED_LIST_BYTES: usize = 256;
 
 /// Bound on one framed read or write against the daemon's Shell socket.
 const SERVE_IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -149,6 +154,12 @@ fn parse_mode(executable: PathBuf, arguments: Vec<OsString>) -> io::Result<Mode>
 /// Parse the alias invocation, deriving the socket from this image's own path.
 fn parse_alias(executable: &Path, name: &str, arguments: Vec<OsString>) -> io::Result<Mode> {
     if PYTHON_ALIAS_NAMES.contains(&name) {
+        if is_replaced(executable, name)? {
+            return shell_mode(
+                executable,
+                OsString::from(replaced_command(name, arguments)?),
+            );
+        }
         return parse_script_alias(executable, arguments);
     }
     // Any other name is an MCP server's program.
@@ -235,6 +246,70 @@ fn shell_mode(executable: &Path, command: OsString) -> io::Result<Mode> {
         interpreter: Interpreter::Shell,
         source: command,
     })
+}
+
+/// Whether a `[tool.<name>]` replaces the Python name `name`, from the list Box writes beside the
+/// aliases.
+///
+/// Box writes the list and lets the agent read it only while a tool replaces a Python name, so a
+/// list that is absent or that this sandbox refuses means none is, and the alias runs Monty.
+fn is_replaced(executable: &Path, name: &str) -> io::Result<bool> {
+    use std::io::Read as _;
+
+    let Some(bin) = executable.parent() else {
+        return Ok(false);
+    };
+    let list = bin.join(REPLACED_PYTHON_FILE);
+    let file = match std::fs::File::open(&list) {
+        Ok(file) => file,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+            ) =>
+        {
+            return Ok(false);
+        }
+        Err(error) => {
+            return Err(io::Error::new(
+                error.kind(),
+                format!("read {}: {error}", list.display()),
+            ));
+        }
+    };
+    let mut text = String::new();
+    file.take(MAX_REPLACED_LIST_BYTES as u64 + 1)
+        .read_to_string(&mut text)
+        .map_err(|error| {
+            io::Error::new(error.kind(), format!("read {}: {error}", list.display()))
+        })?;
+    if text.len() > MAX_REPLACED_LIST_BYTES {
+        return Err(invalid_input(format!(
+            "{} is over {MAX_REPLACED_LIST_BYTES} bytes",
+            list.display()
+        )));
+    }
+    Ok(text.lines().any(|line| line == name))
+}
+
+/// The Shell command that runs `name` with `arguments`, each argument single-quoted as one word.
+fn replaced_command(name: &str, arguments: Vec<OsString>) -> io::Result<String> {
+    let mut command = name.to_string();
+    for (index, argument) in arguments.into_iter().enumerate() {
+        let argument = argument.into_string().map_err(|_| {
+            invalid_input(format!("Python argument {} is not valid UTF-8", index + 1))
+        })?;
+        command.push_str(" '");
+        command.push_str(&argument.replace('\'', "'\\''"));
+        command.push('\'');
+    }
+    if command.len() > MAX_SCRIPT_BYTES {
+        return Err(invalid_input(format!(
+            "the Python command is {} bytes; maximum is {MAX_SCRIPT_BYTES}",
+            command.len()
+        )));
+    }
+    Ok(command)
 }
 
 /// Parse a `python3`/`python` invocation into one script submission.
@@ -939,6 +1014,85 @@ mod tests {
             }
             Err(_) => {}
         }
+    }
+
+    // ── Python names a tool replaces ─────────────────────────────────────────
+
+    /// A box root whose `bin/` holds a replaced-Python list with `contents`, when given.
+    fn replaced_box(contents: Option<&str>) -> (tempfile::TempDir, PathBuf) {
+        let root = tempfile::tempdir().expect("a box root");
+        let bin = root.path().join("public/bin");
+        std::fs::create_dir_all(&bin).expect("a bin directory");
+        if let Some(contents) = contents {
+            std::fs::write(bin.join(REPLACED_PYTHON_FILE), contents).expect("the list");
+        }
+        (root, bin)
+    }
+
+    fn arguments(values: &[&str]) -> Vec<OsString> {
+        values.iter().map(OsString::from).collect()
+    }
+
+    /// **A listed Python name sends every argument to the Shell as one command**, each argument one
+    /// single-quoted word, so the Shell runs the tool that replaces the name.
+    #[test]
+    fn a_replaced_python_name_routes_its_arguments_to_the_shell() {
+        let (_root, bin) = replaced_box(Some("python\npython3\n"));
+        for (name, given, command) in [
+            (
+                "python3",
+                vec!["-m", "venv", ".venv"],
+                "python3 '-m' 'venv' '.venv'",
+            ),
+            (
+                "python",
+                vec!["-I", "-c", "print('a b')"],
+                "python '-I' '-c' 'print('\\''a b'\\'')'",
+            ),
+            ("python3", vec![], "python3"),
+        ] {
+            let mode =
+                parse_mode(bin.join(name), arguments(&given)).expect("a replaced name parses");
+            assert_eq!(mode.interpreter, Interpreter::Shell, "{name} {given:?}");
+            assert_eq!(mode.source, command);
+            assert_eq!(mode.socket, bin.parent().unwrap().join("run/box.sock"));
+        }
+    }
+
+    /// **A name the list leaves out, or a box with no list, keeps Monty**, so `-m` is still the
+    /// alias's own usage error there.
+    #[test]
+    fn an_unlisted_python_name_keeps_the_script_boundary() {
+        for (contents, name) in [
+            (Some("python\n"), "python3"),
+            (None, "python3"),
+            (Some(""), "python"),
+        ] {
+            let (_root, bin) = replaced_box(contents);
+
+            let error = parse_mode(bin.join(name), arguments(&["-m", "venv"]))
+                .expect_err("Monty refuses -m");
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::InvalidInput,
+                "{contents:?} {name}"
+            );
+
+            let mode = parse_mode(bin.join(name), arguments(&["-c", "print(1)"]))
+                .expect("-c still reaches Monty");
+            assert_eq!(mode.interpreter, Interpreter::Python);
+            assert_eq!(mode.source, "print(1)");
+        }
+    }
+
+    /// **A list over the size bound is refused** rather than read in part.
+    #[test]
+    fn an_oversized_replaced_python_list_is_refused() {
+        let (_root, bin) = replaced_box(Some(&"python3\n".repeat(64)));
+
+        let error = parse_mode(bin.join("python3"), arguments(&["-c", "pass"]))
+            .expect_err("an oversized list is refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     // ── Fail-closed exit status ───────────────────────────────────────────────

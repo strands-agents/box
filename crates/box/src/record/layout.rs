@@ -118,7 +118,9 @@ const TRAMPOLINE_DIRECTORY: &str = "trampoline";
 
 // `run/broker/protocol.rs` owns the two alias name lists, because it is the one module the separate
 // `strands-box-sock-alias` binary can `#[path]`-include — so it cannot import from here, and one
-use crate::run::broker::protocol::{BROKER_SOCKET, PYTHON_ALIAS_NAMES, SHELL_ALIAS_NAMES};
+use crate::run::broker::protocol::{
+    BROKER_SOCKET, PYTHON_ALIAS_NAMES, REPLACED_PYTHON_FILE, SHELL_ALIAS_NAMES,
+};
 
 /// One box's filesystem: the root, and every path computed from it.
 #[derive(Debug, Clone)]
@@ -546,6 +548,11 @@ impl BoxRoot {
             .iter()
             .map(|name| bin.join(name))
             .collect()
+    }
+
+    /// The list of Python names a tool replaces, which the Python aliases read beside themselves.
+    pub(crate) fn replaced_python_file(&self) -> PathBuf {
+        self.bin_directory().join(REPLACED_PYTHON_FILE)
     }
 
     /// Where the trusted process binds its sockets.

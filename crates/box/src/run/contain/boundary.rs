@@ -596,6 +596,17 @@ impl Boundary {
             for alias in layout.mcp_aliases(&stored.mcp) {
                 containment = allow(containment, &alias, Operation::Exec, Scope::File)?;
             }
+            // A Python alias reads which names a tool replaces, so it can send them to the Shell.
+            if stored.replaced_commands().iter().any(|name| {
+                crate::run::broker::protocol::PYTHON_ALIAS_NAMES.contains(&name.as_str())
+            }) {
+                containment = allow(
+                    containment,
+                    &layout.replaced_python_file(),
+                    Operation::Read,
+                    Scope::File,
+                )?;
+            }
             // A `PATH` search reads an absent name in the alias directory as absent, not refused.
             containment = allow(
                 containment,
@@ -4551,6 +4562,44 @@ write = ["/Users/example/box-demo/aws-tmp"]
         assert!(
             agent_cells.contains(&(socket.clone(), Operation::Connect, Scope::File)),
             "the agent connects to the broker: {agent_cells:?}"
+        );
+    }
+
+    /// **The agent reads the replaced-Python list only while a tool replaces a Python name**, and
+    /// gets no other operation on it.
+    #[test]
+    fn the_agent_reads_the_replaced_python_list_only_while_a_tool_replaces_python() {
+        let mut fixture = Fixture::new();
+        let spec = fixture.spec();
+        let list = fixture.root.replaced_python_file();
+        let on_list = |boundary: &Boundary| {
+            cells(boundary)
+                .into_iter()
+                .filter(|(path, _, _)| *path == list)
+                .collect::<Vec<_>>()
+        };
+
+        let plain =
+            fixture.translate_full(&spec, "[agent]", RuntimeReach::Agent, EgressMode::Gateway);
+        assert_eq!(on_list(&plain), Vec::new(), "no tool replaces a name");
+
+        std::fs::create_dir_all(fixture.root.bin_directory()).expect("bin/");
+        std::fs::write(&list, "python3\n").expect("the list");
+        let mut python = spec.clone();
+        python.replaces = vec!["python3".to_string()];
+        fixture.record.tool.insert("python".to_string(), python);
+        let replaced =
+            fixture.translate_full(&spec, "[agent]", RuntimeReach::Agent, EgressMode::Gateway);
+        assert_eq!(
+            on_list(&replaced),
+            vec![(list.clone(), Operation::Read, Scope::File)]
+        );
+        let leaf =
+            fixture.translate_full(&spec, "[tool.sh]", RuntimeReach::Leaf, EgressMode::Gateway);
+        assert_eq!(
+            on_list(&leaf),
+            Vec::new(),
+            "a tool has no Python alias to read it"
         );
     }
 
