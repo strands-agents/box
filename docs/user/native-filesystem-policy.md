@@ -89,8 +89,9 @@ Production use still requires further review and tests for those failures.
 ## Stored configuration and rollback
 
 When `limits.shell.timeout` is omitted, `file-attributes` is `false`, MCP argument wildcards
-are disabled, MCP executable names are bare, and the agent declares no `[[agent.ingress]]`,
-configurations without process overrides retain version 21 when disabled and version 22 when enabled.
+are disabled, MCP executable names are bare, the agent declares no `[[agent.ingress]]`, and no tool
+sets `replaces`, configurations without process overrides retain version 21 when disabled and
+version 22 when enabled.
 An explicit process override requires record version 23.
 Two stdio MCP servers that share a program require record version 24.
 Setting [`file-attributes`](config.md#file-attributes) to `true` requires record version 25.
@@ -98,6 +99,8 @@ Enabling [MCP argument wildcards](mcp.md#argument-wildcards) on any server requi
 An explicit `limits.shell.timeout` requires record version 27, including `30` and `false`.
 An [absolute MCP executable path](mcp.md#select-an-executable-by-path) requires record version 28.
 A box whose agent declares `[[agent.ingress]]` requires record version 29.
+A [`replaces`](shell.md#run-the-hosts-python-for-python3) key on any `[tool.<name>]` requires record
+version 30.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 
@@ -109,6 +112,7 @@ If MCP argument wildcards are enabled, replace the stars with concrete arguments
 `argument_wildcards` on each server too.
 Replace each absolute MCP executable path with a bare program name that the server's `PATH`
 resolves to the intended executable.
+Remove every `replaces` key from the `[tool.<name>]` tables.
 Run once with the current build before switching binaries.
 This writes a version 21 record while retaining durable policy history.
 Changing TOML alone does not rewrite an existing version 22, 23, 24, 25, 26, 27, or 28 record.

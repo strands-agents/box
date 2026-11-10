@@ -207,9 +207,9 @@ deny  = ["~/src/project/.env"]
 
 ### Run the host's Python for `python3`
 
-By default `python` and `python3` in the Shell run Monty, so a project's `python3 -m pytest` or
-`python3 -m venv .venv` fails with `invalid option '-m'`. To run the host's Python for those names,
-list them in `replaces` on the tool that runs it. The tool must also read the folder its `command`
+By default `python` and `python3` in the Shell run Monty, which refuses `-m` and `-I` and can't
+import `urllib.request` or a project's own modules. To run the host's Python for those names, list
+them in `replaces` on the tool that runs it. The tool must also read the folder its `command`
 is in, the interpreter's own install tree, and the Homebrew trees its extension modules load, such
 as OpenSSL for `ssl`. None of these is in the folders every sandbox gets:
 
@@ -244,16 +244,24 @@ when {
 };
 ```
 
-On macOS, `python3 -m venv .venv` fails in a box when it installs pip, with or without
-[`file-attributes = true`](config.md#file-attributes). `python3 -m venv --without-pip .venv` works.
-
 A bare `python3` always runs the tool's own file, whatever `PATH` holds, so activating a virtual
 environment doesn't change what it runs. A virtual environment's interpreter run by its path, such
 as `.venv/bin/python`, names the same canonical file, so the same tool runs it, and
 `context.input.program` is the path the agent typed. Box starts the tool's own file and passes that
-path only as the program's name. On macOS, Homebrew's Python finds its virtual environment from the
-file the system started, not from that name, so `.venv/bin/python` in the Shell runs without the
-virtual environment's packages.
+path only as the program's name.
+
+On macOS this leaves two limits:
+
+- Homebrew's Python finds its virtual environment from the file the system started, not from its
+  name, so `.venv/bin/python` in the Shell runs without the virtual environment's packages. A
+  project's third-party packages must already be installed in the Python that the tool's `command`
+  names.
+- `python3 -m venv .venv` fails while it installs pip, with or without
+  [`file-attributes = true`](config.md#file-attributes), and prints
+  `Error: Command '[..., '-m', 'ensurepip', '--upgrade', '--default-pip']' returned non-zero exit status 1.`
+  pip's installer copies pip with Python's `shutil.copy2`, which also sets the copy's flags with
+  `chflags`, and a box refuses `chflags` in its write folders. `python3 -m venv --without-pip .venv`
+  works.
 
 Startup prints one line for each replaced name, such as ``strands-box: [tool.python]: a bare
 `python3` in the Shell runs /opt/homebrew/bin/python3, in place of Box's Python (Monty)``. `type` and
