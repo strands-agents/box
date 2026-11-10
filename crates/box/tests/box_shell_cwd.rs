@@ -45,7 +45,10 @@ fn shell_decisions(box_: &Configured, action: &str) -> Vec<BTreeMap<String, Stri
         .into_iter()
         .filter(|decision| {
             decision.get("process.command").is_some_and(|program| {
-                program == "pwd" || program.ends_with("/pwd") || program.ends_with("/native-pwd")
+                program == "pwd"
+                    || program == "native-pwd"
+                    || program.ends_with("/pwd")
+                    || program.ends_with("/native-pwd")
             })
         })
         .collect()
@@ -352,17 +355,31 @@ fn an_explicit_tool_workspace_is_checked_before_the_tool_starts() {
         return;
     };
     let allowed_directory = allowed.workspace().join("allowed");
-    let output = run_in(&allowed, &allowed.workspace().join("caller"), &pwd);
-    expect_output_directory(&output, &allowed_directory);
+    for program in [pwd.as_str(), "native-pwd"] {
+        let output = run_in(&allowed, &allowed.workspace().join("caller"), program);
+        expect_output_directory(&output, &allowed_directory);
+    }
     let (guarded, pwd) = tool_directory_fixture(
         "explicit-cwd-denial",
         Some("{workspace}/guarded"),
         "~/workspace/guarded",
     )
     .expect("the launcher was available for the control");
-    expect_refused(&guarded, &guarded.workspace().join("allowed"), &pwd);
-    expect_spawn_decisions(&allowed, &[(&allowed_directory, "permit")]);
-    expect_spawn_decisions(&guarded, &[(&guarded.workspace().join("guarded"), "deny")]);
+    for program in [pwd.as_str(), "native-pwd"] {
+        expect_refused(&guarded, &guarded.workspace().join("allowed"), program);
+    }
+    expect_spawn_decisions(
+        &allowed,
+        &[
+            (&allowed_directory, "permit"),
+            (&allowed_directory, "permit"),
+        ],
+    );
+    let guarded_directory = guarded.workspace().join("guarded");
+    expect_spawn_decisions(
+        &guarded,
+        &[(&guarded_directory, "deny"), (&guarded_directory, "deny")],
+    );
 }
 
 #[test]

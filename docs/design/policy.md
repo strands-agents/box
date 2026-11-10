@@ -135,8 +135,8 @@ three kinds of event:
 - `::error` for an operation that definitely didn't happen.
 
 For an MCP command with [argument wildcards](../user/mcp.md#argument-wildcards) enabled, the
-`shell:spawn` request records the effective launch command and arguments, including the received
-values in the `*` positions.
+`shell:spawn` request records the alias name and effective launch arguments, including the received
+values in the `*` positions. The `program_path` field identifies the resolved executable file.
 
 A metadata read has occurred once the workload receives its answer. A Shell `test -e`, `test -L`, or
 `test -r` on a missing file in an existing folder therefore records a `::response`. The same applies
@@ -199,13 +199,19 @@ the remaining body under the same deadline before recording the outcome.
 Partial or uncertain outcomes still count as `::response`, which does not prove tool success.
 Response delivery adds no second policy event.
 
+For stdio MCP item calls, the broker records terminal outcomes before client delivery.
+A modern cancellation records an indeterminate outcome for an admitted call.
+The broker records the same outcome for admitted calls still pending after it stops the server.
+A valid `input_required` result received before cancellation records no outcome.
+See [MCP call accounting](mcp.md#modern-stdio-requests).
+
 Because a denied attempt is still a `::request`, asking and being refused satisfies a precondition
 keyed on `::request`. Key a precondition on `::response` instead. See [temporal rules are enforced
 against recorded history](decisions.md#temporal-rules-are-enforced-against-recorded-history).
 Counting differs the same way. Each request is appended under the one lock before the next is
 decided, so a `::request` count includes every earlier attempt, and a budget keyed on `::request`
-admits exactly N attempts, even when they arrive together. A `::response` count only sees operations
-that have finished, so several requests in flight at once can each pass before any of them finishes.
+admits exactly N attempts, even when they arrive together. A `::response` count only sees recorded
+outcomes, so several requests in flight at once can each pass before any outcome is recorded.
 
 A `when temporal` clause names one action, with no group, no `or`, and no wildcard, so a budget over
 several actions needs one clause per action. See [a temporal rule names one
@@ -224,6 +230,13 @@ stops a restart from resetting a budget. The history follows these rules:
   a history exists but the record says the box has never run.
 - After a policy edit, unchanged history rules keep their state. New or changed rules start with
   empty state.
+- A rule whose head names only per-tool MCP actions keeps its state across a restart, although its
+  schema arrives only when the server lists its tools again. Box keeps it installed under the server
+  schemas the history declares, and holds the calls it decides until they arrive. It starts with
+  empty state when the new tool list doesn't validate it, or when the server doesn't list its tools
+  in that run. A rule whose head names a Box action and whose `when temporal` clause reads a
+  per-tool action starts with empty state at each run. See [discovery serves the schema-independent
+  subset](decisions.md#discovery-serves-the-schema-independent-subset).
 - The engine timestamps each event from the system clock. Callers cannot supply timestamps. If the
   clock steps backwards, timestamps keep moving forward, so rolling the clock back doesn't free a
   budget. The cost is that a restriction can outlast its window a little.
@@ -286,10 +299,12 @@ of every process's declared writable directories. The scan includes subdirectori
 [Configured command integrity](../user/config.md#configured-command-integrity) describes those
 constraints.
 
-When two MCP entries enable [argument wildcards](../user/mcp.md#argument-wildcards), Box also refuses wildcard commands that can select different servers for the same request. Box
-also refuses installed trusted programs with unaccounted hard-link names or overlap with any
-process's writable grants. [Installation integrity](../user/config.md#installation-integrity)
-describes these refusals.
+MCP command matching uses the executable's filename and the arguments, including for an absolute
+executable path. Box refuses duplicate exact invocations. When two MCP entries enable
+[argument wildcards](../user/mcp.md#argument-wildcards), Box also refuses wildcard commands that can
+select different servers for the same request. Box also refuses installed trusted programs with
+unaccounted hard-link names or overlap with any process's writable grants.
+[Installation integrity](../user/config.md#installation-integrity) describes these refusals.
 
 The inert-rule check sorts each rule into one of three classes:
 

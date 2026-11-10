@@ -369,6 +369,38 @@ pub fn validate_mcp_schema_composition(generated: &[(&str, &str)]) -> Result<(),
     Ok(())
 }
 
+/// Each MCP server namespace that `composed` declares and `base` does not, with its own fragment.
+pub(crate) fn mcp_schemas_in(composed: &str, base: &str) -> Vec<(String, String)> {
+    let namespaces = |source: &str| match SchemaFragment::from_cedarschema_str(source)
+        .ok()
+        .and_then(|(fragment, _)| fragment.to_json_value().ok())
+    {
+        Some(serde_json::Value::Object(definitions)) => Some(definitions),
+        _ => None,
+    };
+    let (Some(definitions), Some(built_in)) = (namespaces(composed), namespaces(base)) else {
+        return Vec::new();
+    };
+    definitions
+        .into_iter()
+        .filter(|(namespace, _)| {
+            !namespace.is_empty() && !namespace.contains("::") && !built_in.contains_key(namespace)
+        })
+        .filter_map(|(namespace, definition)| {
+            let single = serde_json::Value::Object(serde_json::Map::from_iter([(
+                namespace.clone(),
+                definition,
+            )]));
+            let source = SchemaFragment::from_json_value(single)
+                .ok()?
+                .to_cedarschema()
+                .ok()?;
+            validate_unbound_mcp_schema(&source).ok()?;
+            Some((namespace, source))
+        })
+        .collect()
+}
+
 pub(crate) fn validate_unbound_mcp_schema(source: &str) -> Result<(), McpSchemaError> {
     validate_mcp_schema_namespaces(None, source)
 }
@@ -928,6 +960,66 @@ mod tests {
                 }}
             }}"##
         )
+    }
+
+    #[test]
+    fn a_composed_schema_yields_each_server_fragment_and_no_other_namespace() {
+        let alpha = generate_mcp_schema("alpha", TOOLS).expect("alpha generates");
+        let beta =
+            generate_mcp_schema("beta", &shared_type_tools("string")).expect("beta generates");
+        let composed = crate::schema::composed_action_schema(&[], &[alpha, beta])
+            .expect("the schemas compose");
+
+        let recovered = mcp_schemas_in(&composed.source, SCHEMA_SRC);
+        assert_eq!(
+            recovered
+                .iter()
+                .map(|(namespace, _)| namespace.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha", "beta"]
+        );
+        let fragments = recovered
+            .into_iter()
+            .map(|(_, fragment)| fragment)
+            .collect::<Vec<_>>();
+        let recomposed = crate::schema::composed_action_schema(&[], &fragments)
+            .expect("the recovered fragments compose");
+        let actions = |schema: &Schema| {
+            schema
+                .actions()
+                .map(ToString::to_string)
+                .collect::<BTreeSet<_>>()
+        };
+        assert_eq!(actions(&recomposed.cedar), actions(&composed.cedar));
+        assert!(
+            mcp_schemas_in(SCHEMA_SRC, SCHEMA_SRC).is_empty(),
+            "Box is not a server"
+        );
+        assert!(mcp_schemas_in("not a schema", SCHEMA_SRC).is_empty());
+    }
+
+    #[test]
+    fn a_previous_build_of_the_box_actions_is_not_read_as_a_server() {
+        let stored = format!(
+            "namespace Box {{ entity Agent; action \"retired:action\" appliesTo {{ principal: [Agent], resource: [Agent] }}; }}\n{}",
+            generate_mcp_schema("alpha", TOOLS).expect("alpha generates")
+        );
+        let recovered = mcp_schemas_in(&stored, SCHEMA_SRC);
+        assert_eq!(
+            recovered
+                .iter()
+                .map(|(namespace, _)| namespace.as_str())
+                .collect::<Vec<_>>(),
+            ["alpha"]
+        );
+        let base = format!(
+            "{SCHEMA_SRC}\n{}",
+            generate_mcp_schema("alpha", TOOLS).expect("alpha generates")
+        );
+        assert!(
+            mcp_schemas_in(&stored, &base).is_empty(),
+            "a namespace this build declares is never read as a server"
+        );
     }
 
     #[test]

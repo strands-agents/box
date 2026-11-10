@@ -225,8 +225,31 @@ async fn host_program(os: &Arc<Mediated>, proc: &Process, program: &str) -> Opti
     // keeps the walk from widening the floor generally is that its only consumer is the
     // `shell:spawn` decision — the path it finds is not returned to the workload, is not openable
     // through the VFS, and reaches nothing unless a rule permits that exact program.
-    let _ = os;
+    //
+    // A bare name the embedder declares runs its declared file and is never searched on `PATH`, so
+    // a missing declared file is not found rather than found elsewhere.
+    if !program.contains('/')
+        && let Some(declared) = os.host_program(program)
+    {
+        return Some(declared_program(&declared));
+    }
     host_program_path(program, &proc.cwd)
+}
+
+/// Whether this Shell runs `name` itself, as a builtin, a command, or its script interpreter.
+pub fn implements_program(name: &str) -> bool {
+    builtins::lookup(name).is_some()
+        || commands::lookup(name).is_some()
+        || name == "lash"
+        || name == "sh"
+}
+
+/// The host program a declared file names, bound to its canonical identity when the file exists.
+fn declared_program(declared: &std::path::Path) -> HostProgram {
+    match declared.canonicalize() {
+        Ok(identity) => HostProgram::bound(&identity, &lexical_absolute(declared)),
+        Err(_) => HostProgram::unbound(declared),
+    }
 }
 
 /// A host program a `shell:spawn` decision names.

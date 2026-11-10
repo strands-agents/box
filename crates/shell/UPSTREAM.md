@@ -58,6 +58,22 @@ TOML, Python, and Node configuration surfaces do not change.
 repeated calls that outlast the configured limit. `builder_timeout_can_be_restored_after_disabling`
 checks cancellation and a successful subsequent call after restoring a finite deadline.
 
+### Local addition: an embedder can declare the file a bare name runs
+
+At the pinned revision, a bare name the Shell does not implement is found on the trusted process's
+host `PATH`. An embedder that runs a host program under its own name, such as Box's `[tool.git]` on
+the developer folder's `git`, cannot reach that program by its name when another file of the same
+name comes first on `PATH`. This is a missing seam, not an upstream bug.
+
+`Kernel::host_program` returns the absolute path a bare name runs, and its default declares nothing.
+`VfsKernel::host_programs` and `ShellBuilder::host_programs` hold a `HostPrograms` map for the bundled
+kernel. `exec::host_program` asks the kernel after the builtin, command, and function checks and
+before the `PATH` walk, so the Shell's own programs keep precedence. A declared file binds to its
+canonical identity like a spelling with a `/`; a declared file that is gone is unbound, so the
+command is not found and `PATH` is not searched for another file. A name with a `/` ignores the map. `exec::implements_program` tells an embedder which names the
+Shell runs itself, so it does not declare a name that never reaches the declared file.
+`tests/declared_host_programs.rs` covers each case.
+
 ### Execution deadlines refuse clock overflow
 
 The builder and per-call refresh use checked clock arithmetic. An unrepresentable timeout

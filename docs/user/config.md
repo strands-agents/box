@@ -232,7 +232,10 @@ The box adds the runtime minimum to every process; see
 [the runtime minimum](../design/containment.md#the-runtime-minimum).
 
 The program is a full path or a bare name. A bare name uses `env.PATH` when set.
-Otherwise, Box uses the operator's `PATH`, or `/usr/bin:/bin` if it is absent. A relative path with more than one
+Otherwise, Box uses the operator's `PATH`, or `/usr/bin:/bin` if it is absent. In the Shell, the last
+part of a `[tool]`'s program is the name that runs it, before the operator's `PATH`, and `run` prints
+``strands-box: [tool.git]: a bare `git` in the Shell runs <file>`` for each. See
+[`PATH` in the Shell reference](shell.md#path). A relative path with more than one
 component is refused: ``` `command` element 0 "<program>" is a relative path; write an absolute
 path, or a bare name that `env.PATH` resolves```. Scripts on Linux require
 [interpreter grants](#script-commands-on-linux). The example's `command` runs
@@ -576,10 +579,25 @@ It checks elapsed time between filesystem calls and before accepting a completed
 This budget cannot interrupt a blocked filesystem call, and separate trees receive separate
 budgets. The command and its paths must still pass the writable-grant checks.
 
+On Linux, Box can skip this scan for a configured program when it counts every hard-link name
+in the program's own directory and verifies the mount layout for the directory being checked.
+The program and both directories must share one ext4, XFS, or tmpfs mount that exposes
+the filesystem's root (`/`). No other mount may share its device or mount point, or sit at or
+below the program's directory or the checked path. Box reads the mount table before and after
+counting and requires both results to match.
+
+Box repeats this check for each writable directory and each directory changed through Strands
+Shell or Monty. Files and missing paths use the existing identity checks without this optional
+mount inspection. Each optional inspection has a separate 30-second budget, checked between
+filesystem calls; it cannot interrupt a blocked call. Directory targets use the recursive scan
+and its limits on macOS. Linux also uses that scan if any condition is unmet, an inspection
+error occurs, or the budget expires.
+
 During the run, Strands Shell and Monty refuse changes to these programs and their enclosing paths,
-even when policy permits the operation. For commands admitted through scanning, directory
-changes require a complete scan that finds none of their hard-link names. The same inspection
-limits apply. Reads still require the applicable policy permission.
+even when policy permits the operation. For operator-writable programs with multiple hard links,
+directory changes require a complete scan that finds none of their names, unless the Linux
+checks allow Box to skip it. The same inspection limits apply. Reads still require the
+applicable policy permission.
 Build output covered by the agent's own grants remains writable when no tool table names it.
 On Linux, native programs can create hard links within one writable mount.
 Links across separate writable grants fail, even when their directories share a filesystem.
@@ -605,6 +623,9 @@ Box accepts hard links only when it finds every name in the installation directo
 `deps` directory. This includes Cargo's build layout. Before each contained launch, Box checks the
 original file identities and hard-link counts.
 Linux also checks the files through existing mounts. If permission checks hide a possible alias, Box protects that path without inspecting its identity.
+A Linux namespace mount keeps a reference to an isolated operating-system resource, such as a network environment.
+During installation validation, Box accepts valid namespace mount records, including those created by Docker, when their device numbers differ from every protected Box executable.
+Invalid namespace records and other mount-table roots that are not filesystem paths still fail installation validation.
 Unrelated grants remain usable. On macOS, Box checks verified Data-volume spellings.
 A writable grant must exclude these aliases and their enclosing directories.
 
@@ -644,9 +665,6 @@ Each of these is refused at startup, before any box state exists:
   experimental: set `tool-grammars = true` in `[experimental-features]` to load it``.
 - A grammar on `[agent]`: ``invalid `[agent]` table: `grammar` is refused on `[agent]`: ...``. A
   grammar on `[mcp.<name>]` is an unknown field there.
-- A `program` that the tool's `command` doesn't run, such as `[tool.gh] command = ["gh"]` with
-  `program = "git"`: ``invalid `[tool.gh]` table: `tool.gh.grammar.program` is "git", but
-  `command` runs "gh"; ...``.
 - Two grammars with one `program`: ``tool grammar refused: `tool.brew_git.grammar` and
   `tool.git.grammar` both have `program = "git"`; keep one grammar for each program``.
 - Two grammars with one `name`: ``tool grammar refused: `tool.git.grammar` and `tool.hub.grammar`
@@ -658,6 +676,17 @@ Each of these is refused at startup, before any box state exists:
 - An `[mcp.Tool]` table while `tool-grammars` is on, because `Tool` is the namespace of every
   grammar action: ``invalid MCP server "Tool": `Tool` is the namespace of every tool grammar action
   while `tool-grammars` is on; give the server another name``.
+
+A grammar binds under its `program`, the name the agent types, so `program` may differ from the
+last part of `command[0]`. Box CLI writes `npm` as the file its link leads to, such as
+`.../npm/bin/npm-cli.js`, and `program = "npm"` still binds under `npm`. When the last part of
+`command[0]` is the `program`, Box accepts the grammar. Otherwise, after it opens each tool's
+program file and before the workload starts, Box finds `program` on the `PATH` that `run` was
+started with, which is the `PATH` the Shell searches. It refuses the grammar unless that file is the
+one `command[0]` names, such as `[tool.gh] command = ["gh"]` with `program = "git"`:
+``invalid `[tool.gh]` table: `tool.gh.grammar.program` is "git", and `PATH` finds /usr/bin/git, but
+`command` runs /usr/bin/gh; ...``. When `PATH` finds nothing by that name, the message says
+`PATH` finds no program by that name.
 
 An older build refuses a box that uses a grammar, so before you go back to one, turn
 `tool-grammars` off, remove every `grammar` table, and start the box once with this build.
@@ -708,11 +737,11 @@ reads the table's name as `context.input.server`. The current reference for this
 [`mcp.md`](./mcp.md). The box adds the runtime minimum to the server's process; see
 [the runtime minimum](../design/containment.md#the-runtime-minimum).
 
-The example box declares no MCP server. To give the Strands CLI one, declare it here, and name the
-same full command under `mcpServers` in the file the CLI reads through its `--mcp-config` option:
-the same program and the same arguments, in the same order. The box places an alias with the
-program's name on the agent's `PATH`, so when the CLI starts `mcp-server-fetch`, the box runs this
-table's `command` in a separate sandbox:
+The example box declares no MCP server. To give the Strands CLI one, declare it here, and add it
+under `mcpServers` in the file the CLI reads through its `--mcp-config` option. Use the executable's
+filename and the same arguments, in the same order. The box places an alias with that filename on
+the agent's `PATH`, so when the CLI starts `mcp-server-fetch`, the box runs this table's `command`
+in a separate sandbox:
 
 ```toml
 [mcp.fetch]
@@ -726,7 +755,7 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | Key | Type | Meaning |
 |---|---|---|
 | `type` | string | `stdio` or `http`. |
-| `command` | string array | For `stdio`: what to start. The first entry is the program and names the alias in the box's `bin/`; the rest are its arguments, fixed here. The harness runs the full command to reach the server. Two tables can share a program when their full commands differ. |
+| `command` | string array | For `stdio`: a bare program name or absolute executable path, followed by its arguments. The executable's filename names the alias in the box's `bin/`. The harness runs that alias with the arguments. Two tables can share an alias when their arguments distinguish them. See [executable paths](mcp.md#select-an-executable-by-path). |
 | `workspace` | string | For `stdio`: the server's initial working directory. It grants nothing. |
 | `env` | table | For `stdio`: the literal environment the server receives. `HOME` and `PATH` default to the operator's own, as for `[agent]`. |
 | `filesystem` | table | For `stdio`: the six lists the server's own syscalls reach, the same six a `[tool.<name>.filesystem]` takes; a `metadata` or `exec` list is refused by name. An absent table grants nothing, so the server's sandbox has the runtime minimum and the reach that [a local MCP server's sandbox](../design/containment.md#local-mcp-servers) states. |

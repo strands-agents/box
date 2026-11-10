@@ -529,6 +529,17 @@ server. A forbid or an absent permit leaves it unstarted, as
 `secret.ref` locator and never a literal token, and the box never parses a harness's own
 configuration file to find one.
 
+<a id="mcp-executable-filenames-name-their-aliases"></a>
+### MCP executable filenames name their aliases
+
+A stdio MCP `command` names the executable to launch, as a bare name or an absolute path.
+The executable's filename names the alias the agent calls, including when the executable is outside
+`PATH`. The path as written keeps the invocation name of a symbolic link, while policy checks the
+resolved executable identity. We rejected separate `alias` or `executable` fields because the
+filename supplies the invocation name without another configuration choice. The cost is that two
+executable paths with the same filename and identical fixed arguments cannot select different
+servers; the existing exact-match precedence and wildcard-overlap rules apply to the derived alias.
+
 <a id="a-stdio-mcp-server-runs-contained"></a>
 ### Every stdio MCP server runs contained, in its own sandbox
 
@@ -1010,16 +1021,30 @@ bypass an argument constraint. Each accepted schema installs more of the rule se
 makes the authority ready. Every install retains unchanged policy identities and their temporal
 state, so an incremental install replays no history.
 
+A per-tool rule that the previous run stored also stays installed while discovery is pending, so it
+keeps its history across a restart. Dogwood gives a removed rule no state, and adds it back with
+empty history, so removing it until its schema arrived reset the rule at every start. Box keeps a
+stored rule when its text is unchanged, its head names only per-tool actions, and it validates
+against the server schemas that the stored history declares. The tools that the rule decides stay
+held until their schemas stage, so a schema from the previous run decides no call. When the real
+schema arrives, the rule keeps its history if that
+schema validates it, and Box removes it otherwise. The cost is that a rule whose head names a Box
+action, and that reads per-tool history in a `temporal` clause, still starts with empty history
+at each run. Keeping it would let it decide requests from the previous run's schema.
+
 <a id="a-server-whose-discovery-a-policy-denies-degrades-alone"></a>
 ### A denied tool list leaves its dependent rules unloaded until recovery
 
 A policy can deny `tools/list` for a server and still carry a per-tool rule that needs its discovered
-catalog. Box starts with that rule unloaded and refuses the tool calls it can identify as subject to
-it. A later permitted list can load the rule and clear those refusals only when the complete policy
-validates and commits. Until then, the rule stays inert, and a diagnostic on stderr and a telemetry
-record name the servers it still needs. Refusing the whole policy at load was rejected because one
-server's mistake would also block the model, shell, and other servers. The cost is that `validate`
-does not report the contradiction, so the operator learns of it from the startup warning.
+catalog. Box starts with that rule unloaded, or installed from the previous run without deciding
+calls while discovery is pending, and refuses the tool calls it can identify as subject to it. When
+discovery finishes without the schema, Box removes a rule that it kept from the previous run, so
+that rule loses its history. A later permitted list can load the rule and clear those refusals only
+when the complete policy validates and commits. Until then, the rule stays inert, and a diagnostic
+on stderr and a telemetry record name the servers it still needs. Refusing the whole policy at load
+was rejected because one server's mistake would also block the model, shell, and other servers. The
+cost is that `validate` does not report the contradiction, so the operator learns of it from the
+startup warning.
 
 <a id="the-policy-crate-exposes-one-facade"></a>
 ### The policy crate exposes one facade
@@ -1139,16 +1164,25 @@ forbid (principal, action in [Tool::git::Action::"*", Tool::git::Action::"unmode
 <a id="a-tool-grammar-binds-on-the-program-file-and-the-called-name"></a>
 ### A tool grammar binds by its program name, on the program file's identity and the name it was called by, and any other name of that file is a `shell:spawn`
 
-A tool grammar names one program, and it binds every `[tool]` whose command calls that program name.
-A grammar on `[tool.git]` with `program = "git"` at `/usr/bin/git` also covers `[tool.brew_git]` at
+A tool grammar names one program through its `program`, the name the agent types to run the tool. A
+grammar on `[tool.git]` with `program = "git"` at `/usr/bin/git` also covers `[tool.brew_git]` at
 `/opt/homebrew/bin/git`, because both run `git`. One program name therefore has at most one grammar.
 Box refuses a second grammar with the same `program` and names both tables. Letting two grammars
 share a program was rejected, because both would match the same tools. Table order would then select
-which grammar reads a command. A stdio `[mcp.<name>]` whose command calls that program name binds
-the same way, so its start is decided as the grammar's action.
+which grammar reads a command. A stdio `[mcp.<name>]`, or a `[tool]` with no grammar of its own,
+binds the same way when its command calls that program name, so a server's start is decided as the
+grammar's action.
+
+The grammar's own `[tool]` binds under its `program`, the name the agent types, even when its command
+names a link-resolved file: `[tool.npm] command = [".../npm/bin/npm-cli.js"]` with
+`program = "npm"` binds under `npm`, not under `npm-cli.js`. When the last component of the command
+isn't the `program`, Box resolves the `program` at startup on the same `PATH` that the Shell
+searches at runtime, and refuses the grammar unless it reaches the tool's own file. So a `git`
+grammar still cannot sit on a tool that runs `gh`. A server or another tool whose command names
+`npm-cli.js` calls the program by another name, so the npm grammar doesn't bind it.
 
 For each tool, Box binds the grammar to a pair: the identity of the resolved program file, and the
-name the program was called by. The identity is the file's device and inode on the surrounding OS. A
+name the program is called by, which is the grammar's `program` for the grammar's own tool. The identity is the file's device and inode on the surrounding OS. A
 hard link or symbolic link to a bound file therefore refers to the same identity. A command is
 parsed with a tool grammar only when both halves match one binding. The file identity alone isn't
 enough, because several programs can share one binary. mise runs every tool it manages through one
@@ -1378,7 +1412,18 @@ A third method pins a configured tool's program. It records the file's link coun
 same count during revalidation. Box first rules out workload writes through its other names.
 On macOS and Linux, Box can establish this by scanning every process's declared writable
 directories before the workload starts. The broker and each platform's native boundary prevent
-later alias imports.
+later creation of writable filesystem paths to those programs. Linux can skip a scan when Box
+counts every hard-link name in the program's own directory and verifies the mount layout for
+a directory named in a write grant or requested change. Other paths retain the existing
+identity checks. The program and both directories must share one ext4, XFS, or tmpfs mount
+that exposes the filesystem's root (`/`). No other mount may share its device or mount point,
+or sit at or below the program's directory or the checked path. Box reads the mount table before and after counting and requires both results
+to match. Another mounted path does not increase the file's hard-link count, so counting names
+alone cannot rule out writes. Each shortcut check has a 30-second budget, checked between
+filesystem calls; a blocked call must return first.
+Box repeats the checks before each skip. Any unmet condition, inspection error, or timeout
+falls back to the bounded recursive scan. macOS retains that scan for directory targets.
+File identity and link-count verification at launch still apply.
 
 A backend may make the file non-executable if it cannot preserve both write subtraction and
 write-xor-execute. Callers must not rely on write protection to preserve an execute grant.
@@ -1889,18 +1934,25 @@ operator must read that disclosure. No tool grant can name the box directory, wh
 `a_tool_grant_cannot_expose_the_box_directory` pins.
 
 <a id="a-host-binary-resolves-on-the-operator-path"></a>
-### A host binary resolves against the operator's real `PATH`, and the longest command prefix selects the tool
+### A bare name that a tool answers to runs that tool's file, any other name resolves on the operator's `PATH`, and the longest command prefix selects the tool
 
-The Shell resolves a host binary against the operator's real host `PATH`, with `/usr/bin:/bin` as
-the fallback, so Box finds a tool under Homebrew, nvm, or mise. Each process searches its table's
-`env.PATH` if present. Otherwise, it uses the operator's real `PATH`, then the fallback if neither
-exists. Selection compares the canonical resolved path of each tool's program with the program the
-workload invoked, and compares the tool's fixed leading arguments with the head of the argv. The
-longest matching `command` wins, so `[tool.git-read]` and `[tool.git-push]` can differ only in their
-fixed arguments, which `the_longest_matching_command_prefix_selects_the_tool` pins. Box names a
-program by its canonical identity for the `shell:spawn` decision, for selection, and for
-credentials, and the spawn hook runs only an identity that was bound to an existing file when the decision was made. `shell:spawn` stays the one control on whether a program runs; a larger `PATH` changes
-only where Box finds a permitted program.
+A `[tool]` with no grammar, or whose grammar's `program` is that name, answers to the last
+component of its `command` element 0, unless the Shell implements that name. A bare name that a
+tool answers to runs the file that the tool opened at startup, through `Kernel::host_program`,
+whatever is first on `PATH`. A tool with fixed leading arguments claims its name too. When tools
+with different command paths answer to one name, the operator's `PATH` decides if it finds one of
+those paths, and else the tool whose label is the name runs. Any other bare name resolves against
+the operator's real `PATH`, or the table's own `env.PATH`. The table label as the name lost because
+it makes a label such as `brew_git` a command and changes what `python` runs for a
+`[tool.python]` on `python3`. The longest matching `command` prefix selects the tool, which
+`the_longest_matching_command_prefix_selects_the_tool` pins, and
+`a_bare_name_runs_the_tool_that_declares_it_when_another_file_is_first_on_path` pins the name rule.
+Box names a program by its canonical identity for the `shell:spawn` decision, for selection, and
+for credentials, and the spawn hook runs only an identity that was bound to an existing file when
+the decision was made. `shell:spawn`, or a grammar action, stays the one control on whether a
+program runs. A second program of a tool's name that the agent reaches through `exec` no longer
+runs by its bare name, which runs the tool's file or is refused, so it needs its own `[tool]` or its
+path.
 
 <a id="the-caller-spelling-becomes-argument-zero"></a>
 ### The identity selects the program, and the caller's spelling becomes `argv[0]`

@@ -160,6 +160,9 @@ impl BrokerHost {
         commands: Arc<crate::run::commands::ConfiguredCommands>,
         installation: Arc<crate::run::installation::TrustedInstallation>,
     ) -> Result<Self, BoxError> {
+        let host_programs = commands
+            .bare_names(record, &crate::run::contain::executable::host_search_path())
+            .programs();
         // The agent's workspace is the interpreters' working directory, and its `HOME` is what every
         // participant reads, so one directory has one name on both sides of the socket.
         let reach = Arc::new(
@@ -209,6 +212,7 @@ impl BrokerHost {
                     egress,
                     recorder,
                     host_spawner,
+                    host_programs,
                     command_timeout,
                     &ready_sender,
                     shutdown_receiver,
@@ -418,7 +422,7 @@ async fn start_mcp_server(
     authorize_mcp_start(
         spec,
         server,
-        Path::new(server.program()),
+        Path::new(server.executable()),
         server.arguments(),
         &spec.mcp_working_directory,
         &[],
@@ -489,6 +493,7 @@ fn host(
     egress: Option<EgressRouting>,
     recorder: Arc<crate::run::telemetry::DecisionRecorder>,
     host_spawner: Option<crate::run::hosted::ToolSpawner>,
+    host_programs: strands_shell::os::HostPrograms,
     command_timeout: Option<Duration>,
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
     shutdown: oneshot::Receiver<()>,
@@ -523,6 +528,7 @@ fn host(
             egress,
             recorder,
             host_spawner,
+            host_programs,
         };
         // Built once here and dropped immediately — a *probe*, not the serving Shell.
         if let Err(error) = spec.build() {
@@ -1864,6 +1870,7 @@ done"#;
             egress: None,
             recorder: crate::run::telemetry::DecisionRecorder::discarding(),
             host_spawner: None,
+            host_programs: Default::default(),
         })
     }
 
@@ -1883,7 +1890,7 @@ done"#;
             @id("no_marker_start")
             forbid (principal, action == Box::Action::"shell:spawn", resource)
             when {
-                context.input.program == "/bin/sh" &&
+                context.input.program == "sh" &&
                 context.input.program_path == "/bin/sh" &&
                 context.input has arg1 && context.input.arg1 == "-c" &&
                 context.input.arg_count == 2
@@ -2123,6 +2130,7 @@ done"#;
             egress: None,
             recorder: crate::run::telemetry::DecisionRecorder::discarding(),
             host_spawner: None,
+            host_programs: Default::default(),
         })
     }
 
@@ -3299,7 +3307,7 @@ done"#;
                 7,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
                         arguments: declared.clone(),
                     },
                 },
@@ -3344,7 +3352,7 @@ exit 17"#;
                 1,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
                         arguments: declared.clone(),
                     },
                 },
@@ -3393,7 +3401,7 @@ exit 17"#;
                 1,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
                         arguments: declared.clone(),
                     },
                 },
@@ -3495,6 +3503,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 egress: None,
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
+                host_programs: Default::default(),
             });
             let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
@@ -3505,7 +3514,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 1,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
                         arguments: declared.clone(),
                     },
                 },
@@ -3597,7 +3606,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 7,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
                         arguments: declared.clone(),
                     },
                 },
@@ -3667,7 +3676,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 7,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
                         arguments: declared.clone(),
                     },
                 },
@@ -3802,6 +3811,7 @@ done"#,
                 egress: None,
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
+                host_programs: Default::default(),
             });
             let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
@@ -3812,7 +3822,7 @@ done"#,
                 1,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
                         arguments: declared.clone(),
                     },
                 },
@@ -3959,6 +3969,7 @@ done"#;
                 egress: None,
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
+                host_programs: Default::default(),
             });
             let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
@@ -3969,7 +3980,7 @@ done"#;
                 1,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
                         arguments: declared.clone(),
                     },
                 },
