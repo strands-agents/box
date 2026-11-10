@@ -1823,7 +1823,9 @@ reached by its absolute path already does. Builtins and functions keep precedenc
 The direct `python3` and `python` aliases follow `replaces` too, so a program the agent starts
 without the Shell reaches the same Python. Box writes the replaced names to `bin/.replaced-python`,
 which the agent may read, and an alias whose own name is listed sends its arguments to the Shell as
-one command with each argument single-quoted. The Shell then decides it as a typed `python3`. The
+one command with each argument single-quoted. The command first enters the caller's working
+directory with `cd`, because the Shell starts every command in the workspace, and a relative script
+path would otherwise name a different file. The Shell then decides it as a typed `python3`. The
 list selects a route and grants nothing: a workload that changed it could at most reach the Shell or
 Monty, and the broker decides every request on either route. The broker protocol is unchanged, and a
 box with no replaced name has no list and an unchanged boundary.

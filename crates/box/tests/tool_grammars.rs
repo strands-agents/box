@@ -8,7 +8,7 @@ mod support {
 use std::path::Path;
 use std::process::Output;
 
-use support::fixture::{Configured, Request, namespace_launcher_is_usable};
+use support::fixture::{Configured, PROJECT, Request, namespace_launcher_is_usable};
 
 const FORBID_PUSH: &str = r#"
 permit (principal, action == Box::Action::"shell:exec", resource);
@@ -784,7 +784,8 @@ fn a_tool_with_fixed_arguments_claims_its_bare_name_and_refuses_other_arguments(
     );
 }
 
-/// Compile a program at `path` that prints `args=` and its arguments, then exits 0.
+/// Compile a program at `path` that prints `args=` and its arguments, prints `cwd=` and its working
+/// directory on stderr, then exits 0.
 fn compile_arguments_printer(path: &Path) {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
@@ -809,7 +810,8 @@ fn compile_arguments_printer(path: &Path) {
         .expect("compiler input")
         .write_all(
             b"fn main() { let args: Vec<String> = std::env::args().skip(1).collect(); \
-              println!(\"args={}\", args.join(\" \")); }",
+              println!(\"args={}\", args.join(\" \")); \
+              eprintln!(\"cwd={}\", std::env::current_dir().unwrap().display()); }",
         )
         .expect("write the probe source");
     let output = compiler.wait_with_output().expect("compile the probe");
@@ -907,6 +909,46 @@ fn the_direct_python_alias_runs_the_tool_that_replaces_its_name() {
     assert!(
         stdout(&quoted).contains("args=-c it's a b \n|status=0"),
         "each argument reaches the tool as one word, quotes and empty ones included: {quoted:?}"
+    );
+}
+
+#[test]
+fn the_direct_python_alias_runs_the_tool_in_the_callers_directory() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let home = support::fixture::short_temporary_home();
+    let directory = tools_directory(home.path());
+    std::fs::create_dir_all(&directory).expect("the tools directory");
+    let python = directory.join("python3");
+    compile_arguments_printer(&python);
+    let python = python.canonicalize().expect("the python probe resolves");
+    let (box_, started) = Request::with_config(
+        "replaced-cwd",
+        r#"permit (principal, action == Box::Action::"shell:exec", resource);
+           permit (principal, action == Box::Action::"fs:read", resource);
+           permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        &format!(
+            "[tool.python]\ncommand = [{:?}]\nreplaces = [\"python3\"]\n\
+             [tool.python.filesystem]\nread = [{:?}, {PROJECT:?}]\n",
+            python.display().to_string(),
+            directory.display().to_string()
+        ),
+    )
+    .agent_list("read", &[PROJECT])
+    .attempt();
+    assert!(started.status.success(), "{}", stderr(&started));
+    let sub = box_.workspace().join("sub");
+    std::fs::create_dir_all(&sub).expect("a folder in the workspace");
+    let sub = sub.canonicalize().expect("the folder resolves");
+
+    let ran = box_.bash(r#"cd sub && python3 setup.py; printf "|status=%s" "$?""#);
+
+    assert!(stdout(&ran).contains("args=setup.py\n|status=0"), "{ran:?}");
+    assert!(
+        stderr(&ran).contains(&format!("cwd={}\n", sub.display())),
+        "the tool runs in the caller's directory, not the workspace: {ran:?}"
     );
 }
 

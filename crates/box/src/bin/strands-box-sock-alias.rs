@@ -155,10 +155,11 @@ fn parse_mode(executable: PathBuf, arguments: Vec<OsString>) -> io::Result<Mode>
 fn parse_alias(executable: &Path, name: &str, arguments: Vec<OsString>) -> io::Result<Mode> {
     if PYTHON_ALIAS_NAMES.contains(&name) {
         if is_replaced(executable, name)? {
-            return shell_mode(
-                executable,
-                OsString::from(replaced_command(name, arguments)?),
-            );
+            let directory = std::env::current_dir().map_err(|error| {
+                io::Error::new(error.kind(), format!("read the working directory: {error}"))
+            })?;
+            let command = replaced_command(&directory, name, arguments)?;
+            return shell_mode(executable, OsString::from(command));
         }
         return parse_script_alias(executable, arguments);
     }
@@ -292,16 +293,24 @@ fn is_replaced(executable: &Path, name: &str) -> io::Result<bool> {
     Ok(text.lines().any(|line| line == name))
 }
 
-/// The Shell command that runs `name` with `arguments`, each argument single-quoted as one word.
-fn replaced_command(name: &str, arguments: Vec<OsString>) -> io::Result<String> {
-    let mut command = name.to_string();
+/// The Shell command that runs `name` with `arguments` in `directory`, the caller's own working
+/// directory, each word single-quoted.
+///
+/// The Shell starts every command in the workspace, so the command enters `directory` first, and a
+/// relative path names what it named for the caller. A directory the Shell can't enter fails the
+/// command there rather than running it elsewhere.
+fn replaced_command(directory: &Path, name: &str, arguments: Vec<OsString>) -> io::Result<String> {
+    let quoted = |word: &str| format!("'{}'", word.replace('\'', "'\\''"));
+    let directory = directory
+        .to_str()
+        .ok_or_else(|| invalid_input("the working directory is not valid UTF-8"))?;
+    let mut command = format!("cd {} && {name}", quoted(directory));
     for (index, argument) in arguments.into_iter().enumerate() {
         let argument = argument.into_string().map_err(|_| {
             invalid_input(format!("Python argument {} is not valid UTF-8", index + 1))
         })?;
-        command.push_str(" '");
-        command.push_str(&argument.replace('\'', "'\\''"));
-        command.push('\'');
+        command.push(' ');
+        command.push_str(&quoted(&argument));
     }
     if command.len() > MAX_SCRIPT_BYTES {
         return Err(invalid_input(format!(
@@ -1038,6 +1047,8 @@ mod tests {
     #[test]
     fn a_replaced_python_name_routes_its_arguments_to_the_shell() {
         let (_root, bin) = replaced_box(Some("python\npython3\n"));
+        let here = std::env::current_dir().expect("the test's working directory");
+        let enter = format!("cd '{}' && ", here.display());
         for (name, given, command) in [
             (
                 "python3",
@@ -1054,9 +1065,26 @@ mod tests {
             let mode =
                 parse_mode(bin.join(name), arguments(&given)).expect("a replaced name parses");
             assert_eq!(mode.interpreter, Interpreter::Shell, "{name} {given:?}");
-            assert_eq!(mode.source, command);
+            assert_eq!(mode.source, format!("{enter}{command}"));
             assert_eq!(mode.socket, bin.parent().unwrap().join("run/box.sock"));
         }
+    }
+
+    /// **The command enters the caller's own directory first**, quoted like every argument, so a
+    /// relative path names what it named for the caller.
+    #[test]
+    fn a_replaced_command_enters_the_callers_directory_first() {
+        let command = replaced_command(
+            Path::new("/work/it's here"),
+            "python3",
+            arguments(&["setup.py", "build"]),
+        )
+        .expect("the command builds");
+
+        assert_eq!(
+            command,
+            "cd '/work/it'\\''s here' && python3 'setup.py' 'build'"
+        );
     }
 
     /// **A name the list leaves out, or a box with no list, keeps Monty**, so `-m` is still the

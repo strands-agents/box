@@ -271,10 +271,13 @@ Box refuses the configuration when `replaces` names anything but `python` or `py
 tool's `command` has fixed arguments, or when two tools replace the same name.
 
 A program the agent starts without the Shell, such as a harness that runs `python3 -m pytest`
-directly, reaches the box's `python3` alias. For a replaced name, the alias sends the command to the
-Shell, so the same tool runs under the same decision. [`limits.shell.timeout`](#limitsshelltimeout)
-then applies, not the direct alias's own Monty limits. Each argument reaches the tool as one word,
-relative paths resolve in the agent's workspace, and the alias forwards no standard input.
+directly, reaches the box's `python3` alias. For a replaced name, the alias sends the Shell one
+command, `cd '<the caller's directory>' && python3 '<argument>' ...`, so the same tool runs under
+the same decision, in the directory the caller ran it from. The `cd` is its own
+[`shell:exec`](#shellexec) decision, so policy must permit `cd` too, as the `read_only_commands`
+example does. A directory the Shell can't enter fails the command.
+[`limits.shell.timeout`](#limitsshelltimeout) then applies, not the direct alias's own Monty
+limits. Each argument reaches the tool as one word, and the alias forwards no standard input.
 
 Monty decides each file operation a script makes. The host's Python makes its own system calls, so
 code the agent writes runs with everything the tool's lists grant. Keep the tool's `write` list to
