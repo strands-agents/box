@@ -131,6 +131,7 @@ def main():
     polling_error = None
     event_warning_printed = False
     last_creation_error = None
+    pod_seen = False
     try:
         require_sandbox_settings(created.get('spec', {}).get('template', {}).get('spec', {}),
                                  'the created Job')
@@ -147,11 +148,12 @@ def main():
                                        timeout=min(COMMAND_TIMEOUT_SECONDS, remaining)).stdout)
             (dest / 'pod-configuration.json').write_text(json.dumps(observed, indent=2))
             if observed.get('items'):
+                pod_seen = True
                 last_creation_error = None
             for pod in observed.get('items', []):
                 require_sandbox_settings(pod.get('spec', {}),
                                          'Pod ' + pod.get('metadata', {}).get('name', '<unknown>'))
-            if not observed.get('items'):
+            if not pod_seen:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise RuntimeError('The deadline expired before Pod creation events could be inspected')
@@ -179,7 +181,7 @@ def main():
             failed = status.get('failed') or any(
                 x.get('type') == 'Failed' and x.get('status') == 'True' for x in status.get('conditions', [])
             )
-            if failed and not observed.get('items') and last_creation_error:
+            if failed and not pod_seen and last_creation_error:
                 raise RuntimeError('The Job failed before a Pod was created')
             if status.get('succeeded') or failed:
                 break

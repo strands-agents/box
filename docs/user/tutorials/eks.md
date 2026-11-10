@@ -68,7 +68,7 @@ The cluster did not preserve required Box settings in the server dry-run Job; no
 ```
 
 The script prints warnings returned by the dry run. It also checks the created Job and its Pods,
-because Pod admission can differ from Job admission. While no Pods exist, it reads that Job's
+because Pod admission can differ from Job admission. Before it first observes a Pod, it reads that Job's
 `FailedCreate` events and reports the controller's message, including admission rejections.
 The operator needs permission to list namespace events for this diagnostic. If the event query
 fails, the script prints a warning, saves the error, and continues its bounded wait.

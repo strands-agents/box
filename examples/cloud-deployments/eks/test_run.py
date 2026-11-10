@@ -23,7 +23,7 @@ class JobReceiptTests(unittest.TestCase):
                  diagnostic_timeouts=False, diagnostic_hook=None, job_pending=False, extra_args=(),
                  dry_run_edit=None, created_edit=None, pod_edit=None, no_pods=False,
                  dry_run_warning="", failed_create=None, event_failure=False,
-                 pending_job_polls=0, empty_pod_polls=0, failed_job=False):
+                 pending_job_polls=0, empty_pod_polls=0, failed_job=False, pod_disappears_after=None):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         previous = Path.cwd()
@@ -62,7 +62,7 @@ class JobReceiptTests(unittest.TestCase):
                     return subprocess.CompletedProcess(command, 1, "", "Kubernetes API unavailable")
                 self.job_polls += 1
                 status = {} if job_pending or self.job_polls <= pending_job_polls else {"succeeded": 1}
-                if failed_job:
+                if failed_job and self.job_polls > pending_job_polls:
                     status = {"conditions": [{"type": "Failed", "status": "True", "reason": "DeadlineExceeded"}]}
                 return subprocess.CompletedProcess(command, 0, json.dumps({**created, "status": status}), "")
             if "pods" in command and not polling_failure and not polling_timeout and not any("logs" in previous for previous in calls):
@@ -70,7 +70,9 @@ class JobReceiptTests(unittest.TestCase):
                 pod = {"metadata": {"name": "box-pod"}, "spec": json.loads(json.dumps(pod_spec))}
                 if pod_edit:
                     pod_edit(pod["spec"])
-                return subprocess.CompletedProcess(command, 0, json.dumps({"items": [] if no_pods or self.observed_polls <= empty_pod_polls else [pod]}), "")
+                absent = (no_pods or self.observed_polls <= empty_pod_polls
+                          or (pod_disappears_after is not None and self.observed_polls > pod_disappears_after))
+                return subprocess.CompletedProcess(command, 0, json.dumps({"items": [] if absent else [pod]}), "")
             if "logs" in command:
                 if diagnostic_hook:
                     diagnostic_hook(stderr.getvalue())
@@ -308,6 +310,20 @@ raise SystemExit(module.main())
                 self.assertTrue(receipt["passed"])
                 self.assertIsNone(receipt["error"])
                 self.assertIn(message, stderr)
+
+    def test_disappearing_pod_does_not_revive_an_old_creation_error(self):
+        message = 'forbidden: exceeded quota: compute'
+        with mock.patch.object(runner.time, "sleep"):
+            status, receipt, stderr, calls = self.run_case(
+                pending_job_polls=2, empty_pod_polls=1, pod_disappears_after=2,
+                failed_job=True, failed_create=message)
+        self.assertEqual(self.observed_polls, 3)
+        self.assertEqual(status, 1)
+        self.assertFalse(receipt["passed"])
+        self.assertNotIn(message, str(receipt["error"]))
+        self.assertNotIn("before a Pod was created", str(receipt["error"]))
+        self.assertEqual(stderr.count(message), 1)
+        self.assertEqual(sum("events" in call for call in calls), 1)
 
     def test_persistent_creation_error_is_in_the_deadline_receipt(self):
         message = 'forbidden: exceeded quota: compute'
