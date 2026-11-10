@@ -449,6 +449,7 @@ mod tests {
             .observed_by(recording.clone());
         let words = argv(&["make"]);
         let spawn = Request::ShellSpawn {
+            server: None,
             command: "make",
             program: "make",
             program_path: "/usr/bin/make",

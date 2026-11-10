@@ -134,6 +134,10 @@ three kinds of event:
 - `::response` for an operation that happened, or may have happened.
 - `::error` for an operation that definitely didn't happen.
 
+An admitted MCP start carries its configured name in `shell:spawn`'s `input.server`, both in
+the immediate condition and in request history. Ordinary shell spawns omit that field.
+[The action reference](../user/policy/actions.md#shell) states its policy syntax.
+
 For an MCP command with [argument wildcards](../user/mcp.md#argument-wildcards) enabled, the
 `shell:spawn` request records the alias name and effective launch arguments, including the received
 values in the `*` positions. The `program_path` field identifies the resolved executable file.

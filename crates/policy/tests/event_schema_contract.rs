@@ -182,6 +182,7 @@ fn every_public_producer_populates_the_reserved_fields_declared_by_its_schema() 
     record_operation(
         &engine,
         Request::ShellSpawn {
+            server: None,
             command: "tool value",
             program: "tool",
             program_path: "/usr/bin/tool",

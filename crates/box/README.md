@@ -610,3 +610,16 @@ It covers both directions: a permitted command routes and returns, an unpermitte
 is denied with no output, a temporal cap denies after its budget, host interpreters
 are refused, the workload cannot start its own serving shim or replace the socket, and the
 shim's policy is unreachable from inside.
+
+## Check imported MCP names from Rust
+
+`strands_box::check_mcp_names(&[&str])` checks the server names before a caller writes a
+configuration. It returns `Result<(), McpNamesRefused>`. The error names the reserved namespace
+or the two names that normalize to the same namespace. The check uses the same rules as MCP
+schema composition, without reading configuration, starting servers, or discovering tools.
+It checks namespace compatibility, not the other requirements of an MCP declaration.
+
+```rust
+assert!(strands_box::check_mcp_names(&["time", "files"]).is_ok());
+assert!(strands_box::check_mcp_names(&["a-b", "a_b"]).is_err());
+```

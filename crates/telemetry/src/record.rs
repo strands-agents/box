@@ -187,6 +187,9 @@ pub struct Subject(SubjectKind);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SubjectKind {
+    McpServer {
+        name: String,
+    },
     Destination {
         address: String,
         port: u16,
@@ -203,6 +206,14 @@ enum SubjectKind {
 }
 
 impl Subject {
+    /// The admitted MCP server, as `strands.box.mcp.server`.
+    #[must_use]
+    pub fn mcp_server(name: &str) -> Self {
+        Self(SubjectKind::McpServer {
+            name: bounded(name),
+        })
+    }
+
     /// A network destination, as `server.address` and `server.port`.
     #[must_use]
     pub fn destination(address: &str, port: u16) -> Self {
@@ -285,6 +296,9 @@ impl Subject {
                     pairs.push(("http.request.method", method.to_string().into()));
                 }
                 pairs
+            }
+            SubjectKind::McpServer { name } => {
+                vec![("strands.box.mcp.server", name.clone().into())]
             }
             SubjectKind::File { path } => vec![("file.path", path.clone().into())],
             SubjectKind::Process {
@@ -1164,6 +1178,36 @@ mod tests {
             text_of(&genuine, "file.path").as_deref(),
             Some("~/notes.txt")
         );
+    }
+
+    #[test]
+    fn an_mcp_start_record_names_the_server_under_a_broad_rule() {
+        for record in [
+            DecisionRecord::permit(
+                r#"Box::Action::"shell:spawn""#,
+                "/usr/bin/launcher",
+                "broad",
+            ),
+            DecisionRecord::deny(
+                r#"Box::Action::"shell:spawn""#,
+                "/usr/bin/launcher",
+                "broad",
+                "refused",
+            ),
+        ] {
+            let attributes = record.about(Subject::mcp_server("time")).attributes();
+            assert_eq!(
+                text_of(&attributes, "strands.box.mcp.server").as_deref(),
+                Some("time")
+            );
+        }
+        let ordinary = DecisionRecord::permit(
+            r#"Box::Action::"shell:spawn""#,
+            "/usr/bin/launcher",
+            "broad",
+        )
+        .attributes();
+        assert!(text_of(&ordinary, "strands.box.mcp.server").is_none());
     }
 
     /// **Each lane states its subject under the standard names.** A destination comes from the

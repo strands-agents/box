@@ -256,6 +256,11 @@ caller control of one argument to a server with its own configured permissions. 
 checks only the program does not restrict that value. If the argument selects a package or a
 destination, the caller selects the code or destination used under the server's permissions.
 
+The admitted server name reaches `context.input.server` on a `shell:spawn` request and its
+request history. Ordinary shell spawns omit this field. The start decision record carries
+`strands.box.mcp.server` even when a broad permit matches or a tool grammar replaces the
+spawn action. This keeps servers on the same launcher distinct in policy and telemetry.
+
 The broker then decides `shell:spawn` on the configured program and effective arguments, before the
 process exists. If it's allowed, the server starts in its own sandbox.
 
