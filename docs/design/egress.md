@@ -161,8 +161,8 @@ starts TLS. A policy refusal of a request to an HTTP MCP server gets a JSON-RPC 
 
 Policy provides the only check on metadata endpoints. The gateway has no built-in block. A policy
 needs two `forbid` rules on `net:connect`: one for the metadata hostnames `metadata.google.internal`
-and `metadata.azure.internal`, and one for the metadata addresses `169.254.*`, `fd00:ec2::254`, and
-the IPv6 link-local range.
+and `metadata.azure.internal`, and one for the metadata addresses `169.254.*`, `fd00:ec2::254`,
+Azure WireServer `168.63.129.16`, Alibaba Cloud `100.100.100.200`, and the IPv6 link-local range.
 
 ## How responses reach the workload
 

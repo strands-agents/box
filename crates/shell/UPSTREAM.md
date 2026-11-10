@@ -1863,3 +1863,26 @@ each `Kernel` must forward them and cannot hide the refusal. `is_executable`, `f
 outcome, because admission refuses it first.
 `tests/kernel_effect_interception.rs::an_answered_probe_reports_a_completed_effect` and
 `a_probe_the_admission_window_refuses_reports_a_failure` pin the change.
+
+## 2026-11-10 — the SSRF floor missed translated and platform metadata addresses
+
+`is_ip_blocked` checked the IPv4 address inside IPv4-mapped, IPv4-compatible, 6to4, and Teredo
+addresses, but not inside the NAT64 well-known prefix `64:ff9b::/96` or the IPv4-translated prefix
+`::ffff:0:0:0/96`. It also had no entry for `0.0.0.0/8`, Azure WireServer `168.63.129.16`, or the
+Alibaba Cloud metadata address `100.100.100.200`. So `check_url_safe` accepted a literal such as
+`http://[64:ff9b::a9fe:a9fe]/`, which carries `169.254.169.254`. Box calls `check_url_safe` before
+the Shell `curl` and the Monty `fetch` reach the gateway, so these literals passed that check.
+Upstream would call this a bug, because its security policy names this floor as a control.
+
+This copy applies the IPv4 checks to the address inside the NAT64 and IPv4-translated prefixes,
+refuses the whole RFC 8215 local-use prefix `64:ff9b:1::/48`, and refuses `0.0.0.0/8`,
+`168.63.129.16`, and `100.100.100.200`. A NAT64 address that carries a public IPv4 address, and
+the rest of `100.64.0.0/10`, stay allowed. The same change is proposed upstream on
+`feature/ssrf-nat64-platform-metadata`.
+
+`vfs_kernel.rs::url_safety_tests::check_url_safe_blocks_translated_and_platform_metadata_addresses`
+fails without the change and passes with it.
+`check_url_safe_allows_public_destinations_behind_nat64_and_shared_space` pins the addresses that
+stay allowed. In Box,
+`run::broker::python::fetch::tests::a_fetch_to_a_translated_or_platform_metadata_literal_is_refused_before_transport`
+pins that the Monty `fetch` refuses these literals before transport.
