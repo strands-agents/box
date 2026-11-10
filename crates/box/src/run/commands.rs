@@ -20,6 +20,27 @@ pub(crate) struct ConfiguredCommands {
     tools: BTreeMap<String, Arc<ConfiguredCommand>>,
 }
 
+/// The file each bare name runs in the hosted Shell, from the `[tool]` tables that answer to it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct BareNames {
+    /// Each name that one program file answers to: the spelling that runs it, and its tables.
+    pub(crate) declared: BTreeMap<String, (PathBuf, Vec<String>)>,
+    /// Each name that tables with different program files answer to, and those tables.
+    pub(crate) shared: BTreeMap<String, Vec<String>>,
+}
+
+impl BareNames {
+    /// The declared file of each name, as the Shell reads it.
+    pub(crate) fn programs(&self) -> strands_shell::os::HostPrograms {
+        Arc::new(
+            self.declared
+                .iter()
+                .map(|(name, (path, _))| (name.clone(), path.clone()))
+                .collect(),
+        )
+    }
+}
+
 /// Why command protection refuses a mutation.
 #[derive(Debug)]
 pub(crate) enum CommandMutationRefusal {
@@ -128,6 +149,47 @@ impl ConfiguredCommands {
             .and_then(|label| label.strip_suffix(']'))
             .unwrap_or(label);
         self.tools.get(label)
+    }
+
+    /// The bare names that `record`'s tools answer to: each one's bound name, which a grammar whose
+    /// `program` is not its command's file name leaves to `PATH`, and none the Shell implements.
+    pub(crate) fn bare_names(&self, record: &Record) -> BareNames {
+        use crate::record::config::grammar::{bound_name, called_name};
+        let mut found: BTreeMap<&str, Vec<(&str, &ConfiguredCommand, bool)>> = BTreeMap::new();
+        for (label, spec) in &record.tool {
+            let (Some(name), Some(command)) = (bound_name(spec), self.tools.get(label)) else {
+                continue;
+            };
+            if strands_shell::exec::implements_program(name) {
+                continue;
+            }
+            let declares = name == called_name(spec);
+            found
+                .entry(name)
+                .or_default()
+                .push((label, command, declares));
+        }
+        let mut names = BareNames::default();
+        for (name, commands) in found {
+            let Some((_, declaring, _)) = commands.iter().find(|(_, _, declares)| *declares) else {
+                continue;
+            };
+            let tables = commands
+                .iter()
+                .map(|(label, _, _)| format!("[tool.{label}]"))
+                .collect();
+            if commands
+                .iter()
+                .all(|(_, command, _)| command.identity == declaring.identity)
+            {
+                names
+                    .declared
+                    .insert(name.to_string(), (declaring.invoked.clone(), tables));
+            } else {
+                names.shared.insert(name.to_string(), tables);
+            }
+        }
+        names
     }
 
     pub(crate) fn mutation_refusal(&self, path: &Path) -> Option<CommandMutationRefusal> {
@@ -1206,5 +1268,202 @@ mod tests {
             .unwrap()
             .verify()
             .expect_err("a changed route refuses launch");
+    }
+
+    fn tool(command: &Path, program: Option<&str>) -> ProcessSpec {
+        ProcessSpec {
+            native_filesystem_policy: None,
+            command: vec![command.display().to_string()],
+            workspace: None,
+            env: Default::default(),
+            filesystem: Default::default(),
+            network: None,
+            grammar: program.map(|program| {
+                toml::Value::Table(toml::Table::from_iter([(
+                    "program".to_string(),
+                    toml::Value::String(program.to_string()),
+                )]))
+                .try_into()
+                .expect("a grammar table")
+            }),
+        }
+    }
+
+    fn bare_names(tools: &[(&str, ProcessSpec)], at: &Path) -> BareNames {
+        let mut record = record(at);
+        record.tool = tools
+            .iter()
+            .map(|(label, spec)| ((*label).to_string(), spec.clone()))
+            .collect();
+        ConfiguredCommands::load(&record)
+            .expect("the commands load")
+            .bare_names(&record)
+    }
+
+    /// **A tool answers to its command's file name, not its label**, and several tables that run
+    /// one file under one name share that name.
+    #[test]
+    fn a_tool_answers_to_its_commands_file_name() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        std::fs::create_dir_all(root.join("developer/usr/bin")).expect("folder");
+        let git = root.join("developer/usr/bin/git");
+        program(&git);
+
+        let names = bare_names(
+            &[
+                ("brew_git", tool(&git, None)),
+                ("git_status", tool(&git, None)),
+            ],
+            &git,
+        );
+
+        assert_eq!(
+            names.declared,
+            BTreeMap::from([(
+                "git".to_string(),
+                (
+                    git.clone(),
+                    vec![
+                        "[tool.brew_git]".to_string(),
+                        "[tool.git_status]".to_string()
+                    ]
+                )
+            )])
+        );
+        assert!(names.shared.is_empty());
+        assert_eq!(
+            *names.programs(),
+            BTreeMap::from([("git".to_string(), git)])
+        );
+    }
+
+    /// **A name that two different program files answer to is declared by neither**, so the Shell
+    /// finds it on `PATH` as before.
+    #[test]
+    fn a_name_two_files_answer_to_is_left_to_path() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        for folder in ["system", "brew"] {
+            std::fs::create_dir_all(root.join(folder)).expect("folder");
+            program(&root.join(folder).join("git"));
+        }
+
+        let names = bare_names(
+            &[
+                ("git", tool(&root.join("system/git"), None)),
+                ("brew_git", tool(&root.join("brew/git"), None)),
+            ],
+            &root.join("system/git"),
+        );
+
+        assert!(names.declared.is_empty(), "{:?}", names.declared);
+        assert_eq!(
+            names.shared,
+            BTreeMap::from([(
+                "git".to_string(),
+                vec!["[tool.brew_git]".to_string(), "[tool.git]".to_string()]
+            )])
+        );
+    }
+
+    /// **A grammar whose `program` is not its command's file name declares no bare name**, so a
+    /// shim that its called name selects keeps the spelling that `PATH` finds.
+    #[test]
+    fn a_grammar_on_another_program_name_declares_no_bare_name() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let cli = root.join("npm-cli.js");
+        program(&cli);
+        let git = root.join("git");
+        program(&git);
+
+        let names = bare_names(
+            &[
+                ("npm", tool(&cli, Some("npm"))),
+                ("git", tool(&git, Some("git"))),
+            ],
+            &cli,
+        );
+
+        assert_eq!(
+            names.declared.keys().collect::<Vec<_>>(),
+            vec!["git"],
+            "{:?}",
+            names.declared
+        );
+    }
+
+    /// **A grammar's `program` that another tool's different file answers to is left to `PATH`**,
+    /// so the startup check that `PATH` reaches the grammar's file still holds for the Shell.
+    #[test]
+    fn a_grammar_program_another_file_answers_to_is_left_to_path() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let cli = root.join("npm-cli.js");
+        program(&cli);
+        std::fs::create_dir_all(root.join("brew")).expect("folder");
+        let brew = root.join("brew/npm");
+        program(&brew);
+        let mut ci = tool(&brew, None);
+        ci.command.push("ci".to_string());
+
+        let names = bare_names(&[("npm", tool(&cli, Some("npm"))), ("npm_ci", ci)], &cli);
+
+        assert!(names.declared.is_empty(), "{:?}", names.declared);
+        assert_eq!(
+            names.shared,
+            BTreeMap::from([(
+                "npm".to_string(),
+                vec!["[tool.npm]".to_string(), "[tool.npm_ci]".to_string()]
+            )])
+        );
+    }
+
+    /// **A name the Shell runs itself is never declared**, because the Shell's own program wins.
+    #[test]
+    fn a_name_the_shell_implements_is_not_declared() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let tools: Vec<(&str, ProcessSpec)> = ["python3", "cat", "sh", "echo", "git"]
+            .into_iter()
+            .map(|name| {
+                let path = root.join(name);
+                program(&path);
+                (name, tool(&path, None))
+            })
+            .collect();
+
+        let names = bare_names(&tools, &root.join("git"));
+
+        assert_eq!(
+            names.declared.keys().collect::<Vec<_>>(),
+            vec!["git"],
+            "{:?}",
+            names.declared
+        );
+        assert!(names.shared.is_empty(), "{:?}", names.shared);
+    }
+
+    /// **A command is declared through the spelling the run starts it by**, so a linked program
+    /// keeps its link as `argv[0]`.
+    #[test]
+    fn a_linked_command_is_declared_through_its_link() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        std::fs::create_dir_all(root.join("cellar")).expect("folder");
+        std::fs::create_dir_all(root.join("bin")).expect("folder");
+        program(&root.join("cellar/git"));
+        std::os::unix::fs::symlink(root.join("cellar/git"), root.join("bin/git")).expect("link");
+
+        let names = bare_names(
+            &[("git", tool(&root.join("bin/git"), None))],
+            &root.join("bin/git"),
+        );
+
+        assert_eq!(
+            names.declared.get("git").map(|(path, _)| path.clone()),
+            Some(root.join("bin/git"))
+        );
     }
 }

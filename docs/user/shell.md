@@ -35,7 +35,7 @@ Once the alias hands a command to the Shell, each command in it runs as follows:
 | Inside a command, the agent runs | Action | Where it runs | What bounds its reach |
 |---|---|---|---|
 | A builtin or a command the Shell implements | `shell:exec`, then one `fs:*` action for each file operation | In the Shell | Policy, then the reachable paths check |
-| A program on the `PATH` of `box run`, such as `git` | `shell:spawn` on the program's resolved path, or the grammar action when a tool grammar binds the program | Its own sandbox | Its `[tool.<name>]` table or `exec` entry. See [Configuration](#configuration). |
+| A program named without a path, such as `git`, which runs a `[tool]`'s file or the first match on the `PATH` of `box run` (see [`PATH`](#path)) | `shell:spawn` on the program's resolved path, or the grammar action when a tool grammar binds the program | Its own sandbox | Its `[tool.<name>]` table or `exec` entry. See [Configuration](#configuration). |
 | A program named by a path, such as `./target/debug/app` | `shell:spawn` on the program's resolved path, or the grammar action when a tool grammar binds the program | Its own sandbox | Its `[tool.<name>]` table or `exec` entry |
 
 The Shell implements these, each in place of a program of the same name on the `PATH`:
@@ -109,7 +109,7 @@ cases:
   otherwise make the same `shell:spawn` request.
 - The file at a bound path is no longer the file that the run bound.
 - The agent called a bound name with no path, and the file bound under that name is gone or
-  replaced, so `PATH` would find another file.
+  replaced, so another file would run.
 
 A refused spawn enters history as a `shell:spawn` request. After a bound file is replaced or
 removed, its bound names stay refused until the box restarts.
@@ -177,7 +177,7 @@ execution can delay timeout reporting. The direct `python` and `python3` aliases
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `command` | string array | required | Element 0 is the program, and the rest are fixed leading arguments. A bare name resolves on the table's `env.PATH`, else on the `PATH` of `box run`. |
+| `command` | string array | required | Element 0 is the program, and the rest are fixed leading arguments. A bare name resolves on the table's `env.PATH`, else on the `PATH` of `box run`. The last part of element 0 is the name the agent types to run it in the Shell, as [`PATH`](#path) states. |
 | `workspace` | path | the Shell's working directory when it is inside the agent's workspace or a path the tool's lists name, else the agent's workspace | The program's initial working directory. |
 | `env` | table | empty | Variables the program receives. |
 | `filesystem` | table | empty | `read`, `write`, `read_file`, `write_file`, `list`, and `deny`: the paths the program's own system calls reach. |
@@ -237,8 +237,31 @@ exec = ["~/src/project/target/debug"]
 
 ## `PATH`
 
-A bare program name in a command resolves on the `PATH` of the host OS's shell that runs `box run`, else on
-`/usr/bin:/bin`.
+A program name with no `/` in a command runs the file of the `[tool.<name>]` that answers to that
+name. A `[tool]` answers to the last part of its `command` element 0, whatever its label, so
+`[tool.git]` with `command = ["/Applications/Xcode.app/Contents/Developer/usr/bin/git"]` makes `git`
+run that file, even when `/usr/bin/git` comes first on `PATH`. A `[tool]` with a grammar answers only
+when the grammar's `program` is that same name. The Shell's own builtins, commands, and functions
+come first, so a `[tool.cat]` doesn't replace the Shell's `cat`, and Box prints no line for it.
+The same holds for `sh`, which the Shell runs as a script.
+
+A `[tool]` claims its name even when its `command` has fixed leading arguments. With
+`[tool.cargo_fmt] command = ["/usr/bin/cargo", "fmt"]`, a bare `cargo build` runs `/usr/bin/cargo`,
+where no table matches `build`, so it is refused. It no longer reaches a `cargo` that `PATH` finds
+under an `[agent.filesystem] exec` entry. Give that program its own `[tool]`, or call it by its path.
+
+Any other name resolves on the `PATH` of the host OS's shell that runs `box run`, else on
+`/usr/bin:/bin`. That includes a name that two `[tool]` tables with different files answer to. When
+the file of a `[tool]` is gone, its name is not found, and the Shell doesn't look for another file on
+`PATH`. `run` prints the file each name runs:
+
+```text
+strands-box: [tool.git]: a bare `git` in the Shell runs /Applications/Xcode.app/Contents/Developer/usr/bin/git
+strands-box: [tool.brew_node], [tool.node]: these tables run different files, so a bare `node` in the Shell runs the file that `PATH` finds
+```
+
+A name changes only which file runs. The spawn still needs a `shell:spawn` permit, or a grammar
+action permit when a tool grammar binds the file, and `program` is still the name the agent typed.
 
 ## `curl`
 

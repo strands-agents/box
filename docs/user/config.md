@@ -232,7 +232,10 @@ The box adds the runtime minimum to every process; see
 [the runtime minimum](../design/containment.md#the-runtime-minimum).
 
 The program is a full path or a bare name. A bare name uses `env.PATH` when set.
-Otherwise, Box uses the operator's `PATH`, or `/usr/bin:/bin` if it is absent. A relative path with more than one
+Otherwise, Box uses the operator's `PATH`, or `/usr/bin:/bin` if it is absent. In the Shell, the last
+part of a `[tool]`'s program is the name that runs it, before the operator's `PATH`, and `run` prints
+``strands-box: [tool.git]: a bare `git` in the Shell runs <file>`` for each. See
+[`PATH` in the Shell reference](shell.md#path). A relative path with more than one
 component is refused: ``` `command` element 0 "<program>" is a relative path; write an absolute
 path, or a bare name that `env.PATH` resolves```. Scripts on Linux require
 [interpreter grants](#script-commands-on-linux). The example's `command` runs

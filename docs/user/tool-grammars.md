@@ -267,8 +267,11 @@ with the same `program` is refused.
 
 The grammar's own `[tool]` may name the file that a link leads to. With
 `command = [".../npm/bin/npm-cli.js"]` and `program = "npm"`, the grammar binds that file under
-`npm`, the name the agent types. When the last part of `command[0]` isn't the `program`, `run` finds
-`program` on its own `PATH`, the one the Shell searches, and starts only when that is the same file.
+`npm`, the name the agent types. When the last part of `command[0]` is the `program`, as with
+`git`, the Shell runs that tool's file for the bare name, whatever `PATH` finds first. When it isn't,
+`run` finds `program` on its own `PATH` and starts only when that is the same file. The Shell then
+finds the bare name on that `PATH` too. If another `[tool]` whose file name is the `program` runs a
+different file, the Shell still uses `PATH` for that name, so the grammar keeps deciding it.
 Otherwise it refuses the grammar, so a `git` grammar can't sit on a `[tool.gh]`. Another `[tool]` or
 `[mcp.<name>]` whose command names `npm-cli.js` calls the program by another name, so the npm
 grammar doesn't bind it.
