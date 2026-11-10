@@ -115,7 +115,7 @@ resolves to the intended executable.
 Remove every `replaces` key from the `[tool.<name>]` tables.
 Run once with the current build before switching binaries.
 This writes a version 21 record while retaining durable policy history.
-Changing TOML alone does not rewrite an existing version 22, 23, 24, 25, 26, 27, or 28 record.
+Changing TOML alone does not rewrite an existing version 22, 23, 24, 25, 26, 27, 28, 29, or 30 record.
 
 ## FAQ
 
@@ -179,7 +179,7 @@ Tests cover normal detached-child cleanup, but not every shutdown failure or enf
 
 ### Can I immediately return to an older binary?
 
-No, if the box has a version 22, 23, 24, 25, 26, 27, or 28 record that the older binary does not support.
+No, if the box has a version 22, 23, 24, 25, 26, 27, 28, 29, or 30 record that the older binary does not support.
 Follow [Stored configuration and rollback](#stored-configuration-and-rollback) before starting an older binary.
 Changing TOML alone does not rewrite the stored record.
 
