@@ -37,9 +37,12 @@ trailing dots, and compares IP literals by their parsed address. It does not gro
 results. A different hostname or a direct IP address therefore does not select a server declared
 under another hostname, even when both reach the same application.
 
-This selection uses the host alone. Ports and paths in a destination do not narrow MCP inspection,
-and wildcard entries do not select subdomains. Credential routing has separate
-[destination matching rules](../user/egress.md#destinations).
+This selection uses the host alone. Ports and paths in a destination do not narrow MCP inspection.
+Wildcard entries select neither the parent domain nor concrete subdomains for MCP checks. A
+configured credential can still attach to matching subdomain requests under the separate credential
+[destination matching rules](../user/egress.md#destinations). See the
+[configuration reference](../user/mcp.md#remote-destination-matching) for the consequence of
+listing only wildcard destinations.
 
 After a host matches, Box parses the MCP request and applies the server's MCP checks. Without a
 match, network and HTTP policy still apply, without MCP checks. Its body does not select an MCP server,

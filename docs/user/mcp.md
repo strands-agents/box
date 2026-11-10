@@ -272,7 +272,7 @@ to the server in both modes.
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `type` | string | required | `"http"`. |
-| `destinations` | string array | required | Destinations for MCP identification and optional credential routing. Entries accept a host, `host:port`, a host with a path prefix, or a `*.` wildcard host. MCP identification uses the explicit host only; see [remote destination matching](#remote-destination-matching). |
+| `destinations` | string array | required | Destinations for MCP identification and optional credential routing. Entries accept a host, `host:port`, or a host with a path prefix. A `*.` wildcard entry supports credential routing only. MCP identification uses the explicit host; see [remote destination matching](#remote-destination-matching). |
 | `secret.ref` | string | none | The credential the gateway attaches to each request to the server: `env://NAME` or `aws://PROFILE`. |
 | `secret.header` | string | `Authorization` | The header the credential goes in. |
 | `secret.prefix` | string | `Bearer ` on `Authorization` | The text before the credential. |
@@ -291,9 +291,20 @@ entry. Hostname comparison ignores letter case and trailing dots. IP literals ma
 parsed address. Box does not use DNS results to treat different hostnames, or a hostname and an
 IP address, as the same MCP server.
 
+Keep equivalent hostname spellings in the same `[mcp.<name>]` table. The configuration loader
+currently fails to reject different server entries for names such as `mcp.example.com` and
+`mcp.example.com.`. Runtime matching treats those spellings as one host. Requests to either spelling can therefore
+use one entry's server name and tool rules, leaving the other entry's rules unapplied. Use one
+server table for the host; its declared hostname already matches with and without trailing dots.
+
 MCP matching ignores an entry's port and path. A request to the matching host enters MCP checks
-on any port and path that network and HTTP policy permit. A `*.` wildcard does not select
-subdomains for MCP checks. List each intended hostname or IP address explicitly.
+on any port and path that network and HTTP policy permit.
+
+A `*.` wildcard entry does not select the parent domain or any concrete subdomain for MCP checks.
+For example, `*.example.com` selects neither `example.com` nor `api.example.com`. If a server lists
+only wildcard destinations, requests to those hosts receive no `mcp:call` or per-tool checks for
+that server. Its configured credential can still attach when the credential pattern matches and
+network and HTTP policy permit the request. List each intended hostname or IP address explicitly.
 
 Credential routing uses the [destination patterns](egress.md#destinations), including their port,
 path, and wildcard rules. Attaching a credential does not establish an MCP server identity.
@@ -303,7 +314,7 @@ alternative routes to the same application.
 
 ## Errors and exit codes
 
-`box run` exits with an error before the agent starts when a table breaks a rule on this page.
+`box run` exits with an error before the agent starts when the configuration loader rejects a table.
 
 | Message | Cause |
 |---|---|
