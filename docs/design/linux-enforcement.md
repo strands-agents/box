@@ -225,7 +225,7 @@ The sandbox cannot connect directly to the surrounding OS's loopback listeners, 
 `localhost`, or [abstract Unix sockets](#terms).
 A client can reach a surrounding-OS HTTP service through the gateway when it explicitly sends the request there and policy permits.
 Box sets `NO_PROXY=127.0.0.1,localhost`, so clients that honor it attempt direct connections to those destinations inside the private namespace.
-Strands Shell `curl` and Monty `fetch()` refuse URLs naming `localhost` or a literal loopback, private, or link-local address.
+Strands Shell `curl` and Monty `fetch()` refuse URLs naming `localhost` or a literal loopback, private, link-local, `0.0.0.0/8`, or cloud metadata address, or an IPv6 address that carries one of these.
 See [how traffic reaches the gateway](egress.md#how-traffic-reaches-the-gateway).
 
 `contain_egress = false` selects the surrounding OS network namespace.
