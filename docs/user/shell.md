@@ -250,8 +250,12 @@ A `[tool]` claims its name even when its `command` has fixed leading arguments. 
 where no table matches `build`, so it is refused. It no longer reaches a `cargo` that `PATH` finds
 under an `[agent.filesystem] exec` entry. Give that program its own `[tool]`, or call it by its path.
 
+When `[tool]` tables with different files answer to one name, `PATH` decides if it finds one of
+their files. If it finds none, such as the `/usr/bin/git` stub with `[tool.git]` and
+`[tool.brew_git]`, the table whose label is the name runs.
+
 Any other name resolves on the `PATH` of the host OS's shell that runs `box run`, else on
-`/usr/bin:/bin`. That includes a name that two `[tool]` tables with different files answer to. When
+`/usr/bin:/bin`. When
 the file of a `[tool]` is gone, its name is not found, and the Shell doesn't look for another file on
 `PATH`. `run` prints the file each name runs:
 

@@ -231,7 +231,10 @@ async fn hosted(
     write_grammar_disclosures(&locked.record, std::io::stderr().lock())
         .map_err(|source| ConfigError::Disclosure { source })?;
     write_bare_name_disclosures(
-        &commands.bare_names(&locked.record),
+        &commands.bare_names(
+            &locked.record,
+            &crate::run::contain::executable::host_search_path(),
+        ),
         std::io::stderr().lock(),
     )
     .map_err(|source| ConfigError::Disclosure { source })?;

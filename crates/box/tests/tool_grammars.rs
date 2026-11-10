@@ -748,3 +748,38 @@ fn without_a_grammar_a_bare_name_runs_its_tool_under_shell_spawn() {
         "a permit pinned on the typed name and the tool's file admits it: {output:?}"
     );
 }
+
+#[test]
+fn a_tool_with_fixed_arguments_claims_its_bare_name_and_refuses_other_arguments() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let home = support::fixture::short_temporary_home();
+    let cargo = install_cargo(home.path(), 0);
+    let decoy = home.path().join("decoy");
+    std::fs::create_dir_all(&decoy).expect("the decoy directory");
+    compile_tool(&decoy.join("cargo"), 0);
+    let box_ = Request::with_config(
+        "bare-name-fixed",
+        r#"permit (principal, action == Box::Action::"shell:exec", resource);
+           permit (principal, action == Box::Action::"fs:read", resource);
+           permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        &format!(
+            "[tool.cargo_fmt]\ncommand = [{cargo:?}, \"fmt\"]\n[tool.cargo_fmt.filesystem]\nread = [{:?}]\n",
+            tools_directory(home.path()).display().to_string()
+        ),
+    )
+    .env("PATH", &format!("{}:/usr/bin:/bin", decoy.display()))
+    .expect();
+
+    let fmt = in_the_shell(&box_, "cargo fmt");
+    let build = in_the_shell(&box_, "cargo build");
+
+    assert!(stdout(&fmt).contains("|status=0"), "{fmt:?}");
+    assert!(stdout(&build).contains("|status=126"), "{build:?}");
+    assert!(
+        stderr(&build).contains("no `[tool.<name>] command` matches this program"),
+        "the tool's file is selected, and its fixed arguments do not match: {build:?}"
+    );
+}

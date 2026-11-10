@@ -160,7 +160,9 @@ impl BrokerHost {
         commands: Arc<crate::run::commands::ConfiguredCommands>,
         installation: Arc<crate::run::installation::TrustedInstallation>,
     ) -> Result<Self, BoxError> {
-        let host_programs = commands.bare_names(record).programs();
+        let host_programs = commands
+            .bare_names(record, &crate::run::contain::executable::host_search_path())
+            .programs();
         // The agent's workspace is the interpreters' working directory, and its `HOME` is what every
         // participant reads, so one directory has one name on both sides of the socket.
         let reach = Arc::new(

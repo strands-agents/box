@@ -271,7 +271,9 @@ The grammar's own `[tool]` may name the file that a link leads to. With
 `git`, the Shell runs that tool's file for the bare name, whatever `PATH` finds first. When it isn't,
 `run` finds `program` on its own `PATH` and starts only when that is the same file. The Shell then
 finds the bare name on that `PATH` too. If another `[tool]` whose file name is the `program` runs a
-different file, the Shell still uses `PATH` for that name, so the grammar keeps deciding it.
+different file, the Shell still uses `PATH` for that name, so the grammar keeps deciding it. To make
+the bare name run the grammar's file whatever `PATH` finds, spell `command[0]` as a link whose name is
+the `program`, such as `.../v20/bin/npm`.
 Otherwise it refuses the grammar, so a `git` grammar can't sit on a `[tool.gh]`. Another `[tool]` or
 `[mcp.<name>]` whose command names `npm-cli.js` calls the program by another name, so the npm
 grammar doesn't bind it.

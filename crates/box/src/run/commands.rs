@@ -153,7 +153,9 @@ impl ConfiguredCommands {
 
     /// The bare names that `record`'s tools answer to: each one's bound name, which a grammar whose
     /// `program` is not its command's file name leaves to `PATH`, and none the Shell implements.
-    pub(crate) fn bare_names(&self, record: &Record) -> BareNames {
+    /// Among tools with different files, `search_path` decides when it finds one of them, else the
+    /// one tool whose label is the name.
+    pub(crate) fn bare_names(&self, record: &Record, search_path: &std::ffi::OsStr) -> BareNames {
         use crate::record::config::grammar::{bound_name, called_name};
         let mut found: BTreeMap<&str, Vec<(&str, &ConfiguredCommand, bool)>> = BTreeMap::new();
         for (label, spec) in &record.tool {
@@ -178,18 +180,52 @@ impl ConfiguredCommands {
                 .iter()
                 .map(|(label, _, _)| format!("[tool.{label}]"))
                 .collect();
-            if commands
+            let chosen = if commands
                 .iter()
                 .all(|(_, command, _)| command.identity == declaring.identity)
             {
-                names
-                    .declared
-                    .insert(name.to_string(), (declaring.invoked.clone(), tables));
+                Some(*declaring)
             } else {
-                names.shared.insert(name.to_string(), tables);
+                Self::label_choice(name, &commands, search_path)
+            };
+            match chosen {
+                Some(command) => {
+                    names
+                        .declared
+                        .insert(name.to_string(), (command.invoked.clone(), tables));
+                }
+                None => {
+                    names.shared.insert(name.to_string(), tables);
+                }
             }
         }
         names
+    }
+
+    /// The one tool labelled `name` among `commands`, which run different files, when
+    /// `search_path` finds none of their files for `name`.
+    fn label_choice<'a>(
+        name: &str,
+        commands: &[(&str, &'a ConfiguredCommand, bool)],
+        search_path: &std::ffi::OsStr,
+    ) -> Option<&'a ConfiguredCommand> {
+        use std::os::unix::fs::MetadataExt as _;
+        let found = super::contain::executable::find_on(name, search_path)
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| (metadata.dev(), metadata.ino()));
+        if commands
+            .iter()
+            .any(|(_, command, _)| Some(command.identity) == found)
+        {
+            return None;
+        }
+        let mut labelled = commands
+            .iter()
+            .filter(|(label, _, declares)| *declares && *label == name);
+        match (labelled.next(), labelled.next()) {
+            (Some((_, command, _)), None) => Some(command),
+            _ => None,
+        }
     }
 
     pub(crate) fn mutation_refusal(&self, path: &Path) -> Option<CommandMutationRefusal> {
@@ -1297,7 +1333,7 @@ mod tests {
             .collect();
         ConfiguredCommands::load(&record)
             .expect("the commands load")
-            .bare_names(&record)
+            .bare_names(&record, std::ffi::OsStr::new(""))
     }
 
     /// **A tool answers to its command's file name, not its label**, and several tables that run
@@ -1338,8 +1374,8 @@ mod tests {
         );
     }
 
-    /// **A name that two different program files answer to is declared by neither**, so the Shell
-    /// finds it on `PATH` as before.
+    /// **A name that two different program files answer to, with no table labelled that name, is
+    /// declared by neither**, so the Shell finds it on `PATH` as before.
     #[test]
     fn a_name_two_files_answer_to_is_left_to_path() {
         let root = tempfile::tempdir().expect("root");
@@ -1351,7 +1387,7 @@ mod tests {
 
         let names = bare_names(
             &[
-                ("git", tool(&root.join("system/git"), None)),
+                ("system_git", tool(&root.join("system/git"), None)),
                 ("brew_git", tool(&root.join("brew/git"), None)),
             ],
             &root.join("system/git"),
@@ -1362,7 +1398,10 @@ mod tests {
             names.shared,
             BTreeMap::from([(
                 "git".to_string(),
-                vec!["[tool.brew_git]".to_string(), "[tool.git]".to_string()]
+                vec![
+                    "[tool.brew_git]".to_string(),
+                    "[tool.system_git]".to_string()
+                ]
             )])
         );
     }
@@ -1391,6 +1430,40 @@ mod tests {
             vec!["git"],
             "{:?}",
             names.declared
+        );
+    }
+
+    /// **Among tools with different files under one name, `PATH` decides when it finds one of
+    /// them, and otherwise the tool whose label is the name runs.**
+    #[test]
+    fn the_label_breaks_a_tie_that_path_does_not_settle() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        for folder in ["developer", "brew", "stub"] {
+            std::fs::create_dir_all(root.join(folder)).expect("folder");
+            program(&root.join(folder).join("git"));
+        }
+        let mut record = record(&root.join("developer/git"));
+        record.tool = BTreeMap::from([
+            ("git".to_string(), tool(&root.join("developer/git"), None)),
+            ("brew_git".to_string(), tool(&root.join("brew/git"), None)),
+        ]);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+
+        let past_the_stub = commands.bare_names(&record, root.join("stub").as_os_str());
+        let brew_first = commands.bare_names(&record, root.join("brew").as_os_str());
+
+        assert_eq!(
+            past_the_stub
+                .declared
+                .get("git")
+                .map(|(path, _)| path.clone()),
+            Some(root.join("developer/git")),
+            "{past_the_stub:?}"
+        );
+        assert!(
+            brew_first.declared.is_empty() && brew_first.shared.contains_key("git"),
+            "{brew_first:?}"
         );
     }
 
