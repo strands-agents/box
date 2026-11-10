@@ -24,6 +24,7 @@ pub use model::{Destination, DestinationPattern, InjectMode, Locator, PhantomChe
 pub use opened::{Opened, Phantom, Skipped};
 pub use preflight::credsd_preflight;
 pub use redaction::ResponseRedactor;
+pub use sources::{REFERENCE_ARGUMENT, SecretSourceCommand};
 pub use vault::Vault;
 
 // Crate-internal. Each of these was public until 2026-08-07 and is now reached only from inside:

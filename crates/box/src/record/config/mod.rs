@@ -30,6 +30,7 @@ pub(crate) mod grammar;
 pub(crate) mod limits;
 pub(crate) mod mcp;
 pub(crate) mod process;
+pub(crate) mod secret_source;
 pub(crate) mod telemetry;
 
 use std::collections::BTreeMap;
@@ -469,6 +470,44 @@ impl RunContract {
             .collect();
         validate_egress_and_remote(&egress, &remote_mcp)?;
         let _ = routes_for_and_remote(&egress, &remote_mcp)?;
+        {
+            let processes: Vec<(String, &ProcessSpec)> = self
+                .file
+                .agent
+                .iter()
+                .map(|spec| ("[agent]".to_string(), spec))
+                .chain(
+                    self.file
+                        .tool
+                        .iter()
+                        .map(|(label, spec)| (format!("[tool.{label}]"), spec)),
+                )
+                .chain(
+                    contained_mcp
+                        .iter()
+                        .map(|(label, mcp)| (format!("[mcp.{label}]"), &mcp.spec)),
+                )
+                .collect();
+            let all: BTreeMap<String, EgressEntry> = egress
+                .iter()
+                .chain(remote_mcp.iter())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            secret_source::validate(&self.file.secret_source, &all, &processes)?;
+        }
+        // PROTOTYPE: no box reaches a secret source, even through a broad grant: a leaf runs any
+        // binary it can read.
+        let denied = secret_source::denied_paths(&self.file.secret_source);
+        let mut agent = self.file.agent.clone();
+        let mut tool = self.file.tool.clone();
+        let mut contained_mcp = contained_mcp;
+        for spec in agent
+            .iter_mut()
+            .chain(tool.values_mut())
+            .chain(contained_mcp.values_mut().map(|mcp| &mut mcp.spec))
+        {
+            secret_source::deny_in(spec, &denied);
+        }
         let mut sources = vec![self.source];
         if let Some(source) = policy_source {
             sources.push(source);
@@ -493,13 +532,24 @@ impl RunContract {
                 box_dir: root.root().to_path_buf(),
                 name: self.file.name.clone(),
                 policy: policy.as_ref().map(|source| source.origin.clone()),
-                agent: self.file.agent.clone(),
-                tool: self.file.tool.clone(),
+                agent,
+                tool,
                 egress,
                 remote_mcp,
                 mcp: mcp_servers,
                 contained_mcp,
                 telemetry: telemetry::checked(&self.file.telemetry, root.root())?,
+                secret_source: self
+                    .file
+                    .secret_source
+                    .iter()
+                    .map(|(scheme, source)| {
+                        let mut source = source.clone();
+                        source.identity =
+                            Some(secret_source::judge_program(scheme, &source.command)?);
+                        Ok((scheme.clone(), source))
+                    })
+                    .collect::<Result<_, ConfigError>>()?,
             },
             policy,
             grammars: self.grammars,
@@ -607,6 +657,14 @@ pub(crate) struct Record {
     /// The telemetry targets this box declares, verbatim.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) telemetry: BTreeMap<String, telemetry::TelemetryEntry>,
+
+    /// PROTOTYPE: the declared secret sources.
+    #[serde(
+        default,
+        rename = "secret-source",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    pub(crate) secret_source: BTreeMap<String, secret_source::SecretSource>,
 }
 
 /// The ordinary record format; native enforcement uses version 22. Version 21 adds `network` to each
@@ -1233,6 +1291,10 @@ struct ConfigFile {
     /// Where this box's decision records and its agent's own spans go.
     #[serde(default)]
     telemetry: BTreeMap<String, telemetry::TelemetryEntry>,
+
+    /// PROTOTYPE: the programs that read secrets for `[egress.*]` references.
+    #[serde(default, rename = "secret-source")]
+    secret_source: BTreeMap<String, secret_source::SecretSource>,
 }
 
 impl ConfigFile {
@@ -1513,6 +1575,7 @@ mod tests {
             mcp: Vec::new(),
             contained_mcp: BTreeMap::new(),
             telemetry: std::collections::BTreeMap::new(),
+            secret_source: Default::default(),
         }
     }
 
@@ -2278,6 +2341,7 @@ native-filesystem-policy = false
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        env: None,
                     }),
                 },
             )]),
@@ -2717,6 +2781,7 @@ env = {}
                             param: None,
                             inject: None,
                             phantom_prefix: None,
+                            env: None,
                         }),
                     },
                 ),
@@ -2733,6 +2798,7 @@ env = {}
                             param: None,
                             inject: None,
                             phantom_prefix: None,
+                            env: None,
                         }),
                     },
                 ),
@@ -2764,6 +2830,7 @@ env = {}
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        env: None,
                     }),
                 },
             )]),
@@ -2818,6 +2885,7 @@ env = {}
                     param: None,
                     inject: None,
                     phantom_prefix: None,
+                    env: None,
                 }),
             },
         );

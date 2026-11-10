@@ -75,7 +75,10 @@ fn credential_groups(bindings: &[EgressRoute]) -> Vec<Vec<&EgressRoute>> {
 }
 
 /// Resolve every declared binding, minting one phantom per provisioned variable.
-pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError> {
+pub(crate) fn workspace(
+    bindings: &[EgressRoute],
+    sources: &[credentials::SecretSourceCommand],
+) -> Result<Projection, BoxError> {
     let mut capabilities = Vec::with_capacity(bindings.len());
     let mut workload_environment: Vec<ProvisionedVariable> = Vec::new();
     for group in credential_groups(bindings) {
@@ -86,11 +89,11 @@ pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError
             .collect::<Vec<_>>()
             .join(", ");
         // `require_every_route` is the box's fail-closed stance, now owned by the vault:
-        let mut config = VaultConfig::new(
-            Backend::local(),
-            format!("strands-box-{}", std::process::id()),
-        )
-        .require_every_route();
+        let backend = Backend::local_with(sources).map_err(|source| {
+            Internal::CredentialProjection(format!("secret sources did not register: {source}"))
+        })?;
+        let mut config = VaultConfig::new(backend, format!("strands-box-{}", std::process::id()))
+            .require_every_route();
         for member in &group {
             config = config.route(member.to_route_spec()?);
         }
@@ -184,7 +187,7 @@ mod tests {
         .to_bindings()
         .expect("an env locator whose variable is set must bind");
 
-        let projection = workspace(&binding).expect("the locator resolves");
+        let projection = workspace(&binding, &[]).expect("the locator resolves");
 
         assert_eq!(projection.capabilities.len(), 1);
         let variable = &projection.workload_environment[0];
@@ -227,7 +230,7 @@ mod tests {
         .flat_map(|toml| target(toml).to_bindings().unwrap())
         .collect();
 
-        let projection = workspace(&bindings).expect("both locators resolve");
+        let projection = workspace(&bindings, &[]).expect("both locators resolve");
 
         assert_eq!(
             projection.capabilities.len(),
@@ -281,7 +284,7 @@ mod tests {
                 .flat_map(|toml| target(toml).to_bindings().unwrap())
                 .collect();
 
-            let projection = workspace(&bindings).expect("the locator resolves");
+            let projection = workspace(&bindings, &[]).expect("the locator resolves");
 
             let [variable] = projection.workload_environment.as_slice() else {
                 panic!(
@@ -321,7 +324,7 @@ mod tests {
     /// A box that declares no egress resolves nothing.
     #[test]
     fn a_box_with_no_declared_egress_resolves_nothing() {
-        let projection = workspace(&[]).expect("no bindings is not a failure");
+        let projection = workspace(&[], &[]).expect("no bindings is not a failure");
 
         assert!(projection.capabilities.is_empty());
         assert!(projection.workload_environment.is_empty());
@@ -341,7 +344,7 @@ mod tests {
         .to_bindings()
         .expect("an aws locator binds as a signed route");
 
-        let Ok(projection) = workspace(&bindings) else {
+        let Ok(projection) = workspace(&bindings, &[]) else {
             // Resolving the profile needs an ambient AWS identity, which CI may not have. The
             // shape below is what this test is about, so skip rather than assert on the host.
             eprintln!("skipping: no ambient AWS identity to open a signed route with");
@@ -381,7 +384,7 @@ mod tests {
         .expect("an untyped credsd locator binds as a signed route");
 
         let projection =
-            workspace(&bindings).expect("a credsd route opens without contacting the daemon");
+            workspace(&bindings, &[]).expect("a credsd route opens without contacting the daemon");
 
         let names: Vec<&str> = projection
             .workload_environment

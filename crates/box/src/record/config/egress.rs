@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::env::checked_provisioned_name;
+use super::env::{checked_name, checked_provisioned_name};
 use super::{
     AWS_SCHEME, BASIC_AUTH_PLACEMENT, BEARER_PREFIX, CREDSD_SCHEME, DEFAULT_HEADER,
     HEADER_PLACEMENT, INJECT_ALWAYS, INJECT_PHANTOM, QUERY_PARAM_PLACEMENT, URL_PATH_PLACEMENT,
@@ -444,6 +444,11 @@ pub(crate) struct EgressSecret {
     /// accepts the injected phantom.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) phantom_prefix: Option<String>,
+
+    /// PROTOTYPE: the variable the workload receives the placeholder under, for a reference that
+    /// a `[secret-source.<scheme>]` resolves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) env: Option<String>,
 }
 
 impl EgressSecret {
@@ -455,7 +460,13 @@ impl EgressSecret {
             "env" => SecretScheme::Env,
             AWS_SCHEME => SecretScheme::Aws,
             CREDSD_SCHEME => SecretScheme::Credsd,
-            _ => return None,
+            // PROTOTYPE: a declared secret source swaps like `env://`, under `secret.env`.
+            _ => {
+                return self
+                    .env
+                    .as_deref()
+                    .map(|variable| (SecretScheme::Env, variable));
+            }
         };
         Some((scheme, value))
     }
@@ -532,9 +543,11 @@ impl EgressEntry {
             // Only an `env://` secret has a name to provision a phantom under. Every other scheme
             // resolves host-side, with nothing placed in the workload's environment.
             let provisioned_name = match secret.deliverable() {
-                Some((SecretScheme::Env, name)) => {
-                    Some(checked_provisioned_name(destination, name)?)
-                }
+                Some((SecretScheme::Env, name)) => Some(checked_name(
+                    destination,
+                    name,
+                    secret.reference.starts_with("env://"),
+                )?),
                 _ => None,
             };
             bindings.push(EgressRoute {

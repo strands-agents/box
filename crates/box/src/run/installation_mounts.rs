@@ -130,6 +130,10 @@ fn parse(table: &[u8]) -> io::Result<Vec<Mount>> {
         {
             return Err(invalid());
         }
+        // PROTOTYPE: an `nsfs` mount (Docker netns) has root `net:[…]`, which holds no executable.
+        if fields[separator + 1] == b"nsfs" {
+            continue;
+        }
         let root = decode_path(fields[3])?;
         let point = decode_path(fields[4])?;
         if !root.is_absolute() || !point.is_absolute() {

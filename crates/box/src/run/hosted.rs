@@ -716,7 +716,10 @@ impl HostedBox {
 
         let telemetry_port = collector.port();
         let recorder = telemetry::DecisionRecorder::over(Arc::clone(&collector));
-        let projection = credential::workspace(&record.egress_routes()?)?;
+        let projection = credential::workspace(
+            &record.egress_routes()?,
+            &crate::record::config::secret_source::commands(&record.secret_source),
+        )?;
         let capabilities = CapabilitySet::new(
             projection
                 .capabilities
@@ -1072,6 +1075,7 @@ mod tests {
             mcp,
             contained_mcp: Default::default(),
             telemetry: Default::default(),
+            secret_source: Default::default(),
         }
     }
 
@@ -2367,6 +2371,7 @@ while :; do :; done"#
             mcp: Vec::new(),
             contained_mcp: Default::default(),
             telemetry: Default::default(),
+            secret_source: Default::default(),
         }
     }
 

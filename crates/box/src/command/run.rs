@@ -385,6 +385,7 @@ mod tests {
             mcp: Vec::new(),
             contained_mcp: BTreeMap::new(),
             telemetry: BTreeMap::new(),
+            secret_source: Default::default(),
         }
     }
 

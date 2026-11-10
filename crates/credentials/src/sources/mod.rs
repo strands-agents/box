@@ -8,6 +8,7 @@ use crate::{CredentialError, Locator, Result, Secret};
 
 mod aws;
 mod aws_profile;
+mod command;
 mod credsd;
 mod env;
 mod file;
@@ -17,6 +18,8 @@ pub(crate) use aws::{
     AmbientFallbackPolicy, AwsAcquisition, AwsResolution, AwsSource, credsd_session_credentials,
     sign_request,
 };
+pub(crate) use command::CommandSource;
+pub use command::{REFERENCE_ARGUMENT, SecretSourceCommand};
 pub(crate) use credsd::{CREDSD_SCHEME, CredsdClient, resolve_credsd_socket};
 pub(crate) use env::EnvSource;
 pub(crate) use file::FileSource;

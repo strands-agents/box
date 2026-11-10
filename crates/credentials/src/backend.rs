@@ -2,7 +2,9 @@
 
 use zeroize::Zeroizing;
 
-use crate::sources::{EnvSource, FileSource, OnePasswordSource, SecretSource, SourceRegistry};
+use crate::sources::{
+    CommandSource, EnvSource, FileSource, OnePasswordSource, SecretSource, SourceRegistry,
+};
 use crate::{CredentialError, Locator, Result, Secret};
 
 /// The structured-config routing tag the AWS source owns. A locator carrying it resolves to
@@ -42,6 +44,27 @@ impl Backend {
         Self {
             profile: Profile::Local { registry },
         }
+    }
+
+    /// PROTOTYPE: the local source set, where each declared command claims its scheme first.
+    pub fn local_with(commands: &[crate::SecretSourceCommand]) -> Result<Self> {
+        let mut registry = SourceRegistry::new();
+        for spec in commands {
+            registry.register(Box::new(CommandSource::new(spec.clone())))?;
+        }
+        for source in [
+            Box::new(EnvSource::new()) as Box<dyn SecretSource>,
+            Box::new(FileSource::new()),
+            Box::new(OnePasswordSource::new()),
+        ] {
+            if commands.iter().any(|spec| spec.scheme == source.scheme()) {
+                continue;
+            }
+            registry.register(source)?;
+        }
+        Ok(Self {
+            profile: Profile::Local { registry },
+        })
     }
 
     /// Register an additional [`SecretSource`], returning the backend for chaining.
