@@ -7,11 +7,13 @@ this route unless the operator enables the network exception described below.
 
 | The gateway | What it does |
 |---|---|
-| Requests policy decisions | `net:connect` for each destination before DNS and again for each address it connects to; `http:request` for each request; `mcp:call` for each request to an HTTP MCP server. |
+| Requests policy decisions | `net:connect` for each destination before DNS and again for each address it connects to; `http:request` for each request; `mcp:call` for MCP requests whose host matches a configured HTTP MCP server, except the protocol methods that pass without an MCP decision. |
 | Adds | The secret an `[egress.<name>]` route binds to the destination. |
 | Removes | A copy of that secret from the response, before the process sees it. |
 
-[How Box runs MCP servers](./mcp.md) covers `mcp:call`.
+[How Box runs MCP servers](./mcp.md#remote-server-destination-matching) covers destination
+matching and `mcp:call`. An unmatched destination remains subject to network and HTTP policy,
+without MCP checks, even when it reaches the same application as a configured MCP server.
 
 ## How traffic reaches the gateway
 

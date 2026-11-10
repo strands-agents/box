@@ -35,7 +35,8 @@ see the [platform comparison](../design/platform-differences.md).
 **`policy.dw` governs each request through the box's trusted process, and the policy engine enforces
 it:** each command line and file operation in Strands Shell (the box's shell), each file operation
 in Monty (the box's Python), each connection and HTTP request through the egress gateway, and each
-MCP request. [When the box asks policy](policy.md#when-the-box-asks-policy) lists them, and
+MCP request through a declared server. For remote MCP servers, the request's host must match
+that server's configured destinations. [When the box asks policy](policy.md#when-the-box-asks-policy) lists the decisions, and
 [policy limitations](#policy-limitations) says what a broad permit reaches. An
 [`[egress.<name>]`](egress.md) credential is attached to a request only after policy permits it. The
 table binds the credential, and the policy's permits open the destination.
@@ -109,6 +110,10 @@ records why, the item links it.
   your home, including `~/.aws` and `~/.ssh`. A `permit` on `fs:read` with no path condition grants
   all of them. Write every filesystem rule with a path condition. See
   [where policy sits](../design/policy.md#where-policy-sits).
+- **MCP tool rules cover the configured server's destinations.** Another hostname or IP address
+  for the same application can remain reachable under network and HTTP policy without those
+  MCP rules. Declare each intended host and restrict other routes when all access to the application
+  must use the tool restrictions. See [remote-server policy scope](mcp-policy.md#scope-of-remote-server-rules).
 - **Box does not check that the rules of a policy agree with one another.** Two permits that admit
   the same requests load without a word. Write every cap as a `forbid`.
   [A cap written as a permit](policy.md#a-cap-written-as-a-permit) describes what the load does

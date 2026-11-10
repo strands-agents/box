@@ -58,8 +58,8 @@ Ten actions in four categories, and one generated action per MCP tool:
   - `shell:spawn`: a command line that runs a program of the surrounding OS, such as `git`. The box
     also raises it at startup, once for each stdio MCP server `box.toml` declares.
 - **[MCP](#mcp)**, raised by the MCP broker for a local server and by the egress gateway for a
-  remote one.
-  - `mcp:call`: each MCP request, on every method.
+  remote server whose host matches its configured destinations.
+  - `mcp:call`: each MCP request, except the protocol methods listed in [MCP](#mcp).
   - `<server>::Action::"<tool>"`: a `tools/call`, after `mcp:call` permitted it.
 
 ## Filesystem
@@ -174,7 +174,10 @@ and wider than it. Its own file operations raise no `fs:*` decision;
 
 ## MCP
 
-**`mcp:call`**, once per request on any method:
+**`mcp:call`**, once per request through a declared MCP server, except the protocol methods
+listed below. For an HTTP server, the request's host must match the server's configured
+`destinations`; [remote destination matching](../mcp.md#remote-destination-matching) defines that scope.
+A request to an unmatched destination receives network and HTTP checks without `mcp:call`.
 
 | Field | Type | Meaning |
 |---|---|---|

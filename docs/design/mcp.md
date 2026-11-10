@@ -2,8 +2,8 @@
 
 Box supports two types of MCP server. MCP means Model Context Protocol. A **stdio server** is a
 program Box starts on the operator's
-machine, and an **http server** runs somewhere else. Either way, the agent reaches the server only
-through Box, and policy decides each request it makes.
+machine, and an **http server** runs somewhere else. Box mediates a stdio server through its
+configured command and an http server through requests to its configured hosts.
 
 This page explains how `box run` starts servers, learns their tools, and decides tool calls.
 It also explains which parts of a request policy can restrict.
@@ -14,7 +14,7 @@ It also explains which parts of a request policy can restrict.
 | Runs in | Its own sandbox, which Box starts | Somewhere else. Box checks its requests, not the server. |
 | Reached through | The alias for the server's program, then the MCP broker, then the server's stdin | The egress gateway |
 | Starting or connecting | `shell:spawn` | `net:connect` and `http:request` |
-| Each MCP request | `mcp:call` | `mcp:call` |
+| Each MCP request, except the protocol methods described below | `mcp:call` | `mcp:call` after the destination matches a configured server |
 
 Box starts each stdio server in a sandbox of its own, separate from the agent's. See [local MCP servers](./containment.md#local-mcp-servers). The MCP broker is the part of Box that
 receives the agent's requests over a local socket, and the egress gateway checks and forwards every
@@ -29,6 +29,34 @@ The server's name comes from `box.toml`. A rule reads the `[mcp.<name>]` table's
 value from the request. See [every MCP server is one configuration
 table](decisions.md#an-mcp-server-is-one-configuration-table).
 
+## Remote-server destination matching
+
+The egress gateway selects a remote MCP server by comparing the request's host with the explicit
+hosts in that server's `destinations` list in `box.toml`. It ignores hostname letter case and
+trailing dots, and compares IP literals by their parsed address. It does not group hosts by DNS
+results. A different hostname or a direct IP address therefore does not select a server declared
+under another hostname, even when both reach the same application.
+
+This selection uses the host alone. Ports and paths in a destination do not narrow MCP inspection,
+and wildcard entries do not select subdomains. Credential routing has separate
+[destination matching rules](../user/egress.md#destinations).
+
+After a host matches, Box parses the MCP request and applies the server's MCP checks. Without a
+match, network and HTTP policy still apply, without MCP checks. Its body does not select an MCP server,
+even if it contains an MCP tool call. The [security model](security.md#remote-mcp-tool-restrictions)
+states the resulting protection limit and the operator's responsibility for alternative routes.
+
+*Figure: Both addresses reach the same example server, and network and HTTP policy permit both.
+Only `localhost` is declared for MCP policy, so its tool restriction does not apply to requests
+sent to `127.0.0.1`.*
+
+![An agent sends a delete_repo tool call through Box's network and HTTP checks, which permit it.
+Box then matches the destination. The declared localhost route receives a tool-policy denial.
+The undeclared 127.0.0.1 route receives no MCP tool check and reaches the same example server,
+where the tool executes.](images/mcp-destination-matching.png)
+
+The [editable diagram](images/mcp-destination-matching.drawio) shows the same request paths.
+
 ## Policy levels
 
 Two actions decide MCP requests, and a rule can narrow either one.
@@ -42,8 +70,9 @@ Two actions decide MCP requests, and a rule can narrow either one.
 | Tool arguments | `github::Action::"search_repositories"`, one per tool | `context.input.<argument>` | `forbid (principal, action == github::Action::"search_repositories", resource) when { context.input has perPage && context.input.perPage > 5 };` |
 | History | Either action, in a `when temporal` clause | Earlier `::request` or `::response` events | `forbid (principal, action == Box::Action::"mcp:call", resource) when { context.input.server == "github" && context.input.method == "tools/call" } when temporal { … };` |
 
-`mcp:call` is built in. Policy decides it on every MCP request, so one rule can combine the server,
-the method, and the item. `tool`, `prompt`, and `uri` are present only on the method that carries
+`mcp:call` is built in. For requests through a declared server, policy decides it except for the
+protocol methods described below. One rule can combine the server, method, and item.
+`tool`, `prompt`, and `uri` are present only on the method that carries
 them, so a rule tests them with `has` first.
 
 Box normalizes each `file`, `http`, or `https` resource URI before policy checks it. It sends the
