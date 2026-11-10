@@ -125,14 +125,16 @@ program inside the agent's sandbox. It cannot open the policy or serve requests.
 
 `strands-box` installs the alias in the box directory's `bin/` under the names `zsh`, `bash`, `sh`,
 `python3`, and `python`. The library defines these names in `INTERPRETER_ALIASES`. It also installs
-one alias for each program name used to start a declared MCP server. Servers that use the same
-program share an alias, and no MCP server can take one of the five interpreter names.
+one alias for each executable filename used to start a declared MCP server. An absolute executable
+path supplies its final filename. Servers with the same filename share an alias, and no MCP server
+can take one of the five interpreter names.
 
 `bin/` comes first on the agent's `PATH`, so a harness that runs `zsh` gets the alias. Tools and
 local MCP servers get neither the alias nor `bin/` on their `PATH`. The alias uses its invocation
 name to select an interpreter. For an MCP program name, it also sends the arguments. `strands-box`
-starts the server whose declared command matches that name and those arguments, or refuses the
-launch.
+starts the server whose alias name and declared arguments match, or refuses the launch.
+The server's configured executable path remains separate from its alias name. See
+[MCP executable filenames name their aliases](decisions.md#mcp-executable-filenames-name-their-aliases).
 
 The alias derives `run/box.sock` from its own location. The caller cannot select another socket. The
 broker in `strands-box` accepts the connection. See [an interpreter runs beside the

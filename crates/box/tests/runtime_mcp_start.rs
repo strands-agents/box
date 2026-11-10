@@ -128,6 +128,89 @@ fn a_program_permit_starts_its_server() {
 }
 
 #[test]
+fn an_absolute_command_starts_its_selected_symlink_instead_of_a_path_decoy() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = RuntimeMcpBox::new("mcp-start-absolute");
+    let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready);
+    box_.install_server(&alpha);
+    let directory = box_.server_executable("selected tools");
+    std::fs::create_dir(&directory).expect("create the off-PATH directory");
+    let target = directory.join("actual-mcp");
+    std::fs::rename(box_.server_executable("alpha-mcp"), &target)
+        .expect("move the selected server off PATH");
+    let selected = directory.join("alpha-mcp");
+    std::os::unix::fs::symlink("actual-mcp", &selected)
+        .expect("name the selected server through a symlink");
+    box_.install_server(&Server::new(
+        "decoy",
+        "alpha-mcp",
+        "wrong",
+        DiscoveryBehavior::Ready,
+    ));
+    let policy = format!(
+        "{}\n{}",
+        call_policy(&["alpha"]),
+        start_permit_for("alpha-mcp")
+    );
+    box_.write_workspace_as_authored(&policy, &[alpha], BLOCKING_WORKLOAD);
+    box_.set_server_executable("alpha", &selected);
+
+    let mut run = box_.spawn();
+    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+    let mut client = box_.open_client("alpha-mcp");
+    let (_, response) = client.initialize_and_activate(json!("initialize-alpha"), STARTUP);
+    assert_eq!(answered_as(&response), "alpha");
+    assert_eq!(box_.invocation_count("alpha-mcp"), 1);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&box_.trace("alpha-mcp", "argv")).unwrap(),
+        json!(["--declared", "alpha"])
+    );
+    assert_eq!(
+        std::path::Path::new(box_.trace("alpha-mcp", "program").trim()),
+        directory
+            .canonicalize()
+            .expect("resolve the selected parent")
+            .join("alpha-mcp"),
+        "the invoked symlink name survives canonical target authorization"
+    );
+
+    drop(client);
+    box_.release_workload();
+    let output = run.wait(SHUTDOWN);
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
+fn a_missing_absolute_command_never_falls_back_to_path() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = RuntimeMcpBox::new("mcp-absolute-missing");
+    let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready);
+    box_.install_server(&alpha);
+    box_.write_workspace(&call_policy(&["alpha"]), &[alpha], BLOCKING_WORKLOAD);
+    let missing = box_.server_executable("missing/alpha-mcp");
+    box_.set_server_executable("alpha", &missing);
+
+    let mut run = box_.spawn();
+    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+    let refusal = box_.invoke_refused_open("alpha-mcp", SHUTDOWN);
+    assert!(!refusal.status.success(), "{}", refusal.stderr);
+    assert!(
+        refusal.stderr.contains(missing.to_str().unwrap()),
+        "{}",
+        refusal.stderr
+    );
+    assert_eq!(box_.invocation_count("alpha-mcp"), 0);
+
+    box_.release_workload();
+    let output = run.wait(SHUTDOWN);
+    assert!(output.status.success(), "{output:?}");
+}
+
+#[test]
 fn a_program_forbid_refuses_only_its_server() {
     if !fixture::namespace_launcher_is_usable() {
         return;
@@ -168,43 +251,48 @@ fn a_start_is_decided_on_the_canonical_program_and_its_arguments() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let box_ = RuntimeMcpBox::new("mcp-start-canonical");
-    let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready);
-    box_.install_server(&alpha);
-    std::os::unix::fs::symlink("alpha-mcp", box_.server_executable("alpha-link"))
-        .expect("link the server under a second name");
-    // The alias is the link's name, and the link resolves to the installed server.
-    let linked = Server::new("alpha", "alpha-link", "read", DiscoveryBehavior::Ready);
-    let policy = format!(
-        r#"{}
+    for absolute in [false, true] {
+        let box_ = RuntimeMcpBox::new("mcp-start-canonical");
+        let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready);
+        box_.install_server(&alpha);
+        std::os::unix::fs::symlink("alpha-mcp", box_.server_executable("alpha-link"))
+            .expect("link the server under a second name");
+        let linked = Server::new("alpha", "alpha-link", "read", DiscoveryBehavior::Ready);
+        let policy = format!(
+            r#"{}
         @id("no_canonical_start")
         forbid (principal, action == Box::Action::"shell:spawn", resource)
         when {{
             context.input.program == "alpha-link" &&
+            context.input.command == "alpha-link --declared alpha" &&
             context.input.program_path like "*/operator-bin/alpha-mcp" &&
             context.input has arg1 && context.input.arg1 == "--declared" &&
             context.input.arg_count == 2
         }};"#,
-        call_policy(&["alpha"])
-    );
-    box_.write_workspace(&policy, &[linked], BLOCKING_WORKLOAD);
+            call_policy(&["alpha"])
+        );
+        box_.write_workspace(&policy, &[linked], BLOCKING_WORKLOAD);
+        if absolute {
+            box_.set_server_executable("alpha", &box_.server_executable("alpha-link"));
+        }
 
-    let mut run = box_.spawn();
-    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
-    assert_start_refused(&box_, "alpha-link", Some("no_canonical_start"));
-    assert_eq!(box_.invocation_count("alpha-mcp"), 0);
+        let mut run = box_.spawn();
+        run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+        assert_start_refused(&box_, "alpha-link", Some("no_canonical_start"));
+        assert_eq!(box_.invocation_count("alpha-mcp"), 0);
 
-    box_.release_workload();
-    let output = run.wait(SHUTDOWN);
-    assert!(output.status.success(), "{output:?}");
-    let records = std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl"))
-        .expect("read the drained policy telemetry");
-    assert!(
-        records.lines().any(|line| line.contains("shell:spawn")
-            && line.contains("no_canonical_start")
-            && line.contains("operator-bin/alpha-mcp")),
-        "the refused start is recorded against its canonical program"
-    );
+        box_.release_workload();
+        let output = run.wait(SHUTDOWN);
+        assert!(output.status.success(), "{output:?}");
+        let records = std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl"))
+            .expect("read the drained policy telemetry");
+        assert!(
+            records.lines().any(|line| line.contains("shell:spawn")
+                && line.contains("no_canonical_start")
+                && line.contains("operator-bin/alpha-mcp")),
+            "the refused start is recorded against its canonical program"
+        );
+    }
 }
 
 /// One fixture server declared as `env <script> --declared <name>`.

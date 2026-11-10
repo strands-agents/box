@@ -645,7 +645,7 @@ impl RunningMcpServer {
         cwd: Option<&Path>,
         cwd_handle: Option<&std::fs::File>,
     ) -> io::Result<(Self, tokio::process::ChildStdout)> {
-        let mut command = tokio::process::Command::new(admitted.program());
+        let mut command = tokio::process::Command::new(admitted.executable());
         command
             .args(admitted.arguments())
             .env_clear()
@@ -687,7 +687,7 @@ impl RunningMcpServer {
                 format!(
                     "start MCP server {:?} ({}): {error}",
                     admitted.name,
-                    admitted.program()
+                    admitted.executable()
                 ),
             )
         })?;

@@ -102,7 +102,7 @@ stages on that thread before it writes the response.
 
 | Step | What happens | Server state |
 |---|---|---|
-| 1 | The harness runs the server's full command through its alias. `shell:spawn` decides the declared program, and Box starts the server in its own sandbox. | `Undiscovered` |
+| 1 | The harness runs the server's alias with matching arguments. `shell:spawn` decides the declared program, and Box starts the server in its own sandbox. | `Undiscovered` |
 | 2 | A legacy harness completes `initialize` and `notifications/initialized`. A modern harness sends per-request metadata; `server/discover` is optional. The broker validates the selected protocol. | `Undiscovered` |
 | 3 | The harness sends `tools/list`, and `mcp:call` decides it. A refused list never reaches the server. | `Failed` if refused |
 | 4 | The broker relays the request. Box captures a list that names no cursor, and gives it 30 seconds for each reply. | `Undiscovered` |
