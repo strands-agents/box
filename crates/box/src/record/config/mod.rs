@@ -632,6 +632,7 @@ const FILE_ATTRIBUTES_RECORD_VERSION: u32 = 25;
 const MCP_ARGUMENT_WILDCARDS_RECORD_VERSION: u32 = 26;
 /// The record version that preserves configured execution limits.
 const LIMITS_RECORD_VERSION: u32 = 27;
+const MCP_ABSOLUTE_COMMAND_RECORD_VERSION: u32 = 28;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -679,7 +680,12 @@ fn record_version<'a>(
     specs: impl Iterator<Item = &'a ProcessSpec>,
     mcp: &[crate::record::config::mcp::McpServer],
 ) -> u32 {
-    if !limits.is_default() {
+    if mcp
+        .iter()
+        .any(|server| Path::new(server.executable()).is_absolute())
+    {
+        MCP_ABSOLUTE_COMMAND_RECORD_VERSION
+    } else if !limits.is_default() {
         LIMITS_RECORD_VERSION
     } else if mcp.iter().any(|server| server.argument_wildcards) {
         MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
@@ -936,6 +942,7 @@ impl Record {
             FILE_ATTRIBUTES_RECORD_VERSION,
             MCP_ARGUMENT_WILDCARDS_RECORD_VERSION,
             LIMITS_RECORD_VERSION,
+            MCP_ABSOLUTE_COMMAND_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1351,6 +1358,54 @@ fn validate_tool_label(label: &str) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absolute_mcp_commands_require_their_own_record_version() {
+        let config = ConfigFile::parse(
+            "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+             [mcp.test]\ntype = \"stdio\"\ncommand = [\"/opt/bin/server\", \"arg\"]",
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        let mut stored = record(None, BTreeMap::new());
+        stored.mcp = mcp::from_entries(&config.mcp).unwrap();
+        stored.contained_mcp = mcp::contained_specs(&config.mcp);
+        for file_attributes in [false, true] {
+            for wildcard in [false, true] {
+                for limits in [
+                    Limits::default(),
+                    toml::from_str("[shell]\ntimeout = 600").unwrap(),
+                ] {
+                    stored.mcp[0].argument_wildcards = wildcard;
+                    stored.file_attributes = file_attributes;
+                    stored.limits = limits;
+                    assert_eq!(
+                        record_version(
+                            stored.file_attributes,
+                            &stored.experimental_features,
+                            &stored.limits,
+                            std::iter::empty(),
+                            &stored.mcp
+                        ),
+                        28
+                    );
+                    for old in RECORD_VERSION..=27 {
+                        stored.version = old;
+                        assert!(matches!(
+                            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                            Err(ConfigError::RecordVersion { found, expected: 28 }) if found == old
+                        ));
+                    }
+                    stored.version = 28;
+                    assert_eq!(
+                        Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml"))
+                            .unwrap(),
+                        stored
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn mcp_wildcards_require_per_server_opt_in_and_an_enabled_record_version() {
@@ -2481,7 +2536,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, LIMITS_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, MCP_ABSOLUTE_COMMAND_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

@@ -2007,9 +2007,9 @@ wait"#;
             .registry();
         let arguments = record.mcp[0].arguments().to_vec();
         let (mut leader_reader, mut leader_writer) =
-            initialized_mcp_client(&root, "/bin/sh", &arguments).await;
+            initialized_mcp_client(&root, "sh", &arguments).await;
         let (mut follower_reader, mut follower_writer) =
-            initialized_mcp_client(&root, "/bin/sh", &arguments).await;
+            initialized_mcp_client(&root, "sh", &arguments).await;
         let pids = wait_for_pids(&pids_path, 4)
             .await
             .expect("both MCP process groups start");

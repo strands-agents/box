@@ -189,9 +189,11 @@ A request to an unmatched destination receives network and HTTP checks without `
 
 Each stdio server in `box.toml` starts through a `shell:spawn` decision on the program its
 `[mcp.<name>]` table names, or through the grammar action when a tool grammar binds that program.
-A policy with no matching permit refuses the server at startup. For an enabled [MCP wildcard
-command](../mcp.md#argument-wildcards), `command` contains the effective launch command, joined by
-spaces. Its argument fields contain the same values, including the caller's values in wildcard
+A policy with no matching permit refuses the server at startup. The `program` field is the
+executable's filename, and `program_path` identifies its resolved file. The `command` field starts
+with that filename. For an enabled [MCP wildcard command](../mcp.md#argument-wildcards), `command`
+contains the alias name and effective launch arguments, joined by spaces.
+Its argument fields contain the same values, including the caller's values in wildcard
 positions.
 A permit on `mcp:call` for a server covers every method and tool on it. Refuse one tool by
 name with a `tool` guard, or with the per-tool `forbid` that
