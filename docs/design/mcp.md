@@ -62,7 +62,13 @@ Normalization applies these changes:
   in the path.
 - Resolve `.`, `..`, and empty path segments, and remove a default port.
 - Convert `file:/x` and `file://localhost/x` to `file:///x`.
-- Remove a fragment, which never reaches the server, and remove an empty query.
+- Remove a fragment, which never reaches the server.
+- Remove an empty query only for a `file:` URI.
+
+HTTP and HTTPS resource URIs retain an empty query. For example, `https://notes/report?` and
+`https://notes/report` remain distinct addresses for an exact `uri` rule. If the MCP server fetches
+that address through the Box HTTP gateway, the gateway also preserves the empty `?` in the request
+it forwards to the origin. Each request still requires its applicable policy checks.
 
 Box leaves URIs with other schemes exactly as the workload wrote them. Write each `uri` literal
 in the normalized form. Rules compare text exactly, so another spelling never matches.

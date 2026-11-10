@@ -48,6 +48,7 @@ pub(crate) async fn forward_tls(
         return Ok(deny(state, connect, request, &reason, correlation, refusal));
     }
     let target = std::mem::take(&mut parsed.target);
+    let originally_empty_query = has_empty_query(&target);
     let req = intercepted_request(connect, &target, parsed);
 
     // The post-mutation binding re-check is TLS-only, so it rides in as a closure rather than as a
@@ -55,6 +56,7 @@ pub(crate) async fn forward_tls(
     run_l7_legs(
         connect,
         req,
+        originally_empty_query,
         upstream,
         state,
         correlation,
@@ -68,6 +70,7 @@ pub(crate) async fn forward_tls(
 async fn run_l7_legs(
     connect: &ConnectRequest,
     mut req: InterceptedRequest,
+    originally_empty_query: bool,
     upstream: Upstream<'_>,
     state: &SharedState,
     correlation: RequestId,
@@ -139,7 +142,7 @@ async fn run_l7_legs(
     let allow_reason = req.advisory_note.take().unwrap_or_default();
 
     // Serialize the fully mutated request before claiming its effect permit.
-    let fwd_target = reconstruct_target(&req.target);
+    let fwd_target = reconstruct_target(&req.target, originally_empty_query);
     if let Err(error) = revalidate(&method, &fwd_target, &req.headers) {
         return Ok(refuse(
             &error.to_string(),
@@ -349,6 +352,7 @@ pub(crate) async fn forward_plain(
     completion: &ResponseCompletion,
 ) -> Result<WorkloadResponse> {
     let upstream = Upstream::new(upstream, None, state, completion);
+    let originally_empty_query = has_empty_query(&origin_target);
     let mut req = intercepted_request(connect, &origin_target, parsed);
 
     // Bind the `Host` header to the URL authority the gateway judged. A plain-HTTP request carries its
@@ -370,6 +374,7 @@ pub(crate) async fn forward_plain(
     run_l7_legs(
         connect,
         req,
+        originally_empty_query,
         upstream,
         state,
         correlation,
@@ -558,12 +563,24 @@ fn split_target(target: &str) -> (String, String) {
     }
 }
 
+/// Keep an explicitly empty query distinct from an absent query before [`split_target`] runs.
+fn has_empty_query(target: &str) -> bool {
+    target
+        .split_once('?')
+        .is_some_and(|(_, query)| query.is_empty())
+}
+
 /// Reconstruct the origin-form target (`path[?query]`) from a (possibly mutated) [`Target`].
-fn reconstruct_target(target: &Target) -> String {
-    if target.query.is_empty() {
-        target.path.clone()
-    } else {
+fn reconstruct_target(target: &Target, originally_empty_query: bool) -> String {
+    if !target.query.is_empty() {
         format!("{}?{}", target.path, target.query)
+    } else if originally_empty_query && !target.path.contains('?') {
+        // Preserve the workload's empty delimiter, including across header or path edits. A path
+        // rewrite can itself supply a query; do not append a second delimiter to that replacement.
+        // Stripping the last parameter from an originally nonempty query still removes its `?`.
+        format!("{}?", target.path)
+    } else {
+        target.path.clone()
     }
 }
 
@@ -734,10 +751,63 @@ mod tests {
         target.path = canonicalize_request_path(&path);
         target.query = query;
         assert_eq!(
-            reconstruct_target(&target),
+            reconstruct_target(&target, false),
             "/x?%61=%62",
             "the forwarded target keeps the canonical path and the verbatim query"
         );
+    }
+
+    #[test]
+    fn forwarding_preserves_empty_and_absent_queries_through_request_edits() {
+        use crate::boundary::Mutation;
+
+        let header = || Mutation::SetHeader {
+            name: "Authorization".into(),
+            value: Zeroizing::new("fixture".into()),
+        };
+        let strip = || Mutation::StripQueryParam { name: "key".into() };
+        let add = || Mutation::AddQueryParam {
+            name: "key".into(),
+            value: Zeroizing::new("value".into()),
+        };
+        let rewrite = |path: &str| Mutation::RewritePath {
+            path: Zeroizing::new(path.into()),
+        };
+        for (original, mutations, expected) in [
+            ("/report?", vec![], "/report?"),
+            ("/report", vec![], "/report"),
+            ("/report??", vec![], "/report??"),
+            ("/report?format=text", vec![], "/report?format=text"),
+            ("/report?", vec![header()], "/report?"),
+            ("/report?", vec![strip()], "/report?"),
+            ("/report?key=placeholder", vec![strip()], "/report"),
+            ("/report?", vec![add()], "/report?key=value"),
+            (
+                "/report?key=placeholder",
+                vec![strip(), add()],
+                "/report?key=value",
+            ),
+            ("/report?", vec![rewrite("/replacement")], "/replacement?"),
+            (
+                "/report?",
+                vec![rewrite("/replacement?token")],
+                "/replacement?token",
+            ),
+        ] {
+            let (path, query) = split_target(original);
+            let mut target = Target::new("notes", 443);
+            target.path = path;
+            target.query = query;
+            let mut headers = HeaderMap::default();
+            for mutation in mutations {
+                mutation.apply(&mut headers, &mut target);
+            }
+            assert_eq!(
+                reconstruct_target(&target, has_empty_query(original)),
+                expected,
+                "forwarded target after edits to {original}"
+            );
+        }
     }
 
     fn connect(host: &str, port: u16) -> ConnectRequest {
