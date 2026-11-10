@@ -927,11 +927,26 @@ fn the_direct_python_alias_runs_the_tool_in_the_callers_directory() {
     let python = directory.join("python3");
     compile_arguments_printer(&python);
     let python = python.canonicalize().expect("the python probe resolves");
+    // Exactly the policy in `docs/user/shell.md`, "Run the host's Python for `python3`", with this
+    // test's tool file and workspace in place of the example's.
+    let policy = format!(
+        r#"permit (principal, action == Box::Action::"shell:spawn", resource)
+           when {{
+               (context.input.program == "python3" || context.input.program == "python") &&
+               context.input.program_path == {python:?}
+           }};
+           permit (principal, action == Box::Action::"shell:exec", resource)
+           when {{ context.input.program == "cd" }};
+           permit (principal, action == Box::Action::"fs:read", resource)
+           when {{
+               context.input.operation == Box::FsReadOperation::"change_dir" &&
+               (context.input.path == "{PROJECT}" || context.input.path like "{PROJECT}/*")
+           }};"#,
+        python = python.display().to_string()
+    );
     let (box_, started) = Request::with_config(
         "replaced-cwd",
-        r#"permit (principal, action == Box::Action::"shell:exec", resource);
-           permit (principal, action == Box::Action::"fs:read", resource);
-           permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        &policy,
         &format!(
             "[tool.python]\ncommand = [{:?}]\nreplaces = [\"python3\"]\n\
              [tool.python.filesystem]\nread = [{:?}, {PROJECT:?}]\n",
@@ -946,8 +961,13 @@ fn the_direct_python_alias_runs_the_tool_in_the_callers_directory() {
     std::fs::create_dir_all(&sub).expect("a folder in the workspace");
     let sub = sub.canonicalize().expect("the folder resolves");
 
+    let root = box_.bash(r#"python3 setup.py; printf "|status=%s" "$?""#);
     let ran = box_.bash(r#"cd sub && python3 setup.py; printf "|status=%s" "$?""#);
 
+    assert!(
+        stdout(&root).contains("args=setup.py\n|status=0"),
+        "the docs policy admits the direct alias in the workspace root: {root:?}"
+    );
     assert!(stdout(&ran).contains("args=setup.py\n|status=0"), "{ran:?}");
     assert!(
         stderr(&ran).contains(&format!("cwd={}\n", sub.display())),

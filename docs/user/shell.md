@@ -242,6 +242,16 @@ when {
     context.input.program_path ==
         "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14"
 };
+
+// The `python3` and `python` aliases enter the caller's directory first. See below.
+permit (principal, action == Box::Action::"shell:exec", resource)
+when { context.input.program == "cd" };
+
+permit (principal, action == Box::Action::"fs:read", resource)
+when {
+    context.input.operation == Box::FsReadOperation::"change_dir" &&
+    (context.input.path == "~/src/project" || context.input.path like "~/src/project/*")
+};
 ```
 
 A bare `python3` always runs the tool's own file, whatever `PATH` holds, so activating a virtual
@@ -273,12 +283,15 @@ tool's `command` has fixed arguments, or when two tools replace the same name.
 A program the agent starts without the Shell, such as a harness that runs `python3 -m pytest`
 directly, reaches the box's `python3` alias. For a replaced name, the alias sends the Shell one
 command, `cd '<the caller's directory>' && python3 '<argument>' ...`, so the same tool runs under
-the same decision, in the directory the caller ran it from. The `cd` is its own
-[`shell:exec`](#shellexec) decision, so policy must permit `cd` too, as the `read_only_commands`
-example does. A directory the Shell can't enter fails the command. The alias reads the directory
-from `PWD` when `PWD` names the directory it runs in, and asks the system otherwise. On macOS a
-process that may only enter the workspace can't read the workspace's path, so with no `PWD` the
-command runs in the workspace, where the Shell starts.
+the same decision, in the directory the caller ran it from. The `cd` is a [`shell:exec`](#shellexec)
+of `cd` and an [`fs:read`](#fs) with operation `change_dir`, so policy must permit both, as the two
+`cd` rules in the example above do. A directory the Shell can't enter fails the command.
+
+The alias takes the directory from `PWD` when `PWD` names the directory it runs in, and from the
+system otherwise. On macOS a process that may only enter its directory can't read that directory's
+path. The alias then uses the workspace, but only when it runs in the workspace, and refuses
+otherwise, so a command never runs in a directory the caller didn't run it from. A harness that
+starts `python3` in another folder of an unreadable tree should set `PWD` for it.
 [`limits.shell.timeout`](#limitsshelltimeout) then applies, not the direct alias's own Monty
 limits. Each argument reaches the tool as one word, and the alias forwards no standard input.
 
