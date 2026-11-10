@@ -785,7 +785,8 @@ fn a_tool_with_fixed_arguments_claims_its_bare_name_and_refuses_other_arguments(
 }
 
 /// Compile a program at `path` that prints `args=` and its arguments, prints `cwd=` and its working
-/// directory on stderr, then exits 0.
+/// directory on stderr, then exits 0. A tool that may only enter its working directory can't read
+/// that directory's path on macOS, so the probe reports that rather than failing.
 fn compile_arguments_printer(path: &Path) {
     use std::io::Write as _;
     use std::process::{Command, Stdio};
@@ -811,7 +812,9 @@ fn compile_arguments_printer(path: &Path) {
         .write_all(
             b"fn main() { let args: Vec<String> = std::env::args().skip(1).collect(); \
               println!(\"args={}\", args.join(\" \")); \
-              eprintln!(\"cwd={}\", std::env::current_dir().unwrap().display()); }",
+              match std::env::current_dir() { \
+              Ok(directory) => eprintln!(\"cwd={}\", directory.display()), \
+              Err(error) => eprintln!(\"cwd unreadable: {error}\") } }",
         )
         .expect("write the probe source");
     let output = compiler.wait_with_output().expect("compile the probe");
