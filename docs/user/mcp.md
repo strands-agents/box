@@ -157,9 +157,9 @@ It skips Box's alias directory and retains the agent's existing sandbox grants a
 It receives none of a server's extra sandbox grants or credentials. The program still needs the
 agent's execution and filesystem grants. A mistyped server command takes this same path.
 A policy denial, ambiguous match, or broker failure never falls back.
-Box records each non-match as `enforcement:mcp-unmatched`, so you can find a harness command that
-drifted from its declaration. This records the declined MCP route, not the result of ordinary
-execution. A server started through fallback has no Box MCP tool checks.
+Box records each non-match as a [`strands.box.mcp.unmatched` diagnostic](telemetry.md#an-unmatched-mcp-route),
+so you can find a harness command that drifted from its declaration. This records only that no
+declared command matched. A server started through fallback has no Box MCP tool checks.
 
 Words that mean the same thing to the server are still different words. `--port=3000` and
 `--port 3000` don't match, and neither do `~/data` and `/Users/me/data`. Write each argument the same

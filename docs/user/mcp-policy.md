@@ -213,7 +213,7 @@ that `forbid` and the per-tool action. The agent gets each refusal as an MCP err
 |---|---|
 | `MCP server "<name>" may not start` | No `shell:spawn` permit for the program. |
 | The harness starts an ordinary program instead of its MCP server | Its command does not match a declared server. Set the executable's filename and every declared argument, as in [step 2](#step-2-connect-the-harness). With `argument_wildcards = true`, supply a value for each `*` argument. |
-| `enforcement:mcp-unmatched` in the telemetry records | Box declined the MCP route and selected ordinary fallback. Compare the harness command with the declared command. The record carries the program and redacted arguments; it does not say whether ordinary execution succeeded. See [what a record carries](telemetry.md#what-a-record-carries). |
+| `strands.box.mcp.unmatched` in the telemetry records | No declared MCP command matched. Compare the harness command with the declared command. The diagnostic carries the program and redacted arguments, with no policy verdict or execution outcome. See [an unmatched MCP route](telemetry.md#an-unmatched-mcp-route). |
 | `no MCP server declares "<command>"` | The program is undeclared, or a command on that program cannot expand. Check that the harness uses a declared program, and correct any command expansion named in the error. |
 | Two MCP tables `declare overlapping wildcard commands` | The wildcard entries can match the same request, so Box refuses to start. Give them fixed arguments that distinguish them. An exact entry may overlap a wildcard entry; the exact entry takes priority. |
 | `MCP command matches multiple servers` | No exact entry matched, and more than one wildcard entry matched the received command. The launch is refused. |

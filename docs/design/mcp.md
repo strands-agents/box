@@ -240,10 +240,10 @@ the program, so servers that share a program, such as `npx`, share one alias. Th
 form or all match the form the server receives after `${OTEL_EXPORTER_OTLP_*}` tokens expand.
 A harness with a fixed configuration relies on the written form, because an endpoint token expands to
 a port that changes on each run. If no command matches a declared program, the broker sends an
-explicit non-match response. It starts no server and records the declined MCP route as
-`enforcement:mcp-unmatched`. The record names the program and carries redacted received arguments.
-It does not authorize or report the result of ordinary execution. The alias then executes the
-ordinary program inside the agent's sandbox, using that sandbox's existing grants.
+explicit non-match response. It starts no server and records a `strands.box.mcp.unmatched` diagnostic.
+The record names the program and carries redacted received arguments, with no policy verdict or
+execution outcome. The alias then executes the ordinary program inside the agent's sandbox, using
+that sandbox's existing grants.
 An undeclared program, an ambiguous match, or an unavailable command expansion remains a refusal.
 MCP commands use literal argument matching by default.
 

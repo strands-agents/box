@@ -78,6 +78,62 @@ fn assert_start_refused(box_: &RuntimeMcpBox, program: &str, rule: Option<&str>)
     );
 }
 
+fn log_records(text: &str, scope_name: &str) -> Vec<serde_json::Value> {
+    let mut records = Vec::new();
+    for line in text.lines() {
+        let payload: serde_json::Value = serde_json::from_str(line).expect("telemetry JSON");
+        for resource in payload["resourceLogs"].as_array().into_iter().flatten() {
+            for scope in resource["scopeLogs"].as_array().into_iter().flatten() {
+                if scope["scope"]["name"] == scope_name {
+                    records.extend(
+                        scope["logRecords"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .cloned(),
+                    );
+                }
+            }
+        }
+    }
+    records
+}
+
+fn attribute<'a>(record: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    record["attributes"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["key"] == key)
+        .map(|entry| &entry["value"])
+}
+
+fn unmatched_diagnostic(text: &str, program: &str) -> serde_json::Value {
+    assert!(!text.contains("enforcement:mcp-unmatched"), "{text}");
+    let records = log_records(text, "strands-box.mcp");
+    assert_eq!(records.len(), 1, "{text}");
+    let record = records.into_iter().next().unwrap();
+    assert_eq!(record["eventName"], "strands.box.mcp.unmatched", "{record}");
+    assert_eq!(
+        attribute(&record, "process.command"),
+        Some(&json!({"stringValue": program})),
+        "{record}"
+    );
+    assert!(
+        record["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| !entry["key"]
+                .as_str()
+                .unwrap()
+                .starts_with("strands.box.policy.")),
+        "{record}"
+    );
+    assert_ne!(record["severityText"], "deny", "{record}");
+    assert_ne!(record["severityText"], "permit", "{record}");
+    record
+}
+
 #[test]
 fn absent_start_permit_refuses_the_server_and_it_never_runs() {
     if !fixture::namespace_launcher_is_usable() {
@@ -96,6 +152,26 @@ fn absent_start_permit_refuses_the_server_and_it_never_runs() {
     box_.release_workload();
     let output = run.wait(SHUTDOWN);
     assert!(output.status.success(), "{output:?}");
+    let records =
+        std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl")).unwrap();
+    assert!(
+        log_records(&records, "strands-box.policy")
+            .iter()
+            .any(|record| {
+                attribute(record, "strands.box.policy.action")
+                    == Some(&json!({"stringValue": "shell:spawn"}))
+                    && attribute(record, "strands.box.policy.resource")
+                        .and_then(|value| value["stringValue"].as_str())
+                        .is_some_and(|resource| resource.ends_with("/alpha-mcp"))
+                    && attribute(record, "strands.box.policy.verdict")
+                        == Some(&json!({"stringValue": "deny"}))
+            }),
+        "{records}"
+    );
+    assert!(
+        log_records(&records, "strands-box.mcp").is_empty(),
+        "{records}"
+    );
 }
 
 #[test]
@@ -429,19 +505,19 @@ fn an_unmatched_launch_without_agent_exec_grants_starts_no_server() {
     let records =
         std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl")).unwrap();
     assert!(!records.contains("enforcement:mcp-command"), "{records}");
-    let unmatched: Vec<_> = records
-        .lines()
-        .filter(|line| line.contains("enforcement:mcp-unmatched"))
-        .collect();
-    assert!(!unmatched.is_empty(), "{records}");
-    for record in unmatched {
-        assert!(record.contains("shell:spawn"), "{record}");
-        assert!(record.contains("process.command"), "{record}");
-        assert!(record.contains("--declared"), "{record}");
-        assert!(record.contains("<redacted>"), "{record}");
-        assert!(record.contains("ordinary execution"), "{record}");
-        assert!(!record.contains("unmatched-secret"), "{record}");
-    }
+    let record = unmatched_diagnostic(&records, "env");
+    assert_eq!(
+        attribute(&record, "process.command_args"),
+        Some(&json!({"arrayValue": {"values": [
+            {"stringValue": "env"},
+            {"stringValue": "<redacted>"},
+            {"stringValue": "--declared"},
+            {"stringValue": "<redacted>"},
+            {"stringValue": "--token=<redacted>"}
+        ]}})),
+        "{record}"
+    );
+    assert!(!records.contains("unmatched-secret"), "{records}");
 }
 
 #[test]
@@ -540,7 +616,15 @@ fi
     assert!(output.status.success(), "{output:?}");
     let records =
         std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl")).unwrap();
-    assert!(records.contains("enforcement:mcp-unmatched"), "{records}");
+    let record = unmatched_diagnostic(&records, "npx");
+    assert_eq!(
+        attribute(&record, "process.command_args"),
+        Some(&json!({"arrayValue": {"values": [
+            {"stringValue": "npx"},
+            {"stringValue": "<redacted>"}
+        ]}})),
+        "{record}"
+    );
     assert!(!records.contains("server-env-secret"), "{records}");
 }
 
