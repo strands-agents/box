@@ -209,7 +209,8 @@ deny  = ["~/src/project/.env"]
 
 By default `python` and `python3` in the Shell run Monty, so a project's `python3 -m pytest` or
 `python3 -m venv .venv` fails with `invalid option '-m'`. To run the host's Python for those names,
-list them in `replaces` on the tool that runs it:
+list them in `replaces` on the tool that runs it. The tool must also read the interpreter's own
+install tree, which is outside the folders every sandbox gets:
 
 ```toml
 [tool.python]
@@ -217,8 +218,8 @@ command  = ["/opt/homebrew/bin/python3"]
 replaces = ["python3", "python"]
 
 [tool.python.filesystem]
-read  = ["~/src/project"]
-write = ["~/src/project/.venv"]
+read  = ["~/src/project", "/opt/homebrew/Cellar/python@3.14", "/opt/homebrew/lib/python3.14"]
+write = ["~/src/project"]
 ```
 
 A bare `python3` or `python` in the Shell is then a `shell:spawn` of the tool's file, with every
@@ -231,9 +232,14 @@ permit (principal, action == Box::Action::"shell:spawn", resource)
 when {
     (context.input.program == "python3" || context.input.program == "python") &&
     context.input.program_path ==
-        "/opt/homebrew/Cellar/python@3.13/3.13.5/Frameworks/Python.framework/Versions/3.13/bin/python3.13"
+        "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14"
 };
 ```
+
+A bare `python3` always runs the tool's own file, whatever `PATH` holds, so activating a virtual
+environment doesn't change what it runs. Run a virtual environment's interpreter by its path, such
+as `.venv/bin/python -m pytest`. That spawn names the same canonical file, so the same tool runs it,
+but `context.input.program` is the path the agent typed, so the permit must admit that spelling too.
 
 Startup prints one line for each replaced name, such as ``strands-box: [tool.python]: a bare
 `python3` in the Shell runs /opt/homebrew/bin/python3, in place of Box's Python (Monty)``. `type` and
