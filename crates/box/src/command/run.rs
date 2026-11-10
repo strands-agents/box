@@ -126,8 +126,8 @@ fn write_bare_name_disclosures(
     for (name, tables) in &names.passed_over {
         writeln!(
             output,
-            "strands-box: {}: runs another file, so a bare `{}` in the Shell runs the file of \
-             `[tool.{}]`, whose label is that name",
+            "strands-box: {}: runs another program path, so a bare `{}` in the Shell runs \
+             the file of `[tool.{}]`, whose label is that name",
             tables.join(", "),
             escaped(name),
             escaped(name)
@@ -136,8 +136,8 @@ fn write_bare_name_disclosures(
     for (name, tables) in &names.shared {
         writeln!(
             output,
-            "strands-box: {}: these tables run different files, so a bare `{}` in the Shell \
-             runs the file that `PATH` finds",
+            "strands-box: {}: these tables run different program paths, so a bare `{}` \
+             in the Shell runs the file that `PATH` finds",
             tables.join(", "),
             escaped(name)
         )?;
@@ -535,10 +535,10 @@ mod tests {
             String::from_utf8(output).expect("the disclosure is UTF-8"),
             "strands-box: [tool.git], [tool.git_status]: a bare `git` in the Shell runs \
              /Dev/usr/bin/git\n\
-             strands-box: [tool.brew_git]: runs another file, so a bare `git` in the Shell runs \
-             the file of `[tool.git]`, whose label is that name\n\
-             strands-box: [tool.brew_node], [tool.node]: these tables run different files, so a \
-             bare `node` in the Shell runs the file that `PATH` finds\n"
+             strands-box: [tool.brew_git]: runs another program path, so a bare `git` in the Shell \
+             runs the file of `[tool.git]`, whose label is that name\n\
+             strands-box: [tool.brew_node], [tool.node]: these tables run different program paths, \
+             so a bare `node` in the Shell runs the file that `PATH` finds\n"
         );
     }
 

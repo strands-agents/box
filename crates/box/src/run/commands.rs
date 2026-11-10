@@ -155,8 +155,8 @@ impl ConfiguredCommands {
 
     /// The bare names that `record`'s tools answer to: each one's bound name, which a grammar whose
     /// `program` is not its command's file name leaves to `PATH`, and none the Shell implements.
-    /// Among tools with different files, `search_path` decides when it finds one of them, else the
-    /// one tool whose label is the name.
+    /// Among tools whose commands resolve to different paths, including hard links to one file,
+    /// `search_path` decides when it finds one of them, else the one tool whose label is the name.
     pub(crate) fn bare_names(&self, record: &Record, search_path: &std::ffi::OsStr) -> BareNames {
         use crate::record::config::grammar::{bound_name, called_name};
         let mut found: BTreeMap<&str, Vec<(&str, &ConfiguredCommand, bool)>> = BTreeMap::new();
@@ -184,7 +184,7 @@ impl ConfiguredCommands {
                 .collect();
             let chosen = if commands
                 .iter()
-                .all(|(_, command, _)| command.identity == declaring.identity)
+                .all(|(_, command, _)| command.path == declaring.path)
             {
                 Some(*declaring)
             } else {
@@ -196,7 +196,7 @@ impl ConfiguredCommands {
             };
             let (running, other): (Vec<_>, Vec<_>) = commands
                 .iter()
-                .partition(|(_, candidate, _)| candidate.identity == command.identity);
+                .partition(|(_, candidate, _)| candidate.path == command.path);
             let label =
                 |(label, _, _): &(&str, &ConfiguredCommand, bool)| format!("[tool.{label}]");
             if !other.is_empty() {
@@ -212,20 +212,18 @@ impl ConfiguredCommands {
         names
     }
 
-    /// The one tool labelled `name` among `commands`, which run different files, when
-    /// `search_path` finds none of their files for `name`.
+    /// The one tool labelled `name` among `commands`, whose commands resolve to different paths,
+    /// when `search_path` finds none of those paths for `name`.
     fn label_choice<'a>(
         name: &str,
         commands: &[(&str, &'a ConfiguredCommand, bool)],
         search_path: &std::ffi::OsStr,
     ) -> Option<&'a ConfiguredCommand> {
-        use std::os::unix::fs::MetadataExt as _;
         let found = super::contain::executable::find_on(name, search_path)
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map(|metadata| (metadata.dev(), metadata.ino()));
+            .and_then(|path| path.canonicalize().ok());
         if commands
             .iter()
-            .any(|(_, command, _)| Some(command.identity) == found)
+            .any(|(_, command, _)| Some(&command.path) == found.as_ref())
         {
             return None;
         }
@@ -1416,6 +1414,49 @@ mod tests {
         );
     }
 
+    /// **Hard links at two paths keep the table that `PATH` selects**, because a spawn selects its
+    /// tool by the resolved path, not by the file the two paths share. The label settles the name
+    /// only when `PATH` finds neither path.
+    #[test]
+    fn hard_links_at_two_paths_keep_the_table_that_path_selects() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        for folder in ["developer", "project", "stub"] {
+            std::fs::create_dir_all(root.join(folder)).expect("folder");
+        }
+        program(&root.join("developer/git"));
+        program(&root.join("stub/git"));
+        std::fs::hard_link(root.join("developer/git"), root.join("project/git"))
+            .expect("a hard link");
+        let mut record = record(&root.join("developer/git"));
+        record.tool = BTreeMap::from([
+            ("git".to_string(), tool(&root.join("developer/git"), None)),
+            (
+                "project_git".to_string(),
+                tool(&root.join("project/git"), None),
+            ),
+        ]);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+
+        let project_first = commands.bare_names(&record, root.join("project").as_os_str());
+        let past_the_stub = commands.bare_names(&record, root.join("stub").as_os_str());
+
+        assert!(
+            project_first.declared.is_empty() && project_first.shared.contains_key("git"),
+            "{project_first:?}"
+        );
+        assert_eq!(
+            past_the_stub.declared.get("git"),
+            Some(&(root.join("developer/git"), vec!["[tool.git]".to_string()])),
+            "{past_the_stub:?}"
+        );
+        assert_eq!(
+            past_the_stub.passed_over.get("git"),
+            Some(&vec!["[tool.project_git]".to_string()]),
+            "{past_the_stub:?}"
+        );
+    }
+
     /// **A grammar whose `program` is not its command's file name declares no bare name**, so a
     /// shim that its called name selects keeps the spelling that `PATH` finds.
     #[test]
@@ -1443,8 +1484,8 @@ mod tests {
         );
     }
 
-    /// **Among tools with different files under one name, `PATH` decides when it finds one of
-    /// them, and otherwise the tool whose label is the name runs.**
+    /// **Among tools with different command paths under one name, `PATH` decides when it finds one
+    /// of them, and otherwise the tool whose label is the name runs.**
     #[test]
     fn the_label_breaks_a_tie_that_path_does_not_settle() {
         let root = tempfile::tempdir().expect("root");

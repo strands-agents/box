@@ -250,9 +250,10 @@ A `[tool]` claims its name even when its `command` has fixed leading arguments. 
 where no table matches `build`, so it is refused. It no longer reaches a `cargo` that `PATH` finds
 under an `[agent.filesystem] exec` entry. Give that program its own `[tool]`, or call it by its path.
 
-When `[tool]` tables with different files answer to one name, `PATH` decides if it finds one of
-their files. If it finds none, such as the `/usr/bin/git` stub with `[tool.git]` and
-`[tool.brew_git]`, the table whose label is the name runs.
+When `[tool]` tables whose commands resolve to different paths answer to one name, `PATH` decides
+if it finds one of those paths. Two hard links to one file at two paths count as two paths, because
+Box selects a tool by the path that runs. If `PATH` finds none, such as the `/usr/bin/git` stub with
+`[tool.git]` and `[tool.brew_git]`, the table whose label is the name runs.
 
 Any other name resolves on the `PATH` of the host OS's shell that runs `box run`, else on
 `/usr/bin:/bin`. When
@@ -261,8 +262,8 @@ the file of a `[tool]` is gone, its name is not found, and the Shell doesn't loo
 
 ```text
 strands-box: [tool.git]: a bare `git` in the Shell runs /Applications/Xcode.app/Contents/Developer/usr/bin/git
-strands-box: [tool.brew_git]: runs another file, so a bare `git` in the Shell runs the file of `[tool.git]`, whose label is that name
-strands-box: [tool.brew_node], [tool.node]: these tables run different files, so a bare `node` in the Shell runs the file that `PATH` finds
+strands-box: [tool.brew_git]: runs another program path, so a bare `git` in the Shell runs the file of `[tool.git]`, whose label is that name
+strands-box: [tool.brew_node], [tool.node]: these tables run different program paths, so a bare `node` in the Shell runs the file that `PATH` finds
 ```
 
 A name changes only which file runs. The spawn still needs a `shell:spawn` permit, or a grammar
