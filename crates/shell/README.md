@@ -204,7 +204,7 @@ The Kernel mediates everything; it runs in the same process as your code, not in
 **Default-deny. You allowlist what the agent can reach:**
 
 - Files: only bound paths exist, everything else is hidden.
-- Network: `curl` blocks private ranges (RFC1918, link-local, loopback, cloud metadata addresses, and IPv6 encodings of any of them such as NAT64) unconditionally while letting public URLs pass through. This floor is deny-only; it is not the authorization decision. The shell does not decide egress at all — the effect interceptor sees command and filesystem attempts, never a network attempt. Turn outbound HTTP off entirely with `disable_network()`, or route the host process through an egress boundary you control and decide there.
+- Network: `curl` blocks private ranges (RFC1918, link-local, loopback, IMDS and other cloud metadata addresses, and IPv6 encodings of any of them such as NAT64) unconditionally while letting public URLs pass through. This floor is deny-only; it is not the authorization decision. The shell does not decide egress at all — the effect interceptor sees command and filesystem attempts, never a network attempt. Turn outbound HTTP off entirely with `disable_network()`, or route the host process through an egress boundary you control and decide there.
 - Secrets: the shell holds none, so the agent never sees one. Credential injection belongs to the egress boundary you route the process through.
 - Syscalls: there are none; no `fork`, no `exec` because the shell is pure userspace.
 
