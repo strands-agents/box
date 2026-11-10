@@ -88,6 +88,9 @@ pub(super) struct ShellSpec {
 
     /// The `[tool]` file each declared bare name runs, in place of a host `PATH` lookup.
     pub(super) host_programs: strands_shell::os::HostPrograms,
+
+    /// The Shell commands, such as `python3`, whose declared `[tool]` file runs in their place.
+    pub(super) replaced_commands: strands_shell::os::ReplacedCommands,
 }
 
 impl ShellSpec {
@@ -123,6 +126,7 @@ impl ShellSpec {
         backend.script_interpreter = Some(self.script_interpreter());
         backend.host_spawner = self.host_spawner.clone();
         backend.host_programs = Arc::clone(&self.host_programs);
+        backend.replaced_commands = Arc::clone(&self.replaced_commands);
         Ok(Arc::new(backend))
     }
 

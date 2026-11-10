@@ -1204,6 +1204,7 @@ mod linked_command_mutation_tests {
                     network: None,
                     grammar: None,
                     ingress: Vec::new(),
+                    replaces: Vec::new(),
                 },
             )]),
             egress: Default::default(),

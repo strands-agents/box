@@ -1805,16 +1805,26 @@ The direct route adds an outer request timeout. A script file argument through t
 reach a bind, while the direct alias cannot.
 
 <a id="a-bare-python-name-always-means-monty"></a>
-### A bare `python` name always means Monty, so a host interpreter needs its absolute path
+### A bare `python` name means Monty unless a tool `replaces` it
 
 The Shell's registered `python` and `python3` commands win over any host interpreter on `PATH`, and
-over a declared `[tool.<name>]` table that names a host interpreter. So `python --version` returns a
-Monty identifying string, and `python3 -m venv` fails. That precedence prevents a declared tool from
-taking over the bare name. This is a known gap. A workload that runs an interpreter by its own
-absolute path, or runs a virtual environment's `python` by absolute path, reaches the host OS's
-Python under the `[tool.<name>]` table whose `command` names that path. Monty is stateless and
-refuses the interactive frames, so a `python` with no `-c` and no script file refuses instead of
-opening a REPL.
+over a declared `[tool.<name>]` table that names a host interpreter. So by default `python --version`
+returns a Monty identifying string, and `python3 -m venv` fails. That precedence prevents a declared
+tool from taking over the bare name without the operator asking.
+
+An operator asks with `replaces = ["python3", "python"]` on one `[tool.<name>]`. The Shell then runs
+that tool's file for each name it lists, as a `shell:spawn` under that tool's own sandbox, so a
+project's own `python3 -m pytest` runs unchanged. Only `python` and `python3` can be replaced, only by
+a tool whose `command` has no fixed arguments, and only by one tool each. Box refuses anything else
+at startup, and the startup line names the file that runs in place of Monty. The cost is that code
+the agent writes runs under the tool's grants with no per-file decision, as a host interpreter
+reached by its absolute path already does. Builtins and functions keep precedence, and the direct
+`python3` alias still runs Monty.
+
+Without `replaces`, a workload that runs an interpreter by its own absolute path, or runs a virtual
+environment's `python` by absolute path, reaches the host OS's Python under the `[tool.<name>]` table
+whose `command` names that path. Monty is stateless and refuses the interactive frames, so a `python`
+with no `-c` and no script file refuses instead of opening a REPL.
 
 <a id="monty-is-judged-at-the-effect-level-alone"></a>
 ### Monty is judged at the effect level alone, above two deny-only floors

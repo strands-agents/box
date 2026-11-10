@@ -115,9 +115,14 @@ fn write_bare_name_disclosures(
 ) -> std::io::Result<()> {
     let escaped = |text: &str| -> String { text.chars().flat_map(char::escape_default).collect() };
     for (name, (path, tables)) in &names.declared {
+        let replacing = if names.replaced.contains(name) {
+            ", in place of Box's Python (Monty)"
+        } else {
+            ""
+        };
         writeln!(
             output,
-            "strands-box: {}: a bare `{}` in the Shell runs {}",
+            "strands-box: {}: a bare `{}` in the Shell runs {}{replacing}",
             tables.join(", "),
             escaped(name),
             escaped(&path.to_string_lossy())
@@ -445,6 +450,7 @@ mod tests {
             network: None,
             grammar: None,
             ingress: Vec::new(),
+            replaces: Vec::new(),
         }
     }
 
@@ -527,6 +533,7 @@ mod tests {
                 vec!["[tool.brew_node]".to_string(), "[tool.node]".to_string()],
             )]),
             passed_over: BTreeMap::from([("git".to_string(), vec!["[tool.brew_git]".to_string()])]),
+            replaced: Default::default(),
         };
         let mut output = Vec::new();
 
@@ -540,6 +547,30 @@ mod tests {
              runs the file of `[tool.git]`, whose label is that name\n\
              strands-box: [tool.brew_node], [tool.node]: these tables run different program paths, \
              so a bare `node` in the Shell runs the file that `PATH` finds\n"
+        );
+    }
+
+    #[test]
+    fn startup_says_a_replaced_name_runs_in_place_of_monty() {
+        let names = crate::run::commands::BareNames {
+            declared: BTreeMap::from([(
+                "python3".to_string(),
+                (
+                    PathBuf::from("/opt/homebrew/bin/python3"),
+                    vec!["[tool.python]".to_string()],
+                ),
+            )]),
+            replaced: ["python3".to_string()].into(),
+            ..Default::default()
+        };
+        let mut output = Vec::new();
+
+        write_bare_name_disclosures(&names, &mut output).expect("the disclosure writes");
+
+        assert_eq!(
+            String::from_utf8(output).expect("the disclosure is UTF-8"),
+            "strands-box: [tool.python]: a bare `python3` in the Shell runs \
+             /opt/homebrew/bin/python3, in place of Box's Python (Monty)\n"
         );
     }
 

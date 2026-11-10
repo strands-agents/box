@@ -1904,6 +1904,7 @@ mod tests {
                 network: None,
                 grammar: None,
                 ingress: Vec::new(),
+                replaces: Vec::new(),
             }
         }
 

@@ -9,7 +9,7 @@ use crate::os::Process;
 use crate::prelude::*;
 
 pub fn builtin_type<'a>(
-    _os: &'a Mediated,
+    os: &'a Mediated,
     proc: &'a mut Process,
     args: &'a [String],
 ) -> Pin<Box<dyn Future<Output = CommandResult> + 'a>> {
@@ -27,6 +27,8 @@ pub fn builtin_type<'a>(
                 wprintln!(w, "{} is a shell function", name)?;
             } else if let Some(path) = proc.hash_table.get(name.as_str()) {
                 wprintln!(w, "{} is hashed ({})", name, path)?;
+            } else if let Some(path) = crate::exec::replacing_file(os, name) {
+                wprintln!(w, "{} is {}", name, path.display())?;
             } else if crate::commands::lookup(name).is_some() {
                 wprintln!(w, "{} is a shell builtin", name)?;
             } else {

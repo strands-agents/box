@@ -231,6 +231,7 @@ Both tables hold one process, in one shape:
 | `native-filesystem-policy` | boolean | Optional override of the global experimental setting for this process and its descendants. See [workload selection](native-filesystem-policy.md#select-workloads). |
 | `[tool.<name>.grammar]` | table | Experimental, and `[tool.<name>]` only. The tool grammar for the program this tool runs. See [`[tool.<name>.grammar]`](#toolnamegrammar). |
 | `[[agent.ingress]]` | list of tables | `[agent]` only. Where callers reach the agent's servers, one entry per port. See [`[[agent.ingress]]`](#agentingress). |
+| `replaces` | string array | `[tool.<name>]` only. `python`, `python3`, or both: the bare names that run this tool in place of Monty in the Shell. See [Run the host's Python for `python3`](shell.md#run-the-hosts-python-for-python3). |
 
 The box adds the runtime minimum to every process; see
 [the runtime minimum](../design/containment.md#the-runtime-minimum).

@@ -783,3 +783,124 @@ fn a_tool_with_fixed_arguments_claims_its_bare_name_and_refuses_other_arguments(
         "the tool's file is selected, and its fixed arguments do not match: {build:?}"
     );
 }
+
+/// Compile a program at `path` that prints `args=` and its arguments, then exits 0.
+fn compile_arguments_printer(path: &Path) {
+    use std::io::Write as _;
+    use std::process::{Command, Stdio};
+
+    let mut compiler = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()))
+        .args([
+            "--edition=2024",
+            "--crate-name",
+            "replaced_command_probe",
+            "-",
+        ])
+        .arg("-o")
+        .arg(path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("start the probe compiler");
+    compiler
+        .stdin
+        .take()
+        .expect("compiler input")
+        .write_all(
+            b"fn main() { let args: Vec<String> = std::env::args().skip(1).collect(); \
+              println!(\"args={}\", args.join(\" \")); }",
+        )
+        .expect("write the probe source");
+    let output = compiler.wait_with_output().expect("compile the probe");
+    assert!(output.status.success(), "probe compilation: {output:?}");
+}
+
+/// A `[tool.python]` whose program is a probe named `python3`, with `more` after its `command`.
+fn python_box(home: &Path, name: &str, more: &str) -> (Configured, Output, String) {
+    let directory = tools_directory(home);
+    std::fs::create_dir_all(&directory).expect("the tools directory");
+    let python = directory.join("python3");
+    compile_arguments_printer(&python);
+    let python = python
+        .canonicalize()
+        .expect("the python probe resolves")
+        .display()
+        .to_string();
+    let (box_, started) = Request::with_config(
+        name,
+        r#"permit (principal, action == Box::Action::"shell:exec", resource);
+           permit (principal, action == Box::Action::"fs:read", resource);
+           permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        &format!(
+            "[tool.python]\ncommand = [{python:?}]\n{more}[tool.python.filesystem]\nread = [{:?}]\n",
+            directory.display().to_string()
+        ),
+    )
+    .attempt();
+    assert!(started.status.success(), "{}", stderr(&started));
+    (box_, started, python)
+}
+
+#[test]
+fn a_tool_that_replaces_python3_runs_for_the_bare_name_with_every_argument() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let home = support::fixture::short_temporary_home();
+    let (box_, started, python) = python_box(
+        home.path(),
+        "replaced-python",
+        "replaces = [\"python3\", \"python\"]\n",
+    );
+    for name in ["python", "python3"] {
+        assert!(
+            stderr(&started).contains(&format!(
+                "strands-box: [tool.python]: a bare `{name}` in the Shell runs {python}, in place \
+                 of Box's Python (Monty)\n"
+            )),
+            "startup names the file a bare `{name}` runs: {}",
+            stderr(&started)
+        );
+    }
+
+    let module = in_the_shell(&box_, "python3 -m venv .venv");
+    let isolated = in_the_shell(&box_, "python -I -c pass");
+    let found = in_the_shell(&box_, "command -v python3");
+
+    assert!(
+        stdout(&module).contains("args=-m venv .venv\n|status=0"),
+        "`python3 -m` reaches the tool with every argument: {module:?}"
+    );
+    assert!(
+        stdout(&isolated).contains("args=-I -c pass\n|status=0"),
+        "`python -I` reaches the same tool: {isolated:?}"
+    );
+    assert!(
+        stdout(&found).contains(&format!("{python}\n|status=0")),
+        "`command -v` names the tool's file: {found:?}"
+    );
+}
+
+#[test]
+fn a_python_tool_without_replaces_leaves_python3_to_monty() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let home = support::fixture::short_temporary_home();
+    let (box_, started, _) = python_box(home.path(), "monty-python", "");
+    assert!(
+        !stderr(&started).contains("a bare `python3` in the Shell runs"),
+        "{}",
+        stderr(&started)
+    );
+
+    let version = in_the_shell(&box_, "python3 --version");
+
+    assert!(
+        stdout(&version).contains("Monty (Strands-Box Python subset)\n|status=0"),
+        "{version:?}"
+    );
+}

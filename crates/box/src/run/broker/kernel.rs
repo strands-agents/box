@@ -243,6 +243,10 @@ impl Kernel for CallKernel {
     fn host_program(&self, name: &str) -> Option<std::path::PathBuf> {
         self.backend.host_program(name)
     }
+
+    fn replaces_command(&self, name: &str) -> bool {
+        self.backend.replaces_command(name)
+    }
 }
 
 #[cfg(all(test, feature = "test-support"))]

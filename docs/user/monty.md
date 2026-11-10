@@ -64,9 +64,11 @@ in the next. An uncaught exception prints `<exception type>: <message>` on stder
 | Script file | Read with the agent's own access, so a list in `[agent.filesystem]` must grant it | Read by Strands Shell, under an `fs:read` decision |
 | Policy decisions | The script's file operations | `shell:exec` for the command, `fs:read` for a script file, and the script's file operations |
 
-In Strands Shell, `python` and `python3` always run Monty, whatever the operator's `PATH` holds, and
-`python3 --version` prints `Monty (Strands-Box Python subset)`. Strands Shell refuses these forms
-with exit status `2`:
+In Strands Shell, `python` and `python3` run Monty, whatever the operator's `PATH` holds, and
+`python3 --version` prints `Monty (Strands-Box Python subset)`. To run the host's own Python for
+those names instead, give one `[tool.<name>]` the
+[`replaces`](shell.md#run-the-hosts-python-for-python3) key. Strands Shell refuses these forms of
+Monty with exit status `2`:
 
 - `python` alone, or `python` that reads its source from stdin, such as a pipe or a heredoc.
 - `python -`.

@@ -146,6 +146,7 @@ pub(crate) fn contained_specs(
                         network: (!network.is_default()).then(|| network.clone()),
                         grammar: None,
                         ingress: Vec::new(),
+                        replaces: Vec::new(),
                     },
                 },
             )),

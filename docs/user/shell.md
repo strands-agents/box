@@ -45,7 +45,8 @@ The Shell implements these, each in place of a program of the same name on the `
 - Text: `cat`, `grep`, `sed`, `head`, `tail`, `sort`, `uniq`, `cut`, `tr`, `wc`, `tee`.
 - Files: `ls`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `ln`, `chmod`, `touch`, `mktemp`, `readlink`.
 - Data and network: `jq`, `curl`.
-- Interpreters: `lua`, and `python` and `python3`, which run in Monty, Box's Python interpreter.
+- Interpreters: `lua`, and `python` and `python3`, which run in Monty, Box's Python interpreter,
+  unless a `[tool.<name>]` [replaces them](#run-the-hosts-python-for-python3).
 
 Paths outside the operator's home, the agent's home, and the workspace, such as `/tmp`, exist only
 in the Shell's memory, for one command. A file written to `/tmp` is gone when the command ends.
@@ -183,6 +184,7 @@ execution can delay timeout reporting. The direct `python` and `python3` aliases
 | `filesystem` | table | empty | `read`, `write`, `read_file`, `write_file`, `list`, and `deny`: the paths the program's own system calls reach. |
 | `network.contain_egress` | bool | `true` | How the program reaches the network. See [`[tool.<name>.network]`](#toolnamenetwork). |
 | `grammar` | table | none | Experimental. The tool grammar for the program. See [`[tool.<name>.grammar]`](config.md#toolnamegrammar). |
+| `replaces` | string array | empty | `python`, `python3`, or both: the bare names that run this tool in place of Monty. See [Run the host's Python for `python3`](#run-the-hosts-python-for-python3). |
 
 A table matches a `shell:spawn` when `program_path` names the command file that Box resolved at startup,
 and its fixed arguments match the leading arguments of the command. When several tables match,
@@ -202,6 +204,48 @@ read  = ["~/src/project", "/Library/Developer/CommandLineTools"]
 write = ["~/src/project/.git"]
 deny  = ["~/src/project/.env"]
 ```
+
+### Run the host's Python for `python3`
+
+By default `python` and `python3` in the Shell run Monty, so a project's `python3 -m pytest` or
+`python3 -m venv .venv` fails with `invalid option '-m'`. To run the host's Python for those names,
+list them in `replaces` on the tool that runs it:
+
+```toml
+[tool.python]
+command  = ["/opt/homebrew/bin/python3"]
+replaces = ["python3", "python"]
+
+[tool.python.filesystem]
+read  = ["~/src/project"]
+write = ["~/src/project/.venv"]
+```
+
+A bare `python3` or `python` in the Shell is then a `shell:spawn` of the tool's file, with every
+argument the agent passes, under the tool's own sandbox. `context.input.program` is the name the
+agent typed, and `context.input.program_path` is the canonical file that the tool's `command`
+resolves to. Pin both:
+
+```cedar
+permit (principal, action == Box::Action::"shell:spawn", resource)
+when {
+    (context.input.program == "python3" || context.input.program == "python") &&
+    context.input.program_path ==
+        "/opt/homebrew/Cellar/python@3.13/3.13.5/Frameworks/Python.framework/Versions/3.13/bin/python3.13"
+};
+```
+
+Startup prints one line for each replaced name, such as ``strands-box: [tool.python]: a bare
+`python3` in the Shell runs /opt/homebrew/bin/python3, in place of Box's Python (Monty)``. `type` and
+`command -v` name the same file.
+
+Box refuses the configuration when `replaces` names anything but `python` or `python3`, when the
+tool's `command` has fixed arguments, or when two tools replace the same name. The direct `python3`
+and `python` aliases that a harness runs without the Shell still run Monty.
+
+Monty decides each file operation a script makes. The host's Python makes its own system calls, so
+code the agent writes runs with everything the tool's lists grant. Keep the tool's `write` list to
+the folders the project needs.
 
 ### `[tool.<name>.network]`
 

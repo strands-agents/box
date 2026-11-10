@@ -160,9 +160,10 @@ impl BrokerHost {
         commands: Arc<crate::run::commands::ConfiguredCommands>,
         installation: Arc<crate::run::installation::TrustedInstallation>,
     ) -> Result<Self, BoxError> {
-        let host_programs = commands
-            .bare_names(record, &crate::run::contain::executable::host_search_path())
-            .programs();
+        let bare_names =
+            commands.bare_names(record, &crate::run::contain::executable::host_search_path());
+        let host_programs = bare_names.programs();
+        let replaced_commands = bare_names.replaced_commands();
         // The agent's workspace is the interpreters' working directory, and its `HOME` is what every
         // participant reads, so one directory has one name on both sides of the socket.
         let reach = Arc::new(
@@ -213,6 +214,7 @@ impl BrokerHost {
                     recorder,
                     host_spawner,
                     host_programs,
+                    replaced_commands,
                     command_timeout,
                     &ready_sender,
                     shutdown_receiver,
@@ -494,6 +496,7 @@ fn host(
     recorder: Arc<crate::run::telemetry::DecisionRecorder>,
     host_spawner: Option<strands_shell::os::HostSpawner>,
     host_programs: strands_shell::os::HostPrograms,
+    replaced_commands: strands_shell::os::ReplacedCommands,
     command_timeout: Option<Duration>,
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
     shutdown: oneshot::Receiver<()>,
@@ -529,6 +532,7 @@ fn host(
             recorder,
             host_spawner,
             host_programs,
+            replaced_commands,
         };
         // Built once here and dropped immediately — a *probe*, not the serving Shell.
         if let Err(error) = spec.build() {
@@ -1881,6 +1885,7 @@ done"#;
             recorder: crate::run::telemetry::DecisionRecorder::discarding(),
             host_spawner: None,
             host_programs: Default::default(),
+            replaced_commands: Default::default(),
         })
     }
 
@@ -2141,6 +2146,7 @@ done"#;
             recorder: crate::run::telemetry::DecisionRecorder::discarding(),
             host_spawner: None,
             host_programs: Default::default(),
+            replaced_commands: Default::default(),
         })
     }
 
@@ -3514,6 +3520,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
                 host_programs: Default::default(),
+                replaced_commands: Default::default(),
             });
             let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
@@ -3829,6 +3836,7 @@ done"#,
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
                 host_programs: Default::default(),
+                replaced_commands: Default::default(),
             });
             let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
@@ -3987,6 +3995,7 @@ done"#;
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
                 host_programs: Default::default(),
+                replaced_commands: Default::default(),
             });
             let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);

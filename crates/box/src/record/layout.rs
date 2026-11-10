@@ -3808,6 +3808,7 @@ mod tests {
             network: None,
             grammar: None,
             ingress: Vec::new(),
+            replaces: Vec::new(),
         });
         let updated_text = updated.to_toml().expect("updated record");
 

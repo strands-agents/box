@@ -205,7 +205,7 @@ async fn admit(
 /// host exec.
 async fn host_program(os: &Arc<Mediated>, proc: &Process, program: &str) -> Option<HostProgram> {
     if builtins::lookup(program).is_some()
-        || commands::lookup(program).is_some()
+        || own_command(os, program).is_some()
         || proc.get_function(program).is_some()
     {
         return None;
@@ -242,6 +242,26 @@ pub fn implements_program(name: &str) -> bool {
         || commands::lookup(name).is_some()
         || name == "lash"
         || name == "sh"
+}
+
+/// The Shell's own command named `name`, unless the embedder runs its declared file in its place.
+///
+/// Every dispatch and every lookup that reports what a name runs asks here, so a replaced name is a
+/// host program at admission, at dispatch, and in `type` and `command -v` alike.
+pub(crate) fn own_command(os: &Mediated, name: &str) -> Option<commands::CommandFn> {
+    if os.replaces_command(name) {
+        return None;
+    }
+    commands::lookup(name)
+}
+
+/// The declared file that runs in place of the Shell's own command `name`, if one does.
+pub(crate) fn replacing_file(os: &Mediated, name: &str) -> Option<std::path::PathBuf> {
+    if os.replaces_command(name) {
+        os.host_program(name)
+    } else {
+        None
+    }
 }
 
 /// The host program a declared file names, bound to its canonical identity when the file exists.
@@ -3221,7 +3241,7 @@ async fn execute_pipeline_checked(
                         for name in &args[1..] {
                             if is_special(name)
                                 || crate::builtins::lookup(name).is_some()
-                                || crate::commands::lookup(name).is_some()
+                                || own_command(&os, name).is_some()
                             {
                                 if verbose {
                                     let label = if is_special(name) {
@@ -3238,6 +3258,13 @@ async fn execute_pipeline_checked(
                                     proc.out_msg(&format!("{name} is a shell function"));
                                 } else {
                                     proc.out_msg(name);
+                                }
+                            } else if let Some(path) = replacing_file(&os, name) {
+                                let path = path.display();
+                                if verbose {
+                                    proc.out_msg(&format!("{name} is {path}"));
+                                } else {
+                                    proc.out_msg(&path.to_string());
                                 }
                             } else if let Some(path) = proc.hash_table.get(name.as_str()).cloned() {
                                 proc.out_msg(&path);
@@ -3414,7 +3441,7 @@ async fn run_pipeline(
         let cmd = &expanded_args[i][0];
         if builtins::lookup(cmd).is_some()
             || shell_proc.get_function(cmd).is_some()
-            || commands::lookup(cmd).is_some()
+            || own_command(os.as_ref(), cmd).is_some()
         {
             continue;
         }
@@ -3863,7 +3890,7 @@ async fn run_pipeline(
                 tokio::task::spawn_local(CURRENT_KERNEL.scope(
                     os.clone(),
                     CURRENT_PROCESS.scope(RefCell::new(child), async move {
-                        match commands::lookup(&name) {
+                        match own_command(os.as_ref(), &name) {
                             Some(f) => match f(os.as_ref(), &args).await {
                                 Ok(code) => code,
                                 Err(e) => {

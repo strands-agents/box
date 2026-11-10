@@ -641,6 +641,9 @@ const LIMITS_RECORD_VERSION: u32 = 27;
 const MCP_ABSOLUTE_COMMAND_RECORD_VERSION: u32 = 28;
 /// The record version of a record whose agent declares an ingress.
 const INGRESS_RECORD_VERSION: u32 = 29;
+/// The record version of a record whose `[tool.<name>]` runs in place of a Shell command, so an
+/// older build refuses the box rather than resuming it with Monty under that name.
+const REPLACED_COMMANDS_RECORD_VERSION: u32 = 30;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -691,7 +694,10 @@ fn record_version<'a>(
     mcp: &[crate::record::config::mcp::McpServer],
     ingress: bool,
 ) -> u32 {
-    if ingress {
+    let specs: Vec<&ProcessSpec> = specs.collect();
+    if specs.iter().any(|spec| !spec.replaces.is_empty()) {
+        REPLACED_COMMANDS_RECORD_VERSION
+    } else if ingress {
         INGRESS_RECORD_VERSION
     } else if mcp
         .iter()
@@ -707,7 +713,7 @@ fn record_version<'a>(
     } else if crate::record::config::mcp::shares_a_program(mcp) {
         SHARED_PROGRAM_RECORD_VERSION
     } else {
-        process_record_version(features, specs)
+        process_record_version(features, specs.into_iter())
     }
 }
 
@@ -957,6 +963,7 @@ impl Record {
             LIMITS_RECORD_VERSION,
             MCP_ABSOLUTE_COMMAND_RECORD_VERSION,
             INGRESS_RECORD_VERSION,
+            REPLACED_COMMANDS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1022,6 +1029,7 @@ impl Record {
                 self.experimental_features.tool_grammars,
             )?;
         }
+        process::validate_replaced_commands(&self.tool)?;
         for (name, contained) in &self.contained_mcp {
             contained.spec.validate(&format!("[mcp.{name}]"))?;
             contained.spec.validate_native_policy(
@@ -1324,6 +1332,7 @@ impl ConfigFile {
                 self.experimental_features.tool_grammars,
             )?;
         }
+        process::validate_replaced_commands(&self.tool)?;
         for (name, contained) in crate::record::config::mcp::contained_specs(&self.mcp) {
             contained.spec.validate(&format!("[mcp.{name}]"))?;
             contained.spec.validate_native_policy(
@@ -1570,6 +1579,7 @@ mod tests {
             network: None,
             grammar: None,
             ingress: Vec::new(),
+            replaces: Vec::new(),
         }
     }
 
@@ -1973,6 +1983,65 @@ native-filesystem-policy = false
                 .starts_with("invalid `[agent]` table: `grammar` is refused on `[agent]`"),
             "{error}"
         );
+    }
+
+    const PYTHON_TOOL: &str =
+        "[tool.python]\ncommand = [\"/usr/bin/python3\"]\nreplaces = [\"python3\", \"python\"]\n";
+
+    #[test]
+    fn a_tool_that_replaces_python_is_stored_in_its_own_record_version() {
+        let configured = load(PYTHON_TOOL).expect("a tool may replace python3 and python");
+        assert_eq!(configured.tool["python"].replaces, ["python3", "python"]);
+
+        let mut stored = pinned_record(PYTHON_TOOL);
+        assert_eq!(stored.version, REPLACED_COMMANDS_RECORD_VERSION);
+        let text = stored.to_toml().unwrap();
+        assert!(
+            text.contains("replaces = [\n    \"python3\",\n    \"python\",\n]"),
+            "{text}"
+        );
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml")).unwrap(),
+            stored
+        );
+
+        stored.version = INGRESS_RECORD_VERSION;
+        assert!(
+            matches!(
+                Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                Err(ConfigError::RecordVersion { found, expected })
+                    if found == INGRESS_RECORD_VERSION
+                        && expected == REPLACED_COMMANDS_RECORD_VERSION
+            ),
+            "a record that replaces a command is refused under an older version"
+        );
+    }
+
+    #[test]
+    fn replaces_is_refused_where_no_tool_can_honor_it() {
+        for (text, refusal) in [
+            (
+                "[agent]\ncommand = [\"/bin/true\"]\nreplaces = [\"python3\"]\n",
+                "invalid `[agent]` table: `replaces` is refused on `[agent]`",
+            ),
+            (
+                "[tool.cat]\ncommand = [\"/bin/cat\"]\nreplaces = [\"cat\"]\n",
+                "invalid `[tool.cat]` table: `replaces` names \"cat\"",
+            ),
+            (
+                "[tool.python]\ncommand = [\"/usr/bin/python3\", \"-I\"]\nreplaces = [\"python3\"]\n",
+                "invalid `[tool.python]` table: `replaces` needs a `command` with no fixed arguments",
+            ),
+            (
+                "[tool.brew]\ncommand = [\"/opt/homebrew/bin/python3\"]\nreplaces = [\"python3\"]\n\
+                 [tool.python]\ncommand = [\"/usr/bin/python3\"]\nreplaces = [\"python3\"]\n",
+                "invalid `[tool.python]` table: `replaces` names `python3`, which `[tool.brew]` also \
+                 replaces",
+            ),
+        ] {
+            let error = load(text).expect_err(text);
+            assert!(error.to_string().starts_with(refusal), "{error}");
+        }
     }
 
     #[test]
@@ -2653,7 +2722,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, INGRESS_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, REPLACED_COMMANDS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

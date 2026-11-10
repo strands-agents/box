@@ -1,6 +1,6 @@
 //! The configured tool programs whose identities belong to one run.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,6 +29,8 @@ pub(crate) struct BareNames {
     pub(crate) shared: BTreeMap<String, Vec<String>>,
     /// Each declared name that its label settled, and the tables that run other files.
     pub(crate) passed_over: BTreeMap<String, Vec<String>>,
+    /// Each declared name whose file runs in place of the Shell's own command, from `replaces`.
+    pub(crate) replaced: BTreeSet<String>,
 }
 
 impl BareNames {
@@ -40,6 +42,11 @@ impl BareNames {
                 .map(|(name, (path, _))| (name.clone(), path.clone()))
                 .collect(),
         )
+    }
+
+    /// The Shell commands whose declared file runs in their place, as the Shell reads them.
+    pub(crate) fn replaced_commands(&self) -> strands_shell::os::ReplacedCommands {
+        Arc::new(self.replaced.clone())
     }
 }
 
@@ -157,6 +164,8 @@ impl ConfiguredCommands {
     /// `program` is not its command's file name leaves to `PATH`, and none the Shell implements.
     /// Among tools whose commands resolve to different paths, including hard links to one file,
     /// `search_path` decides when it finds one of them, else the one tool whose label is the name.
+    /// Each name a tool `replaces` runs that tool's file in place of the Shell's own command;
+    /// validation leaves one tool per replaced name.
     pub(crate) fn bare_names(&self, record: &Record, search_path: &std::ffi::OsStr) -> BareNames {
         use crate::record::config::grammar::{bound_name, called_name};
         let mut found: BTreeMap<&str, Vec<(&str, &ConfiguredCommand, bool)>> = BTreeMap::new();
@@ -208,6 +217,18 @@ impl ConfiguredCommands {
                 name.to_string(),
                 (command.invoked.clone(), running.iter().map(label).collect()),
             );
+        }
+        for (label, spec) in &record.tool {
+            let Some(command) = self.tools.get(label) else {
+                continue;
+            };
+            for name in &spec.replaces {
+                names.declared.insert(
+                    name.clone(),
+                    (command.invoked.clone(), vec![format!("[tool.{label}]")]),
+                );
+                names.replaced.insert(name.clone());
+            }
         }
         names
     }
@@ -532,6 +553,7 @@ mod tests {
                     network: None,
                     grammar: None,
                     ingress: Vec::new(),
+                    replaces: Vec::new(),
                 },
             )]),
             egress: Default::default(),
@@ -1331,6 +1353,8 @@ mod tests {
                 .try_into()
                 .expect("a grammar table")
             }),
+            ingress: Vec::new(),
+            replaces: Vec::new(),
         }
     }
 
@@ -1380,6 +1404,40 @@ mod tests {
         assert_eq!(
             *names.programs(),
             BTreeMap::from([("git".to_string(), git)])
+        );
+    }
+
+    /// **A tool that `replaces` a Shell command declares its file for each replaced name**, while
+    /// its own file name, which the Shell implements, stays undeclared without `replaces`.
+    #[test]
+    fn a_replaced_command_runs_the_replacing_tools_file() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        std::fs::create_dir_all(root.join("bin")).expect("folder");
+        let python = root.join("bin/python3");
+        program(&python);
+
+        let plain = bare_names(&[("python", tool(&python, None))], &python);
+        assert!(plain.declared.is_empty(), "{:?}", plain.declared);
+        assert!(plain.replaced.is_empty());
+
+        let mut replacing = tool(&python, None);
+        replacing.replaces = vec!["python3".to_string(), "python".to_string()];
+        let names = bare_names(&[("python", replacing)], &python);
+
+        let declared = |name: &str| {
+            (
+                name.to_string(),
+                (python.clone(), vec!["[tool.python]".to_string()]),
+            )
+        };
+        assert_eq!(
+            names.declared,
+            BTreeMap::from([declared("python"), declared("python3")])
+        );
+        assert_eq!(
+            *names.replaced_commands(),
+            BTreeSet::from(["python".to_string(), "python3".to_string()])
         );
     }
 

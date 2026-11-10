@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use strands_shell::os::{HostPrograms, HostSpawn, HostSpawnOutcome, HostSpawner};
+use strands_shell::os::{HostPrograms, HostSpawn, HostSpawnOutcome, HostSpawner, ReplacedCommands};
 use strands_shell::{EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, Shell};
 
 /// A permit that records nothing and refuses nothing.
@@ -73,15 +73,24 @@ fn recording_spawner(received: Arc<Mutex<Vec<(PathBuf, PathBuf)>>>) -> HostSpawn
     })
 }
 
-/// What one script did: its status and stderr, each decision, and each spawn.
+/// What one script did: its status, stdout and stderr, each decision, and each spawn.
 struct Ran {
     status: i32,
+    stdout: String,
     stderr: String,
     decided: Vec<Decided>,
     received: Vec<(PathBuf, PathBuf)>,
 }
 
 fn run(script: &str, declared: &[(&str, &Path)]) -> Ran {
+    run_replacing(script, declared, &[])
+}
+
+/// Run `script` with `declared` files, each name in `replaced` running its file in place of the
+/// Shell's own command.
+fn run_replacing(script: &str, declared: &[(&str, &Path)], replaced: &[&str]) -> Ran {
+    let replaced: ReplacedCommands =
+        Arc::new(replaced.iter().map(|name| (*name).to_string()).collect());
     let programs: HostPrograms = Arc::new(
         declared
             .iter()
@@ -101,6 +110,7 @@ fn run(script: &str, declared: &[(&str, &Path)]) -> Ran {
             .effect_interceptor(Arc::new(Recorder(Arc::clone(&decided))))
             .host_spawner(recording_spawner(Arc::clone(&received)))
             .host_programs(programs)
+            .replaced_commands(replaced)
             .build()
             .expect("shell builds");
         shell.run(script).await
@@ -108,6 +118,7 @@ fn run(script: &str, declared: &[(&str, &Path)]) -> Ran {
     rt.block_on(local);
     Ran {
         status: out.status,
+        stdout: out.stdout,
         stderr: out.stderr,
         decided: decided.lock().expect("read").clone(),
         received: received.lock().expect("read").clone(),
@@ -254,4 +265,79 @@ fn a_missing_declared_file_is_not_found_on_path_instead() {
         }]
     );
     assert!(ran.received.is_empty(), "{:?}", ran.received);
+}
+
+/// **A replaced command runs its declared file, with every argument.** `python3 -m venv .venv` is a
+/// `shell:spawn` of the declared file, not the Shell's own `python3`, which refuses `-m`.
+#[cfg(unix)]
+#[test]
+fn a_replaced_command_runs_its_declared_file() {
+    let base = fixture("replaced-command");
+    let declared = base.join("bin/tool");
+    let ran = run_replacing(
+        "python3 -m venv .venv",
+        &[("python3", &declared)],
+        &["python3"],
+    );
+
+    assert_eq!(ran.status, 0, "stderr: {}", ran.stderr);
+    assert_eq!(
+        ran.decided,
+        vec![Decided::Spawn {
+            program: "python3".into(),
+            path: base.join("real/tool").display().to_string(),
+        }]
+    );
+    assert_eq!(ran.received, vec![(base.join("real/tool"), declared)]);
+}
+
+/// **Declaring a file for a Shell command does not replace it, and neither does a replacement with
+/// no declared file.** Both keep the Shell's own `python3`, so nothing reaches the host `PATH`.
+#[cfg(unix)]
+#[test]
+fn a_command_is_replaced_only_when_it_is_both_declared_and_replaced() {
+    let base = fixture("declared-not-replaced");
+    let declared = base.join("bin/tool");
+    for ran in [
+        run_replacing("python3 --version", &[("python3", &declared)], &[]),
+        run_replacing("python3 --version", &[], &["python3"]),
+    ] {
+        assert_eq!(ran.status, 0, "stderr: {}", ran.stderr);
+        assert!(ran.stdout.contains("Monty"), "{}", ran.stdout);
+        assert_eq!(ran.decided, vec![Decided::Run("python3".into())]);
+        assert!(ran.received.is_empty(), "{:?}", ran.received);
+    }
+}
+
+/// **A builtin keeps precedence over a replacement.** Only the Shell's commands can be replaced.
+#[cfg(unix)]
+#[test]
+fn a_builtin_is_not_replaced() {
+    let base = fixture("builtin-not-replaced");
+    let declared = base.join("bin/tool");
+    let ran = run_replacing("cd .", &[("cd", &declared)], &["cd"]);
+
+    assert_eq!(ran.status, 0, "stderr: {}", ran.stderr);
+    assert!(ran.received.is_empty(), "{:?}", ran.received);
+}
+
+/// **`type` and `command -v` name the file that runs in place of a replaced command**, so a script
+/// that checks for `python3` before it runs it sees the real program.
+#[cfg(unix)]
+#[test]
+fn type_and_command_v_name_the_replacing_file() {
+    let base = fixture("replaced-lookup");
+    let declared = base.join("bin/tool");
+    let ran = run_replacing(
+        "type python3; command -v python3; command -V python3",
+        &[("python3", &declared)],
+        &["python3"],
+    );
+
+    assert_eq!(ran.status, 0, "stderr: {}", ran.stderr);
+    let path = declared.display().to_string();
+    assert_eq!(
+        ran.stdout,
+        format!("python3 is {path}\n{path}\npython3 is {path}\n")
+    );
 }

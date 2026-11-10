@@ -7,6 +7,7 @@
 //! | `env` | the literal environment, with no host inheritance |
 //! | `filesystem` | the eight path lists the process's own syscalls reach |
 //! | `grammar` | the tool grammar a `[tool.<name>]` carries, behind `tool-grammars` |
+//! | `replaces` | the Shell commands a `[tool.<name>]` runs in place of: `python`, `python3` |
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -56,6 +57,38 @@ pub(crate) struct ProcessSpec {
     /// Where callers reach the agent's servers, from `[[agent.ingress]]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) ingress: Vec<super::ingress::Ingress>,
+
+    /// The Shell commands this `[tool.<name>]` runs in place of: `python`, `python3`, or both.
+    /// Every other table refuses it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) replaces: Vec<String>,
+}
+
+/// The Shell commands a `[tool.<name>] replaces` may name.
+pub(crate) const REPLACEABLE_COMMANDS: [&str; 2] = ["python", "python3"];
+
+/// Refuse two `[tool.<name>]` tables that run in place of the same Shell command.
+pub(crate) fn validate_replaced_commands(
+    tools: &BTreeMap<String, ProcessSpec>,
+) -> Result<(), ConfigError> {
+    let mut claimed: BTreeMap<&str, &str> = BTreeMap::new();
+    for (label, spec) in tools {
+        for name in &spec.replaces {
+            match claimed.insert(name, label) {
+                Some(other) if other != label => {
+                    return Err(ConfigError::Process {
+                        table: format!("[tool.{label}]"),
+                        reason: format!(
+                            "`replaces` names `{name}`, which `[tool.{other}]` also replaces; one \
+                             tool runs in place of each command"
+                        ),
+                    });
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The eight path lists. A directory entry is recursive, and a file entry is exact.
@@ -287,6 +320,31 @@ impl ProcessSpec {
                 "`grammar` is refused on `{table}`: a tool grammar describes a program the hosted \
                  Shell starts, so only a `[tool.<name>]` takes one"
             )));
+        }
+        if !self.replaces.is_empty() {
+            if !table.starts_with("[tool.") {
+                return Err(refuse(format!(
+                    "`replaces` is refused on `{table}`: only a `[tool.<name>]` runs in place of a \
+                     Shell command"
+                )));
+            }
+            if let Some(name) = self
+                .replaces
+                .iter()
+                .find(|name| !REPLACEABLE_COMMANDS.contains(&name.as_str()))
+            {
+                return Err(refuse(format!(
+                    "`replaces` names {name:?}: a tool can run in place of only `python` and \
+                     `python3`, which otherwise run Box's Python (Monty)"
+                )));
+            }
+            if !self.fixed_arguments().is_empty() {
+                return Err(refuse(
+                    "`replaces` needs a `command` with no fixed arguments: a replaced name runs \
+                     the tool with exactly the arguments the agent passes"
+                        .into(),
+                ));
+            }
         }
         match self.command.first() {
             None => {
