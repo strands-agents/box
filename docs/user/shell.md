@@ -275,7 +275,10 @@ directly, reaches the box's `python3` alias. For a replaced name, the alias send
 command, `cd '<the caller's directory>' && python3 '<argument>' ...`, so the same tool runs under
 the same decision, in the directory the caller ran it from. The `cd` is its own
 [`shell:exec`](#shellexec) decision, so policy must permit `cd` too, as the `read_only_commands`
-example does. A directory the Shell can't enter fails the command.
+example does. A directory the Shell can't enter fails the command. The alias reads the directory
+from `PWD` when `PWD` names the directory it runs in, and asks the system otherwise. On macOS a
+process that may only enter the workspace can't read the workspace's path, so with no `PWD` the
+command runs in the workspace, where the Shell starts.
 [`limits.shell.timeout`](#limitsshelltimeout) then applies, not the direct alias's own Monty
 limits. Each argument reaches the tool as one word, and the alias forwards no standard input.
 

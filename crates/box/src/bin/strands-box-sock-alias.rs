@@ -155,10 +155,7 @@ fn parse_mode(executable: PathBuf, arguments: Vec<OsString>) -> io::Result<Mode>
 fn parse_alias(executable: &Path, name: &str, arguments: Vec<OsString>) -> io::Result<Mode> {
     if PYTHON_ALIAS_NAMES.contains(&name) {
         if is_replaced(executable, name)? {
-            let directory = std::env::current_dir().map_err(|error| {
-                io::Error::new(error.kind(), format!("read the working directory: {error}"))
-            })?;
-            let command = replaced_command(&directory, name, arguments)?;
+            let command = replaced_command(working_directory().as_deref(), name, arguments)?;
             return shell_mode(executable, OsString::from(command));
         }
         return parse_script_alias(executable, arguments);
@@ -293,18 +290,51 @@ fn is_replaced(executable: &Path, name: &str) -> io::Result<bool> {
     Ok(text.lines().any(|line| line == name))
 }
 
+/// The caller's working directory: `PWD` when it names that directory, else `getcwd`, else `None`.
+///
+/// On macOS a process that may only enter its directory can't read that directory's path, so
+/// `getcwd` fails in an agent sitting in the workspace root. `PWD` is used only when it is absolute
+/// and names the same directory as `.`, so a stale value never moves the command.
+fn working_directory() -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let same_as_here = |path: &Path| {
+        let (Ok(named), Ok(here)) = (std::fs::metadata(path), std::fs::metadata(".")) else {
+            return false;
+        };
+        (named.dev(), named.ino()) == (here.dev(), here.ino())
+    };
+    if let Some(pwd) = std::env::var_os("PWD").map(PathBuf::from)
+        && pwd.is_absolute()
+        && same_as_here(&pwd)
+    {
+        return Some(pwd);
+    }
+    std::env::current_dir().ok()
+}
+
 /// The Shell command that runs `name` with `arguments` in `directory`, the caller's own working
 /// directory, each word single-quoted.
 ///
 /// The Shell starts every command in the workspace, so the command enters `directory` first, and a
 /// relative path names what it named for the caller. A directory the Shell can't enter fails the
-/// command there rather than running it elsewhere.
-fn replaced_command(directory: &Path, name: &str, arguments: Vec<OsString>) -> io::Result<String> {
+/// command there rather than running it elsewhere. With no readable directory, the command runs in
+/// the workspace, which is where a caller that can't name its own directory almost always is.
+fn replaced_command(
+    directory: Option<&Path>,
+    name: &str,
+    arguments: Vec<OsString>,
+) -> io::Result<String> {
     let quoted = |word: &str| format!("'{}'", word.replace('\'', "'\\''"));
-    let directory = directory
-        .to_str()
-        .ok_or_else(|| invalid_input("the working directory is not valid UTF-8"))?;
-    let mut command = format!("cd {} && {name}", quoted(directory));
+    let mut command = match directory {
+        Some(directory) => {
+            let directory = directory
+                .to_str()
+                .ok_or_else(|| invalid_input("the working directory is not valid UTF-8"))?;
+            format!("cd {} && {name}", quoted(directory))
+        }
+        None => name.to_string(),
+    };
     for (index, argument) in arguments.into_iter().enumerate() {
         let argument = argument.into_string().map_err(|_| {
             invalid_input(format!("Python argument {} is not valid UTF-8", index + 1))
@@ -1047,7 +1077,7 @@ mod tests {
     #[test]
     fn a_replaced_python_name_routes_its_arguments_to_the_shell() {
         let (_root, bin) = replaced_box(Some("python\npython3\n"));
-        let here = std::env::current_dir().expect("the test's working directory");
+        let here = working_directory().expect("the test's working directory");
         let enter = format!("cd '{}' && ", here.display());
         for (name, given, command) in [
             (
@@ -1075,7 +1105,7 @@ mod tests {
     #[test]
     fn a_replaced_command_enters_the_callers_directory_first() {
         let command = replaced_command(
-            Path::new("/work/it's here"),
+            Some(Path::new("/work/it's here")),
             "python3",
             arguments(&["setup.py", "build"]),
         )
@@ -1085,6 +1115,16 @@ mod tests {
             command,
             "cd '/work/it'\\''s here' && python3 'setup.py' 'build'"
         );
+    }
+
+    /// **A caller that can't name its own directory runs the command in the workspace**, where the
+    /// Shell starts, with no `cd`.
+    #[test]
+    fn a_replaced_command_without_a_directory_runs_where_the_shell_starts() {
+        let command = replaced_command(None, "python3", arguments(&["-c", "pass"]))
+            .expect("the command builds");
+
+        assert_eq!(command, "python3 '-c' 'pass'");
     }
 
     /// **A name the list leaves out, or a box with no list, keeps Monty**, so `-m` is still the
