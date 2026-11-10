@@ -1,19 +1,7 @@
-//! `box.toml`'s `[mcp.<name>]` tables: which local MCP servers exist, and how each one starts.
-//!
-//! An entry declares identity and authorizes nothing. It holds only what is the operator's: a name,
-//! a program, and its arguments.
-//!
-//! It lives in the selected configuration, whose loaded filesystem identity cannot be mutated
-//! through either interpreter. That matters more here than for any other key, because the trusted
-//! `run` process starts the program an entry names outside containment.
-//!
-//! Two namespaces answer different questions. `name` is the policy identity a rule reads as
-//! `context.input.server`. `command` is what the harness executes: its program names the alias in
-//! `bin/`, and the full command selects the server. A client can execute `uvx mcp-proxy-for-aws`
-//! while the policy identifies the server as `aws-mcp`.
+//! Declared MCP transports, executable commands, and agent-facing aliases.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -27,8 +15,7 @@ use crate::record::config::process::{ContainedMcp, Filesystem, NetworkConfig, Pr
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub(crate) enum McpEntry {
-    /// A local MCP server. Element 0 of `command` is the program and names the alias in `bin/`;
-    /// the rest are its arguments, fixed here.
+    /// A local MCP server reached through an alias named for its executable's filename.
     ///
     /// Every stdio server is contained — that is not optional. The grant fields below are the
     /// server's reach; an entry that declares none runs on the leaf baseline alone (its command's
@@ -82,16 +69,14 @@ pub(crate) struct HttpMcp {
     pub(crate) secret: Option<EgressSecret>,
 }
 
-/// One declared server, with the name the operator keyed it under folded in. Identity only: a
-/// server's containment, if any, is carried beside this in `Record::contained_mcp` so this type
-/// stays what a rule matches — a name and a program — and every consumer of it is unchanged.
+/// One declared stdio server with its policy name and executable command.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct McpServer {
     /// What this server is called: the name a rule reads as `context.input.server`.
     pub(crate) name: String,
 
-    /// What to start, and the full command that selects it.
+    /// The executable and arguments to start.
     pub(crate) command: Vec<String>,
 
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -99,8 +84,12 @@ pub(crate) struct McpServer {
 }
 
 impl McpServer {
-    /// The program to start, which is the name its alias takes in `bin/`.
+    /// The executable's filename, which names its alias in `bin/`.
     pub(crate) fn program(&self) -> &str {
+        self.executable().rsplit('/').next().unwrap_or_default()
+    }
+
+    pub(crate) fn executable(&self) -> &str {
         self.command.first().map_or("", String::as_str)
     }
 
@@ -366,8 +355,21 @@ fn unrepresentable(server: &McpServer) -> Option<String> {
     if server.name.is_empty() {
         return reason("`name` is empty");
     }
-    if server.command.is_empty() || server.program().is_empty() {
+    if server.executable().is_empty() {
         return reason("`program` is empty, so nothing would start");
+    }
+    if server.executable().contains('/') && !Path::new(server.executable()).is_absolute() {
+        return reason(
+            "`program` must be a bare name or an absolute path; relative paths are unsupported",
+        );
+    }
+    if server.executable().contains("${") {
+        return reason(
+            "`program` does not expand tokens; use a bare name or a literal absolute path",
+        );
+    }
+    if server.program().is_empty() {
+        return reason("`program` ends with a directory separator, so its alias has no filename");
     }
     // `name` is an attribute a rule matches, so it takes the box-name character set.
     if let Some(character) = server
@@ -466,6 +468,110 @@ mod tests {
 
     fn as_declared(server: &McpServer) -> Option<Vec<String>> {
         Some(server.arguments().to_vec())
+    }
+
+    #[test]
+    fn an_absolute_command_keeps_its_target_and_is_called_by_its_filename() {
+        let command = "/opt/My tools/versions/uvx";
+        let map = entries(&format!(
+            "[mcp.fetch]\ntype = \"stdio\"\ncommand = [{command:?}, \"mcp-server-fetch\"]"
+        ));
+        let servers = from_entries(&map).expect("an absolute executable is supported");
+        let server = for_command(&servers, "uvx", &words(&["mcp-server-fetch"]), as_declared)
+            .expect("the filename is the agent-facing alias");
+        assert_eq!(server.command, [command, "mcp-server-fetch"]);
+        assert_eq!(contained_specs(&map)["fetch"].spec.command, server.command);
+        assert!(
+            for_command(
+                &servers,
+                command,
+                &words(&["mcp-server-fetch"]),
+                as_declared
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn absolute_commands_share_an_alias_but_require_distinct_arguments() {
+        for other in ["/other/bin/uvx", "uvx"] {
+            let text = format!(
+                "[[server]]\nname = \"first\"\ncommand = [\"/opt/bin/uvx\", \"fetch\"]\n\
+                 [[server]]\nname = \"second\"\ncommand = [{other:?}, \"fetch\"]"
+            );
+            let error = parse(&text).expect_err("one invocation cannot select two targets");
+            assert!(
+                error.to_string().contains("same command \"uvx fetch\""),
+                "{error}"
+            );
+            let distinct = text.replace(
+                &format!("[{other:?}, \"fetch\"]"),
+                &format!("[{other:?}, \"other\"]"),
+            );
+            let servers = parse(&distinct).expect("different arguments distinguish the targets");
+            assert!(shares_a_program(&servers));
+            for (argument, name) in [("fetch", "first"), ("other", "second")] {
+                assert_eq!(
+                    for_command(&servers, "uvx", &words(&[argument]), as_declared)
+                        .unwrap()
+                        .name,
+                    name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn absolute_commands_keep_the_wildcard_overlap_rules() {
+        let mut servers = parse(
+            "[[server]]\nname = \"first\"\ncommand = [\"/opt/bin/uvx\", \"*\", \"fixed\"]\n\
+             argument_wildcards = true\n\
+             [[server]]\nname = \"second\"\ncommand = [\"/other/bin/uvx\", \"value\", \"*\"]\n\
+             argument_wildcards = true",
+        )
+        .expect("the commands differ");
+        assert!(refuse_overlapping_wildcard_commands(&servers, as_declared).is_err());
+        servers[1].argument_wildcards = false;
+        assert!(refuse_overlapping_wildcard_commands(&servers, as_declared).is_ok());
+    }
+
+    #[test]
+    fn absolute_commands_require_a_representable_filename() {
+        for program in ["/", "/opt/bin/", "/opt/bin/.", "/opt/bin/.."] {
+            let error = parse(&format!(
+                "[[server]]\nname = \"test\"\ncommand = [{program:?}]"
+            ))
+            .expect_err("a directory is not an alias");
+            assert!(error.to_string().contains("directory"), "{error}");
+        }
+        for alias in crate::INTERPRETER_ALIASES {
+            let error = parse(&format!(
+                "[[server]]\nname = \"test\"\ncommand = [\"/opt/bin/{alias}\"]"
+            ))
+            .expect_err("the filename still selects an interpreter");
+            assert!(error.to_string().contains("interpreter aliases"), "{error}");
+        }
+        for program in ["/opt/bin/has space", "/opt/bin/sémantic"] {
+            let error = parse(&format!(
+                "[[server]]\nname = \"test\"\ncommand = [{program:?}]"
+            ))
+            .expect_err("an alias must use the existing character set");
+            assert!(error.to_string().contains("may hold only"), "{error}");
+        }
+    }
+
+    #[test]
+    fn executable_paths_are_absolute_and_do_not_expand_tokens() {
+        for program in ["./uvx", "../bin/uvx", "bin/uvx", "~/bin/uvx"] {
+            let error = parse(&format!(
+                "[[server]]\nname = \"test\"\ncommand = [{program:?}]"
+            ))
+            .expect_err("relative executable paths are unsupported");
+            assert!(error.to_string().contains("absolute"), "{error}");
+        }
+        let error = parse("[[server]]\nname = \"test\"\ncommand = [\"/opt/${VERSION}/uvx\"]")
+            .expect_err("the executable does not expand tokens");
+        assert!(error.to_string().contains("expand"), "{error}");
     }
 
     fn words(words: &[&str]) -> Vec<String> {

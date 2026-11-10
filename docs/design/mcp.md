@@ -37,6 +37,13 @@ The server's name comes from `box.toml`. A rule reads the `[mcp.<name>]` table's
 value from the request. See [every MCP server is one configuration
 table](decisions.md#an-mcp-server-is-one-configuration-table).
 
+For a local server, the configured command selects the executable and its arguments. An absolute
+path selects that file; a bare name uses the server's search path. The agent calls an alias named
+for the executable's filename. Box matches that name and the arguments, then launches the selected
+executable in the server's sandbox. The alias name also supplies policy's `program` field, while
+`program_path` identifies the resolved file. See
+[MCP executable filenames name their aliases](decisions.md#mcp-executable-filenames-name-their-aliases).
+
 ## Policy levels
 
 Two actions decide MCP requests, and a rule can narrow either one.

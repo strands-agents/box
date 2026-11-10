@@ -99,7 +99,7 @@ how Box handles secrets, and [outbound traffic](egress.md) explains the network 
 ### The MCP broker
 
 The MCP broker handles requests to local MCP servers within the broker. Each stdio server runs in
-its own sandbox. It starts when the agent invokes the server's full command through an alias and
+its own sandbox. It starts when the agent invokes the server's alias with matching arguments and
 policy permits `shell:spawn`. The command comes from
 [the server's configuration table](decisions.md#an-mcp-server-is-one-configuration-table).
 

@@ -280,6 +280,7 @@ write("home", os.environ.get("HOME", "<absent>"))
 write("path", os.environ.get("PATH", "<absent>"))
 write("cwd", pathlib.Path.cwd().resolve())
 write("sentinel", "present" if {sentinel:?} in os.environ else "absent")
+write("program", sys.argv[0])
 write("argv", json.dumps(sys.argv[1:], separators=(",", ":")))
 write("environment", json.dumps(dict(sorted(os.environ.items())), separators=(",", ":")))
 if behavior in ("fail", "hang"):
@@ -644,6 +645,15 @@ while True:
             .as_table_mut()
             .unwrap()
             .insert("argument_wildcards".into(), toml::Value::Boolean(enabled));
+        std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
+    }
+
+    pub fn set_server_executable(&self, server: &str, executable: &Path) {
+        let path = self.workspace.join(".strands-box").join("box.toml");
+        let mut config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        config["mcp"][server]["command"][0] =
+            toml::Value::String(executable.to_str().unwrap().to_string());
         std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
     }
 
