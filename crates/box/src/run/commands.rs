@@ -27,6 +27,8 @@ pub(crate) struct BareNames {
     pub(crate) declared: BTreeMap<String, (PathBuf, Vec<String>)>,
     /// Each name that tables with different program files answer to, and those tables.
     pub(crate) shared: BTreeMap<String, Vec<String>>,
+    /// Each declared name that its label settled, and the tables that run other files.
+    pub(crate) passed_over: BTreeMap<String, Vec<String>>,
 }
 
 impl BareNames {
@@ -188,16 +190,24 @@ impl ConfiguredCommands {
             } else {
                 Self::label_choice(name, &commands, search_path)
             };
-            match chosen {
-                Some(command) => {
-                    names
-                        .declared
-                        .insert(name.to_string(), (command.invoked.clone(), tables));
-                }
-                None => {
-                    names.shared.insert(name.to_string(), tables);
-                }
+            let Some(command) = chosen else {
+                names.shared.insert(name.to_string(), tables);
+                continue;
+            };
+            let (running, other): (Vec<_>, Vec<_>) = commands
+                .iter()
+                .partition(|(_, candidate, _)| candidate.identity == command.identity);
+            let label =
+                |(label, _, _): &(&str, &ConfiguredCommand, bool)| format!("[tool.{label}]");
+            if !other.is_empty() {
+                names
+                    .passed_over
+                    .insert(name.to_string(), other.iter().map(label).collect());
             }
+            names.declared.insert(
+                name.to_string(),
+                (command.invoked.clone(), running.iter().map(label).collect()),
+            );
         }
         names
     }
@@ -1454,11 +1464,13 @@ mod tests {
         let brew_first = commands.bare_names(&record, root.join("brew").as_os_str());
 
         assert_eq!(
-            past_the_stub
-                .declared
-                .get("git")
-                .map(|(path, _)| path.clone()),
-            Some(root.join("developer/git")),
+            past_the_stub.declared.get("git"),
+            Some(&(root.join("developer/git"), vec!["[tool.git]".to_string()])),
+            "{past_the_stub:?}"
+        );
+        assert_eq!(
+            past_the_stub.passed_over.get("git"),
+            Some(&vec!["[tool.brew_git]".to_string()]),
             "{past_the_stub:?}"
         );
         assert!(

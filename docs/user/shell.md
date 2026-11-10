@@ -261,6 +261,7 @@ the file of a `[tool]` is gone, its name is not found, and the Shell doesn't loo
 
 ```text
 strands-box: [tool.git]: a bare `git` in the Shell runs /Applications/Xcode.app/Contents/Developer/usr/bin/git
+strands-box: [tool.brew_git]: runs another file, so a bare `git` in the Shell runs the file of `[tool.git]`, whose label is that name
 strands-box: [tool.brew_node], [tool.node]: these tables run different files, so a bare `node` in the Shell runs the file that `PATH` finds
 ```
 
