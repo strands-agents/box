@@ -1194,27 +1194,35 @@ launcher, every other name would become a spawn that no policy can permit, so a 
 `unmodeled` action was also rejected. When several grammars bind one file, no single grammar owns
 the name, and a rule that permits `unmodeled` would admit a program that the operator never named.
 
-Box refuses a spawn of a bound file before the policy decision in three cases, and no rule can
+Box refuses a spawn before the policy decision in four cases, and no rule can
 permit any of them. The first is a replaced file: the bound path or link now leads to another file,
 for example after an update while the box runs. The second is a bare name whose bound file is gone
 or replaced, so `PATH` would find another file. A new file therefore cannot claim a grammar's
-permits under a bound name. The third is an agent spawn under a name that only a stdio
-`[mcp.<name>]` declares for that file. An `[mcp]` server's name counts only for that server's
+permits under a bound name. The third is an agent spawn of a file that a grammar binds, under a name
+that only a stdio `[mcp.<name>]` declares for that file. An `[mcp]` server's name counts only for that server's
 start, because the start and an agent spawn under the same spelling make the same `shell:spawn`
-request, and the permit the server needs would otherwise let the agent skip the grammar. Box also
-refuses bindings that another policy engine issued, so the bindings that decide a spawn are always
-those of the engine that decides it.
+request, and the permit the server needs would otherwise let the agent skip the grammar. The fourth
+is a server start whose called name matches an installed grammar but whose program file lacks a
+matching startup binding. This includes a program that was missing or unreadable at Box startup.
+Box refuses that start instead of applying a general `shell:spawn` permit. Box also refuses bindings
+that another policy engine issued, so the bindings that decide a spawn are always those of the
+engine that decides it.
 
-The cost has four parts. Two binaries of one program can't have different grammars: `/usr/bin/git`
+The cost has five parts. Two binaries of one program can't have different grammars: `/usr/bin/git`
 and `/opt/homebrew/bin/git` both read with the one git grammar. A bound file called by a name that no
 grammar binds is governed only by `shell:spawn`. That includes `make` through the macOS launcher,
 `python` through the mise shim binary, and a link `g` to a bound `git` that the workload can create
 where it can write. A `shell:spawn` permit that matches the bound file's `program_path` therefore
 admits each other name of it, so pin each `shell:spawn` permit on both `program` and `program_path`.
 An update that replaces a bound binary while the box runs refuses its bound names until the box
-restarts. A grammar also covers only the files that a `[tool]` or a stdio `[mcp.<name>]` runs. A copy
-of a bound binary at another path, or the same program reached through an unbound shim binary, is
-decided by the `shell:spawn` rules and not by its grammar.
+restarts. A grammar also covers only the files that a `[tool]` or a stdio `[mcp.<name>]` runs. For an
+agent spawn, an unbound copy at another path or the same program reached through an unbound shim binary is
+decided by `shell:spawn`, after the refusal checks above. A server whose called name matches an
+installed grammar must instead satisfy its startup binding. An unused missing server program does
+not prevent Box startup, but a newly installed or previously unreadable executable requires a new
+Box run with that file readable and executable. A retry in the same run can use an already-bound
+file under the same called name, provided the existing replacement checks pass. This keeps server
+startup on demand without letting an agent-created file claim a grammar's permissions by name.
 
 ## Containment
 

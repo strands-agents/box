@@ -301,7 +301,8 @@ Links, other names, and copies are decided as follows:
   When the server is requested, Box refuses its start if that binding is unavailable. A general
   `shell:spawn` permit cannot replace this check. The rest of Box keeps running.
   A later link to an already-bound file can satisfy the same file-and-name check on a retry.
-  To use a newly installed executable, restart Box with that program available.
+  To use a new or previously unreadable executable, make it readable and executable by the user
+  running Box, then restart Box.
 - **A copy at another path is a different file.** For an ordinary agent command, when no `[tool]`
   runs a copy of `git` at another path, Box decides that copy as `shell:spawn`.
   A local server whose program name requires a grammar must satisfy the binding check above.

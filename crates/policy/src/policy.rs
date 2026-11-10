@@ -636,10 +636,14 @@ mod tests {
         let Some(crate::grammar::GrammarCoverage::Refused(refusal)) = coverage else {
             panic!("an empty binding table must not bypass the server's required grammar");
         };
-        assert!(
-            refusal
-                .to_string()
-                .contains("tool grammar requires an approved program file")
+        assert_eq!(
+            refusal,
+            crate::grammar::CoverageRefusal::UnboundServer {
+                name: "git".into(),
+                program_path: program
+                    .canonicalize()
+                    .expect("the program path is canonical"),
+            }
         );
         assert!(
             engine

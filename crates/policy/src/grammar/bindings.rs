@@ -710,12 +710,13 @@ mod tests {
         let Some(GrammarCoverage::Refused(refusal)) = coverage else {
             panic!("a missing required server binding must refuse its start");
         };
-        assert!(
-            refusal
-                .to_string()
-                .contains("tool grammar requires an approved program file")
+        assert_eq!(
+            refusal,
+            CoverageRefusal::UnboundServer {
+                name: "git".into(),
+                program_path: missing.clone(),
+            }
         );
-        assert!(refusal.to_string().contains(&missing.display().to_string()));
         assert!(
             bindings
                 .coverage_for(ProgramFile::read(&missing), "git", Starter::Agent)
@@ -738,10 +739,12 @@ mod tests {
         else {
             panic!("a new server program must not bypass its required grammar");
         };
-        assert!(
-            refusal
-                .to_string()
-                .contains("tool grammar requires an approved program file")
+        assert_eq!(
+            refusal,
+            CoverageRefusal::UnboundServer {
+                name: "git".into(),
+                program_path: late.path.clone(),
+            }
         );
         assert!(
             bindings

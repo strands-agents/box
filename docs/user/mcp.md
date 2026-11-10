@@ -312,7 +312,7 @@ The harness gets these errors when it starts a server, and the box keeps running
 
 | Message | Cause |
 |---|---|
-| `its tool grammar requires an approved program file` | This server's program name requires a grammar, but its executable does not match a file bound under that name at startup. A link to an already-bound file can pass this check on retry. To use a newly installed executable, restart Box with that program available. |
+| `its tool grammar requires an approved program file` | This server's program name requires a grammar, but its executable does not match a file bound under that name at startup. If the program was missing or unreadable when Box started, make it readable and executable by the user running Box, then start a new Box run. A link to an already-bound file under the same called name can pass this check on retry, provided the existing replacement checks pass. |
 | `no MCP server declares "<command>"; servers on <program>: <name>, ...` | The harness ran a command that matches no `command` on that program. Set the harness's command and arguments to the `command` of one of the listed servers in `box.toml`. |
 | `` <name> (its `command` does not expand) `` in that list | The server's `command` holds a `${...}` name the box does not fill in. Use one of the three `OTEL_EXPORTER_OTLP_` names. |
 | ``no MCP server declares "<command>"; no `[mcp.<name>]` table in box.toml declares the program "<program>"`` | The harness ran a program that no `[mcp.<name>]` table names. |
