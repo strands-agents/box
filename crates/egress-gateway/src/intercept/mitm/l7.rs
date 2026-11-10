@@ -4,14 +4,18 @@ use std::borrow::Cow;
 use std::io;
 use std::net::TcpStream;
 
+use http_body_util::BodyExt;
+use zeroize::Zeroizing;
+
 use crate::audit::RequestId;
 
+use super::body::ResponseBody;
 use super::connect::{ConnectRequest, parse_authority, same_host};
 use super::{SharedState, http1};
 use crate::audit::Decision as AuditDecision;
 use crate::audit::EgressDecision;
 use crate::boundary::{HeaderMap, InterceptedRequest, Target};
-use crate::client::http::Upstream;
+use crate::client::http::{ResponseCompletion, ResponseProgress, Upstream};
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, McpFrame, McpListReply};
 use crate::error::{ProxyError, Result};
 use crate::mcp::{
@@ -25,13 +29,14 @@ pub(crate) async fn forward_tls(
     connect: &ConnectRequest,
     state: &SharedState,
     correlation: RequestId,
+    completion: &ResponseCompletion,
 ) -> Result<WorkloadResponse> {
     // Check the upstream's TLS name before any request effect.
     let server_name =
         rustls::pki_types::ServerName::try_from(connect.host.clone()).map_err(|_| {
             ProxyError::UpstreamConnect(format!("invalid upstream host {}", connect.host))
         })?;
-    let upstream = Upstream::new(upstream, Some(server_name), state);
+    let upstream = Upstream::new(upstream, Some(server_name), state, completion);
     let correlation = correlation.with_headers(&parsed.headers);
     // Pre-leg binding: the inner request must name the CONNECT authority, before any mutation.
     if let Err(error) =
@@ -63,7 +68,7 @@ pub(crate) async fn forward_tls(
 async fn run_l7_legs(
     connect: &ConnectRequest,
     mut req: InterceptedRequest,
-    upstream: Upstream,
+    upstream: Upstream<'_>,
     state: &SharedState,
     correlation: RequestId,
     revalidate: impl FnOnce(&str, &str, &HeaderMap) -> Result<()>,
@@ -227,28 +232,63 @@ async fn run_l7_legs(
         &allow_reason,
         correlation.clone(),
     );
-    // The request permit is consumed at reply time, or when no reply comes.
+    // The request permit follows the upstream exchange through its terminal response.
+    let cursor = mcp_target
+        .as_ref()
+        .filter(|(_, target)| target.method() == "tools/list")
+        .and_then(|_| list_cursor(&req.body));
+    let forwarded_body = match forwarded_body {
+        Cow::Owned(body) => body,
+        Cow::Borrowed(_) => std::mem::take(&mut req.body),
+    };
     let (outcome, response) = upstream
-        .send(state, &method, prepared_request.as_bytes(), &forwarded_body)
+        .send(
+            state,
+            &method,
+            prepared_request,
+            Zeroizing::new(forwarded_body),
+        )
         .await;
-    request_permit
-        .record_outcome(outcome)
-        .map_err(|error| ProxyError::Io(format!("recording upstream request outcome: {error}")))?;
-
-    // --- Response leg: read, scrub, return ---
-    let parsed = response?;
-    let mut res = parsed.response;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) => {
+            request_permit.record_outcome(outcome).map_err(|error| {
+                ProxyError::Io(format!("recording upstream request outcome: {error}"))
+            })?;
+            return Err(error);
+        }
+    };
+    let mut head = response.head;
+    let mut body = response.body;
+    body.track_request(request_permit, outcome)
+        .map_err(|error| ProxyError::Io(error.to_string()))?;
     // Only the gateway claims a refusal, so a relayed response never carries the marker. An origin
     // that set it would otherwise make a permitted answer read as a denial, with its own first body
     // line as the reason.
-    res.headers.remove(crate::PROXY_ORIGIN_HEADER);
+    head.headers.remove(crate::PROXY_ORIGIN_HEADER);
 
-    if state.controls.apply_to_response(&mut res, &target).is_err() {
-        return Ok(WorkloadResponse::refusal(
-            403,
-            b"response blocked by egress control",
-        ));
+    let controls = match state.controls.response_controls(&mut head.headers, &target) {
+        Ok(controls) => controls,
+        Err(_) => {
+            return Ok(WorkloadResponse::refusal(
+                403,
+                b"response blocked by egress control",
+            ));
+        }
+    };
+    if controls.requires_empty_body {
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|error| ProxyError::Io(format!("upstream body: {error}")))?;
+            if frame.data_ref().is_some_and(|data| !data.is_empty()) {
+                return Ok(WorkloadResponse::refusal(
+                    403,
+                    b"response blocked by egress control",
+                ));
+            }
+        }
     }
+    let mut progress = Some(body.progress());
+    let mut body = ResponseBody::streaming(body, controls.redactors);
 
     // Lazy remote MCP discovery: on the workload's `tools/list` to a configured MCP server, stage
     // the response catalog into the authority so the server's per-tool actions reach runtime
@@ -256,29 +296,31 @@ async fn run_l7_legs(
     // Best-effort: a staging failure warns and the catalog still returns.
     if let Some((server, target)) = &mcp_target
         && target.method() == "tools/list"
-        && let Err(error) = state.effect_interceptor.stage_mcp_catalog(
+    {
+        let captured = http1::collect(body, state.config.response_limits.max_body_bytes).await?;
+        if let Err(error) = state.effect_interceptor.stage_mcp_catalog(
             server,
             McpListReply {
                 session: req.headers.get("mcp-session-id"),
-                cursor: list_cursor(&req.body).as_deref(),
-                body: &res.body,
+                cursor: cursor.as_deref(),
+                body: &captured,
             },
-        )
-    {
-        eprintln!(
-            "strands-box: warning: staging remote MCP catalog for {server:?} failed: {error}"
-        );
+        ) {
+            eprintln!(
+                "strands-box: warning: staging remote MCP catalog for {server:?} failed: {error}"
+            );
+        }
+        body = captured.into();
+        progress = None;
     }
 
-    // Wait until response controls and leakback scrubbing have finished, then claim the
-    // release immediately before the governed bytes are delivered to the workload.
+    // Claim release before the workload can receive any processed upstream bytes.
     let response_attempt = EffectAttempt::ResponseRelease {
         host: &connect.host,
         port: connect.port,
         method: &method,
         path: &workload_path,
-        status: res.status,
-        body_bytes: res.body.len(),
+        status: head.status,
     };
     let response_permit = match claim_effect(state, &response_attempt) {
         Ok(permit) => permit,
@@ -286,12 +328,13 @@ async fn run_l7_legs(
     };
 
     Ok(WorkloadResponse {
-        status: res.status,
+        status: head.status,
         reason: None,
-        headers: res.headers,
-        body: res.body,
+        headers: head.headers,
+        body,
         release: Some(response_permit),
-        header_case: parsed.header_case,
+        header_case: head.header_case,
+        progress,
     })
 }
 
@@ -303,8 +346,9 @@ pub(crate) async fn forward_plain(
     origin_target: String,
     state: &SharedState,
     correlation: RequestId,
+    completion: &ResponseCompletion,
 ) -> Result<WorkloadResponse> {
-    let upstream = Upstream::new(upstream, None, state);
+    let upstream = Upstream::new(upstream, None, state, completion);
     let mut req = intercepted_request(connect, &origin_target, parsed);
 
     // Bind the `Host` header to the URL authority the gateway judged. A plain-HTTP request carries its
@@ -361,11 +405,12 @@ pub(crate) struct WorkloadResponse {
     /// A reason phrase in place of the standard one.
     pub(crate) reason: Option<&'static str>,
     pub(crate) headers: HeaderMap,
-    pub(crate) body: Vec<u8>,
+    pub(crate) body: ResponseBody,
     /// The claimed release of a governed response, recorded once hyper has written it.
     pub(crate) release: Option<ClaimedEffectPermit>,
     /// The upstream's header case. Without it, hyper writes header names in lowercase.
     pub(crate) header_case: hyper::http::Extensions,
+    pub(crate) progress: Option<ResponseProgress>,
 }
 
 impl WorkloadResponse {
@@ -374,7 +419,7 @@ impl WorkloadResponse {
         Self {
             reason: None,
             headers: proxy_originated_headers(),
-            body: body.to_vec(),
+            body: body.to_vec().into(),
             ..Self::bare(status)
         }
     }
@@ -391,9 +436,10 @@ impl WorkloadResponse {
             status,
             reason,
             headers: HeaderMap::new(),
-            body: Vec::new(),
+            body: Vec::new().into(),
             release: None,
             header_case: hyper::http::Extensions::new(),
+            progress: None,
         }
     }
 
@@ -596,7 +642,10 @@ mod tests {
             );
             let response = interceptor_error(&error, request);
             assert_eq!(response.status, 403);
-            let body = std::str::from_utf8(&response.body).unwrap();
+            let bytes = crate::transport::socket::block_on(http1::collect(response.body, 16384))
+                .unwrap()
+                .unwrap();
+            let body = std::str::from_utf8(&bytes).unwrap();
             let decoded: serde_json::Value;
             let message = if request.is_some() {
                 decoded = serde_json::from_str(body).unwrap();
@@ -612,7 +661,10 @@ mod tests {
 
             let response = interceptor_error(&io::Error::other("private backend failure"), request);
             assert_eq!(response.status, 502);
-            assert_eq!(response.body, b"effect interceptor unavailable");
+            let bytes = crate::transport::socket::block_on(http1::collect(response.body, 16384))
+                .unwrap()
+                .unwrap();
+            assert_eq!(bytes, b"effect interceptor unavailable");
         }
     }
 

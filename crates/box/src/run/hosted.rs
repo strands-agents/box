@@ -640,39 +640,40 @@ impl HostedBox {
     }
 
     /// `policy`, bound to every `[tool.<name>]` in `record` at the program file `commands` opened
-    /// for it, with each stdio `[mcp.<name>]` program declared for its own start
+    /// for it, and to the program file of each stdio `[mcp.<name>]`. A grammar's `program` that is
+    /// not the last component of its tool's `command` must find that tool's file on `search_path`
     /// (docs/design/decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name).
     pub(crate) fn bind_tool_grammars(
         policy: PolicyEngine,
         record: &Record,
         commands: &ConfiguredCommands,
+        search_path: &std::ffi::OsStr,
     ) -> Result<PolicyEngine, BoxError> {
         let mut bindings = policy.grammar_bindings();
         if !record.experimental_features.tool_grammars {
             return Ok(policy);
         }
-        let programs: BTreeSet<&str> = record
-            .tool
-            .values()
-            .filter(|spec| spec.grammar.is_some())
-            .map(crate::record::config::grammar::called_name)
-            .collect();
         for (label, spec) in &record.tool {
+            let table = format!("[tool.{label}]");
             let command = commands.get(label).ok_or_else(|| ConfigError::Process {
-                table: format!("[tool.{label}]"),
+                table: table.clone(),
                 reason: "has no configured command for this run".to_string(),
             })?;
-            if programs.contains(crate::record::config::grammar::called_name(spec)) {
-                command.refuse_a_grammar_on_several_names()?;
+            let name = crate::record::config::grammar::bound_name(spec).ok_or_else(|| {
+                ConfigError::Process {
+                    table: table.clone(),
+                    reason: format!(
+                        "`{}.program` is not a string",
+                        crate::record::config::grammar::grammar_key(label)
+                    ),
+                }
+            })?;
+            if spec.grammar.is_some() && name != crate::record::config::grammar::called_name(spec) {
+                program_finds_command(label, name, command, search_path)?;
             }
-            bindings.declare_tool(
-                command.opened(),
-                command.path(),
-                command.invoked(),
-                crate::record::config::grammar::called_name(spec),
-            )?;
+            bindings.declare_tool(command.opened(), command.path(), command.invoked(), name)?;
         }
-        for (label, contained) in &record.contained_mcp {
+        for contained in record.contained_mcp.values() {
             let spec = &contained.spec;
             let Ok(program) =
                 crate::run::contain::executable::resolve(spec.program(), &spec.search_path())
@@ -683,23 +684,6 @@ impl HostedBox {
             else {
                 continue;
             };
-            let called = crate::record::config::grammar::called_name(spec);
-            let names = opened.metadata().map_or(1, |metadata| {
-                use std::os::unix::fs::MetadataExt as _;
-                metadata.nlink()
-            });
-            if programs.contains(called) && names > 1 {
-                return Err(ConfigError::Process {
-                    table: format!("[mcp.{label}]"),
-                    reason: format!(
-                        "configured command {} has {names} names, and a tool grammar on it \
-                         refuses each name that no `[tool]` declares. Point `command` at a copy \
-                         with one name",
-                        program.granted_path().display()
-                    ),
-                }
-                .into());
-            }
             bindings.declare_server(
                 &opened,
                 program.granted_path(),
@@ -1015,6 +999,45 @@ impl HostedBox {
     }
 }
 
+/// Refuse the grammar on `[tool.<label>]` unless its `program`, found on `search_path`, is the file
+/// that `command` opened.
+fn program_finds_command(
+    label: &str,
+    program: &str,
+    command: &crate::run::commands::ConfiguredCommand,
+    search_path: &std::ffi::OsStr,
+) -> Result<(), ConfigError> {
+    use std::os::unix::fs::MetadataExt as _;
+    let identity = |metadata: std::fs::Metadata| (metadata.dev(), metadata.ino());
+    let found = crate::run::contain::executable::find_on(program, search_path);
+    let reached = found
+        .as_deref()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(identity);
+    if reached.is_some() && reached == command.opened().metadata().ok().map(identity) {
+        return Ok(());
+    }
+    let finds = match &found {
+        Some(path) => format!(
+            "finds {}",
+            std::fs::canonicalize(path)
+                .unwrap_or_else(|_| path.clone())
+                .display()
+        ),
+        None => "finds no program by that name".to_string(),
+    };
+    Err(ConfigError::Process {
+        table: format!("[tool.{label}]"),
+        reason: format!(
+            "`{}.program` is {program:?}, and `PATH` {finds}, but `command` runs {}; a grammar \
+             reads only the program its own tool runs, so set `program` to the name that finds \
+             that file on `PATH`, or move the grammar to the tool that runs {program:?}",
+            crate::record::config::grammar::grammar_key(label),
+            command.path().display(),
+        ),
+    })
+}
+
 impl Drop for HostedBox {
     fn drop(&mut self) {
         *RUNNING_POLICY
@@ -1116,13 +1139,32 @@ mod tests {
         record
     }
 
-    /// The engine a run opens over `record` and `text`, bound as `run` binds it.
+    /// The engine a run opens over `record` and `text`, bound as `run` binds it, with each tool's
+    /// directory on the search path.
     fn bound_engine(
         root: &BoxRoot,
         record: &Record,
         commands: &ConfiguredCommands,
         text: &str,
     ) -> Arc<PolicyEngine> {
+        let search_path = std::env::join_paths(
+            record
+                .tool
+                .values()
+                .filter_map(|spec| Path::new(spec.program()).parent()),
+        )
+        .expect("the search path joins");
+        Arc::new(bind_on(root, record, commands, text, &search_path).expect("the tools bind"))
+    }
+
+    /// The engine a run opens over `record` and `text`, bound against `search_path`.
+    fn bind_on(
+        root: &BoxRoot,
+        record: &Record,
+        commands: &ConfiguredCommands,
+        text: &str,
+        search_path: &std::ffi::OsStr,
+    ) -> Result<PolicyEngine, BoxError> {
         let grammars =
             crate::record::config::grammar::tool_grammars(&record.tool).expect("the grammar loads");
         let engine = HostedBox::prepare_policy(
@@ -1135,11 +1177,153 @@ mod tests {
             grammars,
         )
         .expect("the policy opens");
-        Arc::new(HostedBox::bind_tool_grammars(engine, record, commands).expect("the tools bind"))
+        HostedBox::bind_tool_grammars(engine, record, commands, search_path)
+    }
+
+    /// `home/lib/npm-cli.js`, at its canonical path, with a link `home/bin/npm` to it.
+    fn linked_npm(home: &Path) -> PathBuf {
+        let library = home.join("lib");
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&library).expect("a library directory");
+        std::fs::create_dir_all(&bin).expect("a bin directory");
+        let file = library.join("npm-cli.js");
+        install_program(&file);
+        std::os::unix::fs::symlink("../lib/npm-cli.js", bin.join("npm")).expect("the npm link");
+        file.canonicalize().expect("the file resolves")
+    }
+
+    /// A record whose one `[tool.npm]` runs `program` and carries an npm grammar with `install`.
+    fn npm_record(root: &BoxRoot, program: &Path) -> Record {
+        let mut record = record_with_mcp(root, Vec::new());
+        record.experimental_features.tool_grammars = true;
+        let spec: ProcessSpec = toml::from_str(&format!(
+            "command = [{:?}]\n[grammar]\nformat = 1\nversion = 1\nname = \"npm\"\n\
+             program = \"npm\"\n[grammar.shell.install]\nusage = \"npm install\"\n",
+            program.display().to_string()
+        ))
+        .expect("the tool parses");
+        record.tool.insert("npm".to_string(), spec);
+        record
+    }
+
+    #[tokio::test]
+    async fn a_grammar_binds_under_its_program_when_the_command_names_the_linked_file() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-linked");
+        let file = linked_npm(home.path());
+        let record = npm_record(&root, &file);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+        let engine = bind_on(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+            home.path().join("bin").as_os_str(),
+        )
+        .expect("`npm` on the search path finds the tool's file");
+        let path = file.display().to_string();
+
+        let capture = telemetry::ObservationCapture::begin();
+        let refused = spawned_as(&Arc::new(engine), "npm", &path, &["install"])
+            .await
+            .expect_err("no rule permits the install, and `shell:spawn` does not decide it");
+        let decided = capture.last().expect("the engine decided the spawn");
+        assert_eq!(decided.action(), r#"Tool::npm::Action::"install""#);
+        assert!(refused.contains("[default-deny]"), "{refused}");
+    }
+
+    #[test]
+    fn a_grammar_whose_program_finds_another_file_is_refused() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-other");
+        let gh = home.path().join("gh");
+        install_program(&gh);
+        install_program(&home.path().join("git"));
+        let gh = gh.canonicalize().expect("gh resolves");
+        let mut record = grammar_record(&root, &gh);
+        let spec = record.tool.remove("git").expect("the git tool");
+        record.tool.insert("gh".to_string(), spec);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+
+        let refusal = bind_on(&root, &record, &commands, "", home.path().as_os_str())
+            .expect_err("`git` finds another file than the tool runs")
+            .to_string();
+
+        let git = home
+            .path()
+            .join("git")
+            .canonicalize()
+            .expect("git resolves");
+        assert_eq!(
+            refusal,
+            format!(
+                "invalid `[tool.gh]` table: `tool.gh.grammar.program` is \"git\", and `PATH` \
+                 finds {}, but `command` runs {}; a grammar reads only the program its own tool \
+                 runs, so set `program` to the name that finds that file on `PATH`, or move the \
+                 grammar to the tool that runs \"git\"",
+                git.display(),
+                gh.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_grammar_whose_command_calls_its_program_binds_when_another_file_is_first_on_path() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-shadowed");
+        let brew = home.path().join("brew");
+        let system = home.path().join("system");
+        std::fs::create_dir(&brew).expect("a first directory");
+        std::fs::create_dir(&system).expect("a second directory");
+        install_program(&brew.join("git"));
+        install_program(&system.join("git"));
+        let git = system.join("git").canonicalize().expect("git resolves");
+        let record = grammar_record(&root, &git);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+        let search_path = std::env::join_paths([&brew, &system]).expect("the search path joins");
+
+        bind_on(&root, &record, &commands, "", &search_path)
+            .expect("a command that calls `git` binds, whatever `PATH` finds first");
+    }
+
+    #[test]
+    fn a_grammar_whose_program_finds_nothing_is_refused() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-absent");
+        let file = linked_npm(home.path());
+        let record = npm_record(&root, &file);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+
+        let refusal = bind_on(
+            &root,
+            &record,
+            &commands,
+            "",
+            home.path().join("lib").as_os_str(),
+        )
+        .expect_err("no `npm` is on the search path")
+        .to_string();
+
+        assert!(
+            refusal.starts_with(
+                "invalid `[tool.npm]` table: `tool.npm.grammar.program` is \"npm\", and `PATH` \
+                 finds no program by that name, but `command` runs "
+            ),
+            "{refusal}"
+        );
     }
 
     async fn spawned(
         engine: &Arc<PolicyEngine>,
+        program_path: &str,
+        args: &[&str],
+    ) -> Result<(), String> {
+        spawned_as(engine, "git", program_path, args).await
+    }
+
+    async fn spawned_as(
+        engine: &Arc<PolicyEngine>,
+        program: &str,
         program_path: &str,
         args: &[&str],
     ) -> Result<(), String> {
@@ -1150,8 +1334,8 @@ mod tests {
             GovernedBox::assigned("codex"),
         )
         .intercept(&strands_shell::EffectAttempt::ShellSpawn {
-            command: "git",
-            program: "git",
+            command: program,
+            program,
             program_path,
             args: &args,
             literal: &[],
@@ -1206,16 +1390,23 @@ mod tests {
         let program = program.canonicalize().expect("the program resolves");
         let record = grammar_record(&root, &program);
         let commands = ConfiguredCommands::load(&record).expect("the commands load");
+        let kept = home.path().join("kept");
+        std::fs::create_dir(&kept).expect("a directory for the opened file");
+        std::fs::hard_link(&program, kept.join("git")).expect("the opened file keeps a name");
         let staged = home.path().join("git.new");
         install_program(&staged);
         std::fs::rename(&staged, &program)
             .expect("the program is replaced after the run opened it");
 
-        let engine = bound_engine(
-            &root,
-            &record,
-            &commands,
-            "permit (principal, action, resource);",
+        let engine = Arc::new(
+            bind_on(
+                &root,
+                &record,
+                &commands,
+                "permit (principal, action, resource);",
+                kept.as_os_str(),
+            )
+            .expect("`git` on the search path finds the opened file"),
         );
 
         let refused = spawned(&engine, &program.display().to_string(), &["status"])
@@ -1272,7 +1463,7 @@ mod tests {
         assert_eq!(
             started,
             Ok(()),
-            "the operator declared the name, so `shell:spawn` decides the start"
+            "no grammar binds the server's name, so `shell:spawn` decides the start"
         );
         let by_the_agent = policy::ShellPolicyInterceptor::into_handle(
             Arc::clone(&engine),
@@ -1296,10 +1487,16 @@ mod tests {
                 .is_err_and(|refused| refused.contains("[tool-grammar]")),
             "the agent cannot use the server's name to leave the grammar: {by_the_agent:?}"
         );
+        assert!(
+            spawned(&engine, &program.display().to_string(), &["push"])
+                .await
+                .is_err_and(|refused| refused.contains("[default-deny]")),
+            "the declared name keeps its grammar, and `shell:spawn` does not decide it"
+        );
     }
 
-    #[test]
-    fn an_mcp_server_that_a_grammar_binds_is_refused_when_its_file_has_several_names() {
+    #[tokio::test]
+    async fn an_mcp_server_that_a_grammar_binds_starts_when_its_file_has_several_names() {
         let home = tempfile::tempdir().expect("operator home");
         let root = crate::record::layout::testing::box_root(home.path(), "grammar-mcp-names");
         let program = home.path().join("git");
@@ -1309,7 +1506,8 @@ mod tests {
         std::fs::create_dir(&shared).expect("a second directory");
         let server = shared.join("git");
         install_program(&server);
-        std::fs::hard_link(&server, shared.join("make")).expect("a second name");
+        let make = shared.join("make");
+        std::fs::hard_link(&server, &make).expect("a second name");
         let mut record = grammar_record(&root, &program);
         record.contained_mcp.insert(
             "repo".to_string(),
@@ -1319,42 +1517,92 @@ mod tests {
             },
         );
         let commands = ConfiguredCommands::load(&record).expect("the commands load");
-        let grammars =
-            crate::record::config::grammar::tool_grammars(&record.tool).expect("the grammar loads");
-        let engine =
-            HostedBox::prepare_policy(&root, &policy::Operator::unanchored(), Vec::new(), grammars)
-                .expect("the policy opens");
-
-        let refusal = HostedBox::bind_tool_grammars(engine, &record, &commands)
-            .expect_err("a grammar on a server file with several names is refused")
-            .to_string();
+        let engine = bound_engine(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        );
 
         assert!(
-            refusal.contains("[mcp.repo]") && refusal.contains("has 2 names"),
-            "{refusal}"
+            spawned(&engine, &server.display().to_string(), &["push"])
+                .await
+                .is_err_and(|refused| refused.contains("[default-deny]")),
+            "the server's file keeps the grammar under the name `git`"
+        );
+        assert_eq!(
+            spawned_as(&engine, "make", &make.display().to_string(), &["all"]).await,
+            Ok(()),
+            "another name of the server's file is a `shell:spawn`"
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn hard_linked_tool_names_keep_separate_grammar_and_spawn_decisions() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-linked-tool");
+        let program = home.path().join("git");
+        install_program(&program);
+        let program = program.canonicalize().expect("the program resolves");
+        let make = home.path().join("make");
+        std::fs::hard_link(&program, &make).expect("a second name for the tool");
+        let record = grammar_record(&root, &program);
+        let commands = ConfiguredCommands::load(&record).expect("the hard-linked tool loads");
+        let engine = bound_engine(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Tool::git::Action::"status", resource);
+               permit (principal, action == Box::Action::"shell:spawn", resource)
+               when { context.input.program == "make" };"#,
+        );
+
+        spawned(&engine, &program.display().to_string(), &["status"])
+            .await
+            .expect("the grammar permits git status");
+        assert!(
+            spawned(&engine, &program.display().to_string(), &["push"])
+                .await
+                .is_err_and(|refused| refused.contains("[default-deny]")),
+            "the second name does not bypass the git grammar"
+        );
+        assert_eq!(
+            spawned_as(&engine, "make", &make.display().to_string(), &["all"]).await,
+            Ok(()),
+            "the second name uses its shell:spawn permission"
         );
     }
 
     #[cfg(target_os = "macos")]
-    #[test]
-    fn a_grammar_on_apples_git_is_refused_because_its_file_has_several_names() {
+    #[tokio::test]
+    async fn a_grammar_on_apples_git_binds_git_and_leaves_its_other_names_to_shell_spawn() {
         let home = tempfile::tempdir().expect("operator home");
         let root = crate::record::layout::testing::box_root(home.path(), "grammar-several");
         let record = grammar_record(&root, Path::new("/usr/bin/git"));
         let commands = ConfiguredCommands::load(&record).expect("/usr/bin/git loads");
-        let grammars =
-            crate::record::config::grammar::tool_grammars(&record.tool).expect("the grammar loads");
-        let engine =
-            HostedBox::prepare_policy(&root, &policy::Operator::unanchored(), Vec::new(), grammars)
-                .expect("the policy opens");
+        let engine = bound_engine(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Tool::git::Action::"status", resource);
+               permit (principal, action == Box::Action::"shell:spawn", resource)
+               when { context.input.program == "make" };"#,
+        );
 
-        let refusal = HostedBox::bind_tool_grammars(engine, &record, &commands)
-            .expect_err("a grammar on a file with several names is refused")
-            .to_string();
-
+        spawned(&engine, "/usr/bin/git", &["status"])
+            .await
+            .expect("the grammar action permit admits `git status`");
         assert!(
-            refusal.contains("names, and a tool grammar on it refuses"),
-            "{refusal}"
+            spawned(&engine, "/usr/bin/git", &["push"])
+                .await
+                .is_err_and(|refused| refused.contains("[default-deny]")),
+            "no rule permits the push"
+        );
+        assert_eq!(
+            spawned_as(&engine, "make", "/usr/bin/git", &["all"]).await,
+            Ok(()),
+            "another name of the launcher file is a `shell:spawn`"
         );
     }
 
@@ -1773,9 +2021,9 @@ wait"#;
             .registry();
         let arguments = record.mcp[0].arguments().to_vec();
         let (mut leader_reader, mut leader_writer) =
-            initialized_mcp_client(&root, "/bin/sh", &arguments).await;
+            initialized_mcp_client(&root, "sh", &arguments).await;
         let (mut follower_reader, mut follower_writer) =
-            initialized_mcp_client(&root, "/bin/sh", &arguments).await;
+            initialized_mcp_client(&root, "sh", &arguments).await;
         let pids = wait_for_pids(&pids_path, 4)
             .await
             .expect("both MCP process groups start");

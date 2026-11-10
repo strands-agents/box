@@ -12,9 +12,22 @@ use crate::record::config::Record;
 use crate::record::config::filesystem::DirectReach;
 use crate::record::layout::{disk_identity, lies_within, open_without_following};
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod aliases;
+
 #[derive(Debug, Default)]
 pub(crate) struct ConfiguredCommands {
     tools: BTreeMap<String, Arc<ConfiguredCommand>>,
+}
+
+/// Why command protection refuses a mutation.
+#[derive(Debug)]
+pub(crate) enum CommandMutationRefusal {
+    CommandOrAncestor,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    HardLinkAlias,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    IncompleteScan(std::io::Error),
 }
 
 #[derive(Debug)]
@@ -26,6 +39,8 @@ pub(crate) struct ConfiguredCommand {
     opened: File,
     identity: (u64, u64),
     loaded: FileState,
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    needs_alias_scan: bool,
 }
 
 /// The link count, owner, group, and mode of a command file.
@@ -70,7 +85,9 @@ impl ConfiguredCommands {
                     return Err(refusal(&table, &path, "must be a regular file"));
                 }
                 let loaded = FileState::of(&metadata);
-                if loaded.links > 1 && writable_by_this_user(&opened, &path, loaded) {
+                let writable_links =
+                    loaded.links > 1 && writable_by_this_user(&opened, &path, loaded);
+                if writable_links && !cfg!(any(target_os = "macos", target_os = "linux")) {
                     return Err(refusal(
                         &table,
                         &path,
@@ -95,6 +112,8 @@ impl ConfiguredCommands {
                     opened,
                     identity: (metadata.dev(), metadata.ino()),
                     loaded,
+                    #[cfg(any(target_os = "macos", target_os = "linux"))]
+                    needs_alias_scan: writable_links,
                 };
                 command.verify()?;
                 Ok((label.clone(), Arc::new(command)))
@@ -111,8 +130,23 @@ impl ConfiguredCommands {
         self.tools.get(label)
     }
 
-    pub(crate) fn refuses_mutation(&self, path: &Path) -> bool {
-        self.tools.values().any(|command| command.enclosed_by(path))
+    pub(crate) fn mutation_refusal(&self, path: &Path) -> Option<CommandMutationRefusal> {
+        if self.tools.values().any(|command| command.enclosed_by(path)) {
+            return Some(CommandMutationRefusal::CommandOrAncestor);
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let identities = self.mutable_aliases(path);
+            if !identities.is_empty() {
+                return match aliases::contains(path, &identities) {
+                    Ok(true) => Some(CommandMutationRefusal::HardLinkAlias),
+                    Ok(false) => None,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => Some(CommandMutationRefusal::IncompleteScan(error)),
+                };
+            }
+        }
+        None
     }
 
     pub(crate) fn validate_reach(&self, table: &str, reach: &DirectReach) -> Result<(), BoxError> {
@@ -139,12 +173,53 @@ impl ConfiguredCommands {
                     .into());
                 }
             }
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
+            if grant.scope != Scope::File {
+                let identities = self.mutable_aliases(&grant.resolved);
+                if identities.is_empty() {
+                    continue;
+                }
+                let reason = match aliases::contains(&grant.resolved, &identities) {
+                    Ok(false) => continue,
+                    Ok(true) => "contains a hard link to a configured tool command".to_string(),
+                    Err(error) => {
+                        format!("cannot be inspected for configured command hard links: {error}")
+                    }
+                };
+                return Err(ConfigError::Filesystem {
+                    table: table.to_string(),
+                    entry: grant.authored.clone(),
+                    reason: format!(
+                        "this write grant {reason}. Keep configured tools and their hard links \
+                         outside every process's write grants"
+                    ),
+                }
+                .into());
+            }
         }
         Ok(())
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn mutable_aliases(&self, target: &Path) -> Vec<(u64, u64)> {
+        let directory = std::fs::symlink_metadata(target).is_ok_and(|metadata| metadata.is_dir());
+        self.tools
+            .values()
+            .filter(|command| {
+                command.needs_alias_scan && (!directory || !command.every_name_beside(target))
+            })
+            .map(|command| command.identity)
+            .collect()
     }
 }
 
 impl ConfiguredCommand {
+    /// Whether the current target can omit the hard-link scan for this command.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn every_name_beside(&self, target: &Path) -> bool {
+        aliases::every_name_beside(&self.path, &self.opened, self.identity, target)
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -157,22 +232,6 @@ impl ConfiguredCommand {
         self.loaded.links > 1
     }
 
-    /// Refuse a tool grammar on this command when its file has more than one name.
-    pub(crate) fn refuse_a_grammar_on_several_names(&self) -> Result<(), BoxError> {
-        if !self.has_several_names() {
-            return Ok(());
-        }
-        Err(refusal(
-            &self.table,
-            &self.path,
-            &format!(
-                "has {} names, and a tool grammar on it refuses each name that no `[tool]` \
-                 declares. Point `command` at a copy with one name",
-                self.loaded.links
-            ),
-        ))
-    }
-
     pub(crate) fn opened(&self) -> &File {
         &self.opened
     }
@@ -183,7 +242,12 @@ impl ConfiguredCommand {
             if self.loaded.links == 1 {
                 now.links == 1
             } else {
-                now == self.loaded && !writable_by_this_user(&self.opened, &self.path, now)
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                let protected_by_reach = self.needs_alias_scan;
+                #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+                let protected_by_reach = false;
+                now == self.loaded
+                    && (protected_by_reach || !writable_by_this_user(&self.opened, &self.path, now))
             }
         });
         if unchanged_names
@@ -420,33 +484,7 @@ mod tests {
             .expect("unrelated build output stays writable");
     }
 
-    #[test]
-    fn a_grammar_is_refused_on_a_command_with_several_names() {
-        let directory = tempfile::tempdir().expect("directory");
-        let command = directory.path().join("reader");
-        program(&command);
-        let mut commands = ConfiguredCommands::load(&record(&command)).expect("commands");
-        let mut loaded = commands
-            .tools
-            .remove("reader")
-            .and_then(Arc::into_inner)
-            .expect("the command is not shared");
-        loaded
-            .refuse_a_grammar_on_several_names()
-            .expect("a command with one name takes a grammar");
-
-        loaded.loaded.links = 78;
-
-        let refusal = loaded
-            .refuse_a_grammar_on_several_names()
-            .expect_err("a command with several names takes no grammar")
-            .to_string();
-        assert!(
-            refusal.contains("has 78 names, and a tool grammar on it refuses each name"),
-            "{refusal}"
-        );
-    }
-
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     #[test]
     fn configured_commands_refuse_preexisting_hard_links_this_user_can_write() {
         let directory = tempfile::tempdir().expect("directory");
@@ -460,6 +498,296 @@ mod tests {
             error.contains("has 2 hard links, and the user that runs Box may be able to write it"),
             "{error}"
         );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn linked_commands_are_admitted_only_outside_every_writable_tree() {
+        let directory = tempfile::tempdir().expect("directory");
+        let home = directory.path().canonicalize().unwrap();
+        let tools = home.join("tools");
+        let work = home.join("work");
+        let nested = work.join("nested");
+        std::fs::create_dir(&tools).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
+        let command = tools.join("reader");
+        let alias = tools.join("alias");
+        program(&command);
+        std::fs::hard_link(&command, &alias).unwrap();
+        let commands = ConfiguredCommands::load(&record(&command)).expect("linked commands load");
+        commands
+            .validate_reach("[agent]", &reach(&home, &work))
+            .unwrap();
+        commands.get("reader").unwrap().verify().unwrap();
+        std::fs::rename(&alias, nested.join("alias")).unwrap();
+        for table in ["[agent]", "[tool.builder]", "[mcp.server]"] {
+            let error = commands
+                .validate_reach(table, &reach(&home, &work))
+                .expect_err("a nested alias makes the grant unsafe")
+                .to_string();
+            assert!(error.contains(table), "{error}");
+            assert!(error.contains("contains a hard link"), "{error}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn shortcut_fixture_skip_reason(home: &Path, tools: &Path, work: &Path) -> Option<String> {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::MetadataExt as _;
+
+        let inspect = || -> Result<(), String> {
+            let file = File::open(home).map_err(|error| error.to_string())?;
+            let metadata = file.metadata().map_err(|error| error.to_string())?;
+            let device = format!(
+                "{}:{}",
+                libc::major(metadata.dev()),
+                libc::minor(metadata.dev())
+            );
+            let table = std::fs::read_to_string("/proc/self/mountinfo")
+                .map_err(|error| error.to_string())?;
+            let mut mounts = Vec::new();
+            for line in table.lines().filter(|line| !line.is_empty()) {
+                let fields: Vec<_> = line.split_ascii_whitespace().collect();
+                let separator = fields
+                    .iter()
+                    .position(|field| *field == "-")
+                    .ok_or("mount table row has no separator")?;
+                if separator < 6 || fields.len() != separator + 4 {
+                    return Err("mount table row is incomplete".into());
+                }
+                for field in &fields[..2] {
+                    field
+                        .parse::<u64>()
+                        .map_err(|_| "mount identity is not numeric")?;
+                }
+                let (major, minor) = fields[2]
+                    .split_once(':')
+                    .ok_or("mount device is incomplete")?;
+                for field in [major, minor] {
+                    field
+                        .parse::<u32>()
+                        .map_err(|_| "mount device is not numeric")?;
+                }
+                if (!Path::new(fields[3]).is_absolute() && fields[separator + 1] != "nsfs")
+                    || !Path::new(fields[4]).is_absolute()
+                    || fields[3].contains('\\')
+                    || fields[4].contains('\\')
+                {
+                    return Err("fixture requires absolute mount points and unescaped filesystem paths or nsfs roots".into());
+                }
+                mounts.push((
+                    fields[2],
+                    fields[3],
+                    Path::new(fields[4]),
+                    fields[separator + 1],
+                ));
+            }
+            let matching: Vec<_> = mounts.iter().filter(|mount| mount.0 == device).collect();
+            if matching.len() != 1 {
+                return Err("fixture device does not have exactly one mount".into());
+            }
+            let selected = matching[0];
+            if selected.1 != "/" || !tools.starts_with(selected.2) || !work.starts_with(selected.2)
+            {
+                return Err("fixture is not below one complete filesystem mount".into());
+            }
+            let expected_type = match selected.3 {
+                "ext4" => libc::EXT4_SUPER_MAGIC,
+                "xfs" => libc::XFS_SUPER_MAGIC,
+                "tmpfs" => libc::TMPFS_MAGIC,
+                _ => return Err("fixture filesystem is not ext4, XFS, or tmpfs".into()),
+            };
+            if mounts.iter().filter(|mount| mount.2 == selected.2).count() != 1
+                || mounts
+                    .iter()
+                    .any(|mount| mount.2.starts_with(tools) || mount.2.starts_with(work))
+            {
+                return Err("fixture paths overlap another mount".into());
+            }
+            let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
+            // SAFETY: the descriptor is live and the output points to writable statfs storage.
+            if unsafe { libc::fstatfs(file.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            // SAFETY: fstatfs succeeded and initialized the output.
+            let filesystem = unsafe { filesystem.assume_init() };
+            if filesystem.f_type != expected_type {
+                return Err("statfs disagrees with the fixture mount type".into());
+            }
+            Ok(())
+        };
+        inspect().err()
+    }
+
+    /// Co-located hard links skip inspection on supported Linux layouts and retain the macOS scan.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_linked_command_whose_names_share_its_folder_skips_the_scan_until_a_name_lands_elsewhere() {
+        let directory = tempfile::tempdir().expect("directory");
+        let home = directory.path().canonicalize().unwrap();
+        let tools = home.join("tools");
+        let work = home.join("work");
+        let locked = work.join("locked");
+        std::fs::create_dir(&tools).unwrap();
+        std::fs::create_dir_all(&locked).unwrap();
+        #[cfg(target_os = "linux")]
+        if let Some(reason) = shortcut_fixture_skip_reason(&home, &tools, &work) {
+            eprintln!("skipping: linked-command shortcut fixture: {reason}");
+            return;
+        }
+        // SAFETY: these calls only read process credentials.
+        if unsafe { [libc::getuid(), libc::geteuid()] }.contains(&0) {
+            eprintln!("skipping: linked-command shortcut fixture requires a non-root user");
+            return;
+        }
+        std::fs::write(locked.join("entry"), "").unwrap();
+        let command = tools.join("reader");
+        program(&command);
+        std::fs::hard_link(&command, tools.join("alias")).unwrap();
+        let commands = ConfiguredCommands::load(&record(&command)).expect("linked commands load");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = std::fs::read_dir(&locked).is_err();
+        let identities = commands.mutable_aliases(&work);
+        let skipped = commands.validate_reach("[agent]", &reach(&home, &work));
+        let mutation = commands.mutation_refusal(&work);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !unreadable {
+            eprintln!("skipping: mode-000 directories remain readable for this test user");
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            assert!(
+                identities.is_empty(),
+                "a supported Linux fixture must use the shortcut"
+            );
+            skipped.expect("the verified layout needs no scan");
+            assert!(mutation.is_none(), "the verified layout needs no scan");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(identities, vec![commands.get("reader").unwrap().identity]);
+            assert!(skipped.is_err(), "macOS keeps the existing scan");
+            assert!(
+                matches!(mutation, Some(CommandMutationRefusal::IncompleteScan(_))),
+                "macOS also scans mutation targets"
+            );
+        }
+        commands.get("reader").unwrap().verify().unwrap();
+
+        std::fs::hard_link(&command, work.join("elsewhere")).unwrap();
+        assert_eq!(
+            commands.mutable_aliases(&work),
+            vec![commands.get("reader").unwrap().identity],
+            "a name outside the folder brings the scan back"
+        );
+        let error = commands
+            .validate_reach("[agent]", &reach(&home, &work))
+            .expect_err("the scan finds the new name")
+            .to_string();
+        assert!(error.contains("contains a hard link"), "{error}");
+        assert!(
+            commands.get("reader").unwrap().verify().is_err(),
+            "the added name also changes the link count"
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn file_and_missing_targets_retain_direct_command_identity_checks() {
+        let directory = tempfile::tempdir().unwrap();
+        let tools = directory.path().join("tools");
+        let work = directory.path().join("work");
+        std::fs::create_dir(&tools).unwrap();
+        std::fs::create_dir(&work).unwrap();
+        let command = tools.join("reader");
+        let alias = tools.join("alias");
+        program(&command);
+        std::fs::hard_link(&command, &alias).unwrap();
+        let commands = ConfiguredCommands::load(&record(&command)).unwrap();
+        let ordinary = work.join("ordinary");
+        std::fs::write(&ordinary, "unchanged").unwrap();
+        for target in [&ordinary, &work.join("missing")] {
+            assert_eq!(
+                commands.mutable_aliases(target),
+                vec![commands.get("reader").unwrap().identity],
+                "file and missing targets retain direct identity checks"
+            );
+            assert!(commands.mutation_refusal(target).is_none());
+        }
+        assert!(
+            commands.mutation_refusal(&alias).is_some(),
+            "a direct hard-link file remains protected"
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_name_outside_the_command_folder_requires_a_complete_directory_scan() {
+        // SAFETY: these calls only read process credentials.
+        if unsafe { [libc::getuid(), libc::geteuid()] }.contains(&0) {
+            eprintln!("skipping: unreadable alias-scan fixture requires a non-root user");
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().canonicalize().unwrap();
+        let tools = home.join("tools");
+        let work = home.join("work");
+        let locked = work.join("locked");
+        std::fs::create_dir(&tools).unwrap();
+        std::fs::create_dir_all(&locked).unwrap();
+        let command = tools.join("reader");
+        program(&command);
+        std::fs::hard_link(&command, home.join("outside")).unwrap();
+        let commands = ConfiguredCommands::load(&record(&command)).unwrap();
+        let expected = vec![commands.get("reader").unwrap().identity];
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = std::fs::read_dir(&locked).is_err();
+        let identities = commands.mutable_aliases(&work);
+        let validation = commands.validate_reach("[agent]", &reach(&home, &work));
+        let mutation = commands.mutation_refusal(&work);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !unreadable {
+            eprintln!("skipping: mode-000 directories remain readable for this test user");
+            return;
+        }
+        assert_eq!(
+            identities, expected,
+            "the name outside the folder requires a scan"
+        );
+        let error = validation
+            .expect_err("an incomplete scan must refuse startup")
+            .to_string();
+        assert!(error.contains("cannot be inspected"), "{error}");
+        assert!(
+            matches!(mutation, Some(CommandMutationRefusal::IncompleteScan(_))),
+            "a directory mutation also requires a complete scan"
+        );
+        let alias = work.join("alias");
+        std::fs::hard_link(&command, &alias).unwrap();
+        assert!(
+            commands.mutation_refusal(&alias).is_some(),
+            "a direct hard-link file remains protected"
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn linked_commands_refuse_metadata_and_link_count_changes_before_launch() {
+        let directory = tempfile::tempdir().expect("directory");
+        let command = directory.path().join("reader");
+        let alias = directory.path().join("alias");
+        program(&command);
+        std::fs::hard_link(&command, &alias).unwrap();
+        let commands = ConfiguredCommands::load(&record(&command)).unwrap();
+        let loaded = commands.get("reader").unwrap();
+        loaded.verify().unwrap();
+        std::fs::set_permissions(&alias, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(loaded.verify().is_err(), "changed mode must refuse");
+        std::fs::set_permissions(&alias, std::fs::Permissions::from_mode(0o755)).unwrap();
+        loaded.verify().unwrap();
+        std::fs::hard_link(&alias, directory.path().join("third")).unwrap();
+        assert!(loaded.verify().is_err(), "changed link count must refuse");
     }
 
     /// A root-owned regular file in a system folder with several names and no group or other write.
@@ -716,6 +1044,8 @@ mod tests {
                 routes: vec![path.to_path_buf()],
                 identity: (metadata.dev(), metadata.ino()),
                 loaded: loaded.unwrap_or_else(|| FileState::of(&metadata)),
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                needs_alias_scan: false,
                 opened,
             }
         };
@@ -804,12 +1134,19 @@ mod tests {
         std::fs::hard_link(&command, &alias).expect("later hard link");
         for mutation in [&command, &route, &alias, &tools, &routes, &home] {
             assert!(
-                commands.refuses_mutation(mutation),
+                matches!(
+                    commands.mutation_refusal(mutation),
+                    Some(CommandMutationRefusal::CommandOrAncestor)
+                ),
                 "{}",
                 mutation.display()
             );
         }
-        assert!(!commands.refuses_mutation(&tools.join("unrelated-output")));
+        assert!(
+            commands
+                .mutation_refusal(&tools.join("unrelated-output"))
+                .is_none()
+        );
         commands
             .get("reader")
             .unwrap()

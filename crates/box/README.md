@@ -151,6 +151,10 @@ exposes the server after its schema is accepted and the complete policy bundle i
 call uses its generated `<normalized-server>::Action::"<tool>"` action. Other MCP methods use
 `Box::Action::"mcp:call"`.
 
+For stdio MCP, `command[0]` accepts a bare program name or an absolute executable path. The
+executable's filename names the alias the harness calls. The configured path selects the file Box
+launches, even when that file is outside `PATH`. See [executable paths](../../docs/user/mcp.md#select-an-executable-by-path).
+
 `[mcp.<name>] argument_wildcards = true` lets that local MCP `command` use `"*"`
 for one complete argument. For example, `command = ["server", "--token", "*"]` accepts the
 harness's token argument and starts the server with that value after `shell:spawn` permits the
@@ -183,8 +187,8 @@ Two properties of that table carry the design:
   reachable. An entry with no `secret` is refused, because a destination alone *would* be a
   reachability claim — which is the policy's to make.
 - **The server name is policy identity.** An `mcp:call` decision reads it as
-  `context.input.server`. The command's program names the executable alias, and the full
-  command selects the server, so the two values are not interchangeable.
+  `context.input.server`. The executable's filename names the alias, and that alias with its
+  arguments selects the server, so the two values are not interchangeable.
 
 ## Policy
 
@@ -426,8 +430,8 @@ private/mcp/                 where a local MCP server is started
 and no namespace a verb can enumerate: a caller holds the path, so Box cannot locate a box it was
 not handed.
 
-Each program that a declared MCP server starts from adds one more alias to `bin/`, named for the
-program. Servers that share a program share its alias, and the alias's arguments select the server.
+Each executable filename that a declared MCP server starts from adds one more alias to `bin/`.
+Servers that share a filename share its alias, and the alias's arguments select the server.
 
 **There are four children, and none of them is a home.** `HOME` is the operator's own home unless
 `[agent] env.HOME` names another directory, and the box copies no configuration into the box

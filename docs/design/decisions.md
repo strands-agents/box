@@ -544,6 +544,17 @@ errors; it does not acquire an implicit shell to make a program run.
 `ordinary_fallback_keeps_agent_grants_and_never_receives_server_secrets` pins the retained sandbox
 and the absence of server credentials.
 
+<a id="mcp-executable-filenames-name-their-aliases"></a>
+### MCP executable filenames name their aliases
+
+A stdio MCP `command` names the executable to launch, as a bare name or an absolute path.
+The executable's filename names the alias the agent calls, including when the executable is outside
+`PATH`. The path as written keeps the invocation name of a symbolic link, while policy checks the
+resolved executable identity. We rejected separate `alias` or `executable` fields because the
+filename supplies the invocation name without another configuration choice. The cost is that two
+executable paths with the same filename and identical fixed arguments cannot select different
+servers; the existing exact-match precedence and wildcard-overlap rules apply to the derived alias.
+
 <a id="a-stdio-mcp-server-runs-contained"></a>
 ### Every stdio MCP server runs contained, in its own sandbox
 
@@ -597,8 +608,8 @@ reaches the server as a JSON-RPC error. A reply to `ping` crosses with no decisi
 and the server receives an empty result whatever the client put in it. Any other response from the
 client is refused. Forwarding the reply with no decision was rejected, because it opens a path from
 the agent to the server that no rule can close. The cost is that a policy that permits only named
-methods must also name these. An http server's own requests are not supported yet, because the
-gateway buffers each response and does not stream it.
+methods must also name these. An http server's own requests are not supported yet; streaming its
+response bytes does not add the broker's request/reply correlation.
 
 <a id="remote-mcp-schemas-are-generated-through-a-direct-client"></a>
 ### `policy generate-schema` covers a remote MCP server through its own discovery client
@@ -1025,16 +1036,30 @@ bypass an argument constraint. Each accepted schema installs more of the rule se
 makes the authority ready. Every install retains unchanged policy identities and their temporal
 state, so an incremental install replays no history.
 
+A per-tool rule that the previous run stored also stays installed while discovery is pending, so it
+keeps its history across a restart. Dogwood gives a removed rule no state, and adds it back with
+empty history, so removing it until its schema arrived reset the rule at every start. Box keeps a
+stored rule when its text is unchanged, its head names only per-tool actions, and it validates
+against the server schemas that the stored history declares. The tools that the rule decides stay
+held until their schemas stage, so a schema from the previous run decides no call. When the real
+schema arrives, the rule keeps its history if that
+schema validates it, and Box removes it otherwise. The cost is that a rule whose head names a Box
+action, and that reads per-tool history in a `temporal` clause, still starts with empty history
+at each run. Keeping it would let it decide requests from the previous run's schema.
+
 <a id="a-server-whose-discovery-a-policy-denies-degrades-alone"></a>
 ### A denied tool list leaves its dependent rules unloaded until recovery
 
 A policy can deny `tools/list` for a server and still carry a per-tool rule that needs its discovered
-catalog. Box starts with that rule unloaded and refuses the tool calls it can identify as subject to
-it. A later permitted list can load the rule and clear those refusals only when the complete policy
-validates and commits. Until then, the rule stays inert, and a diagnostic on stderr and a telemetry
-record name the servers it still needs. Refusing the whole policy at load was rejected because one
-server's mistake would also block the model, shell, and other servers. The cost is that `validate`
-does not report the contradiction, so the operator learns of it from the startup warning.
+catalog. Box starts with that rule unloaded, or installed from the previous run without deciding
+calls while discovery is pending, and refuses the tool calls it can identify as subject to it. When
+discovery finishes without the schema, Box removes a rule that it kept from the previous run, so
+that rule loses its history. A later permitted list can load the rule and clear those refusals only
+when the complete policy validates and commits. Until then, the rule stays inert, and a diagnostic
+on stderr and a telemetry record name the servers it still needs. Refusing the whole policy at load
+was rejected because one server's mistake would also block the model, shell, and other servers. The
+cost is that `validate` does not report the contradiction, so the operator learns of it from the
+startup warning.
 
 <a id="the-policy-crate-exposes-one-facade"></a>
 ### The policy crate exposes one facade
@@ -1152,49 +1177,70 @@ forbid (principal, action in [Tool::git::Action::"*", Tool::git::Action::"unmode
 ```
 
 <a id="a-tool-grammar-binds-on-the-program-file-and-the-called-name"></a>
-### A tool grammar binds by its program name, on the program file's identity and the name it was called by
+### A tool grammar binds by its program name, on the program file's identity and the name it was called by, and any other name of that file is a `shell:spawn`
 
-A tool grammar names one program, and it binds every `[tool]` whose command calls that program name.
-A grammar on `[tool.git]` with `program = "git"` at `/usr/bin/git` also covers `[tool.brew_git]` at
+A tool grammar names one program through its `program`, the name the agent types to run the tool. A
+grammar on `[tool.git]` with `program = "git"` at `/usr/bin/git` also covers `[tool.brew_git]` at
 `/opt/homebrew/bin/git`, because both run `git`. One program name therefore has at most one grammar.
 Box refuses a second grammar with the same `program` and names both tables. Letting two grammars
 share a program was rejected, because both would match the same tools. Table order would then select
-which grammar reads a command.
+which grammar reads a command. A stdio `[mcp.<name>]`, or a `[tool]` with no grammar of its own,
+binds the same way when its command calls that program name, so a server's start is decided as the
+grammar's action.
+
+The grammar's own `[tool]` binds under its `program`, the name the agent types, even when its command
+names a link-resolved file: `[tool.npm] command = [".../npm/bin/npm-cli.js"]` with
+`program = "npm"` binds under `npm`, not under `npm-cli.js`. When the last component of the command
+isn't the `program`, Box resolves the `program` at startup on the same `PATH` that the Shell
+searches at runtime, and refuses the grammar unless it reaches the tool's own file. So a `git`
+grammar still cannot sit on a tool that runs `gh`. A server or another tool whose command names
+`npm-cli.js` calls the program by another name, so the npm grammar doesn't bind it.
 
 For each tool, Box binds the grammar to a pair: the identity of the resolved program file, and the
-name the program was called by. The identity is the file's device and inode on the surrounding OS. A
-hard link or symbolic link to a bound file therefore refers to the same identity and cannot bypass
-the binding. A command is parsed with a tool grammar only when both halves match one binding. The
-file identity alone isn't enough, because several programs can share one binary. mise runs every
-tool it manages through one shim binary, so `cargo`, `node`, and `npm` all resolve to the same file,
-and `cargo` and `rustc` can be links to one binary. The name alone isn't enough, because the caller
-picks the name, so any file called `git` would claim the git grammar. We rejected binding on file
-identity alone. It needs one lookup but would parse `npm install` through the mise shim binary as a
-cargo command.
+name the program is called by, which is the grammar's `program` for the grammar's own tool. The identity is the file's device and inode on the surrounding OS. A
+hard link or symbolic link to a bound file therefore refers to the same identity. A command is
+parsed with a tool grammar only when both halves match one binding. The file identity alone isn't
+enough, because several programs can share one binary. mise runs every tool it manages through one
+shim binary, so `cargo`, `node`, and `npm` all resolve to the same file, and `cargo` and `rustc` can
+be links to one binary. The name alone isn't enough, because the caller picks the name, so any file
+called `git` would claim the git grammar. We rejected binding on file identity alone. It needs one
+lookup but would parse `npm install` through the mise shim binary as a cargo command.
 
 Several grammars can bind one file, each under its own program name. So a cargo grammar binds the
 mise shim binary as `cargo`, and an npm grammar binds the same file as `npm`. One grammar per file
-was rejected, because then only one tool that mise manages could have a grammar. A name that a
-`[tool]` declares, but that no grammar's `program` matches, binds no grammar and stays a
-`shell:spawn`.
+was rejected, because then only one tool that mise manages could have a grammar.
 
-Box refuses a spawn of a bound file before the policy decision in two cases. No rule can permit
-either case. The first is a name that no `[tool]` declares, such as `python` through the mise shim
-binary, or a link `g` to a bound `git`. The second is a replaced file. The bound path or link now
-leads to another file, for example after an update while the box runs. A new name, link, or file
-therefore cannot fall back to a more permissive `shell:spawn` rule. Reading an undeclared name as
-the grammar's `unmodeled` action was rejected. When several grammars bind one file, no single
-grammar owns the name, and a rule that permits `unmodeled` would admit a program that the operator
-never named. A declared name with no grammar stays a `shell:spawn` also after its file is replaced,
-because the operator named it and chose no grammar for it.
+A spawn of a bound file by a name that no grammar binds is decided as `shell:spawn`, whether or not a
+`[tool]` declares that name. macOS `/usr/bin/git` is one developer-tool launcher
+file with about 78 names, such as `make` and `clang`, and it runs the tool its called name selects.
+A git grammar on it decides `git`, and the `shell:spawn` rules decide `make`. We rejected refusing an
+undeclared name outright, before any rule decides it. On a file with several names, such as that
+launcher, every other name would become a spawn that no policy can permit, so a git grammar on
+`/usr/bin/git` would refuse `make` and `clang`. Reading an undeclared name as the grammar's
+`unmodeled` action was also rejected. When several grammars bind one file, no single grammar owns
+the name, and a rule that permits `unmodeled` would admit a program that the operator never named.
+
+Box refuses a spawn of a bound file before the policy decision in three cases, and no rule can
+permit any of them. The first is a replaced file: the bound path or link now leads to another file,
+for example after an update while the box runs. The second is a bare name whose bound file is gone
+or replaced, so `PATH` would find another file. A new file therefore cannot claim a grammar's
+permits under a bound name. The third is an agent spawn under a name that only a stdio
+`[mcp.<name>]` declares for that file. An `[mcp]` server's name counts only for that server's
+start, because the start and an agent spawn under the same spelling make the same `shell:spawn`
+request, and the permit the server needs would otherwise let the agent skip the grammar. Box also
+refuses bindings that another policy engine issued, so the bindings that decide a spawn are always
+those of the engine that decides it.
 
 The cost has four parts. Two binaries of one program can't have different grammars: `/usr/bin/git`
-and `/opt/homebrew/bin/git` both read with the one git grammar. An operator must declare each name
-that runs a bound file, or Box refuses that name. An update that replaces a bound binary while the
-box runs refuses that program until the box restarts. A grammar also covers only the files that a
-`[tool]` runs. A file that no grammar binds remains a `shell:spawn` under every name, including
-names no `[tool]` declares. So a copy of a bound binary at another path, or the same program reached
-through an unbound shim binary, is decided by the `shell:spawn` rules and not by its grammar.
+and `/opt/homebrew/bin/git` both read with the one git grammar. A bound file called by a name that no
+grammar binds is governed only by `shell:spawn`. That includes `make` through the macOS launcher,
+`python` through the mise shim binary, and a link `g` to a bound `git` that the workload can create
+where it can write. A `shell:spawn` permit that matches the bound file's `program_path` therefore
+admits each other name of it, so pin each `shell:spawn` permit on both `program` and `program_path`.
+An update that replaces a bound binary while the box runs refuses its bound names until the box
+restarts. A grammar also covers only the files that a `[tool]` or a stdio `[mcp.<name>]` runs. A copy
+of a bound binary at another path, or the same program reached through an unbound shim binary, is
+decided by the `shell:spawn` rules and not by its grammar.
 
 ## Containment
 
@@ -1373,13 +1419,28 @@ a box state directory created after launch, stay residual risks.
 
 A caller can load authority before the sandbox applies, for example a certificate bundle. It passes
 the opened regular file and its canonical path to one of two configuration methods. Both record the
-device and inode, require the file to have one filesystem name, and revalidate path and identity at
-each backend's last safe point. One method also subtracts writes, for a file that sits below a wider
-writable grant; the other grants no access at all, for a file outside every writable grant.
+device and inode and require one filesystem name. They revalidate the path and identity at each
+backend's last safe point. One method also subtracts writes for a file below a wider writable grant.
+The other grants no access for a file outside every writable grant.
 
 A third method pins a configured tool's program. It records the file's link count and requires the
-same count during revalidation. Box accepts a program with several names only when the user running
-Box cannot write it through any name. A backend may make the file non-executable if it cannot preserve both write subtraction and
+same count during revalidation. Box first rules out workload writes through its other names.
+On macOS and Linux, Box can establish this by scanning every process's declared writable
+directories before the workload starts. The broker and each platform's native boundary prevent
+later creation of writable filesystem paths to those programs. Linux can skip a scan when Box
+counts every hard-link name in the program's own directory and verifies the mount layout for
+a directory named in a write grant or requested change. Other paths retain the existing
+identity checks. The program and both directories must share one ext4, XFS, or tmpfs mount
+that exposes the filesystem's root (`/`). No other mount may share its device or mount point,
+or sit at or below the program's directory or the checked path. Box reads the mount table before and after counting and requires both results
+to match. Another mounted path does not increase the file's hard-link count, so counting names
+alone cannot rule out writes. Each shortcut check has a 30-second budget, checked between
+filesystem calls; a blocked call must return first.
+Box repeats the checks before each skip. Any unmet condition, inspection error, or timeout
+falls back to the bounded recursive scan. macOS retains that scan for directory targets.
+File identity and link-count verification at launch still apply.
+
+A backend may make the file non-executable if it cannot preserve both write subtraction and
 write-xor-execute. Callers must not rely on write protection to preserve an execute grant.
 
 <a id="the-deny-only-floors-run-beneath-every-backend"></a>
@@ -1949,9 +2010,10 @@ because a fragment is client-only and must never reach an origin server.
 The gateway classifies each JSON-RPC frame, then raises `mcp:call { server, tool }` after
 `http:request`, and a deny at either gate wins. A `tools/call` reuses the same per-tool refinement
 the local stdio path uses, so per-argument policy behaves the same on both. `initialize` and the
-`*/list` discovery methods carry the server, so a rule can gate them. The gateway buffers remote MCP
-traffic to terminate TLS and parse frames. It does not stream that traffic. The credential controls
-stay deny-only beneath policy, so the classifier adds no allow authority.
+`*/list` discovery methods carry the server, so a rule can gate them. The gateway terminates TLS and
+parses request frames before forwarding. Responses stream, except that `tools/list` retains bounded
+capture for schema staging. The credential controls stay deny-only beneath policy, so the classifier
+adds no allow authority.
 
 <a id="remote-tool-schemas-are-discovered-at-runtime-in-memory"></a>
 ### The box discovers a remote MCP server's tool schemas at runtime, in memory

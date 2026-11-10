@@ -53,16 +53,20 @@ when { ["fetch", "github"].contains(context.input.server) };
 
 | Action | Field | Value |
 |---|---|---|
-| `shell:spawn` | `context.input.program` | Element 0 of the server's `command`. |
+| `shell:spawn` | `context.input.program` | The executable's filename, which is the server's alias name. |
 | | `context.input.program_path` | The program's file, with every link resolved. `~` is the operator's home. |
 | | `context.input.arg1`, `arg2`, `arg_count` | The server's arguments. |
-| | `context.input.command` | By default, the server's full `command` as written in `box.toml`: the program and its arguments, joined by spaces. Use it with `like` to match an argument past the second. An argument that holds `${OTEL_EXPORTER_OTLP_*}` is the name here, and the value the box puts in its place in `arg1` and `arg2`. |
+| | `context.input.command` | By default, the alias name and the arguments as written in `box.toml`, joined by spaces. Use it with `like` to match an argument past the second. An argument that holds `${OTEL_EXPORTER_OTLP_*}` is the name here, and the value the box puts in its place in `arg1` and `arg2`. |
 | `mcp:call` | `context.input.server` | The `[mcp.<name>]` table's name. |
 | | `context.input.method` | The MCP method, such as `tools/list` or `tools/call`. For the harness's reply to a stdio server's own request, the method of that request, such as `roots/list`. |
 | | `context.input.tool` | The tool name, on `tools/call`. |
 
-For an enabled [wildcard command](mcp.md#argument-wildcards), `command` instead holds the effective
-launch command, with received values in the `*` positions and fixed arguments expanded.
+For modern stdio servers, an input answer inside a retried call is checked in the same way as a
+legacy reply. For example, a `forbid` on `context.input.method == "roots/list"` prevents either
+form of roots answer from reaching the server. The retried tool call also needs its own permit.
+
+For an enabled [wildcard command](mcp.md#argument-wildcards), `command` instead holds the alias name
+and effective launch arguments, with received values in the `*` positions and fixed arguments expanded.
 `arg1`, `arg2`, and `arg_count` describe those same launch arguments.
 A permit that checks only `program`, as above, matches every value supplied in the `*` positions.
 To restrict those values, add conditions on the effective arguments.
@@ -71,9 +75,9 @@ To restrict those values, add conditions on the effective arguments.
 
 Add each server to the harness's own MCP configuration.
 
-- **A `stdio` server:** set its command to the server's full `command` from `box.toml`: the
-  program, then every argument, in the same order. The harness runs the alias with those arguments,
-  and the box starts the server whose `command` matches. With `argument_wildcards = true` on that server, supply
+- **A `stdio` server:** set its command to the executable's filename, then every argument from
+  `box.toml`, in the same order. The harness runs the alias with those arguments,
+  and the box starts the matching server. With `argument_wildcards = true` on that server, supply
   the runtime value for each `*` position.
 - **An `http` server:** set its URL. For a server with `secret.ref = "env://NAME"`, send the
   placeholder from `NAME` in the header, or set `secret.inject = "always"` and send no header.
@@ -91,6 +95,10 @@ a client that takes a command and its arguments apart gets:
 ```json
 { "mcpServers": { "playwright": { "command": "npx", "args": ["-y", "@playwright/mcp"] } } }
 ```
+
+If the table instead uses `command = ["/opt/node/bin/npx", "-y", "@playwright/mcp"]`, the harness
+configuration stays the same. Box launches that absolute executable path when the harness calls
+the `npx` alias.
 
 A harness entry that sets only the program, `"command": "npx"` with no `args`, does not select this
 server. It attempts to run ordinary `npx` inside the agent's sandbox. Add the declared arguments
@@ -114,6 +122,20 @@ per-tool actions and their argument types:
 
 `/tmp/schema/actions.cedarschema` holds one `namespace` per server, one `action` per tool, and the
 arguments of each tool. A JSON `integer` or `number` is a `Long`, and an `enum` is its base type.
+A `type` list of one type and `null` is that type.
+
+An argument that can have more than one type, from `anyOf`, `oneOf`, or a `type` list, is a record
+with one optional field for each type: `typeChoice0`, `typeChoice1`, and so on, in the server's
+order. Box puts the value in every field whose type matches, and refuses a call whose value
+matches none. Test the field with `has` before you compare it:
+
+```cedar
+forbid (principal, action == deepwiki::Action::"ask_wiki_question", resource)
+when {
+  context.input.repoName has typeChoice0 &&
+  context.input.repoName.typeChoice0 == "my-org/private-repo"
+};
+```
 
 ## Step 4. Narrow the server
 
@@ -171,6 +193,14 @@ when temporal {
 `::request` counts every attempt, including a refused one. `::response` counts calls that reached
 the server.
 
+The count carries over when the box restarts. That's also true of a rule written on a tool's own
+action, such as `github::Action::"create_issue"`, as long as the rule only decides tool calls and
+you didn't edit it. Box keeps that rule while the server lists its tools again. It starts with an
+empty count if you edit it, if the server's new tool list no longer fits it, or if the server
+doesn't list its tools in that run. A rule that decides a Box action, such as `http:request`, and
+counts a tool's calls in `when temporal` starts with an empty count at each run. Write that rule
+over `mcp:call` and its `tool` field, as above, to keep its count.
+
 ## Result
 
 Restart the box. The decision log records each decision with the rule's `@id`. A call the server
@@ -182,7 +212,7 @@ that `forbid` and the per-tool action. The agent gets each refusal as an MCP err
 | Error message (excerpt) or symptom | What to do |
 |---|---|
 | `MCP server "<name>" may not start` | No `shell:spawn` permit for the program. |
-| The harness starts an ordinary program instead of its MCP server | Its command does not match a declared server. Copy the full `command` from `box.toml`, as in [step 2](#step-2-connect-the-harness). With `argument_wildcards = true`, supply a value for each `*` argument. |
+| The harness starts an ordinary program instead of its MCP server | Its command does not match a declared server. Set the executable's filename and every declared argument, as in [step 2](#step-2-connect-the-harness). With `argument_wildcards = true`, supply a value for each `*` argument. |
 | `enforcement:mcp-unmatched` in the telemetry records | Box declined the MCP route and selected ordinary fallback. Compare the harness command with the declared command. The record carries the program and redacted arguments; it does not say whether ordinary execution succeeded. See [what a record carries](telemetry.md#what-a-record-carries). |
 | `no MCP server declares "<command>"` | The program is undeclared, or a command on that program cannot expand. Check that the harness uses a declared program, and correct any command expansion named in the error. |
 | Two MCP tables `declare overlapping wildcard commands` | The wildcard entries can match the same request, so Box refuses to start. Give them fixed arguments that distinguish them. An exact entry may overlap a wildcard entry; the exact entry takes priority. |

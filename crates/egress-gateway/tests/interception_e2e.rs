@@ -263,11 +263,17 @@ fn chunked_http1_is_normalized_across_tls_interception() {
     client.send_chunked_request("POST", "/responses", b"chunked-request");
     let response = client.read_response();
 
-    // The gateway frames the de-chunked body itself, so it writes that name in lowercase.
+    let (head, body) = response.split_once("\r\n\r\n").unwrap();
+    assert!(head.starts_with("HTTP/1.1 200 OK"));
+    assert_eq!(body, "mantle-stream-ok");
     assert_eq!(
-        response,
-        "HTTP/1.1 200 OK\r\nConnection: close\r\ncontent-length: 16\r\n\r\nmantle-stream-ok"
+        harness::header_value(head, "transfer-encoding"),
+        Some("chunked")
     );
+    assert_eq!(harness::header_value(head, "connection"), Some("close"));
+    for removed in ["content-length", "x-upstream-hop", "trailer"] {
+        assert_eq!(harness::header_value(head, removed), None);
+    }
     let seen = upstream.last_request();
     assert!(seen.raw.ends_with("chunked-request"));
     assert_eq!(seen.header("content-length").as_deref(), Some("15"));

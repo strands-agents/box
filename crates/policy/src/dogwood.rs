@@ -77,6 +77,7 @@ pub(crate) struct DogwoodEngine {
     rule_ids: HashMap<PolicyToken, RuleId>,
     request_schema: cedar_policy::Schema,
     tool_actions: std::collections::HashSet<cedar_policy::EntityUid>,
+    tool_inputs: crate::mcp_input::ToolInputs,
     #[cfg(test)]
     fixed_clock: Option<Arc<AtomicI64>>,
 }
@@ -213,6 +214,7 @@ impl DogwoodEngine {
                 request_scope: Arc::new(()),
                 request_schema: effective_schema.cedar,
                 tool_actions: effective_schema.tool_actions,
+                tool_inputs: effective_schema.tool_inputs,
                 #[cfg(test)]
                 fixed_clock: None,
             },
@@ -229,6 +231,7 @@ impl DogwoodEngine {
             engine,
             effective_schema.cedar,
             effective_schema.tool_actions,
+            effective_schema.tool_inputs,
         )
     }
 
@@ -246,6 +249,7 @@ impl DogwoodEngine {
             engine,
             effective_schema.cedar,
             effective_schema.tool_actions,
+            effective_schema.tool_inputs,
         )
     }
 
@@ -262,6 +266,7 @@ impl DogwoodEngine {
             engine,
             effective_schema.cedar,
             effective_schema.tool_actions,
+            effective_schema.tool_inputs,
         )
     }
 
@@ -269,6 +274,7 @@ impl DogwoodEngine {
         engine: DurableTemporalEngine,
         request_schema: cedar_policy::Schema,
         tool_actions: std::collections::HashSet<cedar_policy::EntityUid>,
+        tool_inputs: crate::mcp_input::ToolInputs,
     ) -> Result<Self, PolicyStagingError> {
         if engine.has_policy() && engine.event_schema().as_deref() != Some(EVENTS_DWSCHEMA) {
             return Err(PolicyStagingError::Durable(
@@ -282,6 +288,7 @@ impl DogwoodEngine {
             request_scope: Arc::new(()),
             request_schema,
             tool_actions,
+            tool_inputs,
             #[cfg(test)]
             fixed_clock: None,
         })
@@ -289,6 +296,22 @@ impl DogwoodEngine {
 
     pub(crate) fn declares_tool_action(&self, action: &cedar_policy::EntityUid) -> bool {
         self.tool_actions.contains(action)
+    }
+
+    /// A tool call's arguments with each union member placed in its declared `typeChoice` record.
+    fn conformed_arguments(
+        &self,
+        request: ActionRequest<'_>,
+        identity: &ActionIdentity,
+    ) -> Result<Option<serde_json::Value>, PolicyError> {
+        let ActionRequest::Request(Request::McpCall {
+            arguments: Some(arguments),
+            ..
+        }) = request
+        else {
+            return Ok(None);
+        };
+        self.tool_inputs.conform(&identity.cedar_uid()?, arguments)
     }
 
     /// Parse, lower, and strict-validate sources against canonical plus MCP schemas.
@@ -306,20 +329,52 @@ impl DogwoodEngine {
         canonical_policies: &[String],
         effective_schema: ActionSchema,
     ) -> Result<(), DurableError> {
+        let installed = effective_schema.source.clone();
+        self.commit_staged_under(canonical_policies, &installed, effective_schema)
+    }
+
+    /// Install a staged bundle under `installed_schema` and serve requests from `request_schema`.
+    pub(crate) fn commit_staged_under(
+        &mut self,
+        canonical_policies: &[String],
+        installed_schema: &str,
+        request_schema: ActionSchema,
+    ) -> Result<(), DurableError> {
         let mut engine = self
             .engine
             .lock()
             .map_err(|_| DurableError::Log("dogwood durable engine lock poisoned".to_string()))?;
-        reconcile_staged_policy_set(
-            &mut engine,
-            canonical_policies,
-            effective_schema.source.as_str(),
-        )?;
+        reconcile_staged_policy_set(&mut engine, canonical_policies, installed_schema)?;
         self.rule_ids = rule_ids(&engine);
         drop(engine);
-        self.request_schema = effective_schema.cedar;
-        self.tool_actions = effective_schema.tool_actions;
+        self.request_schema = request_schema.cedar;
+        self.tool_actions = request_schema.tool_actions;
+        self.tool_inputs = request_schema.tool_inputs;
         Ok(())
+    }
+
+    /// The canonical statement of each stored rule.
+    pub(crate) fn stored_statements(&self) -> Vec<String> {
+        self.engine
+            .lock()
+            .map(|engine| {
+                engine
+                    .list()
+                    .into_iter()
+                    .map(|entry| entry.statement)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Each MCP server namespace the stored action schema declares beyond `base`, with its fragment.
+    pub(crate) fn stored_mcp_schemas(&self, base: &str) -> Vec<(String, String)> {
+        self.engine
+            .lock()
+            .ok()
+            .and_then(|engine| engine.action_schema())
+            .map(|schema| crate::mcp_schema::mcp_schemas_in(&schema, base))
+            .unwrap_or_default()
     }
 
     /// Open with a fault injector on the durable log, for tests that pause the store.
@@ -346,6 +401,7 @@ impl DogwoodEngine {
             request_scope: Arc::new(()),
             request_schema: effective_schema.cedar,
             tool_actions: effective_schema.tool_actions,
+            tool_inputs: effective_schema.tool_inputs,
             fixed_clock: None,
         })
     }
@@ -377,6 +433,7 @@ impl DogwoodEngine {
             request_scope: Arc::new(()),
             request_schema: effective_schema.cedar,
             tool_actions: effective_schema.tool_actions,
+            tool_inputs: effective_schema.tool_inputs,
             fixed_clock: Some(now),
         })
     }
@@ -406,6 +463,17 @@ impl DogwoodEngine {
         request: ActionRequest<'_>,
     ) -> (Decision, Option<RequestId>) {
         let identity = request.identity();
+        let conformed_arguments = match self.conformed_arguments(request, &identity) {
+            Ok(arguments) => arguments,
+            Err(error) => {
+                eprintln!("policy: warn: {error}; denying");
+                return (Decision::internal_fault(), None);
+            }
+        };
+        let conformed = conformed_arguments
+            .as_ref()
+            .and_then(|arguments| with_arguments(request, arguments));
+        let request = conformed.as_ref().map_or(request, ActionRequest::Request);
         // Validate the (principal, action, context) tuple against the shipped schema
         // BEFORE deciding.
         //
@@ -629,6 +697,8 @@ pub(crate) struct ExpandedPolicy {
     pub(crate) source: String,
     /// The `(namespace, tool)` pairs the head names, read from the parsed scope.
     pub(crate) head_tools: BTreeSet<(String, String)>,
+    /// Whether the head names actions and every one is a per-tool MCP action.
+    pub(crate) decides_only_tools: bool,
 }
 
 /// Parse and macro-expand a source bundle without an action schema.
@@ -650,6 +720,7 @@ pub(crate) fn expand_policy_source(source: &str) -> Result<Vec<ExpandedPolicy>, 
         .map(|policy| ExpandedPolicy {
             source: policy.expanded_source(),
             head_tools: head_tools(&policy.scope()),
+            decides_only_tools: decides_only_tools(&policy.scope()),
         })
         .collect())
 }
@@ -662,6 +733,20 @@ fn head_tools(scope: &dogwood_language::PolicyScope) -> BTreeSet<(String, String
         dogwood_language::ActionConstraint::In(actions) => actions.as_slice(),
     };
     actions.iter().filter_map(mcp_tool_action).collect()
+}
+
+/// Whether a parsed head names actions and every one is a per-tool MCP action.
+fn decides_only_tools(scope: &dogwood_language::PolicyScope) -> bool {
+    match scope.action() {
+        dogwood_language::ActionConstraint::Any => false,
+        dogwood_language::ActionConstraint::Eq(action) => mcp_tool_action(action).is_some(),
+        dogwood_language::ActionConstraint::In(actions) => {
+            !actions.is_empty()
+                && actions
+                    .iter()
+                    .all(|action| mcp_tool_action(action).is_some())
+        }
+    }
 }
 
 /// Parse and macro-expand a source bundle, and run each check on a read of `context.input` that
@@ -1424,6 +1509,32 @@ fn durable_history_error(error: DurableError) -> PolicyError {
     PolicyError::Evaluation(error.to_string())
 }
 
+/// The same tool call carrying `arguments` in place of its own.
+fn with_arguments<'a>(
+    request: ActionRequest<'a>,
+    arguments: &'a serde_json::Value,
+) -> Option<Request<'a>> {
+    let ActionRequest::Request(Request::McpCall {
+        server,
+        method,
+        tool,
+        prompt,
+        uri,
+        arguments: Some(_),
+    }) = request
+    else {
+        return None;
+    };
+    Some(Request::McpCall {
+        server,
+        method,
+        tool: *tool,
+        prompt: *prompt,
+        uri: *uri,
+        arguments: Some(arguments),
+    })
+}
+
 /// Attach the correlation field declared by the event schema, outside Cedar request context.
 fn with_request_id(builder: EventBuilder, request_id: &RequestId) -> EventBuilder {
     builder.logged_field("requestId", Value::String(request_id.as_str().to_string()))
@@ -1553,10 +1664,7 @@ fn outcome_kind(outcome: &Outcome<'_>) -> &'static str {
                 KIND_ERROR
             }
         }
-        // A completed call is a `response`, whatever the server replied — a JSON-RPC error is still
-        // `::response`, exactly as `ShellRun` is always a `response` regardless of exit status and a
-        // delivered `Http` request is a `response` regardless of a 500. A call that never completes
-        // records nothing, so there is no MCP `::error` producer.
+        // Terminal and indeterminate MCP outcomes are responses, with no claim of tool success.
         Outcome::Mcp { .. } => KIND_RESPONSE,
     }
 }

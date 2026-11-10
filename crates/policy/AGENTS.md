@@ -126,6 +126,29 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   across a tool action and another family is refused, not parked; a rule scoped to one tool action
   loads. Pinned by
   `tests/runtime_mcp_policy_staging.rs::a_rule_that_reads_the_input_across_a_tool_action_is_refused_before_its_schema_stages`.
+- An MCP union argument reads as its generated `typeChoice` record. `ToolInputs::conform` places a
+  bare value in every member it matches, before the request gate and the event, so a rule on a
+  duplicate member still fires. It refuses a value that matches none, including a value already in
+  the record shape. A record whose fields
+  are all named `typeChoice<N>` is read as a union, so an object property with that name is too.
+  A `null` matches no member. A `datetime`, `ipaddr`, `decimal`, or `duration` member takes a
+  string that Cedar's constructor accepts. The Dogwood event still carries that value as a string,
+  so a rule that compares it fails evaluation and denies, as it does for a non-union argument.
+  Pinned by
+  `mcp_schema::tests::a_union_argument_accepts_each_member_and_refuses_a_non_member` and
+  `tests/runtime_mcp_policy_staging.rs::a_union_argument_is_decided_by_the_policy` and
+  `a_datetime_union_member_is_placed_and_its_rule_cannot_be_bypassed`.
+- A per-tool rule keeps its history across a restart only when its head names per-tool actions
+  alone. `commit_discovering` keeps it installed under the server fragments that
+  `mcp_schema::mcp_schemas_in` recovers from the stored action schema. The tools it decides stay
+  held until their schemas stage. A rule with a Box head that reads per-tool history, and a rule
+  whose server never lists in that run, start fresh. Pinned by
+  `tests/runtime_mcp_policy_staging.rs::a_rule_that_names_a_tool_keeps_its_history_across_a_restart`,
+  `::a_rule_that_names_two_servers_keeps_its_history_while_they_list_one_at_a_time`,
+  `::a_rule_that_decides_a_box_action_from_tool_history_is_not_kept_from_the_previous_run`, and
+  `::a_server_that_never_lists_its_tools_unloads_the_kept_rule`. A namespace that this build's
+  base schema declares is never read as a server, which
+  `mcp_schema::tests::a_previous_build_of_the_box_actions_is_not_read_as_a_server` pins.
 - `body_bytes` is the offer on a `::request` and the delivery on a `::response`.
 - Sum an outbound budget over `http:request::response`, as `tests/policies/egress_byte_budget.dw`
   does. One exchange records one such event, at reply time, with the delivered request bytes and
