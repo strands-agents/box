@@ -144,6 +144,18 @@ pub(crate) fn write_replaced_python(
         contents.push_str(name);
         contents.push('\n');
     }
+    let limit = crate::run::broker::protocol::MAX_REPLACED_PYTHON_BYTES;
+    if contents.len() > limit {
+        return Err(ShellError::Materialize {
+            path,
+            reason: format!(
+                "the workspace {workspace} is too long for a replaced Python alias to read: the \
+                 file would be {} bytes, and the limit is {limit}",
+                contents.len()
+            ),
+        }
+        .into());
+    }
     layout.write_private_file(&path, &contents, 0o444)
 }
 
@@ -571,7 +583,11 @@ mod tests {
         let (layout, owner, _installed, _home) = fixture(b"image one");
         let names: std::collections::BTreeSet<String> = ["python3".to_string()].into();
 
-        for workspace in ["relative/project", "/work/two\nlines"] {
+        let too_long = format!(
+            "/{}",
+            "a".repeat(crate::run::broker::protocol::MAX_REPLACED_PYTHON_BYTES)
+        );
+        for workspace in ["relative/project", "/work/two\nlines", too_long.as_str()] {
             write_replaced_python(&layout, &names, Path::new(workspace), &owner)
                 .expect_err(workspace);
             assert!(!layout.replaced_python_file().exists(), "{workspace:?}");

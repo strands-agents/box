@@ -69,6 +69,11 @@ pub(crate) const PYTHON_ALIAS_NAMES: [&str; 2] = ["python3", "python"];
 /// every request either way, so the file selects a route and grants nothing.
 pub(crate) const REPLACED_PYTHON_FILE: &str = ".replaced-python";
 
+/// The largest [`REPLACED_PYTHON_FILE`] Box writes and a Python alias reads: a workspace path as
+/// long as Linux allows (4096 bytes, longer than macOS's 1024), the two Python names, and their
+/// newlines. Box refuses a longer file at `run`, so the two ends can't disagree.
+pub(crate) const MAX_REPLACED_PYTHON_BYTES: usize = 4096 + 32;
+
 /// Names one Program within one connection.
 pub(crate) type ProgramId = u32;
 

@@ -30,14 +30,12 @@ const ALIAS_IMAGE_NAME: &str = "strands-box-sock-alias";
 /// The socket's path relative to the alias's grandparent directory. The routing lists come from the
 /// module this binary already includes, so there is one definition rather than a copy per consumer.
 use shell_protocol::{
-    BROKER_SOCKET_RELATIVE, PYTHON_ALIAS_NAMES, REPLACED_PYTHON_FILE, SHELL_ALIAS_NAMES,
+    BROKER_SOCKET_RELATIVE, MAX_REPLACED_PYTHON_BYTES, PYTHON_ALIAS_NAMES, REPLACED_PYTHON_FILE,
+    SHELL_ALIAS_NAMES,
 };
 
 /// The largest positional script the alias will forward as command text.
 const MAX_SCRIPT_BYTES: usize = MAX_FRAME_BYTES / 16;
-
-/// The largest replaced-Python list the alias reads. Box writes at most two short names.
-const MAX_REPLACED_LIST_BYTES: usize = 256;
 
 /// Bound on one framed read or write against the daemon's Shell socket.
 const SERVE_IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -292,14 +290,14 @@ fn read_replaced(executable: &Path) -> io::Result<Option<Replaced>> {
         }
     };
     let mut text = String::new();
-    file.take(MAX_REPLACED_LIST_BYTES as u64 + 1)
+    file.take(MAX_REPLACED_PYTHON_BYTES as u64 + 1)
         .read_to_string(&mut text)
         .map_err(|error| {
             io::Error::new(error.kind(), format!("read {}: {error}", list.display()))
         })?;
-    if text.len() > MAX_REPLACED_LIST_BYTES {
+    if text.len() > MAX_REPLACED_PYTHON_BYTES {
         return Err(invalid_input(format!(
-            "{} is over {MAX_REPLACED_LIST_BYTES} bytes",
+            "{} is over {MAX_REPLACED_PYTHON_BYTES} bytes",
             list.display()
         )));
     }
@@ -1262,6 +1260,19 @@ mod tests {
         }
     }
 
+    /// **A workspace as long as Linux allows still reads**, so a deep checkout keeps both aliases.
+    #[test]
+    fn a_replaced_python_file_with_a_path_max_workspace_reads() {
+        let workspace = format!("/{}", "a".repeat(4095));
+        let (_root, bin) = replaced_box(Some(&format!("{workspace}\npython\npython3\n")));
+
+        let replaced = read_replaced(&bin.join("python3"))
+            .expect("the file reads")
+            .expect("the file is there");
+        assert_eq!(replaced.workspace, PathBuf::from(&workspace));
+        assert_eq!(replaced.names, ["python", "python3"]);
+    }
+
     /// **A file that doesn't start with an absolute workspace is refused**, not read as names.
     #[test]
     fn a_replaced_python_file_without_a_workspace_is_refused() {
@@ -1277,7 +1288,10 @@ mod tests {
     /// **A list over the size bound is refused** rather than read in part.
     #[test]
     fn an_oversized_replaced_python_list_is_refused() {
-        let (_root, bin) = replaced_box(Some(&format!("/work\n{}", "python3\n".repeat(64))));
+        let (_root, bin) = replaced_box(Some(&format!(
+            "/{}\npython3\n",
+            "a".repeat(MAX_REPLACED_PYTHON_BYTES)
+        )));
 
         let error = parse_mode(bin.join("python3"), arguments(&["-c", "pass"]))
             .expect_err("an oversized list is refused");
