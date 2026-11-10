@@ -87,10 +87,15 @@ when policy permits `shell:spawn` for it. When an experimental tool grammar bind
 program, the grammar's action decides the start in place of `shell:spawn`, as for a
 [spawn in the Shell](shell.md#shellspawn). By default, the box runs the `command` and arguments from `box.toml`.
 
-Servers start on demand, so an unused server program can be missing when Box starts. If the
-server executable's filename matches an installed tool grammar's program name, each start requires the file
-identity and called name that Box bound at startup. A later executable cannot receive general
-`shell:spawn` permission instead. Box refuses that server's start and keeps running. See
+Servers start on demand, so an unused server program can be missing when Box starts. When a
+command matches a declared server and its executable's filename matches an installed tool grammar's
+program name, starting that server requires the file identity and called name that Box bound at
+startup. A later executable cannot receive general `shell:spawn` permission instead. If Box reports
+`its tool grammar requires an approved program file`, it refuses that server's start and keeps running.
+
+If the program was missing or unreadable when Box started, make it readable and executable by
+the user running Box, then start a new Box run. A link to an already-bound file under the same
+called name can pass this check on retry, provided the existing replacement checks pass. See
 [which program files a grammar binds](tool-grammars.md#which-program-files-a-grammar-binds) for retries
 and newly installed programs.
 
@@ -342,7 +347,6 @@ The harness gets these errors when it starts a server, and the box keeps running
 
 | Message | Cause |
 |---|---|
-| `its tool grammar requires an approved program file` | This server's program name requires a grammar, but its executable does not match a file bound under that name at startup. If the program was missing or unreadable when Box started, make it readable and executable by the user running Box, then start a new Box run. A link to an already-bound file under the same called name can pass this check on retry, provided the existing replacement checks pass. |
 | `no MCP server declares "<command>"; servers on <program>: <name>, ...` | The harness ran a command that matches no server on that alias. Use the executable's filename and the arguments of one of the listed servers in `box.toml`. |
 | `` <name> (its `command` does not expand) `` in that list | The server's `command` holds a `${...}` name the box does not fill in. Use one of the three `OTEL_EXPORTER_OTLP_` names. |
 | ``no MCP server declares "<command>"; no `[mcp.<name>]` table in box.toml declares the program "<program>"`` | The harness ran a program that no `[mcp.<name>]` table names. |
