@@ -209,9 +209,9 @@ deny  = ["~/src/project/.env"]
 
 By default `python` and `python3` in the Shell run Monty, so a project's `python3 -m pytest` or
 `python3 -m venv .venv` fails with `invalid option '-m'`. To run the host's Python for those names,
-list them in `replaces` on the tool that runs it. The tool must also read the interpreter's own
-install tree and the Homebrew trees its extension modules load, such as OpenSSL for `ssl`, which are
-outside the folders every sandbox gets:
+list them in `replaces` on the tool that runs it. The tool must also read the folder its `command`
+is in, the interpreter's own install tree, and the Homebrew trees its extension modules load, such
+as OpenSSL for `ssl`. None of these is in the folders every sandbox gets:
 
 ```toml
 [tool.python]
@@ -224,6 +224,7 @@ read  = [
   "/opt/homebrew/Cellar",
   "/opt/homebrew/opt",
   "/opt/homebrew/etc",
+  "/opt/homebrew/bin",
   "/opt/homebrew/lib/python3.14",
 ]
 write = ["~/src/project"]
@@ -244,9 +245,12 @@ when {
 ```
 
 A bare `python3` always runs the tool's own file, whatever `PATH` holds, so activating a virtual
-environment doesn't change what it runs. Run a virtual environment's interpreter by its path, such
-as `.venv/bin/python -m pytest`. That spawn names the same canonical file, so the same tool runs it,
-but `context.input.program` is the path the agent typed, so the permit must admit that spelling too.
+environment doesn't change what it runs. A virtual environment's interpreter run by its path, such
+as `.venv/bin/python`, names the same canonical file, so the same tool runs it, and
+`context.input.program` is the path the agent typed. Box starts the tool's own file and passes that
+path only as the program's name. On macOS, Homebrew's Python finds its virtual environment from the
+file the system started, not from that name, so `.venv/bin/python` in the Shell runs without the
+virtual environment's packages.
 
 Startup prints one line for each replaced name, such as ``strands-box: [tool.python]: a bare
 `python3` in the Shell runs /opt/homebrew/bin/python3, in place of Box's Python (Monty)``. `type` and
