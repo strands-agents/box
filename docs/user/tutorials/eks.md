@@ -23,10 +23,11 @@ Test the deployment example on your cluster. The recorded versions are tested co
 
 ## Cluster baseline
 
-Use the recorded configuration as a starting point: Kubernetes 1.35, Amazon Linux 2023 ARM64 workers,
-Linux kernel 6.12.111, and containerd 2.3.5. These versions describe the tested combination, not the
-minimum supported versions. Check the control plane and workers separately; upgrading the control
-plane does not establish that the workers can run this example.
+Use Linux ARM64 workers that meet the requirements below. The scripted example passed on EKS 1.33.13;
+the Claude examples were tested on EKS 1.35. The [sample README](../../../examples/cloud-deployments/eks/README.md#tested-configuration)
+records the worker versions and results. These are tested combinations, not minimum supported versions.
+Check the control plane and workers separately; upgrading the control plane does not establish that
+the workers can run this example.
 
 ```sh
 kubectl version -o yaml
@@ -63,9 +64,13 @@ If Kubernetes removes a required setting, the script exits with a configuration 
 
 ```text
 The cluster did not preserve required Box settings in the server dry-run Job; no Job was created:
-  hostUsers: expected false; received null
-  procMount: expected Unmasked; received "Default"
+  hostUsers: expected false; received null; check UserNamespacesSupport and admission rules
+  procMount: expected Unmasked; received "Default"; check ProcMountType and admission rules
 ```
+
+The error maps `hostUsers` to `UserNamespacesSupport` and `procMount` to `ProcMountType` as
+troubleshooting hints. A changed seccomp profile points to Pod Security and other admission rules.
+The script does not inspect these feature gates or rules, so the hints do not establish the cause.
 
 The script prints warnings returned by the dry run. It also checks the created Job and its Pods,
 because Pod admission can differ from Job admission. Before it first observes a Pod, it reads that Job's
@@ -118,6 +123,16 @@ python3 run.py --image "$IMAGE" --namespace "$NAMESPACE" --context "$KUBE_CONTEX
 The runner checks the server dry run, creates a Job, verifies its Pod settings, and waits for completion.
 It saves logs and a receipt under `evidence/JOB_NAME/`.
 `pod-configuration.json` preserves the last Pod configuration checked during polling.
+
+The runner records assigned node names while monitoring Pods. After monitoring ends and the workload
+receipt is saved, it tries to read each node's kubelet, kernel, container runtime, and architecture once.
+It prints the values and saves them in `node-diagnostics.json`.
+This optional lookup uses `get node NODE_NAME`; it does not list nodes. Missing permission, a
+lookup timeout, or an invalid response produces a diagnostic warning without failing the workload.
+All node lookups share a separate ten-second budget. They cannot consume the Job monitoring deadline.
+If monitoring fails, the runner saves the failed receipt and prints the recovery command before these lookups.
+Version information helps diagnose startup failures; it does not prove sandbox support.
+
 A successful receipt contains `passed: true` and 11 successful checks.
 A failed workload or missing result returns a nonzero exit code.
 If polling fails after submission, the runner saves an incomplete receipt and prints the command to inspect the existing Job.

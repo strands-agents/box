@@ -56,25 +56,67 @@ def require_sandbox_settings(pod, source):
     """Reject API responses that lost the workload's required sandbox settings."""
     differences = []
     if pod.get('hostUsers') is not False:
-        differences.append(f"hostUsers: expected false; received {json.dumps(pod.get('hostUsers'))}")
+        differences.append(
+            f"hostUsers: expected false; received {json.dumps(pod.get('hostUsers'))}; "
+            'check UserNamespacesSupport and admission rules'
+        )
     workload = next((c for c in pod.get('containers', []) if c.get('name') == 'workload'), None)
     if workload is None:
         differences.append('containers: required workload container is absent')
     else:
         security = workload.get('securityContext', {})
         if security.get('procMount') != 'Unmasked':
-            differences.append(f"procMount: expected Unmasked; received {json.dumps(security.get('procMount'))}")
+            differences.append(
+                f"procMount: expected Unmasked; received {json.dumps(security.get('procMount'))}; "
+                'check ProcMountType and admission rules'
+            )
         seccomp = security.get('seccompProfile', pod.get('securityContext', {}).get('seccompProfile', {}))
         if seccomp.get('type') != 'Unconfined':
-            differences.append(f"seccompProfile.type: expected Unconfined; received {json.dumps(seccomp.get('type'))}")
+            differences.append(
+                f"seccompProfile.type: expected Unconfined; received {json.dumps(seccomp.get('type'))}; "
+                'check Pod Security and other admission rules'
+            )
     if differences:
         raise RuntimeError(
             f'The cluster did not preserve required Box settings in {source}:\n  '
             + '\n  '.join(differences)
             + '\nBox cannot start its sandbox with this configuration. '
             'See docs/user/tutorials/eks.md#cluster-baseline for cluster, worker, and admission requirements. '
-            'This check does not identify which feature gate or admission rule changed the settings.'
+            'These are troubleshooting hints, not a confirmed cause; '
+            'this check does not read feature gates or admission rules.'
         )
+
+
+def collect_node_diagnostics(node_names, call, dest):
+    """Record assigned node versions within a separate diagnostic time budget."""
+    if not node_names:
+        return
+    deadline = time.monotonic() + DIAGNOSTIC_TIMEOUT_SECONDS
+    recorded = {}
+    for node_name in sorted(node_names):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            details = {'error': 'The node diagnostic time budget expired before this lookup'}
+        else:
+            result = call('get', 'node', node_name, '-o', 'json', required=False,
+                          timeout=min(DIAGNOSTIC_TIMEOUT_SECONDS, remaining))
+            if result.returncode:
+                details = {'error': result.stderr.strip() or f'Node lookup exited {result.returncode}'}
+            else:
+                try:
+                    info = json.loads(result.stdout)['status']['nodeInfo']
+                    details = {key: info.get(key, '<unknown>') for key in (
+                        'kubeletVersion', 'kernelVersion', 'containerRuntimeVersion', 'architecture')}
+                except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+                    details = {'error': 'The node response did not contain valid status.nodeInfo'}
+        recorded[node_name] = details
+        (dest / 'node-diagnostics.json').write_text(json.dumps(recorded, indent=2))
+        if 'error' in details:
+            print('Could not inspect assigned node ' + node_name + ': ' + details['error'],
+                  file=sys.stderr, flush=True)
+        else:
+            print('Assigned node ' + node_name + ': ' + ', '.join(
+                key + '=' + str(value) for key, value in details.items()), file=sys.stderr, flush=True)
 
 
 def main():
@@ -132,6 +174,7 @@ def main():
     event_warning_printed = False
     last_creation_error = None
     pod_seen = False
+    assigned_nodes = set()
     try:
         require_sandbox_settings(created.get('spec', {}).get('template', {}).get('spec', {}),
                                  'the created Job')
@@ -151,6 +194,9 @@ def main():
                 pod_seen = True
                 last_creation_error = None
             for pod in observed.get('items', []):
+                node_name = pod.get('spec', {}).get('nodeName')
+                if node_name:
+                    assigned_nodes.add(node_name)
                 require_sandbox_settings(pod.get('spec', {}),
                                          'Pod ' + pod.get('metadata', {}).get('name', '<unknown>'))
             if not pod_seen:
@@ -223,6 +269,7 @@ def main():
                    error=polling_error or state.get('error') or (logs.stderr if logs.returncode else None),
                    recorded_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
     (dest / 'receipt.json').write_text(json.dumps(receipt, indent=2))
+    collect_node_diagnostics(assigned_nodes, call, dest)
     print(json.dumps(receipt, indent=2))
     print('Evidence: ' + str(dest), file=sys.stderr)
     return 0 if receipt['passed'] else 1
