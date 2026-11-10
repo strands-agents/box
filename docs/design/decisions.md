@@ -1934,18 +1934,25 @@ operator must read that disclosure. No tool grant can name the box directory, wh
 `a_tool_grant_cannot_expose_the_box_directory` pins.
 
 <a id="a-host-binary-resolves-on-the-operator-path"></a>
-### A host binary resolves against the operator's real `PATH`, and the longest command prefix selects the tool
+### A bare name that a tool answers to runs that tool's file, any other name resolves on the operator's `PATH`, and the longest command prefix selects the tool
 
-The Shell resolves a host binary against the operator's real host `PATH`, with `/usr/bin:/bin` as
-the fallback, so Box finds a tool under Homebrew, nvm, or mise. Each process searches its table's
-`env.PATH` if present. Otherwise, it uses the operator's real `PATH`, then the fallback if neither
-exists. Selection compares the canonical resolved path of each tool's program with the program the
-workload invoked, and compares the tool's fixed leading arguments with the head of the argv. The
-longest matching `command` wins, so `[tool.git-read]` and `[tool.git-push]` can differ only in their
-fixed arguments, which `the_longest_matching_command_prefix_selects_the_tool` pins. Box names a
-program by its canonical identity for the `shell:spawn` decision, for selection, and for
-credentials, and the spawn hook runs only an identity that was bound to an existing file when the decision was made. `shell:spawn` stays the one control on whether a program runs; a larger `PATH` changes
-only where Box finds a permitted program.
+A `[tool]` with no grammar, or whose grammar's `program` is that name, answers to the last
+component of its `command` element 0, unless the Shell implements that name. A bare name that a
+tool answers to runs the file that the tool opened at startup, through `Kernel::host_program`,
+whatever is first on `PATH`. A tool with fixed leading arguments claims its name too. When tools
+with different command paths answer to one name, the operator's `PATH` decides if it finds one of
+those paths, and else the tool whose label is the name runs. Any other bare name resolves against
+the operator's real `PATH`, or the table's own `env.PATH`. The table label as the name lost because
+it makes a label such as `brew_git` a command and changes what `python` runs for a
+`[tool.python]` on `python3`. The longest matching `command` prefix selects the tool, which
+`the_longest_matching_command_prefix_selects_the_tool` pins, and
+`a_bare_name_runs_the_tool_that_declares_it_when_another_file_is_first_on_path` pins the name rule.
+Box names a program by its canonical identity for the `shell:spawn` decision, for selection, and
+for credentials, and the spawn hook runs only an identity that was bound to an existing file when
+the decision was made. `shell:spawn`, or a grammar action, stays the one control on whether a
+program runs. A second program of a tool's name that the agent reaches through `exec` no longer
+runs by its bare name, which runs the tool's file or is refused, so it needs its own `[tool]` or its
+path.
 
 <a id="the-caller-spelling-becomes-argument-zero"></a>
 ### The identity selects the program, and the caller's spelling becomes `argv[0]`

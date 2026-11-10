@@ -108,6 +108,43 @@ fn write_grammar_disclosures(
     Ok(())
 }
 
+/// One line for each bare name a `[tool]` answers to in the hosted Shell, and the file it runs.
+fn write_bare_name_disclosures(
+    names: &crate::run::commands::BareNames,
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    let escaped = |text: &str| -> String { text.chars().flat_map(char::escape_default).collect() };
+    for (name, (path, tables)) in &names.declared {
+        writeln!(
+            output,
+            "strands-box: {}: a bare `{}` in the Shell runs {}",
+            tables.join(", "),
+            escaped(name),
+            escaped(&path.to_string_lossy())
+        )?;
+    }
+    for (name, tables) in &names.passed_over {
+        writeln!(
+            output,
+            "strands-box: {}: runs another program path, so a bare `{}` in the Shell runs \
+             the file of `[tool.{}]`, whose label is that name",
+            tables.join(", "),
+            escaped(name),
+            escaped(name)
+        )?;
+    }
+    for (name, tables) in &names.shared {
+        writeln!(
+            output,
+            "strands-box: {}: these tables run different program paths, so a bare `{}` \
+             in the Shell runs the file that `PATH` finds",
+            tables.join(", "),
+            escaped(name)
+        )?;
+    }
+    Ok(())
+}
+
 /// Run one contained agent from one locked configuration snapshot.
 pub(crate) async fn execute(
     config: &Path,
@@ -203,6 +240,14 @@ async fn hosted(
     )?);
     write_grammar_disclosures(&locked.record, std::io::stderr().lock())
         .map_err(|source| ConfigError::Disclosure { source })?;
+    write_bare_name_disclosures(
+        &commands.bare_names(
+            &locked.record,
+            &crate::run::contain::executable::host_search_path(),
+        ),
+        std::io::stderr().lock(),
+    )
+    .map_err(|source| ConfigError::Disclosure { source })?;
     eprintln!("strands-box: starting workload");
     let hosted = HostedBox::open(
         &locked.root,
@@ -463,6 +508,37 @@ mod tests {
              `shell:spawn` rule applies to it\n\
              strands-box: [mcp.wrapped]: a spawn of `npm` is decided by its tool grammar, and no \
              `shell:spawn` rule applies to it\n"
+        );
+    }
+
+    #[test]
+    fn startup_names_the_file_each_bare_name_runs() {
+        let names = crate::run::commands::BareNames {
+            declared: BTreeMap::from([(
+                "git".to_string(),
+                (
+                    PathBuf::from("/Dev/usr/bin/git"),
+                    vec!["[tool.git]".to_string(), "[tool.git_status]".to_string()],
+                ),
+            )]),
+            shared: BTreeMap::from([(
+                "node".to_string(),
+                vec!["[tool.brew_node]".to_string(), "[tool.node]".to_string()],
+            )]),
+            passed_over: BTreeMap::from([("git".to_string(), vec!["[tool.brew_git]".to_string()])]),
+        };
+        let mut output = Vec::new();
+
+        write_bare_name_disclosures(&names, &mut output).expect("the disclosure writes");
+
+        assert_eq!(
+            String::from_utf8(output).expect("the disclosure is UTF-8"),
+            "strands-box: [tool.git], [tool.git_status]: a bare `git` in the Shell runs \
+             /Dev/usr/bin/git\n\
+             strands-box: [tool.brew_git]: runs another program path, so a bare `git` in the Shell \
+             runs the file of `[tool.git]`, whose label is that name\n\
+             strands-box: [tool.brew_node], [tool.node]: these tables run different program paths, \
+             so a bare `node` in the Shell runs the file that `PATH` finds\n"
         );
     }
 
