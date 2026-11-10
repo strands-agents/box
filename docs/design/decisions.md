@@ -1939,8 +1939,9 @@ it makes a label such as `brew_git` a command and changes what `python` runs for
 Box names a program by its canonical identity for the `shell:spawn` decision, for selection, and
 for credentials, and the spawn hook runs only an identity that was bound to an existing file when
 the decision was made. `shell:spawn`, or a grammar action, stays the one control on whether a
-program runs. A second program of a tool's name that the agent reaches through `exec` is refused by
-its bare name, so it needs its own `[tool]` or its path.
+program runs. A second program of a tool's name that the agent reaches through `exec` no longer
+runs by its bare name, which runs the tool's file or is refused, so it needs its own `[tool]` or its
+path.
 
 <a id="the-caller-spelling-becomes-argument-zero"></a>
 ### The identity selects the program, and the caller's spelling becomes `argv[0]`
