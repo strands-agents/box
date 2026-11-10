@@ -521,7 +521,12 @@ fn generate_schema_uses_an_absolute_command_instead_of_a_path_decoy() {
         !actions.contains(r#"action "decoy_tool" appliesTo"#),
         "{actions}"
     );
-    assert_eq!(trace(&workspace, "chosen-mcp").len(), 3);
+    let requests = trace(&workspace, "chosen-mcp");
+    assert_eq!(requests.len(), 4, "{requests:?}");
+    assert_eq!(requests[0]["method"], "server/discover");
+    assert_eq!(requests[1]["method"], "initialize");
+    assert_eq!(requests[2]["method"], "notifications/initialized");
+    assert_eq!(requests[3]["method"], "tools/list");
 }
 
 #[test]
