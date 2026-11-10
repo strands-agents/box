@@ -244,6 +244,11 @@ when {
 };
 ```
 
+On macOS, `python3 -m venv .venv` and `pip install` copy files together with their times, and a
+write folder refuses to set a file's times by default, so both stop with `Operation not permitted`.
+Set [`file-attributes = true`](config.md#file-attributes) to allow it, after reading what else that
+switch allows. `python3 -m venv --without-pip .venv` works without it.
+
 A bare `python3` always runs the tool's own file, whatever `PATH` holds, so activating a virtual
 environment doesn't change what it runs. A virtual environment's interpreter run by its path, such
 as `.venv/bin/python`, names the same canonical file, so the same tool runs it, and
