@@ -210,7 +210,8 @@ deny  = ["~/src/project/.env"]
 By default `python` and `python3` in the Shell run Monty, so a project's `python3 -m pytest` or
 `python3 -m venv .venv` fails with `invalid option '-m'`. To run the host's Python for those names,
 list them in `replaces` on the tool that runs it. The tool must also read the interpreter's own
-install tree, which is outside the folders every sandbox gets:
+install tree and the Homebrew trees its extension modules load, such as OpenSSL for `ssl`, which are
+outside the folders every sandbox gets:
 
 ```toml
 [tool.python]
@@ -218,7 +219,13 @@ command  = ["/opt/homebrew/bin/python3"]
 replaces = ["python3", "python"]
 
 [tool.python.filesystem]
-read  = ["~/src/project", "/opt/homebrew/Cellar/python@3.14", "/opt/homebrew/lib/python3.14"]
+read  = [
+  "~/src/project",
+  "/opt/homebrew/Cellar",
+  "/opt/homebrew/opt",
+  "/opt/homebrew/etc",
+  "/opt/homebrew/lib/python3.14",
+]
 write = ["~/src/project"]
 ```
 
