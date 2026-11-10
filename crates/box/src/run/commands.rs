@@ -531,6 +531,7 @@ mod tests {
                     filesystem: Default::default(),
                     network: None,
                     grammar: None,
+                    ingress: Vec::new(),
                 },
             )]),
             egress: Default::default(),
@@ -1330,6 +1331,7 @@ mod tests {
                 .try_into()
                 .expect("a grammar table")
             }),
+            ingress: Vec::new(),
         }
     }
 
