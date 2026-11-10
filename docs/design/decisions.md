@@ -2129,9 +2129,10 @@ before the backend token attaches, so the backend token wins and no placeholder 
 A backend `auth` of `aws://` is SigV4-signed over the **backend** host: the gateway signs the
 re-routed request AFTER it rewrites the `Host` to the backend and joins the path, so the signature
 covers exactly the bytes the backend receives, with service and region derived from the backend host
-([where a re-route signs a backend auth](#where-a-re-route-signs-a-backend-auth-of-aws)). A host the
-box cannot derive a service and region for fails closed — it refuses to sign rather than ship a
-signature the backend would reject. A `credsd://` backend `auth` stays refused (out of scope); an
+([where a re-route signs a backend auth](#where-a-re-route-signs-a-backend-auth-of-aws)). The backend
+host is a gateway or custom domain with no derivable scope, so the `aws://` auth states an explicit
+`aws.service` and `aws.region`, which the loader requires — Box never guesses a vendor's host shape.
+A `credsd://` backend `auth` stays refused (out of scope); an
 `auth` on a plaintext `http` backend is refused, because a credential must ride TLS; and a signed
 destination `secret` beside a backend is refused, because it mints no phantom to strip. Because the
 box never reads the destination secret's value, a re-routed entry launches with
@@ -2158,9 +2159,12 @@ The gateway signs it in `run_l7_legs` AFTER it rewrites the `Host` to the backen
 forwarded target, and BEFORE it serializes the request — the one point where the bytes that leave are
 final. The box lowers the `aws://` auth to a signed route keyed on the backend host, held in the
 backend vault; the gateway applies it with an `Outbound` whose host is the backend, so the existing
-in-boundary SigV4 signer covers the backend host, and `derive_service_region` reads the backend host
-(a new arm maps `<id>.gateway.bedrock-agentcore.<region>.amazonaws.com` to `bedrock-agentcore` and the
-region). Signing per request keeps expiring credentials fresh, and the inbound signing artifacts are
+in-boundary SigV4 signer covers the backend host. The service and region are **stated explicitly** on
+the auth (`aws.service`, `aws.region`), carried on the route (`RouteSpec::aws_scope`) and used by the
+signer verbatim — a backend is a gateway or custom domain whose host carries no derivable scope, and
+inferring it would mean encoding each AWS product's host shape in Box. Host derivation
+(`derive_service_region`) stays only for an ordinary AWS destination, whose host is standard.
+Signing per request keeps expiring credentials fresh, and the inbound signing artifacts are
 stripped first, as for a destination signature. The signer covers only the headers that leave:
 `content-length` is left unsigned because the forwarding layer owns it — it refreshes the value and
 omits the header entirely on a bodyless request — so signing the workload's value would attest a
@@ -2171,8 +2175,9 @@ the gateway holds the per-request bytes. The env:// box-owned backend token keep
 attach, because a static token does not depend on the `Host`. The limit: the signature covers the
 backend host as written in `backends.url`, so a future URL rewrite that changes the sent host must
 re-derive the service and region from the rewritten host.
-`a_backend_aws_auth_signs_over_the_backend_host` and the credentials crate's
-`derive_service_region_reads_the_agentcore_gateway_host` pin it.
+`a_backend_aws_auth_signs_over_the_backend_host`,
+`an_aws_backend_auth_without_an_explicit_scope_is_refused`, and the credentials crate's
+`a_gateway_host_is_not_derived_and_needs_an_explicit_scope` pin it.
 
 ## Credentials
 

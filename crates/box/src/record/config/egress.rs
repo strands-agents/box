@@ -278,6 +278,11 @@ pub(crate) struct EgressRoute {
     /// Which vault route kind this builds: an ordinary opaque swap, a strip-phantom (a re-routed
     /// destination's own secret), or a box-owned attach (a re-route's backend token).
     mode: RouteMode,
+
+    /// The explicit SigV4 `(service, region)` for an `aws://` backend auth signed over the backend
+    /// host, which carries no derivable scope. `None` for every other route, which derives its scope
+    /// from its host.
+    aws_scope: Option<(String, String)>,
 }
 
 /// Where a credential lands on an outbound request.
@@ -375,10 +380,14 @@ impl EgressRoute {
                     RouteSpec::opaque(self.destination.clone(), self.locator.clone(), mode)
                         .phantom_check(self.phantom),
                 ),
-                None => Ok(RouteSpec::signed_aws(
-                    self.destination.clone(),
-                    self.locator.clone(),
-                )),
+                None => {
+                    let spec =
+                        RouteSpec::signed_aws(self.destination.clone(), self.locator.clone());
+                    Ok(match &self.aws_scope {
+                        Some((service, region)) => spec.aws_scope(service.clone(), region.clone()),
+                        None => spec,
+                    })
+                }
             },
         }
     }
@@ -560,6 +569,22 @@ pub(crate) struct EgressSecret {
     /// accepts the injected phantom.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) phantom_prefix: Option<String>,
+
+    /// The explicit SigV4 scope for an `aws://` backend `auth`, as `aws.service` and `aws.region`.
+    /// Required on an `aws://` backend auth (its gateway or custom-domain host carries no derivable
+    /// scope) and refused everywhere else, so Box never guesses a vendor's host shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) aws: Option<AwsScope>,
+}
+
+/// The explicit SigV4 `(service, region)` an `aws://` backend `auth` signs under.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AwsScope {
+    /// The SigV4 service name, e.g. `bedrock-agentcore`.
+    pub(crate) service: String,
+    /// The AWS region, e.g. `us-east-1`.
+    pub(crate) region: String,
 }
 
 impl EgressSecret {
@@ -640,6 +665,7 @@ impl EgressEntry {
                     phantom: secret.phantom_check(),
                     phantom_prefix: secret.phantom_prefix.clone(),
                     mode: RouteMode::StripPhantom,
+                    aws_scope: None,
                 });
             }
         }
@@ -659,6 +685,12 @@ impl EgressEntry {
                     host: backend.url.clone(),
                     reason,
                 })?;
+                // `validate` requires `aws.service`/`aws.region` on an aws:// backend auth, so the
+                // signer uses them verbatim rather than deriving a scope from the backend host.
+                let aws_scope = auth
+                    .aws
+                    .as_ref()
+                    .map(|scope| (scope.service.clone(), scope.region.clone()));
                 routes.push(EgressRoute {
                     destination: self.pattern(&backend_destination(&target))?,
                     host: target.host.clone(),
@@ -668,6 +700,7 @@ impl EgressEntry {
                     phantom: PhantomCheck::Strict,
                     phantom_prefix: None,
                     mode: RouteMode::Opaque,
+                    aws_scope,
                 });
             } else {
                 // An `env://` auth is a static box-owned token, attached once at the backend
@@ -682,6 +715,7 @@ impl EgressEntry {
                         phantom: PhantomCheck::Strict,
                         phantom_prefix: None,
                         mode: RouteMode::BoxOwned,
+                        aws_scope: None,
                     });
                 }
             }
@@ -783,6 +817,7 @@ impl EgressEntry {
                 phantom: secret.phantom_check(),
                 phantom_prefix: secret.phantom_prefix.clone(),
                 mode,
+                aws_scope: None,
             });
         }
         Ok(bindings)
@@ -935,20 +970,27 @@ impl EgressEntry {
                          box's own, and the workload presents no placeholder to check or seed",
                     );
                 }
-                // An `aws://` auth signs over the backend host, so that host must yield an AWS
-                // service and region. Refusing here, at load, is the fail-closed alternative to
-                // loading and then refusing every request when the signer cannot derive a scope.
-                // `credsd://` was refused above, so `signs_in_boundary` here means `aws://`.
-                if Self::signs_in_boundary(auth)
-                    && !credentials::aws_scope_is_derivable(&target.host)
-                {
-                    return refuse(&format!(
-                        "a backend auth of aws:// signs over the backend host, but no AWS \
-                         service/region can be derived from {host:?}; name an AWS backend host (such \
-                         as a *.gateway.bedrock-agentcore.<region>.amazonaws.com gateway) or use an \
-                         env:// token",
-                        host = target.host,
-                    ));
+                // An `aws://` auth signs over the backend host — a gateway or custom domain with no
+                // derivable AWS scope — so it carries an explicit `aws.service` and `aws.region`
+                // rather than Box guessing a vendor's host shape. An `env://` auth has no SigV4 scope,
+                // so `aws` is refused there. `credsd://` was refused above, so `signs_in_boundary`
+                // here means `aws://`.
+                if Self::signs_in_boundary(auth) {
+                    match &auth.aws {
+                        Some(scope)
+                            if !scope.service.trim().is_empty()
+                                && !scope.region.trim().is_empty() => {}
+                        _ => {
+                            return refuse(
+                                "an aws:// backend auth requires an explicit aws.service and \
+                                 aws.region: the backend host carries no derivable AWS signing scope",
+                            );
+                        }
+                    }
+                } else if auth.aws.is_some() {
+                    return refuse(
+                        "aws.service and aws.region are only valid for an aws:// backend auth",
+                    );
                 }
             }
             // A destination `secret` beside an http backend is refused. Its strip-phantom route
@@ -978,6 +1020,11 @@ impl EgressEntry {
             return Ok(());
         };
 
+        // `aws.service`/`aws.region` scope an `aws://` backend `auth` only; a destination secret
+        // derives its own scope from its (standard AWS) host, so it never carries them.
+        if secret.aws.is_some() {
+            return refuse("aws.service and aws.region are only valid for an aws:// backend auth");
+        }
         validate_secret(secret, &label)
     }
 }
@@ -2679,14 +2726,14 @@ mod tests {
     /// backend auth stays refused (out of scope).
     #[test]
     fn a_credsd_backend_auth_is_refused() {
-        // aws:// now loads on an AWS-signable backend host: the gateway signs over the backend host.
+        // aws:// loads with an explicit scope, on any backend host (no host guessing).
         load(
             "[egress.github]\ndestinations = [\"api.github.com\"]\n\n\
-             [[egress.github.backends]]\n\
-             url = \"https://gw.gateway.bedrock-agentcore.us-east-1.amazonaws.com\"\n\
-             auth.ref = \"aws://default\"\n",
+             [[egress.github.backends]]\nurl = \"https://gw.example.com\"\n\
+             auth.ref = \"aws://default\"\n\
+             auth.aws.service = \"bedrock-agentcore\"\nauth.aws.region = \"us-east-1\"\n",
         )
-        .expect("an aws:// backend auth loads and signs over the backend host");
+        .expect("an aws:// backend auth with an explicit scope loads");
 
         // credsd:// stays refused.
         let error = load(
@@ -2704,19 +2751,27 @@ mod tests {
     /// An `aws://` backend auth whose backend host yields no AWS service/region is refused at load,
     /// rather than loading and refusing every request when the signer cannot derive a scope.
     #[test]
-    fn a_non_aws_backend_host_with_aws_auth_is_refused() {
+    fn an_aws_backend_auth_without_an_explicit_scope_is_refused() {
+        // No `aws.service`/`aws.region`: refused, because Box does not guess a backend's scope.
         let error = load(
             "[egress.github]\ndestinations = [\"api.github.com\"]\n\n\
-             [[egress.github.backends]]\nurl = \"https://gateway-1.example.com\"\n\
+             [[egress.github.backends]]\nurl = \"https://gw.example.com\"\n\
              auth.ref = \"aws://default\"\n",
         )
-        .expect_err("an aws:// auth on a non-AWS backend host is refused");
+        .expect_err("an aws:// backend auth with no explicit scope is refused");
         assert!(
-            error
-                .to_string()
-                .contains("no AWS service/region can be derived"),
-            "the refusal names the underivable backend host: {error}"
+            error.to_string().contains("aws.service") && error.to_string().contains("aws.region"),
+            "the refusal names the required scope keys: {error}"
         );
+
+        // `aws.service`/`aws.region` are refused on an `env://` backend auth (no SigV4 scope).
+        let on_env = load(
+            "[egress.github]\ndestinations = [\"api.github.com\"]\n\n\
+             [[egress.github.backends]]\nurl = \"https://gw.example.com\"\n\
+             auth.ref = \"env://T\"\nauth.aws.service = \"s\"\nauth.aws.region = \"r\"\n",
+        )
+        .expect_err("aws scope on an env:// auth is refused");
+        assert!(on_env.to_string().contains("aws.service"), "{on_env}");
     }
 
     /// A backend auth needs an https backend, because a credential does not ride a plaintext upstream.

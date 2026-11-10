@@ -445,8 +445,10 @@ fn a_backend_aws_auth_signs_over_the_backend_host() {
     .unwrap();
     let store = Arc::new(
         Vault::open(
-            VaultConfig::new(Backend::local(), "t")
-                .route(RouteSpec::signed_aws(pat(backend_host, port), aws_auth)),
+            VaultConfig::new(Backend::local(), "t").route(
+                RouteSpec::signed_aws(pat(backend_host, port), aws_auth)
+                    .aws_scope("bedrock-agentcore", "us-east-1"),
+            ),
         )
         .unwrap()
         .into_vault(),

@@ -43,6 +43,10 @@ pub(crate) enum RouteKind {
         /// The structured AWS config block (`source = "aws"`, optional `profile`), interpreted by the
         /// AWS source at signing time.
         config: Locator,
+        /// An explicit `(service, region)` to sign under, instead of deriving them from the request
+        /// host. Set for a re-routed backend whose host the box cannot derive a scope from (a gateway
+        /// or a custom domain); `None` keeps host derivation for an ordinary AWS destination.
+        scope: Option<(String, String)>,
     },
     /// A credential the box owns and attaches itself: the real secret is resolved at open and
     /// attached unconditionally, with no phantom minted and no placeholder check. A re-route's backend
@@ -100,8 +104,22 @@ impl RouteSpec {
         Self {
             destination,
             credential_ref: Locator::Uri(AWS_SENTINEL_REF.to_string()),
-            kind: RouteKind::SignedAws { config },
+            kind: RouteKind::SignedAws {
+                config,
+                scope: None,
+            },
         }
+    }
+
+    /// Sign under an explicit `(service, region)` instead of deriving them from the request host. For
+    /// a re-routed backend whose host the box cannot derive a scope from. A no-op on a non-signed
+    /// route.
+    #[must_use]
+    pub fn aws_scope(mut self, service: impl Into<String>, region: impl Into<String>) -> Self {
+        if let RouteKind::SignedAws { scope, .. } = &mut self.kind {
+            *scope = Some((service.into(), region.into()));
+        }
+        self
     }
 
     /// A **box-owned** route: the box resolves `credential_ref` at open and attaches it at `inject`
@@ -405,7 +423,7 @@ mod tests {
         );
 
         match spec.kind() {
-            RouteKind::SignedAws { config } => assert_eq!(config.scheme(), "aws"),
+            RouteKind::SignedAws { config, .. } => assert_eq!(config.scheme(), "aws"),
             other => panic!("expected a signed route, got {other:?}"),
         }
         // Clone + equality round-trip (every component derives Eq).

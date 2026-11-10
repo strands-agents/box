@@ -98,17 +98,28 @@ impl Vault {
         Ok(attachment)
     }
 
-    /// SigV4-sign `req` in-boundary against the AWS `config` bound to its destination.
-    pub(crate) fn sign_aws(&self, config: &Locator, req: &Outbound<'_>) -> Result<Attachment> {
-        // Derive the signing scope from the request host, never from the credential (whose region is a
-        // non-secret hint). An underivable host fails closed rather than signing under a guessed scope.
-        let (service, region) = derive_service_region(req.destination.host).ok_or_else(|| {
-            CredentialError::Credential(format!(
-                "cannot derive an AWS service/region from host {host:?}; refusing to sign with a \
-                 guessed scope",
-                host = req.destination.host,
-            ))
-        })?;
+    /// SigV4-sign `req` in-boundary against the AWS `config` bound to its destination. `scope` is the
+    /// route's explicit `(service, region)`, used verbatim when present (a re-routed backend whose
+    /// host carries no derivable scope); otherwise the scope is derived from the request host.
+    pub(crate) fn sign_aws(
+        &self,
+        config: &Locator,
+        scope: Option<&(String, String)>,
+        req: &Outbound<'_>,
+    ) -> Result<Attachment> {
+        // An explicit route scope wins; else derive from the request host, never from the credential
+        // (whose region is a non-secret hint). An underivable host with no explicit scope fails closed
+        // rather than signing under a guessed scope.
+        let (service, region) = match scope {
+            Some((service, region)) => (service.clone(), region.clone()),
+            None => derive_service_region(req.destination.host).ok_or_else(|| {
+                CredentialError::Credential(format!(
+                    "cannot derive an AWS service/region from host {host:?}; refusing to sign with a \
+                     guessed scope",
+                    host = req.destination.host,
+                ))
+            })?,
+        };
 
         // Session credentials expire, so this resolve happens per request — and therefore gets its own
         // audit record, exactly like a load-time one. A signed route resolves nothing at open,
@@ -362,13 +373,6 @@ fn observe_phantom(req: &Outbound<'_>, location: &InjectMode) -> Option<Zeroizin
 /// The two suffixes are disjoint — no host ends with both — so the order here carries no meaning.
 const AWS_HOST_SUFFIXES: [&str; 2] = [".amazonaws.com", ".api.aws"];
 
-/// Whether an AWS SigV4 service and region can be derived from `host`. A signed route over a host
-/// this rejects fails closed at request time, so the box's config validation calls this to refuse an
-/// `aws://` backend auth whose backend host is not AWS-signable — at load, not per request.
-pub fn aws_scope_is_derivable(host: &str) -> bool {
-    derive_service_region(host).is_some()
-}
-
 /// Derive `(service, region)` from an AWS endpoint host.
 pub(crate) fn derive_service_region(host: &str) -> Option<(String, String)> {
     let host = host.trim_end_matches('.').to_ascii_lowercase();
@@ -389,13 +393,9 @@ pub(crate) fn derive_service_region(host: &str) -> Option<(String, String)> {
         [_, service, region] if *service == "execute-api" => {
             Some(("execute-api".to_string(), (*region).to_string()))
         }
-        // {id}.gateway.bedrock-agentcore.{region}.amazonaws.com — a Bedrock AgentCore Gateway, which
-        // signs as `bedrock-agentcore`. A re-route's backend `auth` signs over this host after the
-        // Host rewrite, so the gateway endpoint must derive its own scope.
-        [_, "gateway", "bedrock-agentcore", region] => {
-            Some(("bedrock-agentcore".to_string(), (*region).to_string()))
-        }
-        // Any other multi-label form is non-standard → fail closed.
+        // Any other multi-label form is non-standard → fail closed. A re-routed backend whose host is
+        // not derivable (a gateway or custom domain) carries an explicit scope on its `aws://` auth
+        // instead (`RouteSpec::aws_scope`), so Box holds no per-vendor host shapes.
         _ => None,
     }
 }
@@ -467,22 +467,17 @@ mod tests {
         assert_eq!(derive_service_region("evil.com"), None);
     }
 
-    /// A Bedrock AgentCore Gateway host signs as `bedrock-agentcore`. This is the host a re-route's
-    /// backend `auth` of `aws://` signs over, after the `Host` rewrite.
+    /// A gateway / prefixed host is NOT derived — Box holds no per-vendor host shapes. A re-routed
+    /// backend over such a host (an AgentCore gateway, a custom domain) carries an explicit
+    /// `(service, region)` on its `aws://` auth instead.
     #[test]
-    fn derive_service_region_reads_the_agentcore_gateway_host() {
+    fn a_gateway_host_is_not_derived_and_needs_an_explicit_scope() {
         assert_eq!(
             derive_service_region(
                 "passthrough-tr144gw4id.gateway.bedrock-agentcore.us-east-1.amazonaws.com"
             ),
-            Some(("bedrock-agentcore".to_string(), "us-east-1".to_string()))
+            None
         );
-        // A different region still derives.
-        assert_eq!(
-            derive_service_region("my-gw.gateway.bedrock-agentcore.eu-west-1.amazonaws.com"),
-            Some(("bedrock-agentcore".to_string(), "eu-west-1".to_string()))
-        );
-        // A look-alike that is not the bedrock-agentcore gateway shape fails closed.
         assert_eq!(
             derive_service_region("x.gateway.something-else.us-east-1.amazonaws.com"),
             None

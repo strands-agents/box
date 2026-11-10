@@ -110,7 +110,8 @@ auth.ref = "env://BOX_GW_TOKEN"
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `backends.url` | string | required | The backend to dial, as `scheme://host[:port][/prefix]`. `https` or `http`. A path prefix is allowed; a query or fragment is not. |
-| `backends.auth.ref` | string | none | The backend's own credential: `env://NAME` for a static token (takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `inject` or `phantom_prefix`), or `aws://PROFILE` to SigV4-sign the request over the backend host. |
+| `backends.auth.ref` | string | none | The backend's own credential: `env://NAME` for a static token (takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `inject` or `phantom_prefix`), or `aws://PROFILE` to SigV4-sign the request over the backend host (requires `backends.auth.aws.service` and `backends.auth.aws.region`). |
+| `backends.auth.aws.service` / `backends.auth.aws.region` | string | none | The SigV4 service (e.g. `bedrock-agentcore`) and region (e.g. `us-east-1`) to sign under. Required for an `aws://` auth, refused otherwise. |
 
 The box dials the backend's host and port, presents the backend host for TLS and in the `Host`
 header, and validates the backend's certificate against the backend host. If the `url` has a path
@@ -122,9 +123,18 @@ a `forbid` on a metadata or private address refuses a backend that resolves ther
 
 A backend's `auth` rides an `https` backend. An `env://` token is attached as-is; an `aws://` profile
 is SigV4-signed over the **backend** host — the box signs the request after it rewrites the `Host` to
-the backend, so the signature covers the bytes the backend receives, and it derives the service and
-region from the backend host (for example a Bedrock AgentCore Gateway signs as `bedrock-agentcore`).
-A `credsd://` auth is refused.
+the backend, so the signature covers the bytes the backend receives. The service and region are
+**stated explicitly** in `backends.auth.aws` (e.g. `service = "bedrock-agentcore"`,
+`region = "us-east-1"`); the box does not guess them from the host, because a gateway or custom-domain
+host carries no standard AWS scope. A `credsd://` auth is refused.
+
+```toml
+[[egress.github.backends]]
+url              = "https://my-gw.gateway.bedrock-agentcore.us-east-1.amazonaws.com/github"
+auth.ref         = "aws://default"
+auth.aws.service = "bedrock-agentcore"
+auth.aws.region  = "us-east-1"
+```
 
 An entry may keep its own `secret` beside a backend, and it must be `env://`. It is phantom-only: the
 box provisions the placeholder to the workload (so the agent's credential-shaped code works) and
@@ -169,7 +179,7 @@ names is refused.
 | An entry has a backend, and its destination is not one exact host | A re-route is matched per connection, on host and port, and the box presents the backend host on the wire. Give a backend entry exactly one destination with an exact host (no path, no wildcard). Write one entry per host. |
 | An entry has a backend and a signed (`aws://`/`credsd://`) `secret` | A re-routed destination secret is phantom-only, so it must be `env://`. |
 | A `backends.auth` uses `credsd://`, or sits on an `http` backend | Use an `env://` token or an `aws://` profile on an `https` backend. |
-| A `backends.auth` uses `aws://`, but no AWS service/region can be derived from the backend host | An `aws://` auth signs over the backend host. Name an AWS backend host (such as a `*.gateway.bedrock-agentcore.<region>.amazonaws.com` gateway), or use an `env://` token. |
+| A `backends.auth` uses `aws://` without `aws.service`/`aws.region` (or sets them on a non-`aws://` auth) | An `aws://` backend auth signs over the backend host, so state `backends.auth.aws.service` and `backends.auth.aws.region`. They are valid only on an `aws://` auth. |
 | `secret.ref` has a scheme other than `env` or `aws` | Use one of the two schemes. |
 | `env://NAME` names a variable that is unset, blank, or reserved by the box | Set `NAME` in the host OS's shell that runs `box run`, or choose another name. |
 | An `aws://` route sets a placement, `header`, `prefix`, `param`, `inject`, or `phantom_prefix` | Remove the key. A signed route takes none. |

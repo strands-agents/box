@@ -129,6 +129,10 @@ impl StripBinding {
     }
 }
 
+/// A signed-AWS route's resolved form: its config locator and an optional explicit `(service,
+/// region)` to sign under (a re-routed backend whose host carries no derivable scope).
+type SignedAwsRoute = (Locator, Option<(String, String)>);
+
 /// The loaded credential set for one tenant.
 #[derive(Debug)]
 pub struct Vault {
@@ -142,7 +146,7 @@ pub struct Vault {
     /// destination pattern → strip-phantom binding (strip the placeholder, attach nothing).
     strip: Vec<(DestinationPattern, StripBinding)>,
     /// destination pattern → the structured AWS config a signed route signs with.
-    signed_aws: Vec<(DestinationPattern, Locator)>,
+    signed_aws: Vec<(DestinationPattern, SignedAwsRoute)>,
     /// The backend, retained because a signed route resolves its credentials per request (they
     /// expire), unlike an opaque secret which is resolved once at open.
     backend: Backend,
@@ -214,13 +218,13 @@ impl Vault {
 
             match route.kind() {
                 // A signed route carries a config block resolved at use, not a secret held here.
-                RouteKind::SignedAws { config } => {
+                RouteKind::SignedAws { config, scope } => {
                     if config.scheme() == CREDSD_SCHEME {
                         declares_credsd = true;
                     }
                     vault
                         .signed_aws
-                        .push((route.destination().clone(), config.clone()));
+                        .push((route.destination().clone(), (config.clone(), scope.clone())));
                 }
                 // A strip-phantom route mints a placeholder (so a workload harness has one) and
                 // resolves NO real secret. The strip at request time is unconditional.
@@ -420,8 +424,8 @@ impl Vault {
     pub fn attach_for(&self, req: Outbound<'_>) -> Result<Option<Attachment>> {
         // A signed AWS binding first: it is signed in-boundary and never phantom-swapped, because
         // nothing was minted to match.
-        if let Some(config) = Self::first_match(&self.signed_aws, &req.destination) {
-            return self.sign_aws(config, &req).map(Some);
+        if let Some((config, scope)) = Self::first_match(&self.signed_aws, &req.destination) {
+            return self.sign_aws(config, scope.as_ref(), &req).map(Some);
         }
         // A re-route composes two edits on one destination (one credential authority, so one control):
         // a strip-phantom binding removes the workload's placeholder, and a box-owned binding attaches

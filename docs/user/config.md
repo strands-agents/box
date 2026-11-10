@@ -790,14 +790,16 @@ An `aws://` route signs inside the box, so it takes no `header`, `prefix`, `plac
 
 An entry re-routes to a backend with one `[[egress.<name>.backends]]` table, holding a `url`
 (`scheme://host[:port][/prefix]`, `https` or `http`) and an optional `auth` — the backend's own
-credential, an `env://` token or an `aws://` profile SigV4-signed over the backend host. The backend
-`url`'s path prefix joins in front of the agent's request path. An entry may keep its own `env://`
-`secret` beside a backend, phantom-only: the box provisions the placeholder and strips it, never
-injecting the real destination credential, so the named variable need not be set. The loader refuses
-more than one backend, a destination that is not one exact host, a `url` with a query, fragment, or a
-non-`http(s)` scheme, a `credsd://` `auth`, an `aws://` `auth` whose backend host yields no AWS
-service/region, a signed (`aws://` or `credsd://`) destination `secret`, and an `auth` on an `http`
-backend.
+credential, an `env://` token or an `aws://` profile SigV4-signed over the backend host (with an
+explicit `auth.aws.service` and `auth.aws.region`, since a gateway host carries no derivable scope).
+The backend `url`'s path prefix joins in front of the agent's request path. An entry may keep its own
+`env://` `secret` beside a backend, phantom-only: the box provisions the placeholder and strips it,
+never injecting the real destination credential, so the named variable need not be set. The loader
+refuses more than one backend, a destination that is not one exact host, a `url` with a query,
+fragment, or a non-`http(s)` scheme, a `credsd://` `auth`, an `aws://` `auth` without
+`auth.aws.service`/`auth.aws.region` (or those keys on a non-`aws://` auth), a signed (`aws://` or
+`credsd://`) destination `secret`, a destination `secret` beside an `http` backend, and an `auth` on
+an `http` backend.
 [The egress table](egress.md#backends) describes the backend, and
 [egress design](../design/egress.md) describes how the box dials it.
 
