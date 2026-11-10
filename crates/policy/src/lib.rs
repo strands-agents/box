@@ -58,7 +58,7 @@ pub use mcp_schema::{
     McpSchemaError, compose_action_schema, generate_mcp_schema, validate_mcp_schema_composition,
 };
 pub use observe::DecisionObserver;
-pub use outcome::{Delivery, FsResult, Outcome};
+pub use outcome::{Delivery, FsResult, Outcome, PendingToolResponse};
 pub use path::{ApprovedPath, PathRefusal, PathResolver};
 pub use policy::{
     ENGINE_ID, EffectivePolicy, Policy, PolicyEngine, SELF_DEFENDED_FILES, SchemaStage,

@@ -193,6 +193,23 @@ when temporal {
 `::request` counts every attempt, including a refused one. `::response` counts calls that reached
 the server.
 
+A rule can also require that another tool call finished first, for the same argument. This rule
+refuses a password reset unless `verify_identity` finished for the same user in the last hour:
+
+```cedar
+@id("reset_after_verify")
+forbid (principal, action == servicenow::Action::"reset_password", resource)
+unless temporal {
+  formerly within 1h (
+    servicenow::Action::"verify_identity"::response{ input.user_name: context.input.user_name }
+  )
+};
+```
+
+Key it on `::response`. A refused `verify_identity` still records `::request`, so a rule on
+`::request` is met by asking. A response shows that the call finished, not that the tool reported
+success. Box doesn't record `::error` for an MCP call, and the load refuses a rule that reads one.
+
 The count carries over when the box restarts. That's also true of a rule written on a tool's own
 action, such as `github::Action::"create_issue"`, as long as the rule only decides tool calls and
 you didn't edit it. Box keeps that rule while the server lists its tools again. It starts with an

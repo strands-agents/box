@@ -168,3 +168,20 @@ pub enum Outcome<'a> {
         uri: Option<&'a str>,
     },
 }
+
+/// The per-tool `::response` an allowed `tools/call` owes, from `refine_tool_call` to `record_tool_response`.
+#[must_use = "a dropped pending tool response is a `::response` that history never sees"]
+pub struct PendingToolResponse {
+    pub(crate) request_id: crate::RequestId,
+    pub(crate) identity: crate::schema::ActionIdentity,
+    pub(crate) input: dogwood_language::Value,
+}
+
+impl std::fmt::Debug for PendingToolResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingToolResponse")
+            .field("identity", &self.identity)
+            .finish_non_exhaustive()
+    }
+}

@@ -134,6 +134,12 @@ three kinds of event:
 - `::response` for an operation that happened, or may have happened.
 - `::error` for an operation that definitely didn't happen.
 
+An MCP call records only `::response`, both as `mcp:call` and, for a `tools/call` a per-tool action
+decided, as that tool's action with the request's `input`. A completed call is a response whatever
+the server replied, and so is a cancelled or uncertain one, so a budget over responses can't be
+escaped by making calls fail. The load refuses a rule that reads an MCP `::error`, because nothing
+records one.
+
 For an MCP command with [argument wildcards](../user/mcp.md#argument-wildcards) enabled, the
 `shell:spawn` request records the alias name and effective launch arguments, including the received
 values in the `*` positions. The `program_path` field identifies the resolved executable file.
@@ -241,18 +247,20 @@ every rule it can prove will never match. See [a rule that can't fire is refused
 load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns). It also
 refuses a rule that reads `context.input` under actions of more than one family, or under no action,
 because a field means what the action makes it mean. See [a rule that reads the input names one
-action family](decisions.md#a-rule-that-reads-the-input-names-one-action-family).
+action family](decisions.md#a-rule-that-reads-the-input-names-one-action-family). It also refuses a
+temporal predicate on `mcp:call::error` or a per-tool `::error`, because an MCP call records only
+`::response`.
 
 The `run` verb validates the policy before it writes any box state. A box with no local MCP server
 validates against the complete action schema, and that check accepts and refuses exactly what the
 later load does, so a policy that passes it loads at the next run.
 
 A box with a local MCP server can finish the check only after the server reports its tools. Up
-front, `run` checks syntax, macro expansion, provider use, and the action family of each rule that
-reads `context.input`. The per-tool actions don't exist until a server reports its tools, so `run`
-stages each server's schema as it arrives and validates the whole policy once more when every server
-has reported. Until then a tool call for that server is denied without reaching the engine. See
-[discovery serves the schema-independent
+front, `run` checks syntax, macro expansion, provider use, MCP `::error` predicates, and the action
+family of each rule that reads `context.input`. The per-tool actions don't exist until a server
+reports its tools, so `run` stages each server's schema as it arrives and validates the whole policy
+once more when every server has reported. Until then a tool call for that server is denied without
+reaching the engine. See [discovery serves the schema-independent
 subset](decisions.md#discovery-serves-the-schema-independent-subset). A rule that names only tool
 grammar `Tool::<name>` actions doesn't wait for a server: the grammar's actions are in the schema
 from the start, so the rule loads at once or the box refuses it. If policy refuses a server's tool

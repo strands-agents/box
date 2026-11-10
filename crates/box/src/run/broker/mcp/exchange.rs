@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use egress_gateway::McpTarget;
 use policy::{
-    Decision, DiscoveryFailure, GovernedBox, ListPage, Outcome, PolicyEngine, Principal, Request,
-    RequestId, ServerDiscovery,
+    Decision, DiscoveryFailure, GovernedBox, ListPage, Outcome, PendingToolResponse, PolicyEngine,
+    Principal, Request, RequestId, ServerDiscovery,
 };
 use serde_json::Value;
 
@@ -99,6 +99,8 @@ enum McpConnectionPhase {
 /// An admitted item call awaiting a terminal or indeterminate outcome.
 struct RecordedCall {
     request_id: RequestId,
+    /// The per-tool `::response` an allowed `tools/call` owes beside `mcp:call::response`.
+    tool_response: Option<PendingToolResponse>,
     method: String,
     tool: Option<String>,
     prompt: Option<String>,
@@ -426,7 +428,7 @@ async fn run_mcp_program(
     };
     let mut recorded = Ok(());
     for call in pending.into_values() {
-        recorded = recorded.and(record_response_leg(&exchange, &call));
+        recorded = recorded.and(record_response_leg(&exchange, call));
     }
     result.and(cleanup).and(recorded)
 }
@@ -751,7 +753,11 @@ async fn handle_client_response(
 
 enum ClientRequestAdmission {
     Undecided,
-    Permit(Box<EffectiveDecision>, Option<RequestId>),
+    Permit(
+        Box<EffectiveDecision>,
+        Option<RequestId>,
+        Option<PendingToolResponse>,
+    ),
     Refused,
 }
 
@@ -771,13 +777,13 @@ async fn admit_client_request(
         frame,
     )? {
         McpRequestAdmission::Undecided => Ok(ClientRequestAdmission::Undecided),
-        McpRequestAdmission::Allowed(decision, request_id) => Ok(ClientRequestAdmission::Permit(
-            Box::new(decision),
-            Some(request_id),
-        )),
+        McpRequestAdmission::Allowed(decision, request_id, tool_response) => Ok(
+            ClientRequestAdmission::Permit(Box::new(decision), Some(request_id), tool_response),
+        ),
         McpRequestAdmission::PolicyPending(decision, _) if pending_is_bootstrap => {
             Ok(ClientRequestAdmission::Permit(
                 Box::new(decision.into_enforcement_permit("policy-pending-bootstrap")),
+                None,
                 None,
             ))
         }
@@ -842,7 +848,7 @@ async fn handle_tools_list(
         }
     };
     match admit_client_request(frame, exchange, policy, governed, true).await? {
-        ClientRequestAdmission::Permit(decision, _) => {
+        ClientRequestAdmission::Permit(decision, ..) => {
             exchange.connection.recorder.record(*decision)
         }
         ClientRequestAdmission::Undecided => {}
@@ -988,12 +994,12 @@ async fn handle_request(
     let policy_request_id =
         match admit_client_request(frame, exchange, policy, governed, false).await? {
             ClientRequestAdmission::Undecided => None,
-            ClientRequestAdmission::Permit(decision, request_id) => {
+            ClientRequestAdmission::Permit(decision, request_id, tool_response) => {
                 let request_id = request_id.ok_or_else(|| {
                     io::Error::other("permitted MCP request has no committed request token")
                 })?;
                 exchange.connection.recorder.record(*decision);
-                Some(request_id)
+                Some((request_id, tool_response))
             }
             ClientRequestAdmission::Refused => return Ok(ProgramAction::Continue),
         };
@@ -1011,9 +1017,13 @@ async fn handle_request(
             exchange.connection.decided_calls.insert(
                 key.clone(),
                 RecordedCall {
-                    request_id: policy_request_id.ok_or_else(|| {
-                        io::Error::other("recorded MCP call has no committed request token")
-                    })?,
+                    request_id: policy_request_id
+                        .as_ref()
+                        .map(|(id, _)| id.clone())
+                        .ok_or_else(|| {
+                            io::Error::other("recorded MCP call has no committed request token")
+                        })?,
+                    tool_response: policy_request_id.and_then(|(_, tool_response)| tool_response),
                     method: target.method().to_string(),
                     tool: target.tool().map(str::to_string),
                     prompt: target.prompt().map(str::to_string),
@@ -1119,13 +1129,13 @@ async fn forward_server_frame(
     }
     let response_leg = exchange.connection.decided_calls.remove(&key);
     if let Some(call) = response_leg.filter(|_| terminal) {
-        record_response_leg(exchange, &call)?;
+        record_response_leg(exchange, call)?;
     }
     emit_text(exchange.frames, exchange.program, raw, None).await?;
     Ok(ProgramAction::Continue)
 }
 
-fn record_response_leg(exchange: &Exchange<'_>, call: &RecordedCall) -> io::Result<()> {
+fn record_response_leg(exchange: &Exchange<'_>, call: RecordedCall) -> io::Result<()> {
     exchange
         .connection
         .policy
@@ -1141,6 +1151,11 @@ fn record_response_leg(exchange: &Exchange<'_>, call: &RecordedCall) -> io::Resu
                 uri: call.uri.as_deref(),
             },
         )
+        .and_then(|()| {
+            call.tool_response.map_or(Ok(()), |response| {
+                exchange.connection.policy.record_tool_response(response)
+            })
+        })
         .map_err(|error| {
             eprintln!("[broker] failed to record mcp:call response leg: {error}");
             io::Error::other(format!("failed to record MCP response: {error}"))
@@ -2095,13 +2110,16 @@ when { context.input has value && context.input.value == "secret" };
 "#,
             );
             let search = |value: &str| {
-                fixture.policy.refine_tool_call(
-                    &GovernedBox::assigned("test-box"),
-                    &Principal::agent(),
-                    "issues-mcp",
-                    "Search",
-                    &json!({ "value": value }),
-                )
+                fixture
+                    .policy
+                    .refine_tool_call(
+                        &GovernedBox::assigned("test-box"),
+                        &Principal::agent(),
+                        "issues-mcp",
+                        "Search",
+                        &json!({ "value": value }),
+                    )
+                    .0
             };
             let log = tempfile::NamedTempFile::new().expect("frame log");
             let (mut program, mut output) =

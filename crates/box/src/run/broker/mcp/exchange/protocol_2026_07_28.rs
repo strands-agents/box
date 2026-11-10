@@ -231,7 +231,7 @@ pub(super) fn cancel_request(request: &Value, exchange: &mut Exchange<'_>) -> io
         && !exchange.connection.cancelled.contains_key(&key)
     {
         if let Some(call) = exchange.connection.decided_calls.remove(&key) {
-            record_response_leg(exchange, &call)?;
+            record_response_leg(exchange, call)?;
         }
         if exchange.connection.cancelled.len() >= protocol_2026_07_28::MAXIMUM_CANCELLED {
             return Err(invalid_data(

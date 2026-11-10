@@ -16,7 +16,10 @@ use crate::GovernedBox;
 use crate::{
     CatalogRefusal, CatalogStage, DiscoveryFailure, ListPage, McpServerKind, ToolCatalogs,
 };
-use crate::{Decision, Delivery, DenyReason, Outcome, PolicyEngine, Principal, Request, RequestId};
+use crate::{
+    Decision, Delivery, DenyReason, Outcome, PendingToolResponse, PolicyEngine, Principal, Request,
+    RequestId,
+};
 
 /// Binds one policy and egress principal to outbound effect interception.
 pub struct EgressPolicyInterceptor {
@@ -102,8 +105,10 @@ impl EgressPolicyInterceptor {
 
     /// The two MCP gates on an allowed `http:request`: `mcp:call` identity, then the per-tool typed
     /// refinement. A non-MCP request carries no frame and passes.
-    fn mcp_gates(&self, mcp: &Option<McpFrame<'_>>) -> Result<Option<RequestId>, String> {
-        let Some(frame) = mcp else { return Ok(None) };
+    fn mcp_gates(&self, mcp: &Option<McpFrame<'_>>) -> Result<McpGrant, String> {
+        let Some(frame) = mcp else {
+            return Ok((None, None));
+        };
         // Gate one: `mcp:call` (identity). `{:?}` quotes the server and method, so a hostile
         // identity cannot forge a log line; identity and args are omitted from it.
         let request = mcp_request(frame);
@@ -147,20 +152,22 @@ impl EgressPolicyInterceptor {
                         diagnostic_context(&action)
                     )
                 })?;
-            if let decision @ Decision::Deny { .. } = self.policy.refine_tool_call(
+            let (decision, tool_response) = self.policy.refine_tool_call(
                 &self.governed,
                 &self.principal,
                 server,
                 tool,
                 &arguments,
-            ) {
+            );
+            if let decision @ Decision::Deny { .. } = decision {
                 return Err(format!(
                     "per-tool gate ({}): {decision}",
                     diagnostic_context(&action)
                 ));
             }
+            return Ok((Some(request_id), tool_response));
         }
-        Ok(Some(request_id))
+        Ok((Some(request_id), None))
     }
 }
 
@@ -180,11 +187,11 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     port: *port,
                 },
             ) {
-                Ok(request_id) => Ok((Some(request_id), None)),
+                Ok(request_id) => Ok((Some(request_id), (None, None))),
                 Err(Decision::Deny {
                     reason: DenyReason::PolicyPending,
                     ..
-                }) if self.mcp_hosts.contains(*host) => Ok((None, None)),
+                }) if self.mcp_hosts.contains(*host) => Ok((None, (None, None))),
                 Err(decision) => Err(decision.to_string()),
             },
             EgressEffectAttempt::Connect {
@@ -202,7 +209,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     port: *port,
                 },
             )
-            .map(|request_id| (Some(request_id), None)),
+            .map(|request_id| (Some(request_id), (None, None))),
             EgressEffectAttempt::HttpRequest {
                 host,
                 port,
@@ -229,16 +236,16 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                 .map_err(|reason| format!("http:request gate: {reason}"))
                 .and_then(|request_id| {
                     self.mcp_gates(mcp)
-                        .map(|mcp_request_id| (Some(request_id), mcp_request_id))
+                        .map(|mcp_grant| (Some(request_id), mcp_grant))
                 })
             }
             // Response release records nothing: the HTTP permit already records the reply.
-            EgressEffectAttempt::ResponseRelease { .. } => Ok((None, None)),
+            EgressEffectAttempt::ResponseRelease { .. } => Ok((None, (None, None))),
             _ => Err("policy does not support this egress effect".to_string()),
         };
 
         decision
-            .map(|(request_id, mcp_request_id)| {
+            .map(|(request_id, (mcp_request_id, tool_response))| {
                 Box::new(LocalPolicyEffectPermit {
                     policy: Arc::clone(&self.policy),
                     principal: self.principal.clone(),
@@ -246,6 +253,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     attempt: AttemptIdentity::capture(effect),
                     request_id,
                     mcp_request_id,
+                    tool_response,
                 }) as Box<dyn EgressEffectPermit>
             })
             .map_err(permission_denied)
@@ -437,12 +445,18 @@ struct LocalPolicyEffectPermit {
     attempt: AttemptIdentity,
     request_id: Option<RequestId>,
     mcp_request_id: Option<RequestId>,
+    /// The per-tool `::response` an allowed `tools/call` owes, recorded beside `mcp:call::response`.
+    tool_response: Option<PendingToolResponse>,
 }
+
+/// The `mcp:call` request an allowed MCP frame recorded, and the per-tool response it owes.
+type McpGrant = (Option<RequestId>, Option<PendingToolResponse>);
 
 impl LocalPolicyEffectPermit {
     /// Submit this effect's history, translating the proxy's outcome into the policy
     /// vocabulary.
-    fn submit(&self, outcome: EgressEffectOutcome) -> io::Result<()> {
+    fn submit(mut self, outcome: EgressEffectOutcome) -> io::Result<()> {
+        let tool_response = self.tool_response.take();
         let Some(request_id) = self.request_id.as_ref() else {
             // Response release and bootstrap resolution have no outcome event.
             return Ok(());
@@ -508,18 +522,28 @@ impl LocalPolicyEffectPermit {
                 // — the effect provably did not occur — records nothing.
                 match mcp.as_ref().zip(self.mcp_request_id.as_ref()) {
                     Some((mcp, mcp_request_id)) if !matches!(delivery, Delivery::Failed) => http
-                        .and(self.policy.record(
-                            &self.governed,
-                            &self.principal,
-                            mcp_request_id,
-                            &Outcome::Mcp {
-                                server: &mcp.server,
-                                method: &mcp.method,
-                                tool: mcp.tool.as_deref(),
-                                prompt: mcp.prompt.as_deref(),
-                                uri: mcp.uri.as_deref(),
-                            },
-                        )),
+                        .and(
+                            self.policy
+                                .record(
+                                    &self.governed,
+                                    &self.principal,
+                                    mcp_request_id,
+                                    &Outcome::Mcp {
+                                        server: &mcp.server,
+                                        method: &mcp.method,
+                                        tool: mcp.tool.as_deref(),
+                                        prompt: mcp.prompt.as_deref(),
+                                        uri: mcp.uri.as_deref(),
+                                    },
+                                )
+                                .and_then(|()| {
+                                    // A failed coarse record surfaces before the tool's leg,
+                                    // so the tool never counts a call `mcp:call` missed.
+                                    tool_response.map_or(Ok(()), |response| {
+                                        self.policy.record_tool_response(response)
+                                    })
+                                }),
+                        ),
                     _ => http,
                 }
             }
@@ -540,14 +564,14 @@ impl LocalPolicyEffectPermit {
 
 impl EgressEffectPermit for LocalPolicyEffectPermit {
     fn record_outcome(self: Box<Self>, outcome: EgressEffectOutcome) -> io::Result<()> {
-        self.submit(outcome)
+        (*self).submit(outcome)
     }
 
     fn mark_indeterminate(self: Box<Self>) {
         // An admitted effect that ended with no terminal outcome. Record it as an
         // indeterminate delivery of zero known bytes rather than silently dropping it:
         // a rule that counts attempts must still see that one happened.
-        let _ = self.submit(EgressEffectOutcome::Indeterminate { accepted_bytes: 0 });
+        let _ = (*self).submit(EgressEffectOutcome::Indeterminate { accepted_bytes: 0 });
     }
 }
 
@@ -1050,13 +1074,15 @@ mod tests {
 
     /// The per-tool refinement of one `demo` `add`, without the catalog gate in front of it.
     fn refine_add(policy: &PolicyEngine, a: i64) -> Decision {
-        policy.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "demo",
-            "add",
-            &serde_json::json!({"a": a, "b": 2}),
-        )
+        policy
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "demo",
+                "add",
+                &serde_json::json!({"a": a, "b": 2}),
+            )
+            .0
     }
 
     /// The forbid that a staged demo schema arms.
@@ -1311,6 +1337,81 @@ mod tests {
         permit(principal, action == Box::Action::"mcp:call", resource)
         when { context.input.server == "demo" };
     "#;
+
+    /// The demo permits, plus a cap of two `demo::Action::"add"::response` events with `a` of 1.
+    fn per_tool_capped_interceptor() -> InterceptorFixture {
+        let fixture = tracked_interceptor(&format!(
+            r#"{DEMO_PERMITS}
+            forbid(principal, action == demo::Action::"add", resource)
+            when temporal {{
+              exists (n: Long). (
+                (count for (t: Timepoint). where (
+                  formerly within 3600s (demo::Action::"add"::response{{ input.a: 1 }} && tp(t))
+                )) == n
+                && n >= 2
+              )
+            }};"#
+        ));
+        fixture
+            .stage_mcp_catalog("demo", root_reply(DEMO_TOOLS.as_bytes()))
+            .expect("the demo catalog stages");
+        fixture
+    }
+
+    /// A delivered remote tool call records the tool's own `::response` with its input, so a cap on
+    /// the tool counts http calls exactly as the same cap on `mcp:call::response` does.
+    #[test]
+    fn a_remote_tool_call_records_its_own_response_a_per_tool_cap_counts() {
+        let fixture = per_tool_capped_interceptor();
+        // A call with another `a` records a response the cap's input filter does not match.
+        fixture
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":2,"b":1}"#))
+            .expect("a call under the cap is admitted")
+            .record_outcome(EgressEffectOutcome::Completed(4))
+            .expect("the delivered call records");
+        for _ in 0..2 {
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .expect("a call under the cap is admitted")
+                .record_outcome(EgressEffectOutcome::Completed(4))
+                .expect("the delivered call records");
+        }
+        assert!(
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .is_err(),
+            "two recorded demo::Action::\"add\"::response events with a = 1 fire the cap"
+        );
+    }
+
+    /// A definite `Failed` delivery records no per-tool `::response`, as it records no
+    /// `mcp:call::response`; an indeterminate one records both.
+    #[test]
+    fn a_remote_tool_call_records_its_own_response_exactly_when_mcp_call_does() {
+        let fixture = per_tool_capped_interceptor();
+        for _ in 0..2 {
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .expect("a call under the cap is admitted")
+                .record_outcome(EgressEffectOutcome::Failed {
+                    accepted_bytes: 0,
+                    error_kind: std::io::ErrorKind::ConnectionReset,
+                })
+                .expect("a failed delivery records no response");
+        }
+        for _ in 0..2 {
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .expect("failed deliveries never counted toward the cap")
+                .mark_indeterminate();
+        }
+        assert!(
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .is_err(),
+            "two indeterminate deliveries record the per-tool ::response and fire the cap"
+        );
+    }
 
     fn refusal(fixture: &InterceptorFixture, attempt: &EgressEffectAttempt<'_>) -> String {
         match fixture.intercept(attempt) {

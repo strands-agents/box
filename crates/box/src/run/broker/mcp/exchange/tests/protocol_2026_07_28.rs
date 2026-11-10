@@ -407,16 +407,21 @@ fn a_pending_probe_does_not_prevent_legacy_timeout_fallback() {
     }));
 }
 
+/// A one-call limit on `Search`, counted over `mcp:call::response`.
+const COARSE_SEARCH_LIMIT: &str = r#"forbid (principal, action == Box::Action::"mcp:call", resource)
+when { context.input has tool && context.input.tool == "Search" }
+when temporal { formerly within 3600s (Box::Action::"mcp:call"::response{input.tool: "Search"}) };"#;
+
+/// The same limit, counted over the tool's own `::response`.
+const TOOL_SEARCH_LIMIT: &str = r#"forbid (principal, action == issues_mcp::Action::"Search", resource)
+when temporal { formerly within 3600s (issues_mcp::Action::"Search"::response{}) };"#;
+
 #[test]
 fn modern_cancellation_counts_a_call_even_if_the_server_never_replies() {
     let (runtime, local) = local_runtime();
     runtime.block_on(local.run_until(async {
-        let fixture = fixture(&format!(
-            r#"{PERMIT_ALL_MCP}
-            forbid (principal, action == Box::Action::"mcp:call", resource)
-            when {{ context.input has tool && context.input.tool == "Search" }}
-            when temporal {{ formerly within 3600s (Box::Action::"mcp:call"::response{{input.tool: "Search"}}) }};"#
-        ));
+      for limit in [COARSE_SEARCH_LIMIT, TOOL_SEARCH_LIMIT] {
+        let fixture = fixture(&format!("{PERMIT_ALL_MCP}\n{limit}"));
         let log = tempfile::NamedTempFile::new().expect("frame log");
         let mut command = modern_server(log.path());
         command[2] = command[2].replace(
@@ -457,7 +462,7 @@ fn modern_cancellation_counts_a_call_even_if_the_server_never_replies() {
         assert_eq!(refused["id"], 4, "{refused}");
         assert_eq!(
             refused["error"]["code"], -32001,
-            "a cancelled call consumes its response budget without a server reply: {refused}"
+            "a cancelled call consumes its response budget without a server reply ({limit}): {refused}"
         );
         program.stop_and_wait().await.expect("stop the exchange");
         assert_eq!(
@@ -467,6 +472,7 @@ fn modern_cancellation_counts_a_call_even_if_the_server_never_replies() {
                 .count(),
             1
         );
+      }
     }));
 }
 
@@ -591,13 +597,21 @@ fn modern_cancellation_records_once_and_hides_every_late_reply() {
 fn modern_connection_closure_records_uncertain_calls_but_not_known_input_requests() {
     let (runtime, local) = local_runtime();
     runtime.block_on(local.run_until(async {
-        for ending in ["stop", "drop", "eof", "malformed", "lost_output", "input_required"] {
-            let fixture = fixture(&format!(
-                r#"{PERMIT_ALL_MCP}
-                forbid (principal, action == Box::Action::"mcp:call", resource)
-                when {{ context.input has tool && context.input.tool == "Search" }}
-                when temporal {{ formerly within 3600s (Box::Action::"mcp:call"::response{{input.tool: "Search"}}) }};"#
-            ));
+        for (limit, ending) in [COARSE_SEARCH_LIMIT, TOOL_SEARCH_LIMIT]
+            .into_iter()
+            .flat_map(|limit| {
+                [
+                    "stop",
+                    "drop",
+                    "eof",
+                    "malformed",
+                    "lost_output",
+                    "input_required",
+                ]
+                .map(|ending| (limit, ending))
+            })
+        {
+            let fixture = fixture(&format!("{PERMIT_ALL_MCP}\n{limit}"));
             let log = tempfile::NamedTempFile::new().expect("frame log");
             let reply = if ending == "malformed" {
                 r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"unknown"}}"#
@@ -605,11 +619,16 @@ fn modern_connection_closure_records_uncertain_calls_but_not_known_input_request
                 r#"{"jsonrpc":"2.0","id":2,"result":{"resultType":"complete","content":[]}}"#
             };
             let mut command = modern_server(log.path());
-            command[2] = command[2].replace("case \"$frame\" in", &format!(r#"case "$frame" in
+            command[2] = command[2].replace(
+                "case \"$frame\" in",
+                &format!(
+                    r#"case "$frame" in
   *'"method":"tools/call"'*'"value":"wait"'*) continue ;;
   *'"method":"ping"'*)
     case "$frame" in *'"release":true'*) printf '%s\n' '{reply}' ;; esac
-    printf '{{"jsonrpc":"2.0","id":%s,"result":{{"resultType":"complete"}}}}\n' "$id"; continue ;;"#));
+    printf '{{"jsonrpc":"2.0","id":%s,"result":{{"resultType":"complete"}}}}\n' "$id"; continue ;;"#
+                ),
+            );
             if ending == "input_required" {
                 command = input_server(log.path());
             }
@@ -620,7 +639,10 @@ fn modern_connection_closure_records_uncertain_calls_but_not_known_input_request
             call["params"]["arguments"] = json!({"value": "wait"});
             send(&program, call).await;
             if ending == "input_required" {
-                assert_eq!(next_output(&mut output).await["result"]["resultType"], "input_required");
+                assert_eq!(
+                    next_output(&mut output).await["result"]["resultType"],
+                    "input_required"
+                );
             } else {
                 send(&program, modern_request(3, "ping", json!({}))).await;
                 assert_eq!(next_output(&mut output).await["id"], 3);
@@ -630,7 +652,10 @@ fn modern_connection_closure_records_uncertain_calls_but_not_known_input_request
                     "stop" | "input_required" => program.stop_and_wait().await.unwrap(),
                     "drop" => {
                         drop(program);
-                        assert!(output.recv().await.is_none(), "drop finishes exchange cleanup");
+                        assert!(
+                            output.recv().await.is_none(),
+                            "drop finishes exchange cleanup"
+                        );
                     }
                     "eof" => {
                         program.eof().await.unwrap();
@@ -638,14 +663,28 @@ fn modern_connection_closure_records_uncertain_calls_but_not_known_input_request
                         assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
                     }
                     "malformed" => {
-                        send(&program, modern_request(4, "ping", json!({"release": true}))).await;
+                        send(
+                            &program,
+                            modern_request(4, "ping", json!({"release": true})),
+                        )
+                        .await;
                         assert_eq!(next_output(&mut output).await["error"]["code"], -32603);
-                        program.join().await.expect_err("the malformed reply closes the exchange");
+                        program
+                            .join()
+                            .await
+                            .expect_err("the malformed reply closes the exchange");
                     }
                     "lost_output" => {
                         drop(output);
-                        send(&program, modern_request(4, "ping", json!({"release": true}))).await;
-                        program.join().await.expect_err("the closed client output ends the exchange");
+                        send(
+                            &program,
+                            modern_request(4, "ping", json!({"release": true})),
+                        )
+                        .await;
+                        program
+                            .join()
+                            .await
+                            .expect_err("the closed client output ends the exchange");
                     }
                     _ => unreachable!(),
                 }
@@ -653,15 +692,24 @@ fn modern_connection_closure_records_uncertain_calls_but_not_known_input_request
             .await
             .expect("the exchange closes within the test deadline");
             assert_eq!(
-                read_log(log.path()).iter().filter(|frame| frame["method"] == "tools/call").count(),
+                read_log(log.path())
+                    .iter()
+                    .filter(|frame| frame["method"] == "tools/call")
+                    .count(),
                 1,
                 "the first Search reached the server before {ending}"
             );
             let response = search_on_new_connection(&fixture).await;
             if ending == "input_required" {
-                assert_eq!(response["result"]["resultType"], "complete", "known input_required is not an uncertain completion: {response}");
+                assert_eq!(
+                    response["result"]["resultType"], "complete",
+                    "known input_required is not an uncertain completion: {response}"
+                );
             } else {
-                assert_eq!(response["error"]["code"], -32001, "{ending} must not erase a forwarded call: {response}");
+                assert_eq!(
+                    response["error"]["code"], -32001,
+                    "{ending} must not erase a forwarded call ({limit}): {response}"
+                );
             }
         }
     }));
