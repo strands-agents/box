@@ -60,11 +60,13 @@ pub(crate) const SHELL_ALIAS_NAMES: [&str; 3] = ["zsh", "bash", "sh"];
 /// The Python names a harness resolves, each an alias of the same broker image.
 pub(crate) const PYTHON_ALIAS_NAMES: [&str; 2] = ["python3", "python"];
 
-/// The file beside the aliases that lists, one per line, each Python name a `[tool.<name>]`
-/// `replaces`. Box writes it only while a tool replaces one. A Python alias whose own name is
-/// listed sends its arguments to the Shell as one command, so the replacing tool runs, as it does
-/// for that name typed in the Shell. The broker decides every request either way, so the list
-/// selects a route and grants nothing.
+/// The file beside the aliases that a Python alias reads to learn whether a `[tool.<name>]`
+/// `replaces` its name. Box writes it only while a tool replaces one. The first line is the agent's
+/// workspace, an absolute path, and each later line is one replaced Python name. A Python alias
+/// whose own name is listed sends its arguments to the Shell as one command, so the replacing tool
+/// runs, as it does for that name typed in the Shell. The alias uses the workspace line only to
+/// confirm that it runs in the workspace when it can't read its own directory. The broker decides
+/// every request either way, so the file selects a route and grants nothing.
 pub(crate) const REPLACED_PYTHON_FILE: &str = ".replaced-python";
 
 /// Names one Program within one connection.

@@ -256,6 +256,7 @@ async fn hosted(
     crate::run::broker::aliases::write_replaced_python(
         &locked.root,
         &locked.record.replaced_commands(),
+        &locked.workspace,
         &locked.owned,
     )?;
     eprintln!("strands-box: starting workload");

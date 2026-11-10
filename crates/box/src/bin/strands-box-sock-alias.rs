@@ -154,8 +154,16 @@ fn parse_mode(executable: PathBuf, arguments: Vec<OsString>) -> io::Result<Mode>
 /// Parse the alias invocation, deriving the socket from this image's own path.
 fn parse_alias(executable: &Path, name: &str, arguments: Vec<OsString>) -> io::Result<Mode> {
     if PYTHON_ALIAS_NAMES.contains(&name) {
-        if is_replaced(executable, name)? {
-            let command = replaced_command(working_directory().as_deref(), name, arguments)?;
+        if let Some(replaced) = read_replaced(executable)?
+            && replaced.names.iter().any(|listed| listed == name)
+        {
+            let directory = resolve_directory(
+                identity(Path::new(".")),
+                std::env::var_os("PWD").map(PathBuf::from),
+                std::env::current_dir(),
+                &replaced.workspace,
+            )?;
+            let command = replaced_command(&directory, name, arguments)?;
             return shell_mode(executable, OsString::from(command));
         }
         return parse_script_alias(executable, arguments);
@@ -246,16 +254,24 @@ fn shell_mode(executable: &Path, command: OsString) -> io::Result<Mode> {
     })
 }
 
-/// Whether a `[tool.<name>]` replaces the Python name `name`, from the list Box writes beside the
-/// aliases.
+/// What Box wrote beside the aliases while a `[tool.<name>]` replaces a Python name.
+#[derive(Debug)]
+struct Replaced {
+    /// The agent's workspace, which the Shell starts every command in.
+    workspace: PathBuf,
+    /// Each replaced Python name.
+    names: Vec<String>,
+}
+
+/// Read the replaced-Python file beside this alias.
 ///
-/// Box writes the list and lets the agent read it only while a tool replaces a Python name, so a
-/// list that is absent or that this sandbox refuses means none is, and the alias runs Monty.
-fn is_replaced(executable: &Path, name: &str) -> io::Result<bool> {
+/// Box writes the file and lets the agent read it only while a tool replaces a Python name, so a
+/// file that is absent or that this sandbox refuses means none is, and the alias runs Monty.
+fn read_replaced(executable: &Path) -> io::Result<Option<Replaced>> {
     use std::io::Read as _;
 
     let Some(bin) = executable.parent() else {
-        return Ok(false);
+        return Ok(None);
     };
     let list = bin.join(REPLACED_PYTHON_FILE);
     let file = match std::fs::File::open(&list) {
@@ -266,7 +282,7 @@ fn is_replaced(executable: &Path, name: &str) -> io::Result<bool> {
                 io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
             ) =>
         {
-            return Ok(false);
+            return Ok(None);
         }
         Err(error) => {
             return Err(io::Error::new(
@@ -287,30 +303,67 @@ fn is_replaced(executable: &Path, name: &str) -> io::Result<bool> {
             list.display()
         )));
     }
-    Ok(text.lines().any(|line| line == name))
+    let mut lines = text.lines();
+    let workspace = lines
+        .next()
+        .map(PathBuf::from)
+        .filter(|workspace| workspace.is_absolute())
+        .ok_or_else(|| {
+            invalid_input(format!(
+                "{} does not start with an absolute workspace",
+                list.display()
+            ))
+        })?;
+    Ok(Some(Replaced {
+        workspace,
+        names: lines.map(str::to_string).collect(),
+    }))
 }
 
-/// The caller's working directory: `PWD` when it names that directory, else `getcwd`, else `None`.
-///
-/// On macOS a process that may only enter its directory can't read that directory's path, so
-/// `getcwd` fails in an agent sitting in the workspace root. `PWD` is used only when it is absolute
-/// and names the same directory as `.`, so a stale value never moves the command.
-fn working_directory() -> Option<PathBuf> {
+/// The `(device, inode)` that names `path`'s directory.
+fn identity(path: &Path) -> Option<(u64, u64)> {
     use std::os::unix::fs::MetadataExt as _;
 
-    let same_as_here = |path: &Path| {
-        let (Ok(named), Ok(here)) = (std::fs::metadata(path), std::fs::metadata(".")) else {
-            return false;
-        };
-        (named.dev(), named.ino()) == (here.dev(), here.ino())
-    };
-    if let Some(pwd) = std::env::var_os("PWD").map(PathBuf::from)
+    std::fs::metadata(path)
+        .ok()
+        .map(|metadata| (metadata.dev(), metadata.ino()))
+}
+
+/// The caller's working directory, from the first source that names it.
+///
+/// `PWD` counts only when it is absolute and names `.`, because a harness that starts a child in
+/// another directory often leaves `PWD` unchanged. On macOS a process that may only enter its
+/// directory can't read that directory's path, so `getcwd` fails in the workspace root, and the
+/// workspace that Box wrote counts only when it names `.`. Anything else is refused, so the command
+/// never runs in a directory the caller didn't run it from.
+fn resolve_directory(
+    here: Option<(u64, u64)>,
+    pwd: Option<PathBuf>,
+    getcwd: io::Result<PathBuf>,
+    workspace: &Path,
+) -> io::Result<PathBuf> {
+    let names_here = |path: &Path| here.is_some() && identity(path) == here;
+    if let Some(pwd) = pwd
         && pwd.is_absolute()
-        && same_as_here(&pwd)
+        && names_here(&pwd)
     {
-        return Some(pwd);
+        return Ok(pwd);
     }
-    std::env::current_dir().ok()
+    let getcwd_error = match getcwd {
+        Ok(directory) => return Ok(directory),
+        Err(error) => error,
+    };
+    if names_here(workspace) {
+        return Ok(workspace.to_path_buf());
+    }
+    Err(io::Error::new(
+        getcwd_error.kind(),
+        format!(
+            "read the working directory: {getcwd_error}; set PWD to it, or run python3 from \
+             the workspace {}",
+            workspace.display()
+        ),
+    ))
 }
 
 /// The Shell command that runs `name` with `arguments` in `directory`, the caller's own working
@@ -318,23 +371,13 @@ fn working_directory() -> Option<PathBuf> {
 ///
 /// The Shell starts every command in the workspace, so the command enters `directory` first, and a
 /// relative path names what it named for the caller. A directory the Shell can't enter fails the
-/// command there rather than running it elsewhere. With no readable directory, the command runs in
-/// the workspace, which is where a caller that can't name its own directory almost always is.
-fn replaced_command(
-    directory: Option<&Path>,
-    name: &str,
-    arguments: Vec<OsString>,
-) -> io::Result<String> {
+/// command there rather than running it elsewhere.
+fn replaced_command(directory: &Path, name: &str, arguments: Vec<OsString>) -> io::Result<String> {
     let quoted = |word: &str| format!("'{}'", word.replace('\'', "'\\''"));
-    let mut command = match directory {
-        Some(directory) => {
-            let directory = directory
-                .to_str()
-                .ok_or_else(|| invalid_input("the working directory is not valid UTF-8"))?;
-            format!("cd {} && {name}", quoted(directory))
-        }
-        None => name.to_string(),
-    };
+    let directory = directory
+        .to_str()
+        .ok_or_else(|| invalid_input("the working directory is not valid UTF-8"))?;
+    let mut command = format!("cd {} && {name}", quoted(directory));
     for (index, argument) in arguments.into_iter().enumerate() {
         let argument = argument.into_string().map_err(|_| {
             invalid_input(format!("Python argument {} is not valid UTF-8", index + 1))
@@ -1057,7 +1100,7 @@ mod tests {
 
     // ── Python names a tool replaces ─────────────────────────────────────────
 
-    /// A box root whose `bin/` holds a replaced-Python list with `contents`, when given.
+    /// A box root whose `bin/` holds a replaced-Python file with `contents`, when given.
     fn replaced_box(contents: Option<&str>) -> (tempfile::TempDir, PathBuf) {
         let root = tempfile::tempdir().expect("a box root");
         let bin = root.path().join("public/bin");
@@ -1072,13 +1115,23 @@ mod tests {
         values.iter().map(OsString::from).collect()
     }
 
+    /// The directory this test process resolves for itself, as the alias would.
+    fn this_directory() -> PathBuf {
+        resolve_directory(
+            identity(Path::new(".")),
+            std::env::var_os("PWD").map(PathBuf::from),
+            std::env::current_dir(),
+            Path::new("/"),
+        )
+        .expect("the test's working directory")
+    }
+
     /// **A listed Python name sends every argument to the Shell as one command**, each argument one
     /// single-quoted word, so the Shell runs the tool that replaces the name.
     #[test]
     fn a_replaced_python_name_routes_its_arguments_to_the_shell() {
-        let (_root, bin) = replaced_box(Some("python\npython3\n"));
-        let here = working_directory().expect("the test's working directory");
-        let enter = format!("cd '{}' && ", here.display());
+        let (_root, bin) = replaced_box(Some("/work\npython\npython3\n"));
+        let enter = format!("cd '{}' && ", this_directory().display());
         for (name, given, command) in [
             (
                 "python3",
@@ -1105,7 +1158,7 @@ mod tests {
     #[test]
     fn a_replaced_command_enters_the_callers_directory_first() {
         let command = replaced_command(
-            Some(Path::new("/work/it's here")),
+            Path::new("/work/it's here"),
             "python3",
             arguments(&["setup.py", "build"]),
         )
@@ -1117,24 +1170,80 @@ mod tests {
         );
     }
 
-    /// **A caller that can't name its own directory runs the command in the workspace**, where the
-    /// Shell starts, with no `cd`.
-    #[test]
-    fn a_replaced_command_without_a_directory_runs_where_the_shell_starts() {
-        let command = replaced_command(None, "python3", arguments(&["-c", "pass"]))
-            .expect("the command builds");
-
-        assert_eq!(command, "python3 '-c' 'pass'");
+    /// A workspace with a `sub` folder, both canonical.
+    fn workspace_with_sub() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().expect("a workspace");
+        let workspace = root.path().canonicalize().expect("a canonical workspace");
+        let sub = workspace.join("sub");
+        std::fs::create_dir(&sub).expect("a sub folder");
+        (root, workspace, sub)
     }
 
-    /// **A name the list leaves out, or a box with no list, keeps Monty**, so `-m` is still the
+    fn unreadable() -> io::Result<PathBuf> {
+        Err(io::Error::from(io::ErrorKind::PermissionDenied))
+    }
+
+    /// **`PWD` counts only when it names `.`, and `getcwd` comes next**, so a stale `PWD` never
+    /// moves the command.
+    #[test]
+    fn the_directory_comes_from_pwd_only_when_pwd_names_it() {
+        let (_root, workspace, sub) = workspace_with_sub();
+        let here = identity(&sub);
+
+        assert_eq!(
+            resolve_directory(here, Some(sub.clone()), unreadable(), &workspace).unwrap(),
+            sub
+        );
+        assert_eq!(
+            resolve_directory(here, Some(workspace.clone()), Ok(sub.clone()), &workspace).unwrap(),
+            sub,
+            "a stale PWD gives way to getcwd"
+        );
+        assert_eq!(
+            resolve_directory(
+                here,
+                Some(PathBuf::from("sub")),
+                Ok(sub.clone()),
+                &workspace
+            )
+            .unwrap(),
+            sub,
+            "a relative PWD doesn't count"
+        );
+    }
+
+    /// **With no readable directory, the workspace counts only when the caller is in it**, and any
+    /// other caller is refused rather than run in the workspace.
+    #[test]
+    fn an_unreadable_directory_is_the_workspace_only_when_it_names_it() {
+        let (_root, workspace, sub) = workspace_with_sub();
+
+        assert_eq!(
+            resolve_directory(identity(&workspace), None, unreadable(), &workspace).unwrap(),
+            workspace,
+            "a caller in the workspace root runs there"
+        );
+        let error = resolve_directory(
+            identity(&sub),
+            Some(workspace.clone()),
+            unreadable(),
+            &workspace,
+        )
+        .expect_err("a caller in sub with a stale PWD is refused");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(error.to_string().contains("set PWD"), "{error}");
+        resolve_directory(None, None, unreadable(), &workspace)
+            .expect_err("a caller that can't stat . is refused");
+    }
+
+    /// **A name the file leaves out, or a box with no file, keeps Monty**, so `-m` is still the
     /// alias's own usage error there.
     #[test]
     fn an_unlisted_python_name_keeps_the_script_boundary() {
         for (contents, name) in [
-            (Some("python\n"), "python3"),
+            (Some("/work\npython\n"), "python3"),
             (None, "python3"),
-            (Some(""), "python"),
+            (Some("/work\n"), "python"),
         ] {
             let (_root, bin) = replaced_box(contents);
 
@@ -1153,10 +1262,22 @@ mod tests {
         }
     }
 
+    /// **A file that doesn't start with an absolute workspace is refused**, not read as names.
+    #[test]
+    fn a_replaced_python_file_without_a_workspace_is_refused() {
+        for contents in ["python3\n", "", "work\npython3\n"] {
+            let (_root, bin) = replaced_box(Some(contents));
+
+            let error =
+                parse_mode(bin.join("python3"), arguments(&["-c", "pass"])).expect_err(contents);
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{contents:?}");
+        }
+    }
+
     /// **A list over the size bound is refused** rather than read in part.
     #[test]
     fn an_oversized_replaced_python_list_is_refused() {
-        let (_root, bin) = replaced_box(Some(&"python3\n".repeat(64)));
+        let (_root, bin) = replaced_box(Some(&format!("/work\n{}", "python3\n".repeat(64))));
 
         let error = parse_mode(bin.join("python3"), arguments(&["-c", "pass"]))
             .expect_err("an oversized list is refused");

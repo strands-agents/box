@@ -4,7 +4,7 @@
 //! |---|---|
 //! | `bin/.alias-image` | this box's own copy of the installed alias image, one inode per box |
 //! | `bin/<name>` | one hard link to that image per interpreter name and per MCP server |
-//! | `bin/.replaced-python` | the Python names a tool `replaces`, present only while one does |
+//! | `bin/.replaced-python` | the workspace, then the Python names a tool `replaces`, present only while one does |
 //! | `private/alias-image.stamp` | the SHA-256 of the installed image the copy was taken from |
 
 use std::fs::File;
@@ -108,13 +108,15 @@ fn materialize_opened(
     Ok(())
 }
 
-/// Write the Python names a tool replaces beside the aliases, or remove the list when none is.
+/// Write the agent's workspace and the Python names a tool replaces beside the aliases, or remove
+/// the file when no name is replaced.
 ///
 /// Every `run` rewrites it from the record before the workload starts, so a Python alias reads the
-/// names of this run. `_owner` is the run lock, as for [`materialize`].
+/// names and the workspace of this run. `_owner` is the run lock, as for [`materialize`].
 pub(crate) fn write_replaced_python(
     layout: &BoxRoot,
     replaced: &std::collections::BTreeSet<String>,
+    workspace: &Path,
     _owner: &Lock,
 ) -> Result<(), BoxError> {
     let path = layout.replaced_python_file();
@@ -126,8 +128,22 @@ pub(crate) fn write_replaced_python(
     if names.is_empty() {
         return layout.remove_file(&path);
     }
-    let mut contents = names.join("\n");
-    contents.push('\n');
+    let workspace = workspace
+        .to_str()
+        .filter(|text| workspace.is_absolute() && !text.contains('\n'))
+        .ok_or_else(|| ShellError::Materialize {
+            path: path.clone(),
+            reason: format!(
+                "the workspace {} must be an absolute UTF-8 path with no newline for a \
+                 replaced Python alias to read it",
+                workspace.display()
+            ),
+        })?;
+    let mut contents = format!("{workspace}\n");
+    for name in names {
+        contents.push_str(name);
+        contents.push('\n');
+    }
     layout.write_private_file(&path, &contents, 0o444)
 }
 
@@ -519,25 +535,47 @@ mod tests {
             names.iter().map(|name| (*name).to_string()).collect()
         };
 
-        write_replaced_python(&layout, &names(&["python3", "python", "curl"]), &owner)
-            .expect("the list is written");
+        let workspace = Path::new("/work/project");
+
+        write_replaced_python(
+            &layout,
+            &names(&["python3", "python", "curl"]),
+            workspace,
+            &owner,
+        )
+        .expect("the list is written");
         assert_eq!(
             std::fs::read_to_string(&list).expect("the list reads"),
-            "python\npython3\n"
+            "/work/project\npython\npython3\n"
         );
-        write_replaced_python(&layout, &names(&["python3"]), &owner)
+        write_replaced_python(&layout, &names(&["python3"]), workspace, &owner)
             .expect("the list is rewritten");
         assert_eq!(
             std::fs::read_to_string(&list).expect("the list reads"),
-            "python3\n"
+            "/work/project\npython3\n"
         );
 
         materialize_from(&layout, &[], &installed, &owner).expect("the aliases are placed again");
         assert!(list.exists(), "materialize keeps the list");
 
-        write_replaced_python(&layout, &names(&[]), &owner).expect("the list is removed");
+        write_replaced_python(&layout, &names(&[]), workspace, &owner)
+            .expect("the list is removed");
         assert!(!list.exists(), "no replaced name leaves no list");
-        write_replaced_python(&layout, &names(&[]), &owner).expect("removing it again is a no-op");
+        write_replaced_python(&layout, &names(&[]), workspace, &owner)
+            .expect("removing it again is a no-op");
+    }
+
+    /// **A workspace the alias couldn't read back is refused** rather than written in part.
+    #[test]
+    fn the_replaced_python_list_refuses_a_workspace_it_cannot_write_as_one_line() {
+        let (layout, owner, _installed, _home) = fixture(b"image one");
+        let names: std::collections::BTreeSet<String> = ["python3".to_string()].into();
+
+        for workspace in ["relative/project", "/work/two\nlines"] {
+            write_replaced_python(&layout, &names, Path::new(workspace), &owner)
+                .expect_err(workspace);
+            assert!(!layout.replaced_python_file().exists(), "{workspace:?}");
+        }
     }
 
     /// **A dropped MCP server's alias is removed at the next `materialize`, under the run lock.**

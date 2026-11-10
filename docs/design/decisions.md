@@ -1821,14 +1821,17 @@ the agent writes runs under the tool's grants with no per-file decision, as a ho
 reached by its absolute path already does. Builtins and functions keep precedence.
 
 The direct `python3` and `python` aliases follow `replaces` too, so a program the agent starts
-without the Shell reaches the same Python. Box writes the replaced names to `bin/.replaced-python`,
-which the agent may read, and an alias whose own name is listed sends its arguments to the Shell as
-one command with each argument single-quoted. The command first enters the caller's working
-directory with `cd`, because the Shell starts every command in the workspace, and a relative script
-path would otherwise name a different file. The Shell then decides it as a typed `python3`. The
-list selects a route and grants nothing: a workload that changed it could at most reach the Shell or
-Monty, and the broker decides every request on either route. The broker protocol is unchanged, and a
-box with no replaced name has no list and an unchanged boundary.
+without the Shell reaches the same Python. Box writes the workspace and the replaced names to
+`bin/.replaced-python`, which the agent may read. An alias whose own name is listed sends its
+arguments to the Shell as one command with each argument single-quoted. The command first enters
+the caller's working directory with `cd`, because the Shell starts every command in the workspace,
+and a relative script path would otherwise name a different file. When the alias can't read its
+directory, as on macOS in a folder it may only enter, it uses the workspace from the file's first
+line, and only when that workspace is the directory it runs in. Otherwise it refuses, so no command
+runs somewhere its caller didn't run it from. The Shell then decides the command as a typed
+`python3`. The file selects a route and grants nothing: a workload that changed it could at most
+reach the Shell or Monty, and the broker decides every request on either route. The broker protocol
+is unchanged, and a box with no replaced name has no file and an unchanged boundary.
 
 Without `replaces`, a workload that runs an interpreter by its own absolute path, or runs a virtual
 environment's `python` by absolute path, reaches the host OS's Python under the `[tool.<name>]` table
