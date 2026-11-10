@@ -67,6 +67,8 @@ pub(crate) async fn forward_tls(
         req,
         originally_empty_query,
         upstream,
+        // The workload connection is the CONNECT/TLS tunnel, regardless of the backend scheme.
+        true,
         state,
         correlation,
         |method, target, headers| validate_request_binding(connect, method, target, headers),
@@ -107,17 +109,22 @@ fn backend_host_header(dial: &BackendDial) -> String {
 
 /// Run the request and response legs, and return the response for the workload. `revalidate`
 /// re-checks the CONNECT binding after the credential edit; plain HTTP passes a no-op.
+#[allow(clippy::too_many_arguments)]
 async fn run_l7_legs(
     connect: &ConnectRequest,
     backend: Option<&BackendDial>,
     mut req: InterceptedRequest,
     originally_empty_query: bool,
     upstream: Upstream<'_>,
+    // Whether the WORKLOAD connection (agent→box) is TLS, read from the caller — a CONNECT tunnel
+    // (`forward_tls`) is `true`, a plain-HTTP request (`forward_plain`) is `false`. NOT the backend
+    // leg's transport: with a re-route the box→backend leg may differ in scheme, so the plaintext
+    // floor and the judged transport must read the workload side instead.
+    intercepted: bool,
     state: &SharedState,
     correlation: RequestId,
     revalidate: impl FnOnce(&str, &str, &HeaderMap) -> Result<()>,
 ) -> Result<WorkloadResponse> {
-    let intercepted = upstream.is_tls();
     let correlation = correlation.with_headers(&req.headers);
     let correlation = if state.mcp_server_for(&connect.host).is_some() {
         correlation.with_mcp(&req.body)
@@ -491,6 +498,8 @@ pub(crate) async fn forward_plain(
         req,
         originally_empty_query,
         upstream,
+        // The workload connection is plain HTTP, regardless of the backend scheme.
+        false,
         state,
         correlation,
         |_method, _target, _headers| Ok(()),
@@ -773,7 +782,10 @@ mod tests {
         // The query rides along after the joined path.
         t.path = "/search".to_string();
         t.query = "q=rust".to_string();
-        assert_eq!(prefixed_target("/github", &t, false), "/github/search?q=rust");
+        assert_eq!(
+            prefixed_target("/github", &t, false),
+            "/github/search?q=rust"
+        );
 
         // A root request under a prefix keeps one slash from the agent path.
         t.path = "/".to_string();

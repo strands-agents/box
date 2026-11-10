@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use credentials::{DestinationPattern, Inbound, Outbound, Vault};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::Outcome;
 use crate::boundary::{InterceptedRequest, InterceptedResponse, Mutation, Target};
@@ -52,6 +52,7 @@ impl CredentialCapability {
             headers: &headers,
             body: &req.body,
         };
+        // `headers` wipes its value copies on drop (`SigningHeaders`); it outlives this `Outbound`.
         let (mutations, advisory) = self.edits_for(outbound)?;
         // An advisory injection (secret attached without a matching placeholder) is a noteworthy
         // allow. Set only when present, so a second matching control's normal swap cannot clobber it.
@@ -221,7 +222,7 @@ impl CredentialCapability {
 /// send, which a strict SigV4 verifier rejects. AWS SDKs likewise leave `content-length` unsigned.
 pub(super) fn headers_for_signing<'a>(
     headers: impl Iterator<Item = (&'a str, &'a str)>,
-) -> Vec<(String, String)> {
+) -> SigningHeaders {
     let mut out: Vec<(String, String)> = headers
         .filter(|(name, _)| {
             !name.eq_ignore_ascii_case("accept-encoding")
@@ -230,7 +231,28 @@ pub(super) fn headers_for_signing<'a>(
         .map(|(name, value)| (name.to_string(), value.to_string()))
         .collect();
     out.push(("accept-encoding".to_string(), IDENTITY_ENCODING.to_string()));
-    out
+    SigningHeaders(out)
+}
+
+/// The signing headers, with every value copy wiped on drop. The signer needs a
+/// `&[(String, String)]` slice ([`Outbound::headers`](credentials::Outbound)), so the values cannot
+/// each be `Zeroizing`; a re-routed `env://` backend token can sit in a copied value, so the whole
+/// buffer is wiped on drop instead of freed un-scrubbed.
+pub(super) struct SigningHeaders(Vec<(String, String)>);
+
+impl std::ops::Deref for SigningHeaders {
+    type Target = [(String, String)];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for SigningHeaders {
+    fn drop(&mut self) {
+        for (_, value) in &mut self.0 {
+            value.zeroize();
+        }
+    }
 }
 
 /// The response's `Content-Encoding` when it names any coding other than `identity`.

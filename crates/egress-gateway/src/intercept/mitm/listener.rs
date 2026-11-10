@@ -161,6 +161,28 @@ pub(crate) fn open_governed_upstream(
     // (docs/design/decisions.md#a-re-route-is-authorized-on-the-original-destination). The
     // supervisor DNS override applies to whichever host is actually resolved.
     let backend = state.backend_for(&connect.host, connect.port).cloned();
+    // Fail closed when the host re-routes to a backend but this PORT matches no backend entry. A
+    // bare-host backend pattern covers only 443/80, so without this guard a `CONNECT host:8443` would
+    // fall through and dial the ORIGINAL destination directly — the one thing a re-route must never do
+    // (docs/design/decisions.md#a-re-route-is-authorized-on-the-original-destination).
+    if backend.is_none() && state.host_reroutes(&connect.host) {
+        let reason = format!(
+            "{}:{} re-routes to a backend, but no backend entry matches this port; refused rather \
+             than dial the original destination",
+            connect.host, connect.port
+        );
+        emit_connect_decision(
+            state,
+            connect,
+            AuditDecision::Deny,
+            &reason,
+            correlation.clone(),
+        );
+        return Err(OpenUpstreamError::Denied(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            reason,
+        )));
+    }
     let (resolve_host, resolve_port) = match &backend {
         Some(dial) => (dial.host.as_str(), dial.port),
         None => (connect.host.as_str(), connect.port),
@@ -875,6 +897,41 @@ mod tests {
         assert!(
             matches!(result, Err(OpenUpstreamError::Failed)),
             "a backend that resolves to nothing fails closed"
+        );
+    }
+
+    /// A CONNECT to a backend host on a port no backend entry covers fails closed, rather than fall
+    /// through and dial the ORIGINAL destination. A bare-host pattern covers only 443/80, so `:8443`
+    /// matches no backend; without the guard the box would reach `api.github.com:8443` directly.
+    #[test]
+    fn a_backend_host_on_a_non_backend_port_fails_closed() {
+        let backend = Recorder::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+        backend.assert_live();
+        let before = backend.accepted();
+        let dial = BackendDial {
+            host: backend.addr.ip().to_string(),
+            port: backend.addr.port(),
+            tls: false,
+            path_prefix: String::new(),
+        };
+        // The pattern has no explicit port, so it re-routes `api.github.com` on 443/80 only.
+        let pattern = credentials::DestinationPattern::parse("api.github.com").unwrap();
+        let shared = state_with_backends(AddressPolicy::permit_all(), vec![(pattern, dial)]);
+
+        // The refusal is reached BEFORE any resolution, so the original host is never looked up.
+        let result = open_governed_upstream(
+            &shared,
+            &connect_to("api.github.com", 8443),
+            &RequestId::new("t"),
+        );
+        assert!(
+            matches!(result, Err(OpenUpstreamError::Denied(_))),
+            "a re-routed host on a non-backend port is refused, not dialled directly"
+        );
+        assert_eq!(
+            backend.accepted(),
+            before,
+            "the backend was not dialled either — the port matched no entry"
         );
     }
 

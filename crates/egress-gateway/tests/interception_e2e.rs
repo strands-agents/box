@@ -415,6 +415,63 @@ fn a_backend_reroute_presents_the_backend_and_judges_the_original() {
     );
 }
 
+/// A PLAIN-HTTP workload leg re-routed to an `https` backend is refused by the plaintext-credential
+/// floor, because the floor reads the WORKLOAD transport — not the backend leg. A credential-matched
+/// request on a plaintext workload connection is refused whatever scheme the backend leg uses.
+#[test]
+fn a_plain_workload_to_an_https_backend_is_refused_by_the_floor() {
+    let backend_host = "gw.example.test";
+    let upstream = TlsUpstream::start(backend_host);
+    let port = upstream.port();
+    let original = "api.github.test";
+
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(
+        pat(original, port),
+        backend_store(original, port, "gw-token-SECRET"),
+    )]);
+    let config = MitmConfig {
+        upstream_ca_pems: vec![upstream.ca_pem()],
+        dns_overrides: vec![(backend_host.to_string(), "127.0.0.1".parse().unwrap())],
+        backends: vec![(
+            pat(original, port),
+            BackendDial {
+                host: backend_host.to_string(),
+                port,
+                tls: true,
+                path_prefix: "/github".to_string(),
+            },
+        )],
+        ..MitmConfig::default()
+    };
+    let emitter = Box::new(RECORDS.with(Clone::clone));
+    let handle = MitmInterceptor::start_with(
+        config,
+        controls,
+        FixedPolicy::allowing(&[original]),
+        emitter,
+        None,
+    )
+    .unwrap();
+
+    // The workload connects in PLAIN HTTP (absolute-form request line), not CONNECT.
+    let reply = plain_exchange(
+        proxy_port(&handle),
+        &format!(
+            "GET http://{original}:{port}/zen HTTP/1.1\r\nHost: {original}:{port}\r\n\
+             Authorization: Bearer strands_box_workloadphantom\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(
+        reply.starts_with("HTTP/1.1 403"),
+        "a credential-matched plaintext workload leg is refused whatever the backend scheme: {reply:?}"
+    );
+    let reasons = format!("{:?}", records());
+    assert!(
+        reasons.contains("a secret must ride TLS"),
+        "the plaintext-credential floor fired on the workload transport: {reasons}"
+    );
+}
+
 // ============================================================================================
 // POSITIVE: a backend `auth` of aws:// is SigV4-signed over the BACKEND host, after the rewrite
 // ============================================================================================

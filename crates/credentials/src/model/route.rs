@@ -22,7 +22,7 @@ pub enum PhantomCheck {
     Advisory,
 }
 
-/// Which of the two credential shapes a route is.
+/// Which credential shape a route is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RouteKind {
     /// A single secret attached at one location, standing behind a Phantom_Token.

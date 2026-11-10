@@ -109,6 +109,19 @@ pub struct BackendDial {
     pub path_prefix: String,
 }
 
+/// The exact host a backend pattern names, dropping an optional `:port`. A backend destination is
+/// validated to an exact host (optional port), with no path and no wildcard, so `as_written` is
+/// `host` or `host:port`.
+fn backend_pattern_host(pattern: &credentials::DestinationPattern) -> String {
+    let written = pattern.as_written();
+    match written.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
+            host.to_string()
+        }
+        _ => written,
+    }
+}
+
 impl Default for MitmConfig {
     fn default() -> Self {
         Self {
@@ -166,6 +179,16 @@ impl SharedState {
             .iter()
             .find(|(pattern, _)| pattern.matches(&destination))
             .map(|(_, dial)| dial)
+    }
+
+    /// Whether some backend entry re-routes `host` on ANY port. A re-routed host must never fall
+    /// through to a direct dial, so a CONNECT to such a host on a port no entry covers fails closed
+    /// rather than reach the original destination.
+    fn host_reroutes(&self, host: &str) -> bool {
+        self.config
+            .backends
+            .iter()
+            .any(|(pattern, _)| backend_pattern_host(pattern).eq_ignore_ascii_case(host))
     }
 
     /// The remote MCP server name configured for `host`, if any (host-only match).
