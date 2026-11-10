@@ -1331,6 +1331,7 @@ mod tests {
                 .try_into()
                 .expect("a grammar table")
             }),
+            ingress: Vec::new(),
         }
     }
 
