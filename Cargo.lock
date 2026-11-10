@@ -4059,6 +4059,7 @@ dependencies = [
  "strands-box-containment",
  "strands-box-credentials",
  "strands-box-egress-gateway",
+ "strands-box-ingress",
  "strands-box-policy",
  "strands-box-telemetry",
  "strands-shell",
@@ -4079,8 +4080,10 @@ dependencies = [
  "sha2 0.11.0",
  "strands-box-credentials",
  "strands-box-egress-gateway",
+ "strands-box-ingress",
  "tempfile",
  "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
@@ -4118,6 +4121,15 @@ dependencies = [
  "tokio-rustls",
  "webpki-roots",
  "zeroize",
+]
+
+[[package]]
+name = "strands-box-ingress"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]
