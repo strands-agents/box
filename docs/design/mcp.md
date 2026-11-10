@@ -239,11 +239,20 @@ the program, so servers that share a program, such as `npx`, share one alias. Th
 `command` in `box.toml` matches those words in order. Arguments must either all match the authored
 form or all match the form the server receives after `${OTEL_EXPORTER_OTLP_*}` tokens expand.
 A harness with a fixed configuration relies on the written form, because an endpoint token expands to
-a port that changes on each run. If no `command` matches, the broker refuses the launch and starts
-no server. The launch cannot reach a server it did not name. The refusal names the servers on that program and never their commands,
-because the agent cannot read `box.toml`. The broker also records the refusal as a `shell:spawn`
-denial with the rule `enforcement:mcp-command`, so an operator finds a mistyped command in the run's
-records. By default, the arguments only select among the servers the operator declared.
+a port that changes on each run. If no command matches a declared program, the broker sends an
+explicit non-match response. It starts no server and records a `strands.box.mcp.unmatched` diagnostic.
+The record names the program and carries redacted received arguments, with no policy verdict or
+execution outcome. The alias then executes the ordinary program inside the agent's sandbox, using
+that sandbox's existing grants.
+An undeclared program, an ambiguous match, or an unavailable command expansion remains a refusal.
+MCP commands use literal argument matching by default.
+
+The alias waits for the routing response before reading standard input. After a matched server
+starts, the broker sends readiness before relaying server output. The alias then starts its input
+relay. A server that waits for input therefore does not block the routing response.
+A denied start or failed broker connection cannot select ordinary fallback.
+The [shared-launcher decision](decisions.md#mcp-nonmatches-retain-ordinary-agent-execution)
+states why a command mismatch can select this route and what it costs.
 
 With `argument_wildcards = true` on a stdio MCP entry, a configured argument equal
 to `*` skips that position's comparison. The executable, argument count, and other arguments must still match. Each entry defaults to literal argument matching. Exact commands, including literal

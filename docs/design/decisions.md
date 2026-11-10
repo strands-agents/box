@@ -529,6 +529,21 @@ server. A forbid or an absent permit leaves it unstarted, as
 `secret.ref` locator and never a literal token, and the box never parses a harness's own
 configuration file to find one.
 
+<a id="mcp-nonmatches-retain-ordinary-agent-execution"></a>
+### MCP non-matches retain ordinary execution inside the agent sandbox
+
+An MCP alias selects ordinary execution only after the broker reports a valid command non-match,
+so a shared launcher remains usable without new agent authority.
+Refusing every non-match makes a server declaration hide unrelated calls to the same launcher.
+The cost is that a mistyped server command can run under the agent's grants without Box's MCP tool
+checks, so the broker records the non-match as a `strands.box.mcp.unmatched` diagnostic.
+Policy denials, ambiguous matches, and invalid routing responses do not select this path, as
+`only_a_valid_nonmatch_response_can_execute_fallback` and the admission tests check.
+The alias uses direct execution, requires a shebang for scripts, and stops on unexpected lookup
+errors; it does not acquire an implicit shell to make a program run.
+`ordinary_fallback_keeps_agent_grants_and_never_receives_server_secrets` pins the retained sandbox
+and the absence of server credentials.
+
 <a id="mcp-executable-filenames-name-their-aliases"></a>
 ### MCP executable filenames name their aliases
 
@@ -2209,7 +2224,8 @@ separate OTLP collector with that vendor's exporter. Point an `otlp` target at t
 ### Every box records by default, to a file the workload cannot reach
 
 An absent `telemetry` key means one `file` target that takes every signal: every effective denial
-and permit, the box's own control-plane records, and the harness's relayed spans, logs, and metrics.
+and permit, the box's own control-plane records and MCP routing diagnostics, and the harness's
+relayed spans, logs, and metrics.
 A box that makes a thousand decisions without recording any cannot be audited. The default provides
 those records even when the operator has configured nothing. The file sits in the box's own private
 tree, which a deny-only floor refuses to the workload whatever a permit says. A declared target
@@ -2219,9 +2235,10 @@ replaces the default instead of adding to it. The file has no size bound or rota
 ### A target names a set of signals, and an absent list takes every signal
 
 `[telemetry.<label>] include` takes five words: `deny` and `permit` name the two effective verdicts,
-`trace` names the agent's relayed spans and the box's own control-plane records, and `logs` and
-`metrics` name the agent's relayed log and metric records. A target names a set, with no ordering,
-and no signal contains another. A target that names no `include` receives every signal, which
+`trace` names the agent's relayed spans and the box's own control-plane records. `logs` names the
+agent's relayed log records and the box's unmatched MCP routing diagnostics. `metrics` names the
+agent's relayed metric records. A target names a set, with no ordering, and no signal contains
+another. A target that names no `include` receives every signal, which
 `an_absent_include_takes_every_signal` pins. An empty list, a repeated word, and a misspelled word
 are each refused before the box exists. The box relays harness signals without producing them. The
 harness's exporter settings determine whether those records exist.
@@ -2277,7 +2294,7 @@ pass can permit what policy denied. The record names every policy that determine
 `forbidden`, `no_match`, `policy_pending`, `internal_fault`, and `enforcement`.
 
 <a id="every-box-record-is-both-a-span-and-a-log-record"></a>
-### Every box record is both a span and a log record
+### Each decision and control record is both a span and a log record
 
 Each effective decision produces one internal span and one audit log record that share a trace ID
 and a span ID. The span marks the instant the enforcement point submits the decision, so it measures
@@ -2286,6 +2303,8 @@ control-plane operation names that root as its parent, so one trace covers the b
 decision is exported even when the caller's parent is unsampled, because a sampling flag must not
 suppress policy evidence. `decisions_export_spans_and_matching_logs_with_request_parentage` pins the
 contract.
+An unmatched MCP route produces only a log record because it states neither a policy decision nor
+an execution outcome.
 
 <a id="correlation-context-is-a-hint-and-never-authority"></a>
 ### Correlation context is a hint, and never evidence of authority

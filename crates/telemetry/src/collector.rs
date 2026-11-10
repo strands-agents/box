@@ -18,13 +18,15 @@ use crate::config::TelemetryConfig;
 use crate::error::Result;
 use crate::export::{BOX_ATTRIBUTE, SOURCE_ATTRIBUTE, SOURCE_BOX, TargetExporter};
 use crate::receive::Receiver;
-use crate::record::{ControlRecord, DecisionRecord, Signal};
+use crate::record::{ControlRecord, DecisionRecord, McpUnmatched, Signal};
 
 /// The scope every decision record carries.
 pub(crate) const SCOPE: &str = "strands-box.policy";
 
 /// The scope every control-plane record carries, so a reader filters one plane from the other.
 pub(crate) const CONTROL_SCOPE: &str = "strands-box.control";
+
+const MCP_SCOPE: &str = "strands-box.mcp";
 
 /// The service every record names.
 const SERVICE: &str = "strands-box";
@@ -130,6 +132,7 @@ pub struct Collector {
     logger: SdkLogger,
     /// The control-plane scope's own logger, so a record names which plane it came from.
     control_logger: SdkLogger,
+    mcp_logger: SdkLogger,
     dropped: Arc<AtomicU64>,
     /// The union of every lane's signals, so a record nothing wants costs one load.
     accepts: [bool; Signal::SLOTS],
@@ -220,6 +223,7 @@ impl Collector {
         let logs = logs.build();
         let logger = logs.logger(SCOPE);
         let control_logger = logs.logger(CONTROL_SCOPE);
+        let mcp_logger = logs.logger(MCP_SCOPE);
 
         // An agent's span arrives already encoded, so it relays rather than going through the SDK.
         let receiving = tokio::spawn(inbound.serve_forever(
@@ -234,6 +238,7 @@ impl Collector {
             logs,
             logger,
             control_logger,
+            mcp_logger,
             dropped,
             accepts,
             port,
@@ -298,6 +303,37 @@ impl Collector {
             emitted.add_attribute(key, value);
         }
         self.logger.emit(emitted);
+    }
+
+    /// Queue one unmatched MCP route without a policy verdict or execution outcome.
+    pub fn mcp_unmatched(&self, record: McpUnmatched) {
+        let signal = Signal::McpUnmatched;
+        if !self.accepts[signal.slot()] {
+            return;
+        }
+        let mut emitted = self.mcp_logger.create_log_record();
+        emitted.set_event_name("strands.box.mcp.unmatched");
+        let parent = record.correlation().parent();
+        if parent.is_valid() {
+            emitted.set_trace_context(
+                parent.trace_id(),
+                parent.span_id(),
+                Some(parent.trace_flags()),
+            );
+        }
+        for (key, value) in record.correlation().attributes() {
+            emitted.add_attribute(key, value);
+        }
+        emitted.set_timestamp(
+            std::time::UNIX_EPOCH
+                + Duration::from_nanos(u64::try_from(record.unix_nanos()).unwrap_or(u64::MAX)),
+        );
+        emitted.set_severity_number(signal.severity());
+        emitted.set_severity_text("info");
+        for (key, value) in record.attributes() {
+            emitted.add_attribute(key, value);
+        }
+        self.mcp_logger.emit(emitted);
     }
 
     /// Queue one control-plane operation.
@@ -553,6 +589,160 @@ mod tests {
             }
         }
         (spans, logs)
+    }
+
+    #[tokio::test]
+    async fn unmatched_mcp_routes_are_diagnostics_not_policy_decisions() {
+        let directory = tempfile::tempdir().unwrap();
+        let verdicts = directory.path().join("verdicts.jsonl");
+        let diagnostics = directory.path().join("diagnostics.jsonl");
+        let collector = Collector::start(
+            TelemetryConfig::for_box("demo")
+                .with_target(
+                    Target::new(TargetKind::File, verdicts.to_string_lossy())
+                        .receiving(Signal::every_verdict()),
+                )
+                .with_target(
+                    Target::new(TargetKind::File, diagnostics.to_string_lossy())
+                        .receiving(vec![Signal::McpUnmatched]),
+                ),
+        )
+        .unwrap();
+        let correlation = crate::Correlation::from_headers(
+            Some("00-0123456789abcdef0123456789abcdef-0123456789abcdef-03"),
+            None,
+        )
+        .request(Some("request-9"));
+        collector.mcp_unmatched(
+            crate::McpUnmatched::new(
+                "npx",
+                &[
+                    "--version".to_string(),
+                    "--token=diagnostic-secret".to_string(),
+                    "pkg@1.2.3".to_string(),
+                ],
+            )
+            .correlated(correlation),
+        );
+        collector.record(DecisionRecord::deny(
+            "shell:spawn",
+            "denied-program",
+            "deny-rule",
+            "forbidden",
+        ));
+        collector.record(DecisionRecord::permit(
+            "shell:spawn",
+            "permitted-program",
+            "permit-rule",
+        ));
+        collector.drained().await;
+
+        let (_, decisions) = spans_and_logs(&verdicts);
+        assert_eq!(decisions.len(), 2, "{decisions:?}");
+        for decision in &decisions {
+            assert_eq!(decision["eventName"], "strands.box.policy.decision");
+        }
+        let rendered = std::fs::read_to_string(&verdicts).unwrap();
+        assert!(rendered.contains("deny-rule"), "{rendered}");
+        assert!(rendered.contains("permit-rule"), "{rendered}");
+        assert!(!rendered.contains("npx"), "{rendered}");
+
+        let (spans, logs) = spans_and_logs(&diagnostics);
+        assert!(spans.is_empty(), "{spans:?}");
+        assert_eq!(logs.len(), 1, "{logs:?}");
+        let log = &logs[0];
+        assert_eq!(log["eventName"], "strands.box.mcp.unmatched");
+        assert_eq!(log["severityNumber"], 11);
+        assert_eq!(log["severityText"], "info");
+        assert_eq!(log["traceId"], "0123456789abcdef0123456789abcdef");
+        assert_eq!(log["spanId"], "0123456789abcdef");
+        assert_eq!(log["flags"], 3);
+        assert_ne!(log["timeUnixNano"], "0");
+        let attributes = log["attributes"].as_array().unwrap();
+        let attribute = |key: &str| {
+            attributes
+                .iter()
+                .find(|attribute| attribute["key"] == key)
+                .map(|attribute| &attribute["value"])
+                .unwrap_or_else(|| panic!("missing {key}: {log}"))
+        };
+        assert_eq!(
+            attribute("strands.box.request.id")["stringValue"],
+            "request-9"
+        );
+        assert_eq!(attribute("process.command")["stringValue"], "npx");
+        let arguments: Vec<_> = attribute("process.command_args")["arrayValue"]["values"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value["stringValue"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            arguments,
+            ["npx", "--version", "--token=<redacted>", "<redacted>"]
+        );
+        for attribute in attributes {
+            let key = attribute["key"].as_str().unwrap();
+            assert!(
+                !key.starts_with("strands.box.policy.")
+                    && !key.starts_with("strands.box.control.")
+                    && key != "strands.box.trace.parent_span_id",
+                "{log}"
+            );
+        }
+        let rendered = std::fs::read_to_string(&diagnostics).unwrap();
+        assert!(rendered.contains("strands-box.mcp"), "{rendered}");
+        assert!(!rendered.contains("diagnostic-secret"), "{rendered}");
+        assert!(!rendered.contains("pkg@1.2.3"), "{rendered}");
+        assert!(!rendered.contains("deny-rule"), "{rendered}");
+        assert!(!rendered.contains("permit-rule"), "{rendered}");
+        for line in rendered.lines() {
+            let batch: serde_json::Value = serde_json::from_str(line).unwrap();
+            for resource in batch["resourceLogs"].as_array().unwrap() {
+                let source = resource["resource"]["attributes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|attribute| attribute["key"] == SOURCE_ATTRIBUTE)
+                    .unwrap();
+                assert_eq!(source["value"]["stringValue"], SOURCE_BOX);
+                for scope in resource["scopeLogs"].as_array().unwrap() {
+                    assert_eq!(scope["scope"]["name"], "strands-box.mcp");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn default_targets_receive_unmatched_mcp_routes() {
+        let directory = tempfile::tempdir().unwrap();
+        let new_path = directory.path().join("new.jsonl");
+        let opened_path = directory.path().join("opened.jsonl");
+        let opened_file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(&opened_path)
+            .unwrap();
+        let collector = Collector::start(
+            TelemetryConfig::for_box("demo")
+                .with_target(Target::new(TargetKind::File, new_path.to_string_lossy()))
+                .with_target(Target::opened_file(
+                    opened_path.to_string_lossy(),
+                    opened_file,
+                )),
+        )
+        .unwrap();
+        collector.mcp_unmatched(crate::McpUnmatched::new("npx", &[]));
+        collector.drained().await;
+        for path in [&new_path, &opened_path] {
+            let (spans, logs) = spans_and_logs(path);
+            assert!(spans.is_empty(), "{path:?}: {spans:?}");
+            assert_eq!(logs.len(), 1, "{path:?}: {logs:?}");
+            let log = &logs[0];
+            assert_eq!(log["eventName"], "strands.box.mcp.unmatched");
+            assert!(log["traceId"].is_null() || log["traceId"] == "", "{log}");
+            assert!(log["spanId"].is_null() || log["spanId"] == "", "{log}");
+        }
     }
 
     /// One control-plane operation reaches a span beside its log record, under the control scope.

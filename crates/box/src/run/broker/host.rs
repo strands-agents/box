@@ -845,7 +845,12 @@ async fn serve_transport(
                             arguments,
                             |declared| spec.launched_arguments(declared),
                         ) {
-                            Ok(admitted) => admitted,
+                            Ok(Some(admitted)) => admitted,
+                            Ok(None) => {
+                                spec.recorder.mcp_unmatched(server, arguments);
+                                send(&frames, id, Body::McpUnmatched).await?;
+                                continue;
+                            }
                             Err(error) => {
                                 spec.recorder.record(
                                     crate::run::telemetry::EffectiveDecision::enforcement_deny(
@@ -868,6 +873,7 @@ async fn serve_transport(
                             .ok_or_else(|| invalid_input("too many MCP programs were opened"))?;
                         match start_mcp_server(&spec, admitted, arguments).await {
                             Ok((running, stdout)) => {
+                                send(&frames, id, Body::McpReady).await?;
                                 let sequence = mcp_opened;
                                 mcp_opened = next_mcp_opened;
                                 let (program, completion) =
@@ -1131,7 +1137,11 @@ async fn serve_transport(
                 }
                 // Refused above; unreachable, and kept explicit so a new daemon body cannot fall
                 // through into the client path.
-                Body::Output { .. } | Body::Exit { .. } | Body::Denied { .. } => {
+                Body::Output { .. }
+                | Body::Exit { .. }
+                | Body::Denied { .. }
+                | Body::McpReady
+                | Body::McpUnmatched => {
                     return Err(invalid_input("a transport client may not send that frame"));
                 }
             }
@@ -3682,6 +3692,13 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 },
             )
             .await;
+            let ready =
+                tokio::time::timeout(Duration::from_secs(5), read_frame::<Frame, _>(&mut reader))
+                    .await
+                    .expect("the MCP readiness response arrives")
+                    .unwrap()
+                    .unwrap();
+            assert!(matches!(ready.body, Body::McpReady));
             let pids = tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     let pids = std::fs::read_to_string(&child_pid)
