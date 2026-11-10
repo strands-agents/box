@@ -1,4 +1,4 @@
-//! Black-box checks that a stdio MCP server starts only under a `shell:spawn` permit.
+//! Black-box checks that a stdio MCP server starts only under its applicable policy action.
 
 #![cfg(unix)]
 
@@ -861,4 +861,218 @@ fn overlapping_wildcard_commands_are_refused_before_the_workload_starts() {
         assert!(output.status.success(), "{output:?}");
         assert!(box_.workload_path("workload.started").exists());
     }
+}
+
+#[test]
+fn a_late_server_is_refused_until_its_path_reaches_an_approved_program() {
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+    if !fixture::namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let mut box_ = RuntimeMcpBox::new("mcp-late-grammar");
+    let server_directory = box_.workload_path("server-bin");
+    std::fs::create_dir(&server_directory).expect("create the workload's program directory");
+    let server_path = server_directory.join("alpha-mcp");
+    let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready)
+        .launched_through("alpha-mcp", vec!["start".to_string()])
+        .with_env("PATH", &server_directory.display().to_string());
+    let beta = Server::new("beta", "beta-mcp", "read", DiscoveryBehavior::Ready);
+    box_.install_server(&alpha);
+    box_.install_server(&beta);
+    let approved = box_
+        .server_executable("alpha-mcp")
+        .canonicalize()
+        .expect("the approved program resolves");
+    std::fs::copy(&approved, box_.workload_path("payload"))
+        .expect("stage the synthetic server source for the workload");
+    let chmod = std::path::Path::new("/bin/chmod")
+        .canonicalize()
+        .expect("resolve chmod");
+    let sleep = std::path::Path::new("/bin/sleep")
+        .canonicalize()
+        .expect("resolve sleep");
+    box_.set_agent_env("FIXTURE_CHMOD", &chmod.display().to_string());
+    box_.set_agent_env("FIXTURE_SLEEP", &sleep.display().to_string());
+    box_.declare_tool(
+        "alpha",
+        &format!(
+            r#"[tool.alpha]
+command = [{:?}]
+[tool.alpha.grammar]
+format = 1
+version = 1
+name = "alpha"
+program = "alpha-mcp"
+[tool.alpha.grammar.shell.start]
+usage = "alpha-mcp start"
+[experimental-features]
+tool-grammars = true
+"#,
+            approved.display().to_string()
+        ),
+    );
+    let policy = format!(
+        r#"{}
+permit (principal, action == Box::Action::"shell:spawn", resource);
+@id("grammar_start")
+permit (principal, action == Tool::alpha::Action::"start", resource);
+"#,
+        call_policy(&["alpha", "beta"])
+    );
+    let workload = r#"
+set -eu
+while IFS= read -r line || [ -n "$line" ]; do
+    printf '%s\n' "$line"
+done < "$HOME/payload" > "$HOME/server-bin/alpha-mcp"
+"$FIXTURE_CHMOD" 700 "$HOME/server-bin/alpha-mcp"
+: > "$HOME/workload.started"
+set +e
+{
+    printf '%s\n' '{"jsonrpc":"2.0","id":"first","method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"late-server-test","version":"1"}}}'
+    "$FIXTURE_SLEEP" 2
+} | alpha-mcp start > "$HOME/first.out" 2> "$HOME/first.err"
+printf '%s\n' "$?" > "$HOME/first.status"
+set -e
+printf 'CONTINUED\n' > "$HOME/continued"
+: > "$HOME/first.done"
+while [ ! -e "$HOME/release" ]; do :; done
+"#;
+    box_.write_workspace_as_authored(&policy, &[alpha, beta], workload);
+    let config_path = box_.operator_home().join("workspace/.strands-box/box.toml");
+    let mut config: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config_path).expect("read the authored config"))
+            .expect("parse the authored config");
+    config["agent"]["filesystem"]
+        .as_table_mut()
+        .expect("the agent has filesystem grants")
+        .insert(
+            "exec".to_string(),
+            toml::Value::Array(
+                [&chmod, &sleep]
+                    .into_iter()
+                    .map(|path| toml::Value::String(path.display().to_string()))
+                    .collect(),
+            ),
+        );
+    config["mcp"]["alpha"]["filesystem"]["read"]
+        .as_array_mut()
+        .expect("the server has a read list")
+        .push(toml::Value::String(server_directory.display().to_string()));
+    let server_filesystem = config["mcp"]["alpha"]["filesystem"].clone();
+    config["tool"]["alpha"]
+        .as_table_mut()
+        .expect("the tool has a configuration table")
+        .insert("filesystem".to_string(), server_filesystem);
+    std::fs::write(
+        config_path,
+        toml::to_string(&config).expect("serialize the fixture grants"),
+    )
+    .expect("write the fixture grants");
+    assert!(
+        !server_path.exists(),
+        "the server is absent before Box starts"
+    );
+
+    let mut run = box_.spawn();
+    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+    run.wait_for_through_alias(box_.workload_path("first.done"), STARTUP);
+    let first_error = std::fs::read_to_string(box_.workload_path("first.err"))
+        .expect("read the contained workload's first refusal");
+    assert!(
+        first_error.contains("tool grammar requires an approved program file"),
+        "the later executable must be refused despite both permits: {first_error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(box_.workload_path("first.status"))
+            .expect("read the first alias status")
+            .trim(),
+        "125",
+        "the alias reports a refused start"
+    );
+    let late = std::fs::metadata(&server_path).expect("the workload created its server");
+    let bound = std::fs::metadata(&approved).expect("the approved server still exists");
+    assert_ne!(
+        (late.dev(), late.ino()),
+        (bound.dev(), bound.ino()),
+        "the workload created a different program file"
+    );
+    assert_ne!(
+        late.permissions().mode() & 0o111,
+        0,
+        "the new file is executable"
+    );
+    assert_eq!(box_.invocation_count("alpha-mcp"), 0);
+    assert!(!box_.server_started("alpha-mcp").exists());
+    assert_eq!(
+        std::fs::read_to_string(box_.workload_path("continued"))
+            .expect("the workload continues after the refusal"),
+        "CONTINUED\n"
+    );
+    assert!(
+        run.is_running(),
+        "the refusal must leave the same Box running"
+    );
+
+    let mut beta_client = box_.open_client("beta-mcp");
+    run.wait_for_through_alias(box_.server_started("beta-mcp"), STARTUP);
+    let (_, beta_response) = beta_client.initialize_and_activate(json!("beta"), STARTUP);
+    assert_eq!(answered_as(&beta_response), "beta");
+    assert_eq!(box_.invocation_count("beta-mcp"), 1);
+
+    // The trusted test host changes the path after observing the contained workload's refusal.
+    let replacement = server_path.with_extension("approved");
+    std::os::unix::fs::symlink(&approved, &replacement)
+        .expect("name the program file Box approved at startup");
+    std::fs::rename(replacement, &server_path)
+        .expect("replace the late file with the approved link");
+    let mut retry = box_.open_client("alpha-mcp");
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
+    let (_, response) = retry.initialize_and_activate(json!("retry"), STARTUP);
+    assert_eq!(answered_as(&response), "alpha");
+    assert_eq!(box_.invocation_count("alpha-mcp"), 1);
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&box_.trace("alpha-mcp", "argv"))
+            .expect("read the permitted server arguments"),
+        json!(["start"])
+    );
+    assert!(run.is_running(), "the retry uses the original Box run");
+    retry.assert_running();
+    beta_client.assert_running();
+
+    drop(retry);
+    drop(beta_client);
+    box_.release_workload();
+    let output = run.wait(SHUTDOWN);
+    assert!(output.status.success(), "{output:?}");
+    let records = std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl"))
+        .expect("read the drained policy telemetry");
+    let mut grammar_start_recorded = false;
+    for line in records.lines() {
+        let batch: serde_json::Value = serde_json::from_str(line).expect("parse telemetry batch");
+        for resource in batch["resourceLogs"].as_array().into_iter().flatten() {
+            for scope in resource["scopeLogs"].as_array().into_iter().flatten() {
+                for entry in scope["logRecords"].as_array().into_iter().flatten() {
+                    let value = |key: &str| {
+                        entry["attributes"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .find(|attribute| attribute["key"] == key)
+                            .and_then(|attribute| attribute["value"]["stringValue"].as_str())
+                    };
+                    grammar_start_recorded |= value("strands.box.policy.category")
+                        == Some("Tool::alpha")
+                        && value("strands.box.policy.action") == Some("start")
+                        && value("strands.box.policy.verdict") == Some("permit")
+                        && value("strands.box.policy.rule") == Some("grammar_start");
+                }
+            }
+        }
+    }
+    assert!(
+        grammar_start_recorded,
+        "the approved retry must use its grammar permit: {records}"
+    );
 }

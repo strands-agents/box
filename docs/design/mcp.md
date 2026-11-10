@@ -13,17 +13,25 @@ It also explains which parts of a request policy can restrict.
 | Declared as | `[mcp.<name>]` with `type = "stdio"` | `[mcp.<name>]` with `type = "http"` |
 | Runs in | Its own sandbox, which Box starts | Somewhere else. Box checks its requests, not the server. |
 | Reached through | The alias for the server's program, then the MCP broker, then the server's stdin | The egress gateway |
-| Starting or connecting | `shell:spawn` | `net:connect` and `http:request` |
+| Starting or connecting | `shell:spawn` or the required tool grammar action | `net:connect` and `http:request` |
 | Each MCP request | `mcp:call` | `mcp:call` |
 
 Box starts each stdio server in a sandbox of its own, separate from the agent's. See [local MCP servers](./containment.md#local-mcp-servers). The MCP broker is the part of Box that
 receives the agent's requests over a local socket, and the egress gateway checks and forwards every
 outbound network request.
 
-A server needs both transport access and MCP authorization. A server needs `shell:spawn`, or `net:connect` and
-`http:request`, plus `mcp:call`. Together they allow every tool on the server. See [an MCP tool call
-takes two decisions](decisions.md#mcp-authorization-is-two-gates). Every other MCP rule narrows
-that.
+A local server needs permission to start and `mcp:call` permission for its requests. Its start uses
+`shell:spawn` unless its configured program name requires a tool grammar. A remote server needs
+`net:connect`, `http:request`, and `mcp:call`. See [an MCP tool call takes two
+decisions](decisions.md#mcp-authorization-is-two-gates).
+
+Local servers start on demand. Box records available program files for tool grammars before the
+workload starts, but an unavailable server program does not stop Box. On each server-start request,
+Box requires any applicable grammar to match the executable's recorded file identity and called
+name. If no binding matches, Box refuses that start before policy can grant general process-start
+permission. A retry can use a link to an already-bound file under the same called name; a new
+executable needs a new Box run. This preserves [delayed server startup](decisions.md#a-stdio-mcp-server-runs-contained)
+and [file-and-name binding](decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name).
 
 The server's name comes from `box.toml`. A rule reads the `[mcp.<name>]` table's name, never a
 value from the request. See [every MCP server is one configuration

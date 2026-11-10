@@ -87,6 +87,13 @@ when policy permits `shell:spawn` for it. When an experimental tool grammar bind
 program, the grammar's action decides the start in place of `shell:spawn`, as for a
 [spawn in the Shell](shell.md#shellspawn). By default, the box runs the `command` and arguments from `box.toml`.
 
+Servers start on demand, so an unused server program can be missing when Box starts. If the
+server's configured program name matches an installed tool grammar, each start requires the file
+identity and called name that Box bound at startup. A later executable cannot receive general
+`shell:spawn` permission instead. Box refuses that server's start and keeps running. See
+[which program files a grammar binds](tool-grammars.md#which-program-files-a-grammar-binds) for retries
+and newly installed programs.
+
 Without argument wildcards, the harness's command must be the same words, in the same order, as `command`.
 The harness runs the alias with its arguments, and the box starts the server whose `command`
 matches. A harness entry that sets only the program reaches only a server whose `command` is the
@@ -305,6 +312,7 @@ The harness gets these errors when it starts a server, and the box keeps running
 
 | Message | Cause |
 |---|---|
+| `its tool grammar requires an approved program file` | This server's program name requires a grammar, but its executable does not match a file bound under that name at startup. A link to an already-bound file can pass this check on retry. To use a newly installed executable, restart Box with that program available. |
 | `no MCP server declares "<command>"; servers on <program>: <name>, ...` | The harness ran a command that matches no `command` on that program. Set the harness's command and arguments to the `command` of one of the listed servers in `box.toml`. |
 | `` <name> (its `command` does not expand) `` in that list | The server's `command` holds a `${...}` name the box does not fill in. Use one of the three `OTEL_EXPORTER_OTLP_` names. |
 | ``no MCP server declares "<command>"; no `[mcp.<name>]` table in box.toml declares the program "<program>"`` | The harness ran a program that no `[mcp.<name>]` table names. |
