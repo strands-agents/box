@@ -158,8 +158,8 @@ the last part of its `command` element 0, runs that tool's file, which Box opene
 startup. Any other bare name is looked up on the `PATH` of the box's trusted process, which is the
 `PATH` of the host OS's shell where the operator ran `box run`, with `/usr/bin:/bin` as the
 fallback. A name with a `/` is that path, relative to the Shell's working directory. Either way, the Shell resolves every link, and `program_path` is the file that
-will run, and the program gets the agent's spelling as its `argv[0]`. See [a program resolves on the
-operator's `PATH`](decisions.md#a-host-binary-resolves-on-the-operator-path).
+will run, and the program gets the agent's spelling as its `argv[0]`. See [a bare name runs its tool's
+file](decisions.md#a-host-binary-resolves-on-the-operator-path).
 
 Use `context.input.program_path` to allow a program by its resolved file, which reads as `~/…` under
 the operator's home, as a path does. `program` and the argument fields work as they do for
