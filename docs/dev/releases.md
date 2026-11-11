@@ -41,7 +41,7 @@ It does not rehearse all publication prerequisites.
 Complete security acceptance and target qualification before approving publication.
 Run the same version, source, and `publish_linux` selection from upstream `main` with `dry_run=false` and `skip_tests=false`.
 Real releases require macOS signing and signed-package verification, including releases that introduce Linux support.
-Approve the protected signing environment when requested, then approve `release-gate` after the checks pass.
+Approve `release-gate` after the checks pass.
 The workflow creates the tag and publishes the verified bundle from that run.
 A new run rebuilds the package. Keep the hashes from the publication run.
 
