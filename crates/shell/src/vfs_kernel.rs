@@ -63,6 +63,8 @@ pub struct VfsKernel {
     pub script_interpreter: Option<crate::os::ScriptInterpreter>,
     /// When set, `spawn_host` forwards the binary to this hook.
     pub host_spawner: Option<crate::os::HostSpawner>,
+    /// The file each declared bare name runs, which `host_program` answers.
+    pub host_programs: crate::os::HostPrograms,
     resolution_generation: Arc<Mutex<u64>>,
     pending_writes: std::sync::Mutex<Vec<PendingWrite>>,
 }
@@ -85,6 +87,7 @@ impl VfsKernel {
             egress_proxy: None,
             script_interpreter: None,
             host_spawner: None,
+            host_programs: crate::os::HostPrograms::default(),
             resolution_generation: Arc::new(Mutex::new(0)),
             pending_writes: std::sync::Mutex::new(Vec::new()),
         }
@@ -2241,6 +2244,10 @@ impl Kernel for VfsKernel {
                 "host-binary execution requires a contained spawner; none is installed",
             )),
         }
+    }
+
+    fn host_program(&self, name: &str) -> Option<std::path::PathBuf> {
+        self.host_programs.get(name).cloned()
     }
 }
 

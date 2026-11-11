@@ -52,11 +52,6 @@ impl<'a> Upstream<'a> {
         }
     }
 
-    /// Whether the exchange runs inside a CONNECT tunnel's TLS.
-    pub(crate) fn is_tls(&self) -> bool {
-        self.tls.is_some()
-    }
-
     /// Send the serialized request and receive the response head under the exchange deadline.
     pub(crate) async fn send(
         self,

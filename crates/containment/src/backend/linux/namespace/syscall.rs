@@ -1243,11 +1243,6 @@ mod tests {
         }
     }
 
-    // The counts moved from 112/115 to 113/116 because main's #356 ("sanitize statfs for Codex
-    // database startup") added the `statfs` entry to `WORKLOAD_PERMITTED`. #356 did not update this
-    // test, so it fails on main itself (`left: 113, right: 112`); this branch merely surfaced it by
-    // merging main. The counts are corrected here rather than left broken — the four guards below
-    // (`seccomp`/`pkey_mprotect` absent, `setresuid`/`setresgid` arg-scoped) are still right.
     #[test]
     fn permit_filter_has_113_workload_entries_and_one_installer_entry() {
         assert_eq!(WORKLOAD_PERMITTED.len(), 113);

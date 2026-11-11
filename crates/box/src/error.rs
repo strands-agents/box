@@ -209,6 +209,9 @@ pub(crate) enum RelayError {
 
     #[error("accepting on the workload's listening socket: {source}")]
     Accept { source: std::io::Error },
+
+    #[error(transparent)]
+    Ingress(#[from] ingress::IngressError),
 }
 
 /// The four inputs could not be read, parsed, or validated.

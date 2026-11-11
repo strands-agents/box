@@ -662,3 +662,143 @@ fn a_translator_prefix_rule_forbids_the_wire_form_and_leaves_the_address_it_carr
         );
     }
 }
+
+#[test]
+fn shell_working_directory_literals_use_the_operator_home_spelling() {
+    let home = Home::new();
+    for action in ["shell:exec", "shell:spawn"] {
+        for (index, comparison) in [
+            format!(
+                r#"context.input.cwd == "{}/project""#,
+                home.canonical.display()
+            ),
+            format!(
+                r#""{}/project" == context.input.cwd"#,
+                home.canonical.display()
+            ),
+            format!(
+                r#"context.input.cwd like "{}/project/*""#,
+                home.canonical.display()
+            ),
+            format!(
+                r#"["{}/project"].contains(context.input.cwd)"#,
+                home.canonical.display()
+            ),
+            format!(r#"context.input.cwd == "{}""#, home.canonical.display()),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let text = format!(
+                r#"@id("protected_directory")
+                forbid(principal, action == Box::Action::"{action}", resource)
+                when {{ {comparison} }};"#
+            );
+            let name = format!("cwd-{action}-{index}");
+            let reason = refusal(home.open(&name, &text));
+            assert!(reason.contains("protected_directory"), "{reason}");
+            assert!(reason.contains("context.input.cwd"), "{reason}");
+            assert!(reason.contains("write \"~"), "{reason}");
+            assert!(PolicyEngine::validate(&home.operator(), &[source(&text)]).is_err());
+            assert!(
+                !PolicyEngine::check(&home.operator(), &[source(&text)], true)
+                    .errors()
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[test]
+fn shell_working_directory_boundaries_remain_loadable() {
+    let home = Home::new();
+    for action in ["shell:exec", "shell:spawn"] {
+        for (index, cwd) in [
+            "~".to_string(),
+            "~/project".to_string(),
+            "/opt/project".to_string(),
+            format!("{}-other/project", home.canonical.display()),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let text = format!(
+                r#"permit(principal, action == Box::Action::"{action}", resource)
+                when {{ context.input.cwd == "{cwd}" }};"#
+            );
+            let engine = home
+                .open(&format!("cwd-valid-{action}-{index}"), &text)
+                .expect("home-relative and outside-home directories load");
+            assert!(engine.warnings().is_empty());
+            let request = if action == "shell:exec" {
+                Request::ShellExec {
+                    command: "pwd",
+                    program: "pwd",
+                    args: &[],
+                    cwd,
+                }
+            } else {
+                Request::ShellSpawn {
+                    command: "pwd",
+                    program: "pwd",
+                    program_path: "/usr/bin/pwd",
+                    credential_reads: &[],
+                    args: &[],
+                    cwd,
+                }
+            };
+            assert!(
+                engine
+                    .decide(
+                        &GovernedBox::assigned("cwd-spelling"),
+                        &Principal::agent(),
+                        &request
+                    )
+                    .0
+                    .is_allow()
+            );
+        }
+        let text = format!(
+            r#"permit(principal, action == Box::Action::"{action}", resource)
+            when {{ context.input.cwd == "{}/project" }};"#,
+            home.canonical.display()
+        );
+        PolicyEngine::open(
+            vec![source(&text)],
+            &home.history(&format!("cwd-unanchored-{action}")),
+        )
+        .expect("without an anchored home the absolute spelling remains valid");
+        assert!(PolicyEngine::validate(&Operator::unanchored(), &[source(&text)]).is_ok());
+    }
+}
+
+#[test]
+fn shell_working_directory_patterns_receive_path_diagnostics() {
+    let home = Home::new();
+    for (index, comparison) in [
+        r#"context.input.cwd == "~/project/""#,
+        r#"context.input.cwd like "~/project/*/""#,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let text = format!(
+            r#"forbid(principal, action in [Box::Action::"shell:exec", Box::Action::"shell:spawn"], resource)
+            when {{ {comparison} }};"#
+        );
+        let reason = refusal(home.open(&format!("cwd-trailing-{index}"), &text));
+        assert!(reason.contains("context.input.cwd"), "{reason}");
+        assert!(reason.contains("without a trailing slash"), "{reason}");
+    }
+    let text = format!(
+        r#"forbid(principal, action == Box::Action::"shell:spawn", resource)
+        when {{ context.input.cwd like "*{}/project/*" }};"#,
+        home.canonical.display()
+    );
+    let engine = home
+        .open("cwd-wildcard", &text)
+        .expect("an uncertain pattern warns");
+    assert!(
+        matches!(engine.warnings(), [PolicyWarning::HomeAfterWildcard { attribute, .. }] if attribute == "cwd")
+    );
+}

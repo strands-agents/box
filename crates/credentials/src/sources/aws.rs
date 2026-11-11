@@ -275,8 +275,13 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 /// through, `/` is preserved when `encode_slash` is false (canonical path), and everything else is
 /// percent-encoded with uppercase hex.
 fn uri_encode(s: &str, encode_slash: bool) -> String {
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
+    uri_encode_bytes(s.as_bytes(), encode_slash)
+}
+
+/// RFC 3986 percent-encode `bytes`, leaving the unreserved set and (optionally) `/`.
+fn uri_encode_bytes(bytes: &[u8], encode_slash: bool) -> String {
+    let mut out = String::with_capacity(bytes.len());
+    for &b in bytes {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(b as char)
@@ -286,6 +291,39 @@ fn uri_encode(s: &str, encode_slash: bool) -> String {
         }
     }
     out
+}
+
+/// Percent-decode `s` to raw bytes, leaving a lone or malformed `%` as a literal byte. The query
+/// arrives already percent-encoded from the URL, so each key and value is decoded here before
+/// `canonical_query` re-encodes it exactly once — otherwise `%3A` becomes `%253A` and the signature
+/// no longer matches what the service decodes.
+fn percent_decode(s: &str) -> Vec<u8> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2]))
+        {
+            out.push((hi << 4) | lo);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
+}
+
+/// The numeric value of one hex digit, or `None` for any other byte.
+fn hex_value(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Build the canonical query string: split on `&`, URI-encode each key and value (encoding `/`
@@ -299,7 +337,12 @@ fn canonical_query(query: &str) -> String {
         .filter(|kv| !kv.is_empty())
         .map(|kv| {
             let (k, v) = kv.split_once('=').unwrap_or((kv, ""));
-            (uri_encode(k, true), uri_encode(v, true))
+            // Decode first: the query is already encoded on the wire, so re-encoding without
+            // decoding would double-encode (`%3A` → `%253A`).
+            (
+                uri_encode_bytes(&percent_decode(k), true),
+                uri_encode_bytes(&percent_decode(v), true),
+            )
         })
         .collect();
     pairs.sort();
@@ -668,6 +711,17 @@ mod tests {
             session_token: None,
             region: None,
         }
+    }
+
+    /// An already-encoded query is decoded then encoded exactly once (not double-encoded), and the
+    /// parameters are sorted. A GitHub-style `q=repo:o/r` arrives as `q=repo%3Ao%2Fr`, and the
+    /// canonical form must reproduce it, not `q=repo%253Ao%252Fr`.
+    #[test]
+    fn canonical_query_encodes_each_parameter_exactly_once() {
+        assert_eq!(canonical_query("q=repo%3Ao%2Fr&b=2"), "b=2&q=repo%3Ao%2Fr");
+        // A value the client sent unencoded still encodes once, and sorting is by encoded key.
+        assert_eq!(canonical_query("type=code&q=a b"), "q=a%20b&type=code");
+        assert_eq!(canonical_query(""), "");
     }
 
     /// The signing-time integer date math reproduces the canonical `get-vanilla` timestamp.

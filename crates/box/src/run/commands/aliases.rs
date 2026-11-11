@@ -13,6 +13,93 @@ const SCAN_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_DEPTH: usize = 128;
 const DIRECTORY_FLAGS: libc::c_int = libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
 
+/// Whether a verified filesystem layout makes the target's recursive scan unnecessary.
+pub(super) fn every_name_beside(
+    path: &Path,
+    command: &File,
+    identity: (u64, u64),
+    target: &Path,
+) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        let inspect = || {
+            let deadline = Instant::now() + SCAN_TIMEOUT;
+            let check = || check_deadline(deadline);
+            let Some(folder) = path.parent() else {
+                return Ok(false);
+            };
+            let directory = checked_io(deadline, &check_deadline, || {
+                OpenOptions::new()
+                    .read(true)
+                    .custom_flags(DIRECTORY_FLAGS)
+                    .open(folder)
+            })?;
+            super::super::installation::inspect_single_mount(
+                command,
+                &directory,
+                folder,
+                target,
+                check,
+                || {
+                    let before = checked_io(deadline, &check_deadline, || command.metadata())?;
+                    if !before.is_file() || (before.dev(), before.ino()) != identity {
+                        return Ok(false);
+                    }
+                    let found = every_name_in_directory(
+                        &directory,
+                        identity,
+                        before.nlink(),
+                        deadline,
+                        &check_deadline,
+                    )?;
+                    let after = checked_io(deadline, &check_deadline, || command.metadata())?;
+                    let named = checked_io(deadline, &check_deadline, || {
+                        std::fs::symlink_metadata(folder)
+                    })?;
+                    let opened = checked_io(deadline, &check_deadline, || directory.metadata())?;
+                    require_unchanged(&named, &opened)?;
+                    Ok(found && before.nlink() == after.nlink())
+                },
+            )
+        };
+        inspect().unwrap_or(false)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (path, command, identity, target);
+        false
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn every_name_in_directory(
+    directory: &File,
+    identity: (u64, u64),
+    links: u64,
+    deadline: Instant,
+    check: &impl Fn(Instant) -> io::Result<()>,
+) -> io::Result<bool> {
+    if links == 0 {
+        return finish_before_deadline(deadline, check, Ok(false));
+    }
+    let before = checked_io(deadline, check, || directory.metadata())?;
+    let stream = DirectoryStream::new(directory, deadline, check)?;
+    let mut names = 0_u64;
+    while let Some(name) = stream.next(deadline, check)? {
+        let metadata = checked_io(deadline, check, || entry_metadata(directory, &name))?;
+        if metadata.st_mode & libc::S_IFMT == libc::S_IFREG && entry_identity(&metadata) == identity
+        {
+            names += 1;
+            if names > links {
+                return finish_before_deadline(deadline, check, Ok(false));
+            }
+        }
+    }
+    let after = checked_io(deadline, check, || directory.metadata())?;
+    require_unchanged(&before, &after)?;
+    finish_before_deadline(deadline, check, Ok(names == links))
+}
+
 /// Inspect existing names without following symbolic links or accepting an incomplete directory walk.
 pub(super) fn contains(path: &Path, identities: &[(u64, u64)]) -> io::Result<bool> {
     contains_before_deadline(
@@ -299,6 +386,85 @@ mod tests {
     fn identity(path: &Path) -> (u64, u64) {
         let metadata = std::fs::metadata(path).unwrap();
         (metadata.dev(), metadata.ino())
+    }
+
+    #[test]
+    fn only_real_hard_links_complete_the_directory_count() {
+        let root = tempfile::tempdir().unwrap();
+        let folder = root.path().join("tools");
+        std::fs::create_dir(&folder).unwrap();
+        let command = folder.join("command");
+        std::fs::write(&command, "command").unwrap();
+        std::fs::hard_link(&command, folder.join("second")).unwrap();
+        symlink(&command, folder.join("symbolic")).unwrap();
+        std::fs::copy(&command, folder.join("copy")).unwrap();
+        let inspect = |links| {
+            every_name_in_directory(
+                &File::open(&folder).unwrap(),
+                identity(&command),
+                links,
+                Instant::now() + SCAN_TIMEOUT,
+                &check_deadline,
+            )
+            .unwrap()
+        };
+        assert!(inspect(2));
+        std::fs::hard_link(&command, root.path().join("elsewhere")).unwrap();
+        assert!(!inspect(3), "a name outside the folder requires a scan");
+        std::fs::rename(folder.join("second"), root.path().join("moved")).unwrap();
+        assert!(
+            !inspect(3),
+            "moving a name must not be hidden by an unchanged link count"
+        );
+    }
+
+    #[test]
+    fn an_expired_directory_count_requires_the_recursive_scan() {
+        let root = tempfile::tempdir().unwrap();
+        let expired = Instant::now().checked_sub(Duration::from_secs(1)).unwrap();
+        let error = every_name_in_directory(
+            &File::open(root.path()).unwrap(),
+            (0, 0),
+            2,
+            expired,
+            &check_deadline,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    #[test]
+    fn an_incomplete_directory_count_cannot_skip_a_scan() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = File::open(root.path()).unwrap();
+        let checks = Cell::new(0);
+        let check = |_| {
+            checks.set(checks.get() + 1);
+            if checks.get() >= 5 {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "test deadline"));
+            }
+            Ok(())
+        };
+        let error =
+            every_name_in_directory(&directory, (0, 0), 2, Instant::now() + SCAN_TIMEOUT, &check)
+                .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(checks.get(), 5, "the budget expires during inspection");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_keeps_scanning_without_a_mount_inventory() {
+        let root = tempfile::tempdir().unwrap();
+        let command = root.path().join("command");
+        std::fs::write(&command, "command").unwrap();
+        std::fs::hard_link(&command, root.path().join("second")).unwrap();
+        assert!(!every_name_beside(
+            &command,
+            &File::open(&command).unwrap(),
+            identity(&command),
+            root.path(),
+        ));
     }
 
     #[test]

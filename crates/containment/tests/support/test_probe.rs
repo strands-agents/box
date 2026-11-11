@@ -28,6 +28,7 @@
 //! expect-deny:write:<path>       writing <path> must fail
 //! expect-ok:connect:<addr>       (macOS) TCP connect to <addr> (host:port) must succeed
 //! expect-deny:connect:<addr>     (macOS) TCP connect to <addr> must fail
+//! expect-ok:listen:<addr>        (macOS) a TCP bind and listen on <addr> must succeed
 //! expect-ok:http:<host>[:port]   (macOS) HTTP CONNECT to <host> through $HTTP_PROXY,
 //!                                then GET / carrying Authorization: Bearer
 //!                                $HTTP_PHANTOM_TOKEN must return 200
@@ -1008,6 +1009,10 @@ fn run_probe(spec: &str) -> Result<bool, String> {
                 Err(e) => return Err(format!("bad addr {target}: {e}")),
             }
         }
+        "listen" => match target.parse::<std::net::SocketAddr>() {
+            Ok(addr) => std::net::TcpListener::bind(addr).is_ok(),
+            Err(e) => return Err(format!("bad addr {target}: {e}")),
+        },
         "http" => http_probe(target)?,
         // `procargs:self` reads this process's own argv/environment,
         // `procargs:child` a child forked inside this same box, and

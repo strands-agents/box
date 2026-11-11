@@ -36,11 +36,11 @@ use credentials::{
     Backend, DestinationPattern, InjectMode, Locator, PhantomCheck, RouteSpec, Vault, VaultConfig,
 };
 use egress_gateway::{
-    AuditDecision, CapabilitySet, CredentialCapability, EffectAttempt, EffectInterceptor,
-    EffectOutcome, EffectPermit, MitmConfig, MitmInterceptor, StubEmitter,
+    AuditDecision, BackendDial, CapabilitySet, CredentialCapability, EffectAttempt,
+    EffectInterceptor, EffectOutcome, EffectPermit, MitmConfig, MitmInterceptor, StubEmitter,
 };
 
-use harness::{TlsUpstream, WorkloadClient};
+use harness::{SeenRequest, TlsUpstream, WorkloadClient};
 
 // ============================================================================================
 // The PDP stand-in: authorization arrives ONLY through the EffectInterceptor seam
@@ -154,10 +154,91 @@ fn advisory_store(host: &str, port: u16, secret: &'static str) -> Arc<Vault> {
     Arc::new(opened.into_vault())
 }
 
+/// A backend store for `host:port`: ONE vault holding both a strip-phantom route (the destination
+/// secret) and a box-owned route (the backend token), exactly as the box opens a backend entry.
+fn backend_store(host: &str, port: u16, backend_secret: &'static str) -> Arc<Vault> {
+    let header = || InjectMode::header("Bearer {}".to_string(), None).expect("a valid placement");
+    let opened = Vault::open(
+        VaultConfig::new(Backend::local(), "tenant")
+            .route(RouteSpec::strip_phantom(pat(host, port), header()))
+            .route(RouteSpec::box_owned(
+                pat(host, port),
+                env_locator(backend_secret),
+                header(),
+            )),
+    )
+    .expect("the backend vault opens");
+    Arc::new(opened.into_vault())
+}
+
 /// A `host:port` destination pattern (the test upstream is on an ephemeral port, so patterns must
 /// carry the exact port — the matcher's default web-port inference only covers 443/80).
 fn pat(host: &str, port: u16) -> DestinationPattern {
     DestinationPattern::parse(&format!("{host}:{port}")).unwrap()
+}
+
+/// Independently recompute the SigV4 signature over the request `seen` received — a separate
+/// implementation from the box's signer (`ring` HMAC/SHA-256) — so a test can assert the box signed
+/// exactly those bytes (the backend `Host`, the forwarded path, and the body). `credential` and
+/// `signed_headers` are the values parsed from the box's `Authorization`.
+fn recompute_sigv4(
+    seen: &SeenRequest,
+    secret: &str,
+    credential: &str,
+    signed_headers: &str,
+    body: &[u8],
+) -> String {
+    use ring::{digest, hmac};
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+    fn sha256_hex(data: &[u8]) -> String {
+        hex(digest::digest(&digest::SHA256, data).as_ref())
+    }
+    fn sign(key: &[u8], data: &[u8]) -> Vec<u8> {
+        hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, key), data)
+            .as_ref()
+            .to_vec()
+    }
+
+    // The request line the upstream received: "METHOD TARGET HTTP/1.1".
+    let mut line = seen.raw.lines().next().expect("a request line").split(' ');
+    let method = line.next().expect("a method");
+    let target = line.next().expect("a target");
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+
+    // scope = date/region/service/aws4_request (everything after the access-key id).
+    let scope = credential.split_once('/').expect("a credential scope").1;
+    let mut scope_parts = scope.split('/');
+    let date = scope_parts.next().expect("a date");
+    let region = scope_parts.next().expect("a region");
+    let service = scope_parts.next().expect("a service");
+    let amz_date = seen.header("x-amz-date").expect("an x-amz-date");
+
+    // Canonical headers over the signed header names, sorted, as `name:trimmed-value\n`.
+    let mut names: Vec<&str> = signed_headers.split(';').collect();
+    names.sort_unstable();
+    let canonical_headers: String = names
+        .iter()
+        .map(|name| format!("{name}:{}\n", seen.header(name).unwrap_or_default()))
+        .collect();
+    let signed = names.join(";");
+
+    let canonical_request = format!(
+        "{method}\n{path}\n{query}\n{canonical_headers}\n{signed}\n{}",
+        sha256_hex(body)
+    );
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+        sha256_hex(canonical_request.as_bytes())
+    );
+
+    let k_date = sign(format!("AWS4{secret}").as_bytes(), date.as_bytes());
+    let k_region = sign(&k_date, region.as_bytes());
+    let k_service = sign(&k_region, service.as_bytes());
+    let k_signing = sign(&k_service, b"aws4_request");
+    hex(&sign(&k_signing, string_to_sign.as_bytes()))
 }
 
 /// The proxy's TCP port. Every scenario in this file drives the default TCP transport, so
@@ -239,6 +320,392 @@ fn opaque_swap_reaches_upstream_with_real_secret() {
     for record in records() {
         assert!(!format!("{record:?}").contains("sk_live_REALSECRET"));
     }
+}
+
+// ============================================================================================
+// POSITIVE: a backend re-route presents the backend on the wire, policy judges the original
+// ============================================================================================
+
+#[test]
+fn a_backend_reroute_presents_the_backend_and_judges_the_original() {
+    // The backend is the recording upstream, addressed by its own host so its certificate matches
+    // the SNI the gateway sends. The original destination is a different host the workload names.
+    let backend_host = "gw.example.test";
+    let upstream = TlsUpstream::start(backend_host);
+    let port = upstream.port();
+    let original = "api.github.test";
+
+    // One control on the original destination: a single vault holds both the strip-phantom route
+    // (the destination secret, whose placeholder is removed) and the box-owned route (the backend
+    // token, attached by the box). On the same `Authorization` header the backend token wins.
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(
+        pat(original, port),
+        backend_store(original, port, "gw-token-SECRET"),
+    )]);
+
+    let config = MitmConfig {
+        upstream_ca_pems: vec![upstream.ca_pem()],
+        // The BACKEND host resolves to the upstream; the original is never resolved.
+        dns_overrides: vec![(backend_host.to_string(), "127.0.0.1".parse().unwrap())],
+        backends: vec![(
+            pat(original, port),
+            BackendDial {
+                host: backend_host.to_string(),
+                port,
+                tls: true,
+                path_prefix: "/github".to_string(),
+            },
+        )],
+        ..MitmConfig::default()
+    };
+    // Policy authorizes the ORIGINAL host only.
+    // See docs/design/decisions.md#a-re-route-is-authorized-on-the-original-destination.
+    let emitter = Box::new(RECORDS.with(Clone::clone));
+    let handle = MitmInterceptor::start_with(
+        config,
+        controls,
+        FixedPolicy::allowing(&[original]),
+        emitter,
+        None,
+    )
+    .unwrap();
+
+    // The workload CONNECTs to the original host and sends GET /zen presenting its destination
+    // placeholder on Authorization (the strip-phantom route provisions it).
+    let mut client = WorkloadClient::connect(proxy_port(&handle), original, port);
+    client.send_request(
+        "GET",
+        "/zen",
+        &[("Authorization", "Bearer strands_box_workloadphantom")],
+        b"",
+    );
+    let status = client.read_status();
+    let seen = upstream.last_request();
+
+    assert_eq!(status, 200, "the re-routed request succeeded end-to-end");
+    // On the wire the backend sees its own host (with the non-default port) and the joined path.
+    assert_eq!(
+        seen.header("host"),
+        Some(format!("{backend_host}:{port}")),
+        "the backend receives its own Host, not the original destination"
+    );
+    assert!(
+        seen.raw.starts_with("GET /github/zen "),
+        "the backend path prefix joins in front of the agent path: {:?}",
+        seen.raw.lines().next()
+    );
+    // The backend token won on Authorization; the workload's destination placeholder was stripped.
+    assert_eq!(
+        seen.header("authorization").as_deref(),
+        Some("Bearer gw-token-SECRET"),
+        "the backend credential reaches the backend"
+    );
+    assert!(
+        !seen.raw.contains("strands_box_workloadphantom"),
+        "the destination placeholder is stripped and never rides to the backend"
+    );
+    // Policy judged the ORIGINAL destination, never the backend host.
+    assert!(
+        records().iter().any(|r| r.host == original),
+        "policy and audit judge the original destination"
+    );
+    assert!(
+        !records().iter().any(|r| r.host == backend_host),
+        "the backend host is never what policy judges"
+    );
+}
+
+/// A PLAIN-HTTP workload leg re-routed to an `https` backend is refused by the plaintext-credential
+/// floor, because the floor reads the WORKLOAD transport — not the backend leg. A credential-matched
+/// request on a plaintext workload connection is refused whatever scheme the backend leg uses.
+#[test]
+fn a_plain_workload_to_an_https_backend_is_refused_by_the_floor() {
+    let backend_host = "gw.example.test";
+    let upstream = TlsUpstream::start(backend_host);
+    let port = upstream.port();
+    let original = "api.github.test";
+
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(
+        pat(original, port),
+        backend_store(original, port, "gw-token-SECRET"),
+    )]);
+    let config = MitmConfig {
+        upstream_ca_pems: vec![upstream.ca_pem()],
+        dns_overrides: vec![(backend_host.to_string(), "127.0.0.1".parse().unwrap())],
+        backends: vec![(
+            pat(original, port),
+            BackendDial {
+                host: backend_host.to_string(),
+                port,
+                tls: true,
+                path_prefix: "/github".to_string(),
+            },
+        )],
+        ..MitmConfig::default()
+    };
+    let emitter = Box::new(RECORDS.with(Clone::clone));
+    let handle = MitmInterceptor::start_with(
+        config,
+        controls,
+        FixedPolicy::allowing(&[original]),
+        emitter,
+        None,
+    )
+    .unwrap();
+
+    // The workload connects in PLAIN HTTP (absolute-form request line), not CONNECT.
+    let reply = plain_exchange(
+        proxy_port(&handle),
+        &format!(
+            "GET http://{original}:{port}/zen HTTP/1.1\r\nHost: {original}:{port}\r\n\
+             Authorization: Bearer strands_box_workloadphantom\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(
+        reply.starts_with("HTTP/1.1 403"),
+        "a credential-matched plaintext workload leg is refused whatever the backend scheme: {reply:?}"
+    );
+    let reasons = format!("{:?}", records());
+    assert!(
+        reasons.contains("a secret must ride TLS"),
+        "the plaintext-credential floor fired on the workload transport: {reasons}"
+    );
+}
+
+// ============================================================================================
+// POSITIVE: a backend `auth` of aws:// is SigV4-signed over the BACKEND host, after the rewrite
+// ============================================================================================
+
+/// A re-route whose backend `auth` is `aws://` signs the request the backend receives: the signature
+/// scope and `Host` are the backend's, derived from the backend host, computed after the rewrite.
+#[test]
+fn a_backend_aws_auth_signs_over_the_backend_host() {
+    let _env = harness::AwsEnvGuard::set(
+        "AKIDEXAMPLE",
+        "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+        None,
+    );
+    // The backend is a Bedrock AgentCore Gateway host, which signs as `bedrock-agentcore`.
+    let backend_host = "gw.gateway.bedrock-agentcore.us-east-1.amazonaws.com";
+    let upstream = TlsUpstream::start(backend_host);
+    let port = upstream.port();
+    let original = "api.github.test";
+
+    // The signed route is keyed on the BACKEND host: the gateway's post-rewrite signing presents a
+    // backend `Outbound`, so it matches here and signs over the backend host. The capability is
+    // registered under the ORIGINAL destination, exactly as the box registers a backend vault.
+    let aws_auth = Locator::structured(
+        [("source".to_string(), "aws".to_string())]
+            .into_iter()
+            .collect(),
+    )
+    .unwrap();
+    let store = Arc::new(
+        Vault::open(
+            VaultConfig::new(Backend::local(), "t").route(
+                RouteSpec::signed_aws(pat(backend_host, port), aws_auth)
+                    .aws_scope("bedrock-agentcore", "us-east-1"),
+            ),
+        )
+        .unwrap()
+        .into_vault(),
+    );
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(pat(original, port), store)]);
+
+    let config = MitmConfig {
+        upstream_ca_pems: vec![upstream.ca_pem()],
+        dns_overrides: vec![(backend_host.to_string(), "127.0.0.1".parse().unwrap())],
+        backends: vec![(
+            pat(original, port),
+            BackendDial {
+                host: backend_host.to_string(),
+                port,
+                tls: true,
+                path_prefix: "/github".to_string(),
+            },
+        )],
+        ..MitmConfig::default()
+    };
+    let emitter = Box::new(RECORDS.with(Clone::clone));
+    let handle = MitmInterceptor::start_with(
+        config,
+        controls,
+        FixedPolicy::allowing(&[original]),
+        emitter,
+        None,
+    )
+    .unwrap();
+
+    // The workload names the original host and presents no credential; the box signs the backend leg.
+    let mut client = WorkloadClient::connect(proxy_port(&handle), original, port);
+    client.send_request("GET", "/zen", &[], b"");
+    let status = client.read_status();
+    let seen = upstream.last_request();
+
+    assert_eq!(status, 200, "the signed re-route succeeded end-to-end");
+    assert_eq!(
+        seen.header("host"),
+        Some(format!("{backend_host}:{port}")),
+        "the backend receives its own Host, which the signature covers"
+    );
+    assert!(
+        seen.raw.starts_with("GET /github/zen "),
+        "the backend path prefix joins the agent path: {:?}",
+        seen.raw.lines().next()
+    );
+    let authz = seen
+        .header("authorization")
+        .expect("a SigV4 signature over the backend");
+    assert!(
+        authz.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/"),
+        "signed with the vault creds: {authz}"
+    );
+    assert!(
+        authz.contains("/us-east-1/bedrock-agentcore/aws4_request"),
+        "service/region derived from the BACKEND host: {authz}"
+    );
+    assert!(
+        seen.header("x-amz-date").is_some(),
+        "a signing date reaches the backend"
+    );
+    assert!(
+        !seen.raw.contains("wJalrXUtnFEMI"),
+        "the secret key never reaches the wire"
+    );
+    // The main claim: the signature is a VALID SigV4 over exactly the bytes the backend received —
+    // the backend `Host`, the prefixed `/github/zen` path, and the body. Independently recompute it
+    // (a separate SigV4 implementation using `ring`) over the received request with the known test
+    // secret, and assert it equals the signature the box produced. This fails if the box signed a
+    // different path (e.g. the unprefixed `/zen`), a different host, or a different body than it sent.
+    let field = |key: &str| {
+        authz
+            .split(',')
+            .find_map(|part| {
+                part.find(key)
+                    .map(|i| part[i + key.len()..].trim().to_string())
+            })
+            .unwrap_or_else(|| panic!("the Authorization names {key}: {authz}"))
+    };
+    let recomputed = recompute_sigv4(
+        &seen,
+        "wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY",
+        &field("Credential="),
+        &field("SignedHeaders="),
+        b"",
+    );
+    assert_eq!(
+        field("Signature="),
+        recomputed,
+        "the box's signature must be a valid SigV4 over the bytes the backend received"
+    );
+    // Policy judged the ORIGINAL host, never the backend.
+    assert!(
+        records().iter().any(|r| r.host == original),
+        "policy judges the original destination"
+    );
+    assert!(
+        !records().iter().any(|r| r.host == backend_host),
+        "the backend host is never what policy judges"
+    );
+}
+
+// ============================================================================================
+// NEGATIVE: a re-route does not open a Host pivot; the binding check runs before the rewrite
+// ============================================================================================
+
+#[test]
+fn a_backend_reroute_still_refuses_a_host_pivot() {
+    let backend_host = "gw.example.test";
+    let upstream = TlsUpstream::start(backend_host);
+    let port = upstream.port();
+    let original = "api.github.test";
+    let before = upstream.request_count();
+
+    let config = MitmConfig {
+        upstream_ca_pems: vec![upstream.ca_pem()],
+        dns_overrides: vec![(backend_host.to_string(), "127.0.0.1".parse().unwrap())],
+        backends: vec![(
+            pat(original, port),
+            BackendDial {
+                host: backend_host.to_string(),
+                port,
+                tls: true,
+                path_prefix: "/github".to_string(),
+            },
+        )],
+        ..MitmConfig::default()
+    };
+    let emitter = Box::new(RECORDS.with(Clone::clone));
+    let handle = MitmInterceptor::start_with(
+        config,
+        CapabilitySet::default(),
+        FixedPolicy::allowing(&[original]),
+        emitter,
+        None,
+    )
+    .unwrap();
+
+    // The workload CONNECTs to the original, then sends an inner request whose Host names a
+    // DIFFERENT authority. The binding check must refuse it, before any backend Host rewrite.
+    let mut client = WorkloadClient::connect(proxy_port(&handle), original, port);
+    client.send_request_with_authority("GET", "/zen", "evil.example.test", &[], b"");
+    let status = client.read_status();
+
+    assert_ne!(status, 200, "a Host pivot is refused, not forwarded");
+    assert_eq!(
+        upstream.request_count(),
+        before,
+        "the pivot never reached the backend"
+    );
+}
+
+/// A re-routed path carrying an encoded separator (`%2F`) under a backend prefix is refused before
+/// it reaches the backend, because the backend could decode it and escape the prefix.
+#[test]
+fn a_backend_reroute_refuses_an_encoded_separator_in_the_path() {
+    let backend_host = "gw.example.test";
+    let upstream = TlsUpstream::start(backend_host);
+    let port = upstream.port();
+    let original = "api.github.test";
+    let before = upstream.request_count();
+
+    let config = MitmConfig {
+        upstream_ca_pems: vec![upstream.ca_pem()],
+        dns_overrides: vec![(backend_host.to_string(), "127.0.0.1".parse().unwrap())],
+        backends: vec![(
+            pat(original, port),
+            BackendDial {
+                host: backend_host.to_string(),
+                port,
+                tls: true,
+                path_prefix: "/github".to_string(),
+            },
+        )],
+        ..MitmConfig::default()
+    };
+    let emitter = Box::new(RECORDS.with(Clone::clone));
+    let handle = MitmInterceptor::start_with(
+        config,
+        CapabilitySet::default(),
+        FixedPolicy::allowing(&[original]),
+        emitter,
+        None,
+    )
+    .unwrap();
+
+    let mut client = WorkloadClient::connect(proxy_port(&handle), original, port);
+    client.send_request("GET", "/..%2Fslack/secret", &[], b"");
+    let status = client.read_status();
+
+    assert_eq!(
+        status, 403,
+        "an encoded separator under a prefix is refused"
+    );
+    assert_eq!(
+        upstream.request_count(),
+        before,
+        "the refused request never reached the backend"
+    );
 }
 
 // ============================================================================================
@@ -790,6 +1257,66 @@ fn a_plain_echo_of_the_real_secret_is_redacted() {
     assert!(
         !response.contains("sk_live_REALSECRET") && response.contains("[REDACTED]"),
         "the echoed secret must be redacted: {response:?}"
+    );
+}
+
+/// A backend reply that echoes its OWN token (`gw-token-SECRET`) in a plain JSON body, as a debug or
+/// error body might. Content-Length is the 33-byte body.
+const BACKEND_ECHO_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 33\r\nConnection: close\r\n\r\n{\"echo\":\"Bearer gw-token-SECRET\"}";
+
+/// A streamed response from a backend that echoes the box-owned backend token is redacted, not
+/// returned to the workload. This covers `box_owned` in `Vault::response_redactor`, the streaming
+/// scrubber; without it the backend token leaks back on an echo.
+#[test]
+fn a_backend_echo_of_its_token_is_redacted() {
+    let backend_host = "gw.example.test";
+    let upstream = TlsUpstream::start_with_response(backend_host, BACKEND_ECHO_RESPONSE);
+    let port = upstream.port();
+    let original = "api.github.test";
+
+    // One control on the original destination: the backend vault with a box-owned `env://` token.
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(
+        pat(original, port),
+        backend_store(original, port, "gw-token-SECRET"),
+    )]);
+    let config = MitmConfig {
+        upstream_ca_pems: vec![upstream.ca_pem()],
+        dns_overrides: vec![(backend_host.to_string(), "127.0.0.1".parse().unwrap())],
+        backends: vec![(
+            pat(original, port),
+            BackendDial {
+                host: backend_host.to_string(),
+                port,
+                tls: true,
+                path_prefix: "/github".to_string(),
+            },
+        )],
+        ..MitmConfig::default()
+    };
+    let emitter = Box::new(RECORDS.with(Clone::clone));
+    let handle = MitmInterceptor::start_with(
+        config,
+        controls,
+        FixedPolicy::allowing(&[original]),
+        emitter,
+        None,
+    )
+    .unwrap();
+
+    let mut client = WorkloadClient::connect(proxy_port(&handle), original, port);
+    client.send_request(
+        "GET",
+        "/zen",
+        &[("Authorization", "Bearer strands_box_workloadphantom")],
+        b"",
+    );
+    let response = client.read_response();
+
+    assert!(response.starts_with("HTTP/1.1 200"), "{response:?}");
+    assert!(
+        !response.contains("gw-token-SECRET") && response.contains("[REDACTED]"),
+        "the backend token echoed in the response must be redacted, not returned to the workload: \
+         {response:?}"
     );
 }
 

@@ -529,6 +529,32 @@ server. A forbid or an absent permit leaves it unstarted, as
 `secret.ref` locator and never a literal token, and the box never parses a harness's own
 configuration file to find one.
 
+<a id="mcp-nonmatches-retain-ordinary-agent-execution"></a>
+### MCP non-matches retain ordinary execution inside the agent sandbox
+
+An MCP alias selects ordinary execution only after the broker reports a valid command non-match,
+so a shared launcher remains usable without new agent authority.
+Refusing every non-match makes a server declaration hide unrelated calls to the same launcher.
+The cost is that a mistyped server command can run under the agent's grants without Box's MCP tool
+checks, so the broker records the non-match as a `strands.box.mcp.unmatched` diagnostic.
+Policy denials, ambiguous matches, and invalid routing responses do not select this path, as
+`only_a_valid_nonmatch_response_can_execute_fallback` and the admission tests check.
+The alias uses direct execution, requires a shebang for scripts, and stops on unexpected lookup
+errors; it does not acquire an implicit shell to make a program run.
+`ordinary_fallback_keeps_agent_grants_and_never_receives_server_secrets` pins the retained sandbox
+and the absence of server credentials.
+
+<a id="mcp-executable-filenames-name-their-aliases"></a>
+### MCP executable filenames name their aliases
+
+A stdio MCP `command` names the executable to launch, as a bare name or an absolute path.
+The executable's filename names the alias the agent calls, including when the executable is outside
+`PATH`. The path as written keeps the invocation name of a symbolic link, while policy checks the
+resolved executable identity. We rejected separate `alias` or `executable` fields because the
+filename supplies the invocation name without another configuration choice. The cost is that two
+executable paths with the same filename and identical fixed arguments cannot select different
+servers; the existing exact-match precedence and wildcard-overlap rules apply to the derived alias.
+
 <a id="a-stdio-mcp-server-runs-contained"></a>
 ### Every stdio MCP server runs contained, in its own sandbox
 
@@ -1012,16 +1038,30 @@ bypass an argument constraint. Each accepted schema installs more of the rule se
 makes the authority ready. Every install retains unchanged policy identities and their temporal
 state, so an incremental install replays no history.
 
+A per-tool rule that the previous run stored also stays installed while discovery is pending, so it
+keeps its history across a restart. Dogwood gives a removed rule no state, and adds it back with
+empty history, so removing it until its schema arrived reset the rule at every start. Box keeps a
+stored rule when its text is unchanged, its head names only per-tool actions, and it validates
+against the server schemas that the stored history declares. The tools that the rule decides stay
+held until their schemas stage, so a schema from the previous run decides no call. When the real
+schema arrives, the rule keeps its history if that
+schema validates it, and Box removes it otherwise. The cost is that a rule whose head names a Box
+action, and that reads per-tool history in a `temporal` clause, still starts with empty history
+at each run. Keeping it would let it decide requests from the previous run's schema.
+
 <a id="a-server-whose-discovery-a-policy-denies-degrades-alone"></a>
 ### A denied tool list leaves its dependent rules unloaded until recovery
 
 A policy can deny `tools/list` for a server and still carry a per-tool rule that needs its discovered
-catalog. Box starts with that rule unloaded and refuses the tool calls it can identify as subject to
-it. A later permitted list can load the rule and clear those refusals only when the complete policy
-validates and commits. Until then, the rule stays inert, and a diagnostic on stderr and a telemetry
-record name the servers it still needs. Refusing the whole policy at load was rejected because one
-server's mistake would also block the model, shell, and other servers. The cost is that `validate`
-does not report the contradiction, so the operator learns of it from the startup warning.
+catalog. Box starts with that rule unloaded, or installed from the previous run without deciding
+calls while discovery is pending, and refuses the tool calls it can identify as subject to it. When
+discovery finishes without the schema, Box removes a rule that it kept from the previous run, so
+that rule loses its history. A later permitted list can load the rule and clear those refusals only
+when the complete policy validates and commits. Until then, the rule stays inert, and a diagnostic
+on stderr and a telemetry record name the servers it still needs. Refusing the whole policy at load
+was rejected because one server's mistake would also block the model, shell, and other servers. The
+cost is that `validate` does not report the contradiction, so the operator learns of it from the
+startup warning.
 
 <a id="the-policy-crate-exposes-one-facade"></a>
 ### The policy crate exposes one facade
@@ -1141,16 +1181,25 @@ forbid (principal, action in [Tool::git::Action::"*", Tool::git::Action::"unmode
 <a id="a-tool-grammar-binds-on-the-program-file-and-the-called-name"></a>
 ### A tool grammar binds by its program name, on the program file's identity and the name it was called by, and any other name of that file is a `shell:spawn`
 
-A tool grammar names one program, and it binds every `[tool]` whose command calls that program name.
-A grammar on `[tool.git]` with `program = "git"` at `/usr/bin/git` also covers `[tool.brew_git]` at
+A tool grammar names one program through its `program`, the name the agent types to run the tool. A
+grammar on `[tool.git]` with `program = "git"` at `/usr/bin/git` also covers `[tool.brew_git]` at
 `/opt/homebrew/bin/git`, because both run `git`. One program name therefore has at most one grammar.
 Box refuses a second grammar with the same `program` and names both tables. Letting two grammars
 share a program was rejected, because both would match the same tools. Table order would then select
-which grammar reads a command. A stdio `[mcp.<name>]` whose command calls that program name binds
-the same way, so its start is decided as the grammar's action.
+which grammar reads a command. A stdio `[mcp.<name>]`, or a `[tool]` with no grammar of its own,
+binds the same way when its command calls that program name, so a server's start is decided as the
+grammar's action.
+
+The grammar's own `[tool]` binds under its `program`, the name the agent types, even when its command
+names a link-resolved file: `[tool.npm] command = [".../npm/bin/npm-cli.js"]` with
+`program = "npm"` binds under `npm`, not under `npm-cli.js`. When the last component of the command
+isn't the `program`, Box resolves the `program` at startup on the same `PATH` that the Shell
+searches at runtime, and refuses the grammar unless it reaches the tool's own file. So a `git`
+grammar still cannot sit on a tool that runs `gh`. A server or another tool whose command names
+`npm-cli.js` calls the program by another name, so the npm grammar doesn't bind it.
 
 For each tool, Box binds the grammar to a pair: the identity of the resolved program file, and the
-name the program was called by. The identity is the file's device and inode on the surrounding OS. A
+name the program is called by, which is the grammar's `program` for the grammar's own tool. The identity is the file's device and inode on the surrounding OS. A
 hard link or symbolic link to a bound file therefore refers to the same identity. A command is
 parsed with a tool grammar only when both halves match one binding. The file identity alone isn't
 enough, because several programs can share one binary. mise runs every tool it manages through one
@@ -1173,27 +1222,35 @@ launcher, every other name would become a spawn that no policy can permit, so a 
 `unmodeled` action was also rejected. When several grammars bind one file, no single grammar owns
 the name, and a rule that permits `unmodeled` would admit a program that the operator never named.
 
-Box refuses a spawn of a bound file before the policy decision in three cases, and no rule can
+Box refuses a spawn before the policy decision in four cases, and no rule can
 permit any of them. The first is a replaced file: the bound path or link now leads to another file,
 for example after an update while the box runs. The second is a bare name whose bound file is gone
 or replaced, so `PATH` would find another file. A new file therefore cannot claim a grammar's
-permits under a bound name. The third is an agent spawn under a name that only a stdio
-`[mcp.<name>]` declares for that file. An `[mcp]` server's name counts only for that server's
+permits under a bound name. The third is an agent spawn of a file that a grammar binds, under a name
+that only a stdio `[mcp.<name>]` declares for that file. An `[mcp]` server's name counts only for that server's
 start, because the start and an agent spawn under the same spelling make the same `shell:spawn`
-request, and the permit the server needs would otherwise let the agent skip the grammar. Box also
-refuses bindings that another policy engine issued, so the bindings that decide a spawn are always
-those of the engine that decides it.
+request, and the permit the server needs would otherwise let the agent skip the grammar. The fourth
+is a server start whose called name matches an installed grammar but whose program file lacks a
+matching startup binding. This includes a program that was missing or unreadable at Box startup.
+Box refuses that start instead of applying a general `shell:spawn` permit. Box also refuses bindings
+that another policy engine issued, so the bindings that decide a spawn are always those of the
+engine that decides it.
 
-The cost has four parts. Two binaries of one program can't have different grammars: `/usr/bin/git`
+The cost has five parts. Two binaries of one program can't have different grammars: `/usr/bin/git`
 and `/opt/homebrew/bin/git` both read with the one git grammar. A bound file called by a name that no
 grammar binds is governed only by `shell:spawn`. That includes `make` through the macOS launcher,
 `python` through the mise shim binary, and a link `g` to a bound `git` that the workload can create
 where it can write. A `shell:spawn` permit that matches the bound file's `program_path` therefore
 admits each other name of it, so pin each `shell:spawn` permit on both `program` and `program_path`.
 An update that replaces a bound binary while the box runs refuses its bound names until the box
-restarts. A grammar also covers only the files that a `[tool]` or a stdio `[mcp.<name>]` runs. A copy
-of a bound binary at another path, or the same program reached through an unbound shim binary, is
-decided by the `shell:spawn` rules and not by its grammar.
+restarts. A grammar also covers only the files that a `[tool]` or a stdio `[mcp.<name>]` runs. For an
+agent spawn, an unbound copy at another path or the same program reached through an unbound shim binary is
+decided by `shell:spawn`, after the refusal checks above. A server whose called name matches an
+installed grammar must instead satisfy its startup binding. An unused missing server program does
+not prevent Box startup, but a newly installed or previously unreadable executable requires a new
+Box run with that file readable and executable. A retry in the same run can use an already-bound
+file under the same called name, provided the existing replacement checks pass. This keeps server
+startup on demand without letting an agent-created file claim a grammar's permissions by name.
 
 ## Containment
 
@@ -1346,9 +1403,10 @@ reaches the operator as the serializer's parse-error text, reported verbatim.
 <a id="localhost-names-the-ports-the-workload-reaches"></a>
 ### Loopback network access names the ports the workload reaches, and no count bounds them
 
-The loopback network mode carries two lists, one for outbound connect and one for listen. Only
-`connect` renders. Both backends refuse a non-empty `listen`, so the field does not yet support
-inbound binds. Box refuses an empty connect list because it would select loopback access without
+The loopback network mode carries two lists, one for outbound connect and one for listen. Both
+render: Seatbelt port rules on macOS, and sockets from the namespace's PID 1 on Linux
+([ingress relay design](../../team/designs/0003-ingress-relay.md)). Box refuses an empty connect
+list because it would select loopback access without
 granting any. It also refuses repeated entries. No count bounds the lists, because a limit there
 would refuse a composition the caller authorized, at a layer that cannot see what was asked for.
 Every entry is loopback and policy still decides each request, so this list cannot become a
@@ -1380,7 +1438,18 @@ A third method pins a configured tool's program. It records the file's link coun
 same count during revalidation. Box first rules out workload writes through its other names.
 On macOS and Linux, Box can establish this by scanning every process's declared writable
 directories before the workload starts. The broker and each platform's native boundary prevent
-later alias imports.
+later creation of writable filesystem paths to those programs. Linux can skip a scan when Box
+counts every hard-link name in the program's own directory and verifies the mount layout for
+a directory named in a write grant or requested change. Other paths retain the existing
+identity checks. The program and both directories must share one ext4, XFS, or tmpfs mount
+that exposes the filesystem's root (`/`). No other mount may share its device or mount point,
+or sit at or below the program's directory or the checked path. Box reads the mount table before and after counting and requires both results
+to match. Another mounted path does not increase the file's hard-link count, so counting names
+alone cannot rule out writes. Each shortcut check has a 30-second budget, checked between
+filesystem calls; a blocked call must return first.
+Box repeats the checks before each skip. Any unmet condition, inspection error, or timeout
+falls back to the bounded recursive scan. macOS retains that scan for directory targets.
+File identity and link-count verification at launch still apply.
 
 A backend may make the file non-executable if it cannot preserve both write subtraction and
 write-xor-execute. Callers must not rely on write protection to preserve an execute grant.
@@ -1891,18 +1960,25 @@ operator must read that disclosure. No tool grant can name the box directory, wh
 `a_tool_grant_cannot_expose_the_box_directory` pins.
 
 <a id="a-host-binary-resolves-on-the-operator-path"></a>
-### A host binary resolves against the operator's real `PATH`, and the longest command prefix selects the tool
+### A bare name that a tool answers to runs that tool's file, any other name resolves on the operator's `PATH`, and the longest command prefix selects the tool
 
-The Shell resolves a host binary against the operator's real host `PATH`, with `/usr/bin:/bin` as
-the fallback, so Box finds a tool under Homebrew, nvm, or mise. Each process searches its table's
-`env.PATH` if present. Otherwise, it uses the operator's real `PATH`, then the fallback if neither
-exists. Selection compares the canonical resolved path of each tool's program with the program the
-workload invoked, and compares the tool's fixed leading arguments with the head of the argv. The
-longest matching `command` wins, so `[tool.git-read]` and `[tool.git-push]` can differ only in their
-fixed arguments, which `the_longest_matching_command_prefix_selects_the_tool` pins. Box names a
-program by its canonical identity for the `shell:spawn` decision, for selection, and for
-credentials, and the spawn hook runs only an identity that was bound to an existing file when the decision was made. `shell:spawn` stays the one control on whether a program runs; a larger `PATH` changes
-only where Box finds a permitted program.
+A `[tool]` with no grammar, or whose grammar's `program` is that name, answers to the last
+component of its `command` element 0, unless the Shell implements that name. A bare name that a
+tool answers to runs the file that the tool opened at startup, through `Kernel::host_program`,
+whatever is first on `PATH`. A tool with fixed leading arguments claims its name too. When tools
+with different command paths answer to one name, the operator's `PATH` decides if it finds one of
+those paths, and else the tool whose label is the name runs. Any other bare name resolves against
+the operator's real `PATH`, or the table's own `env.PATH`. The table label as the name lost because
+it makes a label such as `brew_git` a command and changes what `python` runs for a
+`[tool.python]` on `python3`. The longest matching `command` prefix selects the tool, which
+`the_longest_matching_command_prefix_selects_the_tool` pins, and
+`a_bare_name_runs_the_tool_that_declares_it_when_another_file_is_first_on_path` pins the name rule.
+Box names a program by its canonical identity for the `shell:spawn` decision, for selection, and
+for credentials, and the spawn hook runs only an identity that was bound to an existing file when
+the decision was made. `shell:spawn`, or a grammar action, stays the one control on whether a
+program runs. A second program of a tool's name that the agent reaches through `exec` no longer
+runs by its bare name, which runs the tool's file or is refused, so it needs its own `[tool]` or its
+path.
 
 <a id="the-caller-spelling-becomes-argument-zero"></a>
 ### The identity selects the program, and the caller's spelling becomes `argv[0]`
@@ -1992,6 +2068,118 @@ resolved degrades that one server, with a warning on stderr, exactly as [a serve
 policy denies](#a-server-whose-discovery-a-policy-denies-degrades-alone) describes. Only a durable
 fault is fatal to the box. Putting that orchestration inside the policy engine was rejected, because
 it would change the policy facade to perform coordination the box already owns.
+
+<a id="a-destination-re-routes-to-one-backend"></a>
+### A destination re-routes to one backend, named as a base URL
+
+An `[egress.<name>]` entry carries one `[[egress.<name>.backends]]` table, and the box dials that
+backend in place of the destination. The table holds a `url` as a base URL
+(`scheme://host[:port][/prefix]`) and an optional `auth`. The word is backend, not target, because
+open-source proxies use backend for this and the box already uses target for what the agent wants to
+reach. The `url` path is a prefix the box joins in front of the agent's request path, which is origin
+substitution, not request rewriting, so a query or a fragment on the `url` is refused. The launch
+limit is one backend, so routing rules across several are not yet possible. A backend entry names
+exactly one destination with an exact host: the re-route is matched per connection, on host and port,
+before the path is known, and the box presents the backend host on the wire, so a path, a wildcard,
+or several destinations would bypass the backend or reach it with the agent's host lost. The operator
+writes one entry per host. `more_than_one_backend_is_refused`, `a_backend_destination_is_one_exact_host`,
+`a_backend_destination_may_not_carry_a_path`, and `a_single_backend_loads_and_resolves_its_target` pin
+the shape.
+
+<a id="a-re-route-is-authorized-on-the-original-destination"></a>
+### A re-route is authorized on the original destination, and the address check moves to the backend
+
+Policy authorizes the agent's intent, which is the original destination, and the re-route itself is a
+Box action with no policy action of its own, like credential injection. The box runs the `net:connect`
+host check on the original destination before DNS, so a denied destination resolves nothing, and no
+new action is added. The box then resolves the backend, pins its addresses, and runs the per-address
+`net:connect` check on each backend address with the original host and port still in the context, so
+the metadata and private-range `forbid` floor reads the real dialled IP as `ip4` or `ip6` and refuses
+a backend that resolves to a metadata or private address. The box never resolves or dials the original
+destination, and a backend that resolves to nothing fails closed with no fallback. A backend action
+was rejected, because it would either lose the policy on the destination when one backend serves many,
+or let the agent reach the backend directly once it learns the URL. The cost: the metadata protection
+holds only while the operator keeps the standard `forbid` rules, the same contract a direct destination
+has. `a_backend_reroutes_the_dial_to_the_backend_address` pins that the address check runs on the
+backend address.
+
+<a id="a-re-routed-request-presents-the-backend-as-its-origin"></a>
+### A re-routed request presents the backend as its origin
+
+The box dials the backend host and port, sets the TLS name and the certificate check and the `Host`
+header to the backend host, uses the backend scheme for the upstream leg, and joins the backend path
+prefix in front of the agent's path. The original host and the agent's own path stay what policy and
+the audit record judge, and only the bytes sent to the backend carry the backend host and the joined
+path. The `Host` rewrite runs after the request's authority is bound to the `CONNECT` authority, so a
+workload cannot pivot to a host the box did not authorize. Preserving the original `Host` for a
+forward-proxy backend was rejected for launch, because it needs the backend to read the original
+destination and route onward, which the box does not build. The cost: a backend that routes by the
+original `Host` is not reachable yet. `prefixed_target_prepends_the_backend_prefix` pins the join and
+the `OPTIONS *` edge.
+
+<a id="a-backend-carries-its-own-box-owned-credential"></a>
+### A re-route presents a box-owned backend token, and the destination secret is phantom-only
+
+A re-routed entry carries two credentials, both keyed by the original destination and opened in one
+vault, so one control carries the whole re-route. The backend `auth` is the box's own token: it
+attaches unconditionally at the backend connection, mints no phantom, and provisions no workload
+variable, so `inject` and `phantom_prefix` are refused. The destination's own `secret` is
+phantom-only: the box provisions its placeholder to the workload (so the agent's credential-shaped
+code works) and strips it from the request, and never injects the real destination credential,
+because the backend handles the destination's auth downstream. On the same header the strip runs
+before the backend token attaches, so the backend token wins and no placeholder rides upstream.
+A backend `auth` of `aws://` is SigV4-signed over the **backend** host: the gateway signs the
+re-routed request AFTER it rewrites the `Host` to the backend and joins the path, so the signature
+covers exactly the bytes the backend receives, with service and region derived from the backend host
+([where a re-route signs a backend auth](#where-a-re-route-signs-a-backend-auth-of-aws)). The backend
+host is a gateway or custom domain with no derivable scope, so the `aws://` auth states an explicit
+`aws.service` and `aws.region`, which the loader requires — Box never guesses a vendor's host shape.
+A `credsd://` backend `auth` stays refused (out of scope); an
+`auth` on a plaintext `http` backend is refused, because a credential must ride TLS; and a signed
+destination `secret` beside a backend is refused, because it mints no phantom to strip. Because the
+box never reads the destination secret's value, a re-routed entry launches with
+its variable unset — the case a backend exists for. When one `env://` variable is named by both a
+re-routed entry and a direct entry, the workload holds one placeholder: the direct route's
+Strict-checked phantom, which the re-routed host's unconditional strip removes just the same. The
+cost: a backend authenticates with an `env://` box-owned token or an `aws://` signature over the
+backend host; `credsd://`, and a signature over the ORIGINAL host (which a future URL rewrite would
+need), are not reachable yet. `backend_auth_routes_are_box_owned_and_key_by_the_original_destination`,
+`a_destination_secret_beside_a_backend_is_phantom_only`, `a_credsd_backend_auth_is_refused`,
+`a_backend_auth_needs_an_https_backend`,
+`a_backend_strip_phantom_opens_without_the_destination_secret_set`,
+`a_shared_variable_keeps_the_ordinary_phantom_and_drops_the_backend_duplicate`, and the credentials
+crate's `box_owned_route_attaches_the_real_secret_with_no_phantom`,
+`strip_phantom_route_mints_a_placeholder_and_attaches_nothing`, and
+`a_backend_aws_auth_signs_over_the_backend_host` pin the rules.
+
+<a id="where-a-re-route-signs-a-backend-auth-of-aws"></a>
+### A re-route signs an `aws://` backend auth in the gateway, after the Host rewrite, over the backend host
+
+A backend `auth` of `aws://` signs the request the backend receives, so the signature must cover the
+backend host, the joined path, the sent headers (including the rewritten `Host`), and the body hash.
+The gateway signs it in `run_l7_legs` AFTER it rewrites the `Host` to the backend and builds the
+forwarded target, and BEFORE it serializes the request — the one point where the bytes that leave are
+final. The box lowers the `aws://` auth to a signed route keyed on the backend host, held in the
+backend vault; the gateway applies it with an `Outbound` whose host is the backend, so the existing
+in-boundary SigV4 signer covers the backend host. The service and region are **stated explicitly** on
+the auth (`aws.service`, `aws.region`), carried on the route (`RouteSpec::aws_scope`) and used by the
+signer verbatim — a backend is a gateway or custom domain whose host carries no derivable scope, and
+inferring it would mean encoding each AWS product's host shape in Box. Host derivation
+(`derive_service_region`) stays only for an ordinary AWS destination, whose host is standard.
+Signing per request keeps expiring credentials fresh, and the inbound signing artifacts are
+stripped first, as for a destination signature. The signer covers only the headers that leave:
+`content-length` is left unsigned because the forwarding layer owns it — it refreshes the value and
+omits the header entirely on a bodyless request — so signing the workload's value would attest a
+header the request may not send, which a strict verifier rejects. Signing before the rewrite was rejected: the `Host`
+is a signed header, so signing while the request still names the original destination and then
+rewriting it desynchronizes the signature from the bytes sent. Signing in the box was rejected: only
+the gateway holds the per-request bytes. The env:// box-owned backend token keeps its pre-rewrite
+attach, because a static token does not depend on the `Host`. The limit: the signature covers the
+backend host as written in `backends.url`, so a future URL rewrite that changes the sent host must
+re-derive the service and region from the rewritten host.
+`a_backend_aws_auth_signs_over_the_backend_host`,
+`an_aws_backend_auth_without_an_explicit_scope_is_refused`, and the credentials crate's
+`a_gateway_host_is_not_derived_and_needs_an_explicit_scope` pin it.
 
 ## Credentials
 
@@ -2174,7 +2362,8 @@ separate OTLP collector with that vendor's exporter. Point an `otlp` target at t
 ### Every box records by default, to a file the workload cannot reach
 
 An absent `telemetry` key means one `file` target that takes every signal: every effective denial
-and permit, the box's own control-plane records, and the harness's relayed spans, logs, and metrics.
+and permit, the box's own control-plane records and MCP routing diagnostics, and the harness's
+relayed spans, logs, and metrics.
 A box that makes a thousand decisions without recording any cannot be audited. The default provides
 those records even when the operator has configured nothing. The file sits in the box's own private
 tree, which a deny-only floor refuses to the workload whatever a permit says. A declared target
@@ -2184,9 +2373,10 @@ replaces the default instead of adding to it. The file has no size bound or rota
 ### A target names a set of signals, and an absent list takes every signal
 
 `[telemetry.<label>] include` takes five words: `deny` and `permit` name the two effective verdicts,
-`trace` names the agent's relayed spans and the box's own control-plane records, and `logs` and
-`metrics` name the agent's relayed log and metric records. A target names a set, with no ordering,
-and no signal contains another. A target that names no `include` receives every signal, which
+`trace` names the agent's relayed spans and the box's own control-plane records. `logs` names the
+agent's relayed log records and the box's unmatched MCP routing diagnostics. `metrics` names the
+agent's relayed metric records. A target names a set, with no ordering, and no signal contains
+another. A target that names no `include` receives every signal, which
 `an_absent_include_takes_every_signal` pins. An empty list, a repeated word, and a misspelled word
 are each refused before the box exists. The box relays harness signals without producing them. The
 harness's exporter settings determine whether those records exist.
@@ -2242,7 +2432,7 @@ pass can permit what policy denied. The record names every policy that determine
 `forbidden`, `no_match`, `policy_pending`, `internal_fault`, and `enforcement`.
 
 <a id="every-box-record-is-both-a-span-and-a-log-record"></a>
-### Every box record is both a span and a log record
+### Each decision and control record is both a span and a log record
 
 Each effective decision produces one internal span and one audit log record that share a trace ID
 and a span ID. The span marks the instant the enforcement point submits the decision, so it measures
@@ -2251,6 +2441,8 @@ control-plane operation names that root as its parent, so one trace covers the b
 decision is exported even when the caller's parent is unsampled, because a sampling flag must not
 suppress policy evidence. `decisions_export_spans_and_matching_logs_with_request_parentage` pins the
 contract.
+An unmatched MCP route produces only a log record because it states neither a policy decision nor
+an execution outcome.
 
 <a id="correlation-context-is-a-hint-and-never-authority"></a>
 ### Correlation context is a hint, and never evidence of authority

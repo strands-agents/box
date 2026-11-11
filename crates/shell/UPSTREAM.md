@@ -17,6 +17,34 @@ constraint is held at 15, which shares the workspace's `unicode-width` version.
 
 ## Local divergence from the pinned revision
 
+### Local addition: bind a host spawn to its checked directory (2026-11-04)
+
+An embedding can select a program's launch directory independently of the caller's Shell directory.
+The effect permit previously carried no launch directory to dispatch. That left the embedding to
+check one directory and execute in another. This is a generic gap in Shell's admission contract.
+Box selects the tool and checks policy. Shell owns the path from admission to dispatch.
+
+The operator approved the default `EffectPermit::spawn_working_directory()` method and
+checked-directory transport on 2026-11-04 after the design review. Its default returns `None`, so
+existing permit implementations keep the caller's directory. An interceptor that selects another
+directory checks that directory before it returns it on the permit.
+
+Shell reads the accessor once and retains a copy in `CommandPermit`, beside the admitted
+`HostProgram`. Shell refuses a relative directory before dispatch. Shell passes that directory
+to `spawn_host_program` with the program. Dispatch changes only the child process directory.
+The parent Shell keeps its directory. Shell admits every program in a pipeline before any stage
+runs.
+
+Box selects and resolves the launch directory before policy checks `ShellSpawn`. Ordinary
+`shell:spawn` actions keep home-relative spelling. Tool grammar actions keep absolute spelling.
+If selection or resolution fails, Box checks the caller's original directory and retains its
+absolute path. A command-not-found failure keeps status `127`. A launch failure keeps status `126`.
+
+Before execution, Box compares the translated launch directory with the retained checked path and
+refuses a mismatch. This binds the checked directory path to dispatch. It does not pin the
+directory's filesystem identity. The change preserves stored-record and broker-protocol shapes, so
+it requires no version bump.
+
 ### Local addition: an embedder can disable the execution timeout
 
 `ShellBuilder::disable_timeout()` selects the engine's existing no-deadline mode. The builder
@@ -29,6 +57,22 @@ TOML, Python, and Node configuration surfaces do not change.
 `builder_timeout_can_be_disabled` checks both the default and a configured deadline, including
 repeated calls that outlast the configured limit. `builder_timeout_can_be_restored_after_disabling`
 checks cancellation and a successful subsequent call after restoring a finite deadline.
+
+### Local addition: an embedder can declare the file a bare name runs
+
+At the pinned revision, a bare name the Shell does not implement is found on the trusted process's
+host `PATH`. An embedder that runs a host program under its own name, such as Box's `[tool.git]` on
+the developer folder's `git`, cannot reach that program by its name when another file of the same
+name comes first on `PATH`. This is a missing seam, not an upstream bug.
+
+`Kernel::host_program` returns the absolute path a bare name runs, and its default declares nothing.
+`VfsKernel::host_programs` and `ShellBuilder::host_programs` hold a `HostPrograms` map for the bundled
+kernel. `exec::host_program` asks the kernel after the builtin, command, and function checks and
+before the `PATH` walk, so the Shell's own programs keep precedence. A declared file binds to its
+canonical identity like a spelling with a `/`; a declared file that is gone is unbound, so the
+command is not found and `PATH` is not searched for another file. A name with a `/` ignores the map. `exec::implements_program` tells an embedder which names the
+Shell runs itself, so it does not declare a name that never reaches the declared file.
+`tests/declared_host_programs.rs` covers each case.
 
 ### Execution deadlines refuse clock overflow
 

@@ -1,4 +1,4 @@
-//! One decision, one control-plane operation, and the signal that carries each.
+//! Decisions, control-plane operations, MCP routing diagnostics, and their signals.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -24,6 +24,8 @@ pub enum Signal {
     AgentMetrics,
     /// One change to the authority this box holds, rather than one decision under it.
     ControlPlane,
+    /// One MCP invocation that matches no declared command.
+    McpUnmatched,
 }
 
 impl Signal {
@@ -37,6 +39,7 @@ impl Signal {
             Self::AgentLogs => "agent_logs",
             Self::AgentMetrics => "agent_metrics",
             Self::ControlPlane => "control_plane",
+            Self::McpUnmatched => "mcp_unmatched",
         }
     }
 
@@ -76,10 +79,6 @@ impl Signal {
     }
 
     /// The severity a record carries on the SDK's own channel.
-    ///
-    /// Exhaustive in both directions, so a seventh signal is a compile error rather than a record
-    /// filed as a permit. The two halves lived in separate `impl` blocks with `_` arms that already
-    /// disagreed about what they covered.
     #[must_use]
     pub(crate) fn severity(self) -> opentelemetry::logs::Severity {
         match self {
@@ -89,6 +88,7 @@ impl Signal {
             Self::AgentLogs => opentelemetry::logs::Severity::Trace2,
             Self::AgentMetrics => opentelemetry::logs::Severity::Trace3,
             Self::ControlPlane => opentelemetry::logs::Severity::Info2,
+            Self::McpUnmatched => opentelemetry::logs::Severity::Info3,
         }
     }
 
@@ -111,19 +111,21 @@ impl Signal {
             Self::AgentLogs => 3,
             Self::AgentMetrics => 4,
             Self::ControlPlane => 5,
+            Self::McpUnmatched => 6,
         }
     }
 
     /// How many slots such a set needs.
-    pub(crate) const SLOTS: usize = 6;
+    pub(crate) const SLOTS: usize = 7;
 
-    const EVERY: [Self; 6] = [
+    const EVERY: [Self; 7] = [
         Self::PolicyDenied,
         Self::PolicyPermitted,
         Self::AgentTrace,
         Self::AgentLogs,
         Self::AgentMetrics,
         Self::ControlPlane,
+        Self::McpUnmatched,
     ];
 }
 
@@ -305,6 +307,47 @@ impl Subject {
                 pairs
             }
         }
+    }
+}
+
+/// One MCP invocation that matches no declared command.
+#[derive(Debug, Clone)]
+pub struct McpUnmatched {
+    subject: Subject,
+    correlation: crate::Correlation,
+    unix_nanos: u128,
+}
+
+impl McpUnmatched {
+    /// Record the program and its bounded, redacted arguments.
+    #[must_use]
+    pub fn new(program: &str, arguments: &[String]) -> Self {
+        Self {
+            subject: Subject::process(program, arguments, &[], ""),
+            correlation: crate::Correlation::current(),
+            unix_nanos: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |since| since.as_nanos()),
+        }
+    }
+
+    /// Attach the context of the routing request.
+    #[must_use]
+    pub fn correlated(mut self, correlation: crate::Correlation) -> Self {
+        self.correlation = correlation;
+        self
+    }
+
+    pub(crate) fn correlation(&self) -> &crate::Correlation {
+        &self.correlation
+    }
+
+    pub(crate) fn attributes(&self) -> Vec<(&'static str, AnyValue)> {
+        self.subject.attributes()
+    }
+
+    pub(crate) fn unix_nanos(&self) -> u128 {
+        self.unix_nanos
     }
 }
 
@@ -786,6 +829,29 @@ impl ControlRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unmatched_mcp_routes_bound_and_redact_arguments_at_construction() {
+        let long = "a".repeat(MAXIMUM_ATTRIBUTE_BYTES * 2);
+        let mut arguments = vec!["diagnostic-secret".to_string(); MAXIMUM_COMMAND_ARGS + 1];
+        arguments[0] = format!("--token={long}");
+        let record = McpUnmatched::new(&long, &arguments);
+        assert!(!format!("{record:?}").contains("diagnostic-secret"));
+        let attributes = record.attributes();
+        let program = text_of(&attributes, "process.command").unwrap();
+        assert!(program.len() <= MAXIMUM_ATTRIBUTE_BYTES);
+        assert!(program.ends_with(TRUNCATED));
+        let reported = list_of(&attributes, "process.command_args");
+        assert_eq!(reported.len(), MAXIMUM_COMMAND_ARGS + 2);
+        assert_eq!(reported[0], program);
+        assert_eq!(reported[1], "--token=<redacted>");
+        assert!(
+            reported[2..=MAXIMUM_COMMAND_ARGS]
+                .iter()
+                .all(|arg| arg == REDACTED)
+        );
+        assert!(reported.last().unwrap().starts_with("1 more"));
+    }
 
     /// A verdict arrives on the signal its outcome names, and on no other.
     #[test]

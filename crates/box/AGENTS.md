@@ -6,7 +6,7 @@ Read the **"`strands-box` is interface-frozen"** section of the
 [repository guidance](../../AGENTS.md) before changing anything here. A change to an
 observable surface — the CLI verbs and flags, `box.toml`'s keys, the four box inputs, the
 on-disk records (`Record` at `RECORD_VERSION` and each later record version through
-`SHARED_PROGRAM_RECORD_VERSION`, `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
+`BACKEND_RECORD_VERSION`, `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
 `PROTOCOL_VERSION`, the alias names and their socket derivation, the
 policy action vocabulary, the composed workload environment — or to a foundational premise,
 needs the user's explicit approval **before** the code is written. Fixing a defect behind the
@@ -846,18 +846,24 @@ box_root_path, default_box_directory}`, `BoxRoot::{sited, open}`, `config::selec
 argue it as an addition and note what `ls` cannot mean any more: there is no set of boxes to list, so
 the verb would report on one directory the caller already named.
 
-## Open findings — divergences no decision covers
+## Root-owned output
 
-- **Root ownership remains on policy-mediated file creation.** The Linux sandbox startup check
-  refuses directory write grants, but Shell and Python requests execute in the trusted process.
-  They pass policy and `Reach` checks without becoming containment authorizations.
-  `VfsKernel::open_host_file` and Python's `write` through `HeldPath` can create files with that process's
-  identity. A root launch therefore retains root ownership on permitted new files.
-  The later privileged-consumer effect for this route remains unmeasured. The sandbox restriction
-  does not establish closure of the broader ownership finding.
-  The Shell's symlink path still requires source read/write and destination write permission.
-  `VfsKernel::verify_symlink_target` also refuses absolute targets and escape beyond the bind root.
-  A project-only policy cannot plant the review's `/etc/shadow` example through this path.
+Root-owned output is permitted when the operation passes the controls for its route.
+A Linux sandbox workload uses its filesystem grants; see
+[root sandbox launches](../../docs/design/containment.md#linux-root-sandbox-launches).
+Shell and Python requests execute in the box's trusted process, outside the sandbox.
+They pass policy and `Reach` checks without becoming containment authorizations.
+`VfsKernel::open_host_file` and Python's `write` through `HeldPath` can create files with that
+process's identity. A root launch therefore retains root ownership on permitted new files.
+
+A separate program that later consumes those files uses its own authority.
+Its later access does not by itself establish a failed Box policy, reach check, or sandbox grant.
+Keep the controls on Box's own operations: the Shell's symlink path requires source read/write
+and destination write permission. `VfsKernel::verify_symlink_target` also refuses absolute targets
+and escape beyond the bind root. A project-only policy cannot create a link to `/etc/shadow`
+through this path. Security finding disposition remains separate from this behavior contract.
+
+## Open findings — divergences no decision covers
 
 - **An unresolved metadata read is classified by a second lookup.** `Reach::is_an_unresolved_answer`
   walks the path with `symlink_metadata` after `approve_host` refused it, so the two lookups are not
@@ -870,18 +876,34 @@ the verb would report on one directory the caller already named.
   The maintainers approved this premise for macOS and Linux: protect configured commands from
   workload writes. Writes by unrelated host programs remain outside this boundary.
   `ConfiguredCommands::load` accepts an operator-writable command with multiple hard links and
-  records that it needs alias scans. `validate_reach` checks every process's write grants,
-  including the agent, tools, and local MCP servers. The command, its symbolic-link routes, and
-  their ancestors cannot overlap those grants. Each writable directory must pass a complete
-  scan that finds no hard-link alias, including in subdirectories excluded by `deny`.
+  records that Box must check whether the workload can write through its other filesystem names.
+  `validate_reach` checks every process's write grants, including the agent, tools, and local
+  MCP servers. The command, its symbolic-link routes, and their ancestors cannot overlap those grants. Unless the guarded Linux shortcut applies,
+  each writable directory must pass a complete scan that finds no filesystem hard link to the
+  command, including in subdirectories excluded by `deny`.
   The scan retains directory descriptors, does not follow symbolic links, and refuses unreadable
   entries, observable directory changes, or exhausted inspection limits. It is not an atomic
   snapshot. Each tree has one 30-second inspection budget across recursion and a 128-level depth
   limit. The budget replaces an uncalibrated 100,000-entry cutoff that rejected large, fast scans.
   Thirty seconds matches the default Shell allowance; it is not a guarantee for every filesystem.
   Time checks cannot interrupt a blocked filesystem call, and per-tree budgets do not bound total
-  startup time. Shell and Monty also scan directories involved in brokered mutations, so a move
-  cannot import a command alias into a writable grant.
+  startup time. Shell and Monty apply the same guarded check or scan before directory changes,
+  so a move cannot import a filesystem hard link to a command into a writable grant.
+
+  The Linux shortcut requires every hard-link name to be in the program's own directory.
+  `mutable_aliases` attempts the optional mount check only when `symlink_metadata` identifies
+  the current target as a directory. For regular files, missing paths, symbolic links, or
+  metadata errors, it keeps the command identities for the existing path lookup.
+  Box counts matching directory entries against the open file's current link count and checks
+  for changes during inspection. The program, its directory, and the directory named by the
+  current write grant or requested change must share one ext4, XFS, or tmpfs mount exposing the
+  filesystem's root (`/`). No other mount may share its device or mount point, or occur at or below the
+  program's directory or the checked path. Mount-table snapshots before and after counting
+  must match. Box repeats this inspection before each skip, with a separate 30-second budget
+  checked between filesystem calls. The budget cannot interrupt a blocked call. Any unmet
+  condition, inspection error, or timeout returns to the existing scan. macOS retains the scan
+  for directory targets.
+
   Native containment prevents the workload from creating an alias from a protected command.
   Seatbelt requires source write authority for hard links and renames on macOS.
   Linux permits `linkat` within a writable mount; read-only mounts and separate grant mounts
@@ -897,8 +919,8 @@ the verb would report on one directory the caller already named.
   that other names are safe. On Linux, only `EACCES` is a refusal by itself.
   `ConfiguredCommand::verify` requires the startup identity, link count, owner, group, and mode
   before each multi-link command launch. It repeats the kernel write check for a command admitted
-  without an alias scan. `ContainmentConfig::require_command_identity` records the link count
-  in `command_identities`; single-name commands retain `require_file_identity`.
+  because the operator cannot write it. `ContainmentConfig::require_command_identity` records
+  the link count in `command_identities`; single-name commands retain `require_file_identity`.
   Other `identity_requirements` and `write_protections` still require one name.
   A tool grammar has no additional single-name requirement.
   Rejected: dropping alias checks, because a writable directory can contain another name for

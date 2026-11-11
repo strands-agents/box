@@ -1,17 +1,182 @@
 use std::collections::HashSet;
 use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
 use std::io;
+use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStringExt as _;
-use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 
 use super::InstalledBinary;
 
 #[derive(Debug)]
+#[cfg_attr(test, derive(PartialEq))]
 struct Mount {
+    id: Option<u64>,
+    filesystem: Vec<u8>,
     device: Vec<u8>,
+    namespace_device: Option<u64>,
     root: PathBuf,
     point: PathBuf,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct MountIdentity {
+    id: u64,
+    device: u64,
+}
+
+/// Inspect command names only within one unchanged filesystem view with no alternate mounts.
+pub(in crate::run) fn inspect_single_mount(
+    command: &File,
+    directory: &File,
+    folder: &Path,
+    target: &Path,
+    check: impl Fn() -> io::Result<()>,
+    inspect: impl FnOnce() -> io::Result<bool>,
+) -> io::Result<bool> {
+    inspect_with_mount_table(
+        || std::fs::read("/proc/self/mountinfo"),
+        &check,
+        |mounts| {
+            let target_file = checked(&check, || {
+                OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                    .open(target)
+            })?;
+            let folder_path = checked(&check, || std::fs::canonicalize(folder))?;
+            let target_path = checked(&check, || std::fs::canonicalize(target))?;
+            for (file, path) in [(directory, &folder_path), (&target_file, &target_path)] {
+                let opened = checked(&check, || file.metadata())?;
+                let resolved = checked(&check, || std::fs::metadata(path))?;
+                if (opened.dev(), opened.ino()) != (resolved.dev(), resolved.ino()) {
+                    return Ok(false);
+                }
+            }
+            let identities = [
+                mount_identity(command, &check)?,
+                mount_identity(directory, &check)?,
+                mount_identity(&target_file, &check)?,
+            ];
+            if !one_complete_mount(mounts, identities, &folder_path, &target_path, &check)? {
+                return Ok(false);
+            }
+            checked(&check, inspect)
+        },
+    )
+}
+
+fn inspect_with_mount_table(
+    mut read_table: impl FnMut() -> io::Result<Vec<u8>>,
+    check: &impl Fn() -> io::Result<()>,
+    inspect: impl FnOnce(&[Mount]) -> io::Result<bool>,
+) -> io::Result<bool> {
+    let before = checked(check, &mut read_table)?;
+    let mounts = parse_with_check(&before, check)?;
+    let accepted = checked(check, || inspect(&mounts))?;
+    let after = checked(check, read_table)?;
+    let accepted = accepted && before == after;
+    check()?;
+    Ok(accepted)
+}
+
+fn mount_identity(file: &File, check: &impl Fn() -> io::Result<()>) -> io::Result<MountIdentity> {
+    let metadata = checked(check, || file.metadata())?;
+    let info = checked(check, || {
+        std::fs::read_to_string(format!("/proc/self/fdinfo/{}", file.as_raw_fd()))
+    })?;
+    let mut id = None;
+    for line in info.lines() {
+        check()?;
+        if let Some(value) = line.strip_prefix("mnt_id:") {
+            let parsed = value.trim().parse::<u64>().map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "invalid descriptor mount identity",
+                )
+            })?;
+            if id.replace(parsed).is_some() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "duplicate descriptor mount identity",
+                ));
+            }
+        }
+    }
+    let id = id.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "missing descriptor mount identity",
+        )
+    })?;
+    Ok(MountIdentity {
+        id,
+        device: metadata.dev(),
+    })
+}
+
+fn one_complete_mount(
+    mounts: &[Mount],
+    identities: [MountIdentity; 3],
+    folder: &Path,
+    target: &Path,
+    check: &impl Fn() -> io::Result<()>,
+) -> io::Result<bool> {
+    check()?;
+    let identity = identities[0];
+    if identities.iter().any(|candidate| *candidate != identity) {
+        return Ok(false);
+    }
+    let mut matching = None;
+    for mount in mounts {
+        check()?;
+        if mount.id.is_none() || mount.namespace_device == Some(identity.device) {
+            return Ok(false);
+        }
+        if mount.id == Some(identity.id) && matching.replace(mount).is_some() {
+            return Ok(false);
+        }
+    }
+    let Some(selected) = matching else {
+        return Ok(false);
+    };
+    let device = format!(
+        "{}:{}",
+        libc::major(identity.device),
+        libc::minor(identity.device)
+    );
+    if selected.root != Path::new("/")
+        || !matches!(selected.filesystem.as_slice(), b"ext4" | b"xfs" | b"tmpfs")
+        || selected.device != device.as_bytes()
+        || !folder.starts_with(&selected.point)
+        || !target.starts_with(&selected.point)
+    {
+        return Ok(false);
+    }
+    for mount in mounts {
+        check()?;
+        if mount.id != selected.id
+            && (mount.device == selected.device || mount.point == selected.point)
+        {
+            return Ok(false);
+        }
+        if mount.point.starts_with(folder) || mount.point.starts_with(target) {
+            return Ok(false);
+        }
+    }
+    check()?;
+    Ok(true)
+}
+
+fn checked<T>(
+    check: &impl Fn() -> io::Result<()>,
+    operation: impl FnOnce() -> io::Result<T>,
+) -> io::Result<T> {
+    check()?;
+    let result = operation();
+    check()?;
+    result
 }
 
 pub(super) fn aliases(binaries: &[InstalledBinary]) -> io::Result<Vec<PathBuf>> {
@@ -43,10 +208,22 @@ fn names_at_mounts(
     identity: (u64, u64),
     mounts: &[Mount],
 ) -> io::Result<Vec<PathBuf>> {
+    if mounts
+        .iter()
+        .any(|mount| mount.namespace_device == Some(identity.0))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "namespace mount shares a protected executable device",
+        ));
+    }
     let mut seen = HashSet::new();
     let mut aliases = Vec::new();
     for name in names {
-        for source in mounts {
+        for source in mounts
+            .iter()
+            .filter(|mount| mount.namespace_device.is_none())
+        {
             let Ok(relative) = name.strip_prefix(&source.point) else {
                 continue;
             };
@@ -55,7 +232,10 @@ fn names_at_mounts(
             } else {
                 source.root.join(relative)
             };
-            for destination in mounts {
+            for destination in mounts
+                .iter()
+                .filter(|mount| mount.namespace_device.is_none())
+            {
                 if source.device != destination.device {
                     continue;
                 }
@@ -103,6 +283,11 @@ fn names_at_mounts(
 }
 
 fn parse(table: &[u8]) -> io::Result<Vec<Mount>> {
+    parse_with_check(table, &|| Ok(()))
+}
+
+fn parse_with_check(table: &[u8], check: &impl Fn() -> io::Result<()>) -> io::Result<Vec<Mount>> {
+    check()?;
     let invalid = || {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -114,6 +299,7 @@ fn parse(table: &[u8]) -> io::Result<Vec<Mount>> {
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
     {
+        check()?;
         let fields: Vec<_> = line.split(|byte| *byte == b' ').collect();
         let separator = fields
             .iter()
@@ -132,11 +318,41 @@ fn parse(table: &[u8]) -> io::Result<Vec<Mount>> {
         }
         let root = decode_path(fields[3])?;
         let point = decode_path(fields[4])?;
-        if !root.is_absolute() || !point.is_absolute() {
+        if !point.is_absolute() {
             return Err(invalid());
         }
+        let id = std::str::from_utf8(fields[0])
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok());
+        let namespace_device = if root.is_absolute() {
+            None
+        } else {
+            if fields[separator + 1] != b"nsfs"
+                || !namespace_root(&root)
+                || fields.iter().any(|field| field.is_empty())
+                || !fields[..2].iter().all(|field| {
+                    field.iter().all(u8::is_ascii_digit)
+                        && std::str::from_utf8(field)
+                            .ok()
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .is_some_and(|value| value != 0)
+                })
+            {
+                return Err(invalid());
+            }
+            let number = |part: &[u8]| {
+                std::str::from_utf8(part)
+                    .ok()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .ok_or_else(invalid)
+            };
+            Some(libc::makedev(number(device[0])?, number(device[1])?))
+        };
         mounts.push(Mount {
+            id,
+            filesystem: fields[separator + 1].to_vec(),
             device: fields[2].to_vec(),
+            namespace_device,
             root,
             point,
         });
@@ -144,7 +360,25 @@ fn parse(table: &[u8]) -> io::Result<Vec<Mount>> {
     if mounts.is_empty() {
         return Err(invalid());
     }
+    check()?;
     Ok(mounts)
+}
+
+fn namespace_root(root: &Path) -> bool {
+    let Some((kind, inode)) = root
+        .to_str()
+        .and_then(|value| value.strip_suffix(']'))
+        .and_then(|value| value.split_once(":["))
+    else {
+        return false;
+    };
+    !kind.is_empty()
+        && kind
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        && !inode.is_empty()
+        && inode.bytes().all(|byte| byte.is_ascii_digit())
+        && inode.parse::<u64>().is_ok_and(|value| value != 0)
 }
 
 fn decode_path(field: &[u8]) -> io::Result<PathBuf> {

@@ -81,7 +81,7 @@ The file carries eleven keys. `name` and `box_dir` are required.
 | `[mcp.<name>]` | tables | The MCP servers this box declares. |
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
-| `[experimental-features]` | table | Optional experimental features: native filesystem policy checks and tool grammars. Each is disabled by default. |
+| `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, and ingress. Each is disabled by default. |
 | `[limits]` | table | Execution limits for Strands Shell. |
 
 The example uses five of the eleven: `name`, `box_dir`, `policy`, `[agent]`, and one
@@ -215,6 +215,9 @@ See [native filesystem policy](native-filesystem-policy.md) for build requiremen
 `tool-grammars = true` turns on [tool grammars](#toolnamegrammar), which are experimental and off
 by default.
 
+`ingress = true` turns on [`[[agent.ingress]]`](#agentingress), which is experimental and off by
+default.
+
 ## `[agent]` and `[tool.<name>]`
 
 Both tables hold one process, in one shape:
@@ -227,12 +230,16 @@ Both tables hold one process, in one shape:
 | `[<table>.filesystem]` | table | The path lists the process's own system calls reach. Eight for `[agent]`; six for a `[tool.<name>]`, which has no `metadata` or `exec` list. |
 | `native-filesystem-policy` | boolean | Optional override of the global experimental setting for this process and its descendants. See [workload selection](native-filesystem-policy.md#select-workloads). |
 | `[tool.<name>.grammar]` | table | Experimental, and `[tool.<name>]` only. The tool grammar for the program this tool runs. See [`[tool.<name>.grammar]`](#toolnamegrammar). |
+| `[[agent.ingress]]` | list of tables | `[agent]` only. Where callers reach the agent's servers, one entry per port. See [`[[agent.ingress]]`](#agentingress). |
 
 The box adds the runtime minimum to every process; see
 [the runtime minimum](../design/containment.md#the-runtime-minimum).
 
 The program is a full path or a bare name. A bare name uses `env.PATH` when set.
-Otherwise, Box uses the operator's `PATH`, or `/usr/bin:/bin` if it is absent. A relative path with more than one
+Otherwise, Box uses the operator's `PATH`, or `/usr/bin:/bin` if it is absent. In the Shell, the last
+part of a `[tool]`'s program is the name that runs it, before the operator's `PATH`, and `run` prints
+``strands-box: [tool.git]: a bare `git` in the Shell runs <file>`` for each. See
+[`PATH` in the Shell reference](shell.md#path). A relative path with more than one
 component is refused: ``` `command` element 0 "<program>" is a relative path; write an absolute
 path, or a bare name that `env.PATH` resolves```. Scripts on Linux require
 [interpreter grants](#script-commands-on-linux). The example's `command` runs
@@ -351,6 +358,65 @@ Preserving a spelling adds no authority over a different file.
 On macOS, Box grants a declared command's interpreter chain automatically.
 A workload-selected program without a tool table requires its interpreter chain to have existing `exec` coverage on either platform.
 
+## `[[agent.ingress]]`
+
+Each entry is one listener: the box listens on `listen` and relays each caller's TCP connection to
+the port the agent's server listens on. Add an entry for each port the agent serves, such as one for
+HTTP and one for MCP. An agent may declare up to five entries. The agent's code does not change,
+and the agent gains no reach. Ingress is experimental, so `[experimental-features]` must set
+`ingress = true`.
+
+```toml
+[experimental-features]
+ingress = true
+
+[[agent.ingress]]
+listen        = "0.0.0.0:8080"
+workload_port = 8081
+
+[[agent.ingress]]
+listen        = "0.0.0.0:8000"
+workload_port = 8001
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `listen` | string | The IP address and port the box binds for callers, such as `"0.0.0.0:8080"`. Required in each entry. |
+| `workload_port` | integer | The port the agent's server listens on in its sandbox. Required in each entry. |
+
+The agent listens on `workload_port` on `127.0.0.1` or `0.0.0.0`, because the relay connects to
+`127.0.0.1` only. An agent that listens on `::1` alone gets no callers, and the box logs that nothing
+accepts on its port. On Linux the agent's sandbox creates no IPv6 socket, so an agent that binds
+`::1` fails to start.
+
+- The box binds every `listen` before the agent starts, so a port in use refuses the run.
+- Each entry needs its own `listen` port and its own `workload_port`.
+- On macOS, no `listen` port may equal any entry's `workload_port`, and the box refuses to start
+  when another process already listens on a `workload_port`.
+- On macOS, the agent may listen only on its `workload_port`s, on any address of the Mac. A local
+  process can also connect to those ports directly, and the network can when the agent listens on
+  `0.0.0.0`.
+- No policy decision covers a caller. `listen` decides who can reach the agent.
+- `ingress` is refused on a `[tool.<name>]` and on an `[mcp.<name>]`.
+- Without `ingress = true`, `[[agent.ingress]]` is refused: ``invalid `[agent]` table: `ingress` is
+  experimental: set `ingress = true` in `[experimental-features]` to load it``.
+
+At startup the box prints each listener:
+
+```text
+strands-box: [ingress] 0.0.0.0:8080 is relayed to the agent's port 8081, at most 640 callers at once
+strands-box: [ingress] 0.0.0.0:8000 is relayed to the agent's port 8001, at most 640 callers at once
+```
+
+On Linux, the box starts no listener's relay until the agent's sandbox reports that it is ready, and
+a caller that arrives earlier waits in the listen queue. A sandbox that does not report ready within
+60 seconds refuses the run.
+
+The box raises its own open-file limit as far as the system allows, and holds at most an eighth of
+it in callers at once, split evenly across the listeners; a further caller waits until one closes. The agent and every tool start with
+the open-file limit the box started with. When nothing accepts on `workload_port`, the box closes each caller and prints
+one line until a caller is served again.
+
 ## `[agent.filesystem]` and `[tool.<name>.filesystem]`
 
 Each list, and what one entry in it grants. `[agent.filesystem]` takes all eight;
@@ -373,15 +439,14 @@ mounted aliases, and enclosing directories.
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
 
-On Linux, a launch with real or effective user ID zero refuses sandbox directory write grants before the workload starts.
-Run Box as a non-root account to grant sandbox directory writes.
-Root launches support explicitly granted existing-file writes and read-only directory access.
+On Linux, root and non-root launches support directory writes with explicit read and write grants.
+Permitted file creation retains the launcher's underlying file identity.
+Existing-file write grants permit writes to their named files.
 Private `/tmp` storage remains writable and separate from the surrounding OS.
-The same restriction applies when a container maps a non-root account to user ID zero.
 
 These filesystem lists govern sandbox access.
-Shell and Python requests through Box use separate policy and reach checks in the trusted process.
-This restriction does not change their file ownership or permission to create files.
+Shell and Python requests through Box use separate policy and reach checks in the box's trusted process.
+Permitted file creation retains that process's file identity.
 
 On Linux, write access permits ordinary file writes. Permission changes, including executable-bit
 changes, require a requested mode without set-user-ID or set-group-ID bits. Changing a file's
@@ -402,15 +467,15 @@ under `[mcp.<name>.filesystem]`.
 |---|---|---|---|
 | Read-only | `read` or `read_file` | Supported | Supported |
 | Write-only | `write` or `write_file`, without covering read access | Supported | Startup refuses the configuration before any workload runs |
-| Read-write | Explicit read and write grants | Supported | Files are supported; directories require a non-root launch |
-| Read directory with writable child | Parent in `read`, child in `write` or `write_file` | Supported | Files are supported; writable child directories require a non-root launch |
+| Read-write | Explicit read and write grants | Supported | Supported |
+| Read directory with writable child | Parent in `read`, child in `write` or `write_file` | Supported | Supported |
 | Write directory with only a readable child | Parent in `write`, child in `read` or `read_file` | Supported | Startup refuses the uncovered write-only scope |
 
 Linux writable mounts also allow reads. Box requires an explicit read grant that covers each
 entire write grant. An exact-file read covers only that file. A directory read covers that
 directory and its descendants. Execute grants do not satisfy this requirement.
 
-For Linux read-write access from a non-root account, put a directory in both `read` and `write`. For one file, use
+For Linux read-write access, put a directory in both `read` and `write`. For one file, use
 `read_file` and `write_file`. To retain read-only access, remove the write grant.
 
 An agent's read grant on a recognized Linux loader directory also permits shared-library loading.
@@ -577,10 +642,25 @@ It checks elapsed time between filesystem calls and before accepting a completed
 This budget cannot interrupt a blocked filesystem call, and separate trees receive separate
 budgets. The command and its paths must still pass the writable-grant checks.
 
+On Linux, Box can skip this scan for a configured program when it counts every hard-link name
+in the program's own directory and verifies the mount layout for the directory being checked.
+The program and both directories must share one ext4, XFS, or tmpfs mount that exposes
+the filesystem's root (`/`). No other mount may share its device or mount point, or sit at or
+below the program's directory or the checked path. Box reads the mount table before and after
+counting and requires both results to match.
+
+Box repeats this check for each writable directory and each directory changed through Strands
+Shell or Monty. Files and missing paths use the existing identity checks without this optional
+mount inspection. Each optional inspection has a separate 30-second budget, checked between
+filesystem calls; it cannot interrupt a blocked call. Directory targets use the recursive scan
+and its limits on macOS. Linux also uses that scan if any condition is unmet, an inspection
+error occurs, or the budget expires.
+
 During the run, Strands Shell and Monty refuse changes to these programs and their enclosing paths,
-even when policy permits the operation. For commands admitted through scanning, directory
-changes require a complete scan that finds none of their hard-link names. The same inspection
-limits apply. Reads still require the applicable policy permission.
+even when policy permits the operation. For operator-writable programs with multiple hard links,
+directory changes require a complete scan that finds none of their names, unless the Linux
+checks allow Box to skip it. The same inspection limits apply. Reads still require the
+applicable policy permission.
 Build output covered by the agent's own grants remains writable when no tool table names it.
 On Linux, native programs can create hard links within one writable mount.
 Links across separate writable grants fail, even when their directories share a filesystem.
@@ -606,6 +686,9 @@ Box accepts hard links only when it finds every name in the installation directo
 `deps` directory. This includes Cargo's build layout. Before each contained launch, Box checks the
 original file identities and hard-link counts.
 Linux also checks the files through existing mounts. If permission checks hide a possible alias, Box protects that path without inspecting its identity.
+A Linux namespace mount keeps a reference to an isolated operating-system resource, such as a network environment.
+During installation validation, Box accepts valid namespace mount records, including those created by Docker, when their device numbers differ from every protected Box executable.
+Invalid namespace records and other mount-table roots that are not filesystem paths still fail installation validation.
 Unrelated grants remain usable. On macOS, Box checks verified Data-volume spellings.
 A writable grant must exclude these aliases and their enclosing directories.
 
@@ -645,9 +728,6 @@ Each of these is refused at startup, before any box state exists:
   experimental: set `tool-grammars = true` in `[experimental-features]` to load it``.
 - A grammar on `[agent]`: ``invalid `[agent]` table: `grammar` is refused on `[agent]`: ...``. A
   grammar on `[mcp.<name>]` is an unknown field there.
-- A `program` that the tool's `command` doesn't run, such as `[tool.gh] command = ["gh"]` with
-  `program = "git"`: ``invalid `[tool.gh]` table: `tool.gh.grammar.program` is "git", but
-  `command` runs "gh"; ...``.
 - Two grammars with one `program`: ``tool grammar refused: `tool.brew_git.grammar` and
   `tool.git.grammar` both have `program = "git"`; keep one grammar for each program``.
 - Two grammars with one `name`: ``tool grammar refused: `tool.git.grammar` and `tool.hub.grammar`
@@ -659,6 +739,17 @@ Each of these is refused at startup, before any box state exists:
 - An `[mcp.Tool]` table while `tool-grammars` is on, because `Tool` is the namespace of every
   grammar action: ``invalid MCP server "Tool": `Tool` is the namespace of every tool grammar action
   while `tool-grammars` is on; give the server another name``.
+
+A grammar binds under its `program`, the name the agent types, so `program` may differ from the
+last part of `command[0]`. Box CLI writes `npm` as the file its link leads to, such as
+`.../npm/bin/npm-cli.js`, and `program = "npm"` still binds under `npm`. When the last part of
+`command[0]` is the `program`, Box accepts the grammar. Otherwise, after it opens each tool's
+program file and before the workload starts, Box finds `program` on the `PATH` that `run` was
+started with, which is the `PATH` the Shell searches. It refuses the grammar unless that file is the
+one `command[0]` names, such as `[tool.gh] command = ["gh"]` with `program = "git"`:
+``invalid `[tool.gh]` table: `tool.gh.grammar.program` is "git", and `PATH` finds /usr/bin/git, but
+`command` runs /usr/bin/gh; ...``. When `PATH` finds nothing by that name, the message says
+`PATH` finds no program by that name.
 
 An older build refuses a box that uses a grammar, so before you go back to one, turn
 `tool-grammars` off, remove every `grammar` table, and start the box once with this build.
@@ -689,16 +780,33 @@ requests out. The current reference for this table is
 The example takes every default: the key lands in the `Authorization` header with a `Bearer `
 prefix, and only a request that carries the placeholder gets it.
 
-An entry needs a `secret`. One without is refused: `an entry with no secret declares only a
-destination, which policy already decides; give it a secret, or set protocol = "mcp" for a remote
-MCP server`. `protocol` on this table takes `http` alone; declare a remote MCP server as
-`[mcp.<name>]` with `type = "http"`, which the next section describes.
+An entry needs a `secret` or a backend. One with neither is refused: `an entry with no secret
+declares only a destination, which policy already decides; give it a secret, add a backend, or set
+protocol = "mcp" for a remote MCP server`. `protocol` on this table takes `http` alone; declare a
+remote MCP server as `[mcp.<name>]` with `type = "http"`, which the next section describes.
 
 An `aws://` route signs inside the box, so it takes no `header`, `prefix`, `placement`, `param`,
 `inject`, or `phantom_prefix`. Setting one is refused when the configuration loads. A bare `aws://`
 (no profile) signs with the host's ambient identity and prints a warning on every signed request;
 [Credential sources](egress.md#credential-sources) describes the default chain, the profiles it does
 not resolve (AWS SSO), the warning, and the writable-`~/.aws` rule.
+
+An entry re-routes to a backend with one `[[egress.<name>.backends]]` table, holding a `url`
+(`scheme://host[:port][/prefix]`, `https` or `http`) and an optional `auth` — the backend's own
+credential, an `env://` token or an `aws://` profile SigV4-signed over the backend host (with an
+explicit `auth.aws.service` and `auth.aws.region`, since a gateway host carries no derivable scope).
+The backend `url`'s path prefix joins in front of the agent's request path. An entry may keep its own
+`env://` `secret` beside a backend, phantom-only: the box provisions the placeholder and strips it,
+never injecting the real destination credential, so the named variable need not be set. The loader
+refuses more than one backend, a destination that is not one exact host, a host with a backend that
+another entry also names (on any port), a `url` with a query,
+fragment, or a non-`http(s)` scheme, a `credsd://` `auth`, an `aws://` `auth` without a valid
+`auth.aws.service`/`auth.aws.region` (each non-empty and only lowercase `[a-z0-9-]`, or those keys on
+a non-`aws://` auth), a signed (`aws://` or `credsd://`) destination `secret`, a destination `secret`
+beside an `http` backend, a destination `secret.inject` beside a backend (the re-routed secret is
+phantom-only, so `inject` has no effect), and an `auth` on an `http` backend.
+[The egress table](egress.md#backends) describes the backend, and
+[egress design](../design/egress.md) describes how the box dials it.
 
 ## `[mcp.<name>]`
 
@@ -712,11 +820,11 @@ reads the table's name as `context.input.server`. The current reference for this
 [`mcp.md`](./mcp.md). The box adds the runtime minimum to the server's process; see
 [the runtime minimum](../design/containment.md#the-runtime-minimum).
 
-The example box declares no MCP server. To give the Strands CLI one, declare it here, and name the
-same full command under `mcpServers` in the file the CLI reads through its `--mcp-config` option:
-the same program and the same arguments, in the same order. The box places an alias with the
-program's name on the agent's `PATH`, so when the CLI starts `mcp-server-fetch`, the box runs this
-table's `command` in a separate sandbox:
+The example box declares no MCP server. To give the Strands CLI one, declare it here, and add it
+under `mcpServers` in the file the CLI reads through its `--mcp-config` option. Use the executable's
+filename and the same arguments, in the same order. The box places an alias with that filename on
+the agent's `PATH`, so when the CLI starts `mcp-server-fetch`, the box runs this table's `command`
+in a separate sandbox:
 
 ```toml
 [mcp.fetch]
@@ -730,7 +838,7 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | Key | Type | Meaning |
 |---|---|---|
 | `type` | string | `stdio` or `http`. |
-| `command` | string array | For `stdio`: what to start. The first entry is the program and names the alias in the box's `bin/`; the rest are its arguments, fixed here. The harness runs the full command to reach the server. Two tables can share a program when their full commands differ. |
+| `command` | string array | For `stdio`: a bare program name or absolute executable path, followed by its arguments. The executable's filename names the alias in the box's `bin/`. The harness runs that alias with the arguments. Two tables can share an alias when their arguments distinguish them. See [executable paths](mcp.md#select-an-executable-by-path). |
 | `workspace` | string | For `stdio`: the server's initial working directory. It grants nothing. |
 | `env` | table | For `stdio`: the literal environment the server receives. `HOME` and `PATH` default to the operator's own, as for `[agent]`. |
 | `filesystem` | table | For `stdio`: the six lists the server's own syscalls reach, the same six a `[tool.<name>.filesystem]` takes; a `metadata` or `exec` list is refused by name. An absent table grants nothing, so the server's sandbox has the runtime minimum and the reach that [a local MCP server's sandbox](../design/containment.md#local-mcp-servers) states. |
@@ -757,7 +865,7 @@ started reads with `jq`.
 |---|---|---|
 | `kind` | string | `file` or `otlp`. |
 | `destination` | string | For `file`, an absolute or `~/`-relative path. Inside this box's `box_dir` it must lie under `private/`; outside the box any path is accepted. For `otlp`, the collector endpoint. |
-| `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, or `metrics`. `trace` names the agent's own spans **and** the box's own records together. **Absent means every one of them**, so write `include` only to narrow the target. An empty list is refused, and so is a repeated word. |
+| `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, or `metrics`. `trace` names the agent's own spans and the box's control-plane records. `logs` includes unmatched MCP routing diagnostics. **Absent means every signal**, so write `include` only to narrow the target. An empty list is refused, and so is a repeated word. |
 | `secret.ref` | string | `env://NAME` or `secret://NAME`, attached on the way out. |
 | `secret.header` | string | Defaults to `Authorization` with a `Bearer ` prefix. |
 
@@ -767,14 +875,15 @@ destination under `private/`, or outside the box, or declare no target and take 
 empty `include` is refused with `the target names no signal, so nothing would reach it; write one or
 more of: deny, permit, trace, logs, metrics`, and a repeated word with `the target names deny twice`.
 
-### `logs` and `metrics` are unconditional
+<a id="logs-and-metrics-are-unconditional"></a>
 
-`logs` and `metrics` are accepted in `include` and change nothing: every target receives the agent's
-log records and metrics. `include = ["deny"]` delivers the refusals, the log records, and the
-metrics.
+### Agent logs and metrics are unconditional
 
-`include` narrows `deny`, `permit`, and `trace`, where `trace` covers the agent's spans and the
-box's own records.
+Every target receives the agent's log records and metrics. `include = ["deny"]` delivers the
+refusals, the agent's log records, and the agent's metrics.
+
+`logs` also selects the box's unmatched MCP routing diagnostics. A target with an explicit
+`include` list receives these diagnostics only when the list names `logs`.
 
 ### Agent spans, logs, and metrics need the agent's exporter
 
@@ -845,14 +954,20 @@ absent or invalid `name`, an absent or relative `box_dir`, an empty or relative 
 relative `workspace`, an `env` name the box owns, a relative `env.HOME` or `env.TMPDIR`, a patterned
 or relative `filesystem` path, a `filesystem` path carrying `..`, a duplicated `filesystem` path, an
 overlapping or all-hosts egress destination, a secretless egress entry, a literal egress secret,
-and each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal.
+each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal, an `ingress` outside `[agent]`, an
+`[[agent.ingress]]` while `ingress` is off in `[experimental-features]`, more than
+five `[[agent.ingress]]` entries, an `[[agent.ingress]] listen` that is not an IP address and port, a
+port of 0, two entries with one `listen` port or one `workload_port`, and on macOS a `listen` port
+equal to any entry's `workload_port`.
 An invalid `limits.shell.timeout` is also a parse error.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload
 starts: a `workspace` that does not exist, an `env.HOME` inside or enclosing `box_dir`, a telemetry
 file destination inside the box directory and outside `private/`, a `filesystem` entry whose path
-does not exist or is a symbolic link, and a `[tool.<name>] command` that names a missing file. The
+does not exist or is a symbolic link, a `[tool.<name>] command` that names a missing file, an
+`[[agent.ingress]] listen` address that cannot be bound, and on macOS a `workload_port` that another
+process already listens on. The
 box directory stays behind. It is empty when the refusal came before the record was written, and it
 holds the record when the refusal came after. The next `run` against it judges the file again and
 reports the same refusal until the file is fixed.

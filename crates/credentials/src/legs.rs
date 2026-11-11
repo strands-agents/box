@@ -11,7 +11,7 @@ use crate::sources::{
     AwsAcquisition, AwsResolution, AwsSource, CREDSD_SCHEME, CredsdClient,
     credsd_session_credentials,
 };
-use crate::vault::OpaqueBinding;
+use crate::vault::{BoxOwnedBinding, OpaqueBinding, StripBinding};
 use crate::{
     CredentialError, InjectMode, Locator, PhantomCheck, RequestId, Result, Vault, sign_request,
 };
@@ -82,7 +82,8 @@ impl Vault {
             }
         }
 
-        let mut attachment = attach_secret(binding);
+        let mut attachment = Attachment::new();
+        attach_secret(binding.inject(), binding.secret(), &mut attachment);
         if let Some(against) = advisory {
             // Journalled on the gateway's allow decision (with the destination and requester
             // correlation the vault does not hold), so an advisory injection is reconstructable.
@@ -92,41 +93,33 @@ impl Vault {
         // The harness may have placed the phantom at a *different* location than the one the secret
         // attaches to. `attach_secret` clears the attach location; when the harness location differs,
         // clear that one too so the phantom never rides upstream.
-        match binding.harness() {
-            InjectMode::Header { header_name, .. } => {
-                attachment.strip_header(header_name.as_deref().unwrap_or(DEFAULT_CRED_HEADER));
-            }
-            InjectMode::BasicAuth => attachment.strip_header(DEFAULT_CRED_HEADER),
-            InjectMode::QueryParam { name, .. } => attachment.strip_query_param(name.clone()),
-            // A `UrlPath` harness location has no standalone strip: clearing a phantom spliced into the
-            // path means rewriting the whole path, which only a `UrlPath` *attach* does. When the attach
-            // rewrites the path the phantom is overwritten and there is nothing to do; when it does not,
-            // the phantom would ride upstream beside the real secret, so refuse the exchange.
-            InjectMode::UrlPath { .. } if !attachment.rewrites_path() => {
-                return Err(CredentialError::UnsupportedInjectType(
-                    "the phantom is spliced into the request path but the credential attaches \
-                     elsewhere, so the path phantom cannot be cleared; pair a url_path harness \
-                     location with a url_path inject mode"
-                        .to_string(),
-                ));
-            }
-            InjectMode::UrlPath { .. } => {}
-        }
+        strip_location(binding.harness(), &mut attachment)?;
 
         Ok(attachment)
     }
 
-    /// SigV4-sign `req` in-boundary against the AWS `config` bound to its destination.
-    pub(crate) fn sign_aws(&self, config: &Locator, req: &Outbound<'_>) -> Result<Attachment> {
-        // Derive the signing scope from the request host, never from the credential (whose region is a
-        // non-secret hint). An underivable host fails closed rather than signing under a guessed scope.
-        let (service, region) = derive_service_region(req.destination.host).ok_or_else(|| {
-            CredentialError::Credential(format!(
-                "cannot derive an AWS service/region from host {host:?}; refusing to sign with a \
-                 guessed scope",
-                host = req.destination.host,
-            ))
-        })?;
+    /// SigV4-sign `req` in-boundary against the AWS `config` bound to its destination. `scope` is the
+    /// route's explicit `(service, region)`, used verbatim when present (a re-routed backend whose
+    /// host carries no derivable scope); otherwise the scope is derived from the request host.
+    pub(crate) fn sign_aws(
+        &self,
+        config: &Locator,
+        scope: Option<&(String, String)>,
+        req: &Outbound<'_>,
+    ) -> Result<Attachment> {
+        // An explicit route scope wins; else derive from the request host, never from the credential
+        // (whose region is a non-secret hint). An underivable host with no explicit scope fails closed
+        // rather than signing under a guessed scope.
+        let (service, region) = match scope {
+            Some((service, region)) => (service.clone(), region.clone()),
+            None => derive_service_region(req.destination.host).ok_or_else(|| {
+                CredentialError::Credential(format!(
+                    "cannot derive an AWS service/region from host {host:?}; refusing to sign with a \
+                     guessed scope",
+                    host = req.destination.host,
+                ))
+            })?,
+        };
 
         // Session credentials expire, so this resolve happens per request — and therefore gets its own
         // audit record, exactly like a load-time one. A signed route resolves nothing at open,
@@ -254,12 +247,51 @@ fn credsd_environment(config: &Locator) -> Result<&str> {
     }
 }
 
-/// Build the strip-phantom + attach-real edits for a validated binding, honoring its inject mode.
-fn attach_secret(binding: &OpaqueBinding) -> Attachment {
-    let secret = binding.secret();
-    let mut attachment = Attachment::new();
+/// Attach the box's own credential unconditionally at its inject location, with no phantom check and
+/// no warning. For a re-route's backend token, which the workload never presents a placeholder for.
+/// Writes into `attachment` so it can compose with a strip in one `attach_for`.
+pub(crate) fn attach_box_owned(binding: &BoxOwnedBinding, attachment: &mut Attachment) {
+    attach_secret(binding.inject(), binding.secret(), attachment);
+}
 
-    match binding.inject() {
+/// Strip the workload's placeholder at the binding's harness location, attaching nothing. For a
+/// re-routed destination's own secret: the real credential is never injected, and no placeholder
+/// rides upstream. A `url_path` harness is refused, as it is on the opaque path. Writes into
+/// `attachment` so it can compose with a box-owned attach in one `attach_for`.
+pub(crate) fn strip_phantom(binding: &StripBinding, attachment: &mut Attachment) -> Result<()> {
+    strip_location(binding.harness(), attachment)
+}
+
+/// Strip the placeholder at `location` from `attachment`, so it does not ride upstream. Shared by
+/// `swap_phantom` and `strip_phantom`.
+fn strip_location(location: &InjectMode, attachment: &mut Attachment) -> Result<()> {
+    match location {
+        InjectMode::Header { header_name, .. } => {
+            attachment.strip_header(header_name.as_deref().unwrap_or(DEFAULT_CRED_HEADER));
+        }
+        InjectMode::BasicAuth => attachment.strip_header(DEFAULT_CRED_HEADER),
+        InjectMode::QueryParam { name, .. } => attachment.strip_query_param(name.clone()),
+        // A `UrlPath` harness location has no standalone strip: clearing a phantom spliced into the
+        // path means rewriting the whole path, which only a `UrlPath` *attach* does. When the attach
+        // rewrites the path the phantom is overwritten and there is nothing to do; when it does not,
+        // the phantom would ride upstream beside the real secret, so refuse the exchange.
+        InjectMode::UrlPath { .. } if !attachment.rewrites_path() => {
+            return Err(CredentialError::UnsupportedInjectType(
+                "the phantom is spliced into the request path but the credential attaches \
+                 elsewhere, so the path phantom cannot be cleared; pair a url_path harness \
+                 location with a url_path inject mode"
+                    .to_string(),
+            ));
+        }
+        InjectMode::UrlPath { .. } => {}
+    }
+    Ok(())
+}
+
+/// Write the strip-attach-location + attach-real edits for `inject` into `attachment`, honoring its
+/// mode.
+fn attach_secret(inject: &InjectMode, secret: &str, attachment: &mut Attachment) {
+    match inject {
         InjectMode::Header {
             format,
             header_name,
@@ -294,7 +326,6 @@ fn attach_secret(binding: &OpaqueBinding) -> Attachment {
             attachment.set_query_param(name.clone(), Zeroizing::new(secret.to_string()));
         }
     }
-    attachment
 }
 
 /// Read the phantom the harness placed at `location`.
@@ -362,7 +393,9 @@ pub(crate) fn derive_service_region(host: &str) -> Option<(String, String)> {
         [_, service, region] if *service == "execute-api" => {
             Some(("execute-api".to_string(), (*region).to_string()))
         }
-        // Any other multi-label form is non-standard → fail closed.
+        // Any other multi-label form is non-standard → fail closed. A re-routed backend whose host is
+        // not derivable (a gateway or custom domain) carries an explicit scope on its `aws://` auth
+        // instead (`RouteSpec::aws_scope`), so Box holds no per-vendor host shapes.
         _ => None,
     }
 }
@@ -438,6 +471,23 @@ mod tests {
         // A host carrying neither suffix is still refused, so this is not "any host signs".
         assert_eq!(derive_service_region("s3.us-east-2.api.example"), None);
         assert_eq!(derive_service_region("evil.com"), None);
+    }
+
+    /// A gateway / prefixed host is NOT derived — Box holds no per-vendor host shapes. A re-routed
+    /// backend over such a host (an AgentCore gateway, a custom domain) carries an explicit
+    /// `(service, region)` on its `aws://` auth instead.
+    #[test]
+    fn a_gateway_host_is_not_derived_and_needs_an_explicit_scope() {
+        assert_eq!(
+            derive_service_region(
+                "passthrough-tr144gw4id.gateway.bedrock-agentcore.us-east-1.amazonaws.com"
+            ),
+            None
+        );
+        assert_eq!(
+            derive_service_region("x.gateway.something-else.us-east-1.amazonaws.com"),
+            None
+        );
     }
 
     /// **A Mantle host signs as `bedrock-mantle`, which is the prefix unchanged.**
