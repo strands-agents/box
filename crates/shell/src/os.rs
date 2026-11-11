@@ -114,6 +114,8 @@ pub enum FdKind {
     ChannelReader {
         rx: mpsc::Receiver<Bytes>,
         buf: Vec<u8>,
+        /// Whether this is the input that the Shell's embedder feeds from outside the Shell.
+        outside: bool,
     },
     ChannelWriter {
         tx: mpsc::Sender<Bytes>,
@@ -513,8 +515,29 @@ impl Process {
             FdKind::ChannelReader {
                 rx,
                 buf: Vec::new(),
+                outside: false,
             },
         );
+    }
+
+    /// [`Self::set_channel_reader`] for input fed from outside the Shell.
+    pub fn set_outside_reader(&mut self, fd: Fd, rx: mpsc::Receiver<Bytes>) {
+        self.fds.insert(
+            fd,
+            FdKind::ChannelReader {
+                rx,
+                buf: Vec::new(),
+                outside: true,
+            },
+        );
+    }
+
+    /// Whether `fd` reads the input fed from outside the Shell.
+    pub fn reads_outside_input(&self, fd: Fd) -> bool {
+        matches!(
+            self.fds.get(&fd),
+            Some(FdKind::ChannelReader { outside: true, .. })
+        )
     }
 
     pub fn set_channel_writer(&mut self, fd: Fd, tx: mpsc::Sender<Bytes>) {
@@ -997,6 +1020,7 @@ impl FdReader {
             kind: FdKind::ChannelReader {
                 rx,
                 buf: Vec::new(),
+                outside: false,
             },
             done: false,
         }
@@ -1019,7 +1043,9 @@ impl AsyncRead for FdReader {
             return Poll::Ready(Ok(()));
         }
         match &mut this.kind {
-            FdKind::ChannelReader { rx, buf: remainder } => {
+            FdKind::ChannelReader {
+                rx, buf: remainder, ..
+            } => {
                 if !remainder.is_empty() {
                     let n = remainder.len().min(buf.remaining());
                     buf.put_slice(&remainder[..n]);

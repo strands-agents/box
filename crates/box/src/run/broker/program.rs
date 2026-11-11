@@ -85,7 +85,7 @@ impl Program {
 
         // The writers reach a builtin only because the vendored fork inherits them — see
         // `shell/UPSTREAM.md`.
-        shell.proc.set_channel_reader(STDIN, stdin_rx);
+        shell.proc.set_outside_reader(STDIN, stdin_rx);
         shell.proc.set_channel_writer(STDOUT, stdout_tx);
         shell.proc.set_channel_writer(STDERR, stderr_tx);
 

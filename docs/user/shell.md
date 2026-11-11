@@ -46,10 +46,9 @@ program that the Shell starts in its own sandbox gets no input. Text that a comm
 input is still data: when a command runs it, as in `eval "$(cat)"`, or opens a file it names,
 policy decides that command or file.
 
-Before a Lua script runs, the Shell decides whether the script reads its input. When the script's text names a
-read of its input, even in a comment, in a string, or in code that never runs, the script waits for
-the input to end. With an input that its writer keeps open, such a script fails at the Shell's
-timeout. It never gets wrong input.
+A Lua script that the Shell runs does not read the input piped into the alias: it reads it as empty
+and never waits for it. A pipe inside one command, such as `echo x | lua -e 'print(io.read())'`,
+still reaches the script.
 
 Each invocation is one command. A variable exported in one invocation is unset in the next. The
 Shell starts each command with `HOME` set to the agent's `HOME`, and with the workspace as its

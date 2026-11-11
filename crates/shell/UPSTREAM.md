@@ -1912,18 +1912,15 @@ This copy adds `parser::Item::Negated`, which holds the compound that `!` invert
 `negation_inverts_a_redirected_compound`, `negation_inverts_an_if_compound`, and
 `negation_inverts_a_compound_inside_a_substitution` fail without the change.
 
-## 2026-11-11 — `lua -e` waited for stdin it never read
+## 2026-11-11 — Lua reads input from outside the Shell as empty
 
-`builtin_lua` read stdin to end-of-file before it ran a script from `-e` or a file, so it waited
-for a writer that kept stdin open even when the script never read it. Upstream would call this a
-hang. This copy pre-reads stdin only when the script's text contains `read` or `lines`, the names
-of the two functions that read it. `io.read` and `io.lines` stay synchronous, so a read from a
-coroutine or from a C callback such as `string.gsub` works as at the pinned revision. A script
-that reaches them only through text it builds at run time gets empty stdin.
-`tests/shell_integration.rs::a_lua_script_that_never_reads_stdin_is_not_held_by_it` and
-`a_lua_coroutine_that_never_reads_stdin_is_not_held_by_it` fail without the change;
-`a_lua_script_reads_stdin_however_it_spells_the_call`, `a_lua_coroutine_reads_stdin_that_arrives_late`,
-and `a_lua_read_from_a_callback_gets_late_stdin_and_coroutine_errors_keep_their_value` pin the read.
+`builtin_lua` reads stdin to end of input before it runs a script from `-e` or a file. When the
+embedder feeds stdin from outside the Shell and keeps it open, every such script waits for it.
+Upstream has no such input, so this is box's, not upstream's. `Process::set_outside_reader` marks
+that input, and `builtin_lua` reads it as empty, as it read before box forwarded any. A pipe or a
+redirect inside a command still reaches Lua. `io.read` and `io.lines` are unchanged.
+`tests/shell_integration.rs::lua_reads_input_from_outside_the_shell_as_empty_and_never_waits` fails
+without the change; `lua_reads_a_pipe_inside_a_shell_command` pins the pipe.
 
 ## 2026-11-11 — `set -e` stopped at a command that `!` inverts
 

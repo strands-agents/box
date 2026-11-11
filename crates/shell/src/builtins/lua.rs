@@ -92,20 +92,20 @@ pub fn builtin_lua<'a>(
                 })?
         };
 
-        // A script from a file or `-e` reads stdin before it runs, unless its text cannot reach
-        // `io.read` or `io.lines`, so a script that cannot read stdin never waits for it.
-        let stdin_data = if (script_file.is_some() || eval_code.is_some()) && may_read_stdin(&code)
-        {
-            if let Ok(mut r) = sio::stdin() {
-                os::read_to_string_limited(&mut r, proc.max_output)
-                    .await
-                    .unwrap_or_default()
+        // Pre-read stdin for io.read() when script comes from file or -e. Input fed from outside
+        // the Shell reads as empty, so a script never waits for it.
+        let stdin_data =
+            if (script_file.is_some() || eval_code.is_some()) && !sio::stdin_is_outside() {
+                if let Ok(mut r) = sio::stdin() {
+                    os::read_to_string_limited(&mut r, proc.max_output)
+                        .await
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                }
             } else {
                 String::new()
-            }
-        } else {
-            String::new()
-        };
+            };
 
         // Strip shebang
         let code = if code.starts_with("#!") {
@@ -1036,43 +1036,6 @@ fn setup_sandbox(
     Ok(())
 }
 
-/// Whether a script's text can reach `io.read` or `io.lines`.
-pub(crate) fn may_read_stdin(code: &str) -> bool {
-    const REACH: [&str; 9] = [
-        "read", "lines", "_G", "_ENV", "require", "dofile", "loadfile", "package", "load",
-    ];
-    const IO_FIELDS: [&str; 4] = ["write", "open", "stdout", "stderr"];
-    let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
-    let bytes = code.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if !word(bytes[i] as char) {
-            i += 1;
-            continue;
-        }
-        let start = i;
-        while i < bytes.len() && word(bytes[i] as char) {
-            i += 1;
-        }
-        let token = &code[start..i];
-        if REACH.contains(&token) {
-            return true;
-        }
-        if token == "io" {
-            let rest = code[i..].trim_start();
-            let Some(field) = rest.strip_prefix('.') else {
-                return true;
-            };
-            let field = field.trim_start();
-            let end = field.find(|c: char| !word(c)).unwrap_or(field.len());
-            if !IO_FIELDS.contains(&&field[..end]) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
 fn read_cursor_line(lua: &Lua, c: &Rc<RefCell<std::io::Cursor<Vec<u8>>>>) -> LuaResult<LuaValue> {
     use std::io::BufRead;
     let mut cur = c.borrow_mut();
@@ -1254,42 +1217,4 @@ fn mcp_result_to_lua(lua: &Lua, result: &serde_json::Value) -> LuaResult<LuaValu
         }
     }
     Ok(LuaValue::Table(t))
-}
-
-#[cfg(test)]
-mod may_read_stdin_tests {
-    use super::may_read_stdin;
-
-    #[test]
-    fn a_script_that_names_a_way_to_stdin_reads_it() {
-        for code in [
-            "io.read()",
-            "io . read('*a')",
-            "for l in io.lines() do end",
-            "io['r'..'ead']()",
-            "local m = io",
-            "pairs(io)",
-            "io.stdin:read()",
-            "_G['i'..'o']",
-            "_ENV.io",
-            "require('m')",
-            "dofile('x.lua')",
-            "f:read('*a')",
-        ] {
-            assert!(may_read_stdin(code), "{code}");
-        }
-    }
-
-    #[test]
-    fn a_script_with_no_way_to_stdin_does_not_read_it() {
-        for code in [
-            "print('ready')",
-            "print(#'thread'); x = spread",
-            "io.write('lined'); io.stderr:write('x')",
-            "local f = io.open('a', 'w')",
-            "print('héllo') -- ünïcode",
-        ] {
-            assert!(!may_read_stdin(code), "{code}");
-        }
-    }
 }

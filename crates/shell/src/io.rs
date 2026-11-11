@@ -52,6 +52,11 @@ pub fn stdin() -> std::io::Result<FdReader> {
     CURRENT_PROCESS.with(|p| p.borrow_mut().take_reader(STDIN))
 }
 
+/// Whether stdin (fd 0) of the current process is the input fed from outside the Shell.
+pub fn stdin_is_outside() -> bool {
+    CURRENT_PROCESS.with(|p| p.borrow().reads_outside_input(STDIN))
+}
+
 /// Take stderr (fd 2) from the current process.
 pub fn stderr() -> std::io::Result<FdWriter> {
     CURRENT_PROCESS.with(|p| p.borrow_mut().take_writer(STDERR))
