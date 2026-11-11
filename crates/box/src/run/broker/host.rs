@@ -1169,7 +1169,11 @@ async fn serve_transport(
                     }
                 }
                 Body::InputEof => {
-                    if let Some(control) = control_for(&programs, &running, id) {
+                    // After a refusal stdin stays open, so the Call never reads end-of-file on part
+                    // of its input.
+                    if let Some(control) = control_for(&programs, &running, id)
+                        && !control.input_refused()
+                    {
                         control.close_stdin();
                     }
                 }
@@ -3551,6 +3555,68 @@ done"#;
                 !out.exists(),
                 "the command must not act on part of its input"
             );
+        }));
+    }
+
+    /// An `InputEof` after a refused input does not close stdin, so the running Call is stopped
+    /// rather than reading end-of-file on part of its input.
+    #[test]
+    fn end_of_file_after_a_refused_input_does_not_reach_the_call() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let out = marker.path().join("out");
+            let (mut reader, mut writer) = transport(&socket).await;
+            put(
+                &mut writer,
+                1,
+                Body::Open {
+                    mode: Interpreter::Shell,
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Call {
+                    correlation: Default::default(),
+                    source: format!(r#"x=$(cat); printf %s "$x" > {}"#, out.display()),
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Input {
+                    data: encode_payload(b"abc"),
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Input {
+                    data: "A".repeat(MAX_ENCODED_CHUNK_BYTES + 1),
+                },
+            )
+            .await;
+            put(&mut writer, 1, Body::InputEof).await;
+            loop {
+                let frame = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    read_frame::<Frame, _>(&mut reader),
+                )
+                .await
+                .expect("the Call ends")
+                .expect("a frame")
+                .expect("the daemon answers");
+                if let Body::Exit { status } = frame.body {
+                    assert_ne!(status, 0);
+                    break;
+                }
+            }
+            assert!(!out.exists(), "the Call must not act on part of its input");
         }));
     }
 

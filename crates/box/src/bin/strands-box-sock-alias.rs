@@ -720,19 +720,20 @@ async fn forward(
                 stream: which,
                 data,
             } => {
-                use std::io::Write as _;
+                use tokio::io::AsyncWriteExt as _;
                 let bytes = decode_payload(&data)?;
-                // Flushed per chunk, not at exit.
+                // Flushed per chunk, not at exit. Asynchronous, so a full stdout does not stop the
+                // stdin pump on this one-thread runtime.
                 match which {
                     Stream::Stdout => {
-                        let mut out = std::io::stdout();
-                        out.write_all(&bytes)?;
-                        out.flush()?;
+                        let mut out = tokio::io::stdout();
+                        out.write_all(&bytes).await?;
+                        out.flush().await?;
                     }
                     Stream::Stderr => {
-                        let mut err = std::io::stderr();
-                        err.write_all(&bytes)?;
-                        err.flush()?;
+                        let mut err = tokio::io::stderr();
+                        err.write_all(&bytes).await?;
+                        err.flush().await?;
                     }
                 }
             }
