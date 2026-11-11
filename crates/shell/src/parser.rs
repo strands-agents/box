@@ -250,7 +250,7 @@ pub fn parse_with_aliases(
     parse_source(input, read_line, aliases, false)
 }
 
-/// Parse a source statement that can continue on a later physical line.
+/// Parse a source statement with `more_input` indicating whether another physical line is available.
 pub(crate) fn parse_source(
     input: &str,
     read_line: &mut dyn FnMut(&str) -> Option<String>,
@@ -853,6 +853,7 @@ pub fn collect_dollar_pub(
     collect_dollar(chars)
 }
 
+/// Tokenize shell input, treating a final unquoted backslash as incomplete when `more_input` is true.
 fn tokenize(input: &str, more_input: bool) -> Result<Vec<Token>, ParseError> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
