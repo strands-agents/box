@@ -66,7 +66,7 @@ fn configured_shell_input_limits_apply_independently_of_output() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    for (size, accepted) in [(16, false), (128, true)] {
+    for (size, accepted) in [(16, false), (128, true), (0, true)] {
         let box_ = Request::with_config(
             "shell-input-size",
             PERMISSIVE_POLICY,
@@ -75,13 +75,16 @@ fn configured_shell_input_limits_apply_independently_of_output() {
         .expect();
         let output = box_.bash(
             r#"zsh -c 'printf OK                            '; first=$?
-               zsh -c 'printf OK                            '; second=$?
-               printf '\nstatuses=%s,%s\n' "$first" "$second""#,
+               zsh -c 'printf OK
+                            '; second=$?
+               zsh -c 'true
+printf OK                            '; third=$?
+               printf '\nstatuses=%s,%s,%s\n' "$first" "$second" "$third""#,
         );
         let expected = if accepted {
-            "OKOK\nstatuses=0,0\n"
+            "OKOKOK\nstatuses=0,0,0\n"
         } else {
-            "\nstatuses=1,1\n"
+            "\nstatuses=1,1,1\n"
         };
         assert_eq!(stdout(&output), expected, "{}", stderr(&output));
         assert_eq!(stderr(&output).contains("input too large"), !accepted);
@@ -100,6 +103,7 @@ fn configured_shell_output_limits_control_source_loading_and_capture() {
             "[limits.shell]\nmax_input = 128\nmax_output = 262144\n",
             true,
         ),
+        ("[limits.shell]\nmax_input = 128\nmax_output = 0\n", true),
     ] {
         let box_ = Request::with_config("shell-output-size", PERMISSIVE_POLICY, settings).expect();
         let script = format!("#{}\nprintf SOURCE_LOADED\n", "x".repeat(100 * 1024));

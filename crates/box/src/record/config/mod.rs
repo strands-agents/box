@@ -1609,6 +1609,9 @@ mod tests {
             "[limits]\nshell.max_input = 262144\n",
             "[limits.shell]\nmax_output = 65536\n",
             "[limits.shell]\nmax_input = 524288\nmax_output = 262144\ntimeout = false\n",
+            "[limits.shell]\nmax_input = 0\n",
+            "[limits.shell]\nmax_output = 0\n",
+            "[limits.shell]\nmax_input = 0\nmax_output = 0\ntimeout = false\n",
         ] {
             let mut stored = pinned_record(limits);
             assert_eq!(stored.version, 30, "{limits}");

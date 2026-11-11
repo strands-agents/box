@@ -2837,8 +2837,11 @@ done"#;
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             tokio::time::timeout(Duration::from_secs(20), async {
-                for (max_input, accepted) in [(DEFAULT_SHELL_MAX_INPUT, false), (512 * 1024, true)]
-                {
+                for (max_input, accepted) in [
+                    (DEFAULT_SHELL_MAX_INPUT, false),
+                    (512 * 1024, true),
+                    (0, true),
+                ] {
                     let marker = tempfile::tempdir().expect("marker");
                     let mut spec = connection_spec(marker.path());
                     let limits = Arc::get_mut(&mut spec).expect("unshared spec");
@@ -2855,13 +2858,21 @@ done"#;
                     )
                     .await;
 
-                    for call in 1..=2 {
+                    let padded = format!("printf OK #{}", "x".repeat(300 * 1024));
+                    for (call, source) in [
+                        padded.clone(),
+                        format!("{padded}\n"),
+                        format!("true\n{padded}"),
+                    ]
+                    .into_iter()
+                    .enumerate()
+                    {
                         put(
                             &mut writer,
                             1,
                             Body::Call {
                                 correlation: Default::default(),
-                                source: format!("printf OK #{}", "x".repeat(300 * 1024)),
+                                source,
                             },
                         )
                         .await;

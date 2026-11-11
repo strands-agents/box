@@ -240,7 +240,9 @@ fails the command the way the operation's own error would. The
 
 The stored configuration supplies `max_input` and `max_output` whenever the broker constructs
 Strands Shell, including each new call. Omitted sizes retain the 256 KiB input and 64 KiB output
-defaults. The output limit also bounds script files that Shell loads with `source`.
+defaults; an explicit `0` disables the corresponding Shell size limit. The input limit checks the
+whole submission before single-line or multiline evaluation. The output limit also bounds script
+files that Shell loads with `source`.
 The broker's framing and streamed-output budgets remain separate.
 
 **Each call uses the operator's execution limit.** The operator sets

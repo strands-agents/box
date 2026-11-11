@@ -182,8 +182,8 @@ group, the owner, and access control lists on files in its writable grants`. Lin
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `shell.timeout` | positive integer or `false` | `30` | Seconds allowed for one submitted Strands Shell call, including its commands and pipelines. `false` disables the Shell and broker execution deadlines. |
-| `shell.max_input` | positive integer | `262144` | Bytes of command text submitted to Strands Shell. |
-| `shell.max_output` | positive integer | `65536` | Bytes in each Shell output buffer, including command substitution. Shell also applies this limit when loading script files with `source`. |
+| `shell.max_input` | nonnegative integer | `262144` | Bytes of command text submitted to Strands Shell. `0` disables this limit. |
+| `shell.max_output` | nonnegative integer | `65536` | Bytes in each Shell output buffer, including command substitution. Shell also applies this limit when loading script files with `source`. `0` disables this limit. |
 
 To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent nested table is
 `[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
@@ -194,18 +194,21 @@ Configured-command [hard-link scans](#configured-command-integrity) retain their
 Timeout values of zero, negative numbers, fractions, strings, `true`, or values too large for the platform's clock
 are load errors.
 
-Size limits are positive integer byte counts. Zero, booleans, strings, fractions, and values the
-platform cannot represent are load errors. Omission preserves each default independently.
+Size limits accept a positive integer byte count or `0` to disable that limit. Negative numbers,
+booleans (including `false`), strings, fractions, and values the platform cannot represent are load
+errors. Omission preserves each default independently.
 For a larger source file, set `[limits.shell] max_output = 262144` to allow up to 256 KiB.
 This also enlarges Shell's output buffers. A larger `max_input` alone does not enlarge source-file reads.
 Stdout and stderr captures have separate buffers; `max_output` is not a combined output or
 total memory budget. Oversized command text is refused with `input too large`. An oversized
 capture can produce incomplete or empty output. An oversized source file fails before execution
 with `output size limit exceeded`.
+Raising or disabling a size limit allows Shell to hold more data in the box's trusted process;
+these settings do not bound the process's total memory use.
 
 Broker messages remain capped at 1 MiB, including encoding. Streamed stdout and stderr share
-an 8 MiB budget for the lifetime of one opened Shell program. Increasing either Shell setting
-leaves these limits unchanged.
+an 8 MiB budget for the lifetime of one opened Shell program. These limits still apply when either
+Shell setting is increased or set to `0`.
 Positional script invocations such as `bash script.sh` retain the alias's separate 64 KiB script limit.
 
 The timeout setting applies to the calls forwarded by `zsh`, `bash`, and `sh`, including Python called

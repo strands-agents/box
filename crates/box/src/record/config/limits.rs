@@ -1,6 +1,6 @@
 //! Operator-selected execution limits for hosted interpreters.
 
-use std::num::{NonZeroU64, NonZeroUsize};
+use std::num::NonZeroU64;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
@@ -31,20 +31,18 @@ pub(crate) struct ShellLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     timeout: Option<ShellTimeout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_input: Option<NonZeroUsize>,
+    max_input: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_output: Option<NonZeroUsize>,
+    max_output: Option<usize>,
 }
 
 impl ShellLimits {
     pub(crate) fn max_input(&self) -> usize {
-        self.max_input
-            .map_or(DEFAULT_SHELL_MAX_INPUT, NonZeroUsize::get)
+        self.max_input.unwrap_or(DEFAULT_SHELL_MAX_INPUT)
     }
 
     pub(crate) fn max_output(&self) -> usize {
-        self.max_output
-            .map_or(DEFAULT_SHELL_MAX_OUTPUT, NonZeroUsize::get)
+        self.max_output.unwrap_or(DEFAULT_SHELL_MAX_OUTPUT)
     }
 
     pub(super) fn has_size_limits(&self) -> bool {
@@ -190,19 +188,34 @@ mod tests {
             "[shell]\nmax_input = 1\n",
             "[shell]\nmax_output = 262144\n",
             "[shell]\nmax_input = 524288\nmax_output = 131072\ntimeout = false\n",
+            "[shell]\nmax_input = 0\n",
+            "[shell]\nmax_output = 0\n",
+            "[shell]\nmax_input = 0\nmax_output = 0\ntimeout = false\n",
         ] {
-            let limits: Limits = toml::from_str(text).expect("positive byte limits");
+            let limits: Limits = toml::from_str(text).expect("byte limits");
             assert!(!limits.is_default());
             let actual: toml::Value = toml::from_str(&toml::to_string(&limits).unwrap()).unwrap();
             let expected: toml::Value = toml::from_str(text).unwrap();
             assert_eq!(actual, expected);
+            assert_eq!(
+                limits.shell.max_input(),
+                expected["shell"]
+                    .get("max_input")
+                    .map_or(262144, |value| value.as_integer().unwrap() as usize)
+            );
+            assert_eq!(
+                limits.shell.max_output(),
+                expected["shell"]
+                    .get("max_output")
+                    .map_or(65536, |value| value.as_integer().unwrap() as usize)
+            );
         }
     }
 
     #[test]
-    fn shell_size_limits_refuse_non_positive_or_non_integer_bytes() {
+    fn shell_size_limits_refuse_negative_or_non_integer_bytes() {
         for key in ["max_input", "max_output"] {
-            for value in ["0", "-1", "1.5", "\"65536\"", "false", "true", "[]", "{}"] {
+            for value in ["-1", "1.5", "\"65536\"", "false", "true", "[]", "{}"] {
                 assert!(
                     toml::from_str::<Limits>(&format!("[shell]\n{key} = {value}\n")).is_err(),
                     "{key} = {value}"

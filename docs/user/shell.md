@@ -156,7 +156,8 @@ a `shell:spawn` permit, the program runs under the first of these that covers it
 3. Neither: the program is refused with status `126`.
 
 `limits.shell.max_input` bounds submitted command text, and `limits.shell.max_output` bounds
-output buffers and script files loaded with `source`. The [limits reference](config.md#limits)
+output buffers and script files loaded with `source`. Set either size to `0` to disable that Shell
+limit. The [limits reference](config.md#limits)
 gives their defaults, byte units, and the separate limits on transport and positional script invocation.
 
 ### `limits.shell.timeout`
