@@ -34,14 +34,15 @@ python3.12 -m pip install -r requirements-deploy.txt
 python3.12 run-tests.py
 ```
 
-Preparation builds the pinned Box source and installs locked Python dependencies.
+Preparation builds commit `e39544d49188b82933264b83159c7ccc278ced5a`, the source used for Box v0.2.1.
+It installs locked Python dependencies.
 It records local binary and dependency hashes. Build outputs and invocation receipts stay outside Git.
 Use a fresh checkout and `--framework langchain` for the LangChain variant.
 The offline tests make no model calls. The LangChain graph tests also block socket connections.
 
 ## Tested scope
 
-The Box source pin is `e4ca8b80359b2213d684de31cd6ef32e0d61478a`.
+The recorded cloud checks below used Box source `e4ca8b80359b2213d684de31cd6ef32e0d61478a`.
 Recorded cloud checks used managed Runtime V2, Python 3.12, Linux ARM64, and a non-root operator.
 Strands 1.63.0 passed 24 assertions. LangChain 1.4.8 with LangChain AWS 1.9.1 passed 36 assertions.
 Both used `us.anthropic.claude-sonnet-4-6` through `us-west-2`.
