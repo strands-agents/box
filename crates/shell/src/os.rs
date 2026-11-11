@@ -892,6 +892,18 @@ pub(crate) fn append_limited(target: &mut String, value: &str, limit: usize) -> 
     false
 }
 
+/// Return the largest char boundary in `s` at or below `index`.
+pub(crate) fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
 /// Read from an async reader into a String, enforcing an optional size limit.
 /// Returns Err if the limit is exceeded.
 pub async fn read_to_string_limited<R: tokio::io::AsyncRead + Unpin>(
@@ -1181,6 +1193,9 @@ pub type HostSpawner = std::sync::Arc<dyn Fn(HostSpawn) -> HostSpawnFuture + Sen
 pub type HostSpawnFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<HostSpawnOutcome>> + Send>>;
 
+/// The absolute file each bare name runs, looked up after the Shell's own programs and before `PATH`.
+pub type HostPrograms = std::sync::Arc<std::collections::BTreeMap<String, std::path::PathBuf>>;
+
 /// One resolved host-binary spawn request handed to a [`HostSpawner`].
 pub struct HostSpawn {
     /// The resolved absolute path of the program to run.
@@ -1375,6 +1390,12 @@ pub trait Kernel: Send + Sync {
     async fn lstat(&self, proc: &Process, path: Resolved) -> FileStat;
     /// Check access permissions (ACCESS_R, ACCESS_W, ACCESS_X).
     async fn access(&self, proc: &Process, path: Resolved, mode: i32) -> bool;
+    /// Stat a file (follows symlinks), and report a refusal as an error.
+    async fn stat_answer(&self, proc: &Process, path: Resolved) -> io::Result<FileStat>;
+    /// Stat a file (does not follow symlinks), and report a refusal as an error.
+    async fn lstat_answer(&self, proc: &Process, path: Resolved) -> io::Result<FileStat>;
+    /// Check access permissions, and report a refusal as an error.
+    async fn access_answer(&self, proc: &Process, path: Resolved, mode: i32) -> io::Result<bool>;
     /// Canonicalize a path (resolve symlinks).
     async fn canonicalize(&self, proc: &Process, path: Resolved) -> io::Result<PathBuf>;
     /// Check if a path is an executable file.
@@ -1461,6 +1482,11 @@ pub trait Kernel: Send + Sync {
             io::ErrorKind::Unsupported,
             "host-binary spawner not available",
         ))
+    }
+
+    /// The declared file a bare `name` runs, which is not found when it is gone, or `None` for `PATH`.
+    fn host_program(&self, _name: &str) -> Option<std::path::PathBuf> {
+        None
     }
 }
 

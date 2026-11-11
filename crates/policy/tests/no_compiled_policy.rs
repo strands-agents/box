@@ -33,14 +33,16 @@ fn assert_authored_policy_governs(
     for path in paths {
         for &operation in operations {
             let approved = approved(path);
-            let verdict = policy.decide(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                &Request::Fs {
-                    path: &approved,
-                    operation,
-                },
-            );
+            let verdict = policy
+                .decide(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    &Request::Fs {
+                        path: &approved,
+                        operation,
+                    },
+                )
+                .0;
             assert!(
                 verdict.is_allow(),
                 "the authored catch-all permit must govern {operation:?} on {path}. Got {verdict:?}"

@@ -3,26 +3,102 @@
 use std::io;
 
 use egress_gateway::McpTarget;
-use policy::{Decision, GovernedBox, PolicyEngine, Principal, Request};
+use policy::{
+    Decision, GovernedBox, PendingToolResponse, PolicyEngine, Principal, Request, RequestId,
+};
 use serde_json::Value;
 
 use crate::record::config::mcp::McpServer;
 use crate::run::telemetry::{EffectiveDecision, capture_policy_action};
 
-/// Resolve this alias to the server the operator declared, and answer with what to start.
+/// Resolve this launch to the server whose command, as Box starts it, the launch spells.
 pub(crate) fn admit_server<'a>(
     declared: &'a [McpServer],
-    alias: &str,
-) -> io::Result<&'a McpServer> {
-    crate::record::config::mcp::for_alias(declared, alias).ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!(
-                "no MCP server declares the program {alias:?} in box.toml, so the box placed no \
-                 alias for it"
-            ),
+    program: &str,
+    arguments: &[String],
+    launched: impl Fn(&McpServer) -> Option<Vec<String>>,
+) -> io::Result<Option<&'a McpServer>> {
+    use crate::record::config::mcp::{for_command, on_program};
+
+    if let Some(server) = for_command(declared, program, arguments, &launched) {
+        return Ok(Some(server));
+    }
+    let mut matches = declared.iter().filter(|server| {
+        server.has_argument_wildcards()
+            && server.program() == program
+            && launched(server)
+                .is_some_and(|expanded| server.matches_arguments(arguments, &expanded))
+    });
+    if let Some(server) = matches.next() {
+        if let Some(other) = matches.next() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "MCP command matches multiple servers: {}, {}; no server starts",
+                    server.name, other.name
+                ),
+            ));
+        }
+        return Ok(Some(server));
+    }
+    if on_program(declared, program).next().is_some()
+        && on_program(declared, program).all(|server| launched(server).is_some())
+    {
+        return Ok(None);
+    }
+    let received = std::iter::once(program.to_string())
+        .chain(arguments.iter().cloned())
+        .collect::<Vec<_>>();
+    let received = bounded(&received);
+    let named = bounded(std::slice::from_ref(&program.to_string()));
+    let servers = on_program(declared, program)
+        .map(|server| match launched(server) {
+            Some(_) => server.name.clone(),
+            None => format!("{} (its `command` does not expand)", server.name),
+        })
+        .collect::<Vec<_>>();
+    let reason = if servers.is_empty() {
+        format!(
+            "no MCP server declares \"{received}\"; no `[mcp.<name>]` table in box.toml declares \
+             the program \"{named}\", so the box placed no alias for it"
         )
-    })
+    } else {
+        format!(
+            "no MCP server declares \"{received}\"; servers on {named}: {}",
+            servers.join(", ")
+        )
+    };
+    Err(io::Error::new(io::ErrorKind::PermissionDenied, reason))
+}
+
+/// The most characters of a received command a refusal prints.
+const RECEIVED_LIMIT: usize = 256;
+
+/// `words` cut to [`RECEIVED_LIMIT`] characters, then spelled, then marked with `...` when cut.
+fn bounded(words: &[String]) -> String {
+    use crate::record::config::mcp::spelled;
+
+    let mut budget = RECEIVED_LIMIT;
+    let mut kept = Vec::new();
+    let mut cut = false;
+    for word in words {
+        if budget == 0 {
+            cut = true;
+            break;
+        }
+        if word.chars().nth(budget).is_some() {
+            kept.push(word.chars().take(budget).collect::<String>());
+            cut = true;
+            break;
+        }
+        budget -= word.chars().count();
+        kept.push(word.clone());
+    }
+    let mut text = spelled(&kept);
+    if cut {
+        text.push_str("...");
+    }
+    text
 }
 
 /// Decide one frame, if it asks the server to do anything.
@@ -39,7 +115,7 @@ pub(super) fn admit_tool_call(
             return Ok(McpRequestAdmission::Undecided);
         };
 
-        let decision = policy.decide(
+        let (decision, request_id) = policy.decide(
             governed,
             principal,
             &Request::McpCall {
@@ -75,6 +151,10 @@ pub(super) fn admit_tool_call(
             }
         }
 
+        let request_id = request_id.ok_or_else(|| {
+            io::Error::other("permitted MCP request has no committed request token")
+        })?;
+
         // Gate two: the server-namespaced per-tool refinement for a `tools/call`.
         // It rides the coarse allow unless a `forbid` on the tool or its arguments matches; an
         // undeclared tool is unaffected. The arguments are typed against the composed schema.
@@ -85,8 +165,12 @@ pub(super) fn admit_tool_call(
                     format!("MCP tool arguments are not valid JSON: {error}"),
                 )
             })?;
+            let mut tool_response = None;
             let (refined, refined_action) = capture_policy_action(|| {
-                policy.refine_tool_call(governed, principal, server, tool, &arguments)
+                let (decision, pending) =
+                    policy.refine_tool_call(governed, principal, server, tool, &arguments);
+                tool_response = pending;
+                decision
             });
             match &refined {
                 Decision::Deny { .. } => {
@@ -108,12 +192,20 @@ pub(super) fn admit_tool_call(
                             resource,
                             &refined,
                         ),
+                        request_id,
+                        tool_response,
                     ));
                 }
-                Decision::Allow { .. } => {}
+                Decision::Allow { .. } => {
+                    return Ok(McpRequestAdmission::Allowed(
+                        coarse,
+                        request_id,
+                        tool_response,
+                    ));
+                }
             }
         }
-        Ok(McpRequestAdmission::Allowed(coarse))
+        Ok(McpRequestAdmission::Allowed(coarse, request_id, None))
     })
 }
 
@@ -137,7 +229,8 @@ pub(super) fn request_refusal(decision: &Decision, method: &str) -> io::Error {
 
 pub(super) enum McpRequestAdmission {
     Undecided,
-    Allowed(EffectiveDecision),
+    /// The coarse `mcp:call` request, and the per-tool response an allowed `tools/call` owes.
+    Allowed(EffectiveDecision, RequestId, Option<PendingToolResponse>),
     PolicyPending(EffectiveDecision, io::Error),
     Denied {
         decision: EffectiveDecision,
@@ -166,12 +259,19 @@ mod tests {
     fn declared() -> Vec<McpServer> {
         let servers = vec![
             McpServer {
+                argument_wildcards: false,
                 name: "issues-mcp".to_string(),
                 command: vec!["issues-mcp".to_string()],
             },
             McpServer {
+                argument_wildcards: false,
                 name: "aws-mcp".to_string(),
                 command: vec!["uvx".to_string(), "mcp-proxy-for-aws@latest".to_string()],
+            },
+            McpServer {
+                argument_wildcards: false,
+                name: "fetch".to_string(),
+                command: vec!["uvx".to_string(), "mcp-server-fetch".to_string()],
             },
         ];
         crate::record::config::mcp::validate_authored(&servers)
@@ -199,9 +299,225 @@ mod tests {
         .observed_by(Arc::new(crate::run::telemetry::PolicyDecisionObserver))
     }
 
-    /// Admit through an **alias**, which is named for the declared `program`.
-    fn admit(alias: &str) -> io::Result<McpServer> {
-        admit_server(&declared(), alias).cloned()
+    /// Admit through an **alias**, named for the declared program, with the arguments it received.
+    fn admit(program: &str, arguments: &[&str]) -> io::Result<Option<McpServer>> {
+        let arguments = arguments
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        admit_server(&declared(), program, &arguments, |server| {
+            Some(server.arguments().to_vec())
+        })
+        .map(|server| server.cloned())
+    }
+
+    #[test]
+    fn wildcard_matching_skips_only_whole_star_arguments_after_opt_in() {
+        let servers = vec![McpServer {
+            argument_wildcards: true,
+            name: "test".into(),
+            command: words(&["server", "--token", "*", "prefix*", "*"]),
+        }];
+        let mut literal = servers.clone();
+        literal[0].argument_wildcards = false;
+        let launch = |server: &McpServer| Some(server.arguments().to_vec());
+        for value in ["runtime", "", "${ANYTHING:-default}", "two words", "*"] {
+            let args = words(&["--token", value, "prefix*", "second"]);
+            assert!(
+                admit_server(&servers, "server", &args, launch)
+                    .is_ok_and(|server| server.is_some())
+            );
+            assert!(
+                admit_server(&literal, "server", &args, launch)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for (program, args) in [
+            ("server", words(&["--other", "x", "prefix*", "y"])),
+            ("server", words(&["--token", "x", "prefix-expanded", "y"])),
+            ("server", words(&["--token", "x", "prefix*"])),
+            ("server", words(&["--token", "x", "prefix*", "y", "extra"])),
+        ] {
+            assert!(
+                admit_server(&servers, program, &args, launch)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        assert!(
+            admit_server(&literal, "server", literal[0].arguments(), launch)
+                .is_ok_and(|server| server.is_some())
+        );
+    }
+
+    #[test]
+    fn wildcard_matching_refuses_ambiguity_and_keeps_fixed_argument_expansion() {
+        let one = McpServer {
+            argument_wildcards: true,
+            name: "one".into(),
+            command: words(&["server", "${OTEL_EXPORTER_OTLP_PROTOCOL}", "*"]),
+        };
+        let other = McpServer {
+            argument_wildcards: true,
+            name: "other".into(),
+            command: words(&["server", "*", "value"]),
+        };
+        let launch = |server: &McpServer| {
+            Some(
+                server
+                    .arguments()
+                    .iter()
+                    .map(|argument| {
+                        argument.replace("${OTEL_EXPORTER_OTLP_PROTOCOL}", "http/protobuf")
+                    })
+                    .collect(),
+            )
+        };
+        for args in [
+            words(&["${OTEL_EXPORTER_OTLP_PROTOCOL}", "value"]),
+            words(&["http/protobuf", "value"]),
+        ] {
+            assert!(
+                admit_server(std::slice::from_ref(&one), "server", &args, launch)
+                    .is_ok_and(|server| server.is_some())
+            );
+        }
+        assert!(
+            admit_server(
+                std::slice::from_ref(&one),
+                "server",
+                &words(&["wrong", "value"]),
+                launch
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            admit_server(
+                std::slice::from_ref(&one),
+                "server",
+                &words(&["http/protobuf", "value"]),
+                |_| None
+            )
+            .is_err()
+        );
+        let error = admit_server(
+            &[one, other],
+            "server",
+            &words(&["http/protobuf", "value"]),
+            launch,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("multiple servers"));
+
+        let patterns = [
+            McpServer {
+                argument_wildcards: true,
+                name: "one".into(),
+                command: words(&["server", "*", "value"]),
+            },
+            McpServer {
+                argument_wildcards: true,
+                name: "two".into(),
+                command: words(&["server", "*", "*"]),
+            },
+        ];
+        assert!(
+            admit_server(&patterns, "server", &words(&["*", "value"]), launch)
+                .unwrap_err()
+                .to_string()
+                .contains("multiple servers")
+        );
+    }
+
+    #[test]
+    fn exact_commands_win_over_wildcards_in_either_declaration_order() {
+        let exact = McpServer {
+            argument_wildcards: true,
+            name: "exact".into(),
+            command: words(&["server", "${OTEL_EXPORTER_OTLP_PROTOCOL}"]),
+        };
+        let wildcard = McpServer {
+            argument_wildcards: true,
+            name: "wildcard".into(),
+            command: words(&["server", "*"]),
+        };
+        let launch = |server: &McpServer| {
+            Some(
+                server
+                    .arguments()
+                    .iter()
+                    .map(|argument| {
+                        argument.replace("${OTEL_EXPORTER_OTLP_PROTOCOL}", "http/protobuf")
+                    })
+                    .collect(),
+            )
+        };
+        for servers in [
+            [wildcard.clone(), exact.clone()],
+            [exact.clone(), wildcard.clone()],
+        ] {
+            for value in ["${OTEL_EXPORTER_OTLP_PROTOCOL}", "http/protobuf"] {
+                assert_eq!(
+                    admit_server(&servers, "server", &words(&[value]), launch)
+                        .unwrap()
+                        .unwrap()
+                        .name,
+                    "exact",
+                );
+            }
+            assert_eq!(
+                admit_server(&servers, "server", &words(&["other"]), launch)
+                    .unwrap()
+                    .unwrap()
+                    .name,
+                "wildcard",
+            );
+        }
+    }
+
+    #[test]
+    fn literal_star_entry_remains_exact_beside_an_enabled_pattern() {
+        let pattern = McpServer {
+            name: "pattern".into(),
+            command: words(&["server", "--token", "*"]),
+            argument_wildcards: true,
+        };
+        let literal = McpServer {
+            name: "literal".into(),
+            argument_wildcards: false,
+            ..pattern.clone()
+        };
+        for servers in [[pattern.clone(), literal.clone()], [literal, pattern]] {
+            let launch = |server: &McpServer| Some(server.arguments().to_vec());
+            crate::record::config::mcp::refuse_a_shared_command(&servers, launch).unwrap();
+            crate::record::config::mcp::refuse_overlapping_wildcard_commands(&servers, launch)
+                .unwrap();
+            for (value, selected) in [("*", "literal"), ("runtime", "pattern")] {
+                assert_eq!(
+                    admit_server(&servers, "server", &words(&["--token", value]), launch)
+                        .unwrap()
+                        .unwrap()
+                        .name,
+                    selected
+                );
+            }
+            let only_literal = servers
+                .iter()
+                .find(|server| !server.argument_wildcards)
+                .unwrap();
+            assert!(
+                admit_server(
+                    std::slice::from_ref(only_literal),
+                    "server",
+                    &words(&["--token", "runtime"]),
+                    launch
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
     }
 
     const TOOLS: &str = r#"
@@ -234,7 +550,9 @@ mod tests {
     #[test]
     fn a_declared_server_resolves_to_the_files_own_argv() {
         // Through `uvx`, because that is the alias the harness executes for this server.
-        let admitted = admit("uvx").expect("uvx is declared");
+        let admitted = admit("uvx", &["mcp-proxy-for-aws@latest"])
+            .expect("uvx is declared")
+            .unwrap();
         assert_eq!(admitted.program(), "uvx");
         assert_eq!(
             admitted.name, "aws-mcp",
@@ -245,22 +563,109 @@ mod tests {
             ["mcp-proxy-for-aws@latest"],
             "the argv comes from box.toml, never from the agent"
         );
+        assert_eq!(
+            admit("uvx", &["mcp-server-fetch"])
+                .expect("the second server on uvx is declared")
+                .unwrap()
+                .name,
+            "fetch",
+            "the arguments select the server among those on one program"
+        );
     }
 
     /// **An undeclared program is refused, and that refusal is the whole floor.**
     ///
-    /// The box places one alias per declared server, so an undeclared program names nothing the box
+    /// The box places one alias per declared program, so an undeclared program names nothing the box
     #[test]
     fn an_undeclared_program_is_refused() {
         for undeclared in ["not-in-the-file", "aws-mcp"] {
-            let refusal = admit(undeclared)
+            let refusal = admit(undeclared, &[])
                 .expect_err("a program the file does not declare must be refused")
                 .to_string();
             assert!(
-                refusal.contains("no MCP server declares the program"),
+                refusal.contains(&format!("no MCP server declares \"{undeclared}\"")),
                 "{undeclared:?} must be refused as undeclared: {refusal}"
             );
+            assert!(
+                refusal.contains("no alias"),
+                "the refusal must say the box placed no alias for it: {refusal}"
+            );
         }
+    }
+
+    #[test]
+    fn an_unmatched_call_on_a_declared_program_selects_ordinary_execution() {
+        for arguments in [
+            &["-y", "some-other-server"][..],
+            &[],
+            &["mcp-proxy-for-aws@latest", "--extra"],
+        ] {
+            assert!(admit("uvx", arguments).unwrap().is_none());
+        }
+    }
+
+    /// A server whose command does not expand never matches, and the refusal names it.
+    #[test]
+    fn a_server_whose_command_does_not_expand_is_named_and_never_matches() {
+        let refusal = admit_server(
+            &declared(),
+            "uvx",
+            &words(&["mcp-server-fetch"]),
+            |server| (server.name != "fetch").then(|| server.arguments().to_vec()),
+        )
+        .expect_err("a command that does not expand matches nothing")
+        .to_string();
+        assert!(
+            refusal.ends_with("; servers on uvx: aws-mcp, fetch (its `command` does not expand)"),
+            "{refusal}"
+        );
+    }
+
+    fn words(words: &[&str]) -> Vec<String> {
+        words.iter().map(ToString::to_string).collect()
+    }
+
+    /// A refusal quotes and escapes each received word.
+    #[test]
+    fn a_refusal_spells_each_word_unambiguously() {
+        let text = admit("bad", &["a b", "", "c\u{1b}[2J", "it's"])
+            .expect_err("undeclared")
+            .to_string();
+        assert!(
+            text.contains(r#""bad 'a b' '' c\u{1b}[2J it\'s""#),
+            "{text}"
+        );
+    }
+
+    /// A long received command is cut short.
+    #[test]
+    fn a_long_received_command_is_cut_short() {
+        let long = "x".repeat(crate::run::broker::protocol::MAX_FRAME_BYTES);
+        let text = admit("bad", &[long.as_str()])
+            .expect_err("undeclared")
+            .to_string();
+        assert!(text.len() < 1024, "{} bytes", text.len());
+        assert!(text.contains("..."), "{text}");
+    }
+
+    /// A long undeclared program is cut short.
+    #[test]
+    fn a_long_undeclared_program_is_cut_short() {
+        let long = "p".repeat(crate::run::broker::protocol::MAX_FRAME_BYTES);
+        let text = admit(&long, &[]).expect_err("undeclared").to_string();
+        assert!(text.len() < 1024, "{} bytes", text.len());
+        assert_eq!(text.matches("...").count(), 2, "{text}");
+    }
+
+    /// A cut command keeps each escape whole.
+    #[test]
+    fn a_cut_command_keeps_each_escape_whole() {
+        let control = "\u{1b}".repeat(RECEIVED_LIMIT);
+        let text = admit("bad", &[control.as_str()])
+            .expect_err("undeclared")
+            .to_string();
+        let printed = format!("\"bad {}...\"", r"\u{1b}".repeat(RECEIVED_LIMIT - 3));
+        assert!(text.contains(&printed), "{text}");
     }
 
     fn call(policy: &PolicyEngine, frame: &str) -> io::Result<Option<String>> {
@@ -274,9 +679,173 @@ mod tests {
             frame,
         )? {
             McpRequestAdmission::Undecided => Ok(None),
-            McpRequestAdmission::Allowed(_) => Ok(reported),
+            McpRequestAdmission::Allowed(..) => Ok(reported),
             McpRequestAdmission::PolicyPending(_, refusal) => Err(refusal),
             McpRequestAdmission::Denied { refusal, .. } => Err(refusal),
+        }
+    }
+
+    /// **No `uri` pattern names one origin and only that origin, while a port spelling is unfolded.**
+    ///
+    /// `docs/design/mcp.md` states this, and nothing pinned it. A pattern that keeps the path
+    /// separator matches no port spelling, because the canonical form puts the port before the
+    /// `/`. A pattern that ends at the host's last character matches every port spelling and
+    /// every host that starts with those characters. Neither reaches an empty userinfo.
+    #[test]
+    fn a_uri_like_pattern_cannot_name_one_origin_and_only_that_origin() {
+        let read = |uri: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{{"uri":"{uri}"}}}}"#
+            )
+        };
+        let forbids = |pattern: &str| {
+            policy(&format!(
+                r#"permit (principal, action == Box::Action::"mcp:call", resource)
+                   when {{ context.input.server == "issues-mcp" }};
+                   @id("forbid_notes")
+                   forbid (principal, action == Box::Action::"mcp:call", resource)
+                   when {{ context.input has uri && context.input.uri like "{pattern}" }};"#
+            ))
+        };
+
+        // The pattern the page used to recommend. It matches the plain spelling and nothing else.
+        let with_separator = forbids("https://notes/*");
+        assert!(call(&with_separator, &read("https://notes/page")).is_err());
+        for reaches_the_same_origin in [
+            "https://notes:0443/page",
+            "https://notes:08080/page",
+            "https://notes:/page",
+        ] {
+            assert!(
+                call(&with_separator, &read(reaches_the_same_origin)).is_ok(),
+                "a pattern holding the path separator matches no port spelling: \
+                 {reaches_the_same_origin}"
+            );
+        }
+
+        // The pattern that does reach them, and what else it reaches with them.
+        let host_prefix = forbids("https://notes*");
+        for port_spelling in [
+            "https://notes/page",
+            "https://notes:0443/page",
+            "https://notes:08080/page",
+            "https://notes:/page",
+        ] {
+            assert!(
+                call(&host_prefix, &read(port_spelling)).is_err(),
+                "a host-prefix pattern matches every port spelling: {port_spelling}"
+            );
+        }
+        for another_host in [
+            "https://notes.example.com/page",
+            "https://notes-staging/page",
+        ] {
+            assert!(
+                call(&host_prefix, &read(another_host)).is_err(),
+                "and every host that starts with those characters: {another_host}"
+            );
+        }
+
+        // A userinfo put the host out of BOTH patterns' reach, because the canonical form spells
+        // it before the host. That is refused at the door under these schemes now (RFC 9110
+        // §4.2.4), so no pattern has to reach it and the request never gets a decision.
+        for carries_userinfo in [
+            "https://@notes/page",
+            "https://user@notes/page",
+            "https://a@notes/page",
+            "https://user:pass@notes/page",
+            "https://user:@notes/page",
+        ] {
+            assert!(
+                call(&with_separator, &read(carries_userinfo)).is_err(),
+                "a userinfo is refused, so no pattern has to reach it: {carries_userinfo}"
+            );
+            assert!(
+                call(&host_prefix, &read(carries_userinfo)).is_err(),
+                "and the same under the host-prefix pattern: {carries_userinfo}"
+            );
+        }
+    }
+
+    /// **The `file:` pattern the design page recommends is a SUFFIX match, in a `forbid` only.**
+    ///
+    /// Under `file:` the authority is not load-bearing: Node and the Rust `url` crate refuse every
+    /// host but an empty one and `localhost`, and Python's `url2pathname` ignores the host, so any
+    /// host reaches the local path. The page therefore gives a `forbid` a pattern that allows any
+    /// authority. `*` matches a `/` too, so the pattern also reaches a DEEPER path ending in the
+    /// same characters — which refuses more than the rule names, and is why the page says not to
+    /// use the shape in a `permit`.
+    #[test]
+    fn a_file_forbid_pattern_is_a_suffix_match_across_every_authority() {
+        let guards_path = policy(
+            r#"permit (principal, action == Box::Action::"mcp:call", resource)
+               when { context.input.server == "issues-mcp" };
+               @id("forbid_env_any_authority")
+               forbid (principal, action == Box::Action::"mcp:call", resource)
+               when { context.input has uri && context.input.uri like "file://*/home/op/.env" };"#,
+        );
+        let read = |uri: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{{"uri":"{uri}"}}}}"#
+            )
+        };
+        for spelling in [
+            // The local spellings, which fold to an empty authority.
+            "file:///home/op/.env",
+            "file:/home/op/.env",
+            "file://localhost/home/op/.env",
+            "file://127.0.0.1/home/op/.env",
+            "file://[::1]/home/op/.env",
+            "file://[::0001]/home/op/.env",
+            // A non-local authority, which the box keeps and `url2pathname` ignores.
+            "file://notes/home/op/.env",
+            "file://example.com/home/op/.env",
+            "file://[::2]/home/op/.env",
+            "file://127.1/home/op/.env",
+            "file://10.0.0.5/home/op/.env",
+        ] {
+            assert!(
+                call(&guards_path, &read(spelling)).is_err(),
+                "the recommended pattern must reach every authority: {spelling}"
+            );
+        }
+        // An encoded slash reached the guarded file past both the exact and the suffix forbid,
+        // because two of three resolvers decode it into a separator. It is refused at the door now,
+        // so the pattern no longer has to carry it.
+        for encoded_slash in [
+            "file:///home/op%2F.env",
+            "file:///home%2Fop/.env",
+            "file://notes/home/op%2f.env",
+            "file:///srv/x/home/op%2F.env",
+        ] {
+            assert!(
+                call(&guards_path, &read(encoded_slash)).is_err(),
+                "an encoded slash must not reach the file: {encoded_slash}"
+            );
+        }
+        // `*` crosses a `/`, so a deeper path ending in the same characters is refused too. That
+        // is the over-reach the page warns about, and it is the safe direction in a `forbid`.
+        for deeper in [
+            "file:///srv/backup/home/op/.env",
+            "file:///tmp/x/home/op/.env",
+            "file://notes/srv/backup/home/op/.env",
+        ] {
+            assert!(
+                call(&guards_path, &read(deeper)).is_err(),
+                "the pattern is a suffix match, so a deeper path is refused too: {deeper}"
+            );
+        }
+        // What it does NOT reach: a path that does not end in those characters.
+        for reads in [
+            "file:///home/op/.env.example",
+            "file:///home/op/other/.env.bak",
+            "file:///etc/passwd",
+        ] {
+            assert_eq!(
+                call(&guards_path, &read(reads)).expect("permitted"),
+                Some(reads.to_string()),
+                "a path the pattern does not end on still reads: {reads}"
+            );
         }
     }
 
@@ -320,11 +889,12 @@ mod tests {
                };"#,
         );
         let governed = GovernedBox::assigned("test-box");
-        let record_response = || {
+        let record_response = |request_id: &RequestId| {
             engine
                 .record(
                     &governed,
                     &Principal::agent(),
+                    request_id,
                     &Outcome::Mcp {
                         server: "issues-mcp",
                         method: "tools/call",
@@ -338,21 +908,17 @@ mod tests {
 
         // Two calls under the cap: each admitted, each records a `mcp:call::response`.
         for _ in 0..2 {
-            assert!(
-                matches!(
-                    admit_tool_call(
-                        &engine,
-                        &governed,
-                        &Principal::agent(),
-                        "issues-mcp",
-                        SEARCH
-                    )
-                    .expect("admit"),
-                    McpRequestAdmission::Allowed(_)
-                ),
-                "a call under the cap must be admitted"
-            );
-            record_response();
+            let McpRequestAdmission::Allowed(_, request_id, _) = admit_tool_call(
+                &engine,
+                &governed,
+                &Principal::agent(),
+                "issues-mcp",
+                SEARCH,
+            )
+            .expect("admit") else {
+                panic!("a call under the cap must be admitted");
+            };
+            record_response(&request_id);
         }
 
         // The third: count(mcp:call::response) == 2, so the temporal forbid fires.
@@ -389,7 +955,7 @@ mod tests {
             SEARCH,
         )
         .expect("the tool call is valid");
-        let McpRequestAdmission::Allowed(decision) = admission else {
+        let McpRequestAdmission::Allowed(decision, ..) = admission else {
             panic!("the coarse permit must be the final permit");
         };
         let (action, resource, rule, verdict, reason) = decision.parts();
@@ -523,7 +1089,7 @@ mod tests {
                @id("tool") @description("tool permit")
                permit(principal, action == issues_mcp::Action::"SearchIssues", resource);"#,
         );
-        let McpRequestAdmission::Allowed(decision) = admit_tool_call(
+        let McpRequestAdmission::Allowed(decision, ..) = admit_tool_call(
             &policy,
             &GovernedBox::assigned("test-box"),
             &Principal::agent(),
@@ -812,6 +1378,156 @@ mod tests {
             Some("file:///tmp/ok".to_string()),
             "a permitted uri is admitted and reported canonically (%74 = 't')"
         );
+    }
+
+    /// An **exact** uri `forbid` holds when the workload appends one delimiter the server resolves
+    /// away.
+    #[test]
+    fn an_appended_delimiter_cannot_dodge_an_exact_uri_forbid() {
+        let guards_env = policy(
+            r#"permit (principal, action == Box::Action::"mcp:call", resource)
+               when { context.input.server == "issues-mcp" };
+               @id("forbid_env")
+               forbid (principal, action == Box::Action::"mcp:call", resource)
+               when { context.input has uri && context.input.uri == "file:///home/op/.env" };"#,
+        );
+        let read = |uri: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{{"uri":"{uri}"}}}}"#
+            )
+        };
+        for spelling in [
+            "file:///home/op/.env",
+            "file:///home/op/.env#",
+            "file:///home/op/.env?",
+            "file:///home/op/.env#x",
+            "file:///home/op/.env?#",
+            // A query carries no part of a `file:` resource, so one more character after the `?`
+            // is not a second resource either. These reach the forbid's resource by refusal.
+            "file:///home/op/.env?x",
+            "file:///home/op/.env?a=1",
+            "file:///home/op/.env?a=1#",
+            "file:///home/op/.env?a=#b",
+            "file:/home/op/.env?x",
+            // A space or a control character is removed by a URL parser before it reads the
+            // scheme, so these name a custom scheme to the box and `file:` to the server.
+            " file:///home/op/.env",
+            "\\tfile:///home/op/.env",
+            "\\u0001file:///home/op/.env",
+            "fi\\tle:///home/op/.env",
+            // The authored scheme already reads as `file` here, so a check that only compares the
+            // scheme before and after preparation would miss it.
+            "file:\\t///home/op/.env",
+            // A URL parser reads a `\\` as a path separator, so these name the guarded file too.
+            "file://localhost\\\\home\\\\op\\\\.env",
+            "file:///home/op\\\\.env",
+            // A parser supplies the slashes these omit, so each reads as the authority form and
+            // reaches the same file: `file:home/op/.env` becomes `file:///home/op/.env`.
+            "file:home/op/.env",
+            "file:./home/op/.env",
+        ] {
+            assert!(
+                call(&guards_env, &read(spelling)).is_err(),
+                "an appended delimiter must not dodge the forbid: {spelling}"
+            );
+        }
+        assert_eq!(
+            call(&guards_env, &read("file:///home/op/.env.example")).expect("permitted"),
+            Some("file:///home/op/.env.example".to_string()),
+            "a sibling the forbid does not name still reads"
+        );
+        // Over-folding control: an `http` query IS part of the request, so it still names its own
+        // resource and a rule that does not name it still admits it.
+        assert_eq!(
+            call(&guards_env, &read("https://notes/page?a=1")).expect("permitted"),
+            Some("https://notes/page?a=1".to_string()),
+            "an http query is part of the request and still rides through"
+        );
+    }
+
+    /// **A host spelling the URI grammar does not allow cannot dodge an exact `uri` forbid.**
+    ///
+    /// Each spelling below carries an authority outside RFC 3986 §3.2, and both reference parsers
+    /// resolve it to a host OTHER than the one the box emitted — an ignorable code point drops, a
+    /// Unicode dot separates a label, a non-ASCII letter becomes a punycode label, or a second `@`
+    /// is escaped. So the rule read one host and the server opened another. Each is refused now.
+    #[test]
+    fn a_host_spelling_outside_the_uri_grammar_cannot_dodge_an_exact_uri_forbid() {
+        let guards_both = policy(
+            r#"permit (principal, action == Box::Action::"mcp:call", resource)
+               when { context.input.server == "issues-mcp" };
+               @id("forbid_env")
+               forbid (principal, action == Box::Action::"mcp:call", resource)
+               when { context.input has uri && context.input.uri == "file:///home/op/.env" };
+               @id("forbid_notes")
+               forbid (principal, action == Box::Action::"mcp:call", resource)
+               when { context.input has uri && context.input.uri == "https://notes/page" };"#,
+        );
+        let read = |uri: &str| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{{"uri":"{uri}"}}}}"#
+            )
+        };
+        for spelling in [
+            // A soft hyphen or a zero-width space in the host: both parsers drop it, so each of
+            // these reaches the guarded file or the guarded page.
+            "file://localhost\\u00ad/home/op/.env",
+            "file://localhost\\u200b/home/op/.env",
+            "file://LOCALHOST\\u200b/home/op/.env",
+            "file://loc\\u00adalhost/home/op/.env",
+            "https://no\\u00adtes/page",
+            "https://no\\u200btes/page",
+            "https://\\u00adnotes/page",
+            "https://notes\\u200b/page",
+            // A Unicode full stop or ideographic full stop: both parsers read it as the label
+            // separator, so each reaches `https://notes./page` or `https://notes.example/page`.
+            "https://notes\\u3002/page",
+            "https://notes\\uff0e/page",
+            "https://notes\\u3002example/page",
+            "https://notes\\uff0eexample/page",
+            // A non-ASCII letter: both parsers emit a punycode label, and the box lowercased the
+            // ASCII alone, so the authored case reached a rule as two strings.
+            "https://not\\u00e9s/page",
+            "https://NOT\\u00c9S/page",
+            "https://NOT\\u00c9S./page",
+            // A second unescaped `@`: both parsers escape it into the userinfo.
+            "https://a@b@notes/page",
+            // The same bytes written as an escape. The URI grammar allows an escape in a host, so
+            // the grammar check does not reach these — a parser decodes the host first, so each one
+            // opens the guarded file or the guarded page just the same.
+            "file://localhost%C2%AD/home/op/.env",
+            "file://LOCALHOST%c2%ad/home/op/.env",
+            "file://loc%C2%ADalhost/home/op/.env",
+            "https://no%E2%80%8Btes/page",
+            "https://no%C2%ADtes/page",
+        ] {
+            assert!(
+                call(&guards_both, &read(spelling)).is_err(),
+                "a host outside §3.2 must not dodge the forbid: {spelling}"
+            );
+        }
+        // Over-rejection control: a conforming authority the rules do not name still reads, under
+        // each production the grammar spells — a plain name, an empty userinfo, an empty port, a
+        // percent-escape, an IPv4 literal, and an IPv6 literal.
+        for (spelling, canonical) in [
+            ("https://notes.example/page", "https://notes.example/page"),
+            ("file://user@localhost/x", "file://user@localhost/x"),
+            ("https://notes.example:/page", "https://notes.example:/page"),
+            ("https://%6Eotes.example/page", "https://notes.example/page"),
+            ("https://notes%2Eexample/page", "https://notes.example/page"),
+            ("https://127.0.0.1/page", "https://127.0.0.1/page"),
+            ("https://[::1]/page", "https://[::1]/page"),
+            (
+                "file:///home/op/.env.example",
+                "file:///home/op/.env.example",
+            ),
+        ] {
+            assert_eq!(
+                call(&guards_both, &read(spelling)).expect("permitted"),
+                Some(canonical.to_string()),
+                "a conforming authority the rules do not name still reads: {spelling}"
+            );
+        }
     }
 
     /// **A `notifications/` frame carrying an `id` is decided, not waved through.**

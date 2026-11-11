@@ -1,6 +1,6 @@
 ---
 name: docs-writer
-description: Draft or rewrite a Box documentation page in docs/user/ (tutorial, how-to, or reference for an operator) or docs/design/ (explanation for a security evaluator or a contributor), or a crate README.md that serves a consumer. Use when asked to write a doc, draft a page, rewrite a page that failed audit, document a feature or a component, or write an architecture or security page. Not for docs/design/decisions.md (use kd), local specs (use spec), or research notes (use explore).
+description: Draft or rewrite a Box page in docs/user/, docs/design/, or a crate README. Also use for wording-only rewrites in docs/dev/. Use for new documentation, wording cleanup, or corrections after a docs audit. Use kd for decision entries, spec for local specs, and explore for research notes.
 ---
 
 # Documentation writer
@@ -15,6 +15,25 @@ Draft or rewrite one Box documentation page in the voice of
   doesn't give it.
 - **Target file**: the path in `docs/user/` or `docs/design/`, if known.
 - **Existing content**: the page to rewrite.
+
+## Wording-only rewrites
+
+Use this path when the request changes prose alone, including a page in `docs/dev/`.
+For new content or factual corrections, use the process below.
+
+1. Save the original text or record its commit and path. Read the voice guide and
+   [terminology](../../../docs/design/terminology.md).
+2. Apply the sentence rules in Layers 4 and 5. Preserve the original assertions and protected
+   text as required by [Preserve meaning](../../references/voice-guide.md#preserve-meaning).
+   Keep the existing structure. Report suspected factual errors separately; a wording edit does
+   not authorize correcting or deleting them.
+3. Compare every changed paragraph with the original. Run Step 8, check local links, and compare
+   code blocks and anchors with the baseline.
+4. Run Step 9 with the original and draft. Finish when every assertion is preserved, each style
+   finding is fixed or justified, and the independent reviewer returns "Ship it". Report any
+   unresolved question that prevents a safe rewrite as incomplete work.
+
+This path checks wording and preservation of meaning. It does not replace a factual audit.
 
 ## Process
 
@@ -67,6 +86,7 @@ structure of an existing page. Raise each terminology clash from Step 2 at the s
 - Each section opens with what the reader needs first (Layer 2).
 - Use the register for the content type (Layer 3).
 - Read each paragraph aloud as you go. Rewrite any sentence a person wouldn't say.
+- Apply the voice guide's sentence rules in Layer 4 while drafting.
 - User guide: describe what is, and explain why only when the reason changes the operator's action.
 - Design guide: keep each claim within what its test pins, name no test, and link each decision by
   anchor.
@@ -78,11 +98,13 @@ structure of an existing page. Raise each terminology clash from Step 2 at the s
 Follow [`claim-verification.md`](../../references/claim-verification.md) for each claim and each
 example. Don't skip this step. Remove each claim you can't verify, and report it.
 
-### Step 7: Cut
+### Step 7: Edit
 
 Cut by altitude, not by a percentage. Look first for detail that belongs to another page, then for
 a list said twice, then for sentences that restate the one before. Keep what this page's reader
 needs. Most of the quality comes from this step.
+Apply the voice guide's [self-check](../../references/voice-guide.md#self-check) to every paragraph.
+Finish this step when every style finding is fixed or justified.
 
 ### Step 8: Check
 
@@ -98,6 +120,8 @@ Compile each Mermaid block with `mmdc`.
 
 Run the `docs-reviewer` skill on the draft in a fresh context. Fix its findings, then run it again
 until the verdict is "Ship it".
+For a rewrite, give the reviewer the original commit and path or saved text, the draft, and the
+requested scope. It must compare meaning as well as style.
 
 ### Step 10: Link the page
 
@@ -119,6 +143,8 @@ In rewrite mode, also report:
 6. Each claim in the original that current `main` contradicts, as its own list, so the author can
    fix the original even if they don't take the rewrite.
 7. Whether the row for the page in its guide's `README.md` needs new wording for the new outline.
+8. The original used for comparison, the reviewer verdict, and any unresolved questions. For a
+   wording-only rewrite, report suspected factual errors without claiming a factual audit.
 
 ## What this skill doesn't do
 

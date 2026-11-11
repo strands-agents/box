@@ -1,6 +1,7 @@
 /* A static ARM64 workload. Each operation calls Linux directly, without Shell. */
 #include <asm/unistd.h>
 #include <fcntl.h>
+#include <sys/vfs.h>
 
 static long invoke(long n, long a, long b, long c, long d, long e) {
     register long x0 __asm__("x0") = a;
@@ -11,6 +12,18 @@ static long invoke(long n, long a, long b, long c, long d, long e) {
     register long x8 __asm__("x8") = n;
     __asm__ volatile("svc 0" : "+r"(x0) : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8) : "memory");
     return x0;
+}
+
+static void check_filesystem_information(const char *path) {
+    struct statfs information;
+    if (invoke(__NR_statfs, (long)path, (long)&information, 0, 0, 0) != 0 ||
+        information.f_type == 0 || information.f_bsize <= 0 ||
+        information.f_blocks != 0 || information.f_bfree != 0 || information.f_bavail != 0 ||
+        information.f_files != 0 || information.f_ffree != 0 ||
+        information.f_fsid.__val[0] != 0 || information.f_fsid.__val[1] != 0) {
+        invoke(__NR_exit, 119, 0, 0, 0, 0);
+        __builtin_unreachable();
+    }
 }
 
 static long temporary_workload(char **argv) {
@@ -80,7 +93,57 @@ void native_main(long *stack) {
     if (op == 'i') directory = -999;
     if (op == 'z') path = "absent.txt";
     if (op == 'e' || op == 'h') path = parent;
-    if (op == 'P') {
+    if (op == 'B' || op == 'F') {
+        long attempt = argv[1][1] == 'r'
+            ? invoke(__NR_renameat, AT_FDCWD, (long)path, AT_FDCWD, (long)argv[3], 0)
+            : invoke(__NR_openat, AT_FDCWD, (long)path, O_RDWR | O_CLOEXEC, 0, 0);
+        long expected = op == 'F' && argv[1][1] == 'r' ? -20 : -13;
+        if (attempt != expected) {
+            invoke(__NR_exit, 126, 0, 0, 0, 0);
+            __builtin_unreachable();
+        }
+        if (op == 'F' && argv[1][1] == 'r') {
+            int length = 0;
+            const char suffix[] = "/child";
+            while (path[length]) {
+                if (length + sizeof(suffix) >= sizeof(parent)) {
+                    invoke(__NR_exit, 127, 0, 0, 0, 0);
+                    __builtin_unreachable();
+                }
+                parent[length] = path[length];
+                length++;
+            }
+            for (int i = 0; i < sizeof(suffix); i++) parent[length + i] = suffix[i];
+            path = parent;
+        }
+        op = 'P';
+    }
+    if (op == 'D') {
+        long first = invoke(__NR_openat, AT_FDCWD, (long)path, O_RDONLY | O_CLOEXEC, 0, 0);
+        if (first < 0) { invoke(__NR_exit, 123, 0, 0, 0, 0); __builtin_unreachable(); }
+        char bytes[16];
+        long count = invoke(__NR_read, first, (long)bytes, sizeof(bytes), 0, 0);
+        static const char expected[] = "original\n";
+        if (count != sizeof(expected)-1) invoke(__NR_exit, 124, 0, 0, 0, 0);
+        for (int i = 0; i < count; i++) if (bytes[i] != expected[i]) invoke(__NR_exit, 125, 0, 0, 0, 0);
+        invoke(__NR_close, first, 0, 0, 0, 0);
+        op = 'P';
+    }
+    if (op == 'R' || op == 'S') {
+        int moves = argv[1][1] - '0';
+        for (int i = 0; i < moves; i++) {
+            const char *from = i % 2 == 0 ? argv[2] : argv[3];
+            const char *to = op == 'S' ? from : i % 2 == 0 ? argv[3] : argv[2];
+            if (invoke(__NR_renameat, AT_FDCWD, (long)from, AT_FDCWD, (long)to, 0) != 0) {
+                invoke(__NR_exit, 120 + i, 0, 0, 0, 0);
+                __builtin_unreachable();
+            }
+        }
+        path = op == 'S' || moves % 2 == 0 ? argv[2] : argv[3];
+        op = 'P';
+    }
+    if (op == 'P' || op == 'Q') {
+        if (op == 'Q') check_filesystem_information(parent);
         int flags = O_RDONLY | O_CLOEXEC;
         if (argv[1][1] == 'c') flags = O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC;
         if (argv[1][1] == 'd') flags = O_WRONLY | O_CREAT | O_CLOEXEC;
@@ -106,6 +169,7 @@ void native_main(long *stack) {
             if (!(invoke(__NR_fcntl, result, F_GETFD, 0, 0, 0) & FD_CLOEXEC)) invoke(__NR_exit, 107, 0, 0, 0, 0);
             invoke(__NR_close, result, 0, 0, 0, 0);
         }
+        if (op == 'Q') check_filesystem_information(parent);
         if (argv[4][0] == 'p') {
             if (result < 0 && result != -95) invoke(__NR_exit, 108, 0, 0, 0, 0);
             argv[4] = result >= 0 ? "allow" : "deny";

@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use policy::{
     ApprovedPath, Decision, Delivery, EgressPolicyInterceptor, GovernedBox, Outcome, PathRefusal,
-    PathResolver, Policy, PolicyEngine, PolicyError, Principal, Request,
+    PathResolver, Policy, PolicyEngine, PolicyError, Principal, Request, RequestId,
 };
 
 /// Mint the `ApprovedPath` a `Request::Fs` now demands.
@@ -57,7 +57,7 @@ fn minimal_example() -> Result<(), PolicyError> {
     }
 
     let policy = open_policy(&history.path().join("dogwood.redb"))?;
-    let decision = policy.decide(
+    let (decision, _request_id) = policy.decide(
         &GovernedBox::assigned("test-box"),
         &Principal::agent(),
         &Request::Connect {
@@ -72,10 +72,11 @@ fn minimal_example() -> Result<(), PolicyError> {
 
 #[test]
 fn history_example() -> Result<(), PolicyError> {
-    fn submit(policy: &PolicyEngine) -> Result<(), PolicyError> {
+    fn submit(policy: &PolicyEngine, request_id: &RequestId) -> Result<(), PolicyError> {
         policy.record(
             &GovernedBox::assigned("test-box"),
             &Principal::agent(),
+            request_id,
             &Outcome::Http {
                 host: "api.github.com",
                 port: 443,
@@ -83,6 +84,7 @@ fn history_example() -> Result<(), PolicyError> {
                 path: "/v1/items",
                 delivery: Delivery::Completed { bytes: 512 },
                 status: Some(200),
+                intercepted: true,
             },
         )
     }
@@ -97,7 +99,20 @@ fn history_example() -> Result<(), PolicyError> {
         }],
         &history.path().join("dogwood.redb"),
     )?;
-    submit(&policy)
+    let (decision, request_id) = policy.decide(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        &Request::Http {
+            host: "api.github.com",
+            port: 443,
+            method: "POST",
+            path: "/v1/items",
+            body_bytes: 512,
+            intercepted: true,
+        },
+    );
+    assert!(decision.is_allow());
+    submit(&policy, &request_id.expect("the request records"))
 }
 
 /// The README's path-minting example.
@@ -160,14 +175,16 @@ fn a_conforming_request_reaches_a_catch_all_permit() {
     .expect("loads");
 
     let approved = approved("/workspace/main.py");
-    let verdict = policy.decide(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        &Request::Fs {
-            path: &approved,
-            operation: policy::FsOperation::ReadContent,
-        },
-    );
+    let verdict = policy
+        .decide(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            &Request::Fs {
+                path: &approved,
+                operation: policy::FsOperation::ReadContent,
+            },
+        )
+        .0;
     assert!(
         verdict.is_allow(),
         "the one principal conforms to every action, so the gate passes it through: {verdict:?}"
@@ -201,6 +218,7 @@ fn the_operation_vocabulary_discriminates_within_one_access_verb() {
                     operation: policy::FsOperation::Enumerate,
                 }
             )
+            .0
             .is_allow(),
         "enumeration is permitted"
     );
@@ -214,6 +232,7 @@ fn the_operation_vocabulary_discriminates_within_one_access_verb() {
                     operation: policy::FsOperation::ReadContent,
                 }
             )
+            .0
             .is_allow(),
         "a content read is refused under the same fs:read action"
     );

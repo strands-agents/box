@@ -66,6 +66,15 @@ signed route the call is accepted and changes nothing, because there is no injec
 |---|---|
 | `attach_for(&self, req: Outbound<'_>) -> Result<Option<Attachment>>` | What to edit before this request goes upstream, as an `Attachment` of header, path, and query edits. `Ok(None)` when this vault governs no credential for the destination. |
 | `redact_leaks(&self, res: Inbound<'_>) -> Option<Redactions>` | The `Redactions` a response needs because it echoed the injected secret back, or `None` when nothing leaked. It returns no `Result`: a response is already received, so there is nothing to fail closed on. |
+| `response_redactor(&self, destination: Destination<'_>) -> Option<ResponseRedactor>` | An owned scrubber for a streamed response, or `None` when no unique opaque binding matches. |
+
+`ResponseRedactor` keeps credential material private and replaces exact secret occurrences with
+`[REDACTED]`. Use `redact_header()` for each header value and `push()` for each body chunk. Each
+`push()` returns bytes ready for delivery and retains a trailing window of up to one less than the
+credential's byte length, including any possible secret prefix. At clean completion, call `finish()`
+to release the tail; on failure, drop the scrubber. Matches can cross chunk boundaries. A small event
+can wait for more bytes or clean completion. Retained state depends on the credential size, not the
+total response size.
 
 `attach_for` performs binding dispatch, phantom location, phantom **validation**,
 and SigV4 signing internally, so the phantom check is not a step a caller can skip.
@@ -91,7 +100,8 @@ returned secret and its lifetime.
 | `env://NAME` | A process environment variable. A nine-name denylist refuses `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN`, `AWS_CREDENTIAL_EXPIRATION`, `AWS_PROFILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `LD_PRELOAD`, and `LD_LIBRARY_PATH`, case-insensitively. | soft when the variable is unset |
 | `file:///path` | File contents, trailing newline stripped. | soft when the file is missing or unreadable |
 | `op://vault/item/field` | The authenticated 1Password CLI. | hard: `op read` returns one exit code for missing, locked, and signed-out, so there is no "absent" signal to trust |
-| `aws://profile` | Structured AWS session credentials for SigV4 signing. Not a single secret, so `Backend::resolve` rejects it. | hard |
+| `aws://profile` | Structured AWS session credentials for SigV4 signing, from the named profile's static keys. Not a single secret, so `Backend::resolve` rejects it. | hard |
+| `aws://` (no profile) | Structured AWS session credentials from the AWS SDK default credential provider chain (the host's ambient identity), driven on a worker thread and cached. Not a single secret, so `Backend::resolve` rejects it. | hard |
 
 A soft outcome means the vault comes up and the route appears in `skipped()`. A hard one aborts
 the open. A present value is always judged on content, so an empty, whitespace-only, non-UTF-8,
@@ -115,9 +125,9 @@ constructor cannot see, because `open` is the one seam every route passes whatev
 
 ## Secret handling
 
-No public method vends a resolved plaintext to an egress caller. A resolved secret
-lives only inside the vault, and reaches the wire as edits on an `Attachment`; the
-one plaintext exit is `Backend::resolve`. Its caller must protect the returned value.
+No public method vends a resolved plaintext to an egress caller. Credential material stays
+private to the vault and its owned response scrubber. It reaches the request wire as edits on an
+`Attachment`; the one plaintext exit is `Backend::resolve`. Its caller must protect the returned value.
 
 Secret-bearing values use `Zeroizing` storage and redact in `Debug`, including a
 `{:?}` of a whole `Vault` or `Attachment`. Redaction happens at each constructor, not at the
@@ -156,9 +166,10 @@ A reader deciding whether to trust this boundary needs four claims, each enforce
 rather than by a convention.
 
 **The workload never holds a secret.** It holds a phantom: a `strands_box_`-prefixed 64-hex
-token from the OS CSPRNG, bound to one destination. Presenting it against a different
-destination attaches nothing. A workload that exfiltrated its whole environment would be
-leaking values that authenticate nowhere.
+token from the OS CSPRNG, bound to one credential's destinations. Routes with an equal
+`Locator` and prefix share one phantom; two credentials never do. Presenting it against a
+destination outside that credential's routes attaches nothing. A workload that exfiltrated its
+whole environment would be leaking values that authenticate nowhere.
 
 **A value that cannot authenticate never becomes a credential.** Every source returns a
 crate-internal `Secret`, and its only constructor refuses an empty value, a whitespace-only
@@ -203,3 +214,23 @@ Two are worth knowing even if you are only reading: the unusable-secret decision
 `Secret` type is the reason three sources cannot each be wrong about content; and the
 endpoint-breadth decision, because the guard it replaced had been bypassable by writing `*:443`
 instead of `*`.
+
+## Live daemon test
+
+The `credsd_e2e` tests use local socket fixtures. One optional test checks a running
+credsd daemon. Configure a test environment that permits the test process to list
+credentials, then run:
+
+```sh
+CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_ENVIRONMENT=test-environment \
+  cargo test -p strands-box-credentials --all-features --test end_to_end \
+  credsd_e2e::a_live_daemon_maps_an_unknown_environment_to_a_hard_failure -- --exact --nocapture
+```
+
+The test checks daemon health and caller access to the configured environment before
+requesting an unknown environment. It requires the specific unknown-environment error.
+A connection failure cannot satisfy that assertion. The configured environment is used
+only for the credential-list check, not for credential acquisition.
+
+An explicit socket or test environment makes setup failures fatal. Without either
+setting, the test reports a skip. A skipped test does not prove daemon compatibility.

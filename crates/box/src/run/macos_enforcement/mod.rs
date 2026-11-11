@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use policy::{
     FsOperation, FsResult, GovernedBox, Outcome, PathResolver, PolicyEngine, Principal, Request,
+    RequestId,
 };
 
 use super::telemetry::{DecisionRecorder, EffectiveDecision};
@@ -62,6 +63,8 @@ unsafe extern "C" {
     fn box_es_prepare_bootstrap(client: *mut c_void, device: u64, inode: u64) -> bool;
     fn box_es_set_process_mode(client: *mut c_void, pid: i32, mediated: bool) -> bool;
     fn box_es_stop(client: *mut c_void) -> i32;
+    #[cfg(test)]
+    fn box_es_test_open(mode: u32, flags: u32, event: *mut RawEvent) -> bool;
     #[cfg(test)]
     fn box_es_event_size() -> usize;
     #[cfg(test)]
@@ -164,7 +167,12 @@ impl Plan {
                     add(&source, operation, "fs:read", false);
                 }
                 if event.flags & FREAD != 0 {
-                    add(&source, FsOperation::ReadContent, "fs:read", false);
+                    let operation = if event.mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32 {
+                        FsOperation::Enumerate
+                    } else {
+                        FsOperation::ReadContent
+                    };
+                    add(&source, operation, "fs:read", false);
                 }
                 // FTRUNC can request a write even with a read-only descriptor.
                 if event.flags & (FWRITE | libc::O_TRUNC as u32) != 0 {
@@ -264,6 +272,7 @@ struct PendingDecision {
     operation: FsOperation,
     action: &'static str,
     decision: policy::Decision,
+    request_id: Option<RequestId>,
 }
 
 #[derive(Default)]
@@ -342,7 +351,7 @@ impl Context {
                 self.resolver.approve_host(&check.path)
             }
             .map_err(io::Error::other)?;
-            let decision = self.engine.decide(
+            let (decision, request_id) = self.engine.decide(
                 &self.governed,
                 &Principal::agent(),
                 &Request::Fs {
@@ -350,12 +359,13 @@ impl Context {
                     operation: check.operation,
                 },
             );
-            let allowed = decision.is_allow();
+            let allowed = decision.is_allow() && request_id.is_some();
             pending.push(PendingDecision {
                 path: approved.reported().into_owned(),
                 operation: check.operation,
                 action: check.action,
                 decision,
+                request_id,
             });
             if !allowed {
                 return Err(io::Error::new(
@@ -414,9 +424,11 @@ impl Context {
                         )
                     });
                 if allowed
+                    && let Some(request_id) = pending.request_id
                     && let Err(error) = self.engine.record(
                         &self.governed,
                         &Principal::agent(),
+                        &request_id,
                         &Outcome::Fs {
                             path: Path::new(&pending.path),
                             operation: pending.operation,

@@ -8,6 +8,10 @@ use crate::{
 /// The `credential_ref` a signed AWS route carries: a placeholder, never dereferenced.
 pub(crate) const AWS_SENTINEL_REF: &str = "aws-signed://route";
 
+/// The `credential_ref` a strip-phantom route carries: it resolves no secret, so the reference is a
+/// placeholder, never dereferenced.
+pub(crate) const STRIP_SENTINEL_REF: &str = "strip-phantom://route";
+
 /// How strictly the vault checks the Phantom_Token before it attaches the Real_Secret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PhantomCheck {
@@ -18,7 +22,7 @@ pub enum PhantomCheck {
     Advisory,
 }
 
-/// Which of the two credential shapes a route is.
+/// Which credential shape a route is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RouteKind {
     /// A single secret attached at one location, standing behind a Phantom_Token.
@@ -39,6 +43,27 @@ pub(crate) enum RouteKind {
         /// The structured AWS config block (`source = "aws"`, optional `profile`), interpreted by the
         /// AWS source at signing time.
         config: Locator,
+        /// An explicit `(service, region)` to sign under, instead of deriving them from the request
+        /// host. Set for a re-routed backend whose host the box cannot derive a scope from (a gateway
+        /// or a custom domain); `None` keeps host derivation for an ordinary AWS destination.
+        scope: Option<(String, String)>,
+    },
+    /// A credential the box owns and attaches itself: the real secret is resolved at open and
+    /// attached unconditionally, with no phantom minted and no placeholder check. A re-route's backend
+    /// token uses this, because the workload never presents a placeholder for it.
+    BoxOwned {
+        /// How the real secret is attached to the outbound request.
+        inject: InjectMode,
+    },
+    /// A phantom with no real secret behind it: minted so a workload harness has a placeholder in its
+    /// environment, and stripped from the request before it goes upstream, with nothing attached. A
+    /// re-routed destination's own `secret` uses this, because the box forwards to the backend and the
+    /// real destination credential is never injected.
+    StripPhantom {
+        /// Where the harness places the placeholder, so the vault strips it before the request egresses.
+        harness: InjectMode,
+        /// The literal prefix the minted placeholder carries, before its 64 hex chars.
+        phantom_prefix: String,
     },
 }
 
@@ -79,7 +104,53 @@ impl RouteSpec {
         Self {
             destination,
             credential_ref: Locator::Uri(AWS_SENTINEL_REF.to_string()),
-            kind: RouteKind::SignedAws { config },
+            kind: RouteKind::SignedAws {
+                config,
+                scope: None,
+            },
+        }
+    }
+
+    /// Sign under an explicit `(service, region)` instead of deriving them from the request host. For
+    /// a re-routed backend whose host the box cannot derive a scope from. A no-op on a non-signed
+    /// route.
+    #[must_use]
+    pub fn aws_scope(mut self, service: impl Into<String>, region: impl Into<String>) -> Self {
+        if let RouteKind::SignedAws { scope, .. } = &mut self.kind {
+            *scope = Some((service.into(), region.into()));
+        }
+        self
+    }
+
+    /// A **box-owned** route: the box resolves `credential_ref` at open and attaches it at `inject`
+    /// unconditionally, with no phantom minted and no placeholder check. For a re-route's backend
+    /// token, which the workload never sees.
+    #[must_use]
+    pub fn box_owned(
+        destination: DestinationPattern,
+        credential_ref: Locator,
+        inject: InjectMode,
+    ) -> Self {
+        Self {
+            destination,
+            credential_ref,
+            kind: RouteKind::BoxOwned { inject },
+        }
+    }
+
+    /// A **strip-phantom** route: the vault mints a placeholder (so a workload harness has one) and
+    /// strips it from each request to the destination, attaching nothing. It resolves no real secret.
+    /// For a re-routed destination's own `secret`, which the box forwards to a backend and never
+    /// injects.
+    #[must_use]
+    pub fn strip_phantom(destination: DestinationPattern, harness: InjectMode) -> Self {
+        Self {
+            destination,
+            credential_ref: Locator::Uri(STRIP_SENTINEL_REF.to_string()),
+            kind: RouteKind::StripPhantom {
+                harness,
+                phantom_prefix: DEFAULT_PHANTOM_PREFIX.to_string(),
+            },
         }
     }
 
@@ -117,8 +188,10 @@ impl RouteSpec {
     pub fn phantom_prefix(mut self, prefix: impl Into<String>) -> Result<Self> {
         let prefix = prefix.into();
         check_phantom_prefix(&prefix)?;
-        if let RouteKind::Opaque { phantom_prefix, .. } = &mut self.kind {
-            *phantom_prefix = prefix;
+        match &mut self.kind {
+            RouteKind::Opaque { phantom_prefix, .. }
+            | RouteKind::StripPhantom { phantom_prefix, .. } => *phantom_prefix = prefix,
+            RouteKind::SignedAws { .. } | RouteKind::BoxOwned { .. } => {}
         }
         Ok(self)
     }
@@ -350,7 +423,7 @@ mod tests {
         );
 
         match spec.kind() {
-            RouteKind::SignedAws { config } => assert_eq!(config.scheme(), "aws"),
+            RouteKind::SignedAws { config, .. } => assert_eq!(config.scheme(), "aws"),
             other => panic!("expected a signed route, got {other:?}"),
         }
         // Clone + equality round-trip (every component derives Eq).

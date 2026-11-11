@@ -4,11 +4,11 @@ use std::io::Write as _;
 use std::path::Path;
 use std::process::ExitCode;
 
-use policy::{compose_action_schema, event_schema_source, generate_mcp_schema};
+use policy::{event_schema_source, generate_mcp_schema};
 
 use crate::error::{BoxError, McpSchemaError};
 use crate::record::config::egress::EgressSecret;
-use crate::record::config::{read_mcp_servers, read_remote_mcp_servers};
+use crate::record::config::{read_mcp_servers, read_remote_mcp_servers, read_tool_grammars};
 use crate::record::layout::operator_home_directory;
 
 const ACTION_SCHEMA_FILE: &str = "actions.cedarschema";
@@ -21,6 +21,7 @@ pub(crate) async fn generate_schema(
     let working =
         std::env::current_dir().map_err(|source| McpSchemaError::WorkingDirectory { source })?;
     let config = working.join(config);
+    let grammars = read_tool_grammars(&config)?;
     let servers = read_mcp_servers(&config)?;
     let home = operator_home_directory()?;
 
@@ -60,7 +61,9 @@ pub(crate) async fn generate_schema(
         .iter()
         .map(|(server, schema)| (server.as_str(), schema.as_str()))
         .collect::<Vec<_>>();
-    let actions = compose_action_schema(&schemas).map_err(McpSchemaError::from)?;
+    let actions = grammars
+        .compose_action_schema(&schemas)
+        .map_err(McpSchemaError::from)?;
     let directory = working.join(output_dir);
     std::fs::create_dir_all(&directory).map_err(|source| McpSchemaError::Write {
         path: directory.clone(),

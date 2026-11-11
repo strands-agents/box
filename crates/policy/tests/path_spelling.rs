@@ -61,6 +61,22 @@ fn refusal(result: Result<PolicyEngine, PolicyStagingError>) -> String {
     }
 }
 
+fn schema_refusal(result: Result<PolicyEngine, PolicyStagingError>) -> String {
+    match result {
+        Ok(_) => panic!("an attribute the schema does not declare must refuse the load"),
+        Err(PolicyStagingError::Policy(PolicyError::Schema(reason))) => reason,
+        Err(other) => panic!("expected a schema refusal, got {other}"),
+    }
+}
+
+fn family_refusal(result: Result<PolicyEngine, PolicyStagingError>) -> String {
+    match result {
+        Ok(_) => panic!("a read of the input without one action family must refuse the load"),
+        Err(PolicyStagingError::Policy(PolicyError::InputAcrossFamilies(reason))) => reason,
+        Err(other) => panic!("expected an action-family refusal, got {other}"),
+    }
+}
+
 fn reads(engine: &PolicyEngine, path: &ApprovedPath) -> bool {
     engine
         .decide(
@@ -71,6 +87,7 @@ fn reads(engine: &PolicyEngine, path: &ApprovedPath) -> bool {
                 operation: FsOperation::ReadContent,
             },
         )
+        .0
         .is_allow()
 }
 
@@ -85,6 +102,22 @@ fn connects(engine: &PolicyEngine, host: &str) -> bool {
                 port: 443,
             },
         )
+        .0
+        .is_allow()
+}
+
+fn connects_to(engine: &PolicyEngine, address: &str) -> bool {
+    engine
+        .decide(
+            &GovernedBox::assigned("spelling"),
+            &Principal::agent(),
+            &Request::Connect {
+                host: "metadata.example",
+                ip: Some(address.parse().expect("an address")),
+                port: 443,
+            },
+        )
+        .0
         .is_allow()
 }
 
@@ -102,6 +135,7 @@ fn spawns(engine: &PolicyEngine, program: &str) -> bool {
                 cwd: "/workspace",
             },
         )
+        .0
         .is_allow()
 }
 
@@ -135,14 +169,18 @@ fn an_absolute_path_under_the_home_is_refused_and_its_home_relative_form_forbids
     assert!(reads(&engine, &home.approved("project/notes.md")));
 }
 
+const EVERY_FS_ACTION: &str = r#"action in [
+            Box::Action::"fs:read", Box::Action::"fs:write",
+            Box::Action::"fs:delete", Box::Action::"fs:move"
+        ]"#;
+
 #[test]
-fn a_forbid_over_every_action_is_judged_too() {
+fn a_forbid_over_every_filesystem_action_is_judged_too() {
     let home = Home::new();
     let absolute = format!(
         r#"{READ_ALL}
-        forbid(principal, action, resource)
-        when {{ context has input && context.input has path
-            && context.input.path == "{}" }};"#,
+        forbid(principal, {EVERY_FS_ACTION}, resource)
+        when {{ context.input.path == "{}" }};"#,
         home.canonical.join("project/secrets.env").display()
     );
     let reason = refusal(home.open("broad-absolute", &absolute));
@@ -153,15 +191,43 @@ fn a_forbid_over_every_action_is_judged_too() {
 
     let control = format!(
         r#"{READ_ALL}
-        forbid(principal, action, resource)
-        when {{ context has input && context.input has path
-            && context.input.path == "~/project/secrets.env" }};"#
+        forbid(principal, {EVERY_FS_ACTION}, resource)
+        when {{ context.input.path == "~/project/secrets.env" }};"#
     );
     let engine = home
         .open("broad-tilde", &control)
         .expect("the ~ spelling loads");
     assert!(!reads(&engine, &home.approved("project/secrets.env")));
     assert!(reads(&engine, &home.approved("project/notes.md")));
+}
+
+#[test]
+fn a_path_rule_over_every_action_is_refused_at_open() {
+    let home = Home::new();
+    let macro_read = format!(
+        r#"{READ_ALL}
+        def cedar is_secret(?path) {{ ?path like "*/secrets.env" }};
+        @id("macro")
+        forbid(principal, action, resource)
+        when {{ is_secret(context.input.path) }};"#
+    );
+    let reason = family_refusal(home.open("macro", &macro_read));
+    assert!(
+        reason.contains("rule @id(\"macro\") reads context.input.path and constrains no action"),
+        "{reason}"
+    );
+    let broad = format!(
+        r#"{READ_ALL}
+        @id("broad")
+        forbid(principal, action, resource)
+        when {{ context has input && context.input has path
+            && context.input.path == "~/project/secrets.env" }};"#
+    );
+    let reason = family_refusal(home.open("broad", &broad));
+    assert!(
+        reason.contains("rule @id(\"broad\") reads context.input.path and constrains no action"),
+        "{reason}"
+    );
 }
 
 #[test]
@@ -340,6 +406,7 @@ fn requests(engine: &PolicyEngine, path: &str) -> bool {
                 intercepted: true,
             },
         )
+        .0
         .is_allow()
 }
 
@@ -347,46 +414,36 @@ const REQUEST_ALL: &str =
     r#"permit(principal == Box::Agent::"self", action == Box::Action::"http:request", resource);"#;
 
 #[test]
-fn an_operation_guard_keeps_a_filesystem_path_rule_off_an_http_request_with_the_same_path() {
-    // `context.input.path` carries a URL path on `http:request` and a filesystem path on
-    // `fs:*`, so a forbid over every action that compares `path` fires on both. Every
-    // filesystem input declares `operation` and no other input does, so `context.input has
-    // operation` is the guard that keeps the rule on the filesystem.
+fn a_filesystem_path_rule_stays_off_an_http_request_with_the_same_path() {
     let home = Home::new();
-    let unguarded = format!(
+    let across = format!(
         r#"{READ_ALL}
         {REQUEST_ALL}
-        forbid(principal, action, resource)
-        when {{ context has input && context.input has path
-            && context.input.path like "*/secrets.env" }};"#
+        forbid(principal, action in [Box::Action::"fs:read", Box::Action::"http:request"], resource)
+        when {{ context.input.path like "*/secrets.env" }};"#
     );
-    let engine = home
-        .open("unguarded", &unguarded)
-        .expect("the forbid loads");
-    assert!(!reads(&engine, &home.approved("project/secrets.env")));
-    assert!(reads(&engine, &home.approved("project/notes.md")));
+    let reason = family_refusal(home.open("across", &across));
     assert!(
-        !requests(&engine, "/v1/secrets.env"),
-        "the unguarded rule denies a request whose URL path matches the filesystem pattern"
+        reason.contains("write one rule for each family: [Box::Action::\"fs:read\"] and [Box::Action::\"http:request\"]"),
+        "{reason}"
     );
-    assert!(requests(&engine, "/v1/notes"));
 
-    let guarded = format!(
+    let filesystem = format!(
         r#"{READ_ALL}
         {REQUEST_ALL}
-        forbid(principal, action, resource)
-        when {{ context has input && context.input has path && context.input has operation
-            && context.input.path like "*/secrets.env" }};"#
+        forbid(principal, {EVERY_FS_ACTION}, resource)
+        when {{ context.input.path like "*/secrets.env" }};"#
     );
     let engine = home
-        .open("guarded", &guarded)
-        .expect("the guarded forbid loads");
+        .open("filesystem", &filesystem)
+        .expect("the filesystem forbid loads");
     assert!(!reads(&engine, &home.approved("project/secrets.env")));
     assert!(reads(&engine, &home.approved("project/notes.md")));
     assert!(
         requests(&engine, "/v1/secrets.env"),
-        "the guard leaves the request to the permit"
+        "the filesystem rule leaves the request to the permit"
     );
+    assert!(requests(&engine, "/v1/notes"));
 }
 
 #[test]
@@ -432,18 +489,20 @@ fn a_multi_word_program_literal_loads_without_a_finding_and_never_matches() {
         "KNOWN GAP: no finding names the literal; got {:?}",
         engine.warnings()
     );
-    let decision = engine.decide(
-        &GovernedBox::assigned("spelling"),
-        &Principal::agent(),
-        &Request::ShellSpawn {
-            command: "git status",
-            program: "git",
-            program_path: "/usr/bin/git",
-            credential_reads: &[],
-            args: &["status".to_string()],
-            cwd: "/workspace",
-        },
-    );
+    let decision = engine
+        .decide(
+            &GovernedBox::assigned("spelling"),
+            &Principal::agent(),
+            &Request::ShellSpawn {
+                command: "git status",
+                program: "git",
+                program_path: "/usr/bin/git",
+                credential_reads: &[],
+                args: &["status".to_string()],
+                cwd: "/workspace",
+            },
+        )
+        .0;
     assert!(
         !decision.is_allow(),
         "the permit the author believes exists matches no spawn: {decision:?}"
@@ -511,4 +570,235 @@ fn a_trailing_dot_and_an_internationalized_host_are_refused_and_punycode_loads()
         .open("punycode-host", &ace)
         .expect("the punycode spelling loads");
     assert!(!connects(&engine, "xn--bcher-kva.example"));
+}
+
+/// A destination address reads as `ip4` and `ip6`, so a rule that names the removed `ip` is
+/// refused and the refusal names both replacements.
+#[test]
+fn a_rule_that_names_the_removed_address_attribute_is_refused_and_names_both_replacements() {
+    let home = Home::new();
+    let removed = format!(
+        r#"{CONNECT_ALL}
+        @id("block_metadata")
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input has ip && context.input.ip like "169.254.*" }};"#
+    );
+    let reason = schema_refusal(home.open("removed-ip", &removed));
+    assert!(reason.contains("rule @id(\"block_metadata\")"), "{reason}");
+    assert!(
+        reason.contains("reads context.input.ip, which no action carries"),
+        "{reason}"
+    );
+    assert!(reason.contains("context.input.ip4"), "{reason}");
+    assert!(reason.contains("context.input.ip6"), "{reason}");
+}
+
+/// One `ip4` literal covers every IPv6 encoding that carries that address, and an `ip6` literal
+/// of the IPv4 family is refused with the attribute that holds it.
+#[test]
+fn one_ipv4_literal_forbids_every_encoding_that_carries_it() {
+    let home = Home::new();
+    let wrong_family = format!(
+        r#"{CONNECT_ALL}
+        @id("block_metadata")
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input has ip6 && context.input.ip6 == "169.254.169.254" }};"#
+    );
+    let reason = refusal(home.open("wrong-family", &wrong_family));
+    assert!(reason.contains("rule @id(\"block_metadata\")"), "{reason}");
+    assert!(
+        reason.contains("compare context.input.ip4 instead"),
+        "{reason}"
+    );
+
+    let control = format!(
+        r#"{CONNECT_ALL}
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input has ip4 && context.input.ip4 == "169.254.169.254" }};"#
+    );
+    let engine = home
+        .open("dotted-address", &control)
+        .expect("the dotted quad loads");
+    for encoding in [
+        "169.254.169.254",
+        "64:ff9b::a9fe:a9fe",
+        "::ffff:0:a9fe:a9fe",
+        "::ffff:a9fe:a9fe",
+        "2002:a9fe:a9fe::",
+    ] {
+        assert!(
+            !connects_to(&engine, encoding),
+            "one ip4 literal must deny {encoding}, which carries that address"
+        );
+    }
+    assert!(connects_to(&engine, "203.0.113.7"));
+}
+
+/// A rule on the translator prefix itself could not be written before the split: the fold
+/// replaced the wire form with the address it carried and discarded it.
+#[test]
+fn a_translator_prefix_rule_forbids_the_wire_form_and_leaves_the_address_it_carries() {
+    let home = Home::new();
+    let translator = format!(
+        r#"{CONNECT_ALL}
+        @id("no_nat64_translator")
+        forbid(principal, action == Box::Action::"net:connect", resource)
+        when {{ context.input has ip6 && context.input.ip6 like "64:ff9b::*" }};"#
+    );
+    let engine = home
+        .open("translator-prefix", &translator)
+        .expect("a wire-form pattern loads");
+
+    for routed in ["64:ff9b::5db8:d822", "64:ff9b::a9fe:a9fe"] {
+        assert!(
+            !connects_to(&engine, routed),
+            "{routed} routes through the translator"
+        );
+    }
+    for direct in ["93.184.216.34", "2002:5db8:d822::", "64:ff9c::5db8:d822"] {
+        assert!(
+            connects_to(&engine, direct),
+            "{direct} does not route through the translator"
+        );
+    }
+}
+
+#[test]
+fn shell_working_directory_literals_use_the_operator_home_spelling() {
+    let home = Home::new();
+    for action in ["shell:exec", "shell:spawn"] {
+        for (index, comparison) in [
+            format!(
+                r#"context.input.cwd == "{}/project""#,
+                home.canonical.display()
+            ),
+            format!(
+                r#""{}/project" == context.input.cwd"#,
+                home.canonical.display()
+            ),
+            format!(
+                r#"context.input.cwd like "{}/project/*""#,
+                home.canonical.display()
+            ),
+            format!(
+                r#"["{}/project"].contains(context.input.cwd)"#,
+                home.canonical.display()
+            ),
+            format!(r#"context.input.cwd == "{}""#, home.canonical.display()),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let text = format!(
+                r#"@id("protected_directory")
+                forbid(principal, action == Box::Action::"{action}", resource)
+                when {{ {comparison} }};"#
+            );
+            let name = format!("cwd-{action}-{index}");
+            let reason = refusal(home.open(&name, &text));
+            assert!(reason.contains("protected_directory"), "{reason}");
+            assert!(reason.contains("context.input.cwd"), "{reason}");
+            assert!(reason.contains("write \"~"), "{reason}");
+            assert!(PolicyEngine::validate(&home.operator(), &[source(&text)]).is_err());
+            assert!(
+                !PolicyEngine::check(&home.operator(), &[source(&text)], true)
+                    .errors()
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[test]
+fn shell_working_directory_boundaries_remain_loadable() {
+    let home = Home::new();
+    for action in ["shell:exec", "shell:spawn"] {
+        for (index, cwd) in [
+            "~".to_string(),
+            "~/project".to_string(),
+            "/opt/project".to_string(),
+            format!("{}-other/project", home.canonical.display()),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let text = format!(
+                r#"permit(principal, action == Box::Action::"{action}", resource)
+                when {{ context.input.cwd == "{cwd}" }};"#
+            );
+            let engine = home
+                .open(&format!("cwd-valid-{action}-{index}"), &text)
+                .expect("home-relative and outside-home directories load");
+            assert!(engine.warnings().is_empty());
+            let request = if action == "shell:exec" {
+                Request::ShellExec {
+                    command: "pwd",
+                    program: "pwd",
+                    args: &[],
+                    cwd,
+                }
+            } else {
+                Request::ShellSpawn {
+                    command: "pwd",
+                    program: "pwd",
+                    program_path: "/usr/bin/pwd",
+                    credential_reads: &[],
+                    args: &[],
+                    cwd,
+                }
+            };
+            assert!(
+                engine
+                    .decide(
+                        &GovernedBox::assigned("cwd-spelling"),
+                        &Principal::agent(),
+                        &request
+                    )
+                    .0
+                    .is_allow()
+            );
+        }
+        let text = format!(
+            r#"permit(principal, action == Box::Action::"{action}", resource)
+            when {{ context.input.cwd == "{}/project" }};"#,
+            home.canonical.display()
+        );
+        PolicyEngine::open(
+            vec![source(&text)],
+            &home.history(&format!("cwd-unanchored-{action}")),
+        )
+        .expect("without an anchored home the absolute spelling remains valid");
+        assert!(PolicyEngine::validate(&Operator::unanchored(), &[source(&text)]).is_ok());
+    }
+}
+
+#[test]
+fn shell_working_directory_patterns_receive_path_diagnostics() {
+    let home = Home::new();
+    for (index, comparison) in [
+        r#"context.input.cwd == "~/project/""#,
+        r#"context.input.cwd like "~/project/*/""#,
+    ]
+    .iter()
+    .enumerate()
+    {
+        let text = format!(
+            r#"forbid(principal, action in [Box::Action::"shell:exec", Box::Action::"shell:spawn"], resource)
+            when {{ {comparison} }};"#
+        );
+        let reason = refusal(home.open(&format!("cwd-trailing-{index}"), &text));
+        assert!(reason.contains("context.input.cwd"), "{reason}");
+        assert!(reason.contains("without a trailing slash"), "{reason}");
+    }
+    let text = format!(
+        r#"forbid(principal, action == Box::Action::"shell:spawn", resource)
+        when {{ context.input.cwd like "*{}/project/*" }};"#,
+        home.canonical.display()
+    );
+    let engine = home
+        .open("cwd-wildcard", &text)
+        .expect("an uncertain pattern warns");
+    assert!(
+        matches!(engine.warnings(), [PolicyWarning::HomeAfterWildcard { attribute, .. }] if attribute == "cwd")
+    );
 }

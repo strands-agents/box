@@ -810,7 +810,18 @@ fn a_shell_spawn_forbid_on_git_refuses_the_binary_and_leaves_the_git_servers_too
     let git = Server::new("git", "git-mcp", "status", DiscoveryBehavior::Ready);
     box_.install_server(&git);
     box_.install_program("git", "#!/bin/bash\nprintf 'GIT_BINARY_RAN\\n'\n");
-    box_.declare_tool("git", "[tool.git]\ncommand = [\"git\"]\n");
+    let interpreter_grant = if cfg!(target_os = "linux") {
+        let bash = std::path::Path::new("/bin/bash")
+            .canonicalize()
+            .expect("Bash interpreter");
+        format!("[tool.git.filesystem]\nread_file = [{bash:?}]\n")
+    } else {
+        String::new()
+    };
+    box_.declare_tool(
+        "git",
+        &format!("[tool.git]\ncommand = [\"git\"]\n{interpreter_grant}"),
+    );
     let policy = format!(
         "@id(\"no_git_binary\")\n\
          forbid (principal, action == Box::Action::\"shell:spawn\", resource)\n\
@@ -903,6 +914,78 @@ fn a_shell_spawn_forbid_on_git_refuses_the_binary_and_leaves_the_git_servers_too
                 && record.resource.ends_with("/operator-bin/git"))
         }),
         "the server's permit must not leak into the binary path: {records:?}"
+    );
+}
+
+/// A budget on a stdio MCP tool holds across two runs of the same box: the second run still sees
+/// the first run's calls, as every other rule does.
+#[test]
+fn a_tool_budget_holds_across_two_runs_of_a_stdio_box() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = RuntimeMcpBox::new("mcp-tool-budget-restart");
+    let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready);
+    box_.install_server(&alpha);
+    let policy = format!(
+        r#"{}
+@id("one-read")
+forbid (principal, action == alpha::Action::"read", resource)
+when temporal {{
+  exists (total: Long). (
+    (count for (t: Timepoint). where (
+      formerly within 1h ( alpha::Action::"read"::request{{ input.value: "fixture" }} && tp(t) )
+    )) == total && total >= 2
+  )
+}};"#,
+        policy_for("alpha", "read")
+    );
+    box_.write_workspace(&policy, &[alpha], BLOCKING_WORKLOAD);
+
+    let one_run = |calls: &[&str]| -> Vec<Value> {
+        let _ = std::fs::remove_file(box_.workload_path("release"));
+        let _ = std::fs::remove_file(box_.workload_path("workload.started"));
+        let mut run = box_.spawn();
+        run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+        let mut client = box_.open_client("alpha-mcp");
+        run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
+        client.initialize_and_activate(json!("initialize-1"), STARTUP);
+        let list = client.list_root(json!(2), STARTUP);
+        assert_list_response(&list, &json!(2), "read");
+        let replies = calls
+            .iter()
+            .map(|id| client.call(json!(id), "read", STARTUP))
+            .collect();
+        drop(client);
+        box_.release_workload();
+        let output = run.wait(SHUTDOWN);
+        assert!(
+            output.status.success(),
+            "the run must succeed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        replies
+    };
+
+    let first = one_run(&["call-1", "call-2"]);
+    assert_eq!(
+        error_code(&first[0]),
+        None,
+        "the first read is within budget: {}",
+        first[0]
+    );
+    assert_eq!(
+        error_code(&first[1]),
+        Some(-32001),
+        "the second read is over budget: {}",
+        first[1]
+    );
+    let second = one_run(&["call-3"]);
+    assert_eq!(
+        error_code(&second[0]),
+        Some(-32001),
+        "the second run still counts the first run's read: {}",
+        second[0]
     );
 }
 
@@ -1774,7 +1857,7 @@ fn unresolved_completion_keeps_ready_tools_and_withdraws_live_state_on_exit() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(r#"discovery denied tools/list for ["missing"]"#),
+        stderr.contains(r#"a per-tool rule never loaded for ["missing"]"#),
         "{stderr}"
     );
     drop(client);
@@ -2176,22 +2259,22 @@ fn trusted_launch_path_falls_back_when_the_run_path_is_absent() {
     let mut run = box_.spawn_without_trusted_path();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let client = box_.open_client("env");
-    run.wait_for_through_alias(box_.server_started("env"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("fallback-mcp"), STARTUP);
 
     assert_eq!(
-        box_.trace("env", "path"),
+        box_.trace("fallback-mcp", "path"),
         "/usr/bin:/bin",
         "an absent trusted PATH must use the fixed MCP fallback, with no box bin"
     );
     let environment: serde_json::Map<String, Value> =
-        serde_json::from_str(&box_.trace("env", "environment"))
+        serde_json::from_str(&box_.trace("fallback-mcp", "environment"))
             .expect("parse the fallback child environment");
     assert_eq!(
         environment.get("PATH").and_then(Value::as_str),
         Some("/usr/bin:/bin")
     );
     assert_eq!(
-        serde_json::from_str::<Value>(&box_.trace("env", "argv"))
+        serde_json::from_str::<Value>(&box_.trace("fallback-mcp", "argv"))
             .expect("parse the fallback command arguments"),
         json!(["--declared", "trace"]),
         "the PATH fallback must still start the declared command"
@@ -2263,7 +2346,7 @@ fn runtime_ignores_workspace_and_private_generated_schema_artifacts() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(r#"discovery denied tools/list for ["stale"]"#),
+        stderr.contains(r#"a per-tool rule never loaded for ["stale"]"#),
         "the stale-only action must degrade rather than adopt a stored schema: {stderr}"
     );
     assert!(
@@ -2290,7 +2373,7 @@ fn runtime_ignores_workspace_and_private_generated_schema_artifacts() {
     );
     assert!(
         String::from_utf8_lossy(&second_output.stderr)
-            .contains(r#"discovery denied tools/list for ["stale"]"#),
+            .contains(r#"a per-tool rule never loaded for ["stale"]"#),
         "the second run must also degrade the stale-only action: {}",
         String::from_utf8_lossy(&second_output.stderr)
     );
@@ -2333,9 +2416,14 @@ fn one_locked_run_keeps_its_record_policy_and_mcp_snapshot() {
 
     let beta = Server::new("beta", "beta-mcp", "write", DiscoveryBehavior::Ready);
     box_.install_server(&beta);
+    let renamed = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready)
+        .launched_through(
+            "alpha-mcp",
+            vec!["--declared".to_string(), "alpha-second".to_string()],
+        );
     box_.write_workspace(
         &policy_for("beta", "write"),
-        &[beta],
+        &[beta, renamed],
         r#"
 set -eu
 : > "$HOME/second-workload.started"
@@ -2395,5 +2483,104 @@ set -eu
     assert!(
         box_.root().is_dir(),
         "the completed run must keep its configured box"
+    );
+}
+
+fn call_read_with(client: &mut RunningMcpClient, id: &str, value: &str) -> Value {
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {"name": "read", "arguments": {"value": value}}
+    }));
+    client.receive(STARTUP)
+}
+
+/// One run of the box: list the tools, then call `read` with each value in order.
+fn run_and_call(box_: &RuntimeMcpBox, values: &[&str]) -> Vec<Value> {
+    let _ = std::fs::remove_file(box_.workload_path("workload.started"));
+    let _ = std::fs::remove_file(box_.box_home().join("release"));
+    let mut run = box_.spawn();
+    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+    let mut client = box_.open_client("alpha-mcp");
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
+    client.initialize_and_activate(json!("initialize-1"), STARTUP);
+    assert_list_response(&client.list_root(json!(2), STARTUP), &json!(2), "read");
+    let replies = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| call_read_with(&mut client, &format!("call-{index}"), value))
+        .collect();
+    drop(client);
+    box_.release_workload();
+    let output = run.wait(SHUTDOWN);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    replies
+}
+
+#[test]
+fn a_tool_precondition_met_in_one_run_holds_in_the_next() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = RuntimeMcpBox::new("mcp-tool-history-restart");
+    let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready);
+    box_.install_server(&alpha);
+    let policy = format!(
+        "{}\n@id(\"after_first\")\n\
+         forbid (principal, action == alpha::Action::\"read\", resource)\n\
+         when {{ context.input.value == \"second\" }}\n\
+         when temporal {{ formerly within 1h ( alpha::Action::\"read\"::request{{ input.value: \"first\" }} ) }};",
+        mcp_call_policy_for("alpha")
+    );
+    box_.write_workspace(&policy, &[alpha], BLOCKING_WORKLOAD);
+
+    let first_run = run_and_call(&box_, &["second", "first", "second"]);
+    assert!(first_run[0].get("error").is_none(), "{}", first_run[0]);
+    assert!(first_run[1].get("error").is_none(), "{}", first_run[1]);
+    assert_eq!(error_code(&first_run[2]), Some(-32001), "{}", first_run[2]);
+
+    let second_run = run_and_call(&box_, &["second"]);
+    assert_eq!(
+        error_code(&second_run[0]),
+        Some(-32001),
+        "the precondition met in the first run still holds: {}",
+        second_run[0]
+    );
+}
+
+/// A one-call limit counted over the tool's own `::response` refuses the second call.
+#[test]
+fn a_limit_over_a_tools_own_response_refuses_the_next_call() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = RuntimeMcpBox::new("mcp-tool-response-limit");
+    let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready);
+    box_.install_server(&alpha);
+    let policy = format!(
+        "{}\n@id(\"one_read\")\n\
+         forbid (principal, action == alpha::Action::\"read\", resource)\n\
+         when temporal {{ formerly within 1h ( alpha::Action::\"read\"::response{{ input.value: \"first\" }} ) }};",
+        mcp_call_policy_for("alpha")
+    );
+    box_.write_workspace(&policy, &[alpha], BLOCKING_WORKLOAD);
+
+    let replies = run_and_call(&box_, &["first", "second"]);
+    assert!(replies[0].get("error").is_none(), "{}", replies[0]);
+    assert_eq!(
+        error_code(&replies[1]),
+        Some(-32001),
+        "the finished first call is recorded under the tool's own action: {}",
+        replies[1]
+    );
+    assert_eq!(
+        box_.call_count("alpha-mcp"),
+        1,
+        "the refused call never reached the server"
     );
 }

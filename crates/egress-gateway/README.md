@@ -6,28 +6,29 @@ traffic, applies credential mutations, and emits secret-free audit records.
 
 Authorization is supplied by the caller as an `EffectInterceptor` — the policy
 engine's seam. This crate holds no allow/deny authority: it cannot widen what
-policy permits. `CapabilityOutcome` has no `Allow` variant, so the most a
-capability can return is a list of edits or a fault. `AuditDecision` does carry
-`Allow` and `Deny`; it records a decision made elsewhere and authorizes nothing.
+policy permits. A credential capability has no allow to return: the most it can
+return is a list of edits or a fault. `AuditDecision` does carry `Allow` and
+`Deny`; it records a decision made elsewhere and authorizes nothing.
 
 Audience: Rust developers composing the Strands box outbound boundary and
 operators inspecting egress decisions.
 
 ## Public Interface
 
-The crate root is the complete public API — 33 names, 29 unconditional and 4
+The crate root is the complete public API — 35 names, 30 unconditional and 5
 behind the `tls-intercept` feature:
 
 | Area | Items |
 |---|---|
-| Audit values | `AuditDecision`, `EgressDecision`, `NetworkAuditEvent`, `RequestId`, `SharedAuditLog` |
-| Boundary values | `BodyRef`, `DenyReason`, `HeaderMap`, `InterceptedRequest`, `InterceptedResponse`, `Mutation`, `MutationTarget`, `Target`, `Verdict` |
-| Credential mutators | `CapabilityContext`, `CapabilityFault`, `CapabilityOutcome`, `CapabilitySet`, `CapabilitySetBuilder`, `CredentialCapability` |
-| Effect lifecycle | `EffectAttempt`, `EffectInterceptor`, `EffectOutcome`, `EffectPermit` |
-| Interception port | `Interceptor` |
+| Audit values | `AuditDecision`, `EgressDecision`, `RequestId` |
+| Boundary values | `HeaderMap`, `InterceptedRequest`, `InterceptedResponse`, `Mutation`, `MutationTarget`, `Target` |
+| Credential mutators | `CapabilitySet`, `CredentialCapability` |
+| Host spelling | `is_bindable_host`, `normalize_host` |
+| Effect lifecycle | `EffectAttempt`, `EffectInterceptor`, `EffectOutcome`, `EffectPermit`, `McpFrame`, `McpListReply` |
+| Remote MCP | `McpTarget`, `McpTargetIdentity`, `canonicalize_mcp_frame`, `mcp_denial_response`, `refuse_duplicate_mcp_keys` |
 | Audit seam | `Emitter`, `StubEmitter` |
-| Errors | `ProxyError`, `Result` |
-| Default adapter | `MitmConfig`, `MitmHandle`, `MitmInterceptor`, `ResponseLimits` |
+| Errors | `PROXY_ORIGIN_HEADER`, `PROXY_ORIGIN_VALUE`, `ProxyError`, `Result` |
+| Default adapter | `BackendDial`, `MitmConfig`, `MitmHandle`, `MitmInterceptor`, `ResponseLimits` |
 
 `AuditDecision` is the one renamed export: the item is `audit::Decision`.
 
@@ -56,16 +57,19 @@ kinds, and the proxy presents each one immediately before its effect:
 |---|---|---|
 | `EffectAttempt::Connect` | `host`, `port`, `address`, `http_visibility` | before one upstream socket opens, once per pinned address |
 | `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes` | after the request is serialized, before it is written |
-| `EffectAttempt::ResponseRelease` | `host`, `port`, `method`, `path`, `status`, `body_bytes` | after response mutators run, before the workload receives bytes |
+| `EffectAttempt::ResponseRelease` | `host`, `port`, `method`, `path`, `status` | after header controls and required catalog capture, before the workload receives bytes |
 
 No attempt carries a header, a body, or credential material. `path` excludes the
 query string and is the path the workload sent, captured before any credential
-edit. `body_bytes` is a length.
+edit. `HttpRequest::body_bytes` is the complete request body length. Response release requires
+no upfront body length.
 
 Both `EffectPermit` methods consume `self: Box<Self>`, so one permit reaches
 exactly one terminal transition. The proxy reports `EffectOutcome::Connected`,
-`ConnectFailed`, `Completed`, `Failed`, `Partial`, or `Indeterminate`. A dropped
+`ConnectFailed`, `Replied`, `Completed`, `Failed`, `Partial`, or `Indeterminate`. A dropped
 permit becomes `mark_indeterminate`, so an early return or a panic still reports.
+Response delivery counts include accepted HTTP headers and framing. A source failure after a
+flushed prefix records incomplete delivery; an earlier flush does not make the response complete.
 
 An `io::ErrorKind::PermissionDenied` from `intercept` blocks the effect. For a
 connect, that happens before any upstream socket opens. Both adapter constructors
@@ -77,20 +81,19 @@ unconstructible.
 Every connection is decided twice through `EffectInterceptor`: on the host before resolution, and
 on each resolved, pinned address before its socket opens. The gateway holds no destination deny
 list of its own. A metadata or link-local address is refused by a policy `forbid` on
-`context.input.ip`.
+`context.input.ip4` or `context.input.ip6`, one clause per address family.
 
 ## Credential Mutators
 
-`CapabilitySet::builder()` returns a `CapabilitySetBuilder`. `add_credential`
-registers one `CredentialCapability` per destination pattern, and `build` freezes
-the set. A capability returns either `CapabilityOutcome::Applied(mutations)` —
-empty when it does not apply to the exchange — or
-`CapabilityOutcome::Unavailable(fault)` on a credential integrity failure such as
-a phantom mismatch, an ambiguous binding, or a signer error. It cannot authorize.
+`CapabilitySet::new` takes one `CredentialCapability` per destination pattern.
+A capability returns either its mutations — empty when it does not apply to the
+exchange — or a fault on a credential integrity failure such as a phantom
+mismatch, an ambiguous binding, or a signer error. It cannot authorize.
 
-Any fault denies the exchange. The interceptor applies the mutations only when
-the fold allows. Two set-like mutations on one header, path, or query parameter
-fail closed as `DenyReason::MutationCollision`; one capability's own
+Any fault denies the exchange, whatever the order of the capabilities.
+`apply_to_request` and `apply_to_response` apply the mutations only when no
+capability faults. Two set-like mutations on one header, path, or query
+parameter fail closed as a mutation collision; one capability's own
 strip-then-set swap is not a collision.
 
 `CapabilitySet::validate` enforces one capability per destination pattern, and
@@ -108,10 +111,10 @@ enter `ResponseRelease` before workload delivery.
 
 A capability governs the requests its `credentials::DestinationPattern` matches.
 This crate adds no matcher of its own: `Target::as_destination()` borrows a
-`Target` as a `credentials::Destination` (`host`, `port`, `path`), and
-`CapabilitySet` prefilters both legs by `pattern().matches(..)`. On the response
-leg the target comes from `CapabilityContext::target`, because a response has no
-target of its own.
+`Target` as a `credentials::Destination` (`host`, `port`, `path`), and a
+capability whose pattern does not match returns no mutations on either leg. On
+the response leg the caller passes the request's target to `apply_to_response`,
+because a response has no target of its own.
 
 `DestinationPattern::parse` reads `host[:port][/path]`:
 
@@ -140,12 +143,14 @@ Two constructors start the adapter, and both require the authorization seam:
 MitmInterceptor::start(MitmConfig, CapabilitySet, Arc<dyn EffectInterceptor>)
     -> Result<MitmHandle>
 
-MitmInterceptor::start_with_emitter(MitmConfig, CapabilitySet,
-                                    Arc<dyn EffectInterceptor>, Box<dyn Emitter>)
+MitmInterceptor::start_with(MitmConfig, CapabilitySet, Arc<dyn EffectInterceptor>,
+                            Box<dyn Emitter>, Option<&File>)
     -> Result<MitmHandle>
 ```
 
-`start` installs a `StubEmitter`, which buffers the durable records in memory.
+`start` installs an emitter that drops each durable record, and no CA file.
+`start_with` takes the `Emitter`, and optionally an already-open file for the
+public interception CA.
 Both validate the `CapabilitySet`, generate the ephemeral CA, build the additive
 upstream trust bundle, bind exactly one transport, and spawn the accept loop:
 
@@ -200,34 +205,52 @@ fn start() -> egress_gateway::Result<MitmHandle> {
 |---|---|---|
 | `bind_addr` | `SocketAddr` | `127.0.0.1:0` |
 | `unix_socket_path` | `Option<PathBuf>` | `None` |
-| `external_proxy` | `Option<SocketAddr>` | `None` |
 | `intercept_ca_dir` | `Option<PathBuf>` | `None` |
-| `enable_h2` | `bool` | `false` |
 | `response_limits` | `ResponseLimits` | `max_body_bytes: 16 MiB` |
 | `expected_token` | `Option<String>` | `None` |
-| `credential_env` | `Vec<(String, String)>` | empty |
 | `upstream_ca_pems` | `Vec<String>` | empty |
 | `dns_overrides` | `Vec<(String, IpAddr)>` | empty |
 | `upstream_read_deadline` | `Duration` | 300 s |
 | `max_connections` | `usize` | `256` |
+| `mcp_servers` | `Vec<(String, String)>` | empty |
+| `backends` | `Vec<(DestinationPattern, BackendDial)>` | empty |
 
 `unix_socket_path` selects the transport. `None` binds a localhost `TcpListener`
 at `bind_addr`; `Some(path)` binds only a `UnixListener`, at mode `0600`, and
 never a TCP port. Every admitted connection is terminated and inspected, so TLS
 interception is not selective. The adapter is thread-per-connection, and
-`max_connections` bounds the thread count. `upstream_read_deadline` bounds each read and each
-write on an upstream socket and one exchange's upstream reads and writes as a whole, so an
-upstream that never drains or sips the request, or never replies or drips its reply, ends the
-exchange with one `http:request::response` that has no `output`. The same bound ends a legitimate
-exchange whose request and reply together take longer than the deadline, with no reply to the
-workload; `box.toml` exposes no key for it.
+`max_connections` bounds the thread count. `upstream_read_deadline` sets one absolute deadline for
+upstream TLS, request transmission, and complete response receipt.
+Arriving chunks do not reset it. If delivery has started, expiry closes the incomplete response.
+Once upstream receipt finishes, this deadline does not bound the final workload write.
+`box.toml` exposes no key for it.
+
+Responses stream through bounded buffers, including credentialed responses and ordinary HTTP MCP
+results. Credential controls scrub headers before release and body chunks before delivery, including
+matches across chunk boundaries. A nonempty encoded response to a credentialed request is refused.
+`ResponseLimits::max_body_bytes` bounds collected requests and HTTP MCP `tools/list` responses;
+its default remains 16 MiB. Catalog pages retain the existing capture and schema-staging order.
+
+The request outcome is recorded when the upstream response completes, fails, or reaches its deadline.
+After a workload disconnect or a response refusal, the connection discards the remaining upstream
+body under the same deadline and connection limit before recording the request outcome.
+A received status is retained even if the body fails. HTTP MCP calls use this same timing; their
+recorded outcome does not prove tool success. A framing error or unsupported trailer closes the
+response, which may already have delivered a processed prefix.
+
+`backends` re-routes a destination: a request whose destination matches a `BackendDial`'s pattern is
+dialled to that backend instead, the backend host is presented on the upstream leg, and the backend
+path prefix joins in front of the agent's path. The host decision still runs on the original
+destination and the address decision on the backend address, so policy judges the agent's intent.
 
 `MitmHandle` exposes `port()`, `unix_socket_path()`, `intercept_ca_path()`,
-`env_vars()`, `credential_env_vars()`, `drain_audit_events()`, and `shutdown()`.
+`env_vars()`, and `shutdown()`.
 `env_vars()` returns the four `HTTP_PROXY`/`HTTPS_PROXY` spellings on the TCP
 transport and no proxy variable on AF_UNIX. It adds `SSL_CERT_FILE` on both
 transports when a CA directory is configured. `Drop` shuts the adapter down and
-joins the accept thread.
+joins the accept thread. A successful wakeup connection stays open until the
+accept thread exits. A failed wakeup connection or an exhausted connection limit
+can still block shutdown.
 
 ## Errors
 
@@ -240,7 +263,5 @@ joins the accept thread.
 | `502` | `UpstreamConnect`, `Intercept`, `ResponseLimit`, `Io` |
 | `503` | `Config`, `Bind` |
 
-`ProxyError` is `#[non_exhaustive]`. `From<DenyReason>` converts every deny
-reason into one of these variants, with `MutationCollision` becoming
-`ProxyError::Config`. `Result<T>` is the crate alias for
+`ProxyError` is `#[non_exhaustive]`. `Result<T>` is the crate alias for
 `std::result::Result<T, ProxyError>`.

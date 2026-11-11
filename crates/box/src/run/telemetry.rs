@@ -23,6 +23,23 @@ pub(crate) use telemetry::Collector;
 /// Re-exported on the same terms, because this module shadows the crate's own name.
 pub(crate) use telemetry::{ControlOperation, ControlRecord};
 
+/// Which policy a control record names, by file name rather than by path.
+pub(crate) fn policy_subject(sources: &[policy::Policy]) -> String {
+    if sources.is_empty() {
+        return "<no authored policy>".to_string();
+    }
+    sources
+        .iter()
+        .map(|source| {
+            source.origin.file_name().map_or_else(
+                || source.origin.to_string_lossy().into_owned(),
+                |name| name.to_string_lossy().into_owned(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// The effective decision that one policy enforcement point applies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EffectiveDecision {
@@ -60,7 +77,6 @@ pub(crate) struct ObservedDecision {
 }
 
 impl ObservedDecision {
-    #[cfg(test)]
     pub(crate) fn action(&self) -> &str {
         &self.action
     }
@@ -662,6 +678,14 @@ impl DecisionRecorder {
         }
     }
 
+    pub(crate) fn mcp_unmatched(&self, program: &str, arguments: &[String]) {
+        if let Some(collector) = &self.collector {
+            collector.mcp_unmatched(
+                telemetry::McpUnmatched::new(program, arguments).correlated(self.request_context()),
+            );
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn discarding() -> Arc<Self> {
         Arc::new(Self {
@@ -793,7 +817,7 @@ mod tests {
         let history = tempfile::tempdir().expect("history directory");
         let policy = PolicyEngine::open(Vec::new(), &history.path().join("dogwood.redb"))
             .expect("policy opens");
-        let no_match = policy.decide(
+        let (no_match, _) = policy.decide(
             &GovernedBox::assigned("test-box"),
             &Principal::agent(),
             &policy::Request::Connect {
@@ -1069,7 +1093,6 @@ mod tests {
                 method: "GET",
                 path: "/",
                 status: 200,
-                body_bytes: 0,
             })
             .expect("the response leg is admitted")
             .mark_indeterminate();
@@ -1297,15 +1320,17 @@ mod tests {
         )
         .expect("policy opens");
         let connect = |host: &'static str| {
-            policy.decide(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                &policy::Request::Connect {
-                    host,
-                    ip: None,
-                    port: 443,
-                },
-            )
+            policy
+                .decide(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    &policy::Request::Connect {
+                        host,
+                        ip: None,
+                        port: 443,
+                    },
+                )
+                .0
         };
         let allowed = connect("allowed.example");
         let denied = connect("denied.example");
@@ -1366,7 +1391,7 @@ mod tests {
         )
         .expect("policy opens");
         let identifier = |port: u16| {
-            let decision = policy.decide(
+            let (decision, _) = policy.decide(
                 &GovernedBox::assigned("test-box"),
                 &Principal::agent(),
                 &policy::Request::Connect {

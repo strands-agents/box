@@ -119,6 +119,13 @@ fn every_documented_credential_key_exists_in_the_entry() {
          and this test would pass vacuously: {nested:?}"
     );
 
+    let backend_fields = fields_of(&config, "struct EgressBackend {");
+    assert!(
+        backend_fields.iter().any(|name| name == "url"),
+        "the field reader found no `url` on EgressBackend, so the backend keys are unchecked \
+         and this test would pass vacuously: {backend_fields:?}"
+    );
+
     // A key row leads with the key: `| `name` | default | meaning |`.
     let mut missing = Vec::new();
     let mut checked = 0;
@@ -142,6 +149,14 @@ fn every_documented_credential_key_exists_in_the_entry() {
         let found = match claimed.split_once('.') {
             Some(("secret", "ref")) => nested.iter().any(|name| name == "reference"),
             Some(("secret", field)) => nested.iter().any(|name| name == field),
+            // A backend table's own field (`backends.url`), or its `auth`, which reuses the secret
+            // vocabulary (`backends.auth.ref` → `reference`, `backends.auth.<field>`).
+            Some(("backends", rest)) => match rest.split_once('.') {
+                Some(("auth", "ref")) => nested.iter().any(|name| name == "reference"),
+                Some(("auth", field)) => nested.iter().any(|name| name == field),
+                Some(_) => false,
+                None => backend_fields.iter().any(|name| name == rest),
+            },
             Some(_) => false,
             None => declared.iter().any(|name| name == claimed),
         };

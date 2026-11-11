@@ -43,6 +43,9 @@ strands-box-egress-gateway = { path = "../egress-gateway" }
 # to tests/, so it is declared again here for the same target.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 libc = "0.2"
+# The inbound-connector tests drive the real relay against `serve_inbound`.
+strands-box-ingress = { path = "../ingress" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
 # The `containment-test-probe` helper binary backs Linux enforcement tests.
 [[bin]]
@@ -92,6 +95,11 @@ path = "tests/inherited_handles_linux.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "supervisor_memory_linux"
+path = "tests/supervisor_memory_linux.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "inherited_handles_macos"
 path = "tests/inherited_handles_macos.rs"
 required-features = ["test-support"]
@@ -104,6 +112,11 @@ required-features = ["test-support"]
 [[test]]
 name = "child_ipc"
 path = "tests/child_ipc.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "nested_user_namespace_linux"
+path = "tests/nested_user_namespace_linux.rs"
 required-features = ["test-support"]
 
 [lints.rust]

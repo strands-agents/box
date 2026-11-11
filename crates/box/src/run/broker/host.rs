@@ -24,6 +24,11 @@ use tokio::sync::oneshot;
 use tokio::task::{JoinError, JoinSet};
 
 use crate::error::{BoxError, ShellError};
+#[cfg(test)]
+use crate::record::config::limits::{
+    DEFAULT_SHELL_MAX_INPUT, DEFAULT_SHELL_MAX_OUTPUT, DEFAULT_SHELL_TIMEOUT,
+};
+use crate::record::config::limits::{SHELL_TIMEOUT_GRACE, ShellLimits};
 use crate::record::config::{AuthoritySource, Record};
 use crate::record::layout::BoxRoot;
 use crate::run::broker::invalid_input;
@@ -35,7 +40,7 @@ use crate::run::broker::protocol::{
     write_frame,
 };
 use crate::run::broker::reach::Reach;
-use crate::run::broker::shell::{EgressRouting, SHELL_COMMAND_TIMEOUT, ShellSpec};
+use crate::run::broker::shell::{EgressRouting, ShellSpec};
 
 /// How many client connections may be in flight at once.
 const SERVE_CONNECTION_CAPACITY: usize = 64;
@@ -43,14 +48,8 @@ const SERVE_CONNECTION_CAPACITY: usize = 64;
 /// Bound on one framed read or write with an untrusted peer.
 const SERVE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Bound on one Shell Call's framing, outside the interpreter's own deadline.
-pub(super) const SERVE_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
-
-const _: () = assert!(
-    SERVE_REQUEST_TIMEOUT.as_nanos() > SHELL_COMMAND_TIMEOUT.as_nanos(),
-    "the transport's bound must outlast the interpreter's, or a command stopped at its own \
-     deadline is reported as a boundary failure"
-);
+#[cfg(test)]
+const SERVE_REQUEST_TIMEOUT: Duration = DEFAULT_SHELL_TIMEOUT.saturating_add(SHELL_TIMEOUT_GRACE);
 
 /// How long a REQUEST-shaped connection may sit idle between frames before it is dropped.
 const SERVE_TRANSPORT_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
@@ -157,10 +156,15 @@ impl BrokerHost {
         registry: Arc<DiscoveryRegistry>,
         egress: Option<EgressRouting>,
         recorder: Arc<crate::run::telemetry::DecisionRecorder>,
-        host_spawner: Option<strands_shell::os::HostSpawner>,
+        host_spawner: Option<crate::run::hosted::ToolSpawner>,
         mcp_leaf_launcher: Option<Arc<crate::run::hosted::McpLeafLauncher>>,
         protected_sources: &[AuthoritySource],
+        commands: Arc<crate::run::commands::ConfiguredCommands>,
+        installation: Arc<crate::run::installation::TrustedInstallation>,
     ) -> Result<Self, BoxError> {
+        let host_programs = commands
+            .bare_names(record, &crate::run::contain::executable::host_search_path())
+            .programs();
         // The agent's workspace is the interpreters' working directory, and its `HOME` is what every
         // participant reads, so one directory has one name on both sides of the socket.
         let reach = Arc::new(
@@ -171,12 +175,14 @@ impl BrokerHost {
                 layout.root(),
                 protected_sources,
             )
-            .map_err(|source| ShellError::Serve { source })?,
+            .map_err(|source| ShellError::Serve { source })?
+            .with_commands(commands)
+            .with_installation(installation),
         );
-        // The declared MCP servers, from the same record. The box places one alias per entry, so
-        // this set and the alias set in `bin/` are the same list — a name outside it names nothing
+        // The declared MCP servers, from the same record.
         let declared_mcp = Arc::new(record.mcp.clone());
         let spawn_credentials = record.tool_credential_paths();
+        let shell_limits = record.limits.shell.clone();
         // Resolved here, where the `BoxRoot` is in hand. `BoxRoot::open` created it.
         let mcp_working_directory = layout.mcp_working_directory();
         let mcp_working_directory_handle = Arc::new(layout.open_mcp_working_directory()?);
@@ -208,6 +214,8 @@ impl BrokerHost {
                     egress,
                     recorder,
                     host_spawner,
+                    host_programs,
+                    shell_limits,
                     &ready_sender,
                     shutdown_receiver,
                 );
@@ -254,8 +262,26 @@ impl Drop for BrokerHost {
     }
 }
 
-/// Decide `shell:spawn` for starting `server`, on the program the start will exec.
-fn authorize_mcp_start(
+impl ShellSpec {
+    /// `server`'s arguments as its start passes them, or `None` when they do not expand.
+    fn launched_arguments(
+        &self,
+        server: &crate::record::config::mcp::McpServer,
+    ) -> Option<Vec<String>> {
+        #[cfg(unix)]
+        if let Some(launcher) = self.mcp_leaf_launcher.as_deref()
+            && launcher.contains(&server.name)
+        {
+            return launcher.launched_arguments(&server.name);
+        }
+        Some(server.arguments().to_vec())
+    }
+}
+
+/// Decide starting `server` on the program the start will exec: as its grammar action when a tool
+/// grammar binds that program, and as `shell:spawn` otherwise
+/// (docs/design/decisions.md#a-grammar-action-replaces-shell-spawn).
+async fn authorize_mcp_start(
     spec: &ShellSpec,
     server: &crate::record::config::mcp::McpServer,
     program_path: &std::path::Path,
@@ -271,36 +297,69 @@ fn authorize_mcp_start(
             None => path.display().to_string(),
         }
     };
-    let program_path = reported(program_path);
+    let host_program_path = program_path.display().to_string();
+    let reported_program_path = reported(program_path);
     let cwd = reported(working_directory);
+    let command_arguments = if server.has_argument_wildcards() {
+        arguments
+    } else {
+        server.arguments()
+    };
     let command = std::iter::once(server.program())
-        .chain(server.arguments().iter().map(String::as_str))
+        .chain(command_arguments.iter().map(String::as_str))
         .collect::<Vec<_>>()
         .join(" ");
-    let decision = spec.policy.decide(
-        &spec.governed,
-        &policy::Principal::agent(),
-        &policy::Request::ShellSpawn {
+    let credentials =
+        std::collections::BTreeMap::from([(host_program_path.clone(), credential_reads.to_vec())]);
+    let interceptor = policy::ShellPolicyInterceptor::into_server_start_handle(
+        Arc::clone(&spec.policy),
+        policy::Principal::agent(),
+        spec.governed.clone(),
+        home.map(std::path::PathBuf::from),
+        credentials,
+    );
+    let capture = crate::run::telemetry::ObservationCapture::begin();
+    let admitted = interceptor
+        .intercept(&strands_shell::EffectAttempt::ShellSpawn {
             command: &command,
             program: server.program(),
-            program_path: &program_path,
-            credential_reads,
+            program_path: &host_program_path,
             args: arguments,
+            literal: &[],
             cwd: &cwd,
-        },
-    );
-    spec.recorder
-        .record(crate::run::telemetry::EffectiveDecision::from_policy(
-            r#"Box::Action::"shell:spawn""#,
-            &program_path,
-            &decision,
-        ));
-    match &decision {
-        policy::Decision::Allow { .. } => Ok(()),
-        policy::Decision::Deny { .. } => Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("MCP server {:?} may not start: {decision}", server.name),
-        )),
+        })
+        .await;
+    let determined = capture.last();
+    let action = determined
+        .as_ref()
+        .map_or(r#"Box::Action::"shell:spawn""#, |observed| {
+            observed.action()
+        });
+    match admitted {
+        Ok(_permit) => {
+            spec.recorder
+                .record(crate::run::telemetry::EffectiveDecision::gate_permit(
+                    action,
+                    &reported_program_path,
+                    "shell-policy",
+                    determined.as_ref(),
+                ));
+            Ok(())
+        }
+        Err(refused) => {
+            spec.recorder
+                .record(crate::run::telemetry::EffectiveDecision::gate_deny(
+                    action,
+                    &reported_program_path,
+                    "shell-policy",
+                    refused.to_string(),
+                    determined.as_ref(),
+                ));
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("MCP server {:?} may not start: {refused}", server.name),
+            ))
+        }
     }
 }
 
@@ -308,6 +367,7 @@ fn authorize_mcp_start(
 async fn start_mcp_server(
     spec: &ShellSpec,
     server: &crate::record::config::mcp::McpServer,
+    received: &[String],
 ) -> io::Result<(
     crate::run::broker::mcp::RunningMcpServer,
     tokio::process::ChildStdout,
@@ -328,7 +388,7 @@ async fn start_mcp_server(
         && launcher.contains(&server.name)
     {
         let boundary = launcher
-            .prepare(&server.name)
+            .prepare(server, received)
             .map_err(|error| io::Error::other(error.to_string()))?;
         let credential_reads = launcher.credential_reads(&server.name, Path::new(home));
         authorize_mcp_start(
@@ -338,7 +398,8 @@ async fn start_mcp_server(
             boundary.arguments(),
             boundary.working_directory(),
             &credential_reads,
-        )?;
+        )
+        .await?;
         let leaf = launcher
             .spawn(boundary)
             .await
@@ -363,11 +424,12 @@ async fn start_mcp_server(
     authorize_mcp_start(
         spec,
         server,
-        Path::new(server.program()),
+        Path::new(server.executable()),
         server.arguments(),
         &spec.mcp_working_directory,
         &[],
-    )?;
+    )
+    .await?;
     // **NOT the box home.** The box home is the workload's own read-write grant, so starting an
     // uncontained child there let the agent plant the child's configuration with its own syscalls
     match spec.mcp_working_directory_handle.as_deref() {
@@ -432,7 +494,9 @@ fn host(
     mcp_hosting: McpHosting,
     egress: Option<EgressRouting>,
     recorder: Arc<crate::run::telemetry::DecisionRecorder>,
-    host_spawner: Option<strands_shell::os::HostSpawner>,
+    host_spawner: Option<crate::run::hosted::ToolSpawner>,
+    host_programs: strands_shell::os::HostPrograms,
+    limits: ShellLimits,
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
     shutdown: oneshot::Receiver<()>,
 ) -> io::Result<()> {
@@ -452,8 +516,12 @@ fn host(
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
         let spec = ShellSpec {
-            command_timeout: SHELL_COMMAND_TIMEOUT,
-            request_timeout: SERVE_REQUEST_TIMEOUT,
+            max_input: limits.max_input(),
+            max_output: limits.max_output(),
+            command_timeout: limits.timeout(),
+            request_timeout: limits
+                .timeout()
+                .map(|timeout| timeout + SHELL_TIMEOUT_GRACE),
             reach,
             policy,
             governed,
@@ -466,6 +534,7 @@ fn host(
             egress,
             recorder,
             host_spawner,
+            host_programs,
         };
         // Built once here and dropped immediately — a *probe*, not the serving Shell.
         if let Err(error) = spec.build() {
@@ -713,15 +782,16 @@ async fn serve_transport(
                             let _ = changed;
                             return Ok(());
                         }
-                        next = tokio::time::timeout(
-                            idle_timeout(!mcp.is_empty()),
-                            &mut next_frame,
-                        ) => {
-                            match next.map_err(|_| timed_out("read a transport frame"))?? {
+                        next = &mut next_frame => {
+                            match next? {
                                 Some(frame) => break frame,
                                 // A clean close ends the connection, which reaps every Program on it.
                                 None => return Ok(()),
                             }
+                        }
+                        _ = tokio::time::sleep(idle_timeout(!mcp.is_empty())),
+                            if running.is_empty() => {
+                            return Err(timed_out("read a transport frame"));
                         }
                     }
                 },
@@ -774,16 +844,32 @@ async fn serve_transport(
                         continue;
                     }
                     // One MCP server, started outside the cage.
-                    if let Interpreter::Mcp { server } = &interpreter {
-                        let admitted =
-                            match crate::run::broker::mcp::admit_server(&spec.mcp, server) {
-                                Ok(admitted) => admitted,
-                                Err(error) => {
-                                    deny(&frames, id, DeniedKind::Internal, &error.to_string())
-                                        .await?;
-                                    continue;
-                                }
-                            };
+                    if let Interpreter::Mcp { server, arguments } = &interpreter {
+                        let admitted = match crate::run::broker::mcp::admit_server(
+                            &spec.mcp,
+                            server,
+                            arguments,
+                            |declared| spec.launched_arguments(declared),
+                        ) {
+                            Ok(Some(admitted)) => admitted,
+                            Ok(None) => {
+                                spec.recorder.mcp_unmatched(server, arguments);
+                                send(&frames, id, Body::McpUnmatched).await?;
+                                continue;
+                            }
+                            Err(error) => {
+                                spec.recorder.record(
+                                    crate::run::telemetry::EffectiveDecision::enforcement_deny(
+                                        r#"Box::Action::"shell:spawn""#,
+                                        server.as_str(),
+                                        "mcp-command",
+                                        error.to_string(),
+                                    ),
+                                );
+                                deny(&frames, id, DeniedKind::Internal, &error.to_string()).await?;
+                                continue;
+                            }
+                        };
                         if let Err(error) = spec.mcp_registry.admit_open(&admitted.name) {
                             deny(&frames, id, DeniedKind::Internal, &error.to_string()).await?;
                             return Ok(());
@@ -791,8 +877,9 @@ async fn serve_transport(
                         let next_mcp_opened = mcp_opened
                             .checked_add(1)
                             .ok_or_else(|| invalid_input("too many MCP programs were opened"))?;
-                        match start_mcp_server(&spec, admitted).await {
+                        match start_mcp_server(&spec, admitted, arguments).await {
                             Ok((running, stdout)) => {
+                                send(&frames, id, Body::McpReady).await?;
                                 let sequence = mcp_opened;
                                 mcp_opened = next_mcp_opened;
                                 let (program, completion) =
@@ -1056,7 +1143,11 @@ async fn serve_transport(
                 }
                 // Refused above; unreachable, and kept explicit so a new daemon body cannot fall
                 // through into the client path.
-                Body::Output { .. } | Body::Exit { .. } | Body::Denied { .. } => {
+                Body::Output { .. }
+                | Body::Exit { .. }
+                | Body::Denied { .. }
+                | Body::McpReady
+                | Body::McpUnmatched => {
                     return Err(invalid_input("a transport client may not send that frame"));
                 }
             }
@@ -1262,10 +1353,21 @@ async fn run_call(
     slot: &mut ProgramSlot,
     command: &str,
     id: ProgramId,
-    request_timeout: Duration,
+    request_timeout: Option<Duration>,
     frames: &tokio::sync::mpsc::Sender<OutboundFrame>,
 ) -> io::Result<i32> {
-    let deadline = tokio::time::Instant::now() + request_timeout;
+    let deadline =
+        request_timeout.and_then(|timeout| tokio::time::Instant::now().checked_add(timeout));
+    if request_timeout.is_some() && deadline.is_none() {
+        deny(
+            frames,
+            id,
+            DeniedKind::Internal,
+            "the call deadline exceeds this platform's clock range",
+        )
+        .await?;
+        return Ok(BOUNDARY_FAILURE_STATUS);
+    }
     let control = slot.control.clone();
     if control.is_cancelled() {
         return Ok(BOUNDARY_FAILURE_STATUS);
@@ -1281,8 +1383,18 @@ async fn run_call(
 
     // Drained inside the loop, so a chunk reaches the client while the Call is still running.
     let outcome = loop {
+        if control.is_cancelled() {
+            break None;
+        }
         tokio::select! {
-            outcome = &mut call => break Some(outcome),
+            outcome = &mut call => {
+                // Synchronous interpreter work can return after both the call and timer are ready.
+                if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                    deny(frames, id, DeniedKind::Timeout, "the call exceeded its deadline").await?;
+                    break None;
+                }
+                break Some(outcome);
+            }
             chunk = output.next_chunk(), if !over_budget => {
                 let mut pending = Vec::new();
                 if output.admit(chunk, &mut pending) == DrainOutcome::CapReached {
@@ -1291,15 +1403,14 @@ async fn run_call(
                 }
                 flush(frames, id, &mut pending).await?;
             }
-            // Poll for a signal rather than awaiting it, because the flag is not a future.
-            _ = tokio::time::sleep(SIGNAL_POLL_INTERVAL) => {
-                // Dropping the Call future is the stop: `select!` abandons the losing branch, so
-                // leaving this loop releases it.
-                if control.is_cancelled() {
-                    break None;
+            // Wake quiet calls to observe cancellation.
+            _ = tokio::time::sleep(SIGNAL_POLL_INTERVAL) => {}
+            _ = async {
+                match deadline {
+                    Some(deadline) => tokio::time::sleep_until(deadline).await,
+                    None => std::future::pending().await,
                 }
-            }
-            _ = tokio::time::sleep_until(deadline) => {
+            } => {
                 deny(frames, id, DeniedKind::Timeout, "the call exceeded its deadline").await?;
                 break None;
             }
@@ -1545,7 +1656,7 @@ done"#;
             marker.path(),
             vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()],
         );
-        let (running, stdout) = start_mcp_server(&spec, &spec.mcp[0])
+        let (running, stdout) = start_mcp_server(&spec, &spec.mcp[0], spec.mcp[0].arguments())
             .await
             .expect("the MCP server starts");
         let (frames, mut output) =
@@ -1686,7 +1797,7 @@ done"#;
     fn connection_spec(marker_directory: &Path) -> Arc<ShellSpec> {
         spec_with(
             marker_directory,
-            SHELL_COMMAND_TIMEOUT,
+            DEFAULT_SHELL_TIMEOUT,
             SERVE_REQUEST_TIMEOUT,
         )
     }
@@ -1740,13 +1851,16 @@ done"#;
         )
         .expect("MCP schema generates");
         let mcp = Arc::new(vec![crate::record::config::mcp::McpServer {
+            argument_wildcards: false,
             name: "test-mcp".to_string(),
             command,
         }]);
         let mcp_registry = crate::run::broker::mcp::DiscoveryRegistry::testing(&mcp);
         Arc::new(ShellSpec {
-            command_timeout: SHELL_COMMAND_TIMEOUT,
-            request_timeout: SERVE_REQUEST_TIMEOUT,
+            max_input: DEFAULT_SHELL_MAX_INPUT,
+            max_output: DEFAULT_SHELL_MAX_OUTPUT,
+            command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
+            request_timeout: Some(SERVE_REQUEST_TIMEOUT),
             reach: Arc::new(
                 Reach::over(
                     &marker_directory
@@ -1774,6 +1888,7 @@ done"#;
             egress: None,
             recorder: crate::run::telemetry::DecisionRecorder::discarding(),
             host_spawner: None,
+            host_programs: Default::default(),
         })
     }
 
@@ -1793,7 +1908,7 @@ done"#;
             @id("no_marker_start")
             forbid (principal, action == Box::Action::"shell:spawn", resource)
             when {
-                context.input.program == "/bin/sh" &&
+                context.input.program == "sh" &&
                 context.input.program_path == "/bin/sh" &&
                 context.input has arg1 && context.input.arg1 == "-c" &&
                 context.input.arg_count == 2
@@ -1802,7 +1917,7 @@ done"#;
         let runtime = tokio::runtime::Runtime::new().expect("runtime");
         let spec = mcp_spec_with_policy(markers.path(), command.clone(), forbid);
         let server = spec.mcp[0].clone();
-        let refused = runtime.block_on(start_mcp_server(&spec, &server));
+        let refused = runtime.block_on(start_mcp_server(&spec, &server, server.arguments()));
         let error = refused.err().expect("the forbidden start is refused");
         assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
         assert!(error.to_string().contains("no_marker_start"), "{error}");
@@ -1813,7 +1928,7 @@ done"#;
         let spec = mcp_spec_with_policy(markers.path(), command, permit);
         let server = spec.mcp[0].clone();
         let (running, _stdout) = runtime
-            .block_on(start_mcp_server(&spec, &server))
+            .block_on(start_mcp_server(&spec, &server, server.arguments()))
             .expect("the permitted start runs");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !started.exists() && std::time::Instant::now() < deadline {
@@ -1823,16 +1938,180 @@ done"#;
         drop(running);
     }
 
+    /// Every action an engine reports a verdict for.
+    #[derive(Default)]
+    struct DecidedActions(std::sync::Mutex<Vec<String>>);
+
+    impl policy::DecisionObserver for DecidedActions {
+        fn observed(&self, action: &str, _resource: &str, _decision: &policy::Decision) {
+            self.0
+                .lock()
+                .expect("the list locks")
+                .push(action.to_string());
+        }
+    }
+
+    /// `mcp_spec_with_policy`'s spec over an engine whose grammar `sh` binds `/bin/sh` as `sh`.
+    fn mcp_spec_with_bound_sh(
+        decided: Arc<DecidedActions>,
+        marker_directory: &Path,
+        history: &Path,
+        command: Vec<String>,
+        policy: &str,
+    ) -> Arc<ShellSpec> {
+        let table: toml::Table =
+            toml::from_str("format = 1\nversion = 1\nname = \"sh\"\nprogram = \"sh\"\n")
+                .expect("the grammar parses");
+        let grammars = policy::ToolGrammars::new(vec![
+            policy::ToolGrammar::from_table(table, "tool.sh.grammar").expect("the grammar loads"),
+        ])
+        .expect("one grammar installs");
+        let database = history.join("dogwood.redb");
+        let file = std::fs::File::options()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&database)
+            .expect("the history opens");
+        let engine = PolicyEngine::open_staged_file_with_grammars(
+            &policy::Operator::unanchored(),
+            vec![Policy {
+                origin: PathBuf::from("mcp-grammar-test.dw"),
+                text: policy.to_string(),
+            }],
+            grammars,
+            file,
+            database,
+        )
+        .expect("the policy opens");
+        let shell = Path::new("/bin/sh");
+        let mut bindings = engine.grammar_bindings();
+        bindings
+            .declare_tool(
+                &std::fs::File::open(shell).expect("the program opens"),
+                &shell.canonicalize().expect("the program resolves"),
+                shell,
+                "sh",
+            )
+            .expect("the program binds");
+        let server = Path::new(&command[0]);
+        bindings
+            .declare_server(
+                &std::fs::File::open(server).expect("the server program opens"),
+                &server.canonicalize().expect("the server program resolves"),
+                server,
+                server
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("the server program has a name"),
+            )
+            .expect("the server declares");
+        let mut spec = Arc::into_inner(mcp_spec_with_policy(marker_directory, command, ""))
+            .expect("the spec is not shared yet");
+        spec.policy = Arc::new(
+            engine
+                .observed_by(decided)
+                .bound_by(bindings)
+                .expect("the engine issued them"),
+        );
+        Arc::new(spec)
+    }
+
+    /// An MCP start whose program a tool grammar binds is decided as the grammar action, and a
+    /// `shell:spawn` permit does not admit it.
+    #[test]
+    fn an_mcp_start_of_a_bound_program_is_decided_as_its_grammar_action() {
+        let markers = tempfile::tempdir().expect("marker directory");
+        let history = tempfile::tempdir().expect("history directory");
+        let command = vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "exec cat".to_string(),
+        ];
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+
+        let decided = Arc::new(DecidedActions::default());
+        let spec = mcp_spec_with_bound_sh(
+            Arc::clone(&decided),
+            markers.path(),
+            history.path(),
+            command.clone(),
+            r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        );
+        let server = spec.mcp[0].clone();
+        let error = runtime
+            .block_on(start_mcp_server(&spec, &server, server.arguments()))
+            .err()
+            .expect("no rule permits the grammar action");
+        assert_eq!(
+            decided.0.lock().expect("the list locks").as_slice(),
+            [r#"Tool::sh::Action::"unmodeled""#.to_string()]
+        );
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert!(
+            error
+                .to_string()
+                .contains("policy denied this operation on '/")
+                && error.to_string().contains("[default-deny]"),
+            "{error}"
+        );
+
+        let history = tempfile::tempdir().expect("history directory");
+        let spec = mcp_spec_with_bound_sh(
+            Arc::default(),
+            markers.path(),
+            history.path(),
+            command,
+            r#"permit (principal, action == Tool::sh::Action::"unmodeled", resource);"#,
+        );
+        let server = spec.mcp[0].clone();
+        let (running, _stdout) = runtime
+            .block_on(start_mcp_server(&spec, &server, server.arguments()))
+            .expect("the grammar action permit starts the server");
+        drop(running);
+    }
+
+    /// An MCP start under the server's own name on a bound file is decided as `shell:spawn`.
+    #[test]
+    fn an_mcp_start_under_its_own_name_on_a_bound_file_is_decided_as_shell_spawn() {
+        let markers = tempfile::tempdir().expect("marker directory");
+        let history = tempfile::tempdir().expect("history directory");
+        let link = markers.path().join("mcp-sh");
+        std::os::unix::fs::symlink("/bin/sh", &link).expect("a second name for the shell");
+        let command = vec![
+            link.display().to_string(),
+            "-c".to_string(),
+            "exec cat".to_string(),
+        ];
+        let runtime = tokio::runtime::Runtime::new().expect("runtime");
+        let spec = mcp_spec_with_bound_sh(
+            Arc::default(),
+            markers.path(),
+            history.path(),
+            command,
+            r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        );
+        let server = spec.mcp[0].clone();
+
+        let (running, _stdout) = runtime
+            .block_on(start_mcp_server(&spec, &server, server.arguments()))
+            .expect("the operator declared the name for this start");
+        drop(running);
+    }
+
     /// A connection spec with both deadlines chosen. A timeout test sets `request_timeout` below
     /// `command_timeout` so the broker's backstop fires before the Shell's own bound.
     fn spec_with(
         marker_directory: &Path,
-        command_timeout: Duration,
-        request_timeout: Duration,
+        command_timeout: impl Into<Option<Duration>>,
+        request_timeout: impl Into<Option<Duration>>,
     ) -> Arc<ShellSpec> {
         Arc::new(ShellSpec {
-            command_timeout,
-            request_timeout,
+            max_input: DEFAULT_SHELL_MAX_INPUT,
+            max_output: DEFAULT_SHELL_MAX_OUTPUT,
+            command_timeout: command_timeout.into(),
+            request_timeout: request_timeout.into(),
             reach: Arc::new(
                 Reach::over(
                     // Canonicalized because `Reach::over` refuses a home with a second
@@ -1871,6 +2150,7 @@ done"#;
             egress: None,
             recorder: crate::run::telemetry::DecisionRecorder::discarding(),
             host_spawner: None,
+            host_programs: Default::default(),
         })
     }
 
@@ -2166,6 +2446,152 @@ done"#;
         }));
     }
 
+    #[test]
+    fn a_deadline_that_no_longer_fits_the_clock_is_refused_before_execution() {
+        let marker = tempfile::tempdir().expect("marker directory");
+        let spec = spec_with(marker.path(), None, None);
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            tokio::time::pause();
+            let backend = spec.backend().expect("backend");
+            let shell = spec
+                .build_on(Arc::clone(&backend), &spec.recorder)
+                .expect("Shell");
+            let (program, output, control) = Program::adopt(shell).expect("program");
+            let mut slot = ProgramSlot {
+                backend,
+                program,
+                output,
+                control,
+            };
+            let (frames, mut received) = tokio::sync::mpsc::channel(OUTBOUND_FRAME_DEPTH);
+            let now = tokio::time::Instant::now();
+            let (mut fits, mut exceeds) = (0, u64::MAX);
+            while fits < exceeds {
+                let candidate = fits + (exceeds - fits) / 2 + 1;
+                if now.checked_add(Duration::from_secs(candidate)).is_some() {
+                    fits = candidate;
+                } else {
+                    exceeds = candidate - 1;
+                }
+            }
+            let timeout = Duration::from_secs(fits);
+            assert!(now.checked_add(timeout).is_some());
+            tokio::time::advance(Duration::from_secs(2)).await;
+            assert!(tokio::time::Instant::now().checked_add(timeout).is_none());
+
+            let status = run_call(
+                &mut slot,
+                "printf EXECUTED > \"$HOME/executed\"",
+                1,
+                Some(timeout),
+                &frames,
+            )
+            .await
+            .expect("the unrepresentable deadline is reported");
+            assert_eq!(status, BOUNDARY_FAILURE_STATUS);
+            assert!(!marker.path().join("executed").exists());
+            assert!(matches!(
+                received.try_recv().expect("the refusal").frame.body,
+                Body::Denied { kind: DeniedKind::Internal, reason }
+                    if reason == "the call deadline exceeds this platform's clock range"
+            ));
+            assert!(
+                received.try_recv().is_err(),
+                "the command produces no output"
+            );
+
+            let status = run_call(
+                &mut slot,
+                "printf STILL_SERVING",
+                1,
+                Some(Duration::from_secs(1)),
+                &frames,
+            )
+            .await
+            .expect("a valid subsequent call succeeds");
+            assert_eq!(status, 0);
+            assert!(matches!(
+                received.try_recv().expect("subsequent output").frame.body,
+                Body::Output { data, .. } if decode_payload(&data).unwrap() == b"STILL_SERVING"
+            ));
+        }));
+    }
+
+    #[test]
+    fn an_unlimited_call_survives_elapsed_time_and_can_still_be_cancelled() {
+        let marker = tempfile::tempdir().expect("marker directory");
+        let spec = spec_with(marker.path(), None, None);
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            tokio::time::pause();
+            let backend = spec.backend().expect("backend");
+            let shell = spec
+                .build_on(Arc::clone(&backend), &spec.recorder)
+                .expect("unlimited Shell");
+            let (program, output, control) = Program::adopt(shell).expect("program");
+            let mut slot = ProgramSlot {
+                backend,
+                program,
+                output,
+                control: control.clone(),
+            };
+            let (frames, mut received) = tokio::sync::mpsc::channel(OUTBOUND_FRAME_DEPTH);
+            let mut call = tokio::task::spawn_local(async move {
+                run_call(
+                    &mut slot,
+                    "printf RUNNING; read proceed; while true; do printf TICK; sleep 0.001; done",
+                    1,
+                    spec.request_timeout,
+                    &frames,
+                )
+                .await
+            });
+            let started = tokio::time::timeout(Duration::from_secs(1), received.recv())
+                .await
+                .expect("call starts promptly")
+                .expect("startup output");
+            assert!(matches!(
+                started.frame.body,
+                Body::Output { data, .. } if decode_payload(&data).unwrap() == b"RUNNING"
+            ));
+            tokio::time::advance(Duration::from_secs(3600)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                !call.is_finished(),
+                "neither execution deadline may stop the call"
+            );
+            assert!(received.try_recv().is_err(), "no timeout or late output");
+
+            control.feed_stdin(b"proceed\n").expect("resume output");
+            let tick = tokio::time::timeout(Duration::from_secs(1), received.recv())
+                .await
+                .expect("the call resumes promptly")
+                .expect("resumed output");
+            assert!(matches!(
+                tick.frame.body,
+                Body::Output { data, .. } if decode_payload(&data).unwrap() == b"TICK"
+            ));
+            control.signal();
+            let status = tokio::time::timeout(Duration::from_secs(1), async {
+                loop {
+                    tokio::select! {
+                        outcome = &mut call => break outcome,
+                        Some(frame) = received.recv() => assert!(matches!(
+                            frame.frame.body,
+                            Body::Output { data, .. } if decode_payload(&data).unwrap() == b"TICK"
+                        )),
+                    }
+                }
+            })
+            .await
+            .expect("output must not delay cancellation")
+            .expect("call task joins")
+            .expect("cancellation succeeds");
+            assert_eq!(status, BOUNDARY_FAILURE_STATUS);
+        }));
+    }
+
     /// A client that closes before sending anything costs nothing and is not an error.
     #[test]
     fn a_connection_that_sends_nothing_builds_no_shell() {
@@ -2403,6 +2829,58 @@ done"#;
                 }),
                 "the foreground command must keep its caller: {records:?}"
             );
+        }));
+    }
+
+    #[test]
+    fn raised_input_limits_survive_repeated_calls_on_one_program() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                for (max_input, accepted) in [
+                    (DEFAULT_SHELL_MAX_INPUT, false),
+                    (512 * 1024, true),
+                    (0, true),
+                ] {
+                    let marker = tempfile::tempdir().expect("marker");
+                    let mut spec = connection_spec(marker.path());
+                    let limits = Arc::get_mut(&mut spec).expect("unshared spec");
+                    limits.max_input = max_input;
+                    limits.max_output = 4;
+                    let (_dir, socket) = serving_socket(spec);
+                    let (mut reader, mut writer) = transport(&socket).await;
+                    put(
+                        &mut writer,
+                        1,
+                        Body::Open {
+                            mode: Interpreter::Shell,
+                        },
+                    )
+                    .await;
+
+                    for call in 1..=2 {
+                        put(
+                            &mut writer,
+                            1,
+                            Body::Call {
+                                correlation: Default::default(),
+                                source: format!("printf OK #{}", "x".repeat(300 * 1024)),
+                            },
+                        )
+                        .await;
+                        let (text, status) = collect(&mut reader, 1).await;
+                        if accepted {
+                            assert_eq!(status, 0, "call {call}: {text}");
+                            assert_eq!(text, "OK", "call {call}");
+                        } else {
+                            assert_ne!(status, 0, "call {call}: {text}");
+                            assert!(text.contains("input too large"), "call {call}: {text}");
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("the calls must finish within the test deadline");
         }));
     }
 
@@ -2892,6 +3370,7 @@ done"#;
                 started.to_string_lossy().into_owned(),
             ];
             let spec = mcp_spec_with_server(marker.path(), command);
+            let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
             let (_reader, mut writer) = transport(&socket).await;
 
@@ -2900,7 +3379,8 @@ done"#;
                 7,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
+                        arguments: declared.clone(),
                     },
                 },
             )
@@ -2935,6 +3415,7 @@ exit 17"#;
                 ],
             );
             let registry = Arc::clone(&spec.mcp_registry);
+            let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
             let (mut leader_reader, mut leader_writer) = transport(&socket).await;
 
@@ -2943,7 +3424,8 @@ exit 17"#;
                 1,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
+                        arguments: declared.clone(),
                     },
                 },
             )
@@ -2991,7 +3473,8 @@ exit 17"#;
                 1,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
+                        arguments: declared.clone(),
                     },
                 },
             )
@@ -3032,6 +3515,7 @@ id=$(printf '%s\n' "$list" | sed -nE 's/.*"id":("[^"]*"|[0-9]+).*/\1/p')
 printf '{"jsonrpc":"2.0","id":%s,"result":{"tools":[{"name":"PrivateSearch","inputSchema":{"type":"object"}}]}}\n' "$id"
 while test ! -e "$1"; do sleep 0.01; done"#;
             let mcp = Arc::new(vec![crate::record::config::mcp::McpServer {
+                argument_wildcards: false,
                 name: "test-mcp".to_string(),
                 command: vec![
                     "/bin/sh".to_string(),
@@ -3070,8 +3554,10 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                     .expect("the registry starts");
             let registry = discovery.registry();
             let spec = Arc::new(ShellSpec {
-                command_timeout: SHELL_COMMAND_TIMEOUT,
-                request_timeout: SERVE_REQUEST_TIMEOUT,
+                max_input: DEFAULT_SHELL_MAX_INPUT,
+                max_output: DEFAULT_SHELL_MAX_OUTPUT,
+                command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
+                request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
                     Reach::over(
                         &marker.path().canonicalize().expect("marker resolves"),
@@ -3091,7 +3577,9 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 egress: None,
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
+                host_programs: Default::default(),
             });
+            let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
             let (mut reader, mut writer) = transport(&socket).await;
 
@@ -3100,7 +3588,8 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 1,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
+                        arguments: declared.clone(),
                     },
                 },
             )
@@ -3178,6 +3667,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
             let socket = directory.path().join("box.sock");
             let listener = UnixListener::bind(&socket).expect("bind test broker");
             let (stop, stopped) = oneshot::channel();
+            let declared = spec.mcp[0].arguments().to_vec();
             let serving = tokio::task::spawn_local(async move {
                 serve(listener, spec, async {
                     let _ = stopped.await;
@@ -3190,7 +3680,8 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 7,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
+                        arguments: declared.clone(),
                     },
                 },
             )
@@ -3250,18 +3741,28 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 "fake-mcp".to_string(),
                 child_pid.to_string_lossy().into_owned(),
             ];
-            let (_directory, socket) = serving_socket(mcp_spec_with_server(marker.path(), command));
+            let spec = mcp_spec_with_server(marker.path(), command);
+            let declared = spec.mcp[0].arguments().to_vec();
+            let (_directory, socket) = serving_socket(spec);
             let (mut reader, mut writer) = transport(&socket).await;
             put(
                 &mut writer,
                 7,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
+                        arguments: declared.clone(),
                     },
                 },
             )
             .await;
+            let ready =
+                tokio::time::timeout(Duration::from_secs(5), read_frame::<Frame, _>(&mut reader))
+                    .await
+                    .expect("the MCP readiness response arrives")
+                    .unwrap()
+                    .unwrap();
+            assert!(matches!(ready.body, Body::McpReady));
             let pids = tokio::time::timeout(Duration::from_secs(5), async {
                 loop {
                     let pids = std::fs::read_to_string(&child_pid)
@@ -3338,6 +3839,7 @@ done"#,
                 list_calls.display()
             );
             let mcp = Arc::new(vec![crate::record::config::mcp::McpServer {
+                argument_wildcards: false,
                 name: "test-mcp".to_string(),
                 command: vec!["/bin/sh".to_string(), "-c".to_string(), script],
             }]);
@@ -3369,8 +3871,10 @@ done"#,
                 crate::run::broker::mcp::DiscoveryRegistryHost::start(&mcp, Arc::clone(&policy))
                     .expect("the registry starts");
             let spec = Arc::new(ShellSpec {
-                command_timeout: SHELL_COMMAND_TIMEOUT,
-                request_timeout: SERVE_REQUEST_TIMEOUT,
+                max_input: DEFAULT_SHELL_MAX_INPUT,
+                max_output: DEFAULT_SHELL_MAX_OUTPUT,
+                command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
+                request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
                     Reach::over(
                         &marker.path().canonicalize().expect("marker resolves"),
@@ -3390,7 +3894,9 @@ done"#,
                 egress: None,
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
+                host_programs: Default::default(),
             });
+            let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
             let (mut reader, mut writer) = transport(&socket).await;
 
@@ -3399,7 +3905,8 @@ done"#,
                 1,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
+                        arguments: declared.clone(),
                     },
                 },
             )
@@ -3490,6 +3997,7 @@ case "$frame" in
 esac
 done"#;
             let mcp = Arc::new(vec![crate::record::config::mcp::McpServer {
+                argument_wildcards: false,
                 name: "test-mcp".to_string(),
                 command: vec![
                     "/bin/sh".to_string(),
@@ -3523,8 +4031,10 @@ done"#;
                 crate::run::broker::mcp::DiscoveryRegistryHost::start(&mcp, Arc::clone(&policy))
                     .expect("the registry starts");
             let spec = Arc::new(ShellSpec {
-                command_timeout: SHELL_COMMAND_TIMEOUT,
-                request_timeout: SERVE_REQUEST_TIMEOUT,
+                max_input: DEFAULT_SHELL_MAX_INPUT,
+                max_output: DEFAULT_SHELL_MAX_OUTPUT,
+                command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
+                request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
                     Reach::over(
                         &marker.path().canonicalize().expect("marker resolves"),
@@ -3544,7 +4054,9 @@ done"#;
                 egress: None,
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
+                host_programs: Default::default(),
             });
+            let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
             let (mut reader, mut writer) = transport(&socket).await;
 
@@ -3553,7 +4065,8 @@ done"#;
                 1,
                 Body::Open {
                     mode: Interpreter::Mcp {
-                        server: "/bin/sh".to_string(),
+                        server: "sh".to_string(),
+                        arguments: declared.clone(),
                     },
                 },
             )

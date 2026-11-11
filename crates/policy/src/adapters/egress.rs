@@ -16,7 +16,10 @@ use crate::GovernedBox;
 use crate::{
     CatalogRefusal, CatalogStage, DiscoveryFailure, ListPage, McpServerKind, ToolCatalogs,
 };
-use crate::{Decision, Delivery, DenyReason, Outcome, PolicyEngine, Principal, Request};
+use crate::{
+    Decision, Delivery, DenyReason, McpReply, Outcome, PendingToolResponse, PolicyEngine,
+    Principal, Request, RequestId,
+};
 
 /// Binds one policy and egress principal to outbound effect interception.
 pub struct EgressPolicyInterceptor {
@@ -102,26 +105,31 @@ impl EgressPolicyInterceptor {
 
     /// The two MCP gates on an allowed `http:request`: `mcp:call` identity, then the per-tool typed
     /// refinement. A non-MCP request carries no frame and passes.
-    fn mcp_gates(&self, mcp: &Option<McpFrame<'_>>) -> Result<(), String> {
-        let Some(frame) = mcp else { return Ok(()) };
+    fn mcp_gates(&self, mcp: &Option<McpFrame<'_>>) -> Result<McpGrant, String> {
+        let Some(frame) = mcp else {
+            return Ok((None, None));
+        };
         // Gate one: `mcp:call` (identity). `{:?}` quotes the server and method, so a hostile
         // identity cannot forge a log line; identity and args are omitted from it.
         let request = mcp_request(frame);
-        if let Err(reason) = authorize(&self.policy, &self.governed, &self.principal, &request) {
-            // A denied `tools/list` produces no reply, so the server is marked terminal here, and
-            // discovery can finish with that one server degraded.
-            if let McpFrame::List { server, method } = *frame
-                && method == "tools/list"
-            {
-                self.catalogs.list_denied(server);
-                self.report_if_remote_finished();
+        let request_id = match authorize(&self.policy, &self.governed, &self.principal, &request) {
+            Ok(request_id) => request_id,
+            Err(reason) => {
+                // A denied `tools/list` produces no reply, so the server is marked terminal here, and
+                // discovery can finish with that one server degraded.
+                if let McpFrame::List { server, method } = *frame
+                    && method == "tools/list"
+                {
+                    self.catalogs.list_denied(server);
+                    self.report_if_remote_finished();
+                }
+                return Err(format!(
+                    "mcp:call gate (server {:?} method {:?}): {reason}",
+                    diagnostic_context(frame.server()),
+                    diagnostic_context(frame.method())
+                ));
             }
-            return Err(format!(
-                "mcp:call gate (server {:?} method {:?}): {reason}",
-                diagnostic_context(frame.server()),
-                diagnostic_context(frame.method())
-            ));
-        }
+        };
         // Gate two: the namespaced per-tool action, a refinement of the `mcp:call` allow. A tracked
         // server's tool must first be named exactly by its accepted `tools/list`. The refinement then
         // blocks only on an explicit `forbid`, and an unruled tool rides the coarse allow. `McpFrame`
@@ -144,20 +152,22 @@ impl EgressPolicyInterceptor {
                         diagnostic_context(&action)
                     )
                 })?;
-            if let decision @ Decision::Deny { .. } = self.policy.refine_tool_call(
+            let (decision, tool_response) = self.policy.refine_tool_call(
                 &self.governed,
                 &self.principal,
                 server,
                 tool,
                 &arguments,
-            ) {
+            );
+            if let decision @ Decision::Deny { .. } = decision {
                 return Err(format!(
                     "per-tool gate ({}): {decision}",
                     diagnostic_context(&action)
                 ));
             }
+            return Ok((Some(request_id), tool_response));
         }
-        Ok(())
+        Ok((Some(request_id), None))
     }
 }
 
@@ -167,9 +177,8 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
         effect: &EgressEffectAttempt<'_>,
     ) -> io::Result<Box<dyn EgressEffectPermit>> {
         let decision = match effect {
-            // The host, decided before it is resolved. No address exists yet, so an address rule does
-            // not apply here; it applies to the per-address `Connect` that follows.
-            EgressEffectAttempt::Resolve { host, port } => match self.policy.decide(
+            // Name resolution records a request only; each address has its own connect attempt.
+            EgressEffectAttempt::Resolve { host, port } => match self.policy.admit(
                 &self.governed,
                 &self.principal,
                 &Request::Connect {
@@ -178,19 +187,20 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     port: *port,
                 },
             ) {
-                Decision::Deny {
+                Ok(request_id) => Ok((Some(request_id), (None, None))),
+                Err(Decision::Deny {
                     reason: DenyReason::PolicyPending,
                     ..
-                } if self.mcp_hosts.contains(*host) => Ok(()),
-                decision @ Decision::Deny { .. } => Err(decision.to_string()),
-                Decision::Allow { .. } => Ok(()),
+                }) if self.mcp_hosts.contains(*host) => Ok((None, (None, None))),
+                Err(decision) => Err(decision.to_string()),
             },
             EgressEffectAttempt::Connect {
                 host,
                 port,
                 address,
                 ..
-            } => match self.policy.decide(
+            } => authorize(
+                &self.policy,
                 &self.governed,
                 &self.principal,
                 &Request::Connect {
@@ -198,15 +208,8 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     ip: Some(address.ip()),
                     port: *port,
                 },
-            ) {
-                // Unreachable: a `Connect` never carries `PolicyPending`, so this arm never fires.
-                Decision::Deny {
-                    reason: DenyReason::PolicyPending,
-                    ..
-                } if self.mcp_hosts.contains(*host) => Ok(()),
-                decision @ Decision::Deny { .. } => Err(decision.to_string()),
-                Decision::Allow { .. } => Ok(()),
-            },
+            )
+            .map(|request_id| (Some(request_id), (None, None))),
             EgressEffectAttempt::HttpRequest {
                 host,
                 port,
@@ -216,9 +219,9 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                 intercepted,
                 mcp,
             } => {
-                // The `http:request` gate. `decide` records to history, so it is called exactly
-                // once here; the `mcp:call` gate below is the second recorded decision.
-                match self.policy.decide(
+                // HTTP and MCP decisions are separate requests, even in one gateway exchange.
+                authorize(
+                    &self.policy,
                     &self.governed,
                     &self.principal,
                     &Request::Http {
@@ -229,44 +232,28 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                         body_bytes: *body_bytes,
                         intercepted: *intercepted,
                     },
-                ) {
-                    // Unreachable: an `Http` request never carries `PolicyPending`, so this arm never
-                    // fires.
-                    Decision::Deny {
-                        reason: DenyReason::PolicyPending,
-                        ..
-                    } if self.mcp_hosts.contains(*host)
-                        && !matches!(
-                            mcp,
-                            Some(
-                                McpFrame::ToolCall { .. }
-                                    | McpFrame::PromptGet { .. }
-                                    | McpFrame::ResourceRead { .. }
-                            )
-                        ) =>
-                    {
-                        Ok(())
-                    }
-                    decision @ Decision::Deny { .. } => {
-                        Err(format!("http:request gate: {decision}"))
-                    }
-                    // Allowed; the `mcp:call` gate and per-tool refinement run on the Ready authority.
-                    Decision::Allow { .. } => self.mcp_gates(mcp),
-                }
+                )
+                .map_err(|reason| format!("http:request gate: {reason}"))
+                .and_then(|request_id| {
+                    self.mcp_gates(mcp)
+                        .map(|mcp_grant| (Some(request_id), mcp_grant))
+                })
             }
-            // The release of a reply to the workload decides nothing and records nothing. The
-            // reply reaches history once, on the `HttpRequest` permit, as `output.status`.
-            EgressEffectAttempt::ResponseRelease { .. } => Ok(()),
+            // Response release records nothing: the HTTP permit already records the reply.
+            EgressEffectAttempt::ResponseRelease { .. } => Ok((None, (None, None))),
             _ => Err("policy does not support this egress effect".to_string()),
         };
 
         decision
-            .map(|()| {
+            .map(|(request_id, (mcp_request_id, tool_response))| {
                 Box::new(LocalPolicyEffectPermit {
                     policy: Arc::clone(&self.policy),
                     principal: self.principal.clone(),
                     governed: self.governed.clone(),
                     attempt: AttemptIdentity::capture(effect),
+                    request_id,
+                    mcp_request_id,
+                    tool_response,
                 }) as Box<dyn EgressEffectPermit>
             })
             .map_err(permission_denied)
@@ -378,6 +365,9 @@ enum AttemptIdentity {
         port: u16,
         method: String,
         path: String,
+        /// Whether the gateway decrypted a TLS exchange, carried from the attempt so the
+        /// response leg reports the transport the request leg reported.
+        intercepted: bool,
         /// Present when this request carried an `mcp:call`; drives the response-leg recording.
         mcp: Option<McpCallIdentity>,
     },
@@ -404,6 +394,7 @@ impl AttemptIdentity {
                 port,
                 method,
                 path,
+                intercepted,
                 mcp,
                 ..
             } => Self::Http {
@@ -411,6 +402,7 @@ impl AttemptIdentity {
                 port: *port,
                 method: (*method).to_string(),
                 path: (*path).to_string(),
+                intercepted: *intercepted,
                 // Record a response leg only for an actual tool/resource/prompt CALL — never for
                 // `List`/enumeration (tools/list, resources/list, prompts/list). Discovery drives
                 // those `List` frames through the gateway at startup; counting them would inflate a
@@ -451,12 +443,24 @@ struct LocalPolicyEffectPermit {
     /// Integration metadata for the box this boundary serves.
     governed: GovernedBox,
     attempt: AttemptIdentity,
+    request_id: Option<RequestId>,
+    mcp_request_id: Option<RequestId>,
+    /// The per-tool `::response` an allowed `tools/call` owes, recorded beside `mcp:call::response`.
+    tool_response: Option<PendingToolResponse>,
 }
+
+/// The `mcp:call` request an allowed MCP frame recorded, and the per-tool response it owes.
+type McpGrant = (Option<RequestId>, Option<PendingToolResponse>);
 
 impl LocalPolicyEffectPermit {
     /// Submit this effect's history, translating the proxy's outcome into the policy
     /// vocabulary.
-    fn submit(&self, outcome: EgressEffectOutcome) -> io::Result<()> {
+    fn submit(mut self, outcome: EgressEffectOutcome) -> io::Result<()> {
+        let tool_response = self.tool_response.take();
+        let Some(request_id) = self.request_id.as_ref() else {
+            // Response release and bootstrap resolution have no outcome event.
+            return Ok(());
+        };
         let delivery = delivery_of(outcome);
         let recorded = match (&self.attempt, delivery) {
             (
@@ -469,6 +473,7 @@ impl LocalPolicyEffectPermit {
             ) => self.policy.record(
                 &self.governed,
                 &self.principal,
+                request_id,
                 &Outcome::Connect {
                     host,
                     port: *port,
@@ -485,6 +490,7 @@ impl LocalPolicyEffectPermit {
                     port,
                     method,
                     path,
+                    intercepted,
                     mcp,
                 },
                 Some(delivery),
@@ -492,6 +498,7 @@ impl LocalPolicyEffectPermit {
                 let http = self.policy.record(
                     &self.governed,
                     &self.principal,
+                    request_id,
                     &Outcome::Http {
                         host,
                         port: *port,
@@ -499,6 +506,7 @@ impl LocalPolicyEffectPermit {
                         path,
                         delivery,
                         status: reply_status_of(outcome),
+                        intercepted: *intercepted,
                     },
                 );
                 // Record the `mcp:call::response` leg for a remote (http) MCP call, so temporal caps
@@ -512,20 +520,34 @@ impl LocalPolicyEffectPermit {
                 // call is a `response` whatever the server then replies (a JSON-RPC error is still
                 // `::response`, like a delivered `Http` request with a 500); only a definite `Failed`
                 // — the effect provably did not occur — records nothing.
-                match mcp {
-                    Some(mcp) if !matches!(delivery, Delivery::Failed) => {
-                        http.and(self.policy.record(
-                            &self.governed,
-                            &self.principal,
-                            &Outcome::Mcp {
-                                server: &mcp.server,
-                                method: &mcp.method,
-                                tool: mcp.tool.as_deref(),
-                                prompt: mcp.prompt.as_deref(),
-                                uri: mcp.uri.as_deref(),
-                            },
-                        ))
-                    }
+                match mcp.as_ref().zip(self.mcp_request_id.as_ref()) {
+                    Some((mcp, mcp_request_id)) if !matches!(delivery, Delivery::Failed) => http
+                        .and(
+                            self.policy
+                                .record(
+                                    &self.governed,
+                                    &self.principal,
+                                    mcp_request_id,
+                                    &Outcome::Mcp {
+                                        server: &mcp.server,
+                                        method: &mcp.method,
+                                        tool: mcp.tool.as_deref(),
+                                        prompt: mcp.prompt.as_deref(),
+                                        uri: mcp.uri.as_deref(),
+                                    },
+                                )
+                                .and_then(|()| {
+                                    // A failed coarse record surfaces before the tool's leg,
+                                    // so the tool never counts a call `mcp:call` missed.
+                                    tool_response.map_or(Ok(()), |response| {
+                                        // The gateway reads no reply body, and a streamed reply
+                                        // sends its status before the tool's result, so how an
+                                        // http call ended is not known.
+                                        self.policy
+                                            .record_tool_response(response, McpReply::Indeterminate)
+                                    })
+                                }),
+                        ),
                     _ => http,
                 }
             }
@@ -546,14 +568,14 @@ impl LocalPolicyEffectPermit {
 
 impl EgressEffectPermit for LocalPolicyEffectPermit {
     fn record_outcome(self: Box<Self>, outcome: EgressEffectOutcome) -> io::Result<()> {
-        self.submit(outcome)
+        (*self).submit(outcome)
     }
 
     fn mark_indeterminate(self: Box<Self>) {
         // An admitted effect that ended with no terminal outcome. Record it as an
         // indeterminate delivery of zero known bytes rather than silently dropping it:
         // a rule that counts attempts must still see that one happened.
-        let _ = self.submit(EgressEffectOutcome::Indeterminate { accepted_bytes: 0 });
+        let _ = (*self).submit(EgressEffectOutcome::Indeterminate { accepted_bytes: 0 });
     }
 }
 
@@ -635,11 +657,10 @@ fn authorize(
     governed: &GovernedBox,
     principal: &Principal,
     request: &Request<'_>,
-) -> Result<(), String> {
-    match policy.decide(governed, principal, request) {
-        Decision::Allow { .. } => Ok(()),
-        decision @ Decision::Deny { .. } => Err(decision.to_string()),
-    }
+) -> Result<RequestId, String> {
+    policy
+        .admit(governed, principal, request)
+        .map_err(|decision| decision.to_string())
 }
 
 fn diagnostic_context(value: &str) -> String {
@@ -719,6 +740,38 @@ mod tests {
             interceptor,
             _history: history,
         }
+    }
+
+    #[test]
+    fn http_and_mcp_outcomes_keep_their_own_ids_when_calls_finish_out_of_order() {
+        use crate::adapters::correlation_tests::{assert_pair, events, id};
+        let fixture = interceptor(DEMO_PERMITS);
+        let path = fixture._history.path().join("dogwood.redb");
+        let attempt = mcp_call_attempt("demo", "add", r#"{"a":1,"b":2}"#);
+        let first = fixture.intercept(&attempt).expect("first call admitted");
+        let second = fixture
+            .intercept(&attempt)
+            .expect("identical second call admitted");
+        second
+            .record_outcome(EgressEffectOutcome::Completed(64))
+            .expect("second records");
+        first
+            .record_outcome(EgressEffectOutcome::Completed(64))
+            .expect("first records");
+        drop(fixture.interceptor);
+        let events = events(&path);
+        assert_eq!(
+            events.len(),
+            8,
+            "two HTTP and two MCP request/response pairs"
+        );
+        assert_pair(&events[2], &events[4]);
+        assert_pair(&events[3], &events[5]);
+        assert_pair(&events[0], &events[6]);
+        assert_pair(&events[1], &events[7]);
+        assert_eq!(events[0].action(), "http:request");
+        assert_eq!(events[1].action(), "mcp:call");
+        assert_eq!(events[..4].iter().map(id).collect::<BTreeSet<_>>().len(), 4);
     }
 
     /// The demo server's `tools/list`, which generates the typed `demo::Action::"add"` action.
@@ -990,6 +1043,208 @@ mod tests {
         );
     }
 
+    /// A tracked demo server over a staged policy, with its policy and its catalogs.
+    fn tracked_demo(
+        source: &str,
+    ) -> (
+        Arc<PolicyEngine>,
+        Arc<ToolCatalogs>,
+        Arc<dyn EgressEffectInterceptor>,
+        tempfile::TempDir,
+    ) {
+        let history = tempfile::tempdir().expect("history directory");
+        let policy = Arc::new(
+            PolicyEngine::open_staged(
+                &crate::Operator::unanchored(),
+                vec![Policy {
+                    origin: PathBuf::from("adapter-test.cedar"),
+                    text: source.to_string(),
+                }],
+                &history.path().join("dogwood.redb"),
+            )
+            .expect("the staged policy opens"),
+        );
+        let catalogs = demo_catalogs(&policy);
+        let interceptor = EgressPolicyInterceptor::into_handle_with_discovery(
+            Arc::clone(&policy),
+            Principal::agent(),
+            GovernedBox::assigned("test-box"),
+            vec![("mcp-fixture.demo".to_string(), "demo".to_string())],
+            Arc::clone(&catalogs),
+            Arc::new(|| {}),
+        );
+        (policy, catalogs, interceptor, history)
+    }
+
+    /// The per-tool refinement of one `demo` `add`, without the catalog gate in front of it.
+    fn refine_add(policy: &PolicyEngine, a: i64) -> Decision {
+        policy
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "demo",
+                "add",
+                &serde_json::json!({"a": a, "b": 2}),
+            )
+            .0
+    }
+
+    /// The forbid that a staged demo schema arms.
+    const DEMO_ADD_FORBID: &str = r#"
+        forbid(principal, action == demo::Action::"add", resource)
+        when { context.input.a > 5 };
+    "#;
+
+    /// A rule that reads history refuses one `tools/list` and permits the next, and the later list
+    /// lifts the degraded refusal.
+    #[test]
+    fn a_remote_server_whose_list_policy_refused_recovers_when_a_later_list_is_permitted() {
+        let (policy, catalogs, interceptor, _history) = tracked_demo(&format!(
+            r#"{DEMO_PERMITS}
+            forbid(principal, action == Box::Action::"mcp:call", resource)
+            when {{ context.input.method == "tools/list" }}
+            unless temporal {{
+                formerly within 600s
+                    Box::Action::"mcp:call"::request{{ input.method: "prompts/list" }}
+            }};
+            {DEMO_ADD_FORBID}"#
+        ));
+        assert!(
+            interceptor
+                .intercept(&mcp_list_attempt("demo", "tools/list"))
+                .is_err(),
+            "no prompts/list is in history yet, so the forbid refuses the first tools/list"
+        );
+        assert_eq!(
+            catalogs.state("demo"),
+            Some(crate::ServerDiscovery::Failed(
+                DiscoveryFailure::ToolsListDenied
+            ))
+        );
+        assert_eq!(
+            policy
+                .finish_mcp_discovery()
+                .expect("completion degrades rather than fataling"),
+            vec!["demo".to_string()]
+        );
+        let held = refine_add(&policy, 9);
+        assert!(
+            matches!(
+                held,
+                Decision::Deny {
+                    reason: DenyReason::NoMatch,
+                    ..
+                }
+            ),
+            "the degraded refusal holds the tool: {held:?}"
+        );
+
+        interceptor
+            .intercept(&mcp_list_attempt("demo", "prompts/list"))
+            .expect("the coarse permit admits prompts/list");
+        interceptor
+            .intercept(&mcp_list_attempt("demo", "tools/list"))
+            .expect("the same policy permits this tools/list, because history changed");
+        interceptor
+            .stage_mcp_catalog("demo", root_reply(DEMO_TOOLS.as_bytes()))
+            .expect("the later list stages");
+        assert_eq!(catalogs.state("demo"), Some(crate::ServerDiscovery::Ready));
+        interceptor
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":2}"#))
+            .expect("an add the forbid does not name passes");
+        let forbidden = refine_add(&policy, 9);
+        assert!(
+            matches!(
+                forbidden,
+                Decision::Deny {
+                    reason: DenyReason::Forbidden,
+                    ..
+                }
+            ),
+            "the per-tool forbid, not a stale mark, refuses the add it names: {forbidden:?}"
+        );
+        assert!(
+            interceptor
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":9,"b":2}"#))
+                .is_err(),
+            "the gateway refuses the add the forbid names"
+        );
+    }
+
+    /// A remote server that replaces a schema the policy refused with one it accepts lifts the
+    /// degraded refusal.
+    #[test]
+    fn a_remote_server_recovers_when_it_corrects_the_schema_the_policy_refused() {
+        let (policy, catalogs, interceptor, _history) =
+            tracked_demo(&format!("{DEMO_PERMITS}{DEMO_ADD_FORBID}"));
+        assert!(
+            interceptor
+                .stage_mcp_catalog("demo", root_reply(b"not a tools/list reply"))
+                .is_err()
+        );
+        assert_eq!(
+            catalogs.state("demo"),
+            Some(crate::ServerDiscovery::Failed(
+                DiscoveryFailure::CatalogCapture
+            ))
+        );
+        assert_eq!(
+            policy
+                .finish_mcp_discovery()
+                .expect("completion degrades rather than fataling"),
+            vec!["demo".to_string()]
+        );
+
+        let renamed = r#"{"result":{"tools":[{"name":"add","inputSchema":{"type":"object",
+          "properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]}}]}}"#;
+        let refused = interceptor
+            .stage_mcp_catalog("demo", root_reply(renamed.as_bytes()))
+            .expect_err("the forbid reads an argument this schema does not declare");
+        assert!(refused.to_string().contains("rejected"), "{refused}");
+        assert_eq!(
+            catalogs.state("demo"),
+            Some(crate::ServerDiscovery::Failed(
+                DiscoveryFailure::PolicyStaging
+            ))
+        );
+        let held = refine_add(&policy, 9);
+        assert!(
+            matches!(
+                held,
+                Decision::Deny {
+                    reason: DenyReason::NoMatch,
+                    ..
+                }
+            ),
+            "the degraded refusal still holds the tool: {held:?}"
+        );
+
+        interceptor
+            .stage_mcp_catalog("demo", root_reply(DEMO_TOOLS.as_bytes()))
+            .expect("the corrected list stages");
+        assert_eq!(catalogs.state("demo"), Some(crate::ServerDiscovery::Ready));
+        interceptor
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":2}"#))
+            .expect("an add the forbid does not name passes");
+        let forbidden = refine_add(&policy, 9);
+        assert!(
+            matches!(
+                forbidden,
+                Decision::Deny {
+                    reason: DenyReason::Forbidden,
+                    ..
+                }
+            ),
+            "the per-tool forbid, not a stale mark, refuses the add it names: {forbidden:?}"
+        );
+        assert!(
+            interceptor
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":9,"b":2}"#))
+                .is_err(),
+            "the gateway refuses the add the forbid names"
+        );
+    }
+
     /// Staging a catalog declares the per-tool action, so the complete bundle validates, the
     /// authority becomes Ready, and the per-tool `forbid` takes effect.
     #[test]
@@ -1073,25 +1328,7 @@ mod tests {
     /// An interceptor under `source` that tracks the demo server, so its host is a bootstrap target
     /// while pending.
     fn tracked_interceptor(source: &str) -> InterceptorFixture {
-        let history = tempfile::tempdir().expect("history directory");
-        let policy = PolicyEngine::open_staged(
-            &crate::Operator::unanchored(),
-            vec![Policy {
-                origin: PathBuf::from("adapter-test.cedar"),
-                text: source.to_string(),
-            }],
-            &history.path().join("dogwood.redb"),
-        )
-        .expect("the staged policy opens");
-        let policy = Arc::new(policy);
-        let interceptor = EgressPolicyInterceptor::into_handle_with_discovery(
-            Arc::clone(&policy),
-            Principal::agent(),
-            GovernedBox::assigned("test-box"),
-            vec![("mcp-fixture.demo".to_string(), "demo".to_string())],
-            demo_catalogs(&policy),
-            Arc::new(|| {}),
-        );
+        let (_, _, interceptor, history) = tracked_demo(source);
         InterceptorFixture {
             interceptor,
             _history: history,
@@ -1104,6 +1341,112 @@ mod tests {
         permit(principal, action == Box::Action::"mcp:call", resource)
         when { context.input.server == "demo" };
     "#;
+
+    /// The demo permits, plus a cap of two `demo::Action::"add"::response` events with `a` of 1.
+    fn per_tool_capped_interceptor() -> InterceptorFixture {
+        let fixture = tracked_interceptor(&format!(
+            r#"{DEMO_PERMITS}
+            forbid(principal, action == demo::Action::"add", resource)
+            when temporal {{
+              exists (n: Long). (
+                (count for (t: Timepoint). where (
+                  formerly within 3600s (demo::Action::"add"::response{{ input.a: 1 }} && tp(t))
+                )) == n
+                && n >= 2
+              )
+            }};"#
+        ));
+        fixture
+            .stage_mcp_catalog("demo", root_reply(DEMO_TOOLS.as_bytes()))
+            .expect("the demo catalog stages");
+        fixture
+    }
+
+    /// A delivered remote tool call records the tool's own `::response` with its input, so a cap on
+    /// the tool counts http calls exactly as the same cap on `mcp:call::response` does.
+    #[test]
+    fn a_remote_tool_call_records_its_own_response_a_per_tool_cap_counts() {
+        let fixture = per_tool_capped_interceptor();
+        // A call with another `a` records a response the cap's input filter does not match.
+        fixture
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":2,"b":1}"#))
+            .expect("a call under the cap is admitted")
+            .record_outcome(EgressEffectOutcome::Completed(4))
+            .expect("the delivered call records");
+        for _ in 0..2 {
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .expect("a call under the cap is admitted")
+                .record_outcome(EgressEffectOutcome::Completed(4))
+                .expect("the delivered call records");
+        }
+        assert!(
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .is_err(),
+            "two recorded demo::Action::\"add\"::response events with a = 1 fire the cap"
+        );
+    }
+
+    /// A definite `Failed` delivery records no per-tool `::response`, as it records no
+    /// `mcp:call::response`; an indeterminate one records both.
+    #[test]
+    fn a_remote_tool_call_records_its_own_response_exactly_when_mcp_call_does() {
+        let fixture = per_tool_capped_interceptor();
+        for _ in 0..2 {
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .expect("a call under the cap is admitted")
+                .record_outcome(EgressEffectOutcome::Failed {
+                    accepted_bytes: 0,
+                    error_kind: std::io::ErrorKind::ConnectionReset,
+                })
+                .expect("a failed delivery records no response");
+        }
+        for _ in 0..2 {
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .expect("failed deliveries never counted toward the cap")
+                .mark_indeterminate();
+        }
+        assert!(
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .is_err(),
+            "two indeterminate deliveries record the per-tool ::response and fire the cap"
+        );
+    }
+
+    /// A remote tool call records `output.reply` as `indeterminate`, because the gateway cannot
+    /// tell that the tool's result arrived, so a precondition that requires `result` stays unmet.
+    #[test]
+    fn a_remote_tool_call_never_satisfies_a_result_precondition() {
+        let fixture = tracked_interceptor(&format!(
+            r#"{DEMO_PERMITS}
+            forbid(principal, action == demo::Action::"add", resource)
+            when {{ context.input.a == 9 }}
+            unless temporal {{
+              formerly within 3600s (demo::Action::"add"::response{{ output.reply: "result" }})
+            }};"#
+        ));
+        fixture
+            .stage_mcp_catalog("demo", root_reply(DEMO_TOOLS.as_bytes()))
+            .expect("the demo catalog stages");
+        fixture
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+            .expect("an ordinary call is admitted")
+            .record_outcome(EgressEffectOutcome::Replied {
+                accepted_bytes: 4,
+                status: 200,
+            })
+            .expect("the answered call records");
+        assert!(
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":9,"b":1}"#))
+                .is_err(),
+            "a 200 status does not show that the tool's result arrived"
+        );
+    }
 
     fn refusal(fixture: &InterceptorFixture, attempt: &EgressEffectAttempt<'_>) -> String {
         match fixture.intercept(attempt) {
@@ -1318,7 +1661,7 @@ mod tests {
         let fixture = interceptor(
             r#"permit(principal, action == Box::Action::"net:connect", resource);
                forbid(principal, action == Box::Action::"net:connect", resource)
-               when { context.input has ip && context.input.ip like "10.*" };"#,
+               when { context.input has ip4 && context.input.ip4 like "10.*" };"#,
         );
         assert!(
             fixture
@@ -1389,7 +1732,6 @@ mod tests {
                 method: "POST",
                 path: "/v1/messages",
                 status: 201,
-                body_bytes: 84,
             })
             .expect("response release is allowed")
             .record_outcome(EgressEffectOutcome::Completed(120))
@@ -1415,7 +1757,6 @@ mod tests {
             method: "GET",
             path: "/",
             status: 200,
-            body_bytes: 0,
         };
 
         // A cap of two `::response` records within the window. One exchange must leave it unfired.
@@ -1583,14 +1924,15 @@ mod tests {
         }
     }
 
-    /// A forbid on `ip` refuses the pinned address and leaves every other address to the permit.
+    /// A clause per family refuses the pinned address and leaves every other address to the
+    /// permit. One `ip4` clause covers every IPv6 encoding that carries the address.
     #[test]
     fn an_address_forbid_refuses_only_its_addresses() {
         let fixture = interceptor(
             r#"permit(principal, action == Box::Action::"net:connect", resource);
                forbid(principal, action == Box::Action::"net:connect", resource)
-               when { context.input has ip && (context.input.ip like "169.254.*"
-                      || context.input.ip == "fd00:ec2::254") };"#,
+               when { (context.input has ip4 && context.input.ip4 like "169.254.*")
+                      || (context.input has ip6 && context.input.ip6 == "fd00:ec2::254") };"#,
         );
         for refused in [
             "169.254.169.254:80",
@@ -1598,6 +1940,8 @@ mod tests {
             "[fd00:ec2::254]:80",
             "[::ffff:169.254.169.254]:80",
             "[2002:a9fe:a9fe::]:80",
+            "[64:ff9b::a9fe:a9fe]:80",
+            "[::ffff:0:a9fe:a9fe]:80",
         ] {
             assert!(
                 fixture
@@ -1618,7 +1962,32 @@ mod tests {
         }
     }
 
-    /// `ip` is a string, so the Cedar `ipaddr` form fails when the policy loads.
+    /// An `ip6` clause refuses the translator prefix itself, which no `ip4` clause can state: the
+    /// wrapped address is reachable under a different IPv6 prefix.
+    #[test]
+    fn a_translator_prefix_forbid_refuses_the_wire_form_and_not_the_address_it_carries() {
+        let fixture = interceptor(
+            r#"permit(principal, action == Box::Action::"net:connect", resource);
+               @id("no_nat64_translator")
+               forbid(principal, action == Box::Action::"net:connect", resource)
+               when { context.input has ip6 && context.input.ip6 like "64:ff9b::*" };"#,
+        );
+        for refused in ["[64:ff9b::5db8:d822]:443", "[64:ff9b::a9fe:a9fe]:80"] {
+            assert!(
+                fixture
+                    .intercept(&connect_attempt(refused.parse().unwrap()))
+                    .is_err(),
+                "{refused} routes through the translator"
+            );
+        }
+        for admitted in ["93.184.216.34:443", "[2002:5db8:d822::]:443"] {
+            fixture
+                .intercept(&connect_attempt(admitted.parse().unwrap()))
+                .unwrap_or_else(|error| panic!("{admitted} is admitted: {error}"));
+        }
+    }
+
+    /// `ip4` is a string, so the Cedar `ipaddr` form fails when the policy loads.
     #[test]
     fn an_ipaddr_rule_is_refused_when_the_policy_loads() {
         let history = tempfile::tempdir().expect("history directory");
@@ -1626,7 +1995,7 @@ mod tests {
             vec![Policy {
                 origin: PathBuf::from("adapter-test.cedar"),
                 text: r#"forbid(principal, action == Box::Action::"net:connect", resource)
-                    when { context.input has ip && context.input.ip.isInRange(ip("10.0.0.0/8")) };"#
+                    when { context.input has ip4 && context.input.ip4.isInRange(ip("10.0.0.0/8")) };"#
                     .to_string(),
             }],
             &history.path().join("dogwood.redb"),
@@ -1634,7 +2003,10 @@ mod tests {
             panic!("an ipaddr comparison does not load");
         };
         let refusal = refusal.to_string();
-        assert!(refusal.contains("schema validation"), "{refusal}");
+        assert!(
+            refusal.contains("expected ipaddr but saw String"),
+            "{refusal}"
+        );
     }
 
     /// The request leg projects `port` and `body_bytes` into its decision. No rule runs on the
@@ -1704,6 +2076,58 @@ mod tests {
         assert!(
             interceptor.intercept(&request(false)).is_err(),
             "a plain-HTTP request must not satisfy a rule that requires intercepted"
+        );
+    }
+
+    /// A `http:request::response` reports the transport the exchange really used. A plain-HTTP
+    /// exchange records `intercepted: false`, and a TLS-intercepted exchange records `true`.
+    #[test]
+    fn the_response_leg_reports_the_real_transport() {
+        // One `::response` with `input.intercepted: true` arms the forbid. A plain-HTTP
+        // exchange must leave it unarmed; a TLS-intercepted exchange must arm it.
+        let tls_only_history = || {
+            interceptor(
+                r#"permit(principal, action == Box::Action::"http:request", resource);
+                   forbid(principal, action == Box::Action::"http:request", resource)
+                   when temporal {
+                     formerly within 3600s (
+                       Box::Action::"http:request"::response{ input.intercepted: true }
+                     )
+                   };"#,
+            )
+        };
+        let request = |intercepted| EgressEffectAttempt::HttpRequest {
+            host: "api.github.com",
+            port: 443,
+            method: "POST",
+            path: "/v1/messages",
+            body_bytes: 0,
+            intercepted,
+            mcp: None,
+        };
+        let exchange = |fixture: &InterceptorFixture, intercepted| {
+            fixture
+                .intercept(&request(intercepted))
+                .expect("the permit admits the request")
+                .record_outcome(EgressEffectOutcome::Replied {
+                    accepted_bytes: 10,
+                    status: 200,
+                })
+                .expect("the reply records");
+        };
+
+        let plain = tls_only_history();
+        exchange(&plain, false);
+        plain
+            .intercept(&request(false))
+            .expect("a plain-HTTP response records intercepted: false, so the forbid stays unarmed")
+            .mark_indeterminate();
+
+        let tls = tls_only_history();
+        exchange(&tls, true);
+        assert!(
+            tls.intercept(&request(true)).is_err(),
+            "a TLS-intercepted response records intercepted: true, which arms the forbid"
         );
     }
 }

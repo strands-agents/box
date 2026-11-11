@@ -46,7 +46,10 @@ Box's interpreters and gateways share an event history, so rules can use earlier
 actions and elapsed time to decide what is allowed next. For example, a file read
 through Shell or Python can cause the gateway to deny a later outbound HTTP request.
 
-**Preview:** Box currently supports local execution on macOS with Apple silicon.
+**Preview:** Box supports local execution on Linux ARM64 and macOS with Apple silicon.
+Linux x86-64 is experimental and requires `EXPERIMENTAL_X86_SUPPORT=TRUE` in the
+environment of the Box process. See [building from source](docs/user/getting-started.md#build-from-source)
+for the x86-64 opt-in; release downloads remain ARM64-only on Linux.
 We welcome feedback through [GitHub issues](https://github.com/strands-agents/box/issues).
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 
@@ -90,6 +93,23 @@ to start host threads after hardening and signal registration, before workload s
 Call it before starting application threads or loading secrets, and use one Box workload
 per host process. Later `run` calls fail, even if the first call failed.
 Ship the matching Box helper binaries beside the host application.
+
+To replace the running box's policy from a host thread:
+
+```rust,no_run
+strands_box::reload(&[strands_box::Policy {
+    origin: "policy.dw".into(),
+    text: new_policy_text,
+}])?;
+```
+
+`reload` waits until the change takes effect. Invalid policy returns `ReloadRefused` and leaves
+the current policy in place. An empty list denies all policy requests. Policy files and the
+OS sandbox stay unchanged. A box must be open; `on_ready` runs too early.
+Use `ReloadRefused::is_not_running()` to distinguish that case from a rejected policy.
+A rule for an MCP tool can reload only after Box loads that server's tool definitions.
+Without them, even reloading the unchanged policy is refused. If policy blocks discovery,
+waiting will not help. The current policy stays in place.
 
 To generate policy schemas:
 
@@ -152,10 +172,10 @@ For each part, where it runs, what it decides, and how one request moves through
 
 ## Getting started
 
-Follow the [getting-started guide](docs/user/getting-started.md) to run
-Strands CLI with Box. To follow this guide, you need a Mac with Apple silicon and
-macOS 15 or later, Node.js 22.21 or later from Homebrew, and access to Claude
-Opus 5 on Amazon Bedrock in `us-west-2`.
+Follow the [getting-started guide](docs/user/getting-started.md) to download Box for macOS or Linux ARM64.
+The Strands CLI walkthrough uses macOS.
+For that walkthrough, you need macOS 15 or later on Apple silicon and Node.js 22.21 or later from Homebrew.
+You also need access to Claude Opus 5 on Amazon Bedrock in `us-west-2`.
 
 The download script checks the release checksum and unpacks the binaries into
 `./box-core`. It does not change your `PATH` or system directories:
@@ -165,7 +185,22 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh
 ./box-core/box --version
 ```
 
-Keep the downloaded binaries together in `./box-core`.
+The downloader selects macOS Apple silicon or Linux ARM64 archives. For Linux, select a release
+that includes `box-<version>-linux-arm64.tar.gz` and its `SHA256SUMS.txt` entry.
+Set `BOX_VERSION` to that release tag when running the script. Set `BOX_DOWNLOAD_DIR` to change
+the destination. A release can contain macOS assets only; check its assets if a Linux download fails.
+
+The script verifies the checksum and extracts into temporary storage before changing destination files.
+Linux packages must contain executable `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` files.
+The Linux package requires glibc 2.34 or newer and the GCC runtime library (`libgcc_s.so.1`).
+Before replacing files, the downloader runs the candidate's `box --version` in a private directory inside an existing destination.
+For a new destination, it uses the parent directory. This staging location must be writable and allow execution.
+Temporary download storage can prohibit execution (`noexec`).
+A failed version check reports the loader error and leaves existing destination files unchanged.
+The final extraction can partially update the destination if it fails. Use a fresh `BOX_DOWNLOAD_DIR`
+to retain a previous installation.
+
+Keep the entire download together in `./box-core`, including `Box.app` in signed macOS packages.
 You can also [build from source](#build-from-source). Then follow the guide to
 write `box.toml` and `policy.dw`, and run the box.
 
@@ -202,6 +237,18 @@ cargo build --release -p strands-box -p strands-box-containment
 Run the compiled binary as `./target/release/strands-box`. Keep its helper
 binaries in the same directory.
 
+The [release guide](docs/dev/releases.md) covers version selection and publication for macOS and Linux ARM64.
+
+Linux workspace tests run on Ubuntu ARM64 with user, mount, and process namespaces enabled.
+Unexpected prerequisite skips fail the job. The accepted alias-read limitation and missing
+credential-daemon fixture remain explicit in the report. Deterministic integration failures on either platform fail `CI Gate`.
+
+The [macOS release guide](docs/dev/macos-release.md) covers the native-feature build,
+automated signing, notarization, package verification, and release gates.
+
+The [fuzzing guide](docs/dev/fuzzing.md) covers the long libFuzzer run of the tool grammar shell
+parser.
+
 Common tasks run through [`just`](https://github.com/casey/just):
 
 ```sh
@@ -215,6 +262,20 @@ just test-all      # workspace tests and box example checks
 `--all-features` to run the `box_shell` and `box_credentials` suites, which require
 the `test-support` feature.
 
+In pull-request CI, changes to `docs/site-manifest.json`,
+`docs/site-manifest-retirements.json`, or a publishable page under `docs/user/` run the focused
+site-manifest contract test instead of the full Rust test matrix. The test compares the base
+contract to keep the product ID stable and require an append-only retirement before a page or route
+is removed.
+
+### Test the release downloader
+
+Run `python3 -m unittest discover -s scripts -p 'test_*.py' -v` to test release packaging and the downloader.
+Continuous integration runs the downloader tests on Linux and macOS. These tests use local fixture archives
+and simulated HTTP clients; they do not qualify a published binary or its containment behavior.
+On Linux, the mount test requires util-linux and permission to create a user and mount namespace.
+It creates a `noexec` temporary mount only inside the test process's private namespace.
+
 ## Documentation
 
 | Guide | Contents |
@@ -222,7 +283,7 @@ the `test-support` feature.
 | [`docs/user/`](docs/user) | How to install Box and run a box. |
 | [`docs/design/`](docs/design) | Architecture, enforcement boundaries, and design decisions. |
 
-See [AGENTS.md](AGENTS.md) for the repository rules and the current state.
+See [AGENTS.md](AGENTS.md) for the repository rules.
 
 ## Reporting a problem
 

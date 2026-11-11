@@ -75,6 +75,92 @@ fn clear_var(name: &str) {
     unsafe { std::env::remove_var(name) };
 }
 
+/// A box-owned route attaches the box's own credential unconditionally: no phantom is minted, the
+/// workload presents none, and the real secret is attached at the inject location with no advisory.
+#[test]
+fn box_owned_route_attaches_the_real_secret_with_no_phantom() {
+    set_var("E2E_BACKEND_TOKEN", "gw_real_token");
+    let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant-a").route(
+        RouteSpec::box_owned(
+            DestinationPattern::parse("api.github.com").unwrap(),
+            Locator::parse_uri("env://E2E_BACKEND_TOKEN").unwrap(),
+            header("Bearer {}"),
+        ),
+    ))
+    .expect("the box-owned route resolves");
+    assert!(
+        opened.phantoms().is_empty(),
+        "a box-owned route mints no phantom"
+    );
+    let store = opened.into_vault();
+
+    // The workload presents NO placeholder; the box attaches its own token anyway.
+    let headers: Vec<(String, String)> = Vec::new();
+    let attachment = store
+        .attach_for(bearer_request(
+            dest("api.github.com", 443, "/zen"),
+            &headers,
+            "https://api.github.com/zen",
+        ))
+        .expect("box-owned attaches without a phantom check")
+        .expect("a credential is bound");
+    assert_eq!(
+        attachment
+            .set_headers()
+            .find(|(name, _)| name.eq_ignore_ascii_case("Authorization"))
+            .map(|(_, value)| value.to_string()),
+        Some("Bearer gw_real_token".to_string()),
+        "the real backend token is attached"
+    );
+    assert!(
+        attachment.advisory_reason().is_none(),
+        "a box-owned attach is not an advisory injection"
+    );
+    clear_var("E2E_BACKEND_TOKEN");
+}
+
+/// A strip-phantom route mints a placeholder (provisioned to the workload) and resolves no real
+/// secret; on a request it strips the placeholder and attaches nothing.
+#[test]
+fn strip_phantom_route_mints_a_placeholder_and_attaches_nothing() {
+    // No env var is set: a strip-phantom route resolves no real secret.
+    let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant-a").route(
+        RouteSpec::strip_phantom(
+            DestinationPattern::parse("api.github.com").unwrap(),
+            header("Bearer {}"),
+        ),
+    ))
+    .expect("a strip-phantom route opens with no secret to resolve");
+    assert_eq!(
+        opened.phantoms().len(),
+        1,
+        "a strip-phantom route mints a placeholder for the workload"
+    );
+    let store = opened.into_vault();
+
+    // The workload presents the phantom; the box strips it and attaches nothing.
+    let headers = bearer_headers("strands_box_deadbeef");
+    let attachment = store
+        .attach_for(bearer_request(
+            dest("api.github.com", 443, "/zen"),
+            &headers,
+            "https://api.github.com/zen",
+        ))
+        .expect("strip-phantom attaches nothing")
+        .expect("the route governs this destination");
+    assert_eq!(
+        attachment.set_headers().count(),
+        0,
+        "a strip-phantom route attaches no real credential"
+    );
+    assert!(
+        attachment
+            .strip_headers()
+            .any(|name| name.eq_ignore_ascii_case("Authorization")),
+        "the placeholder is stripped so it never rides upstream"
+    );
+}
+
 /// The happy path: two `env://` routes open cleanly, and each destination attaches the real secret
 /// pulled from the environment — the whole `route → open → attach_for` chain, through the public API
 /// only, against the real `Backend::local` and its `env://` source.
@@ -168,6 +254,41 @@ fn opens_env_routes_and_attaches_the_real_secret() {
 
     clear_var("E2E_GITHUB_TOKEN");
     clear_var("E2E_STRIPE_KEY");
+}
+
+/// One `env://` key that serves two hosts mints one phantom, and a strict check accepts it at both.
+#[test]
+fn one_credential_serves_two_hosts_under_one_phantom() {
+    set_var("E2E_SHARED_KEY", "ksk_real_shared");
+    let route = |host: &str| {
+        RouteSpec::opaque(
+            DestinationPattern::parse(host).unwrap(),
+            Locator::parse_uri("env://E2E_SHARED_KEY").unwrap(),
+            header("Bearer {}"),
+        )
+    };
+    let opened = Vault::open(
+        VaultConfig::new(Backend::local(), "tenant-a")
+            .route(route("management.example.dev"))
+            .route(route("runtime.example.dev")),
+    )
+    .expect("both routes resolve");
+
+    let phantom = opened.phantoms()[0].token().to_string();
+    assert_eq!(opened.phantoms()[1].token(), phantom);
+    let store = opened.into_vault();
+
+    let headers = bearer_headers(&phantom);
+    for host in ["management.example.dev", "runtime.example.dev"] {
+        let url = format!("https://{host}/");
+        assert_eq!(
+            attached_authorization(&store, bearer_request(dest(host, 443, "/"), &headers, &url)),
+            "Bearer ksk_real_shared",
+            "the one placeholder must be accepted at {host}"
+        );
+    }
+
+    clear_var("E2E_SHARED_KEY");
 }
 
 /// A custom prefix mints an `sk-ant-` phantom, and the vault swaps it on a full-string match — the
@@ -1212,7 +1333,8 @@ mod credsd_e2e {
     use std::thread::JoinHandle;
 
     use credentials::{
-        Destination, DestinationPattern, Locator, Outbound, RouteSpec, Vault, VaultConfig,
+        CredentialError, Destination, DestinationPattern, Locator, Outbound, RouteSpec, Vault,
+        VaultConfig, credsd_preflight,
     };
 
     const BEDROCK_HOST: &str = "bedrock-runtime.us-west-2.amazonaws.com";
@@ -1392,33 +1514,134 @@ mod credsd_e2e {
         super::clear_var("E2E_BACKCOMPAT_TOKEN");
     }
 
-    /// A live smoke test against the real daemon at the platform default socket, when present. It
-    /// asserts the transport and error mapping interoperate with the shipped daemon: a nonexistent
-    /// environment is a hard failure, never a hang or a panic. Skips when the socket is absent, per
-    /// the crate's skip-don't-fail convention.
+    fn assert_unknown_environment(error: &CredentialError, environment: &str) {
+        assert!(
+            matches!(error, CredentialError::Credential(message)
+            if message == &format!(
+                "credsd has no environment {environment:?}, or this box is not authorized for it"
+            )),
+            "expected the daemon's unknown-environment mapping, got: {error}"
+        );
+    }
+
+    #[test]
+    fn a_daemon_unknown_environment_response_has_the_specific_mapping() {
+        let path = socket_path();
+        let response = b"{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32000,\"message\":\"x\",\"data\":{\"code\":\"ENVIRONMENT_NOT_FOUND\"}}}\n".to_vec();
+        let (rx, handle) = fake_daemon(&path, response);
+        let error = credsd_vault(path.clone())
+            .attach_for(bedrock_request(&[]))
+            .expect_err("the daemon refused the environment");
+        assert_unknown_environment(&error, "prod-inference");
+        let request: serde_json::Value = serde_json::from_slice(&rx.recv().unwrap()).unwrap();
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "credential/get",
+                "params": { "environment": "prod-inference" },
+            })
+        );
+        handle.join().unwrap();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn unrelated_daemon_failures_cannot_satisfy_the_unknown_environment_assertion() {
+        for (response, expected_message) in [
+            ("not-json", "credsd returned a malformed response"),
+            (
+                r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"fixture error","data":{"code":"INTERNAL"}}}"#,
+                "credsd reported an internal error",
+            ),
+            (
+                r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+                "credsd returned a malformed response",
+            ),
+        ] {
+            let path = socket_path();
+            let (rx, handle) = fake_daemon(&path, format!("{response}\n").into_bytes());
+            let error = credsd_vault(path.clone())
+                .attach_for(bedrock_request(&[]))
+                .expect_err("the unrelated daemon failure must fail the request");
+            assert!(!error.is_soft());
+            let message = match &error {
+                CredentialError::Credential(message) | CredentialError::KeystoreAccess(message) => {
+                    message
+                }
+                other => panic!("the fixture reached an unexpected error: {other}"),
+            };
+            assert_eq!(
+                message,
+                &format!("{expected_message} for environment \"prod-inference\"")
+            );
+            rx.recv().expect("the daemon received the request");
+            handle.join().unwrap();
+            std::fs::remove_file(path).unwrap();
+            assert!(
+                std::panic::catch_unwind(|| assert_unknown_environment(&error, "prod-inference"))
+                    .is_err(),
+                "an unrelated daemon failure must fail the live response assertion"
+            );
+        }
+    }
+
+    #[test]
+    fn a_stale_socket_cannot_satisfy_the_unknown_environment_assertion() {
+        let path = socket_path();
+        drop(UnixListener::bind(&path).expect("create an owned stale socket"));
+        assert!(path.exists());
+        let error = credsd_vault(path.clone())
+            .attach_for(bedrock_request(&[]))
+            .expect_err("no daemon listens on this socket");
+        assert!(matches!(error, CredentialError::KeystoreAccess(_)));
+        assert!(
+            std::panic::catch_unwind(|| assert_unknown_environment(&error, "prod-inference"))
+                .is_err(),
+            "a transport failure must fail the live test's response assertion"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// A configured fixture proves caller access before the unknown-environment request.
     #[test]
     fn a_live_daemon_maps_an_unknown_environment_to_a_hard_failure() {
-        // The same resolution the client uses: CREDSD_SOCKET if set, else the platform default
-        // (macOS /var/run, Linux /run), so this runs against the real daemon on either OS.
-        let socket = std::env::var_os("CREDSD_SOCKET")
+        let explicit_socket = std::env::var_os("CREDSD_SOCKET")
             .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                if cfg!(target_os = "macos") {
-                    PathBuf::from("/var/run/credsd/credsd.sock")
-                } else {
-                    PathBuf::from("/run/credsd/credsd.sock")
-                }
-            });
+            .map(PathBuf::from);
+        let known_environment = std::env::var("CREDSD_TEST_ENVIRONMENT")
+            .ok()
+            .filter(|value| !value.trim().is_empty());
+        let required = explicit_socket.is_some() || known_environment.is_some();
+        let socket = explicit_socket.unwrap_or_else(|| {
+            if cfg!(target_os = "macos") {
+                PathBuf::from("/var/run/credsd/credsd.sock")
+            } else {
+                PathBuf::from("/run/credsd/credsd.sock")
+            }
+        });
         if !socket.exists() {
+            assert!(
+                !required,
+                "configured credsd socket is absent: {}",
+                socket.display()
+            );
             eprintln!("skipping: no credsd daemon at {}", socket.display());
             return;
         }
-        // An environment no daemon is enrolled for, so the only live outcome is a hard
-        // ENVIRONMENT_NOT_FOUND. `credsd_vault` hard-wires `prod-inference`, which a host enrolled
-        // for it would sign — minting real credentials during a unit-test run — so this route names
-        // a unique nonexistent environment and the test never accepts a success.
+        let Some(known_environment) = known_environment else {
+            assert!(
+                !required,
+                "set CREDSD_TEST_ENVIRONMENT to the fixture's configured environment"
+            );
+            eprintln!("skipping: CREDSD_TEST_ENVIRONMENT is absent");
+            return;
+        };
+        credsd_preflight(Some(&socket), &[&known_environment])
+            .expect("the fixture must answer health and authorize the caller's known environment");
         let environment = format!("strands-e2e-nonexistent-{}", std::process::id());
+        assert_ne!(environment, known_environment);
         let vault = Vault::open(
             VaultConfig::new(credentials::Backend::local(), "tenant-e2e")
                 .credsd_socket(socket)
@@ -1430,14 +1653,9 @@ mod credsd_e2e {
         )
         .expect("a credsd signed route registers at open without touching the daemon")
         .into_vault();
-        // The round-trip reaches the real daemon and comes back a hard failure, never a hang, a
-        // panic, or a soft miss.
         let error = vault
             .attach_for(bedrock_request(&[]))
             .expect_err("an environment no daemon is enrolled for must fail");
-        assert!(
-            !error.is_soft(),
-            "a live credsd failure must be hard, got a soft miss: {error}"
-        );
+        assert_unknown_environment(&error, &environment);
     }
 }

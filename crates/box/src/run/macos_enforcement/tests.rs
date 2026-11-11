@@ -48,6 +48,23 @@ fn open_flags_use_kernel_access_bits_and_preserve_append() {
 }
 
 #[test]
+fn directory_open_uses_enumeration_and_file_open_uses_content() {
+    for (mode, expected) in [
+        (libc::S_IFDIR, FsOperation::Enumerate),
+        (libc::S_IFREG, FsOperation::ReadContent),
+    ] {
+        let mut raw = event(OPEN, "/file");
+        // SAFETY: the bridge writes only to this live RawEvent and retains no pointer.
+        assert!(unsafe { box_es_test_open(mode as u32 | 0o700, FREAD, &mut raw) });
+        assert_eq!(raw.mode & libc::S_IFMT as u32, mode as u32);
+        let plan = Plan::decode(&raw).unwrap();
+        assert_eq!(plan.checks.len(), 1);
+        assert_eq!(plan.checks[0].operation, expected);
+        assert_eq!(plan.checks[0].action, "fs:read");
+    }
+}
+
+#[test]
 fn permission_changes_check_the_existing_object_and_policy_operation() {
     for mode in [libc::S_IFREG, libc::S_IFDIR] {
         let mut raw = event(SETMODE, "/target");
@@ -307,6 +324,72 @@ fn the_kernel_denial_replaces_a_provisional_policy_permit() {
         super::super::telemetry::EffectiveVerdict::Deny
     );
     assert_eq!(records[0].cause(), ::telemetry::DecisionCause::Enforcement);
+}
+
+#[test]
+fn each_native_authorization_leg_records_its_own_request_id() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let mut context = context(&root);
+    let mut text = "permit(principal, action, resource);".to_string();
+    for (operation, host) in [("fs:read", "read.example"), ("fs:write", "write.example")] {
+        text.push_str(&format!(
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+               when {{ context.input.host == "{host}" }}
+               when temporal {{
+                   exists (id: String). (
+                       formerly within 3600s (
+                           Box::Action::"{operation}"::request{{ requestId: id }}
+                       ) && formerly within 3600s (
+                           Box::Action::"{operation}"::response{{ requestId: id }}
+                       )
+                   )
+               }};"#
+        ));
+    }
+    context.engine = Arc::new(crate::test_support::open_policy(vec![policy::Policy {
+        origin: root.join("correlated-native.dw"),
+        text,
+    }]));
+    let probe = |host| {
+        let (decision, request_id) = context.engine.decide(
+            &context.governed,
+            &Principal::agent(),
+            &Request::Connect {
+                host,
+                ip: None,
+                port: 443,
+            },
+        );
+        assert!(request_id.is_some(), "the probe request commits");
+        decision
+    };
+    let mut raw = readable(&root);
+    raw.flags = FREAD | FWRITE;
+    assert!(context.receive(&raw, 0));
+    assert_eq!(context.tracker.lock().unwrap().pending.len(), 2);
+    for host in ["read.example", "write.example"] {
+        assert!(
+            probe(host).is_allow(),
+            "authorization alone has no response"
+        );
+    }
+    raw.phase = REPLY;
+    raw.result = 1;
+    context.receive(&raw, 0);
+    assert!(!context.tracker.lock().unwrap().failed);
+    for host in ["read.example", "write.example"] {
+        assert!(
+            matches!(
+                probe(host),
+                policy::Decision::Deny {
+                    reason: policy::DenyReason::Forbidden,
+                    ..
+                }
+            ),
+            "the {host} guard must join its own request and response"
+        );
+    }
 }
 
 #[test]

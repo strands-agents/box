@@ -20,3 +20,24 @@ RUSTFLAGS="--cfg box_native_kernel_tests --cfg box_native_test_faults" cargo tes
 ```
 
 Keep fault-enabled binaries separate from release artifacts. Product builds do not require these private test switches. Native filesystem policy remains an explicit experimental selection.
+
+## Shared filesystem listener
+
+Selected native workloads use one kernel notification listener for both file-policy operations and
+filesystem-information queries. The existing containment supervisor receives every notification.
+It answers `statfs` queries locally, preserving filesystem type information while removing host
+capacity counters and filesystem identifiers. It forwards native file operations to Box for policy
+evaluation and execution.
+
+The supervisor is the client in this private exchange. Box's native policy worker is the server.
+The version-two startup handoff transfers the listener, a path-only handle to the workload root,
+and the private forwarding socket. Box uses the listener to validate and answer requests; only the
+supervisor receives notifications from it. The trusted launcher closes its copies before executing
+the workload. The forwarding socket is local to this workload and is not a public API.
+
+The `filesystem_queries_remain_sanitized_beside_an_allowed_native_read` and
+`filesystem_queries_remain_sanitized_beside_a_denied_native_read` tests query filesystem information
+before and after a native read. They require the expected file-policy result and zero host counters.
+The component tests cover malformed registration, wrong descriptor kinds, truncated requests,
+connection closure, and a forwarding buffer whose reader has stopped. A failed forwarding operation
+terminates supervision; it never allows the intercepted system call to continue unchecked.

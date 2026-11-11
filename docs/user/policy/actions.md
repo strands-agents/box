@@ -1,7 +1,8 @@
-# The action vocabulary
+# Policy action reference
 
 A rule names one action. The action decides which `context.input` fields the rule can read. The box
-ships ten actions, and generates one more for each MCP tool it discovers.
+ships ten actions, and generates one more for each MCP tool it discovers. Each experimental [tool
+grammar](../config.md#toolnamegrammar) adds its own `Tool::<name>` actions.
 
 Audience: an operator writing a `policy.dw` who needs the exact action name, its `context.input`
 fields, and which part of the box raises it. [Policy](../policy.md) introduces the rules, and
@@ -30,9 +31,11 @@ A field marked `?` below is optional. Read it behind a guard, as
 `context.input has arg1 && context.input.arg1 == "-rf"`. A rule that reads an optional field with no
 guard refuses to load.
 
-The name `path` appears on two kinds of action: a filesystem path on `fs:*` and a URL path on
-`http:request`. A rule that names both kinds tells them apart with `context.input has operation`,
-because only `fs:*` carries `operation`.
+Some field names mean different things on different actions. `path` is a file on `fs:read` and
+the path part of a URL on `http:request`. So a rule that checks `context.input` covers actions of
+one family: actions whose names start the same way before the `:`, such as `fs:read` and
+`fs:write`. Each MCP tool action is a family of its own. A rule that checks `context.input` for
+`fs:read` and `http:request` together refuses to load, so write one rule for each.
 
 ## The ten actions
 
@@ -104,11 +107,17 @@ Each outbound call is two decisions, both of which must permit.
 |---|---|---|
 | `host` | String | The destination host. |
 | `port` | Long | The destination port. |
-| `ip?` | String | The IP address the gateway connects to, as text, such as `"203.0.113.7"`. |
+| `ip4?` | String | The IPv4 address the gateway connects to, as a dotted quad, such as `"203.0.113.7"`. Present for an IPv4 destination, and for an IPv6 destination that carries an IPv4 address in a wrapping Box recognises. |
+| `ip6?` | String | The IPv6 address the gateway connects to, as text, compressed and in lowercase, such as `"64:ff9b::cb00:7107"`. Present for every IPv6 destination, and absent for an IPv4 one. |
 
-Compare `ip` as a String behind a guard, as
-`context.input has ip && context.input.ip == "203.0.113.7"`. An `ipaddr` comparison refuses to load
-with `the types String and ipaddr are not compatible`.
+Both are absent before resolution, on the decision for the host. A destination that arrives wrapped
+carries both: dialling `64:ff9b::cb00:7107` gives `ip4 = "203.0.113.7"` and
+`ip6 = "64:ff9b::cb00:7107"`. A plain IPv4 destination carries `ip4` alone, because one IPv4 address
+has many IPv6 encodings and there is no single IPv6 form to report.
+
+Compare either as a String behind its own guard, as
+`context.input has ip4 && context.input.ip4 == "203.0.113.7"`. An `ipaddr` comparison refuses to load
+with `expected ipaddr but saw String`.
 
 **`http:request`**, once per request inside the connection, after TLS on an HTTPS connection:
 
@@ -141,7 +150,7 @@ a program. Each nested command, such as the one `find -exec` or `xargs` runs, is
 | `arg1?` | String | The first argument after the program. |
 | `arg2?` | String | The second argument. |
 | `arg_count` | Long | How many arguments follow the program. |
-| `cwd` | String | The working directory. |
+| `cwd` | String | The Shell's working directory: `~` for the operator's home, `~/…` below it, and an absolute path elsewhere. |
 
 **`shell:spawn`**, for a program of the surrounding OS, carries the six `shell:exec` fields and two
 more:
@@ -150,6 +159,27 @@ more:
 |---|---|---|
 | `program_path` | String | The resolved binary, spelled `~/…` under the operator's home and absolute elsewhere. |
 | `credential_reads?` | Set of String | The credential stores that `box.toml` names for this program under its `[tool.<name>]` table, such as `~/.aws`. |
+
+On `shell:spawn`, `cwd` names the program's launch directory. For programs launched through
+Strands Shell, the selected `[tool.<name>]` or `[agent]` table's `workspace` takes precedence.
+Otherwise, Box checks the caller's resolved directory against the agent's workspace and the
+selected table's `read`, `write`, `list`, and `metadata` trees. It uses the caller's directory when
+one of those trees covers it, or the agent's workspace otherwise.
+
+The decision, request, and outcome use the same `cwd` spelling. The program starts in the
+corresponding absolute directory. If Box cannot select or resolve a directory for a Strands Shell
+launch, `cwd` names the Shell's original directory. A program launched through Strands Shell starts
+only when its resolved directory matches the directory policy checked.
+
+A program bound to a tool grammar raises its `Tool::<name>::Action`. For programs launched through
+Strands Shell, its `cwd` names the same selected launch directory and stays absolute in decisions
+and history, including paths below the operator home. Use that absolute path in directory predicates
+for those grammar actions.
+
+When a tool grammar binds the program, the grammar action decides the spawn, and the spawn enters
+history as that action and not as `shell:spawn`. A spawn that the grammar binding refuses before
+any rule decides it enters history as a `shell:spawn` request.
+[`shell:spawn`](../shell.md#shellspawn) states when Box refuses one.
 
 A rule that covers both actions names both, as
 `action in [Box::Action::"shell:exec", Box::Action::"shell:spawn"]`. A `shell:exec` permit covers
@@ -171,8 +201,14 @@ and wider than it. Its own file operations raise no `fs:*` decision;
 | `uri?` | String | The resource URI, on `resources/read`. |
 
 Each stdio server in `box.toml` starts through a `shell:spawn` decision on the program its
-`[mcp.<name>]` table names. A policy with no matching `shell:spawn` permit refuses the server at
-startup. A permit on `mcp:call` for a server covers every method and tool on it. Refuse one tool by
+`[mcp.<name>]` table names, or through the grammar action when a tool grammar binds that program.
+A policy with no matching permit refuses the server at startup. The `program` field is the
+executable's filename, and `program_path` identifies its resolved file. The `command` field starts
+with that filename. For an enabled [MCP wildcard command](../mcp.md#argument-wildcards), `command`
+contains the alias name and effective launch arguments, joined by spaces.
+Its argument fields contain the same values, including the caller's values in wildcard
+positions.
+A permit on `mcp:call` for a server covers every method and tool on it. Refuse one tool by
 name with a `tool` guard, or with the per-tool `forbid` that
 [MCP policy](../mcp-policy.md#step-4-narrow-the-server) shows:
 
@@ -189,8 +225,8 @@ when { context.input.server == "demo" && context.input has tool && context.input
 ./box-core/box policy generate-schema --config my-box/box.toml --output-dir ./schema
 ```
 
-It writes `actions.cedarschema`, with every action and its fields, and `events.dwschema`, with what
-a `when temporal` clause observes. The namespace is the server name with every character other
+It writes `actions.cedarschema`, with every action and its fields, including the actions of each
+tool grammar, and `events.dwschema`, with what a `when temporal` clause observes. The namespace is the server name with every character other
 than a letter, a digit, or `_` changed to `_`. A leading digit gets a `_` prefix. Server `demo-mcp`
 and tool `lookup` give `demo_mcp::Action::"lookup"`.
 
@@ -209,6 +245,37 @@ A few protocol methods pass with no decision, and the set depends on the transpo
 Over HTTP, each frame is also decided as `http:request` first. Because `tools/list` is decided, a
 rule can refuse it and hide a server's tools.
 
+<a id="tool-grammar-actions"></a>
+## Tool grammar actions
+
+Each experimental [tool grammar](../tool-grammars.md) adds the actions `Tool::<name>::Action::"<action>"`,
+one for each `[shell.<action>]` table, and `Tool::<name>::Action::"unmodeled"`. Version 2 and later
+of a grammar use the namespace `Tool::<name>::v<version>`. `Tool::<name>::Action::"*"` is the group
+of every action except `unmodeled`.
+
+Every action of a grammar carries these fields, and `unmodeled` carries only these:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `program` | String | The first word after expansion, as on `shell:spawn`. |
+| `program_path` | String | The resolved program file, spelled `~/…` under the operator's home and absolute elsewhere. |
+| `cwd` | String | The program's selected launch directory, as an absolute path. See [directory selection](#shell). |
+| `args` | Set of String | Every word after the program. |
+| `effects` | Set of `Tool::<name>::Effect` | The effects of this command. A grammar that declares no effect has no `effects` field. |
+| `credential_reads?` | Set of String | The credential stores that the program's `[tool.<name>]` lists name, as on `shell:spawn`. |
+
+Each other action also carries one field for each of its options and operands, named by its key in
+`options` or `operands`:
+
+| The option or operand | Type |
+|---|---|
+| An option with no `value` | Bool |
+| An option with one value, or an operand `<name>` | String, and optional |
+| A `repeated` option, an option with `value = "many"`, or an operand `<name>...` | Set of String |
+
+Box refuses to load a rule that reads `context.input` over two grammars, or over a grammar action
+and a `Box::` action.
+
 ## What a temporal rule observes
 
 A `when temporal { … }` clause reads recorded events. The box records three events for each action
@@ -216,19 +283,44 @@ A `when temporal { … }` clause reads recorded events. The box records three ev
 
 | Event | Recorded when | Fields |
 |---|---|---|
-| `A::request` | Every decision, permitted or denied | The action's `input` fields |
-| `A::response` | The operation ended, or its end is `indeterminate` | The `input` fields, plus `output` |
-| `A::error` | The operation did not happen | The `input` fields |
+| `A::request` | Every submitted decision, permitted or denied | `requestId` and the action's `input` fields |
+| `A::response` | The operation ended, or its end is `indeterminate` | `requestId`, the `input` fields, and `output` when available |
+| `A::error` | The operation did not happen | `requestId` and the `input` fields |
+
+`requestId` is a nonempty string that identifies one policy request within this box's history.
+Its recorded response or error carries the same identifier. Separate requests receive separate identifiers, even when their inputs are identical.
+Bind the same variable to `requestId` in two predicates to require events from the same request.
+Treat the identifier's spelling as opaque.
+Older events that lack this field remain in history, but cannot match a predicate that requires it.
+
+For modern stdio MCP, a valid result that asks for more client input before cancellation is not a
+completed operation and does not record `mcp:call::response`. Each retry is a new request.
+Its terminal result or error records a response with that retry's request ID.
+
+Cancelling an admitted modern stdio `tools/call`, `prompts/get`, or `resources/read` records one
+indeterminate response immediately. A late reply adds no second event, even if it asks for more
+input. When the connection ends, Box stops the server and records its remaining admitted item
+calls as indeterminate outcomes. Each outcome uses the original call's request ID.
+
+To cap how many times the agent tries an action, count `A::request`, which also counts denied
+attempts. Use `A::response` when a later rule needs a recorded outcome. Partial or indeterminate
+outcomes also count; an MCP response does not establish tool success.
 
 What each caller records as a response:
 
 | Action | Response recorded | `output` |
 |---|---|---|
-| `fs:*` | When the operation ends | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
+| `fs:*` | When the operation ends. A `test -e`, `test -L`, or `test -r` in the Shell, or an `os.stat()`, `Path.exists()`, `Path.is_file()`, `Path.is_dir()`, or `Path.is_symlink()` in Python, that got an answer is a response even when the answer is "no": for example, a missing file in an existing folder. A check of a path inside the reachable paths that can't be resolved, such as one under a missing folder or under a folder the operating system won't let Box search, is also a response, although the reachable paths check refuses it. This holds only when the path has no `.` or `..` component, crosses no symbolic link, and isn't in Box's own state. Any other check that Box itself refuses is an error: the reach floor refuses it, or a guard refuses it because a path changed during the check. | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
 | `net:connect` | When the connect attempt ends | none |
-| `http:request` | At reply time, once per exchange | `status`: the upstream's reply status |
+| `http:request` | When the upstream response completes, fails, or reaches its deadline, once per exchange | `status`: the upstream's reply status, when received |
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |
-| `mcp:call` | When a `tools/call`, `prompts/get`, or `resources/read` completes | none |
+| A tool grammar action, `Tool::<name>::Action::"<action>"` | When a program the Shell started ends | `status`, as on `shell:spawn` |
+| `mcp:call` | For `tools/call`, `prompts/get`, and `resources/read`: when the call completes or ends indeterminately over stdio, or when the upstream response completes, fails, or reaches its deadline over HTTP | none |
+| A per-tool action, `<server>::Action::"<tool>"` | Beside each `mcp:call::response` for a `tools/call` that the per-tool action decided and allowed. Its `input` is the call's arguments, as its `::request` recorded them | `reply`, a string: `result`, `tool_error`, or `protocol_error` for a stdio server's answer; `cancelled`; or `indeterminate` when the connection ended, and for every http call, because Box reads no http reply |
+
+An MCP outcome is always a response, so Box never records `mcp:call::error` or a per-tool
+`::error`. The load refuses a `when temporal` clause that names one, because it could never match.
+A `tools/call` to a tool that no per-tool action declares records only `mcp:call::response`.
 
 Each temporal operator carries a window of at most `24h`. A temporal predicate names exactly one
 action, so a budget that spans `fs:read` and `fs:write` is one clause per action.

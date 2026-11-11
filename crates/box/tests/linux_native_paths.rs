@@ -281,3 +281,13 @@ fn rmdir_with_a_trailing_slash_removes_the_directory() {
 fn rename_with_a_trailing_slash_moves_the_directory() {
     entry_suffix("move", "directory", "/", "", true);
 }
+
+#[test]
+fn filesystem_queries_remain_sanitized_beside_an_allowed_native_read() {
+    exercise("Qread", "target", "allow", false);
+}
+
+#[test]
+fn filesystem_queries_remain_sanitized_beside_a_denied_native_read() {
+    exercise("Qread", "target", "deny", true);
+}

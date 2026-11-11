@@ -17,6 +17,89 @@ constraint is held at 15, which shares the workspace's `unicode-width` version.
 
 ## Local divergence from the pinned revision
 
+### Backport: enforce the submitted input limit for multiline commands
+
+The guard matches [strands-agents/shell#178](https://github.com/strands-agents/shell/pull/178),
+merged on 2026-10-27 as `cff867ba10310b42fb4af135b999defc4ed78c6a`.
+The pinned revision predates that fix.
+
+`exec::execute` selected `execute_sourced` for input containing a newline, which skipped the
+`max_input` check in `execute_admitted_line`. Thus an oversized submission ran when it ended in
+a newline, while the same text without that newline was refused. This is an upstream limit
+enforcement bug.
+
+`execute` now checks the full input before choosing the evaluator. Its EXIT-trap handling remains
+after the result, and direct calls to `execute_with_reader` retain their check. Files loaded by
+`source` still use `max_output`; this change adds no `max_input` check to `execute_sourced`.
+`builder_max_input` covers single-line, trailing-newline, and multiline submissions at the limit,
+one byte over it, and with the existing `0` unlimited value. The trailing-newline assertion fails
+without the fix.
+
+### Local addition: bind a host spawn to its checked directory (2026-11-04)
+
+An embedding can select a program's launch directory independently of the caller's Shell directory.
+The effect permit previously carried no launch directory to dispatch. That left the embedding to
+check one directory and execute in another. This is a generic gap in Shell's admission contract.
+Box selects the tool and checks policy. Shell owns the path from admission to dispatch.
+
+The operator approved the default `EffectPermit::spawn_working_directory()` method and
+checked-directory transport on 2026-11-04 after the design review. Its default returns `None`, so
+existing permit implementations keep the caller's directory. An interceptor that selects another
+directory checks that directory before it returns it on the permit.
+
+Shell reads the accessor once and retains a copy in `CommandPermit`, beside the admitted
+`HostProgram`. Shell refuses a relative directory before dispatch. Shell passes that directory
+to `spawn_host_program` with the program. Dispatch changes only the child process directory.
+The parent Shell keeps its directory. Shell admits every program in a pipeline before any stage
+runs.
+
+Box selects and resolves the launch directory before policy checks `ShellSpawn`. Ordinary
+`shell:spawn` actions keep home-relative spelling. Tool grammar actions keep absolute spelling.
+If selection or resolution fails, Box checks the caller's original directory and retains its
+absolute path. A command-not-found failure keeps status `127`. A launch failure keeps status `126`.
+
+Before execution, Box compares the translated launch directory with the retained checked path and
+refuses a mismatch. This binds the checked directory path to dispatch. It does not pin the
+directory's filesystem identity. The change preserves stored-record and broker-protocol shapes, so
+it requires no version bump.
+
+### Local addition: an embedder can disable the execution timeout
+
+`ShellBuilder::disable_timeout()` selects the engine's existing no-deadline mode. The builder
+defaults to 30 seconds, so omission does not disable the timeout despite the old API prose.
+This additive Rust method lets Box implement an operator's explicit unlimited Shell setting
+without substituting an arbitrary large duration. `timeout(Duration)` can restore a finite
+deadline, zero remains invalid, and the other resource limits remain in force. Shell's own
+TOML, Python, and Node configuration surfaces do not change.
+
+`builder_timeout_can_be_disabled` checks both the default and a configured deadline, including
+repeated calls that outlast the configured limit. `builder_timeout_can_be_restored_after_disabling`
+checks cancellation and a successful subsequent call after restoring a finite deadline.
+
+### Local addition: an embedder can declare the file a bare name runs
+
+At the pinned revision, a bare name the Shell does not implement is found on the trusted process's
+host `PATH`. An embedder that runs a host program under its own name, such as Box's `[tool.git]` on
+the developer folder's `git`, cannot reach that program by its name when another file of the same
+name comes first on `PATH`. This is a missing seam, not an upstream bug.
+
+`Kernel::host_program` returns the absolute path a bare name runs, and its default declares nothing.
+`VfsKernel::host_programs` and `ShellBuilder::host_programs` hold a `HostPrograms` map for the bundled
+kernel. `exec::host_program` asks the kernel after the builtin, command, and function checks and
+before the `PATH` walk, so the Shell's own programs keep precedence. A declared file binds to its
+canonical identity like a spelling with a `/`; a declared file that is gone is unbound, so the
+command is not found and `PATH` is not searched for another file. A name with a `/` ignores the map. `exec::implements_program` tells an embedder which names the
+Shell runs itself, so it does not declare a name that never reaches the declared file.
+`tests/declared_host_programs.rs` covers each case.
+
+### Execution deadlines refuse clock overflow
+
+The builder and per-call refresh use checked clock arithmetic. An unrepresentable timeout
+returns `InvalidInput` at build time; if it becomes unrepresentable later, the call expires
+before executing its commands. This fixes an upstream panic without treating overflow as
+unlimited execution. `builder_refuses_a_timeout_that_overflows_the_clock` and
+`an_unrepresentable_refreshed_deadline_stops_work` cover the builder, `run`, and `execute`.
+
 ### Pipeline lifetime and host-command deadlines
 
 Pipeline tasks now stop when the caller drops the pending pipeline.
@@ -25,6 +108,26 @@ Previously, those tasks could outlive cancellation or wait indefinitely for a ho
 The actual Box process cleanup tests cover configured tools and their descendants.
 Background jobs stop when their owning process is dropped or a pending `wait` is cancelled.
 An open shell retains background jobs across completed foreground calls.
+
+### A synchronous command finishing after its deadline reports a timeout
+
+A command that blocked the runtime past its deadline could return success: Tokio's timeout
+wrapper can receive a completed task before polling its timer. `run_pipeline` now checks the
+clock after each task join and reports the existing execution-timeout error when the deadline
+has passed. It also checks limits before expansion and after expansion, so a substitution that
+consumes the deadline stops that pipeline before command dispatch and redirection.
+`execute_item` checks again before returning, so `!` cannot turn the timeout into success. These
+checks do not interrupt synchronous work or undo its completed effects.
+
+This is an upstream deadline-accounting bug, exercised through the script-interpreter hook.
+`a_synchronous_interpreter_cannot_return_success_after_the_shell_deadline` covers late completion
+with `!` and `||`, and a successful subsequent call.
+`an_expired_interpreter_cannot_start_following_commands_or_redirects` covers subsequent commands
+and command substitution.
+`a_late_interpreter_does_not_wait_for_an_open_output_channel` covers cancellation of the output
+drain when a synchronous command finishes late with a writer still open.
+`a_synchronous_interpreter_finishes_with_an_adequate_or_unlimited_deadline` covers both ways to
+complete successfully with a sufficient or disabled limit.
 
 ### Local addition: an effect says which words the script stated (2026-09-25)
 
@@ -531,10 +634,8 @@ after its path read.
 
 This exists so `strands-box` can route the hosted Shell's egress through its one governed
 boundary rather than adding a second network authority inside the Shell
-([egress decision](../../docs/design/decisions.md#shell-network-goes-through-the-egress-gateway)). It is
-plausibly upstream-worthy — proxy support is a general sandbox feature — rather than
-divergence for local convenience, and it changes no existing behaviour when the option is
-absent.
+([egress decision](../../docs/design/decisions.md#shell-network-goes-through-the-egress-gateway)). Box no longer uses `egress_proxy`: its own kernel wrapper sends the Shell's HTTP. Box will not
+propose it upstream, and it changes no existing behaviour when the option is absent.
 
 
 ## 2026-08-20 — additive: `Kernel::run_script` forwards a script to an embedder interpreter
@@ -1704,3 +1805,79 @@ Follow-up: `resolve` holds the VFS lock across the host `canonicalize` calls and
 so a deep path delays the other effects of the same Shell. Only `host_dir_ancestor` and
 `is_bind_point` need the lock, and `resolve_host`, `spelled_host`, and `host_canonical_spelling`
 each canonicalize the bind root again for one path.
+
+## 2026-10-23 — `lstat` on a host bind followed the final symbolic link
+
+A wrong result in the host branch of `lstat`, so upstream would call it a bug. `Mediated::lstat`
+admits `FsOperation::ReadMetadata { follow_symlinks: false }`, and `Kernel::lstat` asserts that its
+token carries `Follow::No`. But `lstat_effect` resolved the host path with `resolve_host`, whose
+`canonicalize` replaces a final link with its target. Then `host_stat` called `tokio::fs::metadata`,
+which also follows the link.
+
+Thus on a `bind_direct` mount, a no-follow metadata read gave the metadata of the target of the link.
+`test -L`, `test -h`, `find -type l`, `ls -l`, and `rm` saw the type of the target, not a symbolic
+link. The token pinned the link, so the effect read an object that the decision did not name.
+
+`lstat_effect` now resolves with `resolve_host_for(.., Follow::No)`, which resolves the parent and
+joins the leaf. `host_stat` and `host_stat_sync` take a `Follow`, and they call `symlink_metadata`
+for `Follow::No`. A bind point keeps `Follow::Yes`, because the bind is the object that the VFS
+names, and its host source can be a link. `stat_effect` passes `Follow::Yes` and does not change.
+
+The rename destination facts also change when the destination is a host symbolic link. They now
+describe the link itself, as in the in-memory case: `destination_exists` is `true` for a dangling
+link, and `destination_is_dir` is `false` for a link to a directory. `rename_effect` still refuses a
+host symbolic link destination with `cannot rename onto a host symlink`.
+
+`tests/lstat_follow_on_a_host_bind.rs` pins the fix. These tests fail without it:
+`test_minus_l_sees_a_host_symlink`, `test_minus_l_sees_a_dangling_host_symlink`,
+`find_type_l_lists_a_host_symlink`, `ls_l_shows_a_host_symlink_as_a_link`,
+`rm_on_a_host_symlink_to_a_directory_removes_the_link`,
+`rm_r_on_a_host_symlink_to_a_directory_removes_only_the_link`, and
+`rm_r_on_a_host_symlink_out_of_the_mount_removes_only_the_link`.
+`a_file_bind_whose_source_is_a_symlink_is_not_a_link` fails when a bind point is read with
+`Follow::No`. `stat_still_follows_a_host_symlink` pins that `stat` still follows.
+`in_mount_admission_window.rs::a_rename_onto_a_dangling_host_symlink_is_refused_by_the_kernel` now
+expects the present destination fact, and it keeps the refusal.
+
+Follow-ups of the same class, not changed here:
+
+- `remove_dir` admits `Follow::Yes`, but POSIX `rmdir` does not follow a final symbolic link.
+- `rename_effect` resolves the source with `resolve_host`, which follows the link, but
+  `Mediated::rename` pins the source with `Follow::No`. So `mv link link2` on a host bind refuses
+  with `filesystem identity changed during effect admission`. It fails closed.
+
+## 2026-10-27 — a multibyte character at `max_output` inside `$(…)` panicked
+
+`run_capturing_status` cut the output of a command substitution with
+`output.truncate(proc.max_output)`. `String::truncate` panics when the index is not a character
+boundary, so `X=$(printf abc; printf é)` with `max_output = 4` stopped the shell. The
+captured-output path did not have this problem, because `append_limited` already moves the cut to
+a character boundary. This is an upstream bug.
+
+This port applies the command-substitution half of
+[strands-agents/shell#176](https://github.com/strands-agents/shell/pull/176)
+from upstream commit `fccc2750dd276a1ffa763207c86e0572e463299c`. The cut now goes to
+`os::floor_char_boundary`, which returns the largest character boundary at or below the limit. The
+limit, the `output size limit exceeded` message, and the exit status do not change.
+`append_limited` stays in place for the captured-output path.
+
+The two upstream tests are copied unchanged. `subst_max_output_truncate_multibyte` panics without
+the change. `stdout_max_output_truncate_multibyte` passes before and after the change, and pins
+that the captured-output path agrees with upstream.
+
+## 2026-10-21 — a metadata probe answered "no" reported a failed effect
+
+`stat`, `lstat`, and `access` reported a "no" answer as `EffectResult::Failed(NotFound)`. The
+probe ran and its caller received the answer, so the effect occurred. A consumer that counts
+completed effects did not count these probes. Upstream would call this a bug, because `Failed`
+means that the effect did not occur.
+
+This copy reports `EffectResult::Completed` for each answered `stat`, `lstat`, and `access`,
+through `Mediated::report_answer`. A probe that the admission-window guard refuses reports
+`EffectResult::Failed`, because `Kernel` now has `stat_answer`, `lstat_answer`, and
+`access_answer`, which return the refusal as an error. They have no default implementation, so
+each `Kernel` must forward them and cannot hide the refusal. `is_executable`, `find_in_path`, and
+`glob` still report through `Mediated::report_probe` unchanged. A denied probe still records no
+outcome, because admission refuses it first.
+`tests/kernel_effect_interception.rs::an_answered_probe_reports_a_completed_effect` and
+`a_probe_the_admission_window_refuses_reports_a_failure` pin the change.

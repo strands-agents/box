@@ -22,15 +22,17 @@
 //! declared root. Policy decides first; this cannot widen what policy allowed,
 //! and no `permit` can open it.
 
+use std::borrow::Cow;
 use std::fmt;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use policy::{PathRefusal, PathResolver};
 
 use crate::record::config::AuthoritySource;
 use crate::record::layout::{disk_identity, has_ancestor_among, lies_within};
 use crate::run::broker::invalid_input;
+use crate::run::commands::CommandMutationRefusal;
 
 /// The set of paths the interpreters may name, and the resolver that admits one.
 #[derive(Debug)]
@@ -52,6 +54,9 @@ pub(super) struct Reach {
 
     /// The exact authority-source identities that this run loaded.
     forbidden_exactly: Vec<AuthoritySource>,
+
+    commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
+    installation: Option<std::sync::Arc<crate::run::installation::TrustedInstallation>>,
 
     /// The operator home both interpreters may name under policy.
     shared: Option<String>,
@@ -194,11 +199,29 @@ impl Reach {
                 .collect(),
             forbidden,
             forbidden_exactly: protected_sources.to_vec(),
+            commands: std::sync::Arc::default(),
+            installation: None,
             shared: shared
                 .map(|home| utf8(&home, "the operator home"))
                 .transpose()?,
             working: working_text,
         })
+    }
+
+    pub(super) fn with_commands(
+        mut self,
+        commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
+    ) -> Self {
+        self.commands = commands;
+        self
+    }
+
+    pub(super) fn with_installation(
+        mut self,
+        installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,
+    ) -> Self {
+        self.installation = Some(installation);
+        self
     }
 
     /// The directory a relative path means, and what the interpreters report as `PWD`.
@@ -282,6 +305,17 @@ impl Reach {
         reported_as: &str,
         mutates: bool,
     ) -> Result<PathBuf, Refused> {
+        if mutates
+            && self
+                .installation
+                .as_ref()
+                .is_some_and(|installation| installation.refuses_mutation(named))
+        {
+            return Err(Refused::new(reported_as, TRUSTED_EXECUTABLE));
+        }
+        if mutates && let Some(refusal) = self.commands.mutation_refusal(named) {
+            return Err(Refused::new(reported_as, command_mutation_reason(refusal)));
+        }
         if !self.is_inside_the_set(named) {
             return Err(Refused::new(reported_as, OUTSIDE_THE_SET));
         }
@@ -293,7 +327,12 @@ impl Reach {
             .resolver
             .approve_host(&identity)
             .map(|approved| approved.as_path().to_path_buf())
-            .map_err(|refusal| Refused::new(reported_as, reason(&refusal)))?;
+            .map_err(|refusal| {
+                let mut refused = Refused::new(reported_as, reason(&refusal));
+                refused.unresolved = matches!(refusal, PathRefusal::Unresolvable { .. })
+                    && self.is_an_unresolved_answer(&identity);
+                refused
+            })?;
         // **The deny floor, applied last and on the canonical identity.**
         //
         self.refuse_forbidden(&approved, reported_as, mutates)?;
@@ -307,6 +346,17 @@ impl Reach {
         reported_as: &str,
         mutates: bool,
     ) -> Result<(), Refused> {
+        if mutates
+            && self
+                .installation
+                .as_ref()
+                .is_some_and(|installation| installation.refuses_mutation(approved))
+        {
+            return Err(Refused::new(reported_as, TRUSTED_EXECUTABLE));
+        }
+        if mutates && let Some(refusal) = self.commands.mutation_refusal(approved) {
+            return Err(Refused::new(reported_as, command_mutation_reason(refusal)));
+        }
         // The authority this run loaded is trusted Box state wherever it sits, so no operation
         // reaches it; changing its enclosing directory is refused too. It keeps its own reason, so
         // the operator learns which file the run loaded rather than which root refused it.
@@ -343,6 +393,26 @@ impl Reach {
         Ok(())
     }
 
+    /// Whether a path the resolver could not resolve crosses no symbolic link and lies beneath no deny floor.
+    fn is_an_unresolved_answer(&self, identity: &Path) -> bool {
+        if identity
+            .components()
+            .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
+        {
+            return false;
+        }
+        let mut prefix = PathBuf::new();
+        for component in identity.components() {
+            prefix.push(component);
+            match std::fs::symlink_metadata(&prefix) {
+                Ok(metadata) if metadata.file_type().is_symlink() => return false,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        self.refuse_forbidden(identity, "", false).is_ok()
+    }
+
     /// Whether `named` lies under a root of this box's reachable set.
     fn is_inside_the_set(&self, named: &Path) -> bool {
         [
@@ -365,6 +435,31 @@ const BENEATH_THE_FLOOR: &str = "resolves into trusted Box state, which no polic
 const ENCLOSES_BOX_STATE: &str =
     "contains trusted Box state, so no policy may change this directory";
 
+const TRUSTED_EXECUTABLE: &str = "cannot change a trusted Box executable or its path";
+
+const CONFIGURED_COMMAND: &str =
+    "is a configured tool command or its ancestor, which this run does not allow to change";
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const CONFIGURED_COMMAND_ALIAS: &str =
+    "contains a hard link to a configured tool command, so this mutation is not allowed";
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const COMMAND_SCAN_INCOMPLETE: &str =
+    "cannot finish checking for configured tool command hard links";
+
+fn command_mutation_reason(refusal: CommandMutationRefusal) -> Cow<'static, str> {
+    match refusal {
+        CommandMutationRefusal::CommandOrAncestor => CONFIGURED_COMMAND.into(),
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        CommandMutationRefusal::HardLinkAlias => CONFIGURED_COMMAND_ALIAS.into(),
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        CommandMutationRefusal::IncompleteScan(error) => {
+            format!("{COMMAND_SCAN_INCOMPLETE}: {error}").into()
+        }
+    }
+}
+
 const AUTHORITY_SOURCE: &str =
     "resolves to an authority source that this run loaded, which no policy may open or change";
 
@@ -380,15 +475,24 @@ pub(super) struct Refused {
     requested: String,
 
     /// What is wrong with it, in the operator's and the agent's terms.
-    reason: &'static str,
+    reason: Cow<'static, str>,
+
+    /// Whether the host could not resolve the path, beneath no deny floor and through no symbolic link.
+    unresolved: bool,
 }
 
 impl Refused {
-    fn new(requested: &str, reason: &'static str) -> Self {
+    fn new(requested: &str, reason: impl Into<Cow<'static, str>>) -> Self {
         Self {
             requested: requested.to_string(),
-            reason,
+            reason: reason.into(),
+            unresolved: false,
         }
+    }
+
+    /// Whether the refusal only reports that the host could not resolve the path.
+    pub(super) fn is_unresolved(&self) -> bool {
+        self.unresolved
     }
 }
 
@@ -707,6 +811,41 @@ mod tests {
         }
     }
 
+    /// Only a path under a missing folder, through no link and beneath no deny floor, is unresolved.
+    #[test]
+    fn only_a_plain_path_under_a_missing_folder_is_unresolved() {
+        let (operator, reach) = operator_home_fixture();
+        let resolved = operator.path().canonicalize().expect("the home resolves");
+        let private = resolved.join("boxes/codex/private");
+        std::fs::create_dir(resolved.join("real")).expect("a real folder");
+        std::os::unix::fs::symlink(resolved.join("real"), resolved.join("link"))
+            .expect("a link in the home");
+        std::os::unix::fs::symlink(private.join("nodir"), resolved.join("dangle"))
+            .expect("a dangling link into box state");
+        let unresolved = |target: PathBuf| {
+            let spelled = target.to_str().expect("UTF-8").to_string();
+            crate::test_support::with_operator_home(&resolved, || reach.approve(&target, &spelled))
+                .err()
+                .unwrap_or_else(|| panic!("{spelled} must be refused"))
+                .is_unresolved()
+        };
+
+        assert!(unresolved(resolved.join("absent-dir/x")));
+        assert!(unresolved(resolved.join("absent-dir/deeper/x")));
+        for target in [
+            private.join("nodir/x"),
+            resolved.join("link/nodir/x"),
+            resolved.join("link/x"),
+            resolved.join("dangle"),
+            resolved.join("dangle/x"),
+            resolved.join("boxes/codex/private/policy.dw"),
+            resolved.join("absent-dir/../boxes/codex/private/policy.dw"),
+        ] {
+            let spelled = target.display().to_string();
+            assert!(!unresolved(target), "{spelled} must not be unresolved");
+        }
+    }
+
     /// **A box directory in the macOS data-volume spelling is still beneath the floor** for a path
     /// that names its private state in the ordinary spelling.
     #[cfg(target_os = "macos")]
@@ -1017,5 +1156,188 @@ mod private_tree_mutation_tests {
         let sibling = temporary.path().canonicalize().unwrap().join("sibling");
         assert!(reach.refuse_forbidden(&sibling, "dummy", true).is_ok());
         assert_eq!(reach.approve_mutation(&sibling, "dummy").unwrap(), sibling);
+    }
+}
+
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod linked_command_mutation_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::sync::Arc;
+
+    use crate::record::config::Record;
+    use crate::record::config::process::ProcessSpec;
+    use crate::run::commands::ConfiguredCommands;
+
+    fn fixture() -> (tempfile::TempDir, Reach, PathBuf) {
+        let temporary = tempfile::tempdir().expect("fixture directory");
+        let home = temporary.path().canonicalize().expect("canonical fixture");
+        let tools = home.join("tools");
+        let staging = home.join("staging/nested");
+        std::fs::create_dir(&tools).expect("tool directory");
+        std::fs::create_dir_all(&staging).expect("alias directory");
+        std::fs::create_dir(home.join("output")).expect("unrelated directory");
+        let command = tools.join("reader");
+        std::fs::write(&command, "#!/bin/sh\nexit 0\n").expect("fixture command");
+        std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755))
+            .expect("executable command");
+        std::fs::hard_link(&command, staging.join("alias")).expect("preexisting hard link");
+        let record = Record {
+            version: crate::record::config::RECORD_VERSION,
+            experimental_features: Default::default(),
+            file_attributes: false,
+            limits: Default::default(),
+            box_id: "linked-command-reach".to_string(),
+            box_dir: home.join("box-state"),
+            name: "linked-command-reach".to_string(),
+            policy: None,
+            agent: None,
+            tool: BTreeMap::from([(
+                "reader".to_string(),
+                ProcessSpec {
+                    native_filesystem_policy: None,
+                    command: vec![command.display().to_string()],
+                    workspace: None,
+                    env: Default::default(),
+                    filesystem: Default::default(),
+                    network: None,
+                    grammar: None,
+                    ingress: Vec::new(),
+                },
+            )]),
+            egress: Default::default(),
+            remote_mcp: Default::default(),
+            mcp: Default::default(),
+            contained_mcp: Default::default(),
+            telemetry: Default::default(),
+        };
+        let commands = ConfiguredCommands::load(&record).expect("linked command is admitted");
+        let reach = Reach::over(&home, None, None)
+            .expect("reachable fixture")
+            .with_commands(Arc::new(commands));
+        (temporary, reach, home)
+    }
+
+    fn mutation_refused_for(reach: &Reach, named: &Path, reported_as: &str, reason: &str) {
+        for result in [
+            reach.approve_mutation(named, reported_as).map(|_| ()),
+            reach.refuse_forbidden(named, reported_as, true),
+        ] {
+            assert_eq!(
+                result.expect_err("mutation is refused").to_string(),
+                format!("{reported_as}: {reason}")
+            );
+        }
+    }
+
+    #[test]
+    fn known_command_paths_keep_the_precise_mutation_refusal() {
+        let (_temporary, reach, home) = fixture();
+        for (relative, reported_as) in [
+            ("tools/reader", "tools/reader"),
+            ("tools", "tools"),
+            ("", "home"),
+        ] {
+            mutation_refused_for(
+                &reach,
+                &home.join(relative),
+                reported_as,
+                "is a configured tool command or its ancestor, which this run does not allow to change",
+            );
+        }
+    }
+
+    #[test]
+    fn a_preexisting_command_alias_and_its_ancestors_refuse_mutation() {
+        let (_temporary, reach, home) = fixture();
+        for (relative, reason) in [
+            ("staging", CONFIGURED_COMMAND_ALIAS),
+            ("staging/nested", CONFIGURED_COMMAND_ALIAS),
+            ("staging/nested/alias", CONFIGURED_COMMAND),
+        ] {
+            let named = home.join(relative);
+            assert_eq!(
+                reach
+                    .approve(&named, relative)
+                    .expect("reading remains reachable"),
+                named
+            );
+            mutation_refused_for(&reach, &named, relative, reason);
+        }
+    }
+
+    #[test]
+    fn unrelated_directory_and_new_destination_mutations_remain_reachable() {
+        let (_temporary, reach, home) = fixture();
+        for relative in ["output", "output/new"] {
+            let named = home.join(relative);
+            assert_eq!(
+                reach
+                    .approve_mutation(&named, relative)
+                    .expect("an unrelated mutation remains reachable"),
+                named
+            );
+            assert!(reach.refuse_forbidden(&named, relative, true).is_ok());
+        }
+    }
+
+    #[test]
+    fn an_unreadable_directory_cannot_be_cleared_for_mutation() {
+        let (_temporary, reach, home) = fixture();
+        let named = home.join("output");
+        std::fs::write(named.join("ordinary"), "ordinary contents").expect("directory entry");
+        std::fs::set_permissions(&named, std::fs::Permissions::from_mode(0o000))
+            .expect("remove directory access");
+        let inaccessible = std::fs::read_dir(&named).is_err();
+        let results = [
+            reach.approve_mutation(&named, "output").map(|_| ()),
+            reach.refuse_forbidden(&named, "output", true),
+        ];
+        std::fs::set_permissions(&named, std::fs::Permissions::from_mode(0o755))
+            .expect("restore fixture access");
+        if !inaccessible {
+            eprintln!(
+                "skipping: this identity can enumerate the mode-000 directory, so the refusal is unmeasured"
+            );
+            return;
+        }
+        for result in results {
+            let refusal = result
+                .expect_err("an incomplete alias scan must refuse the mutation")
+                .to_string();
+            assert!(
+                refusal.starts_with(&format!(
+                    "output: {COMMAND_SCAN_INCOMPLETE}: directory inspection failed: "
+                )),
+                "{refusal}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_incomplete_scan_reports_its_cause_without_claiming_to_find_a_command() {
+        let (_temporary, reach, home) = fixture();
+        let named = home.join("output");
+        let mut nested = named.clone();
+        for _ in 0..128 {
+            nested.push("d");
+            std::fs::create_dir(&nested).expect("directory beyond the inspection depth");
+        }
+        assert_eq!(
+            reach
+                .approve(&named, "output")
+                .expect("reading remains reachable"),
+            named
+        );
+        mutation_refused_for(
+            &reach,
+            &named,
+            "output",
+            &format!(
+                "{COMMAND_SCAN_INCOMPLETE}: directory inspection failed: directory depth exceeds 128"
+            ),
+        );
+        mutation_refused_for(&reach, &home.join("tools"), "tools", CONFIGURED_COMMAND);
     }
 }

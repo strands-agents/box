@@ -242,7 +242,19 @@ fn renderer_only_replaces_the_checked_in_placeholders() {
     ));
     assert!(profile.contains("(deny process-info*)"));
     assert!(profile.contains("(allow process-info* (target self))"));
+    assert!(profile.contains("(allow process-info-pidinfo (target children))"));
     assert!(!profile.contains("(allow process-info* (target same-sandbox))"));
+    assert!(profile.contains("(allow signal (target children))"));
+    let signal_rules: Vec<_> = rules(&profile)
+        .lines()
+        .filter(|line| line.starts_with("(allow signal"))
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        signal_rules,
+        ["(allow signal (target children))"],
+        "the only signal grant reaches the workload's own children"
+    );
     assert!(profile.contains(&format!(
         "(allow process-exec (literal \"{}\"))",
         executable.display()
@@ -1403,22 +1415,44 @@ fn every_network_allow_names_a_granted_target() {
     }
 }
 
-/// Relaxing `require_expressible` to accept `AllowAll` must not accept the postures it still cannot
-/// express. A `Network::Localhost` with an inbound `listen` port has no lowering on this backend, so
-/// the profile must refuse it rather than silently render a boundary that omits the bind — the
-/// macOS backend surfaces the unexpressible posture instead of masking it.
+/// A listen port renders one bind rule and one inbound rule, each on that port at localhost.
 #[test]
-fn a_localhost_listen_port_is_still_rejected() {
+fn a_localhost_listen_port_renders_one_bind_and_one_inbound_rule() {
     let (_directory, config) = fixed_config();
 
-    let with_listen = config
-        .set_network(Network::localhost().connect(43123).listen(8080))
-        .expect("the portable model accepts a listen port");
-    let refusal = generate_seatbelt_profile(&with_listen)
-        .expect_err("a listen port has no lowering on macOS and must be refused");
+    let without = generate_seatbelt_profile(
+        &config
+            .clone()
+            .set_network(Network::localhost().connect(43123))
+            .expect("one connect port"),
+    )
+    .expect("the profile renders");
+    let with = generate_seatbelt_profile(
+        &config
+            .set_network(Network::localhost().connect(43123).listen(8080))
+            .expect("the portable model accepts a listen port"),
+    )
+    .expect("a listen port renders");
+
+    for operation in ["network-bind", "network-inbound"] {
+        assert_eq!(
+            rules(&with).matches(&format!("(allow {operation}")).count(),
+            rules(&without)
+                .matches(&format!("(allow {operation}"))
+                .count()
+                + 1,
+            "a listen port adds one {operation} rule"
+        );
+        assert!(
+            rules(&with).contains(&format!(
+                "(allow {operation}\n    (local tcp \"localhost:8080\"))"
+            )),
+            "the {operation} rule names the listen port: {with}"
+        );
+    }
     assert!(
-        refusal.to_string().contains("localhost ports"),
-        "the refusal must name the unexpressible network posture: {refusal}"
+        !rules(&with).contains("(remote tcp \"localhost:8080\")"),
+        "a listen port grants no outbound connection to itself: {with}"
     );
 }
 
@@ -1720,19 +1754,22 @@ fn the_rendered_profile_grants_exactly_these_operations_and_no_others() {
     granted.sort();
 
     // One line per authority, with why it exists. `process-fork` is what lets a harness invoke a
-    // child at all; the rest are the placeholders' own rules.
+    // child at all, and `signal` is what lets it stop that child; the rest are the placeholders'
+    // own rules.
     //
-    // **Five operations left this list and none joined it.** `/`, `/etc`, `/private/tmp` and
-    // `/dev/null` were static text, so every box carried them whether or not its start program
-    // needed one — a Python box carried Bun's `/private/tmp` entry. Each is a grant the box's
-    // floor states now, so it renders through the same cells every other grant uses. The profile's
-    // own authority is strictly smaller than it was.
+    // **Five operations left this list.** `/`, `/etc`, `/private/tmp` and `/dev/null` were static
+    // text, so every box carried them whether or not its start program needed one — a Python box
+    // carried Bun's `/private/tmp` entry. Each is a grant the box's floor states now, so it renders
+    // through the same cells every other grant uses. Two joined it on purpose, each scoped to the
+    // workload's own children: `process-info-pidinfo` and `signal`.
     let mut expected = vec![
         "mach-lookup",
         "process-info*", // self-inspection only; paired with (deny process-info*)
+        "process-info-pidinfo", // pidinfo on the workload's own children
         "process-exec",  // the one execute grant
         "file-read-metadata", // that literal, so a PATH search can stat it
         "process-fork",  // unscoped; SBPL has no argv/child-count filter
+        "signal",        // the workload's own children only
         "file-ioctl",    // inherited PTY slave
         "file-read*",    // the trust bundle
         "file-read-metadata", // path-ancestors of the home
@@ -2731,9 +2768,9 @@ fn a_second_served_port_renders_one_more_localhost_rule_and_nothing_else() {
     );
 }
 
-/// Listen ports and a telemetry port do not compose, and the refusal says which shape failed.
+/// Listen ports render beside the composition's connect ports, and neither list leaks into the other.
 #[test]
-fn listen_ports_are_still_the_only_network_shape_the_profile_refuses() {
+fn listen_ports_render_beside_the_composition_ports() {
     let (directory, _config) = fixed_config();
     let root = directory.path().canonicalize().expect("canonical tempdir");
     let home_directory = root.join("home");
@@ -2757,12 +2794,27 @@ fn listen_ports_are_still_the_only_network_shape_the_profile_refuses() {
         )
         .expect("the portable model accepts listen ports");
 
-    let error = generate_seatbelt_profile(&config).expect_err("the profile cannot bind");
+    let profile = rules(&generate_seatbelt_profile(&config).expect("the profile renders"));
+    for port in [43123, 43124] {
+        assert!(
+            profile.contains(&format!("(remote tcp \"localhost:{port}\")")),
+            "{profile}"
+        );
+        assert!(
+            !profile.contains(&format!("(local tcp \"localhost:{port}\")")),
+            "{profile}"
+        );
+    }
     assert!(
-        error.to_string().contains("network access other than"),
-        "unexpected error: {error}"
+        profile.contains("(local tcp \"localhost:3000\")"),
+        "{profile}"
+    );
+    assert!(
+        !profile.contains("(remote tcp \"localhost:3000\")"),
+        "{profile}"
     );
 }
+
 /// An execute grant whose CALLER spelling sits inside the read-write root carries the warning.
 ///
 /// The check once compared only the resolved target, and this backend renders
@@ -3567,6 +3619,55 @@ fn a_leaf_shape_renders_byte_for_byte_what_it_rendered_before() {
         "leaf-writable-workspace.sb",
         &fixture.root,
         &fixture.leaf_with_a_writable_workspace(),
+    );
+}
+
+/// **The file-attributes switch adds the wildcard allow and its withheld-leaf denies to each write root, and
+/// nothing else.** Removing exactly those lines from the switched profile gives the recorded one.
+#[test]
+fn the_file_attributes_switch_adds_only_the_wildcard_and_its_denies_to_a_leaf_shape() {
+    let fixture = ShapeFixture::new();
+    let off = generate_seatbelt_profile(&fixture.leaf_with_a_writable_workspace())
+        .expect("the recorded shape renders");
+    let on = generate_seatbelt_profile(
+        &fixture
+            .leaf_with_a_writable_workspace()
+            .allow_file_attributes(),
+    )
+    .expect("the switched shape renders");
+    let write_roots: Vec<String> = [fixture.project.clone(), fixture.box_root.join("home")]
+        .iter()
+        .map(|root| {
+            root.canonicalize()
+                .expect("the write root resolves")
+                .display()
+                .to_string()
+        })
+        .collect();
+    let added: Vec<String> = write_roots
+        .iter()
+        .flat_map(|root| {
+            [
+                format!("(allow file-write* (subpath \"{root}\"))"),
+                format!("(deny file-write-flags (subpath \"{root}\"))"),
+                format!("(deny file-write-owner (subpath \"{root}\"))"),
+                format!("(deny file-write-acl (subpath \"{root}\"))"),
+                format!("(deny file-write-finderinfo (subpath \"{root}\"))"),
+            ]
+        })
+        .collect();
+    let remaining: Vec<&str> = on
+        .lines()
+        .filter(|line| !added.iter().any(|rule| rule == line))
+        .collect();
+    assert_eq!(
+        on.lines().count() - remaining.len(),
+        added.len(),
+        "each added rule appears exactly once"
+    );
+    assert_eq!(
+        remaining.join("\n"),
+        off.lines().collect::<Vec<_>>().join("\n")
     );
 }
 

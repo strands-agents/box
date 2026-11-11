@@ -1,15 +1,12 @@
 //! The Dogwood decision engine — history-dependent authorization.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 #[cfg(test)]
-use std::sync::{
-    Arc,
-    atomic::{AtomicI64, Ordering},
-};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use dogwood_language::{
@@ -23,12 +20,13 @@ use dogwood_local_engine::{
     PolicyToken, Verb,
 };
 
+use crate::check::{Finding, Refused, RuleRef, annotated_id};
 use crate::error::{PolicyError, PolicyStagingError};
 use crate::outcome::Delivery;
-use crate::request::{Principal, Request};
+use crate::request::{ActionRequest, Principal, Request, RequestId};
 use crate::schema::{
     AGENT_TYPE, ActionIdentity, ActionSchema, GovernedBox, RESOURCE_TYPE, SCHEMA_SRC,
-    UNUSED_RESOURCE_ID, action, action_schema, attr,
+    UNUSED_RESOURCE_ID, action, action_schema, attr, composed_action_schema, mcp_tool_action,
 };
 use crate::spelling::{Operator, PolicyWarning};
 use crate::{Decision, DenyReason, Outcome, PolicyAttribution, RuleId};
@@ -54,6 +52,11 @@ impl ActionIdentity {
             Self::McpTool { namespace, tool } => {
                 Event::builder_for(&[namespace, "Action"], tool, kind)
             }
+            Self::GrammarAction { namespace, action } => {
+                let mut path: Vec<&str> = namespace.split("::").collect();
+                path.push("Action");
+                Event::builder_for(&path, action, kind)
+            }
         }
     }
 }
@@ -70,9 +73,11 @@ const SNAPSHOT_INTERVAL: u64 = 10_000;
 /// One loaded Dogwood policy authority over a single temporal history.
 pub(crate) struct DogwoodEngine {
     engine: Mutex<DurableTemporalEngine>,
+    request_scope: Arc<()>,
     rule_ids: HashMap<PolicyToken, RuleId>,
     request_schema: cedar_policy::Schema,
     tool_actions: std::collections::HashSet<cedar_policy::EntityUid>,
+    tool_inputs: crate::mcp_input::ToolInputs,
     #[cfg(test)]
     fixed_clock: Option<Arc<AtomicI64>>,
 }
@@ -155,7 +160,7 @@ pub fn event_schema_source() -> &'static str {
     EVENTS_DWSCHEMA
 }
 
-fn service_schema() -> Result<ServiceSchema, PolicyError> {
+pub(crate) fn service_schema() -> Result<ServiceSchema, PolicyError> {
     ServiceSchema::builder()
         .event_schema_str(EVENTS_DWSCHEMA)
         .build()
@@ -171,19 +176,34 @@ impl DogwoodEngine {
     }
 
     /// Open durable history and install sources against canonical plus MCP schemas.
+    #[cfg(test)]
     pub(crate) fn open_with_mcp_schemas(
         source: &str,
         mcp_schemas: &[String],
         history: &Path,
         operator: &Operator,
     ) -> Result<(Self, Vec<PolicyWarning>), PolicyError> {
+        Self::open_with_schemas(source, &[], mcp_schemas, history, operator)
+    }
+
+    /// Open durable history and install sources against canonical, tool grammar, and MCP schemas.
+    pub(crate) fn open_with_schemas(
+        source: &str,
+        grammar_schemas: &[String],
+        mcp_schemas: &[String],
+        history: &Path,
+        operator: &Operator,
+    ) -> Result<(Self, Vec<PolicyWarning>), PolicyError> {
+        let effective_schema = composed_action_schema(grammar_schemas, mcp_schemas)?;
         let (canonical_policies, effective_schema, warnings) =
-            validate_and_expand(source, mcp_schemas, operator)?;
+            check_against(source, effective_schema, operator, true, &[])
+                .map_err(Refused::into_error)?;
+        let fragments: Vec<String> = grammar_schemas.iter().chain(mcp_schemas).cloned().collect();
         let mut engine = open_history(history, durable_config()).map_err(durable_history_error)?;
         reconcile_policy_set(
             &mut engine,
             &canonical_policies,
-            mcp_schemas,
+            &fragments,
             &effective_schema.source,
         )?;
 
@@ -191,8 +211,10 @@ impl DogwoodEngine {
             Self {
                 rule_ids: rule_ids(&engine),
                 engine: Mutex::new(engine),
+                request_scope: Arc::new(()),
                 request_schema: effective_schema.cedar,
                 tool_actions: effective_schema.tool_actions,
+                tool_inputs: effective_schema.tool_inputs,
                 #[cfg(test)]
                 fixed_clock: None,
             },
@@ -209,6 +231,7 @@ impl DogwoodEngine {
             engine,
             effective_schema.cedar,
             effective_schema.tool_actions,
+            effective_schema.tool_inputs,
         )
     }
 
@@ -226,6 +249,7 @@ impl DogwoodEngine {
             engine,
             effective_schema.cedar,
             effective_schema.tool_actions,
+            effective_schema.tool_inputs,
         )
     }
 
@@ -242,6 +266,7 @@ impl DogwoodEngine {
             engine,
             effective_schema.cedar,
             effective_schema.tool_actions,
+            effective_schema.tool_inputs,
         )
     }
 
@@ -249,6 +274,7 @@ impl DogwoodEngine {
         engine: DurableTemporalEngine,
         request_schema: cedar_policy::Schema,
         tool_actions: std::collections::HashSet<cedar_policy::EntityUid>,
+        tool_inputs: crate::mcp_input::ToolInputs,
     ) -> Result<Self, PolicyStagingError> {
         if engine.has_policy() && engine.event_schema().as_deref() != Some(EVENTS_DWSCHEMA) {
             return Err(PolicyStagingError::Durable(
@@ -259,8 +285,10 @@ impl DogwoodEngine {
         Ok(Self {
             rule_ids: rule_ids(&engine),
             engine: Mutex::new(engine),
+            request_scope: Arc::new(()),
             request_schema,
             tool_actions,
+            tool_inputs,
             #[cfg(test)]
             fixed_clock: None,
         })
@@ -268,6 +296,47 @@ impl DogwoodEngine {
 
     pub(crate) fn declares_tool_action(&self, action: &cedar_policy::EntityUid) -> bool {
         self.tool_actions.contains(action)
+    }
+
+    /// Record the `::response` of one per-tool `tools/call`, with its request's `input` and `output.reply`.
+    pub(crate) fn observe_tool_response(
+        &self,
+        response: crate::PendingToolResponse,
+        reply: crate::McpReply,
+    ) -> Result<(), PolicyError> {
+        let crate::PendingToolResponse {
+            request_id,
+            identity,
+            input,
+        } = response;
+        self.verify_request_id(&request_id)?;
+        self.submit(|_| {
+            with_request_id(
+                with_output_fields(
+                    with_input(identity.event_builder(KIND_RESPONSE), input),
+                    vec![(attr::REPLY, Value::String(reply.eid().to_string()))],
+                ),
+                &request_id,
+            )
+        })
+        .map(|_| ())
+        .map_err(PolicyError::Evaluation)
+    }
+
+    /// A tool call's arguments with each union member placed in its declared `typeChoice` record.
+    fn conformed_arguments(
+        &self,
+        request: ActionRequest<'_>,
+        identity: &ActionIdentity,
+    ) -> Result<Option<serde_json::Value>, PolicyError> {
+        let ActionRequest::Request(Request::McpCall {
+            arguments: Some(arguments),
+            ..
+        }) = request
+        else {
+            return Ok(None);
+        };
+        self.tool_inputs.conform(&identity.cedar_uid()?, arguments)
     }
 
     /// Parse, lower, and strict-validate sources against canonical plus MCP schemas.
@@ -285,20 +354,52 @@ impl DogwoodEngine {
         canonical_policies: &[String],
         effective_schema: ActionSchema,
     ) -> Result<(), DurableError> {
+        let installed = effective_schema.source.clone();
+        self.commit_staged_under(canonical_policies, &installed, effective_schema)
+    }
+
+    /// Install a staged bundle under `installed_schema` and serve requests from `request_schema`.
+    pub(crate) fn commit_staged_under(
+        &mut self,
+        canonical_policies: &[String],
+        installed_schema: &str,
+        request_schema: ActionSchema,
+    ) -> Result<(), DurableError> {
         let mut engine = self
             .engine
             .lock()
             .map_err(|_| DurableError::Log("dogwood durable engine lock poisoned".to_string()))?;
-        reconcile_staged_policy_set(
-            &mut engine,
-            canonical_policies,
-            effective_schema.source.as_str(),
-        )?;
+        reconcile_staged_policy_set(&mut engine, canonical_policies, installed_schema)?;
         self.rule_ids = rule_ids(&engine);
         drop(engine);
-        self.request_schema = effective_schema.cedar;
-        self.tool_actions = effective_schema.tool_actions;
+        self.request_schema = request_schema.cedar;
+        self.tool_actions = request_schema.tool_actions;
+        self.tool_inputs = request_schema.tool_inputs;
         Ok(())
+    }
+
+    /// The canonical statement of each stored rule.
+    pub(crate) fn stored_statements(&self) -> Vec<String> {
+        self.engine
+            .lock()
+            .map(|engine| {
+                engine
+                    .list()
+                    .into_iter()
+                    .map(|entry| entry.statement)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Each MCP server namespace the stored action schema declares beyond `base`, with its fragment.
+    pub(crate) fn stored_mcp_schemas(&self, base: &str) -> Vec<(String, String)> {
+        self.engine
+            .lock()
+            .ok()
+            .and_then(|engine| engine.action_schema())
+            .map(|schema| crate::mcp_schema::mcp_schemas_in(&schema, base))
+            .unwrap_or_default()
     }
 
     /// Open with a fault injector on the durable log, for tests that pause the store.
@@ -322,8 +423,10 @@ impl DogwoodEngine {
         Ok(Self {
             rule_ids: rule_ids(&engine),
             engine: Mutex::new(engine),
+            request_scope: Arc::new(()),
             request_schema: effective_schema.cedar,
             tool_actions: effective_schema.tool_actions,
+            tool_inputs: effective_schema.tool_inputs,
             fixed_clock: None,
         })
     }
@@ -352,8 +455,10 @@ impl DogwoodEngine {
         Ok(Self {
             rule_ids: rule_ids(&engine),
             engine: Mutex::new(engine),
+            request_scope: Arc::new(()),
             request_schema: effective_schema.cedar,
             tool_actions: effective_schema.tool_actions,
+            tool_inputs: effective_schema.tool_inputs,
             fixed_clock: Some(now),
         })
     }
@@ -376,24 +481,35 @@ impl DogwoodEngine {
     }
 
     /// Decide one request at the current point in history.
-    #[cfg(test)]
     pub(crate) fn decide(
         &self,
         governed: &GovernedBox,
         principal: &Principal,
-        request: &Request<'_>,
-    ) -> Decision {
-        let identity = ActionIdentity::for_request(request);
-        self.decide_with_identity(governed, principal, request, &identity)
+        request: ActionRequest<'_>,
+    ) -> (Decision, Option<RequestId>) {
+        let (decision, request_id, _) = self.decide_recording(governed, principal, request);
+        (decision, request_id)
     }
 
-    pub(crate) fn decide_with_identity(
+    /// Decide one request, and return the `input` its `::request` recorded when that is a tool call's arguments.
+    pub(crate) fn decide_recording(
         &self,
         governed: &GovernedBox,
         principal: &Principal,
-        request: &Request<'_>,
-        identity: &ActionIdentity,
-    ) -> Decision {
+        request: ActionRequest<'_>,
+    ) -> (Decision, Option<RequestId>, Option<Value>) {
+        let identity = request.identity();
+        let conformed_arguments = match self.conformed_arguments(request, &identity) {
+            Ok(arguments) => arguments,
+            Err(error) => {
+                eprintln!("policy: warn: {error}; denying");
+                return (Decision::internal_fault(), None, None);
+            }
+        };
+        let conformed = conformed_arguments
+            .as_ref()
+            .and_then(|arguments| with_arguments(request, arguments));
+        let request = conformed.as_ref().map_or(request, ActionRequest::Request);
         // Validate the (principal, action, context) tuple against the shipped schema
         // BEFORE deciding.
         //
@@ -407,23 +523,66 @@ impl DogwoodEngine {
         // *policy* against the schema but not the *request*, so the check belongs here.
         //
         // The schema is the single source of truth for both engines, which is why this
-        // reuses the same request-construction gate rather than restating the
+        // builds each request through a schema-bound gate rather than restating the
         // principal/action pairings.
-        if let Err(error) =
-            crate::schema::to_cedar_request(principal, request, identity, &self.request_schema)
-        {
+        let gate = match request {
+            ActionRequest::Request(request) => {
+                crate::schema::to_cedar_request(principal, request, &identity, &self.request_schema)
+                    .map(|_| ())
+            }
+            ActionRequest::Grammar(request) => crate::schema::to_cedar_input_request(
+                principal,
+                &identity,
+                request.input(),
+                &self.request_schema,
+            )
+            .map(|_| ()),
+        };
+        if let Err(error) = gate {
             eprintln!("policy: warn: {error}; denying");
-            return Decision::internal_fault();
+            return (Decision::internal_fault(), None, None);
         }
-
-        match self.submit(|| request_event(governed, principal, request, identity)) {
-            Ok(Some(decision)) => decision,
-            // A decision-kind event that produced no response, or a poisoned lock:
-            // neither is a permit.
-            Ok(None) => Decision::internal_fault(),
+        // A tool call's `input` is built once, so its `::request` and `::response` carry one value.
+        let tool_input = match request {
+            ActionRequest::Request(Request::McpCall {
+                arguments: Some(arguments),
+                ..
+            }) => Some(json_value(arguments)),
+            _ => None,
+        };
+        let event = |offset| {
+            with_request_id(
+                match (request, &tool_input) {
+                    (ActionRequest::Request(_), Some(input)) => {
+                        with_input(identity.event_builder(KIND_REQUEST), input.clone())
+                    }
+                    (ActionRequest::Request(request), None) => {
+                        request_event(governed, principal, request, &identity)
+                    }
+                    (ActionRequest::Grammar(request), _) => with_input(
+                        identity.event_builder(KIND_REQUEST),
+                        entity_json_value(request.input()),
+                    ),
+                },
+                &RequestId::new(&self.request_scope, offset),
+            )
+        };
+        match self.submit(event) {
+            Ok((Some(decision), offset)) => (
+                decision,
+                Some(RequestId::new(&self.request_scope, offset)),
+                tool_input,
+            ),
+            // A decision-kind event that produced no response is not a permit,
+            // but the confirmed append still identifies the recorded request.
+            Ok((None, offset)) => (
+                Decision::internal_fault(),
+                Some(RequestId::new(&self.request_scope, offset)),
+                tool_input,
+            ),
             Err(error) => {
                 eprintln!("policy: warn: {error}; denying");
-                Decision::internal_fault()
+                (Decision::internal_fault(), None, None)
             }
         }
     }
@@ -433,15 +592,60 @@ impl DogwoodEngine {
         &self,
         governed: &GovernedBox,
         principal: &Principal,
+        request_id: &RequestId,
         outcome: &Outcome<'_>,
     ) -> Result<(), PolicyError> {
-        self.submit(|| outcome_event(governed, principal, outcome))
+        self.verify_request_id(request_id)?;
+        self.submit(|_| with_request_id(outcome_event(governed, principal, outcome), request_id))
             .map(|_| ())
             .map_err(PolicyError::Evaluation)
     }
 
+    /// Submit the `::response` of one completed action whose `input` is the JSON record `input`.
+    #[cfg_attr(
+        not(any(test, feature = "shell-adapter")),
+        expect(
+            dead_code,
+            reason = "only the shell adapter records a grammar response"
+        )
+    )]
+    pub(crate) fn observe_response(
+        &self,
+        identity: &ActionIdentity,
+        input: &serde_json::Value,
+        request_id: &RequestId,
+        status: i32,
+    ) -> Result<(), PolicyError> {
+        self.verify_request_id(request_id)?;
+        self.submit(|_| {
+            let builder = with_input(
+                identity.event_builder(KIND_RESPONSE),
+                entity_json_value(input),
+            );
+            with_request_id(
+                with_output_fields(builder, vec![(attr::STATUS, Value::Int(i64::from(status)))]),
+                request_id,
+            )
+        })
+        .map(|_| ())
+        .map_err(PolicyError::Evaluation)
+    }
+
+    fn verify_request_id(&self, request_id: &RequestId) -> Result<(), PolicyError> {
+        if request_id.belongs_to(&self.request_scope) {
+            Ok(())
+        } else {
+            Err(PolicyError::Evaluation(
+                "request identifier belongs to a different opened policy history".to_string(),
+            ))
+        }
+    }
+
     /// Feed one event through the durable engine under the scope lock.
-    fn submit(&self, build: impl FnOnce() -> EventBuilder) -> Result<Option<Decision>, String> {
+    fn submit(
+        &self,
+        build: impl FnOnce(u64) -> EventBuilder,
+    ) -> Result<(Option<Decision>, u64), String> {
         let mut engine = self
             .engine
             .lock()
@@ -455,10 +659,16 @@ impl DogwoodEngine {
                 std::thread::park();
             }
         }
-        let submitted = engine.submit(build()).map_err(|error| error.to_string())?;
+        let offset = engine.log_offset();
+        offset
+            .checked_add(1)
+            .ok_or_else(|| "dogwood history offset exhausted".to_string())?;
+        let submitted = engine
+            .submit(build(offset))
+            .map_err(|error| error.to_string())?;
 
         let DurableOutcome::Decision(response) = submitted.outcome else {
-            return Ok(None);
+            return Ok((None, offset));
         };
 
         let attribution = response
@@ -477,18 +687,28 @@ impl DogwoodEngine {
                     description: reference.description().map(str::to_owned),
                 })
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect::<Result<Vec<_>, String>>();
+        let attribution = match attribution {
+            Ok(attribution) => attribution,
+            Err(error) => {
+                eprintln!("policy: warn: {error}; denying");
+                return Ok((Some(Decision::internal_fault()), offset));
+            }
+        };
 
         let mut errors = response.diagnostics().errors().peekable();
         if errors.peek().is_some() {
             let joined = errors.collect::<Vec<_>>().join("; ");
             eprintln!("policy: warn: dogwood evaluation failed: {joined}; denying");
-            return Ok(Some(Decision::Deny {
-                reason: DenyReason::InternalFault,
-                rule: RuleId::default_deny(),
-                attribution,
-                resource: String::new(),
-            }));
+            return Ok((
+                Some(Decision::Deny {
+                    reason: DenyReason::InternalFault,
+                    rule: RuleId::default_deny(),
+                    attribution,
+                    resource: String::new(),
+                }),
+                offset,
+            ));
         }
 
         let rule = attribution
@@ -496,26 +716,29 @@ impl DogwoodEngine {
             .map(|attribution| attribution.rule.clone())
             .unwrap_or_else(RuleId::default_deny);
 
-        Ok(Some(match response.decision() {
-            DogwoodDecision::Allow => Decision::Allow {
-                rule,
-                attribution,
-                resource: String::new(),
-            },
-            DogwoodDecision::Deny => {
-                let reason = if attribution.is_empty() {
-                    DenyReason::NoMatch
-                } else {
-                    DenyReason::Forbidden
-                };
-                Decision::Deny {
-                    reason,
+        Ok((
+            Some(match response.decision() {
+                DogwoodDecision::Allow => Decision::Allow {
                     rule,
                     attribution,
                     resource: String::new(),
+                },
+                DogwoodDecision::Deny => {
+                    let reason = if attribution.is_empty() {
+                        DenyReason::NoMatch
+                    } else {
+                        DenyReason::Forbidden
+                    };
+                    Decision::Deny {
+                        reason,
+                        rule,
+                        attribution,
+                        resource: String::new(),
+                    }
                 }
-            }
-        }))
+            }),
+            offset,
+        ))
     }
 
     #[cfg(test)]
@@ -527,33 +750,257 @@ impl DogwoodEngine {
     }
 }
 
+/// One macro-expanded rule, and the per-tool actions its head names.
+#[derive(Debug, Clone)]
+pub(crate) struct ExpandedPolicy {
+    pub(crate) source: String,
+    /// The `(namespace, tool)` pairs the head names, read from the parsed scope.
+    pub(crate) head_tools: BTreeSet<(String, String)>,
+    /// Whether the head names actions and every one is a per-tool MCP action.
+    pub(crate) decides_only_tools: bool,
+}
+
 /// Parse and macro-expand a source bundle without an action schema.
 pub(crate) fn parse_policy_source(source: &str) -> Result<Vec<String>, PolicyError> {
+    expand_policy_source(source)
+        .map(|expanded| expanded.into_iter().map(|policy| policy.source).collect())
+        .map_err(Refused::into_error)
+}
+
+/// Parse and macro-expand a source bundle, keeping each rule's decoded head actions and the
+/// findings of a refusal.
+pub(crate) fn expand_policy_source(source: &str) -> Result<Vec<ExpandedPolicy>, Refused> {
     let service = service_schema()?;
     let parsed = dogwood_language::ParsedPolicySet::parse(source, &service)
-        .map_err(|error| PolicyError::Parse(format!("dogwood parse: {error}")))?;
-
-    if parsed.policies().any(|policy| policy.uses_providers()) {
-        return Err(PolicyError::Parse(
-            "dogwood: information providers are not enabled in this build".to_string(),
-        ));
-    }
-
+        .map_err(|error| parse_refused(source, &error, true))?;
+    refuse_providers(&parsed, &[])?;
+    refuse_unrecorded_mcp_errors(&parsed, &[])?;
+    refuse_unknown_mcp_replies(&parsed, &[])?;
     Ok(parsed
         .policies()
-        .map(|policy| policy.expanded_source())
+        .map(|policy| ExpandedPolicy {
+            source: policy.expanded_source(),
+            head_tools: head_tools(&policy.scope()),
+            decides_only_tools: decides_only_tools(&policy.scope()),
+        })
         .collect())
 }
 
+/// The per-tool actions a parsed head names.
+fn head_tools(scope: &dogwood_language::PolicyScope) -> BTreeSet<(String, String)> {
+    let actions: &[cedar_policy::EntityUid] = match scope.action() {
+        dogwood_language::ActionConstraint::Any => &[],
+        dogwood_language::ActionConstraint::Eq(action) => std::slice::from_ref(action),
+        dogwood_language::ActionConstraint::In(actions) => actions.as_slice(),
+    };
+    actions.iter().filter_map(mcp_tool_action).collect()
+}
+
+/// Whether a parsed head names actions and every one is a per-tool MCP action.
+fn decides_only_tools(scope: &dogwood_language::PolicyScope) -> bool {
+    match scope.action() {
+        dogwood_language::ActionConstraint::Any => false,
+        dogwood_language::ActionConstraint::Eq(action) => mcp_tool_action(action).is_some(),
+        dogwood_language::ActionConstraint::In(actions) => {
+            !actions.is_empty()
+                && actions
+                    .iter()
+                    .all(|action| mcp_tool_action(action).is_some())
+        }
+    }
+}
+
+/// Parse and macro-expand a source bundle, and run each check on a read of `context.input` that
+/// needs no MCP action schema.
+pub(crate) fn validate_staged_source(source: &str) -> Result<(), PolicyError> {
+    let expanded = parse_policy_source(source)?;
+    refuse_input_reads_before_discovery(&expanded).map_err(Refused::into_error)
+}
+
+/// The conditions of one macro-expanded rule, as the engine's own parsed tree rather than its
+/// rendered text, with each `temporal { … }` expression replaced by `true`. Empty when the rule
+/// cannot lower without an MCP action schema, which is the case for a rule that names a typed
+/// action outside a history clause. An `unless` condition arrives as a negated `when`, which is
+/// how Cedar states it.
+pub(crate) fn rule_conditions(expanded: &str) -> Vec<serde_json::Value> {
+    let Ok(policy_schema) = action_schema(&[])
+        .and_then(|schema| {
+            PolicySchema::from_cedarschema_str(&schema.source)
+                .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))
+        })
+        .map_err(drop)
+    else {
+        return Vec::new();
+    };
+    let Ok(service) = service_schema() else {
+        return Vec::new();
+    };
+    let Ok(parsed) =
+        dogwood_language::ParsedPolicySet::parse(&without_temporal(expanded), &service)
+    else {
+        return Vec::new();
+    };
+    let Ok(lowered) = parsed.lower(&policy_schema) else {
+        return Vec::new();
+    };
+    lowered
+        .as_cedar()
+        .policies()
+        .filter_map(|policy| policy.to_json().ok())
+        .filter_map(|json| json.get("conditions")?.as_array().cloned())
+        .flatten()
+        .filter_map(|condition| condition.get("body").cloned())
+        .collect()
+}
+
+/// Refuse a macro-expanded rule that names the removed `ip` attribute, or reads `context.input`
+/// without one action family, before an MCP action schema stages.
+pub(crate) fn refuse_input_reads_before_discovery(expanded: &[String]) -> Result<(), Refused> {
+    let source = expanded
+        .iter()
+        .map(|policy| without_temporal(policy))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let policy_schema = PolicySchema::from_cedarschema_str(&action_schema(&[])?.source)
+        .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
+    let Ok(parsed) = dogwood_language::ParsedPolicySet::parse(&source, &service_schema()?) else {
+        return Ok(());
+    };
+    let Ok(lowered) = parsed.lower(&policy_schema) else {
+        return Ok(());
+    };
+    let rule_of = |cedar_policy_id: &str| rule_ref(&lowered, cedar_policy_id, &[]);
+    crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &rule_of)?;
+    crate::spelling::refuse_input_across_families(lowered.as_cedar(), &rule_of)
+}
+
+/// A rendered rule with each `temporal { … }` expression replaced by `true`.
+fn without_temporal(rendered: &str) -> String {
+    const KEYWORD: &str = "temporal";
+    let bytes = rendered.as_bytes();
+    let mut out = String::with_capacity(rendered.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            let end = string_end(bytes, index);
+            out.push_str(&rendered[index..end]);
+            index = end;
+            continue;
+        }
+        let starts_word = index == 0
+            || !(bytes[index - 1].is_ascii_alphanumeric()
+                || bytes[index - 1] == b'_'
+                || bytes[index - 1] == b'.');
+        if starts_word && rendered[index..].starts_with(KEYWORD) {
+            let after = index + KEYWORD.len();
+            let open = after
+                + rendered[after..]
+                    .bytes()
+                    .take_while(u8::is_ascii_whitespace)
+                    .count();
+            if bytes.get(open) == Some(&b'{')
+                && let Some(close) = block_end(bytes, open)
+            {
+                out.push_str("true");
+                index = close;
+                continue;
+            }
+        }
+        let character = rendered[index..].chars().next().unwrap_or_default();
+        out.push(character);
+        index += character.len_utf8().max(1);
+    }
+    out
+}
+
+/// The byte after the string literal that opens at `start`.
+fn string_end(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' => index += 2,
+            b'"' => return index + 1,
+            _ => index += 1,
+        }
+    }
+    bytes.len()
+}
+
+/// The byte after the `}` that closes the block that opens at `open`.
+fn block_end(bytes: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index = string_end(bytes, index);
+                continue;
+            }
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
 /// Strict-validate canonical policy statements against an ordered schema set.
+///
+/// `positions` holds the authored index of each statement, and an empty slice means the statements
+/// are the authored rules in order.
 pub(crate) fn validate_canonical_policy_set(
     canonical_policies: &[String],
+    grammar_schemas: &[String],
     mcp_schemas: &[String],
     operator: &Operator,
+    positions: &[usize],
 ) -> Result<(ActionSchema, Vec<PolicyWarning>), PolicyError> {
+    check_canonical_policy_set(
+        canonical_policies,
+        grammar_schemas,
+        mcp_schemas,
+        operator,
+        positions,
+    )
+    .map_err(Refused::into_error)
+}
+
+/// Strict-validate canonical policy statements, keeping the findings of a refusal.
+pub(crate) fn check_canonical_policy_set(
+    canonical_policies: &[String],
+    grammar_schemas: &[String],
+    mcp_schemas: &[String],
+    operator: &Operator,
+    positions: &[usize],
+) -> Result<(ActionSchema, Vec<PolicyWarning>), Refused> {
     let source = canonical_policies.join("\n");
-    validate_and_expand(&source, mcp_schemas, operator)
-        .map(|(_, schema, warnings)| (schema, warnings))
+    check_and_expand(
+        &source,
+        grammar_schemas,
+        mcp_schemas,
+        operator,
+        false,
+        positions,
+    )
+    .map(|(_, schema, warnings)| (schema, warnings))
+}
+
+/// Strict-validate authored `source` against the canonical, tool grammar, and MCP schemas.
+pub(crate) fn validate_with_schemas(
+    source: &str,
+    grammar_schemas: &[String],
+    mcp_schemas: &[String],
+    operator: &Operator,
+) -> Result<Vec<PolicyWarning>, PolicyError> {
+    check_and_expand(source, grammar_schemas, mcp_schemas, operator, true, &[])
+        .map(|(_, _, warnings)| warnings)
+        .map_err(Refused::into_error)
 }
 
 /// Parse and validate a bundle before the durable engine installs it.
@@ -562,29 +1009,44 @@ fn validate_and_expand(
     mcp_schemas: &[String],
     operator: &Operator,
 ) -> Result<(Vec<String>, crate::schema::ActionSchema, Vec<PolicyWarning>), PolicyError> {
+    check_and_expand(source, &[], mcp_schemas, operator, true, &[]).map_err(Refused::into_error)
+}
+
+/// Parse and validate a bundle, keeping the findings of a refusal, located when `source` is authored.
+pub(crate) fn check_and_expand(
+    source: &str,
+    grammar_schemas: &[String],
+    mcp_schemas: &[String],
+    operator: &Operator,
+    authored: bool,
+    positions: &[usize],
+) -> Result<(Vec<String>, crate::schema::ActionSchema, Vec<PolicyWarning>), Refused> {
     // Parse the Cedar-side schema here, not on the first decision. The request gate
     // caches it behind a `OnceLock`, so leaving it lazy charged the workload's *first*
     // filesystem call ~1.5ms of schema parsing. Startup is where blocking work
     // belongs; a parse fault also becomes a load error rather than a first-request
     // deny.
-    let effective_schema = action_schema(mcp_schemas)?;
+    let effective_schema = composed_action_schema(grammar_schemas, mcp_schemas)?;
+    check_against(source, effective_schema, operator, authored, positions)
+}
 
+/// Parse and validate a bundle against `effective_schema`, keeping the findings of a refusal.
+pub(crate) fn check_against(
+    source: &str,
+    effective_schema: ActionSchema,
+    operator: &Operator,
+    authored: bool,
+    positions: &[usize],
+) -> Result<(Vec<String>, crate::schema::ActionSchema, Vec<PolicyWarning>), Refused> {
     let policy_schema = PolicySchema::from_cedarschema_str(&effective_schema.source)
         .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
 
     let service = service_schema()?;
     let parsed = dogwood_language::ParsedPolicySet::parse(source, &service)
-        .map_err(|error| PolicyError::Parse(format!("dogwood parse: {error}")))?;
-
-    // An information provider runs a sandboxed script on the decision path. We
-    // ship none, and an erroring provider is documented upstream as undefined
-    // behaviour, so a policy that uses one is refused at load rather than trusted
-    // to fail closed.
-    if parsed.policies().any(|policy| policy.uses_providers()) {
-        return Err(PolicyError::Parse(
-            "dogwood: information providers are not enabled in this build".to_string(),
-        ));
-    }
+        .map_err(|error| parse_refused(source, &error, authored))?;
+    refuse_providers(&parsed, positions)?;
+    refuse_unrecorded_mcp_errors(&parsed, positions)?;
+    refuse_unknown_mcp_replies(&parsed, positions)?;
     let canonical_policies = parsed
         .policies()
         .map(|policy| policy.expanded_source())
@@ -592,9 +1054,13 @@ fn validate_and_expand(
     let lowered: LoweredPolicySet = parsed
         .lower(&policy_schema)
         .map_err(|error| PolicyError::Schema(format!("dogwood lower: {error}")))?;
-    refuse_shared_rule_ids(&lowered)?;
-    refuse_reserved_action_rules(&lowered)?;
-    let cap_warnings = crate::cap::judge(&parsed, &lowered)?;
+    refuse_shared_rule_ids(&lowered, positions)?;
+    refuse_reserved_action_rules(&lowered, positions)?;
+    refuse_group_predicates(&parsed, &lowered, positions)?;
+    let rule_of = |cedar_policy_id: &str| rule_ref(&lowered, cedar_policy_id, positions);
+    crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &rule_of)?;
+    crate::spelling::refuse_input_across_families(lowered.as_cedar(), &rule_of)?;
+    let cap_warnings = crate::cap::judge(&parsed, &lowered, positions)?;
 
     // Strict schema validation, and it is load-bearing: `lower` alone accepts a
     // typo'd action (`Box::Action::"fs:raed"`) and an undeclared context attribute, which
@@ -603,26 +1069,37 @@ fn validate_and_expand(
     // keeps an authoring mistake from becoming a permanent hole.
     let validation = Validator::new().validate(&lowered);
     if !validation.validation_passed() {
-        let errors = validation
+        let (messages, findings): (Vec<String>, Vec<Finding>) = validation
             .validation_errors()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>();
-        let joined = errors.join("; ");
+            .map(|error| validation_finding(&lowered, error, positions))
+            .map(|(message, finding)| (message, place(finding, source, authored)))
+            .unzip();
+        let joined = messages
+            .iter()
+            .zip(&findings)
+            .map(|(message, finding)| finding.described(message))
+            .collect::<Vec<_>>()
+            .join("; ");
         // An unrecognized action keeps its own variant. It is the single most likely
         // authoring mistake (a typo in a verb) and the one whose silent-no-match
         // failure mode this crate names explicitly, so a caller can report it as
         // "you named an action that does not exist" rather than a generic schema
         // fault.
-        if errors
+        let error = if messages
             .iter()
-            .any(|error| error.contains("unrecognized action"))
+            .any(|message| message.contains("unrecognized action"))
         {
-            return Err(PolicyError::UnknownAction(joined));
-        }
-        return Err(PolicyError::Schema(joined));
+            PolicyError::UnknownAction(joined)
+        } else {
+            PolicyError::Schema(joined)
+        };
+        return Err(Refused::new(error, findings));
     }
 
-    let warnings = crate::spelling::judge(lowered.as_cedar(), operator)?
+    let warnings =
+        crate::spelling::judge_naming(lowered.as_cedar(), operator, &|cedar_policy_id| {
+            rule_ref(&lowered, cedar_policy_id, positions)
+        })?
         .into_iter()
         .chain(cap_warnings)
         .collect();
@@ -630,8 +1107,368 @@ fn validate_and_expand(
     Ok((canonical_policies, effective_schema, warnings))
 }
 
+/// `finding` located in `source` when the source is authored, and with no position otherwise.
+fn place(finding: Finding, source: &str, authored: bool) -> Finding {
+    if authored {
+        finding.located_in(source)
+    } else {
+        finding.without_span()
+    }
+}
+
+/// The refusal of a source that does not parse, with the position of each parse error.
+fn parse_refused(source: &str, error: &dogwood_language::Error, authored: bool) -> Refused {
+    let findings: Vec<Finding> = match error {
+        dogwood_language::Error::Parse(errors) => errors
+            .iter()
+            .map(|error| {
+                let span = error.location().span();
+                Finding::new(error.to_string()).with_span(span.offset()..span.offset() + span.len())
+            })
+            .collect(),
+        dogwood_language::Error::Macro(error) => {
+            let span = error.location().span();
+            vec![
+                Finding::new(error.to_string())
+                    .with_span(span.offset()..span.offset() + span.len()),
+            ]
+        }
+        other => vec![Finding::new(other.to_string())],
+    };
+    let findings: Vec<Finding> = findings
+        .into_iter()
+        .map(|finding| place(finding, source, authored))
+        .collect();
+    let text = match findings.first() {
+        Some(first) => Finding::new("")
+            .with_location_of(first)
+            .described(&format!("dogwood parse: {error}")),
+        None => format!("dogwood parse: {error}"),
+    };
+    Refused::new(PolicyError::Parse(text), findings)
+}
+
+/// Refuse a bundle that uses an information provider.
+fn refuse_providers(
+    parsed: &dogwood_language::ParsedPolicySet,
+    positions: &[usize],
+) -> Result<(), Refused> {
+    // An information provider runs a sandboxed script on the decision path. We
+    // ship none, and an erroring provider is documented upstream as undefined
+    // behaviour, so a policy that uses one is refused at load rather than trusted
+    // to fail closed.
+    let rules: Vec<RuleRef> = parsed
+        .policies()
+        .filter(|policy| policy.uses_providers())
+        .map(|policy| {
+            RuleRef::new(
+                authored_index(positions, policy.index()),
+                annotated_id(&policy.expanded_source()),
+            )
+        })
+        .collect();
+    if rules.is_empty() {
+        return Ok(());
+    }
+    let text = "dogwood: information providers are not enabled in this build";
+    Err(Refused::new(
+        PolicyError::Parse(text.to_string()),
+        vec![Finding::new(text).with_rules(rules)],
+    ))
+}
+
+/// Refuse a temporal predicate on an MCP action's `::error`, which Box never records.
+fn refuse_unrecorded_mcp_errors(
+    parsed: &dogwood_language::ParsedPolicySet,
+    positions: &[usize],
+) -> Result<(), Refused> {
+    let mut findings = Vec::new();
+    for policy in parsed.policies() {
+        let mut predicates = Vec::new();
+        for condition in policy.temporal_conditions() {
+            predicate_events(condition, &mut predicates);
+        }
+        let mut named: Vec<String> = predicates
+            .into_iter()
+            .filter(|(namespace, action, kind)| {
+                kind == KIND_ERROR && is_mcp_event(namespace, action)
+            })
+            .map(|(namespace, action, kind)| {
+                format!("{}::{action:?}::{kind}", namespace.join("::"))
+            })
+            .collect();
+        named.dedup();
+        if named.is_empty() {
+            continue;
+        }
+        let index = authored_index(positions, policy.index());
+        let source = policy.expanded_source();
+        let id = annotated_id(&source);
+        let name = parsed_rule_name(&source, id.as_deref());
+        findings.push(
+            Finding::new(format!(
+                "{name} (rule {}): a temporal predicate names {}",
+                index.saturating_add(1),
+                named.join(", ")
+            ))
+            .with_rules(vec![RuleRef::new(index, id)]),
+        );
+    }
+    if findings.is_empty() {
+        return Ok(());
+    }
+    let named = findings.iter().map(Finding::message).collect::<Vec<_>>();
+    Err(Refused::new(
+        PolicyError::UnsupportedClause(format!(
+            "{}; Box records every MCP outcome as `::response`, so the predicate cannot match; \
+             name `::response` instead",
+            named.join("; ")
+        )),
+        findings,
+    ))
+}
+
+/// A parsed rule's name as `spelling::rule_name` spells it, read from its canonical source.
+fn parsed_rule_name(source: &str, id: Option<&str>) -> String {
+    if let Some(id) = id {
+        return format!("rule @id(\"{id}\")");
+    }
+    let body = source
+        .lines()
+        .skip_while(|line| line.trim_start().starts_with('@'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let effect = if body.trim_start().starts_with("forbid") {
+        "forbid"
+    } else {
+        "permit"
+    };
+    format!("the {effect} rule with no @id")
+}
+
+/// Refuse a temporal predicate whose `output.reply` names a value Box never records.
+fn refuse_unknown_mcp_replies(
+    parsed: &dogwood_language::ParsedPolicySet,
+    positions: &[usize],
+) -> Result<(), Refused> {
+    let mut findings = Vec::new();
+    for policy in parsed.policies() {
+        let mut unknown = Vec::new();
+        for condition in policy.temporal_conditions() {
+            reply_literals(condition, &mut unknown);
+        }
+        unknown.dedup();
+        if unknown.is_empty() {
+            continue;
+        }
+        let index = authored_index(positions, policy.index());
+        let source = policy.expanded_source();
+        let id = annotated_id(&source);
+        findings.push(
+            Finding::new(format!(
+                "{} (rule {}): `output.reply` is {}, which Box never records",
+                parsed_rule_name(&source, id.as_deref()),
+                index.saturating_add(1),
+                unknown
+                    .iter()
+                    .map(|value| format!("{value:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+            .with_rules(vec![RuleRef::new(index, id)]),
+        );
+    }
+    if findings.is_empty() {
+        return Ok(());
+    }
+    let named = findings.iter().map(Finding::message).collect::<Vec<_>>();
+    Err(Refused::new(
+        PolicyError::UnsupportedClause(format!(
+            "{}; the predicate cannot match; use one of {}",
+            named.join("; "),
+            crate::McpReply::VALUES
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        findings,
+    ))
+}
+
+/// Collect every `output.reply` literal a temporal condition's predicates compare against that is
+/// not a value Box records.
+fn reply_literals(condition: &dogwood_language::temporal_ast::Condition, out: &mut Vec<String>) {
+    use dogwood_language::temporal_ast::{AggExprKind, ConditionKind, Term};
+    fn reply_terms(term: &Term, out: &mut Vec<String>) {
+        match term {
+            Term::Agg(aggregate) => match &aggregate.kind {
+                AggExprKind::Sum { body, .. } | AggExprKind::Count { body, .. } => {
+                    reply_literals(body, out);
+                }
+                AggExprKind::Call(_) => {}
+            },
+            Term::Array(items) => items.iter().for_each(|item| reply_terms(item, out)),
+            _ => {}
+        }
+    }
+    match &condition.kind {
+        ConditionKind::And { left, right }
+        | ConditionKind::Or { left, right }
+        | ConditionKind::Since { left, right, .. } => {
+            reply_literals(left, out);
+            reply_literals(right, out);
+        }
+        ConditionKind::Not { inner: body }
+        | ConditionKind::Formerly { body, .. }
+        | ConditionKind::Previous { body, .. }
+        | ConditionKind::Exists { body, .. }
+        | ConditionKind::Refine { base: body, .. } => reply_literals(body, out),
+        ConditionKind::Predicate(predicate) => {
+            for argument in &predicate.args {
+                if argument.field_path() == ["output", "reply"]
+                    && let Term::String(value) = &argument.value
+                    && !crate::McpReply::VALUES.contains(&value.as_str())
+                {
+                    out.push(value.clone());
+                }
+                reply_terms(&argument.value, out);
+            }
+        }
+        ConditionKind::Comparison { left, right, .. } => {
+            reply_terms(left, out);
+            reply_terms(right, out);
+        }
+        ConditionKind::Tp { .. } | ConditionKind::Call(_) | ConditionKind::SigilRef { .. } => {}
+    }
+}
+
+/// Whether a predicate's action is `mcp:call` or a per-tool MCP action.
+fn is_mcp_event(namespace: &[String], action: &str) -> bool {
+    match namespace {
+        [box_namespace, kind] if box_namespace == "Box" && kind == "Action" => {
+            action == crate::schema::action::MCP_CALL
+        }
+        [_, kind] => kind == "Action",
+        _ => false,
+    }
+}
+
+/// Collect the namespace, action, and kind of every predicate in a temporal condition.
+fn predicate_events(
+    condition: &dogwood_language::temporal_ast::Condition,
+    out: &mut Vec<(Vec<String>, String, String)>,
+) {
+    use dogwood_language::temporal_ast::{AggExprKind, ConditionKind, Term};
+    fn term_events(term: &Term, out: &mut Vec<(Vec<String>, String, String)>) {
+        match term {
+            Term::Agg(aggregate) => match &aggregate.kind {
+                AggExprKind::Sum { body, .. } | AggExprKind::Count { body, .. } => {
+                    predicate_events(body, out);
+                }
+                AggExprKind::Call(_) => {}
+            },
+            Term::Array(items) => items.iter().for_each(|item| term_events(item, out)),
+            _ => {}
+        }
+    }
+    match &condition.kind {
+        ConditionKind::And { left, right }
+        | ConditionKind::Or { left, right }
+        | ConditionKind::Since { left, right, .. } => {
+            predicate_events(left, out);
+            predicate_events(right, out);
+        }
+        ConditionKind::Not { inner: body }
+        | ConditionKind::Formerly { body, .. }
+        | ConditionKind::Previous { body, .. }
+        | ConditionKind::Exists { body, .. }
+        | ConditionKind::Refine { base: body, .. } => predicate_events(body, out),
+        ConditionKind::Predicate(predicate) => {
+            out.push((
+                predicate.namespace.clone(),
+                predicate.action.clone(),
+                predicate.kind.clone(),
+            ));
+            for argument in &predicate.args {
+                term_events(&argument.value, out);
+            }
+        }
+        ConditionKind::Comparison { left, right, .. } => {
+            term_events(left, out);
+            term_events(right, out);
+        }
+        ConditionKind::Tp { .. } | ConditionKind::Call(_) | ConditionKind::SigilRef { .. } => {}
+    }
+}
+
+/// The validator's message for one error, and its finding with its rule, span, and help.
+fn validation_finding(
+    lowered: &LoweredPolicySet,
+    error: &dogwood_language::ValidationError,
+    positions: &[usize],
+) -> (String, Finding) {
+    let (message, span, help) = match error {
+        dogwood_language::ValidationError::Cedar {
+            message,
+            span,
+            help,
+            ..
+        }
+        | dogwood_language::ValidationError::Extension {
+            message,
+            span,
+            help,
+            ..
+        } => (
+            message.clone(),
+            Some(span.offset()..span.offset() + span.len()),
+            help.clone(),
+        ),
+        other => (other.to_string(), None, None),
+    };
+    let named = cedar_policy_id(&message);
+    let rule = named.and_then(|(id, _)| rule_ref(lowered, id, positions));
+    let own = named.map_or(message.as_str(), |(_, rest)| rest);
+    let whole_rule = own.starts_with("unable to find an applicable action");
+    let mut finding = Finding::new(own)
+        .with_help(help)
+        .with_rules(rule.into_iter().collect());
+    if let Some(span) = span.filter(|_| !whole_rule) {
+        finding = finding.with_span(span);
+    }
+    (message, finding)
+}
+
+/// The Cedar policy id that a validator message names, such as `policy_0`, and the rest of it.
+fn cedar_policy_id(message: &str) -> Option<(&str, &str)> {
+    let rest = message.strip_prefix("for policy `")?;
+    let (id, after) = rest.split_once('`')?;
+    Some((id, after.strip_prefix(", ").unwrap_or(after)))
+}
+
+/// The rule that a lowered Cedar policy id stands for, with its `@id`.
+pub(crate) fn rule_ref(
+    lowered: &LoweredPolicySet,
+    cedar_policy_id: &str,
+    positions: &[usize],
+) -> Option<RuleRef> {
+    let rule = lowered.rule_ref(cedar_policy_id)?;
+    let id = cedar_policy_id
+        .parse::<cedar_policy::PolicyId>()
+        .ok()
+        .and_then(|policy_id| lowered.as_cedar().annotation(&policy_id, "id"))
+        .map(str::to_string);
+    Some(RuleRef::new(authored_index(positions, rule.rule_index), id))
+}
+
+/// The authored index of the statement at `index`, as `positions` maps it.
+pub(crate) fn authored_index(positions: &[usize], index: usize) -> usize {
+    positions.get(index).copied().unwrap_or(index)
+}
+
 /// Refuse a bundle in which two rules carry one non-blank `@id`.
-fn refuse_shared_rule_ids(lowered: &LoweredPolicySet) -> Result<(), PolicyError> {
+fn refuse_shared_rule_ids(lowered: &LoweredPolicySet, positions: &[usize]) -> Result<(), Refused> {
     let cedar = lowered.as_cedar();
     let mut rules_by_id: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for rule in lowered.rules() {
@@ -643,35 +1480,47 @@ fn refuse_shared_rule_ids(lowered: &LoweredPolicySet) -> Result<(), PolicyError>
             Some(id) if !id.trim().is_empty() => rules_by_id
                 .entry(id)
                 .or_default()
-                .push(rule.rule_index.saturating_add(1)),
+                .push(authored_index(positions, rule.rule_index)),
             _ => {}
         }
     }
-    let shared: Vec<String> = rules_by_id
+    let findings: Vec<Finding> = rules_by_id
         .into_iter()
         .filter(|(_, rules)| rules.len() > 1)
         .map(|(id, rules)| {
             let positions = rules
                 .iter()
-                .map(ToString::to_string)
+                .map(|index| index.saturating_add(1).to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
-            format!("@id(\"{id}\") is on rules {positions}")
+            Finding::new(format!("@id(\"{id}\") is on rules {positions}")).with_rules(
+                rules
+                    .iter()
+                    .map(|index| RuleRef::new(*index, Some(id.to_string())))
+                    .collect(),
+            )
         })
         .collect();
-    if shared.is_empty() {
+    if findings.is_empty() {
         return Ok(());
     }
-    Err(PolicyError::SharedRuleId(format!(
-        "{}; a denial and a telemetry record name a rule by its @id, so give each rule its own @id",
-        shared.join("; ")
-    )))
+    let shared = findings.iter().map(Finding::message).collect::<Vec<_>>();
+    Err(Refused::new(
+        PolicyError::SharedRuleId(format!(
+            "{}; a denial and a telemetry record name a rule by its @id, so give each rule its own @id",
+            shared.join("; ")
+        )),
+        findings,
+    ))
 }
 
 /// Refuse a bundle in which a rule's scope is only the reserved `fs:other`.
-fn refuse_reserved_action_rules(lowered: &LoweredPolicySet) -> Result<(), PolicyError> {
+fn refuse_reserved_action_rules(
+    lowered: &LoweredPolicySet,
+    positions: &[usize],
+) -> Result<(), Refused> {
     let cedar = lowered.as_cedar();
-    let mut inert = Vec::new();
+    let mut findings = Vec::new();
     for rule in lowered.rules() {
         let policy_id = rule
             .cedar_policy_id
@@ -680,22 +1529,158 @@ fn refuse_reserved_action_rules(lowered: &LoweredPolicySet) -> Result<(), Policy
         if let Some(policy) = cedar.policy(&policy_id)
             && crate::spelling::names_only_reserved_action(policy)
         {
-            inert.push(format!(
-                "{} (rule {}) names only the reserved action \"{}\"",
-                crate::spelling::rule_name(policy),
-                rule.rule_index.saturating_add(1),
-                action::FS_OTHER
-            ));
+            let index = authored_index(positions, rule.rule_index);
+            findings.push(
+                Finding::new(format!(
+                    "{} (rule {}) names only the reserved action \"{}\"",
+                    crate::spelling::rule_name(policy),
+                    index.saturating_add(1),
+                    action::FS_OTHER
+                ))
+                .with_rules(vec![RuleRef::new(
+                    index,
+                    policy.annotation("id").map(str::to_string),
+                )]),
+            );
         }
     }
-    if inert.is_empty() {
+    if findings.is_empty() {
         return Ok(());
     }
-    Err(PolicyError::ReservedAction(format!(
-        "{}; no operation raises it, so the rule cannot match; name fs:read, fs:write, \
-         fs:delete, or fs:move, alone or beside fs:other",
-        inert.join("; ")
-    )))
+    let inert = findings.iter().map(Finding::message).collect::<Vec<_>>();
+    Err(Refused::new(
+        PolicyError::ReservedAction(format!(
+            "{}; no operation raises it, so the rule cannot match; name fs:read, fs:write, \
+             fs:delete, or fs:move, alone or beside fs:other",
+            inert.join("; ")
+        )),
+        findings,
+    ))
+}
+
+/// Refuse a temporal predicate that names an action group
+/// (docs/design/decisions.md#a-temporal-rule-names-one-action).
+fn refuse_group_predicates(
+    parsed: &dogwood_language::ParsedPolicySet,
+    lowered: &LoweredPolicySet,
+    positions: &[usize],
+) -> Result<(), Refused> {
+    let groups: BTreeMap<(String, String), String> = lowered
+        .cedar_schema()
+        .action_groups()
+        .map(|uid| {
+            (
+                (
+                    uid.type_name().to_string(),
+                    uid.id().unescaped().to_string(),
+                ),
+                uid.to_string(),
+            )
+        })
+        .collect();
+    if groups.is_empty() {
+        return Ok(());
+    }
+    let cedar = lowered.as_cedar();
+    let mut findings = Vec::new();
+    for policy in parsed.policies() {
+        let mut named = Vec::new();
+        for condition in policy.temporal_conditions() {
+            predicate_actions(condition, &mut named);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for key in named {
+            let Some(group) = groups.get(&key) else {
+                continue;
+            };
+            if !seen.insert(group) {
+                continue;
+            }
+            let cedar_policy = lowered
+                .rules()
+                .find(|rule| rule.rule_index == policy.index())
+                .and_then(|rule| rule.cedar_policy_id.parse::<cedar_policy::PolicyId>().ok())
+                .and_then(|policy_id| cedar.policy(&policy_id));
+            let index = authored_index(positions, policy.index());
+            let name =
+                cedar_policy.map_or_else(|| "the rule".to_string(), crate::spelling::rule_name);
+            findings.push(
+                Finding::new(format!(
+                    "{name} (rule {}): a temporal predicate names the action group {group}",
+                    index.saturating_add(1)
+                ))
+                .with_rules(vec![RuleRef::new(
+                    index,
+                    cedar_policy
+                        .and_then(|policy| policy.annotation("id"))
+                        .map(str::to_string),
+                )]),
+            );
+        }
+    }
+    if findings.is_empty() {
+        return Ok(());
+    }
+    let named = findings.iter().map(Finding::message).collect::<Vec<_>>();
+    Err(Refused::new(
+        PolicyError::UnsupportedClause(format!(
+            "{}; the history records each member action and never the group, so the predicate \
+             cannot match; write one predicate for each member action",
+            named.join("; ")
+        )),
+        findings,
+    ))
+}
+
+/// Collect the `(action type, action id)` of each predicate in a temporal condition.
+fn predicate_actions(
+    condition: &dogwood_language::temporal_ast::Condition,
+    out: &mut Vec<(String, String)>,
+) {
+    use dogwood_language::temporal_ast::ConditionKind;
+    match &condition.kind {
+        ConditionKind::And { left, right }
+        | ConditionKind::Or { left, right }
+        | ConditionKind::Since { left, right, .. } => {
+            predicate_actions(left, out);
+            predicate_actions(right, out);
+        }
+        ConditionKind::Not { inner: body }
+        | ConditionKind::Formerly { body, .. }
+        | ConditionKind::Previous { body, .. }
+        | ConditionKind::Exists { body, .. }
+        | ConditionKind::Refine { base: body, .. } => predicate_actions(body, out),
+        ConditionKind::Predicate(predicate) => {
+            out.push((predicate.namespace.join("::"), predicate.action.clone()));
+            for argument in &predicate.args {
+                term_actions(&argument.value, out);
+            }
+        }
+        ConditionKind::Comparison { left, right, .. } => {
+            term_actions(left, out);
+            term_actions(right, out);
+        }
+        ConditionKind::Tp { .. } | ConditionKind::Call(_) | ConditionKind::SigilRef { .. } => {}
+    }
+}
+
+/// Collect the predicate actions inside an aggregate term.
+fn term_actions(term: &dogwood_language::temporal_ast::Term, out: &mut Vec<(String, String)>) {
+    use dogwood_language::temporal_ast::{AggExprKind, Term};
+    match term {
+        Term::Agg(aggregate) => match &aggregate.kind {
+            AggExprKind::Sum { body, .. } | AggExprKind::Count { body, .. } => {
+                predicate_actions(body, out);
+            }
+            AggExprKind::Call(_) => {}
+        },
+        Term::Array(items) => {
+            for item in items {
+                term_actions(item, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn reconcile_staged_policy_set(
@@ -812,6 +1797,37 @@ fn durable_history_error(error: DurableError) -> PolicyError {
     PolicyError::Evaluation(error.to_string())
 }
 
+/// The same tool call carrying `arguments` in place of its own.
+fn with_arguments<'a>(
+    request: ActionRequest<'a>,
+    arguments: &'a serde_json::Value,
+) -> Option<Request<'a>> {
+    let ActionRequest::Request(Request::McpCall {
+        server,
+        method,
+        tool,
+        prompt,
+        uri,
+        arguments: Some(_),
+    }) = request
+    else {
+        return None;
+    };
+    Some(Request::McpCall {
+        server,
+        method,
+        tool: *tool,
+        prompt: *prompt,
+        uri: *uri,
+        arguments: Some(arguments),
+    })
+}
+
+/// Attach the correlation field declared by the event schema, outside Cedar request context.
+fn with_request_id(builder: EventBuilder, request_id: &RequestId) -> EventBuilder {
+    builder.logged_field("requestId", Value::String(request_id.as_str().to_string()))
+}
+
 /// Build the decision-kind event for one request.
 fn request_event(
     governed: &GovernedBox,
@@ -864,6 +1880,34 @@ fn json_value(value: &serde_json::Value) -> Value {
     }
 }
 
+/// A Cedar JSON record that Box builds, as a dogwood `Value` with each `__entity` escape an entity.
+fn entity_json_value(value: &serde_json::Value) -> Value {
+    match value {
+        serde_json::Value::Object(values) => {
+            if let Some(serde_json::Value::Object(entity)) = values.get("__entity")
+                && values.len() == 1
+                && let (Some(serde_json::Value::String(ty)), Some(serde_json::Value::String(id))) =
+                    (entity.get("type"), entity.get("id"))
+            {
+                return Value::Entity {
+                    ty: ty.clone(),
+                    id: id.clone(),
+                };
+            }
+            Value::Object(
+                values
+                    .iter()
+                    .map(|(name, value)| (name.clone(), entity_json_value(value)))
+                    .collect(),
+            )
+        }
+        serde_json::Value::Array(values) => {
+            Value::Array(values.iter().map(entity_json_value).collect())
+        }
+        other => json_value(other),
+    }
+}
+
 /// Build the history-kind event for one observed effect: a `response` when the
 /// effect happened, an `error` when it did not.
 fn outcome_event(
@@ -908,10 +1952,7 @@ fn outcome_kind(outcome: &Outcome<'_>) -> &'static str {
                 KIND_ERROR
             }
         }
-        // A completed call is a `response`, whatever the server replied — a JSON-RPC error is still
-        // `::response`, exactly as `ShellRun` is always a `response` regardless of exit status and a
-        // delivered `Http` request is a `response` regardless of a 500. A call that never completes
-        // records nothing, so there is no MCP `::error` producer.
+        // Terminal and indeterminate MCP outcomes are responses, with no claim of tool success.
         Outcome::Mcp { .. } => KIND_RESPONSE,
     }
 }
@@ -992,7 +2033,7 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
                 (attr::PORT, Value::Int(i64::from(*port))),
             ];
             if let Some(ip) = ip {
-                fields.push((attr::IP, Value::String(crate::address::canonical(*ip))));
+                fields.extend(address_fields(*ip));
             }
             fields
         }
@@ -1070,6 +2111,17 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
     }
 }
 
+/// The address fields of one pinned destination, mirroring [`crate::schema`]'s Cedar mapping.
+///
+/// Both legs of a `net:connect` go through it, so a rule on `ip4` or `ip6` reads the same set on
+/// the request, the response, and the error.
+fn address_fields(ip: std::net::IpAddr) -> Vec<(&'static str, Value)> {
+    crate::address::attributes(ip)
+        .into_iter()
+        .map(|(name, spelling)| (name, Value::String(spelling)))
+        .collect()
+}
+
 /// The argument fields, mirroring [`crate::schema`]'s Cedar mapping exactly.
 ///
 /// The two mappings are checked against one schema, so a field present in one and absent
@@ -1101,19 +2153,27 @@ fn credential_read_fields(paths: &[String]) -> Vec<(&'static str, Value)> {
 /// The `input` fields of a response or error event.
 fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
     match outcome {
-        // Only schema-declared fields may appear; a field the schema does not know is
-        // a hard load error. Whether the socket opened is carried by the event KIND
-        // (`response` vs `error`), so the fields record the attempt's identity.
-        Outcome::Connect { host, port, .. } => vec![
-            (attr::HOST, Value::String((*host).to_string())),
-            (attr::PORT, Value::Int(i64::from(*port))),
-        ],
+        // Whether the socket opened is carried by the event KIND (`response` vs `error`).
+        Outcome::Connect {
+            host,
+            port,
+            address,
+            ..
+        } => {
+            let mut fields = vec![
+                (attr::HOST, Value::String((*host).to_string())),
+                (attr::PORT, Value::Int(i64::from(*port))),
+            ];
+            fields.extend(address_fields(address.ip()));
+            fields
+        }
         Outcome::Http {
             host,
             port,
             method,
             path,
             delivery,
+            intercepted,
             ..
         } => vec![
             (attr::HOST, Value::String((*host).to_string())),
@@ -1126,7 +2186,7 @@ fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
                 attr::BODY_BYTES,
                 Value::Int(clamp(delivery.accepted_bytes())),
             ),
-            (attr::INTERCEPTED, Value::Bool(true)),
+            (attr::INTERCEPTED, Value::Bool(*intercepted)),
         ],
         Outcome::ShellRun {
             command,
@@ -1283,6 +2343,65 @@ when temporal {
     }
 
     #[test]
+    fn an_action_input_that_its_schema_does_not_type_is_refused_as_a_fault() {
+        let grammar = crate::grammar::Grammar::load(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/grammars/valid/git.grammar.toml"
+        )))
+        .expect("the git grammar loads");
+        let history = tempfile::tempdir().expect("history directory");
+        let (engine, _) = DogwoodEngine::open_with_schemas(
+            "permit (principal, action, resource);",
+            &[grammar.schema()],
+            &[],
+            &history.path().join("dogwood.redb"),
+            &Operator::unanchored(),
+        )
+        .expect("policy loads");
+        let args = ["push".to_string(), "origin".to_string()];
+        let invocation = crate::grammar::GrammarInvocation::new(
+            &grammar,
+            "git",
+            &crate::grammar::ProgramFile::fixed("/usr/bin/git", 1),
+            None,
+            "/work",
+            &args,
+            &[],
+        );
+        let typed = invocation.request();
+        let mut input = typed.input().clone();
+        input["force"] = serde_json::json!("yes");
+        let mistyped = invocation.request().with_input(input);
+
+        let typed = engine
+            .decide(
+                &governed(),
+                &Principal::agent(),
+                ActionRequest::Grammar(&typed),
+            )
+            .0;
+        let mistyped = engine
+            .decide(
+                &governed(),
+                &Principal::agent(),
+                ActionRequest::Grammar(&mistyped),
+            )
+            .0;
+
+        assert!(typed.is_allow(), "the typed input is allowed: {typed:?}");
+        assert!(
+            matches!(
+                mistyped,
+                Decision::Deny {
+                    reason: DenyReason::InternalFault,
+                    ..
+                }
+            ),
+            "a `force` that is a string, not a bool, is refused: {mistyped:?}"
+        );
+    }
+
+    #[test]
     fn staged_open_reports_an_incompatible_history_schema_as_durable() {
         let history = tempfile::tempdir().expect("history directory");
         let path = history.path().join("dogwood.redb");
@@ -1328,6 +2447,59 @@ when temporal {
     }
 
     #[test]
+    fn request_identifiers_follow_log_offsets_when_the_clock_stalls_or_moves_backward() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        let engine =
+            DogwoodEngine::open_with_test_clock(BUDGET, &path, 1_000).expect("policy loads");
+        let mut identifiers = Vec::new();
+        for seconds in [0, 0, -100, 1] {
+            engine.advance_clock(seconds);
+            let offset = engine.log_offset();
+            let request_id = permitted_http_request(&engine);
+            assert_eq!(request_id.as_str(), offset.to_string());
+            identifiers.push(request_id);
+        }
+        for (left, request_id) in identifiers.iter().enumerate() {
+            assert!(
+                !identifiers[..left].contains(request_id),
+                "each request is unique despite clock rollback"
+            );
+        }
+        for request_id in identifiers.iter().rev() {
+            engine
+                .observe_outcome(&governed(), &Principal::agent(), request_id, &delivered(1))
+                .expect("reverse-order completion records");
+        }
+        drop(engine);
+        let log = DurableLog::open(&path).expect("history opens");
+        let mut stored = Vec::new();
+        log.scan_from(0, |offset, bytes| {
+            if let Record::Event(event) = Record::decode(bytes).expect("record decodes") {
+                stored.push((offset, event));
+            }
+        })
+        .expect("history scans");
+        assert_eq!(stored.len(), 8);
+        let expected = identifiers.iter().chain(identifiers.iter().rev());
+        for ((_, event), request_id) in stored.iter().zip(expected) {
+            assert_eq!(
+                event.field_path(&["requestId".to_string()]),
+                Some(&Value::String(request_id.as_str().to_string()))
+            );
+        }
+        for (offset, event) in stored
+            .iter()
+            .filter(|(_, event)| event.kind() == KIND_REQUEST)
+        {
+            assert_eq!(
+                event.field_path(&["requestId".to_string()]),
+                Some(&Value::String(offset.to_string()))
+            );
+        }
+    }
+
+    #[test]
     fn every_determining_policy_keeps_its_token_and_raw_annotations() {
         for effect in ["permit", "forbid"] {
             let history = tempfile::tempdir().expect("history directory");
@@ -1353,7 +2525,13 @@ when temporal {
                 .map(|entry| entry.token.to_string())
                 .collect();
             let offset = authority.log_offset();
-            let decision = authority.decide(&governed(), &Principal::agent(), &http());
+            let decision = authority
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http()),
+                )
+                .0;
             assert_eq!(authority.log_offset(), offset + 1);
             assert_eq!(decision.is_allow(), effect == "permit");
             let rule = match &decision {
@@ -1405,7 +2583,13 @@ when temporal {
             let authority = DogwoodEngine::open(&source, &history.path().join("dogwood.redb"))
                 .expect("policy loads");
             let offset = authority.log_offset();
-            let decision = authority.decide(&governed(), &Principal::agent(), &http());
+            let decision = authority
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http()),
+                )
+                .0;
             assert_eq!(authority.log_offset(), offset + 1);
             assert!(matches!(
                 decision,
@@ -1429,7 +2613,13 @@ when temporal {
             }
             authority.poison_scope_for_test();
             assert_eq!(
-                authority.decide(&governed(), &Principal::agent(), &http()),
+                authority
+                    .decide(
+                        &governed(),
+                        &Principal::agent(),
+                        ActionRequest::Request(&http())
+                    )
+                    .0,
                 Decision::internal_fault(),
             );
         }
@@ -1490,13 +2680,25 @@ when temporal {
                 }
             };
             assert_eq!(
-                authority.decide(&governed(), &Principal::agent(), &http()),
+                authority
+                    .decide(
+                        &governed(),
+                        &Principal::agent(),
+                        ActionRequest::Request(&http())
+                    )
+                    .0,
                 expected
             );
             drop(authority);
             authority = DogwoodEngine::open_for_staging(&path).expect("history recovers");
             assert_eq!(
-                authority.decide(&governed(), &Principal::agent(), &http()),
+                authority
+                    .decide(
+                        &governed(),
+                        &Principal::agent(),
+                        ActionRequest::Request(&http())
+                    )
+                    .0,
                 expected
             );
         }
@@ -1513,8 +2715,14 @@ when temporal {
         let future = i64::try_from(now).expect("epoch fits") + 3_600;
         let authority = DogwoodEngine::open_with_test_clock(BUDGET, &path, future)
             .expect("policy installs before clock rollback");
+        let request_id = permitted_http_request(&authority);
         authority
-            .observe_outcome(&governed(), &Principal::agent(), &delivered(101))
+            .observe_outcome(
+                &governed(),
+                &Principal::agent(),
+                &request_id,
+                &delivered(101),
+            )
             .expect("budget consumption records");
         drop(authority);
 
@@ -1538,7 +2746,13 @@ when temporal {
                 .expect("fault-injection open"),
             };
             assert_eq!(
-                authority.decide(&governed(), &Principal::agent(), &http()),
+                authority
+                    .decide(
+                        &governed(),
+                        &Principal::agent(),
+                        ActionRequest::Request(&http())
+                    )
+                    .0,
                 Decision::Deny {
                     reason: DenyReason::NoMatch,
                     rule: RuleId::default_deny(),
@@ -1556,8 +2770,14 @@ when temporal {
         let path = history.path().join("dogwood.redb");
         for _ in 0..3 {
             let engine = DogwoodEngine::open(BUDGET, &path).expect("policy loads");
+            let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(&governed(), &Principal::agent(), &delivered(10))
+                .observe_outcome(
+                    &governed(),
+                    &Principal::agent(),
+                    &request_id,
+                    &delivered(10),
+                )
                 .expect("history records");
         }
         let snapshot = || {
@@ -1578,7 +2798,7 @@ when temporal {
             "a backlog below the interval must not checkpoint"
         );
 
-        recover(3);
+        recover(6);
         assert!(
             snapshot().is_some(),
             "a backlog at the interval must checkpoint on recovery"
@@ -1701,6 +2921,7 @@ when temporal {
             path: "/v1",
             delivery: crate::Delivery::Completed { bytes },
             status: Some(200),
+            intercepted: true,
         }
     }
 
@@ -1715,6 +2936,16 @@ when temporal {
         }
     }
 
+    fn permitted_http_request(engine: &DogwoodEngine) -> RequestId {
+        let (decision, request_id) = engine.decide(
+            &governed(),
+            &Principal::agent(),
+            ActionRequest::Request(&http()),
+        );
+        assert!(decision.is_allow(), "the fixture request must be permitted");
+        request_id.expect("a submitted request has an identifier")
+    }
+
     #[test]
     fn a_poisoned_lock_denies_every_later_decision() {
         // The engine is a large body of vendored code behind a `Mutex`. A panic inside
@@ -1726,11 +2957,7 @@ when temporal {
         // very events a `forbid` depends on. Denying permanently is a liveness cost
         // (the box stops making outbound progress) taken deliberately over that.
         let engine = engine();
-        assert!(
-            engine
-                .decide(&governed(), &Principal::agent(), &http())
-                .is_allow()
-        );
+        let request_id = permitted_http_request(&engine);
 
         // Poison the lock by panicking while holding it.
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1745,7 +2972,13 @@ when temporal {
 
         // Every subsequent verdict is a denial, not a permit.
         for _ in 0..3 {
-            let verdict = engine.decide(&governed(), &Principal::agent(), &http());
+            let verdict = engine
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http()),
+                )
+                .0;
             assert!(
                 matches!(
                     verdict,
@@ -1765,6 +2998,7 @@ when temporal {
                 .observe_outcome(
                     &governed(),
                     &Principal::agent(),
+                    &request_id,
                     &Outcome::Http {
                         host: "api.example.com",
                         port: 443,
@@ -1772,6 +3006,7 @@ when temporal {
                         path: "/v1",
                         delivery: crate::Delivery::Completed { bytes: 10 },
                         status: Some(200),
+                        intercepted: true,
                     }
                 )
                 .is_err(),
@@ -1790,20 +3025,26 @@ when temporal {
 
         // Exhaust the budget with real deliveries.
         for _ in 0..2 {
-            assert!(engine.decide(&governed(), &egress, &http()).is_allow());
+            let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(&governed(), &egress, &delivered(60))
+                .observe_outcome(&governed(), &egress, &request_id, &delivered(60))
                 .expect("records");
         }
         assert!(
-            !engine.decide(&governed(), &egress, &http()).is_allow(),
+            !engine
+                .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .0
+                .is_allow(),
             "budget closed"
         );
 
         // Now make noise: many denied requests, no clock movement, nothing delivered.
         for _ in 0..500 {
             assert!(
-                !engine.decide(&governed(), &egress, &http()).is_allow(),
+                !engine
+                    .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                    .0
+                    .is_allow(),
                 "a denied request must not reopen the budget"
             );
         }
@@ -1817,27 +3058,36 @@ when temporal {
         let egress = Principal::agent();
 
         for _ in 0..2 {
-            assert!(engine.decide(&governed(), &egress, &http()).is_allow());
+            let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(&governed(), &egress, &delivered(60))
+                .observe_outcome(&governed(), &egress, &request_id, &delivered(60))
                 .expect("records");
         }
         assert!(
-            !engine.decide(&governed(), &egress, &http()).is_allow(),
+            !engine
+                .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .0
+                .is_allow(),
             "budget closed"
         );
 
         // Still inside the 60s window.
         engine.advance_clock(59);
         assert!(
-            !engine.decide(&governed(), &egress, &http()).is_allow(),
+            !engine
+                .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .0
+                .is_allow(),
             "the window has not elapsed yet"
         );
 
         // Past it: the old deliveries fall out of the sum.
         engine.advance_clock(2);
         assert!(
-            engine.decide(&governed(), &egress, &http()).is_allow(),
+            engine
+                .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .0
+                .is_allow(),
             "the budget must reopen once the window truly elapses"
         );
     }
@@ -1857,18 +3107,20 @@ when temporal {
             path: "/v1",
             delivery: crate::Delivery::Completed { bytes: 150 },
             status: Some(200),
+            intercepted: true,
         };
-        assert!(
-            engine
-                .decide(&governed(), &Principal::agent(), &http())
-                .is_allow()
-        );
+        let request_id = permitted_http_request(&engine);
         engine
-            .observe_outcome(&governed(), &Principal::agent(), &outcome)
+            .observe_outcome(&governed(), &Principal::agent(), &request_id, &outcome)
             .expect("records");
         assert!(
             !engine
-                .decide(&governed(), &Principal::agent(), &http())
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http())
+                )
+                .0
                 .is_allow(),
             "a recorded 150-byte delivery must exhaust a 100-byte budget; if this \
              allows, the predicate is not matching the recorded event at all"
@@ -1925,7 +3177,12 @@ when temporal {{
             let started = std::time::Instant::now();
             for _ in 0..count {
                 engine.advance_clock(1);
-                assert!(engine.decide(&governed(), &agent, &exec()).is_allow());
+                assert!(
+                    engine
+                        .decide(&governed(), &agent, ActionRequest::Request(&exec()))
+                        .0
+                        .is_allow()
+                );
             }
             started.elapsed()
         };
@@ -2025,9 +3282,9 @@ when temporal {{
 
         let offset_before_reopen = {
             let engine = DogwoodEngine::open(BUDGET, &path).expect("policy loads");
-            assert!(engine.decide(&governed(), &egress, &http()).is_allow());
+            let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(&governed(), &egress, &delivered(150))
+                .observe_outcome(&governed(), &egress, &request_id, &delivered(150))
                 .expect("history records");
             engine.log_offset()
         };
@@ -2039,7 +3296,10 @@ when temporal {{
             "reopening an unchanged policy must not append another install record"
         );
         assert!(
-            !recovered.decide(&governed(), &egress, &http()).is_allow(),
+            !recovered
+                .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .0
+                .is_allow(),
             "the recovered delivery must keep the budget closed"
         );
     }
@@ -2212,12 +3472,15 @@ when temporal {
 
         {
             let engine = DogwoodEngine::open(MACRO_BUDGET, &path).expect("policy loads");
-            assert!(engine.decide(&governed(), &egress, &http()).is_allow());
+            let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(&governed(), &egress, &delivered(150))
+                .observe_outcome(&governed(), &egress, &request_id, &delivered(150))
                 .expect("history records");
             assert!(
-                !engine.decide(&governed(), &egress, &http()).is_allow(),
+                !engine
+                    .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                    .0
+                    .is_allow(),
                 "a 150-byte delivery must exhaust a 100-byte budget"
             );
         }
@@ -2226,7 +3489,10 @@ when temporal {
         assert_ne!(reformatted, MACRO_BUDGET, "the edit must change the source");
         let recovered = DogwoodEngine::open(&reformatted, &path).expect("reformatted bundle loads");
         assert!(
-            !recovered.decide(&governed(), &egress, &http()).is_allow(),
+            !recovered
+                .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .0
+                .is_allow(),
             "a whitespace-only edit must not reopen an exhausted budget"
         );
     }
@@ -2239,9 +3505,9 @@ when temporal {
 
         {
             let engine = DogwoodEngine::open(BUDGET, &path).expect("policy loads");
-            assert!(engine.decide(&governed(), &egress, &http()).is_allow());
+            let request_id = permitted_http_request(&engine);
             engine
-                .observe_outcome(&governed(), &egress, &delivered(150))
+                .observe_outcome(&governed(), &egress, &request_id, &delivered(150))
                 .expect("history records");
         }
 
@@ -2253,8 +3519,45 @@ when temporal {
         );
         let recovered = DogwoodEngine::open(&changed, &path).expect("changed bundle loads");
         assert!(
-            !recovered.decide(&governed(), &egress, &http()).is_allow(),
+            !recovered
+                .decide(&governed(), &egress, ActionRequest::Request(&http()))
+                .0
+                .is_allow(),
             "inserting an unrelated statement must not reset an unchanged budget"
         );
+    }
+}
+
+#[cfg(test)]
+mod authored_positions {
+    use super::*;
+
+    #[test]
+    fn a_subset_refusal_numbers_each_rule_by_its_authored_position() {
+        let subset = [
+            r#"@id("x") permit (principal, action == Box::Action::"fs:read", resource);"#
+                .to_string(),
+            r#"@id("x") permit (principal, action == Box::Action::"fs:write", resource);"#
+                .to_string(),
+        ];
+        let Err(refused) =
+            check_canonical_policy_set(&subset, &[], &[], &Operator::unanchored(), &[3, 7])
+        else {
+            panic!("one @id on two rules must refuse");
+        };
+        assert!(
+            refused
+                .error
+                .to_string()
+                .contains("@id(\"x\") is on rules 4, 8"),
+            "{}",
+            refused.error
+        );
+        let positions: Vec<usize> = refused.findings[0]
+            .rules()
+            .iter()
+            .map(RuleRef::position)
+            .collect();
+        assert_eq!(positions, [4, 8]);
     }
 }

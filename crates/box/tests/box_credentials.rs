@@ -1246,6 +1246,79 @@ when {{ context.input.path == {denied_path:?} }};"#
     eprintln!("TLS_ORIGIN_RESULT={result}");
 }
 
+/// A budget on a remote MCP tool holds across two runs of a box whose only MCP server is http:
+/// the second run still sees the first run's calls, as every other rule does.
+#[test]
+fn a_remote_mcp_tool_budget_holds_across_two_runs_of_an_http_only_box() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let upstream = TraceUpstream::start();
+    let box_ = Request::with_config(
+        "remote-tool-budget",
+        r#"permit(principal, action == Box::Action::"net:connect", resource);
+permit(principal, action == Box::Action::"http:request", resource);
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "demo" };
+permit(principal, action == demo::Action::"echo", resource);
+@id("one-echo")
+forbid(principal, action == demo::Action::"echo", resource)
+when temporal {
+  exists (total: Long). (
+    (count for (t: Timepoint). where (
+      formerly within 1h ( demo::Action::"echo"::request{ input.text: "once" } && tp(t) )
+    )) == total && total >= 2
+  )
+};"#,
+        &format!(
+            "[mcp.demo]\ntype = \"http\"\ndestinations = [\"{}\"]\n",
+            upstream.authority
+        ),
+    )
+    .expect();
+    let requests = |frames: &[Value]| {
+        json!(
+            frames
+                .iter()
+                .map(|frame| json!({
+                    "url": format!("http://{}/mcp", upstream.authority),
+                    "headers": {},
+                    "body": frame
+                }))
+                .collect::<Vec<_>>()
+        )
+    };
+    let list = json!({"jsonrpc": "2.0", "id": "catalog", "method": "tools/list"});
+    let echo = |id: &str| {
+        json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": "echo", "arguments": {"text": "once"}}
+        })
+    };
+    let statuses = |replies: Vec<Value>| -> Vec<Value> {
+        replies
+            .into_iter()
+            .map(|reply| reply["status"].clone())
+            .collect()
+    };
+
+    let first = trace_probe(
+        &box_,
+        &requests(&[list.clone(), echo("first"), echo("second")]),
+    );
+    assert_eq!(
+        statuses(first),
+        [json!(200), json!(200), json!(403)],
+        "the first echo is within budget and the second is not"
+    );
+    let second = trace_probe(&box_, &requests(&[list, echo("third")]));
+    assert_eq!(
+        statuses(second),
+        [json!(200), json!(403)],
+        "the second run still counts the first run's echo"
+    );
+}
+
 #[test]
 fn remote_mcp_policy_spans_prefer_message_parent_and_link_transport() {
     if !fixture::namespace_launcher_is_usable() {
@@ -1266,8 +1339,7 @@ permit(principal, action == demo::Action::"echo", resource);
 forbid(principal, action == demo::Action::"echo", resource)
 when { context.input.text == "denied" };"#,
         &format!(
-            "[mcp.demo]\ntype = \"http\"\ndestinations = [\"{}\"]\n\
-             [mcp.unused]\ntype = \"stdio\"\ncommand = [\"false\"]\n",
+            "[mcp.demo]\ntype = \"http\"\ndestinations = [\"{}\"]\n",
             upstream.authority
         ),
     )
@@ -1644,5 +1716,120 @@ fn the_shell_cannot_read_the_daemons_resolved_secrets() {
     assert!(
         all.contains("/etc/passwd: no such file or directory"),
         "lua io.open must be refused by the VFS, not reach the host: {all}"
+    );
+}
+
+#[test]
+fn a_remote_tool_precondition_met_in_one_run_holds_in_the_next() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let upstream = TraceUpstream::start();
+    let box_ = Request::with_config(
+        "remote-tool-history",
+        r#"permit(principal, action == Box::Action::"net:connect", resource);
+permit(principal, action == Box::Action::"http:request", resource);
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "demo" };
+@id("after_first")
+forbid(principal, action == demo::Action::"echo", resource)
+when { context.input.text == "second" }
+when temporal { formerly within 1h ( demo::Action::"echo"::request{ input.text: "first" } ) };"#,
+        &format!(
+            "[mcp.demo]\ntype = \"http\"\ndestinations = [\"{}\"]\n",
+            upstream.authority
+        ),
+    )
+    .expect();
+    let frame = |id: &str, method: &str, text: Option<&str>| {
+        let params = match text {
+            Some(text) => json!({"name": "echo", "arguments": {"text": text}}),
+            None => json!({}),
+        };
+        json!({
+            "url": format!("http://{}/mcp", upstream.authority),
+            "headers": {},
+            "body": {"jsonrpc": "2.0", "id": id, "method": method, "params": params}
+        })
+    };
+    let statuses = |requests: Vec<Value>| {
+        trace_probe(&box_, &json!(requests))
+            .iter()
+            .map(|reply| reply["status"].as_u64().expect("a status"))
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(
+        statuses(vec![
+            frame("list", "tools/list", None),
+            frame("first", "tools/call", Some("first")),
+            frame("second", "tools/call", Some("second")),
+        ]),
+        [200, 200, 403],
+        "the precondition is met in the first run"
+    );
+    assert_eq!(
+        statuses(vec![
+            frame("list", "tools/list", None),
+            frame("second", "tools/call", Some("second")),
+        ]),
+        [200, 403],
+        "the precondition met in the first run still holds"
+    );
+    assert_eq!(upstream.finish().len(), 3, "no denied call reaches origin");
+}
+
+#[test]
+fn a_limit_over_a_remote_tools_own_response_refuses_the_next_call() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let upstream = TraceUpstream::start();
+    let box_ = Request::with_config(
+        "remote-tool-response",
+        r#"permit(principal, action == Box::Action::"net:connect", resource);
+permit(principal, action == Box::Action::"http:request", resource);
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "demo" };
+@id("one_echo")
+forbid(principal, action == demo::Action::"echo", resource)
+when temporal { formerly within 1h ( demo::Action::"echo"::response{ input.text: "first" } ) };"#,
+        &format!(
+            "[mcp.demo]\ntype = \"http\"\ndestinations = [\"{}\"]\n",
+            upstream.authority
+        ),
+    )
+    .expect();
+    let frame = |id: &str, method: &str, text: Option<&str>| {
+        let params = match text {
+            Some(text) => json!({"name": "echo", "arguments": {"text": text}}),
+            None => json!({}),
+        };
+        json!({
+            "url": format!("http://{}/mcp", upstream.authority),
+            "headers": {},
+            "body": {"jsonrpc": "2.0", "id": id, "method": method, "params": params}
+        })
+    };
+    let statuses: Vec<u64> = trace_probe(
+        &box_,
+        &json!([
+            frame("list", "tools/list", None),
+            frame("first", "tools/call", Some("first")),
+            frame("second", "tools/call", Some("second")),
+        ]),
+    )
+    .iter()
+    .map(|reply| reply["status"].as_u64().expect("a status"))
+    .collect();
+    assert_eq!(
+        statuses,
+        [200, 200, 403],
+        "the finished first echo is recorded under the tool's own action"
+    );
+    assert_eq!(
+        upstream.finish().len(),
+        2,
+        "the refused echo never reached origin"
     );
 }

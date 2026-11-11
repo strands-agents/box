@@ -11,8 +11,12 @@ use crate::error::ContainmentError;
 use crate::model::{ObjectIdentity, ObjectPin, Operation, Scope};
 
 use super::MECHANISM;
-use crate::backend::dependencies::{MissingReads, folded, require_not_refused, workload_writable};
+use crate::backend::dependencies::{
+    MissingReads, folded, require_not_refused, workload_writable,
+    workload_writable_with_alias_check,
+};
 
+mod dependency_permissions;
 mod targets;
 
 /// What provides an entry's bytes.
@@ -72,6 +76,7 @@ pub(crate) struct MountView {
     grant_identities: BTreeMap<PathBuf, ObjectIdentity>,
     grant_pins: Vec<ObjectPin>,
     dependency_sources: RefCell<BTreeMap<PathBuf, Rc<std::fs::File>>>,
+    mount_locations: RefCell<BTreeMap<PathBuf, PathBuf>>,
 }
 
 impl MountView {
@@ -107,7 +112,9 @@ impl MountView {
             source: None,
             target: PathBuf::from("/proc"),
             kind: MountKind::Fresh { fstype: "proc" },
-            writable: true,
+            // Keep process inspection available, but do not allow `/proc/*/mem` to write through
+            // the executable-memory syscall restrictions.
+            writable: false,
             executable: false,
             origin: MountOrigin::Scaffold,
         });
@@ -297,8 +304,7 @@ impl MountView {
                         source: Some(dependency.resolved),
                         target: dependency.path,
                         kind: MountKind::Bind,
-                        // Never writable: read-plus-execute is the safe pairing precisely
-                        // because the bytes cannot change under the grant.
+                        // Write access stays on the explicitly granted mount.
                         writable: false,
                         executable: true,
                         origin: dependency.origin,
@@ -309,13 +315,10 @@ impl MountView {
 
         missing.require_complete(MECHANISM)?;
 
-        // **A grant inside another grant's tree is established after it, whatever order the two
-        // were stated in.** A nested bind sits on top of the tree that encloses it, and its own
-        // flags decide what the workload finds there: a bind that is not an exec grant is no-exec,
-        // so an exec file inside a read tree must be the upper mount, and a write root inside an
-        // exec tree must be the upper mount to stay writable. Stable, so grants at one depth keep
-        // the order they were stated in.
+        // Enclosing mounts and canonical sources precede the entries that depend on them.
         entries[scaffold..].sort_by_key(|entry| entry.target.components().count());
+        let grants = entries.split_off(scaffold);
+        entries.extend(order_mounts(grants)?);
 
         // **The pair the floor warns about lowers as stated, on this backend too.** A bind inside a
         // stated exec tree is executable, and an exec grant inside a stated write grant is
@@ -324,6 +327,7 @@ impl MountView {
         let write_roots = config.grants_in(Operation::Write, Scope::Root);
         let write_files = config.grants_in(Operation::Write, Scope::File);
         let exec_roots = config.grants_in(Operation::Exec, Scope::Root);
+        let explicit_exec_files = config.grants_in(Operation::Exec, Scope::File);
         for entry in entries
             .iter_mut()
             .filter(|entry| entry.kind == MountKind::Bind && entry.origin == MountOrigin::Grant)
@@ -346,6 +350,22 @@ impl MountView {
                 .any(|tree| source.starts_with(&tree.resolved))
             {
                 entry.executable = true;
+            }
+            if entry.writable
+                && entry.executable
+                && !config.broad_exec()
+                && !exec_roots
+                    .iter()
+                    .any(|grant| source.starts_with(&grant.resolved))
+                && !explicit_exec_files
+                    .iter()
+                    .any(|grant| source == grant.resolved)
+            {
+                return Err(refusal(format!(
+                    "writable executable mount for '{}' has no explicit execution grant. \
+                     Remove its write access or explicitly grant execution for this path.",
+                    source.display()
+                )));
             }
         }
 
@@ -449,6 +469,28 @@ impl MountView {
             }
         }
 
+        for refused in entries
+            .iter()
+            .filter(|entry| entry.origin == MountOrigin::Refusal)
+        {
+            for grant in entries.iter().filter(|entry| {
+                entry.writable
+                    && entry.kind == MountKind::Bind
+                    && refused.target.starts_with(&entry.target)
+            }) {
+                protected_parents.extend(
+                    refused
+                        .target
+                        .ancestors()
+                        .skip(1)
+                        .take_while(|parent| {
+                            *parent != grant.target && parent.starts_with(&grant.target)
+                        })
+                        .map(Path::to_path_buf),
+                );
+            }
+        }
+
         // A fresh grant hides every descendant. Extra denial or protection mountpoints would
         // reveal names beneath a metadata-only grant; the empty filesystem already denies access.
         let empty_roots: Vec<_> = entries
@@ -485,6 +527,7 @@ impl MountView {
                 .filter_map(|grant| grant.pin.clone())
                 .collect(),
             dependency_sources: RefCell::new(dependency_sources),
+            mount_locations: RefCell::new(BTreeMap::new()),
         })
     }
 
@@ -520,10 +563,17 @@ impl MountView {
             ))
         })?;
 
+        self.mount_locations.borrow_mut().clear();
         for entry in &self.entries {
             self.establish(entry, root)?;
+            if entry.origin == MountOrigin::Grant
+                && entry.kind == MountKind::Bind
+                && entry.writable
+                && self.protect_parents(root, &entry.target)?
+            {
+                self.establish(entry, root)?;
+            }
         }
-        self.protect_parents(root)?;
 
         // The pivot's temporary old-root mountpoint has to exist *before* the root is sealed read-
         // only.
@@ -554,9 +604,14 @@ impl MountView {
         Ok(())
     }
 
-    /// Pin each protected parent before the root becomes read-only.
-    fn protect_parents(&self, root: &Path) -> Result<(), ContainmentError> {
-        for parent in &self.protected_parents {
+    /// Pin the protected parents inside the grant that will cover them.
+    fn protect_parents(&self, root: &Path, grant: &Path) -> Result<bool, ContainmentError> {
+        let mut protected = false;
+        for parent in self
+            .protected_parents
+            .iter()
+            .filter(|parent| parent.as_path() != grant && parent.starts_with(grant))
+        {
             let target = root.join(parent.strip_prefix("/").unwrap_or(parent));
             let metadata = std::fs::symlink_metadata(&target).map_err(|error| {
                 refusal(format!(
@@ -583,9 +638,10 @@ impl MountView {
                     target.display()
                 ))
             })?;
+            protected = true;
         }
 
-        Ok(())
+        Ok(protected)
     }
 
     /// Establish one planned mount beneath `root`.
@@ -626,8 +682,8 @@ impl MountView {
                     libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC
                 };
                 // **`writable` was ignored here until 2026-08-19, and every fresh mount was
-                // writable.** That was harmless while the only fresh mounts were ones meant to be
-                // writable — the root while the launcher builds it, `/proc`, and `/tmp`.
+                // writable.** That was harmless while the only fresh mounts were `/proc`, `/tmp`,
+                // and the root while the launcher builds it.
                 if !entry.writable {
                     fresh_flags |= libc::MS_RDONLY;
                 }
@@ -711,68 +767,60 @@ impl MountView {
                     .as_ref()
                     .map_or(source, |(_, path)| path.as_path());
                 let mount_source = pinned_path.as_deref().unwrap_or(source);
+                #[cfg(test)]
+                targets::after_bind_source_pin();
 
-                // The mountpoint must match the source's kind: a file binds onto a
-                // file, a directory onto a directory.
-                if matches!(entry.origin, MountOrigin::Protection { .. }) {
-                    let metadata = std::fs::symlink_metadata(&target).map_err(|e| {
+                let directory = mount_source.is_dir();
+                let target_pin = targets::MountTarget::prepare_bind(self, entry, root, directory)
+                    .map_err(|error| {
+                    if matches!(entry.origin, MountOrigin::Protection { .. }) {
                         refusal(format!(
-                            "opening write-protected mountpoint '{}': {e}",
+                            "opening write-protected mountpoint '{}': {error}",
                             target.display()
                         ))
-                    })?;
-                    if !metadata.is_file() {
-                        return Err(refusal(format!(
-                            "write-protected mountpoint '{}' is not a regular file",
-                            target.display()
-                        )));
+                    } else {
+                        error
                     }
-                    Ok(())
-                } else if mount_source.is_dir() {
-                    std::fs::create_dir_all(&target)
-                } else {
-                    // An existing file is already its own mountpoint. A symbolic link an enclosing
-                    // bind brought in is left to that bind: its resolved spelling carries its own bind.
-                    match std::fs::symlink_metadata(&target) {
-                        Ok(metadata) if metadata.is_file() => Ok(()),
-                        Ok(metadata)
-                            if metadata.is_symlink() && self.enclosed_by_a_bind(&entry.target) =>
-                        {
-                            return Ok(());
-                        }
-                        Ok(_) => Err(std::io::Error::other(format!(
-                            "'{}' is not a regular file",
-                            entry.target.display()
-                        ))),
-                        Err(_) if self.enclosed_by_a_bind(&entry.target) => {
-                            Err(std::io::Error::other(format!(
-                                "'{}' is absent from the tree bound over it, and a mountpoint \
-                                 created there would be created on the host",
-                                entry.target.display()
-                            )))
-                        }
-                        Err(_) => target
-                            .parent()
-                            .map_or(Ok(()), std::fs::create_dir_all)
-                            .and_then(|()| {
-                                std::fs::OpenOptions::new()
-                                    .create_new(true)
-                                    .write(true)
-                                    .open(&target)
-                                    .map(|_| ())
-                            }),
-                    }
-                }
-                .map_err(|e| {
-                    refusal(format!(
-                        "creating the mountpoint '{}': {e}",
-                        target.display()
-                    ))
                 })?;
+                if let Some(canonical) = entry.source.as_deref()
+                    && canonical != entry.target
+                    && target_pin.location()
+                        == root.join(canonical.strip_prefix("/").unwrap_or(canonical))
+                    && self.entries.iter().any(|candidate| {
+                        candidate.kind == MountKind::Bind
+                            && candidate.target == canonical
+                            && candidate.source.as_deref() == Some(canonical)
+                            && (!entry.writable || candidate.writable)
+                            && (!entry.executable || candidate.executable)
+                    })
+                {
+                    let identity = std::fs::metadata(mount_source).map_err(|error| {
+                        refusal(format!("inspecting the retained alias source: {error}"))
+                    })?;
+                    require_grant_identity(
+                        &target_pin.path(),
+                        ObjectIdentity::from_metadata(&identity),
+                    )?;
+                    if entry.writable {
+                        self.mount_locations
+                            .borrow_mut()
+                            .insert(entry.target.clone(), target_pin.location().to_path_buf());
+                    }
+                    return Ok(());
+                }
+                if !directory && !target_pin.metadata()?.is_file() {
+                    return Err(refusal(format!(
+                        "mountpoint '{}' is not a regular file",
+                        target.display()
+                    )));
+                }
+                let previous = targets::mount_ids()?;
+                #[cfg(test)]
+                targets::after_bind_target_open();
 
                 mount_syscall(
                     Some(mount_source),
-                    &target,
+                    &target_pin.path(),
                     None,
                     libc::MS_BIND | libc::MS_REC,
                     None,
@@ -785,54 +833,65 @@ impl MountView {
                     ))
                 })?;
 
+                #[cfg(test)]
+                targets::after_bind_mount();
+                let mounted = target_pin.require_new_mount(&target, &previous)?;
+                let mounted_path = targets::descriptor_path(&mounted);
                 if let Some(identity) = expected {
-                    require_grant_identity(&target, identity)?;
+                    require_grant_identity(&mounted_path, identity)?;
                 }
+                #[cfg(test)]
+                targets::after_bind_verification();
                 if let MountOrigin::Protection { device, inode } = entry.origin {
-                    require_mounted_identity(&target, device, inode)?;
-                    remount_protected(&target)?;
+                    require_mounted_identity(&mounted_path, device, inode)?;
+                    remount_protected(&mounted_path)?;
+                    require_mount_flags(&mounted, false, false, false)?;
+                    target_pin.require_same_mount(&target, &previous, &mounted)?;
                     return Ok(());
                 }
 
-                // Read-only and no-exec are a *second* operation. The bind above is `MS_REC`, so a
-                // granted directory containing a submount brings that submount in too.
+                // Retain the top mount while its pathname remains the submount scan prefix.
+                // A recursive bind also imports each submount's permissions.
+                let mountpoint = target_pin.location();
+                let kind = mounted
+                    .metadata()
+                    .map_err(|error| refusal(format!("inspecting the mounted object: {error}")))?
+                    .file_type();
+                let device = std::os::unix::fs::FileTypeExt::is_char_device(&kind)
+                    || std::os::unix::fs::FileTypeExt::is_block_device(&kind);
                 match (entry.writable, entry.executable) {
                     // An exec grant, its loader, or a library: read-only, and runnable.
-                    (false, true) => remount_read_only(&target)?,
+                    (false, true) => remount_read_only(&mounted_path, mountpoint)?,
                     // Every other read-only bind: a read grant confers no exec.
-                    (false, false) => remount_read_only_noexec(&target)?,
+                    (false, false) => remount_read_only_noexec(&mounted_path, mountpoint)?,
                     // The pair the floor warns about, lowered as stated.
-                    (true, true) => remount_writable_executable(&target)?,
+                    (true, true) => remount_writable_executable(&mounted_path, mountpoint)?,
                     (true, false) => {
                         // W^X: a writable bind is the one surface whose bytes the workload chooses,
                         // so it must not also be executable.
-                        let is_device = std::fs::metadata(mount_source)
-                            .map(|meta| {
-                                let kind = meta.file_type();
-                                std::os::unix::fs::FileTypeExt::is_char_device(&kind)
-                                    || std::os::unix::fs::FileTypeExt::is_block_device(&kind)
-                            })
-                            .unwrap_or(false);
-                        if is_device {
-                            remount_writable_device_noexec(&target)?;
+                        if device {
+                            remount_writable_device_noexec(&mounted_path, mountpoint)?;
                         } else {
-                            remount_writable_noexec(&target)?;
+                            remount_writable_noexec(&mounted_path, mountpoint)?;
                         }
                     }
+                }
+                require_mount_flags(
+                    &mounted,
+                    entry.writable,
+                    entry.executable,
+                    device && entry.writable && !entry.executable,
+                )?;
+                target_pin.require_same_mount(&target, &previous, &mounted)?;
+                if entry.writable {
+                    self.mount_locations
+                        .borrow_mut()
+                        .insert(entry.target.clone(), target_pin.location().to_path_buf());
                 }
             }
         }
 
         Ok(())
-    }
-
-    /// Whether a planned bind of a host tree encloses this view path.
-    fn enclosed_by_a_bind(&self, target: &Path) -> bool {
-        self.entries.iter().any(|entry| {
-            entry.kind == MountKind::Bind
-                && entry.target != target
-                && target.starts_with(&entry.target)
-        })
     }
 
     /// `pivot_root` into the assembled view and detach the old root.
@@ -879,6 +938,61 @@ impl MountView {
 
         Ok(())
     }
+}
+
+fn order_mounts(mounts: Vec<MountEntry>) -> Result<Vec<MountEntry>, ContainmentError> {
+    let positions: BTreeMap<_, _> = mounts
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.target.clone(), index))
+        .collect();
+    let mut prerequisites = vec![0; mounts.len()];
+    let mut dependents = vec![Vec::new(); mounts.len()];
+    for (index, entry) in mounts.iter().enumerate() {
+        let mut before = BTreeSet::new();
+        if let Some(parent) = entry
+            .target
+            .ancestors()
+            .skip(1)
+            .find_map(|parent| positions.get(parent))
+        {
+            before.insert(*parent);
+        }
+        if entry.kind == MountKind::Bind
+            && let Some(source) = entry.source.as_deref()
+            && source != entry.target
+            && let Some(canonical) = positions.get(source)
+            && mounts[*canonical].kind == MountKind::Bind
+            && mounts[*canonical].source.as_deref() == Some(source)
+        {
+            before.insert(*canonical);
+        }
+        for predecessor in before {
+            prerequisites[index] += 1;
+            dependents[predecessor].push(index);
+        }
+    }
+    let mut ready: BTreeSet<_> = prerequisites
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &count)| (count == 0).then_some(index))
+        .collect();
+    let mut ordered = Vec::with_capacity(mounts.len());
+    while let Some(index) = ready.pop_first() {
+        ordered.push(mounts[index].clone());
+        for &dependent in &dependents[index] {
+            prerequisites[dependent] -= 1;
+            if prerequisites[dependent] == 0 {
+                ready.insert(dependent);
+            }
+        }
+    }
+    if ordered.len() != mounts.len() {
+        return Err(refusal(
+            "filesystem mounts have cyclic target dependencies".into(),
+        ));
+    }
+    Ok(ordered)
 }
 
 fn pin_grant_source(
@@ -929,28 +1043,28 @@ fn require_grant_identity(target: &Path, expected: ObjectIdentity) -> Result<(),
 }
 
 /// Remount `target` read-only, and every submount beneath it.
-fn remount_read_only(target: &Path) -> Result<(), ContainmentError> {
+fn remount_read_only(target: &Path, subtree: &Path) -> Result<(), ContainmentError> {
     const FLAGS: libc::c_ulong =
         libc::MS_REMOUNT | libc::MS_BIND | libc::MS_RDONLY | libc::MS_NOSUID | libc::MS_NODEV;
-    remount_recursive(target, FLAGS, "read-only")
+    remount_recursive(target, subtree, FLAGS, "read-only")
 }
 
 /// Remount `target` read-only and no-exec, and every submount beneath it.
-fn remount_read_only_noexec(target: &Path) -> Result<(), ContainmentError> {
+fn remount_read_only_noexec(target: &Path, subtree: &Path) -> Result<(), ContainmentError> {
     const FLAGS: libc::c_ulong = libc::MS_REMOUNT
         | libc::MS_BIND
         | libc::MS_RDONLY
         | libc::MS_NOEXEC
         | libc::MS_NOSUID
         | libc::MS_NODEV;
-    remount_recursive(target, FLAGS, "read-only no-exec")
+    remount_recursive(target, subtree, FLAGS, "read-only no-exec")
 }
 
 /// Remount `target` writable and runnable, and every submount beneath it.
-fn remount_writable_executable(target: &Path) -> Result<(), ContainmentError> {
+fn remount_writable_executable(target: &Path, subtree: &Path) -> Result<(), ContainmentError> {
     const FLAGS: libc::c_ulong =
         libc::MS_REMOUNT | libc::MS_BIND | libc::MS_NOSUID | libc::MS_NODEV;
-    remount_recursive(target, FLAGS, "writable and executable")
+    remount_recursive(target, subtree, FLAGS, "writable and executable")
 }
 
 fn remount_protected(target: &Path) -> Result<(), ContainmentError> {
@@ -960,7 +1074,7 @@ fn remount_protected(target: &Path) -> Result<(), ContainmentError> {
         | libc::MS_NOEXEC
         | libc::MS_NOSUID
         | libc::MS_NODEV;
-    remount_recursive(target, FLAGS, "protected")
+    remount_recursive(target, target, FLAGS, "protected")
 }
 
 fn require_mounted_identity(
@@ -986,28 +1100,27 @@ fn require_mounted_identity(
 }
 
 /// Remount a writable *device-node* bind no-exec, keeping the device usable.
-fn remount_writable_device_noexec(target: &Path) -> Result<(), ContainmentError> {
+fn remount_writable_device_noexec(target: &Path, subtree: &Path) -> Result<(), ContainmentError> {
     const FLAGS: libc::c_ulong =
         libc::MS_REMOUNT | libc::MS_BIND | libc::MS_NOEXEC | libc::MS_NOSUID;
-    remount_recursive(target, FLAGS, "no-exec (device)")
+    remount_recursive(target, subtree, FLAGS, "no-exec (device)")
 }
 
 /// Remount `target` no-exec, and every submount beneath it, still writable.
-fn remount_writable_noexec(target: &Path) -> Result<(), ContainmentError> {
+fn remount_writable_noexec(target: &Path, subtree: &Path) -> Result<(), ContainmentError> {
     const FLAGS: libc::c_ulong =
         libc::MS_REMOUNT | libc::MS_BIND | libc::MS_NOEXEC | libc::MS_NOSUID | libc::MS_NODEV;
-    remount_recursive(target, FLAGS, "no-exec")
+    remount_recursive(target, subtree, FLAGS, "no-exec")
 }
 
 /// Remount `target` and every submount beneath it with `flags`.
 fn remount_recursive(
     target: &Path,
+    subtree: &Path,
     flags: libc::c_ulong,
     what: &str,
 ) -> Result<(), ContainmentError> {
-    // The target itself always gets remounted: it was just bound, so it is a mount
-    // point by construction whether or not the table has caught up.
-    let mut points = vec![target.to_path_buf()];
+    let mut points = Vec::new();
 
     // `/proc/self/mounts` is the view's own table here -- the mount namespace is already unshared,
     // so this cannot see host-only mounts.
@@ -1025,20 +1138,23 @@ fn remount_recursive(
             continue;
         };
         let point = PathBuf::from(unescape_mount_field(raw));
-        if point != target && point.starts_with(target) {
+        if point != subtree && point.starts_with(subtree) {
             points.push(point);
         }
     }
 
     points.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    // The top mount is retained separately from the mutable scan prefix.
+    points.push(target.to_path_buf());
 
     for point in points {
         let outcome = mount_syscall(None, &point, None, flags, None);
         // A *shadowed* submount cannot be remounted, and refusing on it would refuse a composition
         // that is already safe.
         if let Err(error) = outcome {
-            let shadowed = error.raw_os_error() == Some(libc::EINVAL)
-                && shadowing_mount(&point, target)?.is_some();
+            let shadowed = point != target
+                && error.raw_os_error() == Some(libc::EINVAL)
+                && shadowing_mount(&point, subtree)?.is_some();
             if !shadowed {
                 return Err(refusal(format!(
                     "remounting '{}' {what}: {error}",
@@ -1048,6 +1164,36 @@ fn remount_recursive(
         }
     }
 
+    Ok(())
+}
+
+/// Verify the restrictions on the retained mount after remounting it.
+fn require_mount_flags(
+    mounted: &std::fs::File,
+    writable: bool,
+    executable: bool,
+    device: bool,
+) -> Result<(), ContainmentError> {
+    let mut status = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: mounted owns the descriptor, and status supplies writable storage.
+    if unsafe { libc::fstatvfs(mounted.as_raw_fd(), status.as_mut_ptr()) } != 0 {
+        return Err(refusal(format!(
+            "reading mounted filesystem permissions: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    // SAFETY: fstatvfs initialized status on success.
+    let actual = unsafe { status.assume_init() }.f_flag;
+    let required = libc::ST_NOSUID
+        | if writable { 0 } else { libc::ST_RDONLY }
+        | if executable { 0 } else { libc::ST_NOEXEC }
+        | if device { 0 } else { libc::ST_NODEV };
+    let mask = libc::ST_RDONLY | libc::ST_NOEXEC | libc::ST_NOSUID | libc::ST_NODEV;
+    if actual & mask != required {
+        return Err(refusal(format!(
+            "mounted filesystem permissions differ from the grant: expected {required:#x}, got {actual:#x}"
+        )));
+    }
     Ok(())
 }
 
@@ -1412,7 +1558,8 @@ fn require_loadable(
     restricted: bool,
     missing: &mut MissingReads,
 ) -> Result<Option<(PathBuf, Rc<std::fs::File>, bool)>, ContainmentError> {
-    let restricted = restricted || workload_writable(config, library, MECHANISM)?;
+    let writable = workload_writable(config, library, MECHANISM)?;
+    let restricted = restricted || writable;
     let granted =
         crate::model::PathGrant::new(library, Operation::Read, Scope::File).map_err(|error| {
             refusal(format!(
@@ -1439,6 +1586,32 @@ fn require_loadable(
         return Ok(None);
     }
     let file = Rc::new(open_dependency(&granted.resolved)?);
+    if !config.broad_exec()
+        && !config.authorizations().iter().any(|grant| {
+            grant.operation == Operation::Exec
+                && match grant.scope {
+                    Scope::Root => granted.resolved.starts_with(&grant.resolved),
+                    Scope::File => granted.resolved == grant.resolved,
+                    Scope::Dir => false,
+                }
+        })
+        && workload_writable_with_alias_check(
+            config,
+            library,
+            MECHANISM,
+            Some(&file.metadata().map_err(|error| {
+                refusal(format!("checking admitted dependency identity: {error}"))
+            })?),
+            |root| dependency_permissions::hard_link_alias_may_be_writable(&file, root),
+        )?
+    {
+        return Err(refusal(format!(
+            "writable dependency {:?} needed by {:?} has no explicit execution grant. \
+             Remove its write access or explicitly grant execution. \
+             Read and Write grants do not authorize loading writable code.",
+            granted.resolved, image
+        )));
+    }
     Ok(Some((granted.resolved, file, restricted)))
 }
 
@@ -1758,8 +1931,12 @@ fn refusal(reason: String) -> ContainmentError {
 
 #[cfg(test)]
 mod tests {
+    mod combined_grants;
     mod loader_admission;
+    mod nested_grants;
+    mod protection_alias;
     mod refusal;
+    mod remount_flags;
     use super::*;
 
     /// **The escapes the kernel actually emits decode, and nothing else is touched.**
@@ -2046,7 +2223,7 @@ mod tests {
             .expect("bind the read grant's directory over it");
 
         // The whole point: this must succeed rather than refuse on the shadowed submount.
-        if let Err(error) = remount_read_only(&view_tree) {
+        if let Err(error) = remount_read_only(&view_tree, &view_tree) {
             eprintln!("remount_read_only refused: {error}");
             return false;
         }
@@ -2652,9 +2829,124 @@ mod tests {
             assert!(std::fs::write(&protected, b"changed").is_err());
             assert_eq!(std::fs::read(&protected).unwrap(), b"unchanged");
             assert!(std::fs::rename(&parent, root.join("moved")).is_err());
-            std::fs::write(parent.join("ordinary"), b"allowed").unwrap();
-            assert_eq!(std::fs::read(parent.join("ordinary")).unwrap(), b"allowed");
+            let ordinary = parent.join("ordinary");
+            std::fs::write(&ordinary, b"allowed").unwrap();
+            std::fs::rename(&ordinary, root.join("ordinary")).unwrap();
+            std::fs::rename(root.join("ordinary"), &ordinary).unwrap();
+            assert_eq!(std::fs::read(&ordinary).unwrap(), b"allowed");
         });
+    }
+
+    fn refusal_parent_moves_preserve_permitted_children(scope: Scope) {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let parent = root.join("parent");
+            let readonly = parent.join("readonly");
+            std::fs::create_dir_all(&readonly).unwrap();
+            std::fs::write(readonly.join("value"), b"unchanged").unwrap();
+            let denied = parent.join("private");
+            match scope {
+                Scope::File => std::fs::write(&denied, b"protected").unwrap(),
+                Scope::Root => std::fs::create_dir(&denied).unwrap(),
+                Scope::Dir => unreachable!(),
+            }
+            let config = ContainmentConfig::new()
+                .allow(&readonly, Operation::Read, Scope::Root)
+                .unwrap()
+                .allow(&root, Operation::Write, Scope::Root)
+                .unwrap()
+                .refuse(&denied, scope)
+                .unwrap();
+            let mut view = MountView::plan(&config).unwrap();
+            view.entries.retain(|entry| {
+                entry.origin != MountOrigin::Scaffold || entry.target == Path::new("/")
+            });
+            view.materialize().unwrap();
+            let error = std::fs::rename(&parent, root.join("moved")).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EBUSY));
+            let refused_write = match scope {
+                Scope::File => denied.clone(),
+                Scope::Root => denied.join("planted"),
+                Scope::Dir => unreachable!(),
+            };
+            assert!(std::fs::write(&refused_write, b"refused").is_err());
+            assert!(std::fs::write(readonly.join("value"), b"changed").is_err());
+            assert_eq!(std::fs::read(readonly.join("value")).unwrap(), b"unchanged");
+            let ordinary = parent.join("ordinary");
+            let outside = root.join("ordinary");
+            std::fs::write(&ordinary, b"allowed").unwrap();
+            std::fs::rename(&ordinary, &outside).unwrap();
+            std::fs::rename(&outside, &ordinary).unwrap();
+            std::fs::hard_link(&ordinary, root.join("linked")).unwrap();
+            assert_eq!(std::fs::read(root.join("linked")).unwrap(), b"allowed");
+            let child = parent.join("child");
+            let moved_child = root.join("child");
+            std::fs::create_dir(&child).unwrap();
+            std::fs::write(child.join("value"), b"allowed").unwrap();
+            std::fs::rename(&child, &moved_child).unwrap();
+            std::fs::rename(&moved_child, &child).unwrap();
+            assert_eq!(std::fs::read(child.join("value")).unwrap(), b"allowed");
+        });
+    }
+
+    #[test]
+    fn file_refusal_parent_moves_preserve_permitted_children() {
+        refusal_parent_moves_preserve_permitted_children(Scope::File);
+    }
+
+    #[test]
+    fn directory_refusal_parent_moves_preserve_permitted_children() {
+        refusal_parent_moves_preserve_permitted_children(Scope::Root);
+    }
+
+    fn metadata_refusal_ancestors(scope: Scope) {
+        super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().canonicalize().unwrap();
+            let parent = root.join("parent");
+            let metadata = parent.join("metadata");
+            let denied = metadata.join("denied");
+            std::fs::create_dir_all(&metadata).unwrap();
+            match scope {
+                Scope::File => std::fs::write(&denied, b"protected").unwrap(),
+                Scope::Root => std::fs::create_dir(&denied).unwrap(),
+                Scope::Dir => unreachable!(),
+            }
+            let config = ContainmentConfig::new()
+                .allow(&root, Operation::Write, Scope::Root)
+                .unwrap()
+                .allow(&metadata, Operation::Metadata, Scope::Dir)
+                .unwrap()
+                .refuse(&denied, scope)
+                .unwrap();
+            let mut view = MountView::plan(&config).unwrap();
+            view.entries.retain(|entry| {
+                entry.origin != MountOrigin::Scaffold || entry.target == Path::new("/")
+            });
+            view.materialize().unwrap();
+            let error = std::fs::rename(&parent, root.join("moved")).unwrap_err();
+            assert_eq!(error.raw_os_error(), Some(libc::EBUSY));
+            assert!(!denied.exists());
+            assert!(std::fs::write(&denied, b"changed").is_err());
+            assert_eq!(std::fs::read_dir(&metadata).unwrap().count(), 0);
+            let sibling = parent.join("sibling");
+            let renamed = parent.join("renamed");
+            std::fs::create_dir(&sibling).unwrap();
+            std::fs::write(sibling.join("value"), b"allowed").unwrap();
+            std::fs::rename(&sibling, &renamed).unwrap();
+            assert_eq!(std::fs::read(renamed.join("value")).unwrap(), b"allowed");
+        });
+    }
+
+    #[test]
+    fn file_refusal_ancestors_remain_protected_above_metadata_only_grants() {
+        metadata_refusal_ancestors(Scope::File);
+    }
+
+    #[test]
+    fn directory_refusal_ancestors_remain_protected_above_metadata_only_grants() {
+        metadata_refusal_ancestors(Scope::Root);
     }
 
     fn planned_parent_fixture() -> (tempfile::TempDir, tempfile::TempDir, MountView, PathBuf) {
@@ -2678,8 +2970,10 @@ mod tests {
 
     #[test]
     fn a_missing_or_replaced_protected_parent_refuses_the_view() {
-        let (_source, staging, view, target) = planned_parent_fixture();
-        let error = view.protect_parents(staging.path()).unwrap_err();
+        let (source, staging, view, target) = planned_parent_fixture();
+        let error = view
+            .protect_parents(staging.path(), source.path())
+            .unwrap_err();
         assert!(
             error.to_string().contains("inspecting protected parent"),
             "{error}"
@@ -2687,7 +2981,9 @@ mod tests {
         std::fs::create_dir_all(&target).unwrap();
         std::fs::rename(&target, target.with_extension("before")).unwrap();
         std::fs::write(&target, b"replacement").unwrap();
-        let error = view.protect_parents(staging.path()).unwrap_err();
+        let error = view
+            .protect_parents(staging.path(), source.path())
+            .unwrap_err();
         assert!(error.to_string().contains("is not a directory"), "{error}");
         assert_eq!(std::fs::read(&target).unwrap(), b"replacement");
     }
@@ -2695,11 +2991,13 @@ mod tests {
     #[test]
     fn a_failed_protected_parent_bind_refuses_the_view() {
         super::super::failure_tests::in_fresh_process_with_user_namespace(true, || {
-            let (_source, staging, view, target) = planned_parent_fixture();
+            let (source, staging, view, target) = planned_parent_fixture();
             std::fs::create_dir_all(&target).unwrap();
-            view.protect_parents(staging.path()).unwrap();
+            view.protect_parents(staging.path(), source.path()).unwrap();
             super::super::failure_tests::refuse_syscall(libc::SYS_mount, None);
-            let error = view.protect_parents(staging.path()).unwrap_err();
+            let error = view
+                .protect_parents(staging.path(), source.path())
+                .unwrap_err();
             assert!(
                 error.to_string().contains("binding protected parent"),
                 "{error}"
@@ -2992,7 +3290,13 @@ mod tests {
                 std::fs::create_dir_all(target).map_err(|e| refusal(format!("mkdir view: {e}")))?;
                 mount_syscall(Some(base), target, None, libc::MS_BIND | libc::MS_REC, None)
                     .map_err(|e| refusal(format!("bind: {e}")))?;
-                remount_read_only(target)?;
+                use std::os::unix::fs::OpenOptionsExt;
+                let mounted = std::fs::OpenOptions::new()
+                    .read(true)
+                    .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+                    .open(target)
+                    .map_err(|e| refusal(format!("pin recursive bind: {e}")))?;
+                remount_read_only(&targets::descriptor_path(&mounted), target)?;
 
                 // The bind itself must be read-only, and so must the submount.
                 let top_writable = std::fs::write(target.join("top_probe"), b"x").is_ok();
@@ -3540,6 +3844,7 @@ mod tests {
             grant_identities: BTreeMap::new(),
             grant_pins: Vec::new(),
             dependency_sources: RefCell::new(BTreeMap::new()),
+            mount_locations: RefCell::new(BTreeMap::new()),
         };
         let mut entry = MountEntry {
             source: None,
@@ -3568,6 +3873,7 @@ mod tests {
             grant_identities: BTreeMap::new(),
             grant_pins: Vec::new(),
             dependency_sources: RefCell::new(BTreeMap::new()),
+            mount_locations: RefCell::new(BTreeMap::new()),
         };
         let entry = MountEntry {
             source: Some(source),
@@ -3608,6 +3914,7 @@ mod tests {
             grant_identities: BTreeMap::new(),
             grant_pins: Vec::new(),
             dependency_sources: RefCell::new(BTreeMap::new()),
+            mount_locations: RefCell::new(BTreeMap::new()),
         };
         let entry = MountEntry {
             source: None,
@@ -3668,6 +3975,7 @@ mod tests {
                 grant_identities: BTreeMap::from([(source.clone(), identity)]),
                 grant_pins: Vec::new(),
                 dependency_sources: RefCell::new(BTreeMap::new()),
+                mount_locations: RefCell::new(BTreeMap::new()),
             };
             let entry = MountEntry {
                 source: Some(source),
@@ -3690,7 +3998,9 @@ mod tests {
 
             let error = view.establish(&entry, root.path()).unwrap_err();
             assert!(
-                error.to_string().contains("mounted grant identity changed"),
+                error
+                    .to_string()
+                    .contains("did not land at its own mountpoint"),
                 "{error}"
             );
             let target = root.path().join("entry");
@@ -3910,6 +4220,7 @@ mod tests {
                 grant_identities: BTreeMap::new(),
                 grant_pins: Vec::new(),
                 dependency_sources: RefCell::new(BTreeMap::new()),
+                mount_locations: RefCell::new(BTreeMap::new()),
             };
             let error = view.pivot_into(&root).unwrap_err();
             assert!(
@@ -3930,7 +4241,7 @@ mod tests {
         super::super::failure_tests::in_fresh_process(|| {
             super::super::failure_tests::refuse_syscall(libc::SYS_openat, None);
             let target = Path::new("/fixture");
-            let error = remount_read_only(target).unwrap_err();
+            let error = remount_read_only(target, target).unwrap_err();
             assert!(
                 error.to_string().contains("reading the mount table"),
                 "{error}"
@@ -3948,7 +4259,7 @@ mod tests {
         super::super::failure_tests::in_fresh_process(|| {
             let directory = tempfile::tempdir().unwrap();
             super::super::failure_tests::refuse_syscall(libc::SYS_mount, None);
-            let error = remount_read_only(directory.path()).unwrap_err();
+            let error = remount_read_only(directory.path(), directory.path()).unwrap_err();
             assert!(error.to_string().contains("remounting"), "{error}");
         });
     }
@@ -3989,11 +4300,16 @@ mod tests {
                 grant_identities,
                 grant_pins: Vec::new(),
                 dependency_sources: RefCell::new(BTreeMap::new()),
+                mount_locations: RefCell::new(BTreeMap::new()),
             };
             let argument =
                 (kind == MountKind::Bind && denied_call == libc::SYS_openat).then_some((
                     2,
-                    (libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC) as u64,
+                    (libc::O_WRONLY
+                        | libc::O_CREAT
+                        | libc::O_EXCL
+                        | libc::O_NOFOLLOW
+                        | libc::O_CLOEXEC) as u64,
                 ));
             super::super::failure_tests::refuse_syscall(denied_call, argument);
             let error = view.establish(&entry, root.path()).unwrap_err();
@@ -4100,6 +4416,7 @@ mod tests {
             grant_identities,
             grant_pins: Vec::new(),
             dependency_sources: RefCell::new(BTreeMap::new()),
+            mount_locations: RefCell::new(BTreeMap::new()),
         };
         let error = view.establish(&entry, root.path()).unwrap_err();
         assert!(

@@ -1,0 +1,37 @@
+# A tool grammar for git: push, commit, and status.
+
+name    = "git_push_commit_status"
+program = "git"
+format  = 1
+version = 1
+
+[effects]
+force_push        = "Replaces commits on a remote branch"
+delete_remote_ref = "Deletes a ref on the remote"
+network           = "Contacts a remote repository"
+override_config   = "Overrides git configuration for this one command"
+run_program       = "Makes git run a program named on the command line"
+skip_hooks        = "Bypasses the repository's commit or push hooks"
+write_file        = "Writes files at a path named on the command line"
+
+[global]
+options.directory = { flag = "-C", value = "required", adds = ["write_file", "run_program"] }
+options.config    = { flag = "-c", value = "required", repeated = true, adds = ["override_config", "skip_hooks", "run_program"] }
+
+[shell.push]
+usage = "git [global options] push [options] [<remote> [<refspec>...]]"
+adds  = ["network"]
+options.force            = { flag = ["-f", "--force"], adds = ["force_push"] }
+options.force_with_lease = { flag = ["--force-with-lease"], value = "optional", adds = ["force_push"] }
+options.dry_run          = { flag = ["-n", "--dry-run"], removes = ["force_push", "delete_remote_ref", "skip_hooks"] }
+options.no_verify        = { flag = ["--no-verify"], adds = ["skip_hooks"] }
+operands.refspec         = { like = "+*", adds = ["force_push"], when = [{ like = [":*", "+:*"], adds = ["delete_remote_ref"] }] }
+
+[shell.commit]
+usage   = "git [global options] commit [options] [--] [<pathspec>...]"
+options.message   = { flag = ["-m", "--message"], value = "required", repeated = true }
+options.no_verify = { flag = ["-n", "--no-verify"], adds = ["skip_hooks"] }
+
+[shell.status]
+usage = "git [global options] status [options] [--] [<pathspec>...]"
+options.short = { flag = ["-s", "--short"] }

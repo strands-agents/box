@@ -1,0 +1,10 @@
+# A tool grammar that declares no effect.
+
+name    = "fmt"
+program = "fmt"
+format  = 1
+version = 1
+
+[shell.check]
+usage = "fmt check [options] [<path>...]"
+options.quiet = { flag = ["-q", "--quiet"] }

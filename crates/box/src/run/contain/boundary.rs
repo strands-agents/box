@@ -60,14 +60,29 @@ pub(crate) struct Launch<'a> {
 #[derive(Debug)]
 pub(crate) struct ApprovedReach {
     tables: BTreeMap<String, DirectReach>,
+    commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
+    installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,
 }
 
 impl ApprovedReach {
     /// Judge every process table's lists, once, before any of them spawns.
+    #[cfg(test)]
     pub(crate) fn judge(
         stored: &Record,
         protected_sources: &[AuthoritySource],
     ) -> Result<Self, BoxError> {
+        let commands = std::sync::Arc::new(crate::run::commands::ConfiguredCommands::load(stored)?);
+        Self::judge_with(stored, protected_sources, commands)
+    }
+
+    /// Judge every process table's lists, once, against the commands this run already opened.
+    pub(crate) fn judge_with(
+        stored: &Record,
+        protected_sources: &[AuthoritySource],
+        commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
+    ) -> Result<Self, BoxError> {
+        let installation =
+            std::sync::Arc::new(crate::run::installation::TrustedInstallation::load()?);
         let agent = stored
             .agent
             .iter()
@@ -84,11 +99,29 @@ impl ApprovedReach {
             .chain(tools)
             .chain(servers)
             .map(|(table, spec)| {
-                judge_filesystem(spec, &table, stored, protected_sources)
-                    .map(|reach| (table, reach))
+                let mut reach = judge_filesystem(spec, &table, stored, protected_sources)?;
+                commands.validate_reach(&table, &reach)?;
+                installation.validate_reach(&table, &reach)?;
+                reach.installation = Some(std::sync::Arc::clone(&installation));
+                reach.command = commands.get(&table).cloned();
+                Ok((table, reach))
             })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
-        Ok(Self { tables })
+            .collect::<Result<BTreeMap<_, _>, BoxError>>()?;
+        Ok(Self {
+            tables,
+            commands,
+            installation,
+        })
+    }
+
+    pub(crate) fn commands(&self) -> &std::sync::Arc<crate::run::commands::ConfiguredCommands> {
+        &self.commands
+    }
+
+    pub(crate) fn installation(
+        &self,
+    ) -> &std::sync::Arc<crate::run::installation::TrustedInstallation> {
+        &self.installation
     }
 
     /// The reach approved for one process table, named as a refusal names it.
@@ -189,7 +222,7 @@ impl RuntimeReach {
 /// How the translator treats an interpreter a script's shebang names when no `exec` entry covers it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ShebangInterpreters {
-    /// Granted, because the operator authored the command that names it.
+    /// A declared command, whose Linux interpreters must reuse its existing filesystem grants.
     Granted,
     /// Refused, because the workload authored the command that names it.
     MustBeListed,
@@ -197,6 +230,7 @@ pub(crate) enum ShebangInterpreters {
 
 /// The translated boundary for one process.
 pub(crate) struct Boundary {
+    installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
         all(target_os = "linux", feature = "native-filesystem-policy")
@@ -231,6 +265,10 @@ pub(crate) struct Boundary {
     /// Every localhost port the containment config grants, in grant order, for the Linux relay.
     #[cfg(target_os = "linux")]
     served_ports: Vec<u16>,
+
+    /// Where the box listens for the agent, and the agent's own port, one pair per
+    /// `[[agent.ingress]]` entry.
+    ingress: Vec<(std::net::SocketAddr, u16)>,
 }
 
 /// Every absolute directory the operator's own `PATH` names.
@@ -290,6 +328,9 @@ impl Boundary {
         let home = declared_home.unwrap_or_else(|| operator_home.clone());
         let declared_search_path: OsString = spec.search_path();
         let mediated = launch.runtime_reach == RuntimeReach::Agent;
+        // Only the agent is reached from outside.
+        let ingress: &[crate::record::config::ingress::Ingress] =
+            if mediated { &spec.ingress } else { &[] };
         // A leaf resolves its shebang hops on the search path its own `PATH` holds.
         let interpreter_search_path: OsString = if mediated {
             declared_search_path.clone()
@@ -393,7 +434,10 @@ impl Boundary {
             EgressMode::Native => Network::AllowAll,
             EgressMode::Gateway => Network::Localhost {
                 connect: served_ports.clone(),
-                listen: Vec::new(),
+                listen: ingress
+                    .iter()
+                    .map(|ingress| ingress.workload_port)
+                    .collect(),
             },
         };
         let mut containment = ContainmentConfig::new().set_network(network)?;
@@ -416,6 +460,11 @@ impl Boundary {
                 &judged
             }
         };
+        let installation = match &reach.installation {
+            Some(installation) => std::sync::Arc::clone(installation),
+            None => std::sync::Arc::new(crate::run::installation::TrustedInstallation::load()?),
+        };
+        installation.validate_reach(table, reach)?;
         let exec_trees: Vec<&Path> = reach
             .grants
             .iter()
@@ -439,8 +488,7 @@ impl Boundary {
                 || exec_trees.iter().any(|tree| path.starts_with(tree))
         };
 
-        // A script's interpreter chain runs too, so each hop is granted exec unless a stated grant
-        // already covers it.
+        // Linux interpreters reuse stated authority; script contents cannot add filesystem access.
         let chain =
             executable::shebang_interpreter_chain(&program_identity, &interpreter_search_path);
         // A hop is granted as spelled and judged by its identity, so a stated `exec` entry naming the
@@ -450,8 +498,39 @@ impl Boundary {
             .map(|hop| hop.canonicalize().unwrap_or_else(|_| hop.clone()))
             .collect();
         let mut interpreters: Vec<PathBuf> = Vec::new();
+        #[cfg(target_os = "linux")]
+        let mut interpreter_aliases: Vec<(PathBuf, PathBuf)> = Vec::new();
+        #[cfg(not(target_os = "linux"))]
+        let interpreter_aliases: Vec<(PathBuf, PathBuf)> = Vec::new();
         let mut interpreter_identities: Vec<&Path> = Vec::new();
+        #[cfg(target_os = "linux")]
+        let mut interpreter_exec_files: Vec<PathBuf> = Vec::new();
+        #[cfg(not(target_os = "linux"))]
+        let interpreter_exec_files: Vec<PathBuf> = Vec::new();
         for (spelled, identity) in chain.iter().zip(&chain_identities) {
+            #[cfg(target_os = "linux")]
+            if launch.shebang_interpreters == ShebangInterpreters::Granted {
+                let prepared = ContainmentConfig::prepare_filesystem_path(spelled)?;
+                let resolved = prepared.resolved_path();
+                let operation = stated_interpreter_operation(
+                    spelled,
+                    resolved,
+                    &program_identity,
+                    reach,
+                    &launch,
+                    &guard,
+                    site.protected_sources,
+                )?;
+                if spelled != resolved {
+                    // Preserve aliases without introducing a new exec-file dependency seed.
+                    if operation == Operation::Exec {
+                        interpreter_exec_files.push(resolved.to_path_buf());
+                    }
+                    interpreter_aliases.push((spelled.clone(), resolved.to_path_buf()));
+                    containment = containment.allow_prepared(prepared, operation, Scope::File)?;
+                }
+                continue;
+            }
             if covered_by_exec(identity) || interpreter_identities.contains(&identity.as_path()) {
                 continue;
             }
@@ -508,7 +587,7 @@ impl Boundary {
         }
 
         // The mediation plumbing, for the agent alone: the five interpreter aliases, one alias per
-        // declared MCP server, and the one broker socket. Every process gets the CA.
+        // declared MCP program, and the one broker socket. Every process gets the CA.
         if mediated {
             for alias in layout
                 .shell_aliases()
@@ -571,6 +650,12 @@ impl Boundary {
             containment = containment.allow_broad_exec();
         }
 
+        // The global `file-attributes` switch reaches the agent, every tool, and every contained MCP
+        // server alike, because each one's write roots are rendered here.
+        if stored.file_attributes {
+            containment = containment.allow_file_attributes();
+        }
+
         // **Every refusal the grants need, applied before the grants themselves.** macOS renders
         // these after every allow and Linux overmounts them empty, so each subtracts from the grant
         // rather than sitting beside it.
@@ -582,7 +667,8 @@ impl Boundary {
         for grant in &reach.grants {
             if grant.operation == Operation::Exec
                 && grant.scope == Scope::File
-                && grant.resolved == program_identity
+                && (grant.resolved == program_identity
+                    || interpreter_exec_files.contains(&grant.resolved))
             {
                 continue;
             }
@@ -593,6 +679,22 @@ impl Boundary {
                 containment.allow_credential_store(&grant.lexical, grant.operation, grant.scope)?
             } else {
                 allow_operator(containment, &grant.resolved, grant.operation, grant.scope)?
+            };
+        }
+
+        if let Some(command) = reach.command.as_ref() {
+            command.verify()?;
+            if command.path() != program_identity {
+                return Err(ConfigError::Process {
+                    table: table.to_string(),
+                    reason: "configured command identity changed before launch".to_string(),
+                }
+                .into());
+            }
+            containment = if command.has_several_names() {
+                containment.require_command_identity(command.path(), command.opened())?
+            } else {
+                containment.require_file_identity(command.path(), command.opened())?
             };
         }
 
@@ -648,6 +750,7 @@ impl Boundary {
             grants: &reach.grants,
             minimum: &minimum,
             interpreters: &interpreters,
+            interpreter_aliases: &interpreter_aliases,
             enterable_workspace: enterable_workspace.as_deref(),
             home: &home,
             path: composed.get("PATH").map(String::as_str).unwrap_or_default(),
@@ -655,6 +758,7 @@ impl Boundary {
             program: &program_identity,
             command_listed,
             broad_exec,
+            file_attributes: cfg!(target_os = "macos") && stored.file_attributes,
             native_egress: launch.egress == EgressMode::Native,
             native_filesystem_policy: spec
                 .native_filesystem_policy
@@ -687,6 +791,7 @@ impl Boundary {
             .filter(|spelled| *spelled != executable_path.as_path())
             .map(|spelled| spelled.display().to_string());
         Ok(Self {
+            installation,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
                 all(target_os = "linux", feature = "native-filesystem-policy")
@@ -706,6 +811,10 @@ impl Boundary {
             disclosure,
             #[cfg(target_os = "linux")]
             served_ports: served_ports.clone(),
+            ingress: ingress
+                .iter()
+                .filter_map(|ingress| Some((ingress.listen_address()?, ingress.workload_port)))
+                .collect(),
         })
     }
 
@@ -715,6 +824,10 @@ impl Boundary {
     ))]
     pub(crate) fn native_filesystem_policy(&self) -> bool {
         self.native_filesystem_policy
+    }
+
+    pub(crate) fn installation(&self) -> &crate::run::installation::TrustedInstallation {
+        &self.installation
     }
 
     pub(crate) fn executable(&self) -> &Path {
@@ -727,6 +840,11 @@ impl Boundary {
 
     pub(crate) fn arguments(&self) -> &[String] {
         &self.arguments
+    }
+
+    pub(crate) fn with_arguments(mut self, arguments: Vec<String>) -> Self {
+        self.arguments = arguments;
+        self
     }
 
     pub(crate) fn argument_zero(&self) -> Option<&Path> {
@@ -772,6 +890,11 @@ impl Boundary {
         &self.disclosure
     }
 
+    /// Where the box listens for the agent, and the agent's own port, one pair per entry.
+    pub(crate) fn ingress(&self) -> &[(std::net::SocketAddr, u16)] {
+        &self.ingress
+    }
+
     /// Every port the Linux relay must receive a descriptor for, in grant order.
     #[cfg(target_os = "linux")]
     pub(crate) fn served_ports(&self) -> &[u16] {
@@ -785,6 +908,7 @@ struct DisclosureInputs<'a> {
     grants: &'a [DirectGrant],
     minimum: &'a [MinimumCell],
     interpreters: &'a [PathBuf],
+    interpreter_aliases: &'a [(PathBuf, PathBuf)],
     enterable_workspace: Option<&'a Path>,
     home: &'a Path,
     path: &'a str,
@@ -792,6 +916,7 @@ struct DisclosureInputs<'a> {
     program: &'a Path,
     command_listed: bool,
     broad_exec: bool,
+    file_attributes: bool,
     native_egress: bool,
     native_filesystem_policy: bool,
 }
@@ -819,6 +944,18 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
             inputs.program.display()
         ));
     }
+    if !inputs.interpreter_aliases.is_empty() {
+        lines.push(format!(
+            "strands-box: {table} interpreter aliases for configured access:"
+        ));
+        for (spelled, resolved) in inputs.interpreter_aliases {
+            lines.push(format!(
+                "  alias       {} -> {}  (interpreter spelling)",
+                spelled.display(),
+                resolved.display()
+            ));
+        }
+    }
     lines.push(format!(
         "strands-box: {table} runtime minimum, added by Core:"
     ));
@@ -839,6 +976,12 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
         lines.push(format!(
             "strands-box: {table} broad exec: may run any reachable binary, and \
              load code it writes into its writable grants above"
+        ));
+    }
+    if inputs.file_attributes {
+        lines.push(format!(
+            "strands-box: {table} file attributes: may set file times, set-user-ID and set-group-ID \
+             bits, the group, the owner, and access control lists on files in its writable grants"
         ));
     }
     if inputs.native_egress {
@@ -932,6 +1075,171 @@ pub(crate) fn require_private_state_absent(
             path: path.to_path_buf(),
             reason: "the grant would expose private Box state",
         });
+    }
+    Ok(())
+}
+
+/// Select an alias operation from original grants without adding execution or dependency authority.
+#[cfg(target_os = "linux")]
+fn stated_interpreter_operation(
+    spelled: &Path,
+    identity: &Path,
+    program: &Path,
+    reach: &DirectReach,
+    launch: &Launch<'_>,
+    guard: &GuardedBoxState<'_>,
+    protected_sources: &[AuthoritySource],
+) -> Result<Operation, BoxError> {
+    if protected_sources
+        .iter()
+        .any(|source| source.path() == identity || source.matches(identity))
+    {
+        return Err(ConfigError::Process {
+            table: launch.table.to_string(),
+            reason: format!(
+                "interpreter {} names a protected authority source",
+                spelled.display()
+            ),
+        }
+        .into());
+    }
+    require_interpreter_route(spelled, identity, reach, guard, launch.table)?;
+    let covers = |grant: &&DirectGrant| match grant.scope {
+        Scope::Root => identity.starts_with(&grant.resolved),
+        Scope::File => identity == grant.resolved,
+        Scope::Dir => false,
+    };
+    if identity == program
+        || reach
+            .grants
+            .iter()
+            .filter(covers)
+            .any(|grant| grant.operation == Operation::Exec && grant.scope == Scope::File)
+    {
+        return Ok(Operation::Exec);
+    }
+    if reach.grants.iter().filter(covers).any(|grant| {
+        grant.operation == Operation::Exec
+            || launch.runtime_reach == RuntimeReach::Leaf
+                && matches!(grant.operation, Operation::Read | Operation::Write)
+    }) {
+        // Existing exec roots and leaf execution apply to Read aliases by source identity.
+        return Ok(Operation::Read);
+    }
+    Err(ConfigError::Process {
+        table: launch.table.to_string(),
+        reason: format!(
+            "{} names the interpreter {}, which no {} entry of {} authorizes; \
+             add {} to {} in that table",
+            program.display(),
+            spelled.display(),
+            if launch.runtime_reach == RuntimeReach::Agent {
+                "`exec`"
+            } else {
+                "`read`, `read_file`, `write`, or `write_file`"
+            },
+            launch.table,
+            identity.display(),
+            if launch.runtime_reach == RuntimeReach::Agent {
+                "`exec`"
+            } else {
+                "`read_file`"
+            },
+        ),
+    }
+    .into())
+}
+
+/// Refuse aliases whose original, intermediate, or resolved paths traverse a denied location.
+#[cfg(target_os = "linux")]
+fn require_interpreter_route(
+    spelled: &Path,
+    identity: &Path,
+    reach: &DirectReach,
+    guard: &GuardedBoxState<'_>,
+    table: &str,
+) -> Result<(), BoxError> {
+    use std::collections::VecDeque;
+    use std::path::Component;
+
+    let refused = |reason: String| -> BoxError {
+        ConfigError::Process {
+            table: table.to_string(),
+            reason: format!("interpreter {} {reason}", spelled.display()),
+        }
+        .into()
+    };
+    let denials = reach
+        .refusals
+        .iter()
+        .map(|denial| {
+            denial
+                .path
+                .canonicalize()
+                .map(|canonical| (denial, canonical))
+                .map_err(|error| {
+                    refused(format!(
+                        "cannot resolve denied path {}: {error}",
+                        denial.path.display()
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let check = |path: &Path| -> Result<(), BoxError> {
+        guard.judge(path, Operation::Exec, Scope::File)?;
+        if let Some((denial, _)) = denials.iter().find(|(denial, canonical)| {
+            [&denial.path, canonical]
+                .into_iter()
+                .any(|denied| match denial.scope {
+                    Scope::Root => path.starts_with(denied),
+                    Scope::File | Scope::Dir => path == denied,
+                })
+        }) {
+            return Err(refused(format!(
+                "traverses denied path {}",
+                denial.path.display()
+            )));
+        }
+        Ok(())
+    };
+    check(spelled)?;
+    check(identity)?;
+    let mut pending: VecDeque<OsString> = spelled
+        .components()
+        .map(|component| component.as_os_str().to_os_string())
+        .collect();
+    let mut resolved = PathBuf::new();
+    let mut links = 0;
+    while let Some(part) = pending.pop_front() {
+        match Path::new(&part).components().next() {
+            Some(Component::RootDir) => resolved = PathBuf::from("/"),
+            Some(Component::CurDir) => continue,
+            Some(Component::ParentDir) => {
+                resolved.pop();
+            }
+            Some(Component::Normal(name)) => resolved.push(name),
+            _ => return Err(refused("has an unsupported path component".to_string())),
+        }
+        check(&resolved)?;
+        let metadata = std::fs::symlink_metadata(&resolved)
+            .map_err(|error| refused(format!("cannot resolve {}: {error}", resolved.display())))?;
+        if metadata.is_symlink() {
+            links += 1;
+            if links > 40 {
+                return Err(refused(
+                    "exceeds the symbolic-link traversal limit".to_string(),
+                ));
+            }
+            let target = std::fs::read_link(&resolved)
+                .map_err(|error| refused(format!("cannot read {}: {error}", resolved.display())))?;
+            resolved.pop();
+            for component in target.components().rev() {
+                pending.push_front(component.as_os_str().to_os_string());
+            }
+        }
+    }
+    if resolved != identity {
+        return Err(refused("changed while its grant was prepared".to_string()));
     }
     Ok(())
 }
@@ -1296,6 +1604,189 @@ mod tests {
     use crate::record::config::process::{ContainedMcp, Filesystem};
     use crate::run::credential::ProvisionedVariable;
 
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn setup_reporting_preserves_late_failures_in_buffered_and_streaming_execution() {
+        if !the_host_can_build_a_view() {
+            return;
+        }
+        use crate::run::contain::supervise::LeafBox;
+        for streaming in [false, true] {
+            for (environment, expected) in [(true, "target environment"), (false, "target exec")] {
+                let fixture = Fixture::new();
+                let mut spec = fixture.spec();
+                spec.command.push("printf WORKLOAD_RAN".into());
+                let mut boundary = fixture.translate_full(
+                    &spec,
+                    "[tool.test]",
+                    RuntimeReach::Leaf,
+                    EgressMode::Native,
+                );
+                if environment {
+                    boundary.target_environment = "{".into();
+                } else {
+                    boundary.executable = "/setup-reporting-missing".into();
+                }
+                let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    if streaming {
+                        LeafBox::spawn_streaming(
+                            boundary,
+                            &fixture.root,
+                            #[cfg(any(
+                                all(target_os = "macos", feature = "native-filesystem-policy"),
+                                all(target_os = "linux", feature = "native-filesystem-policy",)
+                            ))]
+                            None,
+                        )
+                        .await
+                        .map(|_| ())
+                    } else {
+                        LeafBox::run(
+                            boundary,
+                            &fixture.root,
+                            #[cfg(any(
+                                all(target_os = "macos", feature = "native-filesystem-policy"),
+                                all(target_os = "linux", feature = "native-filesystem-policy",)
+                            ))]
+                            None,
+                        )
+                        .await
+                        .map(|_| ())
+                    }
+                })
+                .await
+                .expect("setup must finish");
+                let error = result
+                    .expect_err("a setup failure must not become a workload result")
+                    .to_string();
+                assert!(
+                    error.contains(&format!("containment setup failed during {expected}")),
+                    "{error}"
+                );
+            }
+        }
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[tokio::test]
+    async fn setup_reporting_preserves_successful_buffered_and_streaming_execution() {
+        if !the_host_can_build_a_view() {
+            return;
+        }
+        use crate::run::contain::supervise::LeafBox;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for code in [0, 3, 4, 5, 42] {
+            let fixture = Fixture::new();
+            let mut spec = fixture.spec();
+            spec.command.push(format!("printf BUFFER_OK; exit {code}"));
+            let boundary = fixture.translate_full(
+                &spec,
+                "[tool.test]",
+                RuntimeReach::Leaf,
+                EgressMode::Native,
+            );
+            let output = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                LeafBox::run(
+                    boundary,
+                    &fixture.root,
+                    #[cfg(any(
+                        all(target_os = "macos", feature = "native-filesystem-policy"),
+                        all(target_os = "linux", feature = "native-filesystem-policy",)
+                    ))]
+                    None,
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(output.status, code);
+            assert_eq!(output.stdout, b"BUFFER_OK");
+        }
+        let fixture = Fixture::new();
+        let mut spec = fixture.spec();
+        spec.command
+            .push("read value; printf '%s' \"$value\"; exit 5".into());
+        let boundary =
+            fixture.translate_full(&spec, "[tool.test]", RuntimeReach::Leaf, EgressMode::Native);
+        let leaf = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            LeafBox::spawn_streaming(
+                boundary,
+                &fixture.root,
+                #[cfg(any(
+                    all(target_os = "macos", feature = "native-filesystem-policy"),
+                    all(target_os = "linux", feature = "native-filesystem-policy",)
+                ))]
+                None,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        let mut parts = leaf.into_parts().expect("live streams");
+        assert!(parts.child.try_wait().unwrap().is_none());
+        parts.stdin.write_all(b"STREAM_OK\n").await.unwrap();
+        let mut output = Vec::new();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            parts.stdout.read_to_end(&mut output),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(parts.child.wait().await.unwrap().code(), Some(5));
+        assert_eq!(output, b"STREAM_OK");
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    fn the_host_can_build_a_view() -> bool {
+        // SAFETY: the child uses syscalls only and calls `_exit`.
+        let child = unsafe { libc::fork() };
+        if child < 0 {
+            return true;
+        }
+        if child == 0 {
+            // SAFETY: syscall-only child.
+            unsafe {
+                let namespaces = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
+                if libc::unshare(namespaces) != 0 {
+                    libc::_exit(10);
+                }
+                let inner = libc::fork();
+                if inner < 0 {
+                    libc::_exit(12);
+                }
+                if inner == 0 {
+                    if libc::mount(
+                        c"proc".as_ptr(),
+                        c"/proc".as_ptr(),
+                        c"proc".as_ptr(),
+                        0,
+                        std::ptr::null(),
+                    ) != 0
+                    {
+                        libc::_exit(11);
+                    }
+                    libc::_exit(0);
+                }
+                let mut inner_status = 0;
+                libc::waitpid(inner, &mut inner_status, 0);
+                let mounted = libc::WIFEXITED(inner_status) && libc::WEXITSTATUS(inner_status) == 0;
+                libc::_exit(if mounted { 0 } else { 11 });
+            }
+        }
+
+        let mut status = 0;
+        // SAFETY: wait for this process's child.
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        let usable = libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0;
+        if !usable {
+            eprintln!("skipping: this host cannot build a namespace mount view");
+        }
+        usable
+    }
+
     /// One operator home holding a box root, a project, and the trees the specs below name.
     struct Fixture {
         operator: tempfile::TempDir,
@@ -1309,7 +1800,10 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let operator = tempfile::tempdir().expect("an operator home");
+            Self::from_operator(tempfile::tempdir().expect("an operator home"))
+        }
+
+        fn from_operator(operator: tempfile::TempDir) -> Self {
             let home = operator.path().canonicalize().expect("a canonical home");
             for relative in [
                 "project/src",
@@ -1337,18 +1831,22 @@ mod tests {
             let root = crate::record::layout::testing::box_root(operator.path(), "codex");
             let mcp = vec![
                 McpServer {
+                    argument_wildcards: false,
                     name: "alpha".to_string(),
                     command: vec!["alpha-mcp".to_string()],
                 },
                 McpServer {
+                    argument_wildcards: false,
                     name: "beta".to_string(),
                     command: vec!["beta-mcp".to_string()],
                 },
                 McpServer {
+                    argument_wildcards: false,
                     name: "memory".to_string(),
                     command: vec!["node".to_string()],
                 },
                 McpServer {
+                    argument_wildcards: false,
                     name: "github-local".to_string(),
                     command: vec!["github-mcp-server".to_string()],
                 },
@@ -1365,6 +1863,8 @@ mod tests {
             let record = Record {
                 version: RECORD_VERSION,
                 experimental_features: Default::default(),
+                file_attributes: false,
+                limits: Default::default(),
                 box_id: root.name().to_string(),
                 box_dir: root.root().to_path_buf(),
                 name: "codex".to_string(),
@@ -1445,6 +1945,8 @@ mod tests {
                     ..Filesystem::default()
                 },
                 network: None,
+                grammar: None,
+                ingress: Vec::new(),
             }
         }
 
@@ -1656,6 +2158,64 @@ mod tests {
         assert!(
             cells(&translate(None)).contains(&refusal),
             "a table judged now subtracts the directory holding the source"
+        );
+    }
+
+    /// **A tool whose program has one name keeps the identity requirement it had before
+    /// `command_identities`.** Only a program with several names travels in that list, so a sandbox
+    /// helper built without it still loads every other box.
+    #[test]
+    fn a_tool_program_with_one_name_keeps_its_identity_requirement() {
+        let fixture = Fixture::new();
+        let spec = fixture.spec();
+        let record = Record {
+            tool: BTreeMap::from([("t".to_string(), spec.clone())]),
+            ..fixture.record.clone()
+        };
+        let approved = crate::test_support::with_operator_home(fixture.operator.path(), || {
+            ApprovedReach::judge(&record, &[])
+        })
+        .expect("every table is judged");
+        let command = approved
+            .commands()
+            .get("[tool.t]")
+            .expect("[tool.t] command");
+        assert!(!command.has_several_names(), "{}", command.path().display());
+        let fallback = fixture.path("project");
+        let boundary = crate::test_support::with_operator_home(fixture.operator.path(), || {
+            Boundary::translate(
+                &spec,
+                Launch {
+                    table: "[tool.t]",
+                    trailing: &[],
+                    fallback_workspace: &fallback,
+                    shebang_interpreters: ShebangInterpreters::Granted,
+                    runtime_reach: RuntimeReach::Leaf,
+                    argument_zero: None,
+                    egress: EgressMode::Gateway,
+                    approved: approved.table("[tool.t]"),
+                },
+                &Site {
+                    attachment: &fixture.attachment,
+                    layout: &fixture.root,
+                    stored: &record,
+                    protected_sources: &[],
+                },
+            )
+        })
+        .expect("[tool.t] translates");
+        let config: serde_json::Value =
+            serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
+
+        assert!(config.get("command_identities").is_none(), "{config}");
+        let program = command.path().to_str().expect("UTF-8 path");
+        assert!(
+            config["identity_requirements"]
+                .as_array()
+                .expect("identity requirements")
+                .iter()
+                .any(|entry| entry["path"] == program),
+            "{program}: {config}"
         );
     }
 
@@ -2222,6 +2782,49 @@ mod tests {
         );
     }
 
+    /// **`[[agent.ingress]]` reaches the agent and no tool**: the agent's boundary listens on every
+    /// `workload_port`, and the box binds every `listen`.
+    #[test]
+    fn the_ingress_reaches_the_agent_and_no_tool() {
+        let fixture = Fixture::new();
+        let mut declared = fixture.spec();
+        declared.ingress = vec![
+            crate::record::config::ingress::Ingress {
+                listen: "127.0.0.1:8080".to_string(),
+                workload_port: 8081,
+            },
+            crate::record::config::ingress::Ingress {
+                listen: "127.0.0.1:8000".to_string(),
+                workload_port: 8001,
+            },
+        ];
+        let listening = |boundary: &Boundary| {
+            let config = ContainmentConfig::from_json(&boundary.containment_config_text())
+                .expect("the translated config");
+            match config.network() {
+                Network::Localhost { listen, .. } => listen.clone(),
+                other => panic!("the boundary routes through the gateway: {other:?}"),
+            }
+        };
+
+        let agent = fixture.translate_with_reach(&declared, "[agent]", RuntimeReach::Agent);
+        assert_eq!(
+            agent.ingress(),
+            [
+                ("127.0.0.1:8080".parse().expect("an address"), 8081),
+                ("127.0.0.1:8000".parse().expect("an address"), 8001),
+            ]
+        );
+        assert_eq!(listening(&agent), vec![8081, 8001]);
+
+        let tool = fixture.translate_with_reach(&declared, "[tool.git]", RuntimeReach::Leaf);
+        assert!(
+            tool.ingress().is_empty(),
+            "a leaf ignores an ingress in its spec"
+        );
+        assert!(listening(&tool).is_empty(), "a tool listens on nothing");
+    }
+
     /// **The alias directory's existence allow renders beneath the home deny and reaches no other
     /// box directory.**
     #[cfg(target_os = "macos")]
@@ -2285,6 +2888,33 @@ mod tests {
                 serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
             assert_eq!(config["broad_exec"], expected);
             assert_eq!(boundary.disclosure().contains("broad exec:"), expected);
+        }
+    }
+
+    /// **The file-attributes switch reaches the agent, a tool leaf, and an MCP leaf alike, and is
+    /// disclosed only where it renders.** The wire carries `file_attributes` for each table, and the
+    /// disclosure names the switch on macOS alone, because Linux ignores it.
+    #[test]
+    fn the_file_attributes_switch_reaches_every_process_and_is_disclosed_on_macos() {
+        let mut fixture = Fixture::new();
+        let spec = fixture.spec();
+        for (switch_on, table, reach, egress) in [
+            (false, "[agent]", RuntimeReach::Agent, EgressMode::Gateway),
+            (true, "[agent]", RuntimeReach::Agent, EgressMode::Gateway),
+            (true, "[tool.git]", RuntimeReach::Leaf, EgressMode::Gateway),
+            (true, "[mcp.alpha]", RuntimeReach::Leaf, EgressMode::Native),
+        ] {
+            fixture.record.file_attributes = switch_on;
+            let boundary = fixture.translate_full(&spec, table, reach, egress);
+            let config: serde_json::Value =
+                serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
+            assert_eq!(config["file_attributes"], switch_on, "{table}");
+            assert_eq!(
+                boundary.disclosure().contains("file attributes:"),
+                switch_on && cfg!(target_os = "macos"),
+                "{table}: {}",
+                boundary.disclosure()
+            );
         }
     }
 
@@ -2949,6 +3579,10 @@ mod tests {
         spec.filesystem.write.push(fixture.path("tools"));
         spec.filesystem.exec = vec![fixture.path("bin/run")];
 
+        #[cfg(target_os = "linux")]
+        spec.filesystem
+            .exec
+            .push(Path::new("/bin/sh").canonicalize().expect("sh exists"));
         let boundary = fixture.translate(&spec, "[agent]", &[]);
 
         assert!(
@@ -3048,6 +3682,10 @@ mod tests {
         spec.command = vec![link.display().to_string()];
         spec.filesystem.exec = vec![fixture.path("bin/run")];
 
+        #[cfg(target_os = "linux")]
+        spec.filesystem
+            .exec
+            .push(Path::new("/bin/sh").canonicalize().expect("sh exists"));
         let boundary = fixture.translate(&spec, "[agent]", &[]);
 
         assert_eq!(boundary.executable(), link.as_path());
@@ -3139,6 +3777,10 @@ mod tests {
         spec.command = vec![fixture.path("bin/run").display().to_string()];
         spec.filesystem.exec = vec![fixture.path("bin/run")];
 
+        #[cfg(target_os = "linux")]
+        spec.filesystem
+            .exec
+            .push(Path::new("/bin/sh").canonicalize().expect("sh exists"));
         let boundary = fixture.translate(&spec, "[agent]", &[]);
 
         let translated = cells(&boundary);
@@ -3287,6 +3929,8 @@ mod tests {
             let mut spec: ProcessSpec = toml::from_str(&text).expect("the example parses");
             if cfg!(target_os = "linux") {
                 spec.filesystem.list.clear();
+                // The example's planted programs use a shell interpreter on this test host.
+                spec.filesystem.read_file.push(PathBuf::from(&sh));
             }
             spec.filesystem
                 .metadata
@@ -3835,6 +4479,19 @@ write = ["/Users/example/box-demo/aws-tmp"]
             format!("{}:/usr/bin:/bin", bin.display()),
         );
 
+        #[cfg(target_os = "linux")]
+        for interpreter in ["/usr/bin/env", "/usr/bin/bash"] {
+            spec.filesystem.read_file.push(
+                Path::new(interpreter)
+                    .canonicalize()
+                    .expect("interpreter exists"),
+            );
+        }
+        let interpreter_operation = if cfg!(target_os = "linux") {
+            Operation::Read
+        } else {
+            Operation::Exec
+        };
         let leaf = fixture
             .try_translate_full(&spec, "[tool.run]", RuntimeReach::Leaf, EgressMode::Gateway)
             .unwrap_or_else(|error| panic!("the leaf translates: {error}"));
@@ -3846,7 +4503,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
         assert!(
             leaf_cells
                 .iter()
-                .any(|(path, operation, _)| *operation == Operation::Exec
+                .any(|(path, operation, _)| *operation == interpreter_operation
                     && path.file_name().is_some_and(|name| name == "bash")),
             "the surrounding OS's bash is the shebang hop: {leaf_cells:?}"
         );
@@ -4163,7 +4820,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
         }
     }
 
-    /// The agent's boundary ignores tool and MCP grants, and adds one alias per added MCP server.
+    /// The agent's boundary ignores tool and MCP grants, and adds one alias per added MCP program.
     #[test]
     fn the_agent_boundary_is_identical_with_and_without_tool_and_mcp_grants() {
         let mut fixture = Fixture::new();
@@ -4196,6 +4853,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
         );
 
         let server = McpServer {
+            argument_wildcards: false,
             name: "gamma".to_string(),
             command: vec!["gamma-mcp".to_string()],
         };
@@ -4224,5 +4882,729 @@ write = ["/Users/example/box-demo/aws-tmp"]
             after_cells, before_cells,
             "an added MCP server adds its alias and nothing else"
         );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    mod live_script_mutation {
+        use super::*;
+        use crate::run::contain::supervise::{CapturedLeaf, LeafBox};
+        use std::os::unix::fs::PermissionsExt as _;
+
+        mod namespace_launcher {
+            include!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/support/namespace_launcher.rs"
+            ));
+        }
+
+        fn launcher_is_usable() -> bool {
+            let helper = crate::run::installation::executable()
+                .expect("locate the running test binary")
+                .with_file_name("strands-box-contain-trampoline");
+            let installed = match std::fs::symlink_metadata(&helper) {
+                Ok(metadata) => metadata.is_file() && metadata.permissions().mode() & 0o111 != 0,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                Err(error) => panic!("cannot inspect {}: {error}", helper.display()),
+            };
+            if !installed {
+                eprintln!(
+                    "skipping: no plain executable strands-box-contain-trampoline beside the test binary"
+                );
+                return false;
+            }
+            namespace_launcher::namespace_launcher_is_usable()
+        }
+
+        fn fixture() -> Fixture {
+            Fixture::from_operator(
+                tempfile::Builder::new()
+                    .prefix("bi")
+                    .tempdir_in("/var/tmp")
+                    .expect("a short fixture outside the sandbox's temporary mount"),
+            )
+        }
+
+        fn script_spec(fixture: &Fixture, reach: RuntimeReach) -> ProcessSpec {
+            let shell = Path::new("/bin/sh").canonicalize().expect("system shell");
+            let mut spec = interpreter_script_spec(fixture, &shell);
+            match reach {
+                RuntimeReach::Agent => spec.filesystem.exec.push(shell),
+                RuntimeReach::Leaf => spec.filesystem.read_file.push(shell),
+            }
+            spec
+        }
+
+        fn write_script(path: &Path, text: &str, replace: bool) {
+            if replace {
+                let replacement = path.with_extension("replacement");
+                std::fs::write(&replacement, text).expect("replacement script");
+                std::fs::set_permissions(&replacement, std::fs::Permissions::from_mode(0o755))
+                    .expect("replacement executable mode");
+                std::fs::rename(replacement, path).expect("replace the script");
+            } else {
+                std::fs::write(path, text).expect("overwrite the script");
+            }
+        }
+
+        fn translate(fixture: &Fixture, spec: &ProcessSpec, reach: RuntimeReach) -> Boundary {
+            let table = match reach {
+                RuntimeReach::Agent => "[agent]",
+                RuntimeReach::Leaf => "[tool.t]",
+            };
+            fixture.translate_full(spec, table, reach, EgressMode::Gateway)
+        }
+
+        async fn run(fixture: &Fixture, boundary: Boundary) -> Result<CapturedLeaf, BoxError> {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                LeafBox::run(
+                    boundary,
+                    &fixture.root,
+                    #[cfg(any(
+                        all(target_os = "macos", feature = "native-filesystem-policy"),
+                        all(target_os = "linux", feature = "native-filesystem-policy",)
+                    ))]
+                    None,
+                ),
+            )
+            .await
+            .expect("the contained script finishes")
+        }
+
+        fn assert_output(output: CapturedLeaf, expected: &[u8]) {
+            assert_eq!(
+                output.status,
+                0,
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stdout, expected);
+        }
+
+        #[tokio::test]
+        async fn replacing_a_script_after_translation_cannot_add_an_interpreter() {
+            if !launcher_is_usable() {
+                return;
+            }
+            for reach in [RuntimeReach::Agent, RuntimeReach::Leaf] {
+                for replace in [false, true] {
+                    let fixture = fixture();
+                    let mut spec = script_spec(&fixture, reach);
+                    let script = Path::new(spec.program());
+                    let shell = Path::new("/bin/sh").canonicalize().expect("system shell");
+                    let original = format!("#!{}\nprintf 'original\\n'\n", shell.display());
+                    write_script(script, &original, false);
+                    assert_output(
+                        run(&fixture, translate(&fixture, &spec, reach))
+                            .await
+                            .unwrap(),
+                        b"original\n",
+                    );
+                    let outside = interpreter_fixture_file(
+                        &fixture,
+                        "unlisted/interpreter",
+                        format!("#!{}\nprintf 'outside-interpreter\\n'\n", shell.display())
+                            .as_bytes(),
+                        0o755,
+                    );
+                    let boundary = translate(&fixture, &spec, reach);
+                    let changed = format!("#!{}\n", outside.display());
+                    write_script(script, &changed, replace);
+                    match run(&fixture, boundary).await {
+                        Ok(output) if output.status == 0 => {
+                            assert!(
+                                replace,
+                                "overwritten bytes must not start an unlisted interpreter"
+                            );
+                            assert_output(output, b"original\n");
+                            println!(
+                                "late interpreter change: {reach:?}, replacement={replace}: retained original script"
+                            );
+                        }
+                        Ok(output) => {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            assert!(
+                                output.stdout.is_empty(),
+                                "unlisted interpreter output: {:?}",
+                                output.stdout
+                            );
+                            assert!(
+                                stderr.contains("No such file or directory")
+                                    || stderr.contains("Permission denied"),
+                                "{stderr}"
+                            );
+                            println!(
+                                "late interpreter change: {reach:?}, replacement={replace}: status={}, {stderr}",
+                                output.status
+                            );
+                        }
+                        Err(error) => {
+                            assert!(
+                                error
+                                    .to_string()
+                                    .starts_with("containment setup failed during"),
+                                "{error}"
+                            );
+                            println!(
+                                "late interpreter change: {reach:?}, replacement={replace}: {error}"
+                            );
+                        }
+                    }
+                    match reach {
+                        RuntimeReach::Agent => spec.filesystem.exec.push(outside),
+                        RuntimeReach::Leaf => spec.filesystem.read_file.push(outside),
+                    }
+                    assert_output(
+                        run(&fixture, translate(&fixture, &spec, reach))
+                            .await
+                            .unwrap(),
+                        b"outside-interpreter\n",
+                    );
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn changed_script_bytes_cannot_read_an_ungranted_file_after_translation() {
+            if !launcher_is_usable() {
+                return;
+            }
+            for reach in [RuntimeReach::Agent, RuntimeReach::Leaf] {
+                let fixture = fixture();
+                let mut spec = script_spec(&fixture, reach);
+                let script = Path::new(spec.program());
+                let shell = Path::new("/bin/sh").canonicalize().expect("system shell");
+                write_script(
+                    script,
+                    &format!("#!{}\nprintf 'original\\n'\n", shell.display()),
+                    false,
+                );
+                let outside = interpreter_fixture_file(
+                    &fixture,
+                    "unlisted/marker",
+                    b"synthetic-outside-marker\n",
+                    0o600,
+                );
+                let boundary = translate(&fixture, &spec, reach);
+                write_script(
+                    script,
+                    &format!(
+                        "#!{}\nif IFS= read -r value < '{}'; then printf '%s\\n' \"$value\"; else printf 'read-refused\\n'; fi\n",
+                        shell.display(),
+                        outside.display()
+                    ),
+                    false,
+                );
+                assert_output(run(&fixture, boundary).await.unwrap(), b"read-refused\n");
+                spec.filesystem.read_file.push(outside);
+                assert_output(
+                    run(&fixture, translate(&fixture, &spec, reach))
+                        .await
+                        .unwrap(),
+                    b"synthetic-outside-marker\n",
+                );
+                println!("late script body: {reach:?}: refused without grant, readable with grant");
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn interpreter_fixture_file(
+        fixture: &Fixture,
+        name: &str,
+        content: &[u8],
+        mode: u32,
+    ) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = fixture.path(name);
+        std::fs::create_dir_all(path.parent().expect("fixture parent")).expect("fixture directory");
+        std::fs::write(&path, content).expect("fixture file");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+            .expect("fixture mode");
+        path
+    }
+
+    #[cfg(target_os = "linux")]
+    fn interpreter_script_spec(fixture: &Fixture, interpreter: &Path) -> ProcessSpec {
+        let script = interpreter_fixture_file(
+            fixture,
+            "bin/run",
+            format!("#!{}\n", interpreter.display()).as_bytes(),
+            0o755,
+        );
+        let mut spec = fixture.spec();
+        spec.command = vec![script.display().to_string()];
+        spec.filesystem = Filesystem::default();
+        spec
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_no_interpreter_exec_seed(boundary: &Boundary, interpreter: &Path) {
+        assert!(
+            !cells(boundary).contains(&(interpreter.to_path_buf(), Operation::Exec, Scope::File)),
+            "an interpreter covered by an existing tree or leaf read must not become an exec-file dependency seed"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_interpreter_route(boundary: &Boundary, spelling: &Path, identity: &Path) {
+        let config: serde_json::Value =
+            serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
+        assert!(
+            config["paths"]
+                .as_array()
+                .expect("path grants")
+                .iter()
+                .any(|grant| {
+                    grant["original"].as_str() == spelling.to_str()
+                        && grant["resolved"].as_str() == identity.to_str()
+                }),
+            "the interpreter spelling must remain reachable"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    fn assert_interpreter_alias_disclosure(boundary: &Boundary, spelling: &Path, identity: &Path) {
+        let disclosure = boundary.disclosure();
+        if spelling == identity {
+            assert!(!disclosure.contains("interpreter aliases"), "{disclosure}");
+            return;
+        }
+        let alias = format!(
+            "  alias       {} -> {}  (interpreter spelling)",
+            spelling.display(),
+            identity.display()
+        );
+        let aliases = disclosure
+            .find("interpreter aliases for configured access:")
+            .expect("existing interpreter access has its own alias section");
+        let minimum = disclosure
+            .find("runtime minimum, added by Core:")
+            .expect("the runtime minimum is disclosed separately");
+        let entry = disclosure.find(&alias).expect("the alias names both paths");
+        assert!(aliases < entry && entry < minimum, "{disclosure}");
+        assert!(
+            !disclosure.contains(&format!(
+                "  exec        {}  (interpreter)",
+                spelling.display()
+            )),
+            "an alias is not disclosed as newly added execution authority: {disclosure}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn declared_scripts_refuse_unlisted_interpreter_files_regardless_of_mode() {
+        for mode in [0o644, 0o755] {
+            for linked in [false, true] {
+                for (table, reach, entry) in [
+                    ("[agent]", RuntimeReach::Agent, "exec"),
+                    ("[tool.t]", RuntimeReach::Leaf, "read_file"),
+                ] {
+                    let fixture = Fixture::new();
+                    let interpreter =
+                        interpreter_fixture_file(&fixture, "unlisted/interpreter", b"inert", mode);
+                    let spelling = if linked {
+                        let link = fixture.path("bin/interpreter-link");
+                        std::os::unix::fs::symlink(&interpreter, &link).expect("interpreter link");
+                        link
+                    } else {
+                        interpreter.clone()
+                    };
+                    let spec = interpreter_script_spec(&fixture, &spelling);
+                    let refusal = fixture
+                        .try_translate_full(&spec, table, reach, EgressMode::Gateway)
+                        .err()
+                        .expect("an unlisted interpreter is refused")
+                        .to_string();
+                    assert!(refusal.contains(table), "{refusal}");
+                    assert!(
+                        refusal.contains(spelling.to_str().expect("fixture spelling")),
+                        "{refusal}"
+                    );
+                    assert!(
+                        refusal.contains(&format!(
+                            "add {} to `{entry}` in that table",
+                            interpreter.display()
+                        )),
+                        "the refusal must recommend a canonical grant: {refusal}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_agent_cannot_use_a_read_grant_as_interpreter_exec_authority() {
+        for tree in [false, true] {
+            let fixture = Fixture::new();
+            let interpreter =
+                interpreter_fixture_file(&fixture, "interpreters/inert", b"inert", 0o755);
+            let mut spec = interpreter_script_spec(&fixture, &interpreter);
+            if tree {
+                spec.filesystem.read.push(fixture.path("interpreters"));
+            } else {
+                spec.filesystem.read_file.push(interpreter.clone());
+            }
+            let refusal = fixture
+                .try_translate_full(&spec, "[agent]", RuntimeReach::Agent, EgressMode::Gateway)
+                .err()
+                .expect("reading a file does not authorize agent execution")
+                .to_string();
+            assert!(
+                refusal.contains(interpreter.to_str().expect("fixture path")),
+                "{refusal}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_declared_leaf_reuses_read_and_write_interpreter_grants_without_exec_seeds() {
+        for tree in [false, true] {
+            for operation in [Operation::Read, Operation::Write] {
+                let fixture = Fixture::new();
+                let interpreter =
+                    interpreter_fixture_file(&fixture, "interpreters/inert", b"inert", 0o755);
+                let mut spec = interpreter_script_spec(&fixture, &interpreter);
+                let (path, scope) = if tree {
+                    (fixture.path("interpreters"), Scope::Root)
+                } else {
+                    (interpreter.clone(), Scope::File)
+                };
+                match (operation, tree) {
+                    (Operation::Read, false) => spec.filesystem.read_file.push(path.clone()),
+                    (Operation::Read, true) => spec.filesystem.read.push(path.clone()),
+                    (Operation::Write, false) => {
+                        spec.filesystem.read_file.push(path.clone());
+                        spec.filesystem.write_file.push(path.clone());
+                    }
+                    (Operation::Write, true) => {
+                        spec.filesystem.read.push(path.clone());
+                        spec.filesystem.write.push(path.clone());
+                    }
+                    _ => unreachable!(),
+                }
+                let boundary = fixture
+                    .try_translate_full(&spec, "[tool.t]", RuntimeReach::Leaf, EgressMode::Gateway)
+                    .expect("the tool already has access to the interpreter");
+                assert!(cells(&boundary).contains(&(path, operation, scope)));
+                assert_no_interpreter_exec_seed(&boundary, &interpreter);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_declared_leaf_keeps_linked_interpreter_spellings_without_exec_seeds() {
+        for operation in [Operation::Read, Operation::Write] {
+            let fixture = Fixture::new();
+            let interpreter =
+                interpreter_fixture_file(&fixture, "interpreters/inert", b"inert", 0o755);
+            let spelling = fixture.path("bin/interpreter-link");
+            std::os::unix::fs::symlink(&interpreter, &spelling).expect("interpreter link");
+            let mut spec = interpreter_script_spec(&fixture, &spelling);
+            match operation {
+                Operation::Read => spec.filesystem.read_file.push(interpreter.clone()),
+                Operation::Write => {
+                    spec.filesystem.read_file.push(interpreter.clone());
+                    spec.filesystem.write_file.push(interpreter.clone());
+                }
+                _ => unreachable!(),
+            }
+            let boundary = fixture
+                .try_translate_full(&spec, "[tool.t]", RuntimeReach::Leaf, EgressMode::Gateway)
+                .expect("the tool already has access to the interpreter target");
+            assert_interpreter_route(&boundary, &spelling, &interpreter);
+            assert_interpreter_alias_disclosure(&boundary, &spelling, &interpreter);
+            assert_no_interpreter_exec_seed(&boundary, &interpreter);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_agent_reuses_explicit_interpreter_exec_file_grants_and_link_spellings() {
+        for linked in [false, true] {
+            let fixture = Fixture::new();
+            let interpreter =
+                interpreter_fixture_file(&fixture, "interpreters/inert", b"inert", 0o755);
+            let spelling = if linked {
+                let link = fixture.path("bin/interpreter-link");
+                std::os::unix::fs::symlink(&interpreter, &link).expect("interpreter link");
+                link
+            } else {
+                interpreter.clone()
+            };
+            let mut spec = interpreter_script_spec(&fixture, &spelling);
+            spec.filesystem.exec.push(interpreter.clone());
+            let boundary = fixture
+                .try_translate_full(&spec, "[agent]", RuntimeReach::Agent, EgressMode::Gateway)
+                .expect("the agent explicitly authorizes this interpreter");
+            assert!(cells(&boundary).contains(&(
+                interpreter.clone(),
+                Operation::Exec,
+                Scope::File
+            )));
+            assert_interpreter_route(&boundary, &spelling, &interpreter);
+            assert_interpreter_alias_disclosure(&boundary, &spelling, &interpreter);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_agent_reuses_interpreter_exec_trees_without_adding_exec_file_seeds() {
+        for linked in [false, true] {
+            let fixture = Fixture::new();
+            let interpreter =
+                interpreter_fixture_file(&fixture, "interpreters/inert", b"inert", 0o755);
+            let spelling = if linked {
+                let link = fixture.path("bin/interpreter-link");
+                std::os::unix::fs::symlink(&interpreter, &link).expect("interpreter link");
+                link
+            } else {
+                interpreter.clone()
+            };
+            let mut spec = interpreter_script_spec(&fixture, &spelling);
+            spec.filesystem.exec.push(fixture.path("interpreters"));
+            let boundary = fixture
+                .try_translate_full(&spec, "[agent]", RuntimeReach::Agent, EgressMode::Gateway)
+                .expect("the agent's exec tree covers the interpreter");
+            assert!(cells(&boundary).contains(&(
+                fixture.path("interpreters"),
+                Operation::Exec,
+                Scope::Root
+            )));
+            if linked {
+                assert_interpreter_route(&boundary, &spelling, &interpreter);
+                assert_interpreter_alias_disclosure(&boundary, &spelling, &interpreter);
+            }
+            assert_no_interpreter_exec_seed(&boundary, &interpreter);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_authorized_interpreter_cannot_introduce_an_unlisted_nested_interpreter() {
+        for (table, reach) in [
+            ("[agent]", RuntimeReach::Agent),
+            ("[tool.t]", RuntimeReach::Leaf),
+        ] {
+            let fixture = Fixture::new();
+            let terminal = interpreter_fixture_file(&fixture, "unlisted/terminal", b"inert", 0o755);
+            let first = interpreter_fixture_file(
+                &fixture,
+                "interpreters/first",
+                format!("#!{}\n", terminal.display()).as_bytes(),
+                0o755,
+            );
+            let mut spec = interpreter_script_spec(&fixture, &first);
+            match reach {
+                RuntimeReach::Agent => spec.filesystem.exec.push(first),
+                RuntimeReach::Leaf => spec.filesystem.read_file.push(first),
+            }
+            let refusal = fixture
+                .try_translate_full(&spec, table, reach, EgressMode::Gateway)
+                .err()
+                .expect("every interpreter needs original authority")
+                .to_string();
+            assert!(
+                refusal.contains(terminal.to_str().expect("fixture path")),
+                "{refusal}"
+            );
+            match reach {
+                RuntimeReach::Agent => spec.filesystem.exec.push(terminal),
+                RuntimeReach::Leaf => spec.filesystem.read_file.push(terminal),
+            }
+            fixture
+                .try_translate_full(&spec, table, reach, EgressMode::Gateway)
+                .expect("a nested chain with every interpreter authorized translates");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn interpreter_grants_do_not_override_denied_lookup_routes() {
+        for denied_route in ["original", "resolved", "intermediate", "denial-alias"] {
+            for (table, reach) in [
+                ("[agent]", RuntimeReach::Agent),
+                ("[tool.t]", RuntimeReach::Leaf),
+            ] {
+                let fixture = Fixture::new();
+                let tree = fixture.path("interpreters");
+                let denied = tree.join("blocked");
+                std::fs::create_dir_all(&denied).expect("denied fixture directory");
+                let interpreter = interpreter_fixture_file(
+                    &fixture,
+                    if matches!(denied_route, "resolved" | "denial-alias") {
+                        "interpreters/blocked/inert"
+                    } else {
+                        "interpreters/inert"
+                    },
+                    b"inert",
+                    0o755,
+                );
+                let spelling = if denied_route == "original" {
+                    let link = denied.join("interpreter-link");
+                    std::os::unix::fs::symlink(&interpreter, &link).expect("original link");
+                    link
+                } else {
+                    let link = fixture.path("bin/interpreter-link");
+                    let target = if denied_route == "intermediate" {
+                        let middle = denied.join("middle");
+                        std::os::unix::fs::symlink(&interpreter, &middle)
+                            .expect("intermediate link");
+                        middle
+                    } else {
+                        interpreter.clone()
+                    };
+                    std::os::unix::fs::symlink(target, &link).expect("interpreter link");
+                    link
+                };
+                let mut spec = interpreter_script_spec(&fixture, &spelling);
+                match reach {
+                    RuntimeReach::Agent => spec.filesystem.exec.push(tree),
+                    RuntimeReach::Leaf => spec.filesystem.read.push(tree),
+                }
+                let denied = if denied_route == "denial-alias" {
+                    let alias = fixture.path("denial-link");
+                    std::os::unix::fs::symlink(fixture.path("interpreters"), &alias)
+                        .expect("denial parent link");
+                    alias.join("blocked")
+                } else {
+                    denied
+                };
+                spec.filesystem.deny.push(denied);
+                let refusal = fixture
+                    .try_translate_full(&spec, table, reach, EgressMode::Gateway)
+                    .err()
+                    .expect("denied interpreter lookup is refused")
+                    .to_string();
+                assert!(refusal.contains(table), "{denied_route}: {refusal}");
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn replacing_a_script_header_cannot_expand_its_original_interpreter_authority() {
+        for (table, reach) in [
+            ("[agent]", RuntimeReach::Agent),
+            ("[tool.t]", RuntimeReach::Leaf),
+        ] {
+            let fixture = Fixture::new();
+            let listed = interpreter_fixture_file(&fixture, "interpreters/listed", b"inert", 0o755);
+            let unlisted =
+                interpreter_fixture_file(&fixture, "unlisted/interpreter", b"inert", 0o755);
+            let mut spec = interpreter_script_spec(&fixture, &listed);
+            match reach {
+                RuntimeReach::Agent => spec.filesystem.exec.push(listed),
+                RuntimeReach::Leaf => spec.filesystem.read_file.push(listed),
+            }
+            let first = fixture
+                .try_translate_full(&spec, table, reach, EgressMode::Gateway)
+                .expect("the original interpreter is listed");
+            assert_no_interpreter_exec_seed(&first, &unlisted);
+            std::fs::write(
+                fixture.path("bin/run"),
+                format!("#!{}\n", unlisted.display()),
+            )
+            .expect("replace the fixture header");
+            let refusal = fixture
+                .try_translate_full(&spec, table, reach, EgressMode::Gateway)
+                .err()
+                .expect("changed bytes cannot add an interpreter grant")
+                .to_string();
+            assert!(
+                refusal.contains(unlisted.to_str().expect("fixture path")),
+                "{refusal}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_tool_cannot_borrow_its_agents_interpreter_grants_after_a_script_edit() {
+        let mut fixture = Fixture::new();
+        let own = interpreter_fixture_file(&fixture, "interpreters/tool", b"inert", 0o755);
+        let agent_only = interpreter_fixture_file(&fixture, "unlisted/agent-only", b"inert", 0o755);
+        let mut spec = interpreter_script_spec(&fixture, &own);
+        spec.filesystem.read_file.push(own.clone());
+        let mut agent = fixture.spec();
+        agent.filesystem = Filesystem {
+            write: vec![fixture.path("bin")],
+            exec: vec![agent_only.clone()],
+            ..Filesystem::default()
+        };
+        fixture.record.agent = Some(agent);
+        fixture.record.tool.insert("t".to_string(), spec.clone());
+        let first = fixture
+            .try_translate_full(&spec, "[tool.t]", RuntimeReach::Leaf, EgressMode::Gateway)
+            .expect("the tool's own interpreter read is sufficient");
+        assert_no_interpreter_exec_seed(&first, &own);
+        assert_no_interpreter_exec_seed(&first, &agent_only);
+        std::fs::write(
+            fixture.path("bin/run"),
+            format!("#!{}\n", agent_only.display()),
+        )
+        .expect("edit the agent-writable command");
+        let refusal = fixture
+            .try_translate_full(&spec, "[tool.t]", RuntimeReach::Leaf, EgressMode::Gateway)
+            .err()
+            .expect("a tool cannot inherit its agent's interpreter grant")
+            .to_string();
+        assert!(refusal.contains("[tool.t]"), "{refusal}");
+        assert!(
+            refusal.contains(agent_only.to_str().expect("fixture path")),
+            "{refusal}"
+        );
+    }
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_interpreter_alias_cannot_bypass_authority_source_protection() {
+        for hard_link in [false, true] {
+            let fixture = Fixture::new();
+            let authority =
+                interpreter_fixture_file(&fixture, "authority/box.toml", b"inert", 0o755);
+            let (source, _) =
+                AuthoritySource::read(&authority, "configuration").expect("authority source");
+            let alias = fixture.path("authority/interpreter");
+            if hard_link {
+                std::fs::hard_link(&authority, &alias).expect("authority hard link");
+            } else {
+                std::os::unix::fs::symlink(&authority, &alias).expect("authority symbolic link");
+            }
+            let mut spec = interpreter_script_spec(&fixture, &alias);
+            let tree = fixture.path("authority");
+            spec.filesystem.read.push(tree.clone());
+            spec.filesystem.write.push(tree.clone());
+            spec.filesystem.exec.push(tree);
+            let fallback = fixture.path("project");
+            let refusal = crate::test_support::with_operator_home(fixture.operator.path(), || {
+                Boundary::translate(
+                    &spec,
+                    Launch {
+                        table: "[agent]",
+                        trailing: &[],
+                        fallback_workspace: &fallback,
+                        shebang_interpreters: ShebangInterpreters::Granted,
+                        runtime_reach: RuntimeReach::Agent,
+                        argument_zero: None,
+                        egress: EgressMode::Gateway,
+                        approved: None,
+                    },
+                    &Site {
+                        attachment: &fixture.attachment,
+                        layout: &fixture.root,
+                        stored: &fixture.record,
+                        protected_sources: &[source],
+                    },
+                )
+            })
+            .err()
+            .expect("protected source cannot become an interpreter alias")
+            .to_string();
+            assert!(refusal.contains("protected authority source"), "{refusal}");
+        }
     }
 }
