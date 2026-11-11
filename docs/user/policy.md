@@ -882,6 +882,16 @@ file, with `policy staging failed: ` and the engine's own reason, and the file i
 Remove the box directory to start again, as [getting started](getting-started.md#clean-up)
 describes.
 
+The run also refuses history stamped more than five minutes ahead of the system clock. This
+happens when the clock moved back after the box last ran, or when someone edited the history file:
+
+```text
+strands-box: error: policy staging failed: durable timestamp <t> is <n> ns ahead of the current clock <now>, exceeding the maximum allowed future skew of 300000000000 ns; refusing the operation rather than issuing future-dated timestamps
+```
+
+If the clock moves back more than five minutes during a run, the box denies every request until the
+clock catches up. Correct the system clock and wait, or wipe the box directory to start again.
+
 ## See also
 
 - [Write a policy and read what it decided](tutorials/first-policy.md): a first policy, a denial,

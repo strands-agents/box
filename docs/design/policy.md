@@ -252,7 +252,9 @@ stops a restart from resetting a budget. The history follows these rules:
   subset](decisions.md#discovery-serves-the-schema-independent-subset).
 - The engine timestamps each event from the system clock. Callers cannot supply timestamps. If the
   clock steps backwards, timestamps keep moving forward, so rolling the clock back doesn't free a
-  budget. The cost is that a restriction can outlast its window a little.
+  budget. The cost is that a restriction can outlast its window a little. If history is stamped
+  more than five minutes ahead of the clock, the box refuses to open it. During a run, each request
+  is denied while the gap exceeds five minutes, and decisions resume when the clock catches up.
 - If an append fails, the engine denies that request and every subsequent request. When recording an
   outcome fails, the caller warns on stderr and nothing retries it.
 - The engine checkpoints as events accumulate and removes events outside the longest window. This

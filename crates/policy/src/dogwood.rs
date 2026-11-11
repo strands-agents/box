@@ -7,7 +7,6 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use dogwood_language::{
     Decision as DogwoodDecision, Event, EventBuilder, LoweredPolicySet, PolicySchema,
@@ -143,7 +142,7 @@ fn opened_file_path(file: &File) -> PathBuf {
 }
 
 fn durable_config() -> DurableConfig {
-    DurableConfig::new(SNAPSHOT_INTERVAL).with_max_future_skew(Duration::MAX)
+    DurableConfig::new(SNAPSHOT_INTERVAL)
 }
 
 fn rule_ids(engine: &DurableTemporalEngine) -> HashMap<PolicyToken, RuleId> {
@@ -2695,16 +2694,18 @@ when temporal {
         }
     }
 
-    #[test]
-    fn wall_clock_rollback_preserves_history_across_every_open_path() {
-        let history = tempfile::tempdir().expect("history directory");
-        let path = history.path().join("dogwood.redb");
+    /// Seconds since the epoch on the system wall clock.
+    fn wall_clock_secs() -> i64 {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time")
             .as_secs();
-        let future = i64::try_from(now).expect("epoch fits") + 3_600;
-        let authority = DogwoodEngine::open_with_test_clock(BUDGET, &path, future)
+        i64::try_from(now).expect("epoch fits")
+    }
+
+    /// Consume the whole `BUDGET` in a history stamped at `at_secs`.
+    fn exhaust_budget_at(path: &Path, at_secs: i64) {
+        let authority = DogwoodEngine::open_with_test_clock(BUDGET, path, at_secs)
             .expect("policy installs before clock rollback");
         let request_id = permitted_http_request(&authority);
         authority
@@ -2715,27 +2716,39 @@ when temporal {
                 &delivered(101),
             )
             .expect("budget consumption records");
-        drop(authority);
+    }
 
-        for mode in 0..4 {
-            let authority = match mode {
-                0 => DogwoodEngine::open(BUDGET, &path).expect("normal open"),
-                1 => DogwoodEngine::open_for_staging(&path).expect("staged open"),
-                2 => {
-                    let file = std::fs::OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .open(&path)
-                        .expect("history file");
-                    DogwoodEngine::open_for_staging_file(file, path.clone())
-                        .expect("descriptor open")
-                }
-                _ => DogwoodEngine::open_for_staging_with_faults(
-                    &path,
-                    Arc::new(FaultInjector::new()),
-                )
-                .expect("fault-injection open"),
-            };
+    /// The number of production open paths that [`open_by_path`] covers.
+    const OPEN_PATHS: usize = 4;
+
+    /// Open `path` on the system wall clock through production open path `mode`.
+    fn open_by_path(mode: usize, path: &Path) -> Result<DogwoodEngine, String> {
+        match mode {
+            0 => DogwoodEngine::open(BUDGET, path).map_err(|error| error.to_string()),
+            1 => DogwoodEngine::open_for_staging(path).map_err(|error| error.to_string()),
+            2 => {
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(path)
+                    .expect("history file");
+                DogwoodEngine::open_for_staging_file(file, path.to_path_buf())
+                    .map_err(|error| error.to_string())
+            }
+            _ => DogwoodEngine::open_for_staging_with_faults(path, Arc::new(FaultInjector::new()))
+                .map_err(|error| error.to_string()),
+        }
+    }
+
+    #[test]
+    fn wall_clock_rollback_within_the_skew_bound_preserves_history_across_every_open_path() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        exhaust_budget_at(&path, wall_clock_secs() + 60);
+
+        for mode in 0..OPEN_PATHS {
+            let authority = open_by_path(mode, &path)
+                .unwrap_or_else(|error| panic!("open mode {mode} must open: {error}"));
             assert_eq!(
                 authority
                     .decide(
@@ -2751,6 +2764,23 @@ when temporal {
                     resource: String::new(),
                 },
                 "open mode {mode} must retain the consumed budget after clock rollback"
+            );
+        }
+    }
+
+    #[test]
+    fn history_stamped_beyond_the_skew_bound_is_refused_by_every_open_path() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        exhaust_budget_at(&path, wall_clock_secs() + 3_600);
+
+        for mode in 0..OPEN_PATHS {
+            let Err(error) = open_by_path(mode, &path) else {
+                panic!("open mode {mode} must refuse a high-water mark an hour ahead of the clock");
+            };
+            assert!(
+                error.contains("maximum allowed future skew"),
+                "open mode {mode} must refuse for clock skew: {error}"
             );
         }
     }
