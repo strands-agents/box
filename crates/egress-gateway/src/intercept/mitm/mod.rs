@@ -87,6 +87,39 @@ pub struct MitmConfig {
     /// borrow another server's identity. Host-only match (a host registers all its ports). Empty means
     /// no remote MCP servers, and every existing caller keeps today's behavior unchanged.
     pub mcp_servers: Vec<(String, String)>,
+    /// Per-destination backend re-routes. A request whose destination matches the pattern is dialed to
+    /// the [`BackendDial`] instead of the original destination, and the backend is presented on the
+    /// upstream leg (SNI, certificate, and `Host`). The host decision still runs on the original
+    /// destination, and the address decision on the backend address. Empty means no re-route, and
+    /// every existing caller keeps today's behavior unchanged.
+    pub backends: Vec<(credentials::DestinationPattern, BackendDial)>,
+}
+
+/// Where a re-routed destination dials, and how the upstream leg speaks to it.
+#[derive(Debug, Clone)]
+pub struct BackendDial {
+    /// The backend host to dial, resolve, and present on the upstream leg.
+    pub host: String,
+    /// The backend port to dial.
+    pub port: u16,
+    /// Whether the upstream leg speaks TLS (the backend scheme is `https`).
+    pub tls: bool,
+    /// A path prefix the gateway prepends to the agent's request path, normalized to empty or
+    /// `/segment...` with no trailing slash. Empty means the agent's path is forwarded unchanged.
+    pub path_prefix: String,
+}
+
+/// The exact host a backend pattern names, dropping an optional `:port`. A backend destination is
+/// validated to an exact host (optional port), with no path and no wildcard, so `as_written` is
+/// `host` or `host:port`.
+fn backend_pattern_host(pattern: &credentials::DestinationPattern) -> String {
+    let written = pattern.as_written();
+    match written.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
+            host.to_string()
+        }
+        _ => written,
+    }
 }
 
 impl Default for MitmConfig {
@@ -102,6 +135,7 @@ impl Default for MitmConfig {
             upstream_read_deadline: std::time::Duration::from_secs(300),
             max_connections: 256,
             mcp_servers: Vec::new(),
+            backends: Vec::new(),
         }
     }
 }
@@ -131,6 +165,30 @@ impl SharedState {
             .iter()
             .find(|(h, _)| h.eq_ignore_ascii_case(host))
             .map(|(_, ip)| *ip)
+    }
+
+    /// The backend `host:port` dials to, if the original destination `host:port` re-routes. Matched by
+    /// the same [`DestinationPattern`](credentials::DestinationPattern) the credential layer uses, so a
+    /// backend applies to exactly the destinations policy and credentials consider. `None` leaves the
+    /// dial on the original destination.
+    fn backend_for(&self, host: &str, port: u16) -> Option<&BackendDial> {
+        let target = crate::boundary::Target::new(host, port);
+        let destination = target.as_destination();
+        self.config
+            .backends
+            .iter()
+            .find(|(pattern, _)| pattern.matches(&destination))
+            .map(|(_, dial)| dial)
+    }
+
+    /// Whether some backend entry re-routes `host` on ANY port. A re-routed host must never fall
+    /// through to a direct dial, so a CONNECT to such a host on a port no entry covers fails closed
+    /// rather than reach the original destination.
+    fn host_reroutes(&self, host: &str) -> bool {
+        self.config
+            .backends
+            .iter()
+            .any(|(pattern, _)| backend_pattern_host(pattern).eq_ignore_ascii_case(host))
     }
 
     /// The remote MCP server name configured for `host`, if any (host-only match).

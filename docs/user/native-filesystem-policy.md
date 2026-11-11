@@ -89,7 +89,8 @@ Production use still requires further review and tests for those failures.
 ## Stored configuration and rollback
 
 When `[limits]` has no explicit settings, `file-attributes` is `false`, MCP argument wildcards
-are disabled, MCP executable names are bare, and the agent declares no `[[agent.ingress]]`,
+are disabled, MCP executable names are bare, the agent declares no `[[agent.ingress]]`,
+and no egress destination has a backend,
 configurations without process overrides retain version 21 when disabled and version 22 when enabled.
 An explicit process override requires record version 23.
 Two stdio MCP servers that share a program require record version 24.
@@ -98,7 +99,8 @@ Enabling [MCP argument wildcards](mcp.md#argument-wildcards) on any server requi
 An explicit `limits.shell.timeout` requires record version 27, including `30` and `false`.
 An [absolute MCP executable path](mcp.md#select-an-executable-by-path) requires record version 28.
 A box whose agent declares `[[agent.ingress]]` requires record version 29.
-An explicit `limits.shell.max_input` or `limits.shell.max_output` requires record version 30,
+A box whose egress re-routes a destination to a [backend](egress.md) requires record version 30.
+An explicit `limits.shell.max_input` or `limits.shell.max_output` requires record version 31,
 including values equal to the defaults.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
@@ -111,6 +113,7 @@ If MCP argument wildcards are enabled, replace the stars with concrete arguments
 `argument_wildcards` on each server too.
 Replace each absolute MCP executable path with a bare program name that the server's `PATH`
 resolves to the intended executable.
+Remove any egress backends before returning to a binary that supports only version 21.
 Run once with the current build before switching binaries.
 This writes a version 21 record while retaining durable policy history.
 Changing TOML alone does not rewrite an existing record.

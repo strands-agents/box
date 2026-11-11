@@ -1778,3 +1778,58 @@ when temporal { formerly within 1h ( demo::Action::"echo"::request{ input.text: 
     );
     assert_eq!(upstream.finish().len(), 3, "no denied call reaches origin");
 }
+
+#[test]
+fn a_limit_over_a_remote_tools_own_response_refuses_the_next_call() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let upstream = TraceUpstream::start();
+    let box_ = Request::with_config(
+        "remote-tool-response",
+        r#"permit(principal, action == Box::Action::"net:connect", resource);
+permit(principal, action == Box::Action::"http:request", resource);
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "demo" };
+@id("one_echo")
+forbid(principal, action == demo::Action::"echo", resource)
+when temporal { formerly within 1h ( demo::Action::"echo"::response{ input.text: "first" } ) };"#,
+        &format!(
+            "[mcp.demo]\ntype = \"http\"\ndestinations = [\"{}\"]\n",
+            upstream.authority
+        ),
+    )
+    .expect();
+    let frame = |id: &str, method: &str, text: Option<&str>| {
+        let params = match text {
+            Some(text) => json!({"name": "echo", "arguments": {"text": text}}),
+            None => json!({}),
+        };
+        json!({
+            "url": format!("http://{}/mcp", upstream.authority),
+            "headers": {},
+            "body": {"jsonrpc": "2.0", "id": id, "method": method, "params": params}
+        })
+    };
+    let statuses: Vec<u64> = trace_probe(
+        &box_,
+        &json!([
+            frame("list", "tools/list", None),
+            frame("first", "tools/call", Some("first")),
+            frame("second", "tools/call", Some("second")),
+        ]),
+    )
+    .iter()
+    .map(|reply| reply["status"].as_u64().expect("a status"))
+    .collect();
+    assert_eq!(
+        statuses,
+        [200, 200, 403],
+        "the finished first echo is recorded under the tool's own action"
+    );
+    assert_eq!(
+        upstream.finish().len(),
+        2,
+        "the refused echo never reached origin"
+    );
+}
