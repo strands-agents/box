@@ -1,4 +1,4 @@
-//! The tenant-keyed [`Vault`] — one startup door and two request-leg verbs.
+//! The tenant-keyed [`Vault`] for credential attachment and response redaction.
 
 use std::path::{Path, PathBuf};
 
@@ -8,8 +8,8 @@ use crate::model::RouteKind;
 use crate::sources::{AmbientFallbackPolicy, CREDSD_SCHEME, resolve_credsd_socket};
 use crate::{
     Backend, CredentialDiagnostic, CredentialError, Destination, DestinationPattern, InjectMode,
-    Locator, Opened, Phantom, PhantomCheck, PhantomToken, RequestId, Result, RouteSpec, Secret,
-    Skipped, VaultConfig,
+    Locator, Opened, Phantom, PhantomCheck, PhantomToken, RequestId, ResponseRedactor, Result,
+    RouteSpec, Secret, Skipped, VaultConfig,
 };
 
 /// The correlation id the eager load uses for its audit records.
@@ -83,6 +83,56 @@ impl std::fmt::Debug for OpaqueBinding {
     }
 }
 
+/// One resolved box-owned binding: the real secret and where the box attaches it. No phantom is
+/// minted, because the workload never presents a placeholder for it.
+pub(crate) struct BoxOwnedBinding {
+    /// How the real secret attaches to the outbound request.
+    inject: InjectMode,
+    /// The resolved secret, wiped on drop and validated at construction.
+    secret: Secret,
+}
+
+impl BoxOwnedBinding {
+    pub(crate) fn inject(&self) -> &InjectMode {
+        &self.inject
+    }
+
+    pub(crate) fn secret(&self) -> &str {
+        self.secret.as_str()
+    }
+
+    pub(crate) fn secret_value(&self) -> &Secret {
+        &self.secret
+    }
+}
+
+impl std::fmt::Debug for BoxOwnedBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoxOwnedBinding")
+            .field("inject", &self.inject)
+            .field("secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// One strip-phantom binding: where the placeholder is, so the vault strips it before the request
+/// egresses. It holds no secret: nothing is attached, only stripped.
+#[derive(Debug)]
+pub(crate) struct StripBinding {
+    /// Where the harness placed the placeholder, so it is stripped before the request goes upstream.
+    harness: InjectMode,
+}
+
+impl StripBinding {
+    pub(crate) fn harness(&self) -> &InjectMode {
+        &self.harness
+    }
+}
+
+/// A signed-AWS route's resolved form: its config locator and an optional explicit `(service,
+/// region)` to sign under (a re-routed backend whose host carries no derivable scope).
+type SignedAwsRoute = (Locator, Option<(String, String)>);
+
 /// The loaded credential set for one tenant.
 #[derive(Debug)]
 pub struct Vault {
@@ -91,8 +141,12 @@ pub struct Vault {
     tenant: String,
     /// destination pattern → resolved opaque binding.
     opaque: Vec<(DestinationPattern, OpaqueBinding)>,
+    /// destination pattern → resolved box-owned binding (a credential the box attaches itself).
+    box_owned: Vec<(DestinationPattern, BoxOwnedBinding)>,
+    /// destination pattern → strip-phantom binding (strip the placeholder, attach nothing).
+    strip: Vec<(DestinationPattern, StripBinding)>,
     /// destination pattern → the structured AWS config a signed route signs with.
-    signed_aws: Vec<(DestinationPattern, Locator)>,
+    signed_aws: Vec<(DestinationPattern, SignedAwsRoute)>,
     /// The backend, retained because a signed route resolves its credentials per request (they
     /// expire), unlike an opaque secret which is resolved once at open.
     backend: Backend,
@@ -123,6 +177,8 @@ impl Vault {
         let mut vault = Self {
             tenant,
             opaque: Vec::new(),
+            box_owned: Vec::new(),
+            strip: Vec::new(),
             signed_aws: Vec::new(),
             backend,
             ambient_policy,
@@ -137,82 +193,125 @@ impl Vault {
         // Every minted phantom, to enforce vault-wide uniqueness: a collision is a
         // fail-closed error, never two credentials sharing one placeholder.
         let mut seen_phantoms = std::collections::HashSet::new();
+        // The phantom each credential minted, keyed by its reference and prefix. Routes that name
+        // one credential share its phantom, so one placeholder works at every destination it serves.
+        let mut minted: Vec<(Locator, String, PhantomToken)> = Vec::new();
+
+        // Mint a unique phantom, failing closed on a vault-wide collision. The caller records the
+        // per-destination `phantoms` mapping, so a shared phantom is recorded at each host it serves.
+        let mut mint = |prefix: &str| -> Result<PhantomToken> {
+            let phantom = PhantomToken::generate(prefix)?;
+            if !seen_phantoms.insert(phantom.as_str().to_string()) {
+                return Err(CredentialError::Credential(
+                    "phantom-token collision across the vault; refusing to bind two credentials to \
+                     one placeholder"
+                        .to_string(),
+                ));
+            }
+            Ok(phantom)
+        };
 
         for route in &routes {
             // Refuse before dispatching, so no branch can claim a route first and leave an unsupported
             // field unread.
             Self::refuse_unsupported(route)?;
 
-            let (inject, harness, phantom_check, phantom_prefix) = match route.kind() {
+            match route.kind() {
                 // A signed route carries a config block resolved at use, not a secret held here.
-                RouteKind::SignedAws { config } => {
+                RouteKind::SignedAws { config, scope } => {
                     if config.scheme() == CREDSD_SCHEME {
                         declares_credsd = true;
                     }
                     vault
                         .signed_aws
-                        .push((route.destination().clone(), config.clone()));
-                    continue;
+                        .push((route.destination().clone(), (config.clone(), scope.clone())));
                 }
+                // A strip-phantom route mints a placeholder (so a workload harness has one) and
+                // resolves NO real secret. The strip at request time is unconditional.
+                RouteKind::StripPhantom {
+                    harness,
+                    phantom_prefix,
+                } => {
+                    let phantom = mint(phantom_prefix)?;
+                    phantoms.push(Phantom::new(route.destination().clone(), phantom));
+                    vault.strip.push((
+                        route.destination().clone(),
+                        StripBinding {
+                            harness: harness.clone(),
+                        },
+                    ));
+                }
+                // An opaque route resolves a real secret and mints a phantom to stand in for it.
                 RouteKind::Opaque {
                     inject,
                     harness,
                     phantom_check,
                     phantom_prefix,
-                } => (
-                    inject.clone(),
-                    harness.clone(),
-                    *phantom_check,
-                    phantom_prefix.clone(),
-                ),
-            };
-
-            match vault.resolve_secret(route) {
-                Ok(secret) => {
-                    // Mint a unique phantom for the resolved secret. Generation failure or a
-                    // vault-wide collision fails closed — never a weak or duplicated value.
-                    let phantom = PhantomToken::generate(&phantom_prefix)?;
-                    if !seen_phantoms.insert(phantom.as_str().to_string()) {
-                        return Err(CredentialError::Credential(
-                            "phantom-token collision across the vault; refusing to bind two \
-                             credentials to one placeholder"
-                                .to_string(),
+                } => {
+                    if let Some(secret) = Self::classify_resolve(
+                        vault.resolve_secret(route),
+                        route,
+                        missing,
+                        &mut skipped,
+                    )? {
+                        // Routes naming one credential (by reference and prefix) share one phantom,
+                        // so a single placeholder works at every destination the credential serves.
+                        // A new credential mints one (which records its per-destination mapping); a
+                        // shared one reuses the token and records this destination's mapping too.
+                        let phantom = match minted.iter().find(|(locator, prefix, _)| {
+                            locator == route.credential_ref() && prefix == phantom_prefix
+                        }) {
+                            Some((_, _, phantom)) => {
+                                let phantom = phantom.clone();
+                                phantoms.push(Phantom::new(
+                                    route.destination().clone(),
+                                    phantom.clone(),
+                                ));
+                                phantom
+                            }
+                            None => {
+                                let phantom = mint(phantom_prefix)?;
+                                phantoms.push(Phantom::new(
+                                    route.destination().clone(),
+                                    phantom.clone(),
+                                ));
+                                minted.push((
+                                    route.credential_ref().clone(),
+                                    phantom_prefix.clone(),
+                                    phantom.clone(),
+                                ));
+                                phantom
+                            }
+                        };
+                        vault.opaque.push((
+                            route.destination().clone(),
+                            OpaqueBinding {
+                                inject: inject.clone(),
+                                harness: harness.clone(),
+                                secret,
+                                phantom,
+                                phantom_check: *phantom_check,
+                            },
                         ));
                     }
-                    phantoms.push(Phantom::new(route.destination().clone(), phantom.clone()));
-                    vault.opaque.push((
-                        route.destination().clone(),
-                        OpaqueBinding {
-                            inject,
-                            harness,
-                            secret,
-                            phantom,
-                            phantom_check,
-                        },
-                    ));
                 }
-                // A genuinely absent secret is the one soft failure — unless the caller asked for no
-                // soft tier, in which case it is fatal like everything else.
-                Err(err) if err.is_soft() && missing == MissingRoutePolicy::Skip => {
-                    skipped.push(Skipped::new(CredentialDiagnostic::new(
-                        "secret_not_found",
-                        &err,
-                        route.destination_display(),
-                        &route.reference_display(),
-                        format!("{err}"),
-                        "ensure the referenced secret exists before opening the vault",
-                    )));
+                // A box-owned route resolves a real secret and attaches it itself, with no phantom.
+                RouteKind::BoxOwned { inject } => {
+                    if let Some(secret) = Self::classify_resolve(
+                        vault.resolve_secret(route),
+                        route,
+                        missing,
+                        &mut skipped,
+                    )? {
+                        vault.box_owned.push((
+                            route.destination().clone(),
+                            BoxOwnedBinding {
+                                inject: inject.clone(),
+                                secret,
+                            },
+                        ));
+                    }
                 }
-                Err(err) if err.is_soft() => {
-                    // `require_every_route`: name the destination, since the caller wanted no skips.
-                    return Err(CredentialError::Credential(format!(
-                        "{destination} declares a credential that did not resolve ({err}), and \
-                         every route is required: the destination would stay reachable with no \
-                         credential attached",
-                        destination = route.destination_display(),
-                    )));
-                }
-                Err(err) => return Err(err),
             }
         }
 
@@ -221,6 +320,39 @@ impl Vault {
         }
 
         Ok(Opened::new(vault, phantoms, skipped))
+    }
+
+    /// Classify a secret resolution: `Ok(Some)` is a resolved secret, `Ok(None)` a soft miss under
+    /// the skip policy (recorded in `skipped`), and `Err` a hard failure. Shared by the opaque and
+    /// box-owned routes, which both resolve a real secret.
+    fn classify_resolve(
+        result: Result<Secret>,
+        route: &RouteSpec,
+        missing: MissingRoutePolicy,
+        skipped: &mut Vec<Skipped>,
+    ) -> Result<Option<Secret>> {
+        match result {
+            Ok(secret) => Ok(Some(secret)),
+            // A genuinely absent secret is the one soft failure — unless the caller asked for no soft
+            // tier, in which case it is fatal like everything else.
+            Err(err) if err.is_soft() && missing == MissingRoutePolicy::Skip => {
+                skipped.push(Skipped::new(CredentialDiagnostic::new(
+                    "secret_not_found",
+                    &err,
+                    route.destination_display(),
+                    &route.reference_display(),
+                    format!("{err}"),
+                    "ensure the referenced secret exists before opening the vault",
+                )));
+                Ok(None)
+            }
+            Err(err) if err.is_soft() => Err(CredentialError::Credential(format!(
+                "{destination} declares a credential that did not resolve ({err}), and every route \
+                 is required: the destination would stay reachable with no credential attached",
+                destination = route.destination_display(),
+            ))),
+            Err(err) => Err(err),
+        }
     }
 
     /// Refuse a route naming a credential this vault has no way to produce.
@@ -292,8 +424,24 @@ impl Vault {
     pub fn attach_for(&self, req: Outbound<'_>) -> Result<Option<Attachment>> {
         // A signed AWS binding first: it is signed in-boundary and never phantom-swapped, because
         // nothing was minted to match.
-        if let Some(config) = Self::first_match(&self.signed_aws, &req.destination) {
-            return self.sign_aws(config, &req).map(Some);
+        if let Some((config, scope)) = Self::first_match(&self.signed_aws, &req.destination) {
+            return self.sign_aws(config, scope.as_ref(), &req).map(Some);
+        }
+        // A re-route composes two edits on one destination (one credential authority, so one control):
+        // a strip-phantom binding removes the workload's placeholder, and a box-owned binding attaches
+        // the box's own token. On the same header the strip runs first, so the backend token wins and
+        // no placeholder rides upstream. Either may be absent.
+        let strip = Self::first_match(&self.strip, &req.destination);
+        let box_owned = Self::first_match(&self.box_owned, &req.destination);
+        if strip.is_some() || box_owned.is_some() {
+            let mut attachment = Attachment::new();
+            if let Some(binding) = strip {
+                crate::legs::strip_phantom(binding, &mut attachment)?;
+            }
+            if let Some(binding) = box_owned {
+                crate::legs::attach_box_owned(binding, &mut attachment);
+            }
+            return Ok(Some(attachment));
         }
         match self.resolve_opaque(&req.destination)? {
             Some(binding) => self.swap_phantom(binding, &req).map(Some),
@@ -304,10 +452,27 @@ impl Vault {
     /// Scan `res` for an injected secret and return the redactions needed, or `None` when nothing is
     /// bound for its destination or nothing leaked.
     pub fn redact_leaks(&self, res: Inbound<'_>) -> Option<Redactions> {
+        // A box-owned credential is really attached, so an echo of it is scrubbed like any other.
+        if let Some(binding) = Self::first_match(&self.box_owned, &res.destination) {
+            return Redactions::scan(&res, binding.secret_value());
+        }
         // An ambiguous binding is not a fault on the response leg: there is nothing to attach, so the
         // conservative move is to scan nothing rather than fail a response already received.
         let binding = self.resolve_opaque(&res.destination).ok()??;
         Redactions::scan(&res, binding.secret_value())
+    }
+
+    /// Create an owned response scrubber, or `None` when no box-owned or unique opaque binding
+    /// matches the destination.
+    pub fn response_redactor(&self, destination: Destination<'_>) -> Option<ResponseRedactor> {
+        // A box-owned credential (a re-route's backend token) is really attached, so an echo of it in
+        // a streamed response is scrubbed like any opaque secret. Match it first, as `redact_leaks`
+        // does, or a backend that echoes `Authorization` returns the backend token to the workload.
+        if let Some(binding) = Self::first_match(&self.box_owned, &destination) {
+            return Some(ResponseRedactor::new(binding.secret_value()));
+        }
+        let binding = self.resolve_opaque(&destination).ok()??;
+        Some(ResponseRedactor::new(binding.secret_value()))
     }
 
     /// Resolve the opaque binding for `dest`, failing closed on ambiguity.
@@ -430,14 +595,22 @@ mod tests {
 
     // --- open ----------------------------------------------------------------
 
-    /// Every resolved route is bound and mints exactly one phantom, and the vault comes up with no
-    /// skips.
+    fn opaque_route_for(dest: &str, reference: &str) -> RouteSpec {
+        RouteSpec::opaque(
+            DestinationPattern::parse(dest).unwrap(),
+            Locator::parse_uri(reference).unwrap(),
+            header_mode(),
+        )
+    }
+
+    /// Every resolved route is bound and two credentials mint two phantoms, and the vault comes up
+    /// with no skips.
     #[test]
     fn open_binds_every_resolved_route_and_mints_one_phantom_each() {
         let opened = Vault::open(
             VaultConfig::new(backend_with(Box::new(FixedSource("s3cret"))), "tenant-a")
-                .route(opaque_route("api.github.com"))
-                .route(opaque_route("api.stripe.com")),
+                .route(opaque_route_for("api.github.com", "test://github"))
+                .route(opaque_route_for("api.stripe.com", "test://stripe")),
         )
         .expect("both routes resolve");
 
@@ -448,6 +621,49 @@ mod tests {
             tokens[0], tokens[1],
             "two secrets sharing one phantom would let either be swapped for the other"
         );
+    }
+
+    /// Routes that name one credential share one phantom, so one placeholder works at each host.
+    #[test]
+    fn routes_that_name_one_credential_share_one_phantom() {
+        let vault_for = |second: &str| {
+            Vault::open(
+                VaultConfig::new(backend_with(Box::new(FixedSource("s3cret"))), "t")
+                    .route(opaque_route_for("management.example.dev", "test://key"))
+                    .route(opaque_route_for("runtime.example.dev", second)),
+            )
+            .unwrap()
+        };
+
+        let shared = vault_for("test://key");
+        let tokens: Vec<&str> = shared.phantoms().iter().map(Phantom::token).collect();
+        assert_eq!(tokens.len(), 2, "one phantom entry per route");
+        assert_eq!(tokens[0], tokens[1], "one credential, one placeholder");
+
+        let distinct = vault_for("test://other");
+        let tokens: Vec<&str> = distinct.phantoms().iter().map(Phantom::token).collect();
+        assert_ne!(
+            tokens[0], tokens[1],
+            "two credentials sharing one phantom would let either be swapped for the other"
+        );
+    }
+
+    /// One credential with two phantom prefixes mints two phantoms: each carries its own prefix.
+    #[test]
+    fn one_credential_with_two_prefixes_mints_two_phantoms() {
+        let route = |dest: &str, prefix: &str| {
+            opaque_route_for(dest, "test://key")
+                .phantom_prefix(prefix.to_string())
+                .unwrap()
+        };
+        let opened = Vault::open(
+            VaultConfig::new(backend_with(Box::new(FixedSource("s3cret"))), "t")
+                .route(route("a.example.dev", "sk-a-"))
+                .route(route("b.example.dev", "sk-b-")),
+        )
+        .unwrap();
+        let tokens: Vec<&str> = opened.phantoms().iter().map(Phantom::token).collect();
+        assert!(tokens[0].starts_with("sk-a-") && tokens[1].starts_with("sk-b-"));
     }
 
     /// A phantom names the destination it stands in for, so a supervisor can seed it correctly.
@@ -699,6 +915,52 @@ mod tests {
             vault
                 .resolve_opaque(&dest("other.example.com", 443, "/"))
                 .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn response_redactor_preserves_destination_binding_and_outlives_the_vault() {
+        let vault = Vault::open(
+            VaultConfig::new(backend_with(Box::new(FixedSource("private-value"))), "t")
+                .route(opaque_route("api.example.com:443/v1/chat")),
+        )
+        .unwrap()
+        .into_vault();
+
+        for destination in [
+            dest("other.example.com", 443, "/v1/chat"),
+            dest("api.example.com", 80, "/v1/chat"),
+            dest("api.example.com", 443, "/v1/chatbot"),
+        ] {
+            assert!(vault.response_redactor(destination).is_none());
+        }
+        let mut redactor = vault
+            .response_redactor(dest("API.EXAMPLE.COM", 443, "/v1/chat/completions"))
+            .unwrap();
+        drop(vault);
+        assert_eq!(
+            redactor.redact_header("private-value").unwrap(),
+            "[REDACTED]"
+        );
+        assert!(redactor.push(b"private-").is_empty());
+        let mut redacted = redactor.push(b"value");
+        redacted.extend(redactor.finish());
+        assert_eq!(redacted, b"[REDACTED]");
+    }
+
+    #[test]
+    fn an_ambiguous_response_has_no_streaming_redactor() {
+        let vault = Vault::open(
+            VaultConfig::new(backend_with(Box::new(FixedSource("private-value"))), "t")
+                .route(opaque_route("*.example.com"))
+                .route(opaque_route("api.example.com")),
+        )
+        .unwrap()
+        .into_vault();
+        assert!(
+            vault
+                .response_redactor(dest("api.example.com", 443, "/"))
                 .is_none()
         );
     }

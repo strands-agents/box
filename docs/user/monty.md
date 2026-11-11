@@ -1,4 +1,4 @@
-# Python scripts in a box
+# Python in a box
 
 A box runs the agent's Python scripts in [Monty](https://github.com/pydantic/monty), an
 interpreter for a subset of Python. Policy decides each file operation a script makes, and the
@@ -100,6 +100,18 @@ These raise an error whatever the policy says:
 | A path outside the operator's home and the workspace | `PermissionError: <path>: outside this box's home and every declared bind` | A path under the operator's home or the workspace |
 | A path that is a symbolic link, or has one in it | `PermissionError: <path>: resolves to a different path, so it is not the identity policy judged` | The path of the file the link points to |
 | The box directory, or the `box.toml` and `policy.dw` this run loaded | `PermissionError: <path>: resolves into trusted Box state, which no policy may open`, or `resolves to an authority source that this run loaded` | A path outside the box directory |
+| A write, deletion, or rename that reaches a configured tool command or its ancestor | `PermissionError` containing `is a configured tool command or its ancestor, which this run does not allow to change` | A path outside the command and its enclosing directories |
+| A directory mutation that reaches a hard-link alias for a configured command | `PermissionError` containing `contains a hard link to a configured tool command, so this mutation is not allowed` | A directory without the command's hard-link names |
+| A directory mutation whose hard-link scan cannot finish | `PermissionError` containing `cannot finish checking for configured tool command hard links`, followed by the scan failure | [Correct the reported cause or narrow the directory](config.md#configured-command-integrity) |
+| A write, deletion, or rename that changes an installed Box program or an enclosing path | `PermissionError` containing `cannot change a trusted Box executable or its path` | [Update the installation between runs](config.md#installation-integrity) |
+
+A rename can also fail if another operation creates its destination while Box checks policy.
+Box raises `PermissionError: <destination>: filesystem identity changed during effect admission`
+and leaves both files in place. Retry the rename to let policy check deletion of the existing destination.
+
+For a destination that does not exist, Box requires an atomic rename that cannot replace an existing name.
+If the operating system or filesystem rejects that operation, the rename raises `OSError` and changes neither path.
+Box does not retry with a replacing rename. An overwrite that policy explicitly permits still uses the existing rename operation.
 
 ## Time and randomness
 

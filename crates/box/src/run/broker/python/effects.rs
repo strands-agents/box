@@ -11,7 +11,7 @@ use monty_types::{
 use policy::{FsResult, RenameDestination, ScriptPermit, ScriptPolicyInterceptor, ScriptRefusal};
 
 use super::clock::{date_today, datetime_now, unix_seconds_now, urandom};
-use crate::run::broker::held::HeldPath;
+use crate::run::broker::held::{HeldPath, Unreached};
 use crate::run::broker::reach::Reach;
 use crate::run::telemetry::{DecisionRecorder, EffectiveDecision, ObservationCapture};
 
@@ -31,14 +31,25 @@ impl<'p> MontyPep<'p> {
         call: &OsFunctionCall,
         reach: &Reach,
         dst_spelled: &str,
-    ) -> Result<(std::path::PathBuf, std::path::PathBuf, ScriptPermit<'p>), ScriptRefusal> {
-        self.policy.admit_rename(call, |destination| {
-            match reach.approve_mutation(destination, dst_spelled) {
+    ) -> Result<
+        (
+            std::path::PathBuf,
+            std::path::PathBuf,
+            ScriptPermit<'p>,
+            RenameDestination,
+        ),
+        ScriptRefusal,
+    > {
+        let mut judged = RenameDestination::Unbound;
+        let (source, destination, permit) = self.policy.admit_rename(call, |destination| {
+            judged = match reach.approve_mutation(destination, dst_spelled) {
                 Ok(approved) => RenameDestination::bound_at(&approved),
                 // The floor refuses this destination after admission, so nothing is read there.
                 Err(_) => RenameDestination::Unbound,
-            }
-        })
+            };
+            judged
+        })?;
+        Ok((source, destination, permit, judged))
     }
 }
 
@@ -159,8 +170,16 @@ pub(super) fn admit_and_perform(
                     ));
             }
             // Refused by the floor, *after* policy allowed it — which is the point: policy
-            // cannot widen this. Recorded as failed rather than dropped, because the attempt
-            record(permit, FsResult::Failed);
+            // cannot widen this. A metadata read of a path the host cannot resolve is an answer
+            // (docs/design/decisions.md#temporal-rules-are-enforced-against-recorded-history).
+            record(
+                permit,
+                if refused.is_unresolved() && is_metadata_read(&call) {
+                    FsResult::Completed
+                } else {
+                    FsResult::Failed
+                },
+            );
             return Err(MontyException::new(
                 ExcType::PermissionError,
                 Some(refused.to_string()),
@@ -349,20 +368,39 @@ fn root_paths(call: &mut OsFunctionCall, reach: &Reach) {
 
 /// Perform one admitted effect against the resolved path, following no symbolic link in it.
 fn perform(call: &OsFunctionCall, path: &Path) -> (FsResult, ExtFunctionResult) {
-    let held = match HeldPath::of(path) {
+    let held = match HeldPath::reach(path) {
         Ok(held) => held,
         // A predicate answers false for a path it cannot reach, as `os.path.exists` does.
-        Err(_) if is_predicate(call) => {
+        Err(unreached) if is_predicate(call) => {
             return (
-                FsResult::Completed,
+                answered(&unreached),
                 ExtFunctionResult::Return(MontyObject::bool(false)),
             );
         }
-        Err(error) => return (FsResult::Failed, io_exception(&error).into()),
+        Err(unreached) if matches!(call, OsFunctionCall::Stat(_)) => {
+            return (
+                answered(&unreached),
+                io_exception(&unreached.into_error()).into(),
+            );
+        }
+        Err(unreached) => {
+            return (
+                FsResult::Failed,
+                io_exception(&unreached.into_error()).into(),
+            );
+        }
     };
     let is_kind = |kind: libc::mode_t| {
         held.stat()
             .is_ok_and(|metadata| metadata.st_mode & libc::S_IFMT == kind)
+    };
+    // Approval admits no symbolic link at the leaf, so one found here was swapped in afterwards.
+    let leaf_answered = || {
+        if is_kind(libc::S_IFLNK) {
+            FsResult::Failed
+        } else {
+            FsResult::Completed
+        }
     };
     match call {
         OsFunctionCall::ReadText(_) => match read(&held) {
@@ -417,15 +455,15 @@ fn perform(call: &OsFunctionCall, path: &Path) -> (FsResult, ExtFunctionResult) 
             }
         }
         OsFunctionCall::Exists(_) => (
-            FsResult::Completed,
+            leaf_answered(),
             ExtFunctionResult::Return(MontyObject::bool(held.stat().is_ok())),
         ),
         OsFunctionCall::IsFile(_) => (
-            FsResult::Completed,
+            leaf_answered(),
             ExtFunctionResult::Return(MontyObject::bool(is_kind(libc::S_IFREG))),
         ),
         OsFunctionCall::IsDir(_) => (
-            FsResult::Completed,
+            leaf_answered(),
             ExtFunctionResult::Return(MontyObject::bool(is_kind(libc::S_IFDIR))),
         ),
         // `create_dir`, never `create_dir_all`: the recursive form would create ancestors
@@ -487,16 +525,24 @@ fn perform(call: &OsFunctionCall, path: &Path) -> (FsResult, ExtFunctionResult) 
         // The leaf's own metadata, so this answers the question about the link itself. A missing
         // path is not a symlink, matching `os.path.islink`.
         OsFunctionCall::IsSymlink(_) => (
-            FsResult::Completed,
+            leaf_answered(),
             ExtFunctionResult::Return(MontyObject::bool(is_kind(libc::S_IFLNK))),
         ),
         // `Stat` returns the fields the Shell's `FileStat` carries, and **normalizes**
         // `uid`/`gid`/`nlink` to a fixed value so no host identity leaks.
         OsFunctionCall::Stat(_) => match held.stat() {
             Ok(metadata) => (
-                FsResult::Completed,
+                leaf_answered(),
                 ExtFunctionResult::Return(normalized_stat(&metadata)),
             ),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
+                ) =>
+            {
+                (FsResult::Completed, io_exception(&error).into())
+            }
             Err(error) => (FsResult::Failed, io_exception(&error).into()),
         },
         _ => (
@@ -511,6 +557,19 @@ fn perform(call: &OsFunctionCall, path: &Path) -> (FsResult, ExtFunctionResult) 
             .into(),
         ),
     }
+}
+
+/// The outcome of a metadata read that did not reach its parent
+/// (docs/design/decisions.md#temporal-rules-are-enforced-against-recorded-history).
+fn answered(unreached: &Unreached) -> FsResult {
+    match unreached {
+        Unreached::Answered(_) => FsResult::Completed,
+        Unreached::Refused(_) => FsResult::Failed,
+    }
+}
+
+fn is_metadata_read(call: &OsFunctionCall) -> bool {
+    is_predicate(call) || matches!(call, OsFunctionCall::Stat(_))
 }
 
 fn is_predicate(call: &OsFunctionCall) -> bool {
@@ -603,7 +662,7 @@ fn perform_rename(
     let capture = ObservationCapture::begin();
     let admitted = interceptor.admit_rename(call, reach, dst_spelled);
     let determined = capture.last();
-    let (source, destination, permit) = match admitted {
+    let (source, destination, permit, judged_destination) = match admitted {
         Ok(admitted) => admitted,
         Err(refusal) => {
             let legs = match call {
@@ -668,6 +727,34 @@ fn perform_rename(
         }
     };
 
+    let (result, resume_with) =
+        match rename_approved(&approved_src, &approved_dst, judged_destination) {
+            Ok(()) => (
+                FsResult::Completed,
+                ExtFunctionResult::Return(MontyObject::none()),
+            ),
+            Err(error)
+                if error.kind() == io::ErrorKind::AlreadyExists
+                    && judged_destination == RenameDestination::Unbound =>
+            {
+                interceptor
+                    .recorder
+                    .record(EffectiveDecision::enforcement_deny(
+                        r#"Box::Action::"fs:move""#,
+                        interceptor
+                            .policy
+                            .reported(destination.to_string_lossy().as_ref()),
+                        "admission-window",
+                        STALE_DESTINATION,
+                    ));
+                record(permit, FsResult::Failed);
+                return Err(MontyException::new(
+                    ExcType::PermissionError,
+                    Some(format!("{dst_spelled}: {STALE_DESTINATION}")),
+                ));
+            }
+            Err(error) => (FsResult::Failed, io_exception(&error).into()),
+        };
     if let Some(subject) = subject {
         interceptor.recorder.record(EffectiveDecision::gate_permit(
             subject.action,
@@ -676,20 +763,20 @@ fn perform_rename(
             determined.as_ref(),
         ));
     }
-    let (result, resume_with) = match rename_approved(&approved_src, &approved_dst) {
-        Ok(()) => (
-            FsResult::Completed,
-            ExtFunctionResult::Return(MontyObject::none()),
-        ),
-        Err(error) => (FsResult::Failed, io_exception(&error).into()),
-    };
     record(permit, result);
     Ok(resume_with)
 }
 
-/// Move one approved path to another, following no symbolic link in either.
-fn rename_approved(source: &Path, destination: &Path) -> io::Result<()> {
-    HeldPath::of(source)?.rename_to(&HeldPath::of(destination)?)
+const STALE_DESTINATION: &str = "filesystem identity changed during effect admission";
+
+/// Move one approved path without replacing a destination admission read as unbound.
+fn rename_approved(source: &Path, destination: &Path, judged: RenameDestination) -> io::Result<()> {
+    let source = HeldPath::of(source)?;
+    let destination = HeldPath::of(destination)?;
+    match judged {
+        RenameDestination::Unbound => source.rename_to_new(&destination),
+        RenameDestination::File | RenameDestination::Directory => source.rename_to(&destination),
+    }
 }
 
 #[cfg(test)]
@@ -711,7 +798,7 @@ mod tests {
     use monty_types::{
         GetenvArgs, MkdirCallArgs, PathBytesDataArgs, PathStringDataArgs, RenameCallArgs,
     };
-    use policy::{GovernedBox, Policy, PolicyEngine, Principal};
+    use policy::{Decision, DecisionObserver, GovernedBox, Policy, PolicyEngine, Principal};
 
     use crate::run::telemetry::{EffectiveRule, EffectiveVerdict, PolicyDecisionObserver};
     use crate::test_support::open_policy;
@@ -1573,6 +1660,354 @@ permit(principal == Box::Agent::"self", action == Box::Action::"fs:move", resour
         );
     }
 
+    fn rename_history_policy(home: &Path, delete_policy: &str) -> String {
+        let mut rules = format!(
+            r#"
+permit(principal, action == Box::Action::"fs:read", resource);
+permit(principal, action == Box::Action::"fs:write", resource);
+permit(principal, action == Box::Action::"fs:move", resource);
+{delete_policy}
+"#
+        );
+        for (action, name) in [
+            ("fs:read", "payload.txt"),
+            ("fs:move", "protected.txt"),
+            ("fs:delete", "protected.txt"),
+        ] {
+            for event in ["error", "completed", "indeterminate"] {
+                let kind = if event == "error" {
+                    "error"
+                } else {
+                    "response"
+                };
+                let output = if event == "error" {
+                    String::new()
+                } else {
+                    format!(r#", output.result: Box::FsResponseResult::"{event}""#)
+                };
+                rules.push_str(&format!(r#"
+forbid(principal, action == Box::Action::"fs:write", resource)
+when {{ context.input.path == "{probe}" }}
+when temporal {{ formerly within 300s Box::Action::"{action}"::{kind}{{ input.path: "{path}"{output} }} }};
+"#,
+                    probe = home.join(format!("probe-{action}-{event}")).display(),
+                    path = home.join(name).display(),
+                ));
+            }
+        }
+        rules
+    }
+
+    fn assert_rename_history(
+        policy: &PolicyEngine,
+        home: &Path,
+        outcome: Option<&str>,
+        deleted: bool,
+    ) {
+        for action in ["fs:read", "fs:move", "fs:delete"] {
+            for event in ["error", "completed", "indeterminate"] {
+                let probe = policy::PathResolver::over([home.to_path_buf()])
+                    .expect("fixture root")
+                    .approve_virtual(&home.join(format!("probe-{action}-{event}")))
+                    .expect("fixture probe");
+                let (decision, _) = policy.decide(
+                    &GovernedBox::assigned("codex"),
+                    &Principal::agent(),
+                    &policy::Request::Fs {
+                        path: &probe,
+                        operation: policy::FsOperation::WriteContent,
+                    },
+                );
+                let delete_recorded = action != "fs:delete" || deleted;
+                let read_recorded = action != "fs:read" || outcome != Some("error");
+                let event_matches = Some(event) == outcome;
+                let expected = delete_recorded && read_recorded && event_matches;
+                assert_eq!(
+                    !matches!(decision, Decision::Allow { .. }),
+                    expected,
+                    "unexpected {action} {event} history: {decision:?}"
+                );
+            }
+        }
+    }
+
+    struct RenameDestinationWriter {
+        destination: PathBuf,
+        created: std::sync::atomic::AtomicBool,
+    }
+
+    impl DecisionObserver for RenameDestinationWriter {
+        fn observed(&self, action: &str, resource: &str, decision: &Decision) {
+            if action == r#"Box::Action::"fs:move""#
+                && resource.ends_with("/protected.txt")
+                && matches!(decision, Decision::Allow { .. })
+                && !self.created.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&self.destination)
+                    .expect("the destination was absent during admission");
+                file.write_all(b"keep destination")
+                    .expect("write the destination");
+            }
+        }
+    }
+
+    fn rename_destination_window(delete_policy: &str) {
+        let (root, reach) = fixture();
+        let home = home(&root);
+        std::fs::write(home.join("payload.txt"), "keep source").expect("source");
+        let writer = Arc::new(RenameDestinationWriter {
+            destination: home.join("protected.txt"),
+            created: std::sync::atomic::AtomicBool::new(false),
+        });
+        let policy = open_policy(vec![Policy {
+            origin: PathBuf::from("<rename-window>"),
+            text: rename_history_policy(&home, delete_policy),
+        }])
+        .observed_by(writer.clone());
+        let (interceptor, recorder) = recording_interceptor(&policy);
+        let outcome = admit_and_perform(
+            &interceptor,
+            OsFunctionCall::Rename(RenameCallArgs {
+                src: MontyPath::new("payload.txt".to_string()),
+                dst: MontyPath::new("protected.txt".to_string()),
+            }),
+            &reach,
+        );
+        assert!(writer.created.load(std::sync::atomic::Ordering::SeqCst));
+        let destination = std::fs::read_to_string(home.join("protected.txt")).expect("destination");
+        assert_eq!(
+            outcome.as_ref().err().map(MontyException::exc_type),
+            Some(ExcType::PermissionError),
+            "destination created during admission must survive: {outcome:?}, contents {destination:?}"
+        );
+        assert_eq!(destination, "keep destination");
+        assert_eq!(
+            std::fs::read_to_string(home.join("payload.txt")).expect("source survives"),
+            "keep source"
+        );
+        assert_eq!(
+            outcome.unwrap_err().message(),
+            Some("protected.txt: filesystem identity changed during effect admission")
+        );
+        assert_rename_history(&policy, &home, Some("error"), false);
+        let recorded = recorder.recorded();
+        let verdicts: Vec<_> = recorded
+            .iter()
+            .filter_map(|entry| {
+                let (action, _, _, verdict, _) = entry.parts();
+                (action == r#"Box::Action::"fs:move""#).then_some(verdict)
+            })
+            .collect();
+        assert_eq!(
+            verdicts,
+            vec![EffectiveVerdict::Deny],
+            "the refused move must record one denial and no permit"
+        );
+    }
+
+    #[test]
+    fn rename_destination_window_without_delete_permit_is_refused() {
+        rename_destination_window("");
+    }
+
+    #[test]
+    fn rename_destination_window_with_delete_forbid_is_refused() {
+        rename_destination_window(
+            r#"
+permit(principal, action == Box::Action::"fs:delete", resource);
+forbid(principal, action == Box::Action::"fs:delete", resource);
+"#,
+        );
+    }
+
+    fn rename_control(preexisting: bool, delete_policy: &str, permitted: bool) {
+        let (root, reach) = fixture();
+        let home = home(&root);
+        std::fs::write(home.join("payload.txt"), "source").expect("source");
+        if preexisting {
+            std::fs::write(home.join("protected.txt"), "destination").expect("destination");
+        }
+        let policy = open_policy(vec![Policy {
+            origin: PathBuf::from("<rename-control>"),
+            text: rename_history_policy(&home, delete_policy),
+        }]);
+        let (interceptor, recorder) = recording_interceptor(&policy);
+        let result = admit_and_perform(
+            &interceptor,
+            OsFunctionCall::Rename(RenameCallArgs {
+                src: MontyPath::new("payload.txt".to_string()),
+                dst: MontyPath::new("protected.txt".to_string()),
+            }),
+            &reach,
+        );
+        if permitted {
+            assert!(matches!(
+                returned(result.expect("rename succeeds")),
+                Ok(MontyNode::None)
+            ));
+            assert!(!home.join("payload.txt").exists());
+            assert_eq!(
+                std::fs::read_to_string(home.join("protected.txt")).expect("destination"),
+                "source"
+            );
+            assert_rename_history(&policy, &home, Some("completed"), preexisting);
+        } else {
+            assert_eq!(result.unwrap_err().exc_type(), ExcType::PermissionError);
+            assert_eq!(
+                std::fs::read_to_string(home.join("payload.txt")).expect("source"),
+                "source"
+            );
+            assert_eq!(
+                std::fs::read_to_string(home.join("protected.txt")).expect("destination"),
+                "destination"
+            );
+            assert_rename_history(&policy, &home, None, false);
+        }
+        let recorded = recorder.recorded();
+        assert_eq!(recorded.len(), 1, "one effective rename decision");
+        assert_eq!(
+            recorded[0].parts().3,
+            if permitted {
+                EffectiveVerdict::Permit
+            } else {
+                EffectiveVerdict::Deny
+            }
+        );
+    }
+
+    #[test]
+    fn rename_to_absent_destination_needs_no_delete_permit() {
+        rename_control(false, "", true);
+    }
+
+    #[test]
+    fn rename_explicitly_authorized_overwrite_records_completion() {
+        rename_control(
+            true,
+            r#"permit(principal, action == Box::Action::"fs:delete", resource);"#,
+            true,
+        );
+    }
+
+    #[test]
+    fn rename_existing_destination_without_delete_permit_is_refused() {
+        rename_control(true, "", false);
+    }
+
+    #[test]
+    fn rename_existing_destination_with_delete_forbid_is_refused() {
+        rename_control(
+            true,
+            r#"
+permit(principal, action == Box::Action::"fs:delete", resource);
+forbid(principal, action == Box::Action::"fs:delete", resource);
+"#,
+            false,
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rename_unsupported_operation_never_falls_back_to_replacement() {
+        const CHILD_ERROR: &str = "BOX_RENAME_TEST_ERRNO";
+        let Ok(error) = std::env::var(CHILD_ERROR) else {
+            for error in [libc::ENOSYS, libc::EINVAL, libc::EOPNOTSUPP] {
+                let output = std::process::Command::new(std::env::current_exe().expect("test image"))
+                    .args(["--exact", "run::broker::python::effects::tests::rename_unsupported_operation_never_falls_back_to_replacement", "--nocapture"])
+                    .env(CHILD_ERROR, error.to_string())
+                    .output().expect("child test");
+                assert!(
+                    output.status.success(),
+                    "errno {error}: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            return;
+        };
+        let error: u32 = error.parse().expect("test errno");
+        let (root, reach) = fixture();
+        let home = home(&root);
+        std::fs::write(home.join("payload.txt"), "source").expect("source");
+        let policy = open_policy(vec![Policy {
+            origin: PathBuf::from("<unsupported-rename>"),
+            text: rename_history_policy(&home, ""),
+        }]);
+        let mut filter = [
+            libc::sock_filter {
+                code: 0x20,
+                jt: 0,
+                jf: 0,
+                k: 0,
+            },
+            libc::sock_filter {
+                code: 0x15,
+                jt: 0,
+                jf: 1,
+                k: libc::SYS_renameat2 as u32,
+            },
+            libc::sock_filter {
+                code: 0x06,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_ERRNO | error,
+            },
+            libc::sock_filter {
+                code: 0x06,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_ALLOW,
+            },
+        ];
+        let program = libc::sock_fprog {
+            len: filter.len() as u16,
+            filter: filter.as_mut_ptr(),
+        };
+        // SAFETY: this disposable child installs an initialized filter on its own test thread.
+        unsafe {
+            libc::alarm(30);
+            assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+            assert_eq!(libc::prctl(libc::PR_SET_SECCOMP, 2, &program), 0);
+        }
+        let result = admit_and_perform(
+            &interceptor(&policy),
+            OsFunctionCall::Rename(RenameCallArgs {
+                src: MontyPath::new("payload.txt".to_string()),
+                dst: MontyPath::new("protected.txt".to_string()),
+            }),
+            &reach,
+        )
+        .expect("the broker returns the operating system error");
+        let ExtFunctionResult::Error(exception) = result else {
+            panic!("unsupported rename succeeded: {result:?}");
+        };
+        assert_eq!(exception.exc_type(), ExcType::OSError);
+        let reported = exception.message().expect("operating system error");
+        let expected = io::Error::from_raw_os_error(error as i32).to_string();
+        let unavailable_flag = io::Error::from_raw_os_error(libc::EINVAL).to_string();
+        assert!(
+            reported == expected || (error == libc::ENOSYS as u32 && reported == unavailable_flag),
+            "unexpected operating system error: {reported}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(home.join("payload.txt")).expect("source survives"),
+            "source"
+        );
+        assert!(
+            !home.join("protected.txt").exists(),
+            "no ordinary rename fallback may run"
+        );
+        assert_rename_history(&policy, &home, Some("error"), false);
+        rename_control(
+            true,
+            r#"permit(principal, action == Box::Action::"fs:delete", resource);"#,
+            true,
+        );
+    }
+
     /// `Resolve`/`Absolute` stay refused — they would return a host path.
     #[test]
     fn resolve_and_absolute_stay_refused() {
@@ -1737,6 +2172,369 @@ permit(principal == Box::Agent::"self", action == Box::Action::"fs:move", resour
         std::fs::rename(&inside, home(root).join("dir-moved")).expect("move the directory away");
         std::os::unix::fs::symlink(resolved.join("outside"), &inside).expect("a link out");
         (approved, resolved.join("outside"))
+    }
+
+    /// A stat of a missing file, or of a path under a regular file, raises and records `Completed`.
+    #[test]
+    fn a_stat_of_a_missing_path_records_completed() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let base = dir.path().canonicalize().expect("the scratch dir resolves");
+        std::fs::write(base.join("notes.txt"), "x").expect("a regular file");
+        for missing in [base.join("absent.txt"), base.join("notes.txt/child")] {
+            let (result, returned) = perform(
+                &OsFunctionCall::Stat(MontyPath::new(missing.to_string_lossy().into_owned())),
+                &missing,
+            );
+            assert_eq!(result, FsResult::Completed, "{}", missing.display());
+            assert!(
+                !matches!(returned, ExtFunctionResult::Return(_)),
+                "the script sees that {} is missing",
+                missing.display()
+            );
+        }
+    }
+
+    /// A stat that the host refuses for permission raises and records `Completed`, as the Shell does.
+    #[test]
+    fn a_stat_the_host_refuses_for_permission_records_completed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        // SAFETY: `geteuid` reads the calling process's effective user id and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping: root ignores a directory's permission bits");
+            return;
+        }
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let base = dir.path().canonicalize().expect("the scratch dir resolves");
+        let locked = base.join("locked");
+        std::fs::create_dir(&locked).expect("a directory");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("lock the directory");
+        let target = locked.join("f.txt");
+        let (result, _) = perform(
+            &OsFunctionCall::Stat(MontyPath::new(target.to_string_lossy().into_owned())),
+            &target,
+        );
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700))
+            .expect("unlock the directory");
+        assert_eq!(result, FsResult::Completed);
+    }
+
+    /// A predicate that an ancestor swap refuses answers false and records `Failed`.
+    #[test]
+    fn a_predicate_refused_by_an_ancestor_swap_records_failed() {
+        let path = |leaf: &str| MontyPath::new(format!("dir/{leaf}"));
+        for call in [
+            OsFunctionCall::Exists(path("f.txt")),
+            OsFunctionCall::IsFile(path("f.txt")),
+            OsFunctionCall::IsDir(path("f.txt")),
+            OsFunctionCall::IsSymlink(path("f.txt")),
+        ] {
+            let (root, reach) = fixture();
+            let (approved, _outside) = swap_for_a_link_after_approval(&root, &reach);
+            let (result, resumed) = perform(&call, &approved);
+            assert_eq!(result, FsResult::Failed, "{}", call.name());
+            assert!(
+                matches!(returned(resumed), Ok(MontyNode::Bool(false))),
+                "{} answers false",
+                call.name()
+            );
+        }
+    }
+
+    /// A predicate of a missing path answers false and records `Completed`.
+    #[test]
+    fn a_predicate_of_a_missing_path_records_completed() {
+        let dir = tempfile::tempdir().expect("a scratch dir");
+        let base = dir.path().canonicalize().expect("the scratch dir resolves");
+        std::fs::write(base.join("notes.txt"), "x").expect("a regular file");
+        for missing in [base.join("absent.txt"), base.join("notes.txt/child")] {
+            let call =
+                OsFunctionCall::Exists(MontyPath::new(missing.to_string_lossy().into_owned()));
+            let (result, resumed) = perform(&call, &missing);
+            assert_eq!(result, FsResult::Completed, "{}", missing.display());
+            assert!(matches!(returned(resumed), Ok(MontyNode::Bool(false))));
+        }
+    }
+
+    /// A `read_metadata` budget counts each `os.stat()` of a missing path.
+    #[test]
+    fn a_read_metadata_budget_counts_stats_of_missing_paths() {
+        let (root, reach) = fixture();
+        std::fs::write(home(&root).join("ok.txt"), "kept").expect("a fixture file");
+        let policy = open_policy(vec![Policy {
+            origin: PathBuf::from("<test>"),
+            text: r#"
+                permit(principal, action == Box::Action::"fs:read", resource);
+                @id("metadata-budget")
+                forbid(principal, action == Box::Action::"fs:read", resource)
+                when { context.input.operation == Box::FsReadOperation::"read_content" }
+                when temporal {
+                    exists (total: Long). (
+                        (count for (t: Timepoint). where (
+                            formerly within 3600s (
+                                Box::Action::"fs:read"::response{ input.path: _, input.operation: Box::FsReadOperation::"read_metadata" } && tp(t)
+                            )
+                        )) == total
+                        && total >= 3
+                    )
+                };
+            "#
+            .to_string(),
+        }]);
+        let interceptor = interceptor(&policy);
+        let stat = |name: &str| {
+            let _ = admit_and_perform(
+                &interceptor,
+                OsFunctionCall::Stat(MontyPath::new(name.to_string())),
+                &reach,
+            );
+        };
+        let read = || {
+            admit_and_perform(
+                &interceptor,
+                OsFunctionCall::ReadText(MontyPath::new("ok.txt".to_string())),
+                &reach,
+            )
+        };
+
+        stat("absent-1.txt");
+        stat("absent-2.txt");
+        assert!(
+            read().is_ok(),
+            "two answered stats do not spend a budget of three"
+        );
+        stat("absent-3.txt");
+        assert!(
+            read().is_err(),
+            "three answered stats spend a budget of three"
+        );
+    }
+
+    /// A policy that permits every read and refuses a content read once `cap` metadata reads answered.
+    fn metadata_budget(cap: usize) -> PolicyEngine {
+        open_policy(vec![Policy {
+            origin: PathBuf::from("<test>"),
+            text: format!(
+                r#"
+                permit(principal, action == Box::Action::"fs:read", resource);
+                @id("metadata-budget")
+                forbid(principal, action == Box::Action::"fs:read", resource)
+                when {{ context.input.operation == Box::FsReadOperation::"read_content" }}
+                when temporal {{
+                    exists (total: Long). (
+                        (count for (t: Timepoint). where (
+                            formerly within 3600s (
+                                Box::Action::"fs:read"::response{{ input.path: _, input.operation: Box::FsReadOperation::"read_metadata" }} && tp(t)
+                            )
+                        )) == total
+                        && total >= {cap}
+                    )
+                }};
+            "#
+            ),
+        }])
+    }
+
+    /// Whether `calls` spend a metadata budget of their own count, so a read of `kept` is refused.
+    fn calls_spend_the_budget(reach: &Reach, kept: &Path, calls: Vec<OsFunctionCall>) -> bool {
+        let policy = metadata_budget(calls.len());
+        let interceptor = interceptor(&policy);
+        for call in calls {
+            let _ = admit_and_perform(&interceptor, call, reach);
+        }
+        admit_and_perform(
+            &interceptor,
+            OsFunctionCall::ReadText(MontyPath::new(kept.to_string_lossy().into_owned())),
+            reach,
+        )
+        .is_err()
+    }
+
+    fn stat(path: &str) -> OsFunctionCall {
+        OsFunctionCall::Stat(MontyPath::new(path.to_string()))
+    }
+
+    /// A stat of a path beneath this box's own state spends nothing, however it is spelled.
+    #[test]
+    fn a_stat_beneath_the_box_state_spends_nothing() {
+        let root = tempfile::tempdir().expect("a fixture root");
+        let shared = root.path().canonicalize().expect("the root resolves");
+        let box_root = shared.join("boxes/codex");
+        std::fs::create_dir_all(box_root.join("private")).expect("this box's private directory");
+        std::os::unix::fs::symlink(box_root.join("private"), shared.join("link"))
+            .expect("a link into the private directory");
+        let kept = shared.join("ok.txt");
+        std::fs::write(&kept, "kept").expect("a fixture file");
+        let reach = crate::test_support::with_operator_home(&shared, || {
+            Reach::over_box(&shared, Some(&shared), Some(&shared), &box_root, &[])
+                .expect("the reachable set is usable")
+        });
+        std::fs::write(box_root.join("private/x"), "state").expect("a file in box state");
+        std::os::unix::fs::symlink(box_root.join("private/nodir"), shared.join("dangle"))
+            .expect("a dangling link into box state");
+        for probe in [
+            box_root.join("private/x"),
+            box_root.join("private/nodir/x"),
+            shared.join("link/nodir/x"),
+            shared.join("dangle"),
+            shared.join("dangle/x"),
+        ] {
+            assert!(
+                !calls_spend_the_budget(&reach, &kept, vec![stat(probe.to_str().expect("UTF-8"))]),
+                "{} must not spend the budget",
+                probe.display()
+            );
+        }
+    }
+
+    /// A stat outside the reachable set spends nothing.
+    #[test]
+    fn a_stat_outside_the_reachable_set_spends_nothing() {
+        let (root, reach) = fixture();
+        let kept = home(&root).join("ok.txt");
+        std::fs::write(&kept, "kept").expect("a fixture file");
+        let outside = root
+            .path()
+            .canonicalize()
+            .expect("the root resolves")
+            .join("outside-dir/x");
+        assert!(!calls_spend_the_budget(
+            &reach,
+            &kept,
+            vec![stat(outside.to_str().expect("UTF-8"))],
+        ));
+    }
+
+    /// A metadata read under a folder that does not exist spends the budget.
+    #[test]
+    fn a_metadata_read_under_a_missing_folder_spends_the_budget() {
+        let path = |leaf: &str| MontyPath::new(format!("absent-dir/{leaf}"));
+        let (root, reach) = fixture();
+        let kept = home(&root).join("ok.txt");
+        std::fs::write(&kept, "kept").expect("a fixture file");
+        assert!(calls_spend_the_budget(
+            &reach,
+            &kept,
+            vec![
+                OsFunctionCall::Stat(path("1")),
+                OsFunctionCall::Stat(path("2")),
+                OsFunctionCall::Stat(path("3")),
+            ],
+        ));
+        assert!(calls_spend_the_budget(
+            &reach,
+            &kept,
+            vec![
+                OsFunctionCall::Exists(path("x")),
+                OsFunctionCall::IsFile(path("x")),
+                OsFunctionCall::IsDir(path("x")),
+                OsFunctionCall::IsSymlink(path("x")),
+            ],
+        ));
+    }
+
+    /// A metadata read under a folder the host cannot search spends the budget.
+    #[test]
+    fn a_metadata_read_under_an_unsearchable_folder_spends_the_budget() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: `geteuid` reads the calling process's effective user id and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping: root searches every folder");
+            return;
+        }
+        let (root, reach) = fixture();
+        let kept = home(&root).join("ok.txt");
+        std::fs::write(&kept, "kept").expect("a fixture file");
+        let locked = home(&root).join("locked");
+        std::fs::create_dir_all(locked.join("inner")).expect("a folder to lock");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000))
+            .expect("lock the folder");
+        let spent = calls_spend_the_budget(&reach, &kept, vec![stat("locked/inner/f.txt")]);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755))
+            .expect("unlock the folder");
+        assert!(spent);
+    }
+
+    /// A metadata read through a symbolic link inside the home spends nothing.
+    #[test]
+    fn a_metadata_read_through_a_link_in_the_home_spends_nothing() {
+        let (root, reach) = fixture();
+        let home = home(&root);
+        let kept = home.join("ok.txt");
+        std::fs::write(&kept, "kept").expect("a fixture file");
+        std::fs::create_dir(home.join("real")).expect("a real folder");
+        std::os::unix::fs::symlink(home.join("real"), home.join("link"))
+            .expect("a link to the folder");
+        std::os::unix::fs::symlink(home.join("nowhere"), home.join("dangle"))
+            .expect("a dangling link");
+        for probe in ["link/x", "link/nodir/x", "dangle", "dangle/x"] {
+            assert!(
+                !calls_spend_the_budget(&reach, &kept, vec![stat(probe)]),
+                "{probe} must not spend the budget"
+            );
+        }
+    }
+
+    /// A content read under a folder that does not exist records an error.
+    #[test]
+    fn a_content_read_under_a_missing_folder_records_an_error() {
+        let (root, reach) = fixture();
+        let kept = home(&root).join("ok.txt");
+        std::fs::write(&kept, "kept").expect("a fixture file");
+        let policy = open_policy(vec![Policy {
+            origin: PathBuf::from("<test>"),
+            text: r#"
+                permit(principal, action == Box::Action::"fs:read", resource);
+                @id("content-budget")
+                forbid(principal, action == Box::Action::"fs:read", resource)
+                when { context.input.path like "*/ok.txt" }
+                when temporal {
+                    formerly within 3600s (
+                        Box::Action::"fs:read"::response{ input.path: _, input.operation: Box::FsReadOperation::"read_content" }
+                    )
+                };
+            "#
+            .to_string(),
+        }]);
+        let interceptor = interceptor(&policy);
+        let _ = admit_and_perform(
+            &interceptor,
+            OsFunctionCall::ReadText(MontyPath::new("absent-dir/x".to_string())),
+            &reach,
+        );
+        assert!(
+            admit_and_perform(
+                &interceptor,
+                OsFunctionCall::ReadText(MontyPath::new(kept.to_string_lossy().into_owned())),
+                &reach,
+            )
+            .is_ok()
+        );
+    }
+
+    /// A metadata read whose leaf was swapped for a link after approval records `Failed`.
+    #[test]
+    fn a_metadata_read_of_a_leaf_swapped_for_a_link_records_failed() {
+        let path = || MontyPath::new("f.txt".to_string());
+        for call in [
+            OsFunctionCall::Stat(path()),
+            OsFunctionCall::Exists(path()),
+            OsFunctionCall::IsFile(path()),
+            OsFunctionCall::IsDir(path()),
+            OsFunctionCall::IsSymlink(path()),
+        ] {
+            let (root, reach) = fixture();
+            let leaf = home(&root).join("f.txt");
+            std::fs::write(&leaf, "inside").expect("a file in the home");
+            let approved = reach
+                .approve(&leaf, "f.txt")
+                .expect("the floor approves the path before the swap");
+            std::fs::remove_file(&leaf).expect("remove the file");
+            std::os::unix::fs::symlink(home(&root).join("elsewhere"), &leaf)
+                .expect("a link in its place");
+            let (result, _) = perform(&call, &approved);
+            assert_eq!(result, FsResult::Failed, "{}", call.name());
+        }
     }
 
     /// No effect follows a directory that a workload swapped for a link after approval.
@@ -1939,7 +2737,11 @@ permit(principal == Box::Agent::"self", action == Box::Action::"fs:move", resour
         let (approved, outside) = swap_for_a_link_after_approval(&root, &reach);
         let source = home(&root).join("dir-moved/f.txt");
 
-        let renamed = rename_approved(&source, &approved.with_file_name("moved.txt"));
+        let renamed = rename_approved(
+            &source,
+            &approved.with_file_name("moved.txt"),
+            RenameDestination::Unbound,
+        );
 
         assert!(renamed.is_err(), "the rename followed the link");
         assert!(

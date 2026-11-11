@@ -12,7 +12,7 @@
 //! | `Read` + `Root`    | ancestor metadata, and `file-read*` over the subtree |
 //! | `List` + `Root`    | ancestor metadata, `file-read-metadata` over the subtree, and `file-read-data` on its directory vnodes alone; rendered in the read-root block |
 //! | `Write` + `File`   | `file-write*` on the literal, and denies leaving its contents alone: its flags, its identity, its ACL, its mode, its owner, and its executable mapping |
-//! | `Write` + `Root`   | `file-write*` over the subtree, two denies fixing the root's own identity, and denies on the subtree's flags, ACL, owner, and executable mappings |
+//! | `Write` + `Root`   | the `WRITE_ROOT_LEAVES` over the subtree, two denies fixing the root's own identity, and a deny on the subtree's executable mappings; `allow_file_attributes` adds `file-write*` over the subtree and denies the `FILE_ATTRIBUTE_WITHHELD_LEAVES` again |
 //! | `Connect` + `File` | `network-outbound` on the path |
 //!
 //! A write cell ends with one executable-mapping allow per exec grant it reaches, so the pair the
@@ -96,6 +96,24 @@ fn write_leaf_allows(filter: &str, path: &str) -> String {
         .collect()
 }
 
+/// The `file-write*` members that `WRITE_ROOT_LEAVES` withholds, which a write root denies again when
+/// the file-attributes switch grants the wildcard.
+pub(crate) const FILE_ATTRIBUTE_WITHHELD_LEAVES: [&str; 4] = [
+    "file-write-flags",
+    "file-write-owner",
+    "file-write-acl",
+    "file-write-finderinfo",
+];
+
+/// The wildcard allow and the denies that take the withheld leaves back, at subtree scope.
+fn file_attribute_rules(path: &str) -> String {
+    let withheld: String = FILE_ATTRIBUTE_WITHHELD_LEAVES
+        .iter()
+        .map(|leaf| format!("(deny {leaf} (subpath \"{path}\"))\n"))
+        .collect();
+    format!("(allow file-write* (subpath \"{path}\"))\n{withheld}")
+}
+
 /// One `deny` per leaf in `WRITE_ROOT_LEAVES`, at `filter` scope.
 fn write_leaf_denies(filter: &str, path: &str) -> String {
     WRITE_ROOT_LEAVES
@@ -168,9 +186,9 @@ fn require_expressible(config: &ContainmentConfig) -> Result<()> {
         ));
     }
     match config.network() {
-        // Localhost with no inbound bind (the mediated default), or AllowAll (operator-declared
-        // native egress, contain_egress = false). A `listen` port is still unsupported on macOS.
-        Network::Localhost { listen, .. } if listen.is_empty() => {}
+        // Localhost, with or without inbound ports, or AllowAll (operator-declared native egress,
+        // contain_egress = false).
+        Network::Localhost { .. } => {}
         Network::AllowAll => {}
         _ => {
             return Err(unsupported(
@@ -532,8 +550,13 @@ pub(crate) fn render_profile_with_streams(
             // and not on the file cell, because a workload tightens a file it creates in its own
             // tree.
             (Operation::Write, Scope::Root) => {
+                let file_attributes = if config.file_attributes() {
+                    file_attribute_rules(&path)
+                } else {
+                    String::new()
+                };
                 cells.entry(WRITE_ROOT).or_default().push_str(&format!(
-                    "{}(deny file-write-unlink (literal \"{path}\"))\n\
+                    "{}{file_attributes}(deny file-write-unlink (literal \"{path}\"))\n\
                      (deny file-write-create (literal \"{path}\"))\n\
                      (deny file-map-executable (subpath \"{path}\"))\n{}",
                     write_leaf_allows("subpath", &path),
@@ -794,6 +817,7 @@ pub(crate) fn render_profile_with_streams(
         .identity_requirements()
         .iter()
         .chain(config.write_protections())
+        .chain(config.command_identities())
         .flat_map(|required| required.path().ancestors())
         .collect();
     for path in identity_paths {
@@ -823,10 +847,16 @@ pub(crate) fn render_profile_with_streams(
     }
 
     match config.network() {
-        Network::Localhost { connect, .. } => {
+        Network::Localhost { connect, listen } => {
             for port in connect {
                 cells.entry(CONNECT_PORTS).or_default().push_str(&format!(
                     "(allow network-outbound\n    (remote tcp \"localhost:{port}\"))\n"
+                ));
+            }
+            for port in listen {
+                cells.entry(CONNECT_PORTS).or_default().push_str(&format!(
+                    "(allow network-bind\n    (local tcp \"localhost:{port}\"))\n\
+                     (allow network-inbound\n    (local tcp \"localhost:{port}\"))\n"
                 ));
             }
         }
@@ -1813,6 +1843,123 @@ mod tests {
             assert!(
                 profile.contains(&format!("(allow {leaf} (subpath \"{escaped_output}\"))")),
                 "the inner root names every write leaf: {profile}"
+            );
+        }
+    }
+
+    /// The configuration both file-attribute render tests share: one write root, optionally with
+    /// the switch, plus the paths the overrides name.
+    fn file_attribute_config(
+        home_path: &std::path::Path,
+        switch_on: bool,
+    ) -> (ContainmentConfig, std::path::PathBuf, std::path::PathBuf) {
+        let agent = home_path.join("agent");
+        std::fs::write(&agent, "agent").expect("an executable fixture");
+        let state = home_path.join("state");
+        let refused = state.join("private");
+        std::fs::create_dir_all(&refused).expect("a write root with a refused corner");
+        let protected = state.join("authority");
+        std::fs::write(&protected, "authority").expect("an authority fixture");
+        let opened = std::fs::File::open(&protected).expect("an opened authority");
+        let config = ContainmentConfig::new()
+            .set_network(Network::localhost().connect(33085))
+            .expect("localhost")
+            .anchored_at(home_path)
+            .allow(&agent, Operation::Exec, Scope::File)
+            .expect("an executable")
+            .refuse(&refused, Scope::Root)
+            .expect("a refused corner")
+            .allow(&state, Operation::Write, Scope::Root)
+            .expect("a write root")
+            .protect_write(&protected, &opened)
+            .expect("a protected object");
+        let config = if switch_on {
+            config.allow_file_attributes()
+        } else {
+            config
+        };
+        (config, state, protected)
+    }
+
+    #[test]
+    fn a_write_root_without_the_file_attributes_switch_renders_no_wildcard_allow() {
+        let home = tempfile::tempdir().expect("an operator home");
+        let home_path = home.path().canonicalize().expect("the home resolves");
+        let (config, state, _) = file_attribute_config(&home_path, false);
+        let profile = render_profile(&config).expect("the profile renders");
+        let escaped_state = escaped(&state).expect("the root escapes");
+        assert!(
+            !profile.contains(&format!(
+                "(allow file-write* (subpath \"{escaped_state}\"))"
+            )),
+            "the switch is off, so the root names its six leaves alone: {profile}"
+        );
+        for leaf in FILE_ATTRIBUTE_WITHHELD_LEAVES {
+            assert!(
+                !profile.contains(&format!("(deny {leaf} (subpath \"{escaped_state}\"))")),
+                "the switch is off, so no withheld leaf is denied at the root: {leaf}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_write_root_with_the_file_attributes_switch_renders_the_wildcard_and_every_withheld_leaf_deny()
+     {
+        let home = tempfile::tempdir().expect("an operator home");
+        let home_path = home.path().canonicalize().expect("the home resolves");
+        let (config, state, _) = file_attribute_config(&home_path, true);
+        let profile = render_profile(&config).expect("the profile renders");
+        let escaped_state = escaped(&state).expect("the root escapes");
+        let wildcard = profile
+            .find(&format!(
+                "(allow file-write* (subpath \"{escaped_state}\"))"
+            ))
+            .expect("the switch renders the wildcard allow");
+        for leaf in FILE_ATTRIBUTE_WITHHELD_LEAVES {
+            let deny = profile
+                .find(&format!("(deny {leaf} (subpath \"{escaped_state}\"))"))
+                .unwrap_or_else(|| panic!("the root denies {leaf}: {profile}"));
+            assert!(deny > wildcard, "{leaf} is denied after the wildcard allow");
+        }
+        for kept in [
+            format!("(deny file-write-unlink (literal \"{escaped_state}\"))"),
+            format!("(deny file-write-create (literal \"{escaped_state}\"))"),
+            format!("(deny file-map-executable (subpath \"{escaped_state}\"))"),
+        ] {
+            assert!(profile.contains(&kept), "the root keeps {kept}");
+        }
+        for leaf in WRITE_ROOT_LEAVES {
+            assert!(
+                profile.contains(&format!("(allow {leaf} (subpath \"{escaped_state}\"))")),
+                "the six leaves stay named beside the wildcard: {leaf}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_overrides_render_after_the_file_attributes_wildcard() {
+        let home = tempfile::tempdir().expect("an operator home");
+        let home_path = home.path().canonicalize().expect("the home resolves");
+        let (config, state, protected) = file_attribute_config(&home_path, true);
+        let profile = render_profile(&config).expect("the profile renders");
+        let escaped_state = escaped(&state).expect("the root escapes");
+        let wildcard = profile
+            .find(&format!(
+                "(allow file-write* (subpath \"{escaped_state}\"))"
+            ))
+            .expect("the wildcard allow");
+        let escaped_protected = escaped(&protected).expect("the object escapes");
+        let escaped_refused = escaped(&state.join("private")).expect("the corner escapes");
+        for override_rule in [
+            format!("(deny file-write* (literal \"{escaped_protected}\"))"),
+            format!("(deny file-write* (subpath \"{escaped_refused}\"))"),
+        ] {
+            let position = profile
+                .find(&override_rule)
+                .unwrap_or_else(|| panic!("the override {override_rule} renders: {profile}"));
+            assert!(
+                position > wildcard,
+                "{override_rule} must follow the wildcard so the last matching rule is the deny"
             );
         }
     }

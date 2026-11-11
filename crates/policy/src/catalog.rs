@@ -1155,4 +1155,39 @@ mod tests {
         fixture.catalogs.stage(catalog).expect("the list stages");
         assert!(fixture.policy.finish_mcp_discovery().is_ok());
     }
+
+    /// An http server whose list missed its deadline still stages a later list, on any session.
+    #[test]
+    fn an_http_list_after_a_capture_failure_stages_on_a_later_session() {
+        let fixture = fixture(McpServerKind::Http);
+        fixture
+            .catalogs
+            .list_failed("demo", "first", DiscoveryFailure::CaptureDeadline);
+        assert_eq!(
+            fixture.catalogs.state("demo"),
+            Some(ServerDiscovery::Failed(DiscoveryFailure::CaptureDeadline))
+        );
+        assert_eq!(
+            fixture.catalogs.require_listed("demo", "read"),
+            Err(CatalogRefusal::NotAccepted)
+        );
+
+        let page = json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "read", "inputSchema": {"type": "object",
+             "properties": {"path": {"type": "string"}}}}
+        ]}});
+        let ListPage::Complete(complete) = fixture
+            .catalogs
+            .observe_page("demo", "second", None, &page, 65536)
+            .expect("the later page is a catalog")
+        else {
+            panic!("the later page must complete a list");
+        };
+        assert!(matches!(
+            fixture.catalogs.stage(complete),
+            Ok(CatalogStage::Accepted { .. })
+        ));
+        assert_eq!(fixture.catalogs.state("demo"), Some(ServerDiscovery::Ready));
+        assert_eq!(fixture.catalogs.require_listed("demo", "read"), Ok(()));
+    }
 }

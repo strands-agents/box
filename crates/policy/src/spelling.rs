@@ -1,5 +1,6 @@
-//! Load-time judgement of the path, program, and host literals a rule compares.
+//! Load-time judgement of the path, program, host, and address literals a rule compares.
 
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
 use cedar_policy::{ActionConstraint, EntityUid, Policy, PolicySet};
@@ -7,8 +8,9 @@ use egress_gateway::{is_bindable_host, normalize_host};
 use serde_json::Value;
 
 use crate::PolicyError;
+use crate::check::{Refused, RuleRef};
 use crate::schema::action::FS_OTHER;
-use crate::schema::attr::{HOST, PATH, PROGRAM, PROGRAM_PATH};
+use crate::schema::attr::{CWD, HOST, IP4, IP6, PATH, PROGRAM, PROGRAM_PATH, REMOVED_IP};
 
 const BOX_ACTION_TYPE: &str = "Box::Action";
 
@@ -126,11 +128,21 @@ enum Finding {
     ProgramPath(String),
 }
 
-/// Refuse every literal that no reported spelling can match; return the uncertain ones.
+/// `judge_naming` with no rule names, for the tests that read only the refusal text.
+#[cfg(test)]
 pub(crate) fn judge(
     policies: &PolicySet,
     operator: &Operator,
 ) -> Result<Vec<PolicyWarning>, PolicyError> {
+    judge_naming(policies, operator, &|_| None).map_err(Refused::into_error)
+}
+
+/// Refuse every literal that no reported spelling can match; return the uncertain ones.
+pub(crate) fn judge_naming(
+    policies: &PolicySet,
+    operator: &Operator,
+    rule_of: &dyn Fn(&str) -> Option<RuleRef>,
+) -> Result<Vec<PolicyWarning>, Refused> {
     let homes = operator.homes();
     let mut warnings = Vec::new();
     for policy in policies.policies() {
@@ -154,7 +166,12 @@ pub(crate) fn judge(
             match finding {
                 Finding::Sound => {}
                 Finding::Inert(reason) => {
-                    return Err(PolicyError::Spelling(format!("{rule} {reason}")));
+                    let text = format!("{rule} {reason}");
+                    let rules = rule_of(policy.id().as_ref()).into_iter().collect();
+                    return Err(Refused::new(
+                        PolicyError::Spelling(text.clone()),
+                        vec![crate::check::Finding::new(text).with_rules(rules)],
+                    ));
                 }
                 Finding::Uncertain(pattern) => warnings.push(PolicyWarning::HomeAfterWildcard {
                     rule: rule.clone(),
@@ -186,14 +203,134 @@ pub(crate) fn names_only_reserved_action(policy: &Policy) -> bool {
         })
 }
 
-/// The action family a rule's scope names.
+/// Refuse a network rule that names `context.input.ip`, which no action carries.
+pub(crate) fn refuse_removed_address_attribute(
+    policies: &PolicySet,
+    rule_of: &dyn Fn(&str) -> Option<RuleRef>,
+) -> Result<(), Refused> {
+    for policy in policies.policies() {
+        if Scope::of(policy) != Some(Scope::Network) {
+            continue;
+        }
+        let rule = rule_name(policy);
+        let est = policy.to_json().map_err(|error| {
+            PolicyError::Schema(format!("{rule} cannot be inspected at load: {error}"))
+        })?;
+        if !names_removed_address(&est["conditions"]) {
+            continue;
+        }
+        let text = format!(
+            "{rule} reads context.input.{REMOVED_IP}, which no action carries; a destination \
+             address reads as context.input.{IP4} for the IPv4 address it is or carries, and as \
+             context.input.{IP6} for the IPv6 wire form, each behind its own \"has\" guard"
+        );
+        let rules = rule_of(policy.id().as_ref()).into_iter().collect();
+        return Err(Refused::new(
+            PolicyError::Schema(text.clone()),
+            vec![crate::check::Finding::new(text).with_rules(rules)],
+        ));
+    }
+    Ok(())
+}
+
+/// Whether `node` reads or guards `context.input.ip` anywhere.
+fn names_removed_address(node: &Value) -> bool {
+    match node {
+        Value::Array(items) => items.iter().any(names_removed_address),
+        Value::Object(fields) => {
+            for operator in [".", "has"] {
+                if let Some(access) = fields.get(operator)
+                    && access.get("attr").and_then(Value::as_str) == Some(REMOVED_IP)
+                    && access.get("left").is_some_and(is_context_input)
+                {
+                    return true;
+                }
+            }
+            fields.values().any(names_removed_address)
+        }
+        _ => false,
+    }
+}
+
+/// Refuse a rule that reads `context.input` and does not constrain its action to one family
+/// (docs/design/decisions.md#a-rule-that-reads-the-input-names-one-action-family).
+pub(crate) fn refuse_input_across_families(
+    policies: &PolicySet,
+    rule_of: &dyn Fn(&str) -> Option<RuleRef>,
+) -> Result<(), Refused> {
+    for policy in policies.policies() {
+        let rule = rule_name(policy);
+        let est = policy.to_json().map_err(|error| {
+            PolicyError::Schema(format!("{rule} cannot be inspected at load: {error}"))
+        })?;
+        if let Some(text) = input_across_families(policy, &rule, &est["conditions"]) {
+            let rules = rule_of(policy.id().as_ref()).into_iter().collect();
+            return Err(Refused::new(
+                PolicyError::InputAcrossFamilies(text.clone()),
+                vec![crate::check::Finding::new(text).with_rules(rules)],
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn input_across_families(policy: &Policy, rule: &str, conditions: &Value) -> Option<String> {
+    let read = input_read(conditions)?;
+    let uids = match policy.action_constraint() {
+        ActionConstraint::Any => {
+            return Some(format!(
+                "{rule} reads {read} and constrains no action, and an input attribute means what \
+                 the action makes it mean; name the action the rule is for, or actions of one \
+                 family, which share the prefix before \":\" as fs:read and fs:write do"
+            ));
+        }
+        ActionConstraint::Eq(uid) => vec![uid],
+        ActionConstraint::In(uids) => uids,
+    };
+    let mut families: Vec<(String, Vec<String>)> = Vec::new();
+    for uid in &uids {
+        let family = input_family(uid);
+        match families.iter_mut().find(|(known, _)| *known == family) {
+            Some((_, actions)) => actions.push(uid.to_string()),
+            None => families.push((family, vec![uid.to_string()])),
+        }
+    }
+    if families.len() < 2 {
+        return None;
+    }
+    let scopes: Vec<String> = families
+        .iter()
+        .map(|(_, actions)| format!("[{}]", actions.join(", ")))
+        .collect();
+    Some(format!(
+        "{rule} reads {read} under actions of more than one family, and an input attribute \
+         means what the action makes it mean; write one rule for each family: {}",
+        scopes.join(" and ")
+    ))
+}
+
+/// The prefix before `:` of a `Box::Action`, the action type of a tool grammar action, or the whole
+/// action for any other.
+fn input_family(uid: &EntityUid) -> String {
+    let mut namespace = uid.type_name().namespace_components();
+    if namespace.next() == Some(crate::grammar::TOOL_NAMESPACE) && namespace.next().is_some() {
+        return uid.type_name().to_string();
+    }
+    let id = uid.id().escaped();
+    if uid.type_name().to_string() == BOX_ACTION_TYPE
+        && let Some((prefix, _)) = id.split_once(':')
+    {
+        return prefix.to_string();
+    }
+    uid.to_string()
+}
+
+/// The judged family a rule's scope names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scope {
     Filesystem,
     Shell,
     Network,
-    /// Unconstrained, or more than one family, so `path` may be a URL path.
-    Unscoped,
 }
 
 /// Which judgements apply to one attribute under one scope.
@@ -203,11 +340,11 @@ struct Checks {
 }
 
 impl Scope {
-    /// The scope of `policy`, or `None` when it names an action outside `Box::Action` or only
-    /// actions of no judged family.
+    /// The scope of `policy`, or `None` when it constrains no action, or names an action outside
+    /// `Box::Action` or of no judged family.
     fn of(policy: &Policy) -> Option<Self> {
         let uids = match policy.action_constraint() {
-            ActionConstraint::Any => return Some(Self::Unscoped),
+            ActionConstraint::Any => return None,
             ActionConstraint::Eq(uid) => vec![uid],
             ActionConstraint::In(uids) => uids,
         };
@@ -217,16 +354,10 @@ impl Scope {
         {
             return None;
         }
-        let families: Vec<Option<Self>> = uids.iter().map(Self::family).collect();
-        let first = (*families.first()?)?;
-        if families.iter().all(|family| family.is_none()) {
-            return None;
-        }
-        Some(if families.iter().all(|family| *family == Some(first)) {
-            first
-        } else {
-            Self::Unscoped
-        })
+        let first = Self::family(uids.first()?)?;
+        uids.iter()
+            .all(|uid| Self::family(uid) == Some(first))
+            .then_some(first)
     }
 
     fn family(uid: &EntityUid) -> Option<Self> {
@@ -244,13 +375,12 @@ impl Scope {
 
     fn checks(self, attribute: &str) -> Option<Checks> {
         match (self, attribute) {
-            (Self::Filesystem, PATH) | (Self::Shell, PROGRAM | PROGRAM_PATH) => Some(Checks {
-                trailing_slash: true,
-            }),
-            (Self::Unscoped, PATH | PROGRAM_PATH | PROGRAM) => Some(Checks {
-                trailing_slash: false,
-            }),
-            (Self::Network, HOST) => Some(Checks {
+            (Self::Filesystem, PATH) | (Self::Shell, PROGRAM | PROGRAM_PATH | CWD) => {
+                Some(Checks {
+                    trailing_slash: true,
+                })
+            }
+            (Self::Network, HOST | IP4 | IP6) => Some(Checks {
                 trailing_slash: false,
             }),
             _ => None,
@@ -261,6 +391,9 @@ impl Scope {
 fn judge_literal(attribute: &str, literal: &str, homes: &[String], checks: Checks) -> Finding {
     if attribute == HOST {
         return judge_host_literal(literal);
+    }
+    if attribute == IP4 || attribute == IP6 {
+        return judge_address(attribute, &format!("\"{literal}\""), literal);
     }
     if attribute == PROGRAM {
         return if literal.contains('/') {
@@ -295,6 +428,14 @@ fn judge_pattern(
     let pattern = render(elements);
     if attribute == HOST {
         return judge_host_pattern(elements, &pattern);
+    }
+    if attribute == IP4 || attribute == IP6 {
+        return match elements {
+            [PatternElement::Literal(text)] => {
+                judge_address(attribute, &format!("the pattern \"{pattern}\""), text)
+            }
+            _ => judge_address_pattern(attribute, elements, &pattern),
+        };
     }
     if attribute == PROGRAM {
         let names_a_path = elements
@@ -355,6 +496,211 @@ fn judge_host_literal(literal: &str) -> Finding {
         ));
     }
     Finding::Sound
+}
+
+/// An address literal a pinned destination can equal under `attribute`, which it can only when
+/// the literal is of that attribute's family and is already that family's own spelling.
+fn judge_address(attribute: &str, subject: &str, literal: &str) -> Finding {
+    let inert = |advice: String| {
+        Finding::Inert(format!("compares context.input.{attribute} with {advice}"))
+    };
+    let Ok(address) = literal.parse::<IpAddr>() else {
+        return inert(format!(
+            "{subject}, which no pinned destination address can equal; {}",
+            unpinnable_advice(attribute, literal)
+        ));
+    };
+    let Some(canonical) = canonical_under(attribute, address) else {
+        return inert(format!(
+            "{subject}, and {}",
+            other_family_advice(attribute, address)
+        ));
+    };
+    if canonical != literal {
+        return inert(format!(
+            "{subject}, and {}; write \"{canonical}\"",
+            spelling_rule(attribute)
+        ));
+    }
+    Finding::Sound
+}
+
+/// An address pattern whose every literal element holds only characters that attribute's own
+/// spelling holds, as [`judge_host_pattern`] does for a host.
+///
+/// The addresses a wildcard admits cannot be listed, so nothing else about the pattern is judged.
+fn judge_address_pattern(attribute: &str, elements: &[PatternElement], pattern: &str) -> Finding {
+    let literals: Vec<&str> = elements
+        .iter()
+        .filter_map(|element| match element {
+            PatternElement::Literal(text) => Some(text.as_str()),
+            PatternElement::Wildcard => None,
+        })
+        .collect();
+    let inert = |advice: String| {
+        Finding::Inert(format!(
+            "compares context.input.{attribute} with the pattern \"{pattern}\", which no pinned \
+             destination address can match; {advice}"
+        ))
+    };
+    // A ":" names the other family, whatever else the pattern holds, so it decides the advice.
+    if attribute == IP4 && literals.iter().any(|text| text.contains(':')) {
+        return inert(format!(
+            "an IPv4 address holds no \":\"; compare context.input.{IP6} to name an IPv6 address"
+        ));
+    }
+    if literals
+        .iter()
+        .any(|text| text.chars().any(char::is_uppercase))
+    {
+        let lowercase = render(&lowercased(elements));
+        return inert(format!(
+            "an address is spelled in lowercase; write \"{lowercase}\""
+        ));
+    }
+    if attribute == IP6 && literals.iter().any(|text| text.contains('.')) && !mapped_quad(elements)
+    {
+        return inert(format!(
+            "an IPv6 address holds a dotted quad in \"::ffff:\" and the quad alone; write the \
+             hexadecimal groups, or compare context.input.{IP4} to name the IPv4 address it carries"
+        ));
+    }
+    for text in literals {
+        if let Some(character) = text
+            .chars()
+            .find(|character| !is_address_char(attribute, *character))
+        {
+            return inert(format!(
+                "an address holds no \"{}\"; context.input.{attribute} holds only {}",
+                character.escape_debug(),
+                address_characters(attribute)
+            ));
+        }
+    }
+    Finding::Sound
+}
+
+/// Whether an IPv6 pattern can reach the one wire form that holds a dotted quad, which is
+/// `::ffff:` and a dotted quad and nothing else.
+fn mapped_quad(elements: &[PatternElement]) -> bool {
+    let quad = |text: &str| text.chars().all(|c| c.is_ascii_digit() || c == '.');
+    let (head, rest) = match elements.split_first() {
+        Some((PatternElement::Wildcard, _)) => return true,
+        Some((PatternElement::Literal(text), rest)) => (text, rest),
+        None => return false,
+    };
+    // A head that stops inside "::ffff:" leaves the rest of it to the wildcard that follows.
+    if "::ffff:".starts_with(head.as_str())
+        && matches!(rest.first(), Some(PatternElement::Wildcard))
+    {
+        return true;
+    }
+    head.strip_prefix("::ffff:").is_some_and(quad)
+        && rest.iter().all(|element| match element {
+            PatternElement::Literal(text) => quad(text),
+            PatternElement::Wildcard => true,
+        })
+}
+
+/// Whether a pinned address under `attribute` ever holds `character`.
+fn is_address_char(attribute: &str, character: char) -> bool {
+    if attribute == IP4 {
+        character.is_ascii_digit() || character == '.'
+    } else {
+        character.is_ascii_digit() || matches!(character, 'a'..='f' | ':' | '.')
+    }
+}
+
+/// Every character a pinned address under `attribute` holds.
+fn address_characters(attribute: &str) -> &'static str {
+    if attribute == IP4 {
+        "digits and \".\""
+    } else {
+        "digits, \"a\" to \"f\", \":\", and \".\""
+    }
+}
+
+/// What `attribute` holds, and what to compare for an address of the other family.
+///
+/// An IPv6 form that carries an IPv4 address reaches `ip4` as that address, so a literal of that
+/// shape names both choices: the carried address, or this one wire form.
+fn other_family_advice(attribute: &str, address: IpAddr) -> String {
+    if attribute == IP4 {
+        if let Some(carried) = crate::address::ip4(address) {
+            return format!(
+                "context.input.{IP4} holds an IPv4 address; write \"{carried}\" to reach every \
+                 encoding that carries it, or compare context.input.{IP6} to reach this one wire \
+                 form"
+            );
+        }
+        return format!(
+            "context.input.{IP4} holds an IPv4 address; compare context.input.{IP6} instead"
+        );
+    }
+    format!("context.input.{IP6} holds an IPv6 address; compare context.input.{IP4} instead")
+}
+
+/// `address` as `attribute` spells it, or `None` when the address is of the other family.
+fn canonical_under(attribute: &str, address: IpAddr) -> Option<String> {
+    if attribute == IP4 {
+        crate::address::ip4(address).filter(|_| address.is_ipv4())
+    } else {
+        crate::address::ip6(address)
+    }
+}
+
+/// How `attribute` spells the address it holds.
+fn spelling_rule(attribute: &str) -> &'static str {
+    if attribute == IP4 {
+        "an IPv4 address is spelled as a dotted quad"
+    } else {
+        "an IPv6 address is spelled compressed and in lowercase, and keeps the dotted quad of an \
+         IPv4-mapped form"
+    }
+}
+
+/// Why no pinned address equals `literal`, which parses as no [`IpAddr`].
+fn unpinnable_advice(attribute: &str, literal: &str) -> String {
+    if literal.is_empty() {
+        return "an address is never empty".to_string();
+    }
+    if let Some(within) = address_before_port(literal) {
+        return match canonical_under(attribute, within) {
+            Some(canonical) => format!(
+                "an address carries no port; write \"{canonical}\" and compare context.input.port"
+            ),
+            None => other_family_advice(attribute, within),
+        };
+    }
+    if let Some(within) = bracketed(literal).and_then(|inner| inner.parse().ok()) {
+        return match canonical_under(attribute, within) {
+            Some(canonical) => format!("an address carries no brackets; write \"{canonical}\""),
+            None => other_family_advice(attribute, within),
+        };
+    }
+    let family = if attribute == IP4 { "IPv4" } else { "IPv6" };
+    format!(
+        "context.input.{attribute} holds the {family} address the gateway pinned; compare \
+         context.input.{HOST} to pin a name"
+    )
+}
+
+/// The address `literal` holds before a numeric port suffix, as `[v6]:port` or `v4:port`; a bare
+/// IPv6 prefix with one group too many reads as neither.
+fn address_before_port(literal: &str) -> Option<IpAddr> {
+    let (address, port) = literal.rsplit_once(':')?;
+    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    match bracketed(address) {
+        Some(inner) => inner.parse().ok(),
+        None => address.parse::<Ipv4Addr>().ok().map(IpAddr::V4),
+    }
+}
+
+/// What `literal` holds inside `[…]`.
+fn bracketed(literal: &str) -> Option<&str> {
+    literal.strip_prefix('[')?.strip_suffix(']')
 }
 
 /// A host pattern whose every literal element holds only bytes a bound host holds.
@@ -545,18 +891,47 @@ fn collect(node: &Value, out: &mut Vec<(String, Comparison)>) {
     }
 }
 
-/// `path`, `program_path`, `program`, or `host` when `node` is `context.input.<that>`.
+/// The checked attribute when `node` reads a path, program, host, or address under `context.input`.
 fn input_attribute(node: &Value) -> Option<String> {
     let access = node.get(".")?;
     let attribute = access.get("attr")?.as_str()?;
-    if ![PATH, PROGRAM_PATH, PROGRAM, HOST].contains(&attribute) {
+    if ![PATH, PROGRAM_PATH, PROGRAM, CWD, HOST, IP4, IP6].contains(&attribute) {
         return None;
     }
-    let input = access.get("left")?.get(".")?;
-    if input.get("attr")?.as_str()? != "input" {
-        return None;
+    is_context_input(access.get("left")?).then(|| attribute.to_string())
+}
+
+/// The first read of `context.input` in `node`: `context.input.<attribute>` when it names one.
+fn input_read(node: &Value) -> Option<String> {
+    match node {
+        Value::Array(items) => items.iter().find_map(input_read),
+        Value::Object(fields) => {
+            for operator in [".", "has"] {
+                if let Some(access) = fields.get(operator)
+                    && access.get("left").is_some_and(is_context_input)
+                    && let Some(attribute) = access.get("attr").and_then(Value::as_str)
+                {
+                    return Some(format!("context.input.{attribute}"));
+                }
+            }
+            if is_context_input(node) {
+                return Some("context.input".to_string());
+            }
+            fields.values().find_map(input_read)
+        }
+        _ => None,
     }
-    (input.get("left")?.get("Var")?.as_str()? == "context").then(|| attribute.to_string())
+}
+
+fn is_context_input(node: &Value) -> bool {
+    node.get(".").is_some_and(|access| {
+        access.get("attr").and_then(Value::as_str) == Some("input")
+            && access
+                .get("left")
+                .and_then(|left| left.get("Var"))
+                .and_then(Value::as_str)
+                == Some("context")
+    })
 }
 
 fn string_value(node: &Value) -> Option<String> {
@@ -591,6 +966,13 @@ mod tests {
     /// A raw Cedar parse; `tests/path_spelling.rs` covers the Dogwood lowering.
     fn parsed(source: &str) -> PolicySet {
         source.parse().expect("the policy parses")
+    }
+
+    /// The removed-attribute refusal, the scope refusal, then the spelling judge, in load order.
+    fn judge(policies: &PolicySet, operator: &Operator) -> Result<Vec<PolicyWarning>, PolicyError> {
+        refuse_removed_address_attribute(policies, &|_| None).map_err(Refused::into_error)?;
+        refuse_input_across_families(policies, &|_| None).map_err(Refused::into_error)?;
+        super::judge(policies, operator)
     }
 
     fn anchored() -> Operator {
@@ -786,48 +1168,92 @@ mod tests {
     }
 
     #[test]
-    fn an_unconstrained_scope_judges_the_home_and_warns_on_the_program_but_not_a_url_slash() {
-        let broad_forbid = parsed(
-            r#"forbid(principal, action, resource)
-            when { context has input && context.input has path
-                && context.input.path == "/Users/me/project/secrets.env" };"#,
-        );
-        assert!(judge(&broad_forbid, &anchored()).is_err());
+    fn an_input_read_under_no_action_is_refused_and_names_the_actions_to_write() {
+        for read in [
+            r#"context.input.path == "/etc/hosts""#,
+            r#"context.input.program == "git""#,
+            r#"context.input.program_path == "/usr/bin/git""#,
+            r#"context.input.host == "api.example.com""#,
+            r#"context.input.server == "demo""#,
+            r#"context.input.operation == Box::FsReadOperation::"read_content""#,
+            "context has input && context.input has path",
+        ] {
+            let policies = parsed(&format!(
+                r#"@id("broad") forbid(principal, action, resource) when {{ {read} }};"#
+            ));
+            let error = judge(&policies, &anchored()).unwrap_err().to_string();
+            assert!(
+                error.contains("rule @id(\"broad\") reads context.input."),
+                "{read}: {error}"
+            );
+            assert!(error.contains("constrains no action"), "{read}: {error}");
+            assert!(
+                error.contains("name the action the rule is for"),
+                "{read}: {error}"
+            );
+        }
+    }
 
-        let broad_program = parsed(
-            r#"forbid(principal, action, resource)
-            when { context has input && context.input has program
-                && context.input.program == "/usr/bin/curl" };"#,
-        );
-        assert_eq!(
-            judge(&broad_program, &anchored()).expect("a warning").len(),
-            1
-        );
+    #[test]
+    fn an_input_read_across_families_is_refused_whatever_the_order() {
+        for actions in [
+            r#"Box::Action::"fs:read", Box::Action::"http:request""#,
+            r#"Box::Action::"http:request", Box::Action::"fs:read""#,
+            r#"Box::Action::"net:connect", Box::Action::"http:request""#,
+            r#"Box::Action::"fs:read", Box::Action::"mcp:call""#,
+            r#"Box::Action::"mcp:call", Box::Action::"fs:read""#,
+            r#"Box::Action::"shell:spawn", Box::Action::"fs:read""#,
+        ] {
+            let policies = parsed(&format!(
+                r#"permit(principal, action in [{actions}], resource)
+                when {{ context.input has path }};"#
+            ));
+            let error = judge(&policies, &anchored()).unwrap_err().to_string();
+            assert!(
+                error.contains("reads context.input.path under actions of more than one family"),
+                "{actions}: {error}"
+            );
+        }
 
+        let grouped = parsed(
+            r#"permit(principal, action in [Box::Action::"fs:read", Box::Action::"net:connect", Box::Action::"fs:write"], resource)
+            when { context.input.path == "/v1/" };"#,
+        );
+        let error = judge(&grouped, &anchored()).unwrap_err().to_string();
+        assert!(
+            error.ends_with(
+                r#"write one rule for each family: [Box::Action::"fs:read", Box::Action::"fs:write"] and [Box::Action::"net:connect"]"#
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_rule_that_reads_no_input_or_names_one_family_loads() {
+        for source in [
+            "permit(principal, action, resource);",
+            "forbid(principal, action, resource);",
+            r#"permit(principal, action in [Box::Action::"fs:read", Box::Action::"net:connect"], resource);"#,
+            r#"forbid(principal, action, resource) when { context has input };"#,
+            r#"permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write", Box::Action::"fs:other"], resource)
+               when { context.input.path == "/etc/hosts" };"#,
+            r#"permit(principal, action in [Box::Action::"shell:exec", Box::Action::"shell:spawn"], resource)
+               when { context.input.program == "git" };"#,
+            r#"permit(principal, action == Box::Action::"mcp:call", resource)
+               when { context.input.server == "demo" };"#,
+        ] {
+            assert!(judge(&parsed(source), &anchored()).is_ok(), "{source}");
+        }
+    }
+
+    /// A URL path is not judged as a filesystem path.
+    #[test]
+    fn a_network_scope_does_not_judge_a_url_path() {
         let url = parsed(
             r#"permit(principal, action == Box::Action::"http:request", resource)
             when { context.input.path == "/v1/models/" || context.input.path == "/Users/me/api" };"#,
         );
         assert!(judge(&url, &anchored()).is_ok());
-
-        let network_only = parsed(
-            r#"permit(principal, action in [Box::Action::"http:request", Box::Action::"net:connect"], resource)
-            when { context.input has path && context.input.path == "/Users/me/api" };"#,
-        );
-        assert!(judge(&network_only, &anchored()).is_ok());
-
-        let mixed = parsed(
-            r#"permit(principal, action in [Box::Action::"fs:read", Box::Action::"http:request"], resource)
-            when { context.input.path == "/v1/" };"#,
-        );
-        assert!(judge(&mixed, &anchored()).is_ok());
-
-        let baseline_shape = parsed(
-            r#"forbid(principal, action, resource)
-            when { context has input && context.input has path
-                && context.input.path like "*/.strands-box/mcp-schemas/*" };"#,
-        );
-        assert!(judge(&baseline_shape, &anchored()).is_ok());
     }
 
     #[test]
@@ -842,7 +1268,8 @@ mod tests {
             r#"permit(principal, action in [Box::Action::"fs:read", alpha::Action::"read"], resource)
             when { context.input.path == "/Users/me/tool-argument" };"#,
         );
-        assert!(judge(&mixed, &anchored()).is_ok());
+        let error = judge(&mixed, &anchored()).unwrap_err().to_string();
+        assert!(error.contains("more than one family"), "{error}");
     }
 
     #[test]
@@ -993,16 +1420,16 @@ mod tests {
         assert!(judge(&reversed, &Operator::unanchored()).is_err());
 
         let set = parsed(
-            r#"forbid(principal, action in [Box::Action::"net:connect", Box::Action::"http:request"], resource)
+            r#"forbid(principal, action == Box::Action::"http:request", resource)
             when { ["api.example.com", "API.Other.com"].contains(context.input.host) };"#,
         );
         assert!(judge(&set, &Operator::unanchored()).is_err());
     }
 
-    /// Under an unconstrained action, `host` may be the argument of a generated MCP tool action
-    /// rather than a destination, so no host literal is judged there.
+    /// A host literal is judged only as a destination, so a rule that does not name its action
+    /// is refused for the scope and is never told to respell a tool argument.
     #[test]
-    fn an_unconstrained_action_judges_no_host_literal() {
+    fn a_host_literal_under_no_action_is_refused_for_its_scope_and_not_its_spelling() {
         for literal in [
             "API.Example.com",
             "PROD",
@@ -1014,9 +1441,22 @@ mod tests {
                 when {{ context has input && context.input has host
                     && context.input.host == "{literal}" }};"#
             ));
+            let error = judge(&broad, &Operator::unanchored())
+                .unwrap_err()
+                .to_string();
             assert!(
-                judge(&broad, &Operator::unanchored()).is_ok(),
-                "{literal:?} may be a tool argument under an unconstrained action"
+                error.contains("constrains no action"),
+                "{literal:?}: {error}"
+            );
+            assert!(!error.contains("lowercase"), "{literal:?}: {error}");
+
+            let tool = parsed(&format!(
+                r#"forbid(principal, action == alpha::Action::"deploy", resource)
+                when {{ context.input.host == "{literal}" }};"#
+            ));
+            assert!(
+                judge(&tool, &Operator::unanchored()).is_ok(),
+                "{literal:?} is a tool argument under a tool action"
             );
         }
 
@@ -1024,7 +1464,10 @@ mod tests {
             r#"forbid(principal, action in [Box::Action::"net:connect", Box::Action::"fs:read"], resource)
             when { context.input.host == "API.Example.com" };"#,
         );
-        assert!(judge(&mixed, &Operator::unanchored()).is_ok());
+        let error = judge(&mixed, &Operator::unanchored())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("more than one family"), "{error}");
     }
 
     /// A refusal never names a spelling that is itself unreachable, so the unreachable byte is
@@ -1049,6 +1492,356 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("write \"api.example.com\""), "{error}");
+    }
+
+    /// A network rule that names the removed `ip` attribute is refused, in each shape a rule can
+    /// name it, and the refusal names both replacements.
+    #[test]
+    fn a_network_rule_that_names_the_removed_address_attribute_is_refused() {
+        for condition in [
+            r#"context.input has ip"#,
+            r#"context.input.ip == "169.254.169.254""#,
+            r#"context.input has ip && context.input.ip like "169.254.*""#,
+            r#""169.254.169.254" == context.input.ip"#,
+            r#"["169.254.169.254"].contains(context.input.ip)"#,
+            r#"context.input.ip.isInRange(ip("10.0.0.0/8"))"#,
+        ] {
+            let policies = parsed(&format!(
+                r#"@id("block_address")
+                forbid(principal, action == Box::Action::"net:connect", resource)
+                when {{ {condition} }};"#
+            ));
+            let error = judge(&policies, &Operator::unanchored())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("rule @id(\"block_address\")"), "{error}");
+            assert!(
+                error.contains("reads context.input.ip, which no action carries"),
+                "{condition}: {error}"
+            );
+            assert!(error.contains("context.input.ip4"), "{condition}: {error}");
+            assert!(error.contains("context.input.ip6"), "{condition}: {error}");
+        }
+    }
+
+    /// A tool's own schema may declare an `ip` argument, so only a network rule is judged.
+    #[test]
+    fn a_tool_rule_that_names_ip_is_a_tool_argument_and_loads() {
+        let tool = parsed(
+            r#"forbid(principal, action == alpha::Action::"deploy", resource)
+            when { context.input.ip == "64:ff9b::a9fe:a9fe" };"#,
+        );
+        assert!(judge(&tool, &Operator::unanchored()).is_ok());
+    }
+
+    /// Each attribute holds one family, so a literal of the other family is refused with the
+    /// attribute to compare instead.
+    #[test]
+    fn an_address_literal_of_the_other_family_is_refused_with_the_attribute_that_holds_it() {
+        for (attribute, literal, advice) in [
+            ("ip4", "fd00:ec2::254", "compare context.input.ip6 instead"),
+            (
+                "ip6",
+                "169.254.169.254",
+                "compare context.input.ip4 instead",
+            ),
+            // An IPv6 form that carries an IPv4 address names both choices, because the carried
+            // address reaches every encoding and the wire form reaches only itself.
+            (
+                "ip4",
+                "::ffff:169.254.169.254",
+                "write \"169.254.169.254\" to reach every encoding that carries it, or compare \
+                 context.input.ip6 to reach this one wire form",
+            ),
+            (
+                "ip4",
+                "64:ff9b::a9fe:a9fe",
+                "write \"169.254.169.254\" to reach every encoding that carries it",
+            ),
+        ] {
+            let policies = parsed(&format!(
+                r#"@id("wrong_family")
+                forbid(principal, action == Box::Action::"net:connect", resource)
+                when {{ context.input has {attribute} && context.input.{attribute} == "{literal}" }};"#
+            ));
+            let error = judge(&policies, &Operator::unanchored())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("rule @id(\"wrong_family\")"), "{error}");
+            assert!(error.contains(advice), "{attribute} {literal}: {error}");
+        }
+    }
+
+    /// Each attribute carries one spelling, so every other spelling of its own family is refused
+    /// with the one a decision reads.
+    #[test]
+    fn an_address_literal_is_refused_with_the_spelling_a_decision_reads() {
+        for (attribute, literal, canonical) in [
+            ("ip6", "::ffff:a9fe:a9fe", "::ffff:169.254.169.254"),
+            ("ip6", "::169.254.169.254", "::a9fe:a9fe"),
+            ("ip6", "2001:0:0:0:0:0:5601:5601", "2001::5601:5601"),
+            ("ip6", "64:ff9b::169.254.169.254", "64:ff9b::a9fe:a9fe"),
+            ("ip6", "64:FF9B::A9FE:A9FE", "64:ff9b::a9fe:a9fe"),
+            ("ip6", "::ffff:0:169.254.169.254", "::ffff:0:a9fe:a9fe"),
+            (
+                "ip6",
+                "FD00:00EC:0000:0000:0000:0000:0000:0254",
+                "fd00:ec::254",
+            ),
+            ("ip6", "FE80::1", "fe80::1"),
+        ] {
+            let policies = parsed(&format!(
+                r#"@id("block_address")
+                forbid(principal, action == Box::Action::"net:connect", resource)
+                when {{ context.input has {attribute} && context.input.{attribute} == "{literal}" }};"#
+            ));
+            let error = judge(&policies, &Operator::unanchored())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("rule @id(\"block_address\")"), "{error}");
+            assert!(
+                error.contains(&format!("write \"{canonical}\"")),
+                "{attribute} {literal}: {error}"
+            );
+        }
+    }
+
+    /// Every spelling a pinned address reads as must load, so the judge refuses nothing an
+    /// operator needs.
+    #[test]
+    fn a_canonical_address_literal_is_sound() {
+        for (attribute, literal) in [
+            ("ip4", "169.254.169.254"),
+            ("ip4", "127.0.0.1"),
+            ("ip4", "0.0.0.0"),
+            ("ip6", "fd00:ec2::254"),
+            ("ip6", "2001:db8::1"),
+            ("ip6", "::"),
+            ("ip6", "::1"),
+            ("ip6", "::ffff:169.254.169.254"),
+            ("ip6", "64:ff9b::a9fe:a9fe"),
+            ("ip6", "64:ff9c::a9fe:a9fe"),
+            ("ip6", "64:ff9b:1::a9fe:a9fe"),
+            ("ip6", "64:ff9b::1:a9fe:a9fe"),
+        ] {
+            let policies = parsed(&format!(
+                r#"forbid(principal, action == Box::Action::"net:connect", resource)
+                when {{ context.input has {attribute} && context.input.{attribute} == "{literal}" }};"#
+            ));
+            assert!(
+                judge(&policies, &Operator::unanchored()).is_ok(),
+                "{attribute} {literal:?} is a spelling a decision reads and must load"
+            );
+        }
+    }
+
+    #[test]
+    fn an_address_literal_that_no_pinned_address_can_equal_is_refused() {
+        for (attribute, literal, advice) in [
+            ("ip4", "169.254.169.254:80", "write \"169.254.169.254\""),
+            ("ip6", "[2001:db8::1]:443", "write \"2001:db8::1\""),
+            ("ip6", "[2001:db8::1]", "carries no brackets"),
+            // A port or a bracket around an address of the other family names that family.
+            ("ip4", "[2001:db8::1]", "compare context.input.ip6 instead"),
+            (
+                "ip6",
+                "169.254.169.254:80",
+                "compare context.input.ip4 instead",
+            ),
+            ("ip4", "", "an address is never empty"),
+            (
+                "ip4",
+                "169.254.169.254/32",
+                "holds the IPv4 address the gateway pinned",
+            ),
+            (
+                "ip4",
+                "metadata.example",
+                "holds the IPv4 address the gateway pinned",
+            ),
+            // One group too many splits like a port, and names no port in the advice.
+            (
+                "ip6",
+                "2001:db8::1:2:3:4:5:6",
+                "holds the IPv6 address the gateway pinned",
+            ),
+            (
+                "ip6",
+                "fe80::1%eth0",
+                "holds the IPv6 address the gateway pinned",
+            ),
+        ] {
+            let policies = parsed(&format!(
+                r#"forbid(principal, action == Box::Action::"net:connect", resource)
+                when {{ context.input has {attribute} && context.input.{attribute} == "{literal}" }};"#
+            ));
+            let error = judge(&policies, &Operator::unanchored())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(advice), "{attribute} {literal:?}: {error}");
+        }
+    }
+
+    /// A pattern with a wildcard is judged by nothing, because an address a wildcard admits
+    /// cannot be enumerated; a pattern with none is judged as the literal it is.
+    #[test]
+    fn an_address_pattern_is_judged_only_when_it_holds_no_wildcard() {
+        let wildcards = parsed(
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+            when { (context.input has ip4 && context.input.ip4 like "169.254.*")
+                   || (context.input has ip6 && (context.input.ip6 like "64:ff9b::*"
+                   || context.input.ip6 like "fe8*")) };"#,
+        );
+        assert!(
+            judge(&wildcards, &Operator::unanchored())
+                .expect("a pattern loads")
+                .is_empty()
+        );
+
+        let exact = parsed(
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+            when { context.input has ip6 && context.input.ip6 like "64:FF9B::A9FE:A9FE" };"#,
+        );
+        let error = judge(&exact, &Operator::unanchored())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("the pattern \"64:FF9B::A9FE:A9FE\""),
+            "{error}"
+        );
+        assert!(error.contains("write \"64:ff9b::a9fe:a9fe\""), "{error}");
+    }
+
+    /// A wildcard leaves the addresses unlistable, but each literal element still holds only the
+    /// characters that attribute's spelling holds. A case slip is the mistake this catches: `ip6`
+    /// is always lowercase and `like` is case-sensitive.
+    #[test]
+    fn an_address_pattern_whose_literal_holds_a_character_no_address_holds_is_refused() {
+        for (attribute, pattern, advice) in [
+            ("ip6", "64:FF9B::*", "write \"64:ff9b::*\""),
+            ("ip6", "FE8*", "write \"fe8*\""),
+            (
+                "ip4",
+                "fd00:ec2:*",
+                "an IPv4 address holds no \":\"; compare context.input.ip6",
+            ),
+            (
+                "ip4",
+                "169.254.*/*",
+                "an address holds no \"/\"; context.input.ip4 holds only digits and \".\"",
+            ),
+            (
+                "ip6",
+                "fe80::1%*",
+                "an address holds no \"%\"; context.input.ip6 holds only digits, \"a\" to \"f\"",
+            ),
+            (
+                "ip6",
+                "64:ff9b::169.254.*",
+                "an IPv6 address holds a dotted quad in \"::ffff:\" and the quad alone",
+            ),
+            (
+                "ip6",
+                "::169.254.*",
+                "compare context.input.ip4 to name the IPv4 address it carries",
+            ),
+            (
+                "ip6",
+                "::ffff:0:169.254.*",
+                "an IPv6 address holds a dotted quad in \"::ffff:\" and the quad alone",
+            ),
+            (
+                "ip6",
+                "::ffff:a9fe:1.*",
+                "an IPv6 address holds a dotted quad in \"::ffff:\" and the quad alone",
+            ),
+        ] {
+            let policies = parsed(&format!(
+                r#"@id("pattern")
+                forbid(principal, action == Box::Action::"net:connect", resource)
+                when {{ context.input has {attribute} && context.input.{attribute} like "{pattern}" }};"#
+            ));
+            let error = judge(&policies, &Operator::unanchored())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(advice), "{attribute} {pattern}: {error}");
+        }
+    }
+
+    #[test]
+    fn an_ipv6_pattern_that_can_reach_a_dotted_quad_loads() {
+        for pattern in [
+            "::ffff:169.254.*",
+            "::ffff:*.254",
+            "*169.254.*",
+            "::*169.254.*",
+            "::ff*169.254.*",
+            "::ffff*.254",
+            "::ffff:0*169.254.*",
+        ] {
+            let policies = parsed(&format!(
+                r#"@id("pattern")
+                forbid(principal, action == Box::Action::"net:connect", resource)
+                when {{ context.input has ip6 && context.input.ip6 like "{pattern}" }};"#
+            ));
+            assert!(
+                judge(&policies, &Operator::unanchored()).is_ok(),
+                "{pattern} reaches the IPv4-mapped form, so the judge cannot prove it inert"
+            );
+        }
+    }
+
+    /// An address literal is judged only as a pinned destination, so a rule outside `net:*`
+    /// keeps it and a rule that names no action is refused for its scope.
+    #[test]
+    fn an_address_literal_under_no_action_is_refused_for_its_scope_and_not_its_spelling() {
+        let broad = parsed(
+            r#"forbid(principal, action, resource)
+            when { context has input && context.input has ip6
+                && context.input.ip6 == "64:FF9B::A9FE:A9FE" };"#,
+        );
+        let error = judge(&broad, &Operator::unanchored())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("constrains no action"), "{error}");
+        assert!(!error.contains("write \"64:ff9b::a9fe:a9fe\""), "{error}");
+
+        let tool = parsed(
+            r#"forbid(principal, action == alpha::Action::"deploy", resource)
+            when { context.input.ip6 == "64:FF9B::A9FE:A9FE" };"#,
+        );
+        assert!(
+            judge(&tool, &Operator::unanchored()).is_ok(),
+            "an address under a tool action is a tool argument"
+        );
+
+        let pinned = parsed(
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+            when { context.input.ip6 == "64:FF9B::A9FE:A9FE" };"#,
+        );
+        let error = judge(&pinned, &Operator::unanchored())
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("write \"64:ff9b::a9fe:a9fe\""),
+            "the same literal under net:connect is a pinned address: {error}"
+        );
+    }
+
+    /// The address arm reaches the reversed-operand and set-membership shapes.
+    #[test]
+    fn a_reversed_operand_and_a_set_membership_judge_the_address() {
+        let reversed = parsed(
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+            when { "::FFFF:A9FE:A9FE" == context.input.ip6 };"#,
+        );
+        assert!(judge(&reversed, &Operator::unanchored()).is_err());
+
+        let set = parsed(
+            r#"forbid(principal, action == Box::Action::"net:connect", resource)
+            when { ["169.254.169.254", "64:ff9b::a9fe:a9fe"].contains(context.input.ip4) };"#,
+        );
+        assert!(judge(&set, &Operator::unanchored()).is_err());
     }
 
     /// A literal and a pattern give one reason for a host that normalizes to nothing.

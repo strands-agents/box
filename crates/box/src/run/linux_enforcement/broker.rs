@@ -3,7 +3,7 @@ use super::notify;
 use crate::run::telemetry::{DecisionRecorder, EffectiveDecision};
 use policy::{
     ApprovedPath, FsOperation, FsResult, GovernedBox, Outcome, PathResolver, PolicyEngine,
-    Principal, Request,
+    Principal, Request, RequestId,
 };
 use serde_json::{Value, json};
 use std::ffi::CString;
@@ -279,19 +279,21 @@ impl Drop for Audit<'_> {
 fn record(
     engine: &PolicyEngine,
     governed: &GovernedBox,
-    path: &Path,
-    operations: &[FsOperation],
+    path: &ApprovedPath,
+    operations: &[(FsOperation, RequestId)],
     result: FsResult,
 ) -> Result<()> {
-    for operation in operations {
+    let reported = path.reported();
+    for (operation, request_id) in operations {
         if matches!(result, FsResult::DescriptorIssued | FsResult::Completed) {
             super::fault::at("outcome")?;
         }
         engine.record(
             governed,
             &Principal::agent(),
+            request_id,
             &Outcome::Fs {
-                path,
+                path: Path::new(reported.as_ref()),
                 operation: *operation,
                 result,
             },
@@ -455,7 +457,7 @@ pub(super) fn file_request(
     for operation in &operations {
         super::fault::at("request")?;
         notify::valid(listener, request.id)?;
-        let decision = engine.decide(
+        let (decision, request_id) = engine.decide(
             governed,
             &Principal::agent(),
             &Request::Fs {
@@ -482,17 +484,12 @@ pub(super) fn file_request(
         }));
         if !decision.is_allow() {
             audit.refused("a required policy check denied the operation");
-            record(
-                engine,
-                governed,
-                approved.as_path(),
-                &permitted,
-                FsResult::Failed,
-            )?;
+            // No filesystem effect ran. Earlier checks remain request-only.
             notify::reply(listener, request.id, libc::EACCES)?;
             return Ok(json!({"decisions": decisions, "outcome": "denied"}));
         }
-        permitted.push(*operation);
+        let request_id = request_id.ok_or("allowed native request has no history identifier")?;
+        permitted.push((*operation, request_id));
     }
     super::fault::at("entry-verified")?;
     notify::valid(listener, request.id)?;
@@ -507,13 +504,7 @@ pub(super) fn file_request(
     match source {
         Err(error) => {
             audit.refused(&error);
-            record(
-                engine,
-                governed,
-                approved.as_path(),
-                &permitted,
-                FsResult::Failed,
-            )?;
+            record(engine, governed, &approved, &permitted, FsResult::Failed)?;
             let errno = error.raw_os_error().ok_or("open failed without errno")?;
             notify::reply(listener, request.id, errno)?;
             Ok(json!({"decisions": decisions, "outcome": "failed", "broker_errno": errno}))
@@ -532,7 +523,7 @@ pub(super) fn file_request(
                 record(
                     engine,
                     governed,
-                    approved.as_path(),
+                    &approved,
                     &permitted,
                     if effect.is_ok() {
                         FsResult::Completed
@@ -557,7 +548,7 @@ pub(super) fn file_request(
                     record(
                         engine,
                         governed,
-                        approved.as_path(),
+                        &approved,
                         &permitted,
                         FsResult::DescriptorIssued,
                     )?;
@@ -570,7 +561,7 @@ pub(super) fn file_request(
                     record(
                         engine,
                         governed,
-                        approved.as_path(),
+                        &approved,
                         &permitted,
                         FsResult::Indeterminate,
                     )?;
@@ -925,11 +916,12 @@ pub(super) fn entry_request(
     };
     let principal = Principal::agent();
     let mut decisions = Vec::new();
-    let mut permitted = Vec::new();
+    let mut permitted: Vec<(&ApprovedPath, FsOperation, policy::RequestId)> = Vec::new();
     for (path, operation) in checks.drain(..) {
         super::fault::at("request")?;
         notify::valid(listener, request.id)?;
-        let decision = engine.decide(governed, &principal, &Request::Fs { path, operation });
+        let (decision, request_id) =
+            engine.decide(governed, &principal, &Request::Fs { path, operation });
         audit.pending.push((operation, decision.clone()));
         if matches!(
             decision,
@@ -947,21 +939,12 @@ pub(super) fn entry_request(
         );
         if !decision.is_allow() {
             audit.refused("a required policy check denied the operation");
-            for (path, operation) in permitted {
-                engine.record(
-                    governed,
-                    &principal,
-                    &Outcome::Fs {
-                        path,
-                        operation,
-                        result: FsResult::Failed,
-                    },
-                )?;
-            }
+            // No filesystem effect ran. Earlier checks remain request-only.
             notify::reply(listener, request.id, libc::EACCES)?;
             return Ok(json!({"decisions":decisions, "outcome":"denied"}));
         }
-        permitted.push((path.as_path(), operation));
+        let request_id = request_id.ok_or("allowed native request has no history identifier")?;
+        permitted.push((path, operation, request_id));
     }
     super::fault::at("entry-checked")?;
     let verified = source
@@ -969,12 +952,13 @@ pub(super) fn entry_request(
         .and_then(|()| destination.as_ref().map_or(Ok(()), Entry::verify));
     if let Err(error) = verified {
         audit.refused(&error);
-        for (path, operation) in permitted {
+        for (path, operation, request_id) in permitted {
             engine.record(
                 governed,
                 &principal,
+                &request_id,
                 &Outcome::Fs {
-                    path,
+                    path: Path::new(path.reported().as_ref()),
                     operation,
                     result: FsResult::Failed,
                 },
@@ -1079,12 +1063,13 @@ pub(super) fn entry_request(
             descriptor.as_raw_fd(),
             request.data.args[2] as i32 & libc::O_CLOEXEC != 0,
         ) {
-            for (path, operation) in &permitted {
+            for (path, operation, request_id) in &permitted {
                 engine.record(
                     governed,
                     &principal,
+                    request_id,
                     &Outcome::Fs {
-                        path,
+                        path: Path::new(path.reported().as_ref()),
                         operation: *operation,
                         result: FsResult::Indeterminate,
                     },
@@ -1097,15 +1082,22 @@ pub(super) fn entry_request(
     } else {
         (FsResult::Completed, "completed")
     };
-    for (path, operation) in permitted {
+    for (index, (path, operation, request_id)) in permitted.into_iter().enumerate() {
+        // The first rename check authorizes the source mutation. Keep that check, but
+        // report one completed move on the destination, as the Shell adapter does.
+        // Select the check by role/order: source and destination can name the same path.
+        if rename && index == 0 && matches!(result, FsResult::Completed) {
+            continue;
+        }
         if matches!(result, FsResult::DescriptorIssued | FsResult::Completed) {
             super::fault::at("outcome")?;
         }
         engine.record(
             governed,
             &principal,
+            &request_id,
             &Outcome::Fs {
-                path,
+                path: Path::new(path.reported().as_ref()),
                 operation,
                 result,
             },

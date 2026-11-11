@@ -12,12 +12,14 @@
 //! | `input_eof` | c→d | — | 0–1 | no more stdin (≠ empty input, ≠ `close`) |
 //! | `signal` | c→d | `kind` ([`SignalKind`]) | 0+ | end the call, keep the program |
 //! | `close` | c→d | — | 0–1 | discard the program and its state |
+//! | `mcp_ready` | d→c | none | 1 per matched MCP open | server started; begin input relay |
+//! | `mcp_unmatched` | d→c | none | 1, terminal | no matching command; ordinary contained execution |
 //! | `output` | d→c | `stream` ([`Stream`]), `data` (b64) | 0+ | one output chunk, streamed |
 //! | `exit` | d→c | `status` | 1, terminal | the call RAN; the program's own status |
 //! | `denied` | d→c | `kind` ([`DeniedKind`]), `reason` | 1, terminal | boundary REFUSED (transport only) |
 //!
 //! Discriminants (`frame_type`, `mode`, `stream`, `kind`) are closed `deny_unknown_fields` enums;
-//! `reason`/`source`/`data`/`server` are free strings.
+//! `reason`/`source`/`data`/`server` are free strings, and `arguments` is a list of free strings.
 
 #![allow(dead_code)]
 
@@ -32,7 +34,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// The largest frame either end will read or write.
 pub(crate) const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
-/// The most captured output the daemon's Shell returns per stream.
+/// The most captured output the daemon's Python interpreter returns per stream.
 pub(crate) const MAX_CAPTURE_STREAM_BYTES: usize = MAX_FRAME_BYTES / 16;
 
 /// The status reported when the boundary itself failed, as distinct from a policy refusal (126)
@@ -40,7 +42,7 @@ pub(crate) const MAX_CAPTURE_STREAM_BYTES: usize = MAX_FRAME_BYTES / 16;
 pub(crate) const BOUNDARY_FAILURE_STATUS: i32 = 125;
 
 /// The one protocol version either end speaks.
-pub(crate) const PROTOCOL_VERSION: u8 = 6;
+pub(crate) const PROTOCOL_VERSION: u8 = 8;
 
 /// Every name the box materializes its Shell alias under.
 pub(crate) const BROKER_SOCKET: &str = "box.sock";
@@ -94,10 +96,12 @@ pub(crate) enum Interpreter {
     Shell,
     /// Python — what every `python3`/`python` alias reaches.
     Python,
-    /// One MCP server, named by the alias the agent executed.
+    /// One MCP server, selected by the command the agent executed through its alias.
     Mcp {
-        /// The server name, from the alias's own filename.
+        /// The program, from the alias's own filename.
         server: String,
+        /// The alias's arguments, in order.
+        arguments: Vec<String>,
     },
 }
 
@@ -150,6 +154,10 @@ pub(crate) enum Body {
     Close,
 
     // ---- daemon → client ----
+    /// The matched MCP server has started.
+    McpReady,
+    /// No command matches on this declared MCP program.
+    McpUnmatched,
     /// A chunk of output, as produced.
     Output { stream: Stream, data: String },
     /// The Call finished with this status.
@@ -163,7 +171,11 @@ impl Body {
     pub(crate) fn is_daemon_only(&self) -> bool {
         matches!(
             self,
-            Body::Output { .. } | Body::Exit { .. } | Body::Denied { .. }
+            Body::Output { .. }
+                | Body::Exit { .. }
+                | Body::Denied { .. }
+                | Body::McpReady
+                | Body::McpUnmatched
         )
     }
 
@@ -182,6 +194,8 @@ impl Body {
             Body::InputEof => ("input_eof", None),
             Body::Signal { kind } => ("signal", Some(json!({ "kind": kind }))),
             Body::Close => ("close", None),
+            Body::McpReady => ("mcp_ready", None),
+            Body::McpUnmatched => ("mcp_unmatched", None),
             Body::Output { stream, data } => {
                 ("output", Some(json!({ "stream": stream, "data": data })))
             }
@@ -223,6 +237,8 @@ impl<'de> Deserialize<'de> for Frame {
             Output,
             Exit,
             Denied,
+            McpReady,
+            McpUnmatched,
         }
 
         #[derive(Deserialize)]
@@ -318,6 +334,14 @@ impl<'de> Deserialize<'de> for Frame {
             FrameType::Close => {
                 none(header.body)?;
                 Body::Close
+            }
+            FrameType::McpReady => {
+                none(header.body)?;
+                Body::McpReady
+            }
+            FrameType::McpUnmatched => {
+                none(header.body)?;
+                Body::McpUnmatched
             }
             FrameType::Output => {
                 let OutputBody { stream, data } = take(header.body)?;
@@ -608,18 +632,36 @@ mod tests {
         assert_eq!(close["frame_type"], "close");
         assert!(close.get("body").is_none(), "a bodyless kind omits body");
 
-        // An MCP `open` carries its server name in `mode`, and round-trips.
+        // An MCP `open` carries the alias's name and its arguments in `mode`, and round-trips.
         let mcp = frame(Body::Open {
             mode: Interpreter::Mcp {
-                server: "agentcore".to_string(),
+                server: "npx".to_string(),
+                arguments: vec!["-y".to_string(), "@playwright/mcp".to_string()],
             },
         });
+        let wire = serde_json::to_value(&mcp).unwrap();
+        assert_eq!(
+            wire["body"]["mode"],
+            json!({ "mcp": { "server": "npx", "arguments": ["-y", "@playwright/mcp"] } })
+        );
         let bytes = serde_json::to_vec(&mcp).unwrap();
         let back: Frame = serde_json::from_slice(&bytes).unwrap();
         assert!(matches!(
             back.body,
-            Body::Open { mode: Interpreter::Mcp { server } } if server == "agentcore"
+            Body::Open { mode: Interpreter::Mcp { server, arguments } }
+                if server == "npx" && arguments == ["-y", "@playwright/mcp"]
         ));
+    }
+
+    /// An MCP `open` without `arguments` is refused.
+    #[test]
+    fn an_mcp_open_without_its_arguments_is_refused() {
+        let payload = format!(
+            r#"{{"version":{PROTOCOL_VERSION},"program":1,"frame_type":"open","body":{{"mode":{{"mcp":{{"server":"npx"}}}}}}}}"#
+        );
+        let error = serde_json::from_str::<Frame>(&payload)
+            .expect_err("an MCP open must carry its arguments");
+        assert!(error.to_string().contains("arguments"), "{error}");
     }
 
     /// The pre-version-4-shape layout — the tag placed *inside* `body` — is refused, because the
@@ -764,10 +806,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn mcp_routing_responses_round_trip_without_a_payload() {
+        for body in [Body::McpReady, Body::McpUnmatched] {
+            let wire = serde_json::to_value(frame(body)).unwrap();
+            assert!(wire.get("body").is_none());
+            let decoded: Frame = serde_json::from_value(wire.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+            let mut with_payload = wire;
+            with_payload["body"] = json!({"program": "/bin/sh"});
+            assert!(serde_json::from_value::<Frame>(with_payload).is_err());
+        }
+    }
+
     /// A body only the daemon may send is recognizable, so the dispatcher can refuse it.
     #[test]
     fn daemon_only_bodies_are_identified() {
         for body in [
+            Body::McpReady,
+            Body::McpUnmatched,
             Body::Output {
                 stream: Stream::Stdout,
                 data: encode_payload(b"x"),

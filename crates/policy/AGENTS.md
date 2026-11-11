@@ -30,13 +30,27 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 ## Public Contract Discipline
 
 - The lifecycle is `PolicyEngine::open` → `decide` → `record` → `effective`.
-  `PolicyEngine::validate` sits off it and returns no authority.
-- The root `pub use` set is the whole API: `Policy`, `PolicyEngine`, `PolicyError`, `Request`,
-  `FsOperation`, `FsAccess`, `Principal`, `Decision`, `DenyReason`, `RuleId`, `Outcome`,
-  `Delivery`, `FsResult`, `EffectivePolicy`, `ENGINE_ID`, `SELF_DEFENDED_FILES`, `ApprovedPath`,
-  `PathRefusal`, `PathResolver`, `GovernedBox`, `EgressPolicyInterceptor`,
-  `ScriptPolicyInterceptor`, `ScriptPermit`, `ShellPolicyInterceptor`. That is 24 names with
-  `--all-features` and 20 by default; recompute it when you touch the façade.
+  `PolicyEngine::validate` and `PolicyEngine::check` sit off it and return no authority.
+- The root `pub use` set is the whole API: `EgressPolicyInterceptor`, `RenameDestination`,
+  `ScriptPermit`, `ScriptPolicyInterceptor`, `ScriptRefusal`, `ShellPolicyInterceptor`,
+  `CatalogRefusal`, `CatalogStage`, `CompleteCatalog`, `DiscoveryFailure`, `ListPage`,
+  `MAXIMUM_LIST_BYTES`, `MAXIMUM_LIST_PAGES`, `McpServerKind`, `ServerDiscovery`, `ToolCatalogs`,
+  `Finding`, `Location`, `PolicyCheck`, `RuleRef`, `Decision`, `DenyReason`, `PolicyAttribution`,
+  `RuleId`, `event_schema_source`, `PolicyDiagnostic`, `PolicyError`, `PolicyStagingError`,
+  `McpSchemaError`, `compose_action_schema`, `generate_mcp_schema`,
+  `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `McpReply`,
+  `Outcome`, `PendingToolResponse`, `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`,
+  `EffectivePolicy`, `Policy`, `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`,
+  `FsOperation`, `Principal`, `Request`, `RequestId`, `GovernedBox`, `Operator`, `PolicyWarning`,
+  `ToolGrammar`, `ToolGrammars`, `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`. That is 60
+  names with `--all-features` and 54 by default; recompute it when you touch the façade.
+- `check` and `validate` share one composition (`check_and_expand`), and the staged check repeats
+  the steps of `open_staged_with_engine` with no engine. A finding keeps a span only when the span
+  is an offset into the authored text: a Dogwood parse error and a Cedar validation error over
+  the complete set. Box's own checks and every staged validation name rules and carry no span,
+  because Dogwood exposes no span for a parsed rule. Keep `tests/policy_check.rs`
+  `a_check_refuses_exactly_what_open_refuses` and
+  `a_staged_check_refuses_exactly_what_open_staged_refuses`.
 - Keep modules private. Keep every `dogwood_language` and `cedar_policy` type out of the façade.
 - Keep `cedar-policy = "=4.11.0"` exact: the schema and the request gate are Cedar types, and
   Dogwood's own constraint is a caret range.
@@ -44,6 +58,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   endpoint you own; never read it from a request.
 - `decide` is not a pure query: it observes the request into history first, so a denied request
   can advance history. The code and its tests own the exact verdict contract.
+- Retain the confirmed `RequestId` from `decide` for each corresponding `record` call.
+  Refuse an ordinary effect if its allow verdict has no token.
 - One resource entity, `Box::Resource`, always uses the id `"unused"`. It carries no policy
   information, so a rule discriminates on the action and `context.input`.
 - One principal, `Box::Agent`, always uses the id `"self"`. `Principal::with_id` retains integration
@@ -64,7 +80,7 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 
 - `policy.rs` the lifecycle. `dogwood.rs` the private engine, event mapping, scope lock, and clock.
   `schema.rs` the `.cedarschema`, the name constants, and the request gate. `request.rs`,
-  `outcome.rs`, `decision.rs`, `error.rs` their public types. `path.rs` the path types.
+  `outcome.rs`, `decision.rs`, `error.rs`, `check.rs` their public types. `path.rs` the path types.
   `adapters/` one module per enforcement point, each behind its own feature.
 - Put a new boundary in `adapters/`, not in a new root file. Keep a method with its type.
 
@@ -97,11 +113,49 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   Do not reintroduce a group action.
 - Key a precondition on `::response`, because a `::request` predicate matches a denied attempt.
   Pinned by `tests/temporal_shell_e2e.rs::a_denied_attempt_satisfies_a_request_keyed_precondition`.
+- An MCP tool's `::response` also records a cancelled, cut-off, or unread call, so a precondition
+  on one also requires `output.reply: "result"`. Only a stdio reply frame records
+  `result`, `tool_error`, or `protocol_error`; the gateway reads no http reply, so every http call
+  records `indeterminate` until it does. Pinned by
+  `crates/box/.../exchange/tests/protocol_2026_07_28.rs::a_cancelled_call_does_not_satisfy_a_result_precondition`,
+  `::an_error_reply_does_not_satisfy_a_result_precondition`, and
+  `adapters/egress.rs::a_remote_tool_call_never_satisfies_a_result_precondition`.
 - History is pruned to the deepest window, and the workload fills that window. State an
   availability bound.
-- Pin a destination on `host` and `port`, and refuse an address with a `forbid` on the string `ip`.
-- `context.input.path` also carries a URL path, so guard a filesystem rule with
-  `context.input has operation`.
+- Pin a destination on `host` and `port`, and refuse an address with a `forbid` on the string `ip4`
+  or `ip6`. Each needs its own `has` guard, so a rule that covers both families has one clause for
+  each.
+- `context.input.path` also carries a URL path, so a rule that reads `context.input` names actions
+  of one family, and the load refuses any other
+  (`spelling::refuse_input_across_families`). Pinned by
+  `tests/path_spelling.rs::a_filesystem_path_rule_stays_off_an_http_request_with_the_same_path`.
+  The check runs before strict validation and in `validate_staged`, so a rule that reads the input
+  across a tool action and another family is refused, not parked; a rule scoped to one tool action
+  loads. Pinned by
+  `tests/runtime_mcp_policy_staging.rs::a_rule_that_reads_the_input_across_a_tool_action_is_refused_before_its_schema_stages`.
+- An MCP union argument reads as its generated `typeChoice` record. `ToolInputs::conform` places a
+  bare value in every member it matches, before the request gate and the event, so a rule on a
+  duplicate member still fires. It refuses a value that matches none, including a value already in
+  the record shape. A record whose fields
+  are all named `typeChoice<N>` is read as a union, so an object property with that name is too.
+  A `null` matches no member. A `datetime`, `ipaddr`, `decimal`, or `duration` member takes a
+  string that Cedar's constructor accepts. The Dogwood event still carries that value as a string,
+  so a rule that compares it fails evaluation and denies, as it does for a non-union argument.
+  Pinned by
+  `mcp_schema::tests::a_union_argument_accepts_each_member_and_refuses_a_non_member` and
+  `tests/runtime_mcp_policy_staging.rs::a_union_argument_is_decided_by_the_policy` and
+  `a_datetime_union_member_is_placed_and_its_rule_cannot_be_bypassed`.
+- A per-tool rule keeps its history across a restart only when its head names per-tool actions
+  alone. `commit_discovering` keeps it installed under the server fragments that
+  `mcp_schema::mcp_schemas_in` recovers from the stored action schema. The tools it decides stay
+  held until their schemas stage. A rule with a Box head that reads per-tool history, and a rule
+  whose server never lists in that run, start fresh. Pinned by
+  `tests/runtime_mcp_policy_staging.rs::a_rule_that_names_a_tool_keeps_its_history_across_a_restart`,
+  `::a_rule_that_names_two_servers_keeps_its_history_while_they_list_one_at_a_time`,
+  `::a_rule_that_decides_a_box_action_from_tool_history_is_not_kept_from_the_previous_run`, and
+  `::a_server_that_never_lists_its_tools_unloads_the_kept_rule`. A namespace that this build's
+  base schema declares is never read as a server, which
+  `mcp_schema::tests::a_previous_build_of_the_box_actions_is_not_read_as_a_server` pins.
 - `body_bytes` is the offer on a `::request` and the delivery on a `::response`.
 - Sum an outbound budget over `http:request::response`, as `tests/policies/egress_byte_budget.dw`
   does. One exchange records one such event, at reply time, with the delivered request bytes and
@@ -151,6 +205,22 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Shell outbound HTTP raises no attempt, so policy does not cover it and only the deny-only
   `network_enabled` switch and SSRF floor do. Do not decide egress in the Shell adapter. The MCP
   `shell` tool reaches `run_pipeline`, so it does raise `shell:exec`.
+- A degraded tool recovers only when a complete bundle commits: a late list whose schema is the last
+  thing the bundle needs, or a reload. `stage_mcp_schema` and `reload` clear the whole
+  `degraded_tools` set then, so one commit lifts every hold, on every server. While anything else is
+  missing — a second schema, or a staged schema that does not match its rule — a late list is
+  `Rejected` and its fragment goes out with the proposal that held it, so two missing schemas
+  recover neither server. Closing that would mean retaining an accepted fragment across a rejected
+  bundle — the partial install that only `Discovering` allows — so do not widen the clear to reach
+  it. Clear nothing on `Rejected`, because a cleared tool whose action is undeclared rides the
+  coarse `mcp:call` grant past its `forbid`. Pinned by `runtime_mcp_policy_staging.rs`
+  `::a_complete_bundle_after_completion_clears_the_degraded_mark`,
+  `::a_late_list_that_supplies_the_last_schema_recovers_both_servers`,
+  `::two_missing_schemas_do_not_recover_from_a_relist`,
+  `::a_late_list_is_refused_while_a_staged_schema_does_not_match_its_rule`, and
+  `::a_late_list_refused_for_a_namespace_collision_keeps_the_degraded_mark`, and by
+  `policy.rs::a_degraded_tool_stays_denied_until_a_reload_drops_its_rule`. The `Rejected` exit for a
+  refused durable commit needs an exhausted store, and no test pins the mark there.
 - Record an outcome this vocabulary cannot name as `Indeterminate`; never drop it.
 - Refuse `os.getenv` and `os.environ` while the schema cannot name them, because the box projects
   credential phantoms into the environment. Pinned by
@@ -165,7 +235,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Do not align the Script adapter with upstream `monty-dogwood`, which leaves an unmapped call
   ungated and authorizes the caller's spelling. Deny an unmapped call, and normalize before you
   decide.
-- Write every field a temporal predicate reads to both bags: `.field()` and `.request_context()`.
+- Fill both the logged event and Cedar request context for input data read by both policy types.
+  Use `EventBuilder::logged_field` alone for reserved history fields such as `requestId`.
 - Keep both saturations deny-ward: `Clock::now()` to 0, and `clamp(bytes)` to `i64::MAX`.
 - A dropped `ScriptPermit` submits `FsResult::Indeterminate` from `Drop`. Keep `#[must_use]`, claim
   `reported` before you submit, and discard a `Drop` recording failure. `EffectPermit` and

@@ -2,9 +2,16 @@
 
 use std::path::PathBuf;
 
-/// Why a box refused to run, or stopped running.
+/// Why a box refused to run or reload, or stopped running.
 #[derive(Debug)]
 pub(crate) struct BoxError(Internal);
+
+impl BoxError {
+    /// Whether no box is open for reload in this process.
+    pub(crate) fn is_not_running(&self) -> bool {
+        matches!(self.0, Internal::Daemon(DaemonError::NotRunning))
+    }
+}
 
 impl std::fmt::Display for BoxError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -43,6 +50,9 @@ pub(crate) enum Internal {
     Trampoline(#[from] TrampolineError),
 
     #[error(transparent)]
+    Installation(#[from] InstallationError),
+
+    #[error(transparent)]
     Supervise(#[from] SuperviseError),
 
     #[error(transparent)]
@@ -56,6 +66,9 @@ pub(crate) enum Internal {
 
     #[error("policy staging failed: {0}")]
     PolicyStaging(#[from] policy::PolicyStagingError),
+
+    #[error("tool grammar binding refused: {0}")]
+    GrammarBinding(#[from] policy::BindingRefusal),
 
     /// The committed record and the durable history disagree about whether this box has run.
     #[error(
@@ -196,17 +209,22 @@ pub(crate) enum RelayError {
 
     #[error("accepting on the workload's listening socket: {source}")]
     Accept { source: std::io::Error },
+
+    #[error(transparent)]
+    Ingress(#[from] ingress::IngressError),
 }
 
 /// The four inputs could not be read, parsed, or validated.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigError {
-    #[cfg(target_os = "linux")]
-    #[error("Linux support is experimental. Set EXPERIMENTAL_LINUX_SUPPORT=TRUE to enable it.")]
-    ExperimentalLinuxSupport,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[error(
+        "x86 support on Linux is experimental. Set EXPERIMENTAL_X86_SUPPORT=TRUE to enable it."
+    )]
+    ExperimentalX86Support,
 
     #[error(
-        "experimental feature `{feature}` requires a macOS build with `native-filesystem-policy`"
+        "experimental feature `{feature}` requires a supported macOS or Linux ARM64 build with `native-filesystem-policy`"
     )]
     ExperimentalFeatureUnavailable { feature: &'static str },
 
@@ -232,6 +250,9 @@ pub(crate) enum ConfigError {
 
     #[error("invalid `{table}` table: {reason}")]
     Process { table: String, reason: String },
+
+    #[error("tool grammar refused: {source}")]
+    ToolGrammar { source: policy::ToolGrammarError },
 
     /// The hosted Shell was asked to start a program no `[tool.<name>]` names.
     #[error("no tool runs {program}: {reason}")]
@@ -381,6 +402,9 @@ impl std::fmt::Display for HistoryFound {
 /// A trusted Box operation could not start, run, or stop.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum DaemonError {
+    #[error("no box is running in this process")]
+    NotRunning,
+
     #[error("cannot parse the box's live record: {source}")]
     LiveParse { source: serde_json::Error },
 
@@ -431,6 +455,21 @@ pub(crate) enum ExecutableError {
     },
 }
 
+/// The installed trusted executables could not retain their identities.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum InstallationError {
+    #[error("cannot locate the trusted Box executable: {source}")]
+    Locate { source: std::io::Error },
+
+    #[error("trusted Box executable {path} {reason}")]
+    Invalid { path: PathBuf, reason: String },
+
+    #[error(
+        "trusted Box executable {path} changed after this run loaded it. Stop Box before updating its installation"
+    )]
+    Changed { path: PathBuf },
+}
+
 /// The containment trampoline could not be prepared or launched.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum TrampolineError {
@@ -475,6 +514,9 @@ pub(crate) enum TrampolineError {
 
     #[error("read containment setup status: {source}")]
     StatusRead { source: std::io::Error },
+
+    #[error("containment setup channel closed before completion")]
+    SetupIncomplete,
 
     #[error("invalid containment setup status protocol: {reason}")]
     StatusProtocol { reason: String },
@@ -521,6 +563,9 @@ pub(crate) enum ShellError {
 /// The child could not be spawned, supervised, or reaped.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum SuperviseError {
+    #[error("workload diagnostics failed: {source}")]
+    Diagnostics { source: std::io::Error },
+
     #[error("spawn contained workload: {source}")]
     Spawn { source: std::io::Error },
 

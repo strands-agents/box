@@ -116,6 +116,7 @@ fn compile_linux_guard() {
     let status = Command::new("cc")
         .args([
             "-std=c11",
+            "-fPIC",
             "-D_GNU_SOURCE",
             "-Wall",
             "-Wextra",

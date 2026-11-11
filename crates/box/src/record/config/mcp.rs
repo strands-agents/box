@@ -1,18 +1,7 @@
-//! `box.toml`'s `[mcp.<name>]` tables: which local MCP servers exist, and how each one starts.
-//!
-//! An entry declares identity and authorizes nothing. It holds only what is the operator's: a name,
-//! a program, and its arguments.
-//!
-//! It lives in the selected configuration, whose loaded filesystem identity cannot be mutated
-//! through either interpreter. That matters more here than for any other key, because the trusted
-//! `run` process starts the program an entry names outside containment.
-//!
-//! Two namespaces answer different questions. `name` is the policy identity a rule reads as
-//! `context.input.server`. `program` is what the harness executes, so the alias in `bin/` carries
-//! it. A client can execute `uvx` while the policy identifies the server as `aws-mcp`.
+//! Declared MCP transports, executable commands, and agent-facing aliases.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -26,8 +15,7 @@ use crate::record::config::process::{ContainedMcp, Filesystem, NetworkConfig, Pr
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 pub(crate) enum McpEntry {
-    /// A local MCP server. Element 0 of `command` is the program and names the alias in `bin/`;
-    /// the rest are its arguments, fixed here so the agent cannot choose them.
+    /// A local MCP server reached through an alias named for its executable's filename.
     ///
     /// Every stdio server is contained — that is not optional. The grant fields below are the
     /// server's reach; an entry that declares none runs on the leaf baseline alone (its command's
@@ -43,6 +31,8 @@ pub(crate) enum McpEntry {
         native_filesystem_policy: Option<bool>,
         /// What to start.
         command: Vec<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        argument_wildcards: bool,
         /// The initial working directory.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workspace: Option<PathBuf>,
@@ -79,28 +69,50 @@ pub(crate) struct HttpMcp {
     pub(crate) secret: Option<EgressSecret>,
 }
 
-/// One declared server, with the name the operator keyed it under folded in. Identity only: a
-/// server's containment, if any, is carried beside this in `Record::contained_mcp` so this type
-/// stays what a rule matches — a name and a program — and every consumer of it is unchanged.
+/// One declared stdio server with its policy name and executable command.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct McpServer {
     /// What this server is called: the name a rule reads as `context.input.server`.
     pub(crate) name: String,
 
-    /// What to start. Element 0 names the alias in `bin/`.
+    /// The executable and arguments to start.
     pub(crate) command: Vec<String>,
+
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) argument_wildcards: bool,
 }
 
 impl McpServer {
-    /// The program to start, which is the name its alias takes in `bin/`.
+    /// The executable's filename, which names its alias in `bin/`.
     pub(crate) fn program(&self) -> &str {
+        self.executable().rsplit('/').next().unwrap_or_default()
+    }
+
+    pub(crate) fn executable(&self) -> &str {
         self.command.first().map_or("", String::as_str)
     }
 
     /// Its arguments, fixed by the operator's file.
     pub(crate) fn arguments(&self) -> &[String] {
         self.command.get(1..).unwrap_or_default()
+    }
+
+    pub(crate) fn has_argument_wildcards(&self) -> bool {
+        self.argument_wildcards && self.arguments().iter().any(|argument| argument == "*")
+    }
+
+    pub(crate) fn matches_arguments(&self, received: &[String], expanded: &[String]) -> bool {
+        let matches = |expected: &[String]| {
+            expected.len() == received.len()
+                && self.arguments().len() == received.len()
+                && self.arguments().iter().zip(expected).zip(received).all(
+                    |((declared, expected), received)| {
+                        (self.argument_wildcards && declared == "*") || expected == received
+                    },
+                )
+        };
+        matches(self.arguments()) || matches(expanded)
     }
 }
 
@@ -121,6 +133,7 @@ pub(crate) fn contained_specs(
                 env,
                 filesystem,
                 network,
+                ..
             } => Some((
                 name.clone(),
                 ContainedMcp {
@@ -131,6 +144,8 @@ pub(crate) fn contained_specs(
                         env: env.clone(),
                         filesystem: filesystem.clone(),
                         network: (!network.is_default()).then(|| network.clone()),
+                        grammar: None,
+                        ingress: Vec::new(),
                     },
                 },
             )),
@@ -148,7 +163,12 @@ pub(crate) fn partition(
     let mut http = Vec::new();
     for (name, entry) in entries {
         match entry {
-            McpEntry::Stdio { command, .. } => stdio.push(McpServer {
+            McpEntry::Stdio {
+                command,
+                argument_wildcards,
+                ..
+            } => stdio.push(McpServer {
+                argument_wildcards: *argument_wildcards,
                 name: name.clone(),
                 command: command.clone(),
             }),
@@ -173,17 +193,142 @@ pub(crate) fn from_entries(
     Ok(partition(entries)?.0)
 }
 
-/// The server an alias selects, keyed by the program the alias is named for.
-pub(crate) fn for_alias<'a>(servers: &'a [McpServer], program: &str) -> Option<&'a McpServer> {
-    servers.iter().find(|server| server.program() == program)
+/// The server whose `command` is `program` and `arguments`, word for word, with its arguments as
+/// written or as `launched` gives them. A server whose command `launched` cannot give is never
+/// selected, because it cannot start.
+pub(crate) fn for_command<'a>(
+    servers: &'a [McpServer],
+    program: &str,
+    arguments: &[String],
+    launched: impl Fn(&McpServer) -> Option<Vec<String>>,
+) -> Option<&'a McpServer> {
+    servers.iter().find(|server| {
+        !server.has_argument_wildcards()
+            && server.program() == program
+            && launched(server)
+                .is_some_and(|launched| server.matches_arguments(arguments, &launched))
+    })
+}
+
+/// Refuse two servers whose commands, with arguments as `launched` gives them, are the same.
+pub(crate) fn refuse_a_shared_command(
+    servers: &[McpServer],
+    launched: impl Fn(&McpServer) -> Option<Vec<String>>,
+) -> Result<(), ConfigError> {
+    let mut commands = BTreeMap::new();
+    for server in servers {
+        let Some(arguments) = launched(server) else {
+            continue;
+        };
+        let command = std::iter::once(server.program().to_string())
+            .chain(arguments)
+            .collect::<Vec<_>>();
+        let spelling = spelled(&command);
+        if let Some(first) = commands.insert(
+            (command, server.has_argument_wildcards()),
+            server.name.as_str(),
+        ) {
+            return Err(ConfigError::Mcp {
+                name: server.name.clone(),
+                reason: format!(
+                    "`[mcp.{first}]` and `[mcp.{}]` declare the same command \"{spelling}\"; a \
+                     launch selects a server by its full command, so only one of them could be \
+                     reached",
+                    server.name
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Refuse wildcard commands that can match the same received arguments.
+pub(crate) fn refuse_overlapping_wildcard_commands(
+    servers: &[McpServer],
+    launched: impl Fn(&McpServer) -> Option<Vec<String>>,
+) -> Result<(), ConfigError> {
+    for (index, left) in servers.iter().enumerate() {
+        if !left.has_argument_wildcards() {
+            continue;
+        }
+        let Some(left_expanded) = launched(left) else {
+            continue;
+        };
+        for right in &servers[index + 1..] {
+            if !right.has_argument_wildcards() || left.program() != right.program() {
+                continue;
+            }
+            let Some(right_expanded) = launched(right) else {
+                continue;
+            };
+            let overlaps = [left.arguments(), &left_expanded].into_iter().any(|a| {
+                [right.arguments(), &right_expanded].into_iter().any(|b| {
+                    a.len() == b.len()
+                        && left
+                            .arguments()
+                            .iter()
+                            .zip(right.arguments())
+                            .zip(a.iter().zip(b))
+                            .all(|((left, right), (a, b))| left == "*" || right == "*" || a == b)
+                })
+            });
+            if overlaps {
+                return Err(ConfigError::Mcp {
+                    name: right.name.clone(),
+                    reason: format!(
+                        "`[mcp.{}]` and `[mcp.{}]` declare overlapping wildcard commands; \
+                         use fixed arguments that distinguish the servers",
+                        left.name, right.name,
+                    ),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every server declared on `program`, in declaration order.
+pub(crate) fn on_program<'a>(
+    servers: &'a [McpServer],
+    program: &'a str,
+) -> impl Iterator<Item = &'a McpServer> {
+    servers
+        .iter()
+        .filter(move |server| server.program() == program)
+}
+
+/// Whether two servers share one program.
+pub(crate) fn shares_a_program(servers: &[McpServer]) -> bool {
+    let mut programs = BTreeSet::new();
+    !servers
+        .iter()
+        .all(|server| programs.insert(server.program()))
+}
+
+/// `command` as one line: each word escaped, and an empty word or one with whitespace quoted.
+pub(crate) fn spelled(command: &[String]) -> String {
+    command
+        .iter()
+        .map(|word| {
+            let escaped = word
+                .chars()
+                .flat_map(char::escape_debug)
+                .collect::<String>();
+            if word.is_empty() || word.chars().any(char::is_whitespace) {
+                format!("'{escaped}'")
+            } else {
+                escaped
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Refuse a declared server set no run could honor.
 pub(crate) fn validate_authored(servers: &[McpServer]) -> Result<(), ConfigError> {
     // Two namespaces, two sets. One shared set would let a `name` collide with an unrelated
-    // `program`.
+    // `command`.
     let mut names = BTreeSet::new();
-    let mut programs = BTreeSet::new();
     for server in servers {
         let refuse = |reason: String| {
             Err(ConfigError::Mcp {
@@ -197,20 +342,13 @@ pub(crate) fn validate_authored(servers: &[McpServer]) -> Result<(), ConfigError
         if !names.insert(server.name.as_str()) {
             return refuse(SHARED_NAME.to_string());
         }
-        if !programs.insert(server.program()) {
-            return refuse(SHARED_PROGRAM.to_string());
-        }
     }
-    Ok(())
+    refuse_a_shared_command(servers, |server| Some(server.arguments().to_vec()))
 }
 
 /// Why two entries may not share one `name`.
 const SHARED_NAME: &str = "two entries share this `name`; one name is one identity, and a rule \
                            naming it would reach both";
-
-/// Why two entries may not share one `program`.
-const SHARED_PROGRAM: &str = "two entries share this `program`; the alias is named for the program, \
-                              so both would want one path in `bin/` and only one could be placed";
 
 /// Why the box cannot represent `server` on its own terms, or `None` when it can.
 fn unrepresentable(server: &McpServer) -> Option<String> {
@@ -218,8 +356,21 @@ fn unrepresentable(server: &McpServer) -> Option<String> {
     if server.name.is_empty() {
         return reason("`name` is empty");
     }
-    if server.command.is_empty() || server.program().is_empty() {
+    if server.executable().is_empty() {
         return reason("`program` is empty, so nothing would start");
+    }
+    if server.executable().contains('/') && !Path::new(server.executable()).is_absolute() {
+        return reason(
+            "`program` must be a bare name or an absolute path; relative paths are unsupported",
+        );
+    }
+    if server.executable().contains("${") {
+        return reason(
+            "`program` does not expand tokens; use a bare name or a literal absolute path",
+        );
+    }
+    if server.program().is_empty() {
+        return reason("`program` ends with a directory separator, so its alias has no filename");
     }
     // `name` is an attribute a rule matches, so it takes the box-name character set.
     if let Some(character) = server
@@ -253,9 +404,7 @@ fn unrepresentable(server: &McpServer) -> Option<String> {
     }
     // The alias image picks the interpreter from `argv[0]`, so a program called `zsh` gets
     // `bin/zsh` routed to the Shell.
-    if crate::run::broker::protocol::SHELL_ALIAS_NAMES.contains(&server.program())
-        || crate::run::broker::protocol::PYTHON_ALIAS_NAMES.contains(&server.program())
-    {
+    if crate::INTERPRETER_ALIASES.contains(&server.program()) {
         return reason(
             "`program` is one of the box's own interpreter aliases; the alias image selects the \
              interpreter from its own name, so this server would be routed to the shell or the \
@@ -300,19 +449,139 @@ mod tests {
         .expect("valid");
 
         assert_eq!(file.len(), 2);
-        let aws = for_alias(&file, "uvx")
-            .expect("the second server, reached by the program its harness executes");
+        let aws = for_command(
+            &file,
+            "uvx",
+            &words(&[
+                "mcp-proxy-for-aws@latest",
+                "https://aws-mcp.us-east-1.api.aws/mcp",
+            ]),
+            as_declared,
+        )
+        .expect("the second server, reached by the full command its harness executes");
         assert_eq!(aws.name, "aws-mcp", "the policy identity is still the name");
         assert_eq!(aws.arguments().len(), 2, "the argv is fixed by the file");
         assert!(
-            for_alias(&file, "not-declared").is_none(),
+            for_command(&file, "not-declared", &[], as_declared).is_none(),
             "a program the file does not declare selects nothing"
         );
     }
 
-    /// The lookup key is `program`, and the server's `name` selects nothing.
+    fn as_declared(server: &McpServer) -> Option<Vec<String>> {
+        Some(server.arguments().to_vec())
+    }
+
     #[test]
-    fn a_server_is_reached_by_its_program_and_not_by_its_name() {
+    fn an_absolute_command_keeps_its_target_and_is_called_by_its_filename() {
+        let command = "/opt/My tools/versions/uvx";
+        let map = entries(&format!(
+            "[mcp.fetch]\ntype = \"stdio\"\ncommand = [{command:?}, \"mcp-server-fetch\"]"
+        ));
+        let servers = from_entries(&map).expect("an absolute executable is supported");
+        let server = for_command(&servers, "uvx", &words(&["mcp-server-fetch"]), as_declared)
+            .expect("the filename is the agent-facing alias");
+        assert_eq!(server.command, [command, "mcp-server-fetch"]);
+        assert_eq!(contained_specs(&map)["fetch"].spec.command, server.command);
+        assert!(
+            for_command(
+                &servers,
+                command,
+                &words(&["mcp-server-fetch"]),
+                as_declared
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn absolute_commands_share_an_alias_but_require_distinct_arguments() {
+        for other in ["/other/bin/uvx", "uvx"] {
+            let text = format!(
+                "[[server]]\nname = \"first\"\ncommand = [\"/opt/bin/uvx\", \"fetch\"]\n\
+                 [[server]]\nname = \"second\"\ncommand = [{other:?}, \"fetch\"]"
+            );
+            let error = parse(&text).expect_err("one invocation cannot select two targets");
+            assert!(
+                error.to_string().contains("same command \"uvx fetch\""),
+                "{error}"
+            );
+            let distinct = text.replace(
+                &format!("[{other:?}, \"fetch\"]"),
+                &format!("[{other:?}, \"other\"]"),
+            );
+            let servers = parse(&distinct).expect("different arguments distinguish the targets");
+            assert!(shares_a_program(&servers));
+            for (argument, name) in [("fetch", "first"), ("other", "second")] {
+                assert_eq!(
+                    for_command(&servers, "uvx", &words(&[argument]), as_declared)
+                        .unwrap()
+                        .name,
+                    name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn absolute_commands_keep_the_wildcard_overlap_rules() {
+        let mut servers = parse(
+            "[[server]]\nname = \"first\"\ncommand = [\"/opt/bin/uvx\", \"*\", \"fixed\"]\n\
+             argument_wildcards = true\n\
+             [[server]]\nname = \"second\"\ncommand = [\"/other/bin/uvx\", \"value\", \"*\"]\n\
+             argument_wildcards = true",
+        )
+        .expect("the commands differ");
+        assert!(refuse_overlapping_wildcard_commands(&servers, as_declared).is_err());
+        servers[1].argument_wildcards = false;
+        assert!(refuse_overlapping_wildcard_commands(&servers, as_declared).is_ok());
+    }
+
+    #[test]
+    fn absolute_commands_require_a_representable_filename() {
+        for program in ["/", "/opt/bin/", "/opt/bin/.", "/opt/bin/.."] {
+            let error = parse(&format!(
+                "[[server]]\nname = \"test\"\ncommand = [{program:?}]"
+            ))
+            .expect_err("a directory is not an alias");
+            assert!(error.to_string().contains("directory"), "{error}");
+        }
+        for alias in crate::INTERPRETER_ALIASES {
+            let error = parse(&format!(
+                "[[server]]\nname = \"test\"\ncommand = [\"/opt/bin/{alias}\"]"
+            ))
+            .expect_err("the filename still selects an interpreter");
+            assert!(error.to_string().contains("interpreter aliases"), "{error}");
+        }
+        for program in ["/opt/bin/has space", "/opt/bin/sémantic"] {
+            let error = parse(&format!(
+                "[[server]]\nname = \"test\"\ncommand = [{program:?}]"
+            ))
+            .expect_err("an alias must use the existing character set");
+            assert!(error.to_string().contains("may hold only"), "{error}");
+        }
+    }
+
+    #[test]
+    fn executable_paths_are_absolute_and_do_not_expand_tokens() {
+        for program in ["./uvx", "../bin/uvx", "bin/uvx", "~/bin/uvx"] {
+            let error = parse(&format!(
+                "[[server]]\nname = \"test\"\ncommand = [{program:?}]"
+            ))
+            .expect_err("relative executable paths are unsupported");
+            assert!(error.to_string().contains("absolute"), "{error}");
+        }
+        let error = parse("[[server]]\nname = \"test\"\ncommand = [\"/opt/${VERSION}/uvx\"]")
+            .expect_err("the executable does not expand tokens");
+        assert!(error.to_string().contains("expand"), "{error}");
+    }
+
+    fn words(words: &[&str]) -> Vec<String> {
+        words.iter().map(ToString::to_string).collect()
+    }
+
+    /// The lookup key is the full command, and the server's `name` selects nothing.
+    #[test]
+    fn a_server_is_reached_by_its_command_and_not_by_its_name() {
         let file = parse(
             r#"
             [[server]]
@@ -323,35 +592,243 @@ mod tests {
         .expect("valid");
 
         assert!(
-            for_alias(&file, "uvx").is_some(),
-            "the alias is named for the program, so the program must select the server"
+            for_command(&file, "uvx", &[], as_declared).is_some(),
+            "the alias is named for the program, so the full command must select the server"
         );
         assert!(
-            for_alias(&file, "aws-mcp").is_none(),
+            for_command(&file, "aws-mcp", &[], as_declared).is_none(),
             "the server's name places no alias, so it must select nothing"
         );
     }
 
-    /// Two entries sharing one `program` want one alias path, so the file is refused.
+    /// Two servers on one program each load and each is selected by its own full command.
     #[test]
-    fn two_servers_sharing_one_program_are_refused() {
+    fn two_servers_sharing_one_program_load_and_each_command_selects_its_own() {
+        let file = parse(
+            r#"
+            [[server]]
+            name = "playwright"
+            command = ["npx", "-y", "@playwright/mcp"]
+
+            [[server]]
+            name = "github"
+            command = ["npx", "-y", "@modelcontextprotocol/server-github"]
+            "#,
+        )
+        .expect("two servers whose full commands differ load");
+
+        for (arguments, name) in [
+            (["-y", "@playwright/mcp"], "playwright"),
+            (["-y", "@modelcontextprotocol/server-github"], "github"),
+        ] {
+            let selected = for_command(&file, "npx", &words(&arguments), as_declared)
+                .unwrap_or_else(|| panic!("{arguments:?} selects {name}"));
+            assert_eq!(selected.name, name);
+        }
+        assert_eq!(
+            on_program(&file, "npx").count(),
+            2,
+            "both servers are declared on the one program"
+        );
+    }
+
+    /// A launch that differs from the declared command in any word selects nothing.
+    #[test]
+    fn a_launch_that_differs_from_the_declared_command_selects_nothing() {
+        let file = parse(
+            r#"
+            [[server]]
+            name = "playwright"
+            command = ["npx", "-y", "@playwright/mcp"]
+            "#,
+        )
+        .expect("valid");
+
+        for arguments in [
+            words(&[]),
+            words(&["-y"]),
+            words(&["-y", "@playwright/mcp", "--extra"]),
+            words(&["@playwright/mcp", "-y"]),
+            words(&["-y", "@modelcontextprotocol/server-github"]),
+            words(&["-y", "@playwright/mcp "]),
+        ] {
+            assert!(
+                for_command(&file, "npx", &arguments, as_declared).is_none(),
+                "{arguments:?} is not the declared command, so it must select nothing"
+            );
+        }
+    }
+
+    /// A launch selects a server by its command as written or as Box expands it, because an
+    /// endpoint token expands to a port that is new on each run.
+    #[test]
+    fn a_launch_selects_a_server_by_its_command_as_written_or_as_expanded() {
+        let file = parse(
+            r#"
+            [[server]]
+            name = "traced"
+            command = ["traced-mcp", "--endpoint", "${OTEL_EXPORTER_OTLP_ENDPOINT}"]
+            "#,
+        )
+        .expect("valid");
+        let expanded = |server: &McpServer| {
+            Some(
+                server
+                    .arguments()
+                    .iter()
+                    .map(|argument| {
+                        argument.replace("${OTEL_EXPORTER_OTLP_ENDPOINT}", "http://127.0.0.1:43117")
+                    })
+                    .collect(),
+            )
+        };
+
+        for arguments in [
+            words(&["--endpoint", "${OTEL_EXPORTER_OTLP_ENDPOINT}"]),
+            words(&["--endpoint", "http://127.0.0.1:43117"]),
+        ] {
+            assert_eq!(
+                for_command(&file, "traced-mcp", &arguments, expanded)
+                    .map(|server| server.name.as_str()),
+                Some("traced"),
+                "{arguments:?} is the command as written or as Box starts it"
+            );
+        }
+        assert!(
+            for_command(
+                &file,
+                "traced-mcp",
+                &words(&["--endpoint", "http://127.0.0.1:1"]),
+                expanded
+            )
+            .is_none(),
+            "another port is neither the written nor the started command"
+        );
+        let unexpanded = |_: &McpServer| None;
+        assert!(
+            for_command(
+                &file,
+                "traced-mcp",
+                &words(&["--endpoint", "${OTEL_EXPORTER_OTLP_ENDPOINT}"]),
+                unexpanded
+            )
+            .is_none(),
+            "a server whose command does not expand cannot start, so no launch selects it"
+        );
+    }
+
+    #[test]
+    fn wildcard_overlap_checks_allow_exact_entries_and_distinct_patterns() {
+        let first = McpServer {
+            argument_wildcards: true,
+            name: "first".into(),
+            command: words(&["server", "--token", "*"]),
+        };
+        for command in [
+            words(&["server", "--token", "abc"]),
+            words(&["server", "--other", "*"]),
+            words(&["server", "--token", "*", "extra"]),
+            words(&["other", "--token", "*"]),
+            words(&["server", "--token=*", "*"]),
+        ] {
+            let second = McpServer {
+                argument_wildcards: true,
+                name: "second".into(),
+                command,
+            };
+            assert!(
+                refuse_overlapping_wildcard_commands(&[first.clone(), second], as_declared).is_ok()
+            );
+        }
+        let second = McpServer {
+            argument_wildcards: true,
+            name: "second".into(),
+            command: words(&["server", "*", "abc"]),
+        };
+        let error =
+            refuse_overlapping_wildcard_commands(&[first, second], as_declared).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("[mcp.first]") && message.contains("[mcp.second]"));
+        assert!(message.contains("overlapping wildcard commands"));
+    }
+
+    /// Two entries with one full command are refused.
+    #[test]
+    fn two_servers_with_one_full_command_are_refused() {
         let refusal = parse(
             r#"
             [[server]]
             name = "aws-mcp"
-            command = ["uvx"]
+            command = ["uvx", "mcp-proxy-for-aws@latest"]
 
             [[server]]
             name = "other-mcp"
-            command = ["uvx"]
+            command = ["uvx", "mcp-proxy-for-aws@latest"]
             "#,
         )
-        .expect_err("two entries cannot share one alias path");
+        .expect_err("two entries with one command cannot both be selected");
         let text = refusal.to_string();
         assert!(
-            text.contains("program"),
-            "the refusal must name the colliding key, got: {text}"
+            text.contains("[mcp.aws-mcp]") && text.contains("[mcp.other-mcp]"),
+            "the refusal must name both tables, got: {text}"
         );
+        assert!(
+            text.contains("uvx mcp-proxy-for-aws@latest"),
+            "the refusal must name the shared command, got: {text}"
+        );
+    }
+
+    /// Two servers whose launched commands are the same are refused.
+    #[test]
+    fn two_servers_with_one_launched_command_are_refused() {
+        let file = parse(
+            r#"
+            [[server]]
+            name = "token"
+            command = ["srv", "--p=${OTEL_EXPORTER_OTLP_PROTOCOL}"]
+
+            [[server]]
+            name = "literal"
+            command = ["srv", "--p=http/protobuf"]
+            "#,
+        )
+        .expect("the declared commands differ");
+        let expanded = |server: &McpServer| {
+            Some(
+                server
+                    .arguments()
+                    .iter()
+                    .map(|argument| {
+                        argument.replace("${OTEL_EXPORTER_OTLP_PROTOCOL}", "http/protobuf")
+                    })
+                    .collect(),
+            )
+        };
+        let text = refuse_a_shared_command(&file, expanded)
+            .expect_err("the launched commands are the same")
+            .to_string();
+        assert!(
+            text.contains("`[mcp.token]` and `[mcp.literal]`")
+                && text.contains("srv --p=http/protobuf"),
+            "{text}"
+        );
+    }
+
+    /// A shared program is detected.
+    #[test]
+    fn a_shared_program_is_detected() {
+        let shared = parse(
+            "[[server]]\nname = \"a\"\ncommand = [\"npx\", \"a\"]\n\
+             [[server]]\nname = \"b\"\ncommand = [\"npx\", \"b\"]",
+        )
+        .expect("valid");
+        assert!(shares_a_program(&shared));
+        let distinct = parse(
+            "[[server]]\nname = \"a\"\ncommand = [\"npx\", \"a\"]\n\
+             [[server]]\nname = \"b\"\ncommand = [\"uvx\", \"a\"]",
+        )
+        .expect("valid");
+        assert!(!shares_a_program(&distinct));
     }
 
     /// An absent `[[mcp]]` array is a box with no MCP servers, not an error.
@@ -398,7 +875,11 @@ mod tests {
     /// A program the alias image would route to an interpreter is refused.
     #[test]
     fn a_program_that_collides_with_an_interpreter_alias_is_refused() {
-        for taken in ["zsh", "bash", "sh", "python3", "python"] {
+        assert_eq!(
+            crate::INTERPRETER_ALIASES,
+            ["zsh", "bash", "sh", "python3", "python"]
+        );
+        for taken in crate::INTERPRETER_ALIASES {
             let error = parse(&format!(
                 "[[server]]\nname = \"issues-mcp\"\ncommand = [{taken:?}]"
             ))
@@ -411,7 +892,7 @@ mod tests {
 
         // A `name` is free to be any of them, because a name places no alias. Asserted so the check
         // is known to have moved rather than to have been copied to both fields.
-        for free in ["zsh", "bash", "sh", "python3", "python"] {
+        for free in crate::INTERPRETER_ALIASES {
             parse(&format!(
                 "[[server]]\nname = {free:?}\ncommand = [\"issues-mcp\"]"
             ))
@@ -473,6 +954,7 @@ mod tests {
         assert_eq!(
             parsed,
             McpEntry::Stdio {
+                argument_wildcards: false,
                 native_filesystem_policy: None,
                 command: vec!["issues-mcp".to_string()],
                 workspace: None,

@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use policy::{
     FsOperation, FsResult, GovernedBox, Outcome, PathResolver, PolicyEngine, Principal, Request,
+    RequestId,
 };
 
 use super::telemetry::{DecisionRecorder, EffectiveDecision};
@@ -271,6 +272,7 @@ struct PendingDecision {
     operation: FsOperation,
     action: &'static str,
     decision: policy::Decision,
+    request_id: Option<RequestId>,
 }
 
 #[derive(Default)]
@@ -349,7 +351,7 @@ impl Context {
                 self.resolver.approve_host(&check.path)
             }
             .map_err(io::Error::other)?;
-            let decision = self.engine.decide(
+            let (decision, request_id) = self.engine.decide(
                 &self.governed,
                 &Principal::agent(),
                 &Request::Fs {
@@ -357,12 +359,13 @@ impl Context {
                     operation: check.operation,
                 },
             );
-            let allowed = decision.is_allow();
+            let allowed = decision.is_allow() && request_id.is_some();
             pending.push(PendingDecision {
                 path: approved.reported().into_owned(),
                 operation: check.operation,
                 action: check.action,
                 decision,
+                request_id,
             });
             if !allowed {
                 return Err(io::Error::new(
@@ -421,9 +424,11 @@ impl Context {
                         )
                     });
                 if allowed
+                    && let Some(request_id) = pending.request_id
                     && let Err(error) = self.engine.record(
                         &self.governed,
                         &Principal::agent(),
+                        &request_id,
                         &Outcome::Fs {
                             path: Path::new(&pending.path),
                             operation: pending.operation,

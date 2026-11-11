@@ -2,10 +2,9 @@
 # workload-agent-hook — the agent's native hook fires inside its own boundary, and
 # a delegated subtask runs in the same process.
 #
-# Reference: artifact section 6 (the hook and subagent half). On Amazon Linux 2023
-# a hook execs /bin/sh, which is a symbolic link no grant may name, so the agent
-# runs through a `#!/bin/sh` launcher whose own interpreter chain brings /bin/sh
-# into the view under the spelling the child asks for (F49). On macOS /bin/sh and
+# Reference: artifact section 6 (the hook and subagent half). On Linux the
+# manifest grants /bin/sh's canonical executable. The launcher's `#!/bin/sh`
+# header preserves the spelling the hook uses (F49). On macOS /bin/sh and
 # /bin/bash are files: both are exec and both are permitted, and no launcher is
 # needed.
 #
@@ -20,6 +19,10 @@
 # Every fork below names its agent, and an unknown name fails with that name.
 
 wl_manifest() {
+  local hook_shell=""
+  if [ "$WL_PLATFORM" = linux ]; then
+    hook_shell="$(wl_canon /bin/sh)"
+  fi
   cat <<EOF
 tools=
 timeout=600
@@ -36,7 +39,7 @@ EOF
       if [ "$WL_PLATFORM" = linux ]; then
         echo "agent_program_linux={{TOOLS}}/claude-launcher.sh"
         echo "agent_read_linux={{TOOLS}}/claude-launcher.sh"
-        echo "agent_exec_linux={{TOOLS}}/claude-launcher.sh"
+        echo "agent_exec_linux={{TOOLS}}/claude-launcher.sh $hook_shell"
       fi ;;
     codex)
         echo "residuals=codex-no-subagent"
@@ -44,14 +47,14 @@ EOF
         if [ "$WL_PLATFORM" = linux ]; then
           echo "agent_program_linux={{TOOLS}}/codex-launcher.sh"
           echo "agent_read_linux={{TOOLS}}/codex-launcher.sh"
-          echo "agent_exec_linux={{TOOLS}}/codex-launcher.sh"
+          echo "agent_exec_linux={{TOOLS}}/codex-launcher.sh $hook_shell"
         fi ;;
       strands)
         echo "residuals=strands-no-subagent"
         if [ "$WL_PLATFORM" = linux ]; then
           echo "agent_program_linux={{TOOLS}}/strands-launcher.sh"
           echo "agent_read_linux={{TOOLS}}/strands-launcher.sh"
-          echo "agent_exec_linux={{TOOLS}}/strands-launcher.sh"
+          echo "agent_exec_linux={{TOOLS}}/strands-launcher.sh $hook_shell"
         fi ;;
       *)
         echo "workload-agent-hook: wl_manifest has no arm for agent '${WL_AGENT:-}'" >&2
@@ -106,9 +109,9 @@ type = "command"
 command = "$hook"
 EOF
       if [ "$WL_PLATFORM" = linux ]; then
-        # The hook execs /bin/sh, a symbolic link no grant may name; the launcher's
-        # own interpreter chain brings it into the view. The launcher carries the
-        # agent's fixed arguments, so box.toml names the launcher alone.
+        # The manifest grants /bin/sh's canonical target. The launcher's header
+        # preserves the spelling the hook uses. The launcher carries the agent's
+        # fixed arguments, so box.toml names the launcher alone.
         mkdir -p "$WL_TOOLS"
         CODEX_FLAGS="exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check --dangerously-bypass-hook-trust"
         printf '#!/bin/sh\nexec %s %s %s %s "$@"\n' \

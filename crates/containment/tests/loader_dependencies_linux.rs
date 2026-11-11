@@ -128,15 +128,26 @@ int main(int argc, char **argv) {
         &project,
         &[app.to_str().unwrap(), note.to_str().unwrap()],
     );
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert!(String::from_utf8_lossy(&output.stderr).contains("writable dependency"));
+    assert!(output.stdout.is_empty(), "{output:?}");
+    let execute = execute
+        .allow(project.join("libbuilt.so"), Operation::Exec, Scope::File)
+        .unwrap();
+    let output = contained(
+        &execute,
+        &project,
+        &[app.to_str().unwrap(), note.to_str().unwrap()],
+    );
     assert!(
         output.status.success(),
-        "new contained launch failed: {output:?}"
+        "explicitly authorized library launch failed: {output:?}"
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("BUILT_LIBRARY_RAN"), "{stdout}");
     assert!(stdout.contains("OPERATOR_BYTES_REFUSED"), "{stdout}");
     eprintln!(
-        "contained build and run: passed; writable app with private library: passed; ungranted read: refused"
+        "contained build and run: passed; implicit writable library: refused; explicit library execution: passed; ungranted read: refused"
     );
 
     let output = contained(

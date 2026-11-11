@@ -219,10 +219,19 @@ pub(crate) struct WriteProtection {
     device: u64,
     #[cfg(unix)]
     inode: u64,
+    #[cfg(unix)]
+    #[serde(skip_serializing_if = "is_one_link")]
+    links: u64,
 }
 
 impl WriteProtection {
     pub(crate) fn new(path: impl AsRef<Path>, opened: &File) -> Result<Self> {
+        let protected = Self::opened_now(path, opened)?;
+        protected.require_one_name()?;
+        Ok(protected)
+    }
+
+    fn opened_now(path: impl AsRef<Path>, opened: &File) -> Result<Self> {
         let path = canonicalize_existing(&absolute_path(path.as_ref())?)?;
         let opened_metadata = opened.metadata().map_err(|source| {
             ContainmentError::ConfigValidation(format!(
@@ -233,24 +242,45 @@ impl WriteProtection {
         if !opened_metadata.is_file() {
             return Err(ContainmentError::ExpectedFile(path));
         }
-        #[cfg(unix)]
-        if opened_metadata.nlink() != 1 {
-            return Err(ContainmentError::ConfigValidation(format!(
-                "write-protected file {} has {} hard links, so one pathname cannot protect the \
-                 opened object",
-                path.display(),
-                opened_metadata.nlink()
-            )));
-        }
         let protected = Self {
             path,
             #[cfg(unix)]
             device: opened_metadata.dev(),
             #[cfg(unix)]
             inode: opened_metadata.ino(),
+            #[cfg(unix)]
+            links: opened_metadata.nlink(),
         };
         protected.validate_live_identity()?;
         Ok(protected)
+    }
+
+    fn from_wire(wire: WriteProtectionWire) -> Result<Self> {
+        require_absolute("write-protected", &wire.path)?;
+        let protected = Self {
+            path: wire.path,
+            #[cfg(unix)]
+            device: wire.device,
+            #[cfg(unix)]
+            inode: wire.inode,
+            #[cfg(unix)]
+            links: wire.links,
+        };
+        protected.validate_live_identity()?;
+        Ok(protected)
+    }
+
+    fn require_one_name(&self) -> Result<()> {
+        #[cfg(unix)]
+        if self.links != 1 {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "write-protected file {} has {} hard links, so one pathname cannot protect the \
+                 opened object",
+                self.path.display(),
+                self.links
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -286,7 +316,10 @@ impl WriteProtection {
             return Err(ContainmentError::ExpectedFile(self.path.clone()));
         }
         #[cfg(unix)]
-        if metadata.dev() != self.device || metadata.ino() != self.inode || metadata.nlink() != 1 {
+        if metadata.dev() != self.device
+            || metadata.ino() != self.inode
+            || metadata.nlink() != self.links
+        {
             return Err(ContainmentError::ConfigValidation(format!(
                 "write-protected file identity changed before apply: {}",
                 self.path.display()
@@ -304,22 +337,64 @@ struct WriteProtectionWire {
     device: u64,
     #[cfg(unix)]
     inode: u64,
+    #[cfg(unix)]
+    #[serde(default = "one_link")]
+    links: u64,
+}
+
+#[cfg(unix)]
+const fn one_link() -> u64 {
+    1
+}
+
+#[cfg(unix)]
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes the field by reference"
+)]
+const fn is_one_link(links: &u64) -> bool {
+    *links == 1
 }
 
 impl TryFrom<WriteProtectionWire> for WriteProtection {
     type Error = ContainmentError;
 
     fn try_from(wire: WriteProtectionWire) -> Result<Self> {
-        require_absolute("write-protected", &wire.path)?;
-        let protected = Self {
-            path: wire.path,
-            #[cfg(unix)]
-            device: wire.device,
-            #[cfg(unix)]
-            inode: wire.inode,
-        };
-        protected.validate_live_identity()?;
+        let protected = Self::from_wire(wire)?;
+        protected.require_one_name()?;
         Ok(protected)
+    }
+}
+
+/// One opened program file that keeps its path, its identity, and the link count it had when opened.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "WriteProtectionWire")]
+pub(crate) struct CommandIdentity(WriteProtection);
+
+impl CommandIdentity {
+    pub(crate) fn new(path: impl AsRef<Path>, opened: &File) -> Result<Self> {
+        WriteProtection::opened_now(path, opened).map(Self)
+    }
+
+    pub(crate) const fn file(&self) -> &WriteProtection {
+        &self.0
+    }
+}
+
+impl Serialize for CommandIdentity {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl TryFrom<WriteProtectionWire> for CommandIdentity {
+    type Error = ContainmentError;
+
+    fn try_from(wire: WriteProtectionWire) -> Result<Self> {
+        WriteProtection::from_wire(wire).map(Self)
     }
 }
 
@@ -340,8 +415,7 @@ pub enum Network {
         /// handed out per port in this order, because one `recvmsg` carries one descriptor and
         /// that order is the wire contract. An empty list or a duplicate is refused.
         connect: Vec<u16>,
-        /// Ports the workload may bind. Empty by default. The Linux namespace backend refuses a
-        /// non-empty list: it has no lowering for an inbound bind.
+        /// Ports the workload may bind, each reachable from the box. Empty by default.
         listen: Vec<u16>,
     },
 }

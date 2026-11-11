@@ -83,6 +83,9 @@ these shapes:
 - `because the request could not be evaluated.`: the engine hit an internal fault, and it denied
   the request.
 
+A denial of an experimental [tool grammar](config.md#toolnamegrammar) action reads the same way,
+on the path of the program. The decision log names the grammar action.
+
 Each caller shows the text in its own form:
 
 - **A shell command** prints it on stderr. A command the policy refused exits `126`. When policy
@@ -95,12 +98,16 @@ Each caller shows the text in its own form:
 - **An MCP call** receives a JSON-RPC error with code `-32001` and the text, followed by the method
   in parentheses.
 
-Two refusals look like a denial, and no `permit` lifts them:
+Three refusals look like a denial, and no `permit` lifts them:
 
 - **A path inside the box directory, or the `box.toml` or `policy.dw` this run loaded, is refused
   whatever the policy says.** The decision log records the cause as `enforcement`, and
   [step 4 of the tutorial](tutorials/first-policy.md#step-4-read-the-decision-log) shows how to read
   it. [What Box always enforces](security.md#what-box-always-enforces) states the rule.
+- **A program that a tool grammar binds, run by its bound name after its file was replaced or
+  removed, or run by the agent under a name that only a stdio `[mcp.<name>]` declares, is refused
+  whatever the policy says.** The tail is `[tool-grammar]`, then the
+  reason, then `No policy can permit it.` [`shell:spawn`](shell.md#shellspawn) states the cases.
 - **A file tool of the harness itself fails with "operation not permitted" on macOS, or "no such
   file or directory" on Linux, and the decision log holds no record.** The path is outside every
   `[agent.filesystem]` list. Add it to a list in `box.toml` if the agent is meant to reach it.
@@ -108,7 +115,8 @@ Two refusals look like a denial, and no `permit` lifts them:
 ## The actions
 
 The box ships ten actions in four categories, and generates one more for each MCP tool it
-discovers. [The action vocabulary](policy/actions.md) lists the fields of each one.
+discovers. Each experimental [tool grammar](config.md#toolnamegrammar) adds its own `Tool::<name>`
+actions. [The action vocabulary](policy/actions.md) lists the fields of each one.
 
 - **[Filesystem](policy/actions.md#filesystem)**: a file operation in Strands Shell or Monty.
   `fs:read`, `fs:write`, `fs:delete`, `fs:move`, and the reserved `fs:other`.
@@ -422,7 +430,9 @@ strands-box: error: policy file /Users/you/box-tutorial/my-box/policy.dw will no
 Each refusal below is the text after `will not load: `. Two numberings appear. `rule N` counts from
 `1` in file order. `policy_N` is the engine's own name and counts from `0`, so `policy_0` is rule
 1. A rule with no `@id` is named by its effect and position, as
-`the permit rule with no @id (rule 1)`.
+`the permit rule with no @id (rule 1)`. When the engine can point at the text, the refusal ends
+with the line and column in the file, and often a hint in parentheses, such as
+``(did you mean `path`?)``.
 
 When the box suspects a rule is inert but cannot prove it, it prints a warning and starts:
 
@@ -439,7 +449,7 @@ permit (principal, action == Box::Action::"fs:read", resource)
 ```
 
 ```text
-failed to parse policy source: dogwood parse: unexpected end of input; expected `;` to end the policy, or `when`/`unless` to add a condition
+failed to parse policy source: dogwood parse: unexpected end of input; expected `;` to end the policy, or `when`/`unless` to add a condition at line 2, column 1
 ```
 
 A rule reads the request's own fields and the recorded history. This one calls out to an external
@@ -464,7 +474,7 @@ permit (principal, action == Box::Action::"fs:raed", resource);
 ```
 
 ```text
-policy references unknown action: for policy `policy_0`, unrecognized action `Box::Action::"fs:raed"`; for policy `policy_0`, unable to find an applicable action given the policy scope constraints
+policy references unknown action: for policy `policy_0`, unrecognized action `Box::Action::"fs:raed"` at line 1, column 30 (did you mean `Box::Action::"fs:read"`?); for policy `policy_0`, unable to find an applicable action given the policy scope constraints
 ```
 
 A field name is one the action carries, and [the action vocabulary](policy/actions.md) lists them.
@@ -476,7 +486,7 @@ when { context.input.paht like "~/project/*" };
 ```
 
 ```text
-policy fails schema validation: for policy `policy_0`, attribute `input.paht` in context for Box::Action::"fs:read" not found
+policy fails schema validation: for policy `policy_0`, attribute `input.paht` in context for Box::Action::"fs:read" not found at line 2, column 8 (did you mean `path`?)
 ```
 
 An `operation` value is one of the fixed set its action has. The value for a listing is
@@ -488,7 +498,7 @@ when { context.input.operation == Box::FsReadOperation::"list" };
 ```
 
 ```text
-policy fails schema validation: for policy `policy_0`: entity `Box::FsReadOperation::"list"` is of an enumerated entity type, but `"list"` is not declared as a valid eid
+policy fails schema validation: for policy `policy_0`: entity `Box::FsReadOperation::"list"` is of an enumerated entity type, but `"list"` is not declared as a valid eid at line 1, column 1 (valid entity eids: "read_content", "read_metadata", "enumerate", "read_link", "change_dir", "exec")
 ```
 
 ### An optional field read without a guard
@@ -503,7 +513,7 @@ when { context.input.program == "rm" && context.input.arg1 == "-rf" };
 ```
 
 ```text
-policy fails schema validation: for policy `policy_0`, unable to guarantee safety of access to optional attribute `input.arg1` in context for Box::Action::"shell:exec"
+policy fails schema validation: for policy `policy_0`, unable to guarantee safety of access to optional attribute `input.arg1` in context for Box::Action::"shell:exec" at line 2, column 41 (try testing for the attribute's presence with `context.input has arg1 && ..`)
 ```
 
 ### A temporal clause the engine cannot evaluate
@@ -519,7 +529,7 @@ when temporal {
 ```
 
 ```text
-policy fails schema validation: predicate `Box::Action::"fs"::request` does not name a declared event (no event kind `request` derived for action `fs`)
+policy fails schema validation: predicate `Box::Action::"fs"::request` does not name a declared event (no event kind `request` derived for action `fs`) at line 3, column 3 (check the action name and event kind; event kinds are typically `request` or `response` and derive from the schema)
 ```
 
 The longest window is `24h`. The refusal offers to raise `max_window`, but that schema ships inside
@@ -533,13 +543,27 @@ when temporal {
 ```
 
 ```text
-policy fails schema validation: temporal window `48h` exceeds the maximum allowed window `24h` set by the event schema's `max_window`; shorten this window to at most `24h`, or raise `max_window` in the event schema
+policy fails schema validation: temporal window `48h` exceeds the maximum allowed window `24h` set by the event schema's `max_window`; shorten this window to at most `24h`, or raise `max_window` in the event schema at line 3, column 3 (every temporal `within` window is capped by the event schema's `max_window` (default 24h); either shorten this window or raise the cap with a `max_window = <interval>` directive at the top of the event schema)
+```
+
+An MCP call always records `::response`, even when the server replies with an error, so it never
+records `::error`. A predicate on `mcp:call::error`, or on a tool action's `::error`, can't match:
+
+```text
+forbid (principal, action == Box::Action::"shell:exec", resource)
+when temporal { formerly within 1h ( Box::Action::"mcp:call"::error{ input.server: "github" } ) };
+```
+
+```text
+policy uses an unsupported clause: the forbid rule with no @id (rule 1): a temporal predicate names Box::Action::"mcp:call"::error; Box records every MCP outcome as `::response`, so the predicate cannot match; name `::response` instead
 ```
 
 ### A literal that nothing can match
 
-A path under the operator's home is reported `~/…`, and a directory is reported without a trailing
-slash. The refusal names the spelling to write:
+A path under the operator's home is reported `~/…`, and the home itself is reported `~`. A directory
+is reported without a trailing slash. The check also covers `context.input.cwd` on `shell:exec` and
+`shell:spawn`. A directory outside the operator's home keeps its absolute path. The refusal names the
+spelling to write:
 
 ```text
 @id("project_read")
@@ -580,6 +604,121 @@ Two other host spellings each get their own refusal:
 - **An internationalized domain**, such as `bücher.example`. The gateway sees the punycode form, so
   write `xn--bcher-kva.example`.
 
+A pinned address reaches policy as two fields, one per address family. `ip4` holds the IPv4
+address, as a dotted quad. `ip6` holds the IPv6 address, compressed and in lowercase. Each needs its
+own `has` guard, so a rule that covers both families gives each one its own clause:
+
+```text
+@id("metadata_addresses")
+forbid (principal, action == Box::Action::"net:connect", resource)
+when {
+  (context.input has ip4 && context.input.ip4 like "169.254.*") ||
+  (context.input has ip6 && (
+    context.input.ip6 == "fd00:ec2::254" ||
+    context.input.ip6 like "fe8*" || context.input.ip6 like "fe9*" ||
+    context.input.ip6 like "fea*" || context.input.ip6 like "feb*"))
+};
+```
+
+That is longer than one clause over both families would be. What you get for it is that you can tell
+from the rule which addresses it will match.
+
+#### Which field matches what
+
+**`ip4` matches an IPv4 address however it arrives, when Box recognises the wrapping.** A
+destination that reaches the box as an IPv6 encoding of an IPv4 address carries the IPv4 address on
+`ip4` as well. So one `ip4 like "169.254.*"` covers the dotted quad and every encoding in the table
+below, and you need no clause per encoding.
+
+**`ip6` matches the wire form** — the address the gateway actually dials. A destination that arrives
+wrapped carries both fields, so `ip6 like "64:ff9b::*"` refuses every address routed through the
+well-known NAT64 translator, whatever IPv4 address each one carries. Use `ip6` when the route is
+what you care about and `ip4` when the endpoint is.
+
+**A dual-stack destination needs a clause per family.** A host that resolves to both an IPv4 and an
+IPv6 address raises one `net:connect` per pinned address, and each carries only the fields its own
+address has. A rule that names `ip4` alone leaves the IPv6 address to whatever else the policy says.
+
+**An IPv4 destination carries no `ip6`.** Box never computes an IPv6 form for one, because a single
+IPv4 address has many IPv6 encodings and none of them is the address that was dialled.
+
+| The destination arrives as | `ip4` | `ip6` |
+|---|---|---|
+| `169.254.169.254` | `169.254.169.254` | absent |
+| `::ffff:169.254.169.254` (IPv4-mapped) | `169.254.169.254` | `::ffff:169.254.169.254` |
+| `::169.254.169.254` (IPv4-compatible) | `169.254.169.254` | `::a9fe:a9fe` |
+| `2002:a9fe:a9fe::` (6to4) | `169.254.169.254` | `2002:a9fe:a9fe::` |
+| `2001::5601:5601` (Teredo) | `169.254.169.254` | `2001::5601:5601` |
+| `64:ff9b::a9fe:a9fe` (NAT64, well-known prefix) | `169.254.169.254` | `64:ff9b::a9fe:a9fe` |
+| `::ffff:0:a9fe:a9fe` (IPv4-translated) | `169.254.169.254` | `::ffff:0:a9fe:a9fe` |
+| `64:ff9b:1::a9fe:a9fe` (NAT64, local use) | **absent** | `64:ff9b:1::a9fe:a9fe` |
+| an address on a network's own NAT64 prefix | **absent** | the address as dialled |
+| `fd00:ec2::254` | absent | `fd00:ec2::254` |
+
+**Where `ip4` is absent, an `ip4` rule does not fire.** The last two rows are the ones to watch. RFC
+6052 lets a network choose its own NAT64 prefix and RFC 7050 exists so a host can discover it; Box
+takes no such prefix as configuration, so it cannot tell such an address from any other IPv6
+address. On a network like that, pin the destination with `ip6` or with `host`, not with `ip4`.
+
+#### Address spellings that refuse to load
+
+Each field is held to its own spelling at load, and the refusal names the form to write.
+
+- **An IPv6 literal on `ip4`, or an IPv4 literal on `ip6`.** The refusal names the other field.
+- **An IPv6 address that is not compressed and lowercase**, such as `64:FF9B::A9FE:A9FE`. Write
+  `64:ff9b::a9fe:a9fe`. An IPv4-mapped form keeps its dotted quad, so `::ffff:a9fe:a9fe` is written
+  `::ffff:169.254.169.254`.
+- **An address that carries a port**, such as `169.254.169.254:80` or `[2001:db8::1]:443`. Write the
+  address alone, and compare `context.input.port` for the port.
+- **An address in brackets**, such as `[2001:db8::1]`. Write it without them.
+- **Anything that is no IP address**, such as `metadata.example` or `169.254.169.254/32`. These
+  fields hold the address the gateway pinned; compare `context.input.host` to pin a name.
+
+A `like` pattern that holds a wildcard is not held to a whole address, because the addresses a
+wildcard admits cannot be listed. So `context.input.ip4 like "169.254.*"` loads as written, and so
+does `context.input.ip6 like "64:ff9b::*"`. A wildcard pattern reaches whatever its own field holds:
+`ip6 like "fe8*"` reaches an `fe80::` link-local address, and `ip6 like "64:ff9b::*"` reaches every
+address on the well-known translator prefix and also an address outside it whose spelling starts the
+same way, such as `64:ff9b::1:a9fe:a9fe`.
+
+Each piece of the pattern between the wildcards is still held to the characters its field holds.
+`ip4` holds digits and `.`, and `ip6` holds digits, `a` to `f`, `:`, and `.`. So two more mistakes
+refuse to load:
+
+- **A pattern with an uppercase letter**, such as `ip6 like "64:FF9B::*"`. `like` is case-sensitive
+  and `ip6` is always lowercase, so that `forbid` could never fire. Write `64:ff9b::*`.
+- **A pattern of the other family**, such as `ip4 like "fd00:ec2:*"`. The refusal names `ip6`.
+- **An `ip6` pattern with a dotted quad anywhere but in `::ffff:` and the quad**, such as
+  `ip6 like "64:ff9b::169.254.*"`, `ip6 like "::169.254.*"`, or `ip6 like "::ffff:0:169.254.*"`. The
+  IPv4-mapped form is the one wire form written with a dotted quad, and it is exactly `::ffff:` and
+  the quad. So each of those could never fire. RFC 6052 writes a NAT64 address that way and RFC 6145
+  writes a translated one as `::ffff:0:` and a quad, which is why this mistake is easy to reach for.
+  Write the hexadecimal groups, as `64:ff9b::a9fe:*`, or compare `ip4` to name the address it
+  carries. A pattern whose wildcard could cover the rest of `::ffff:` is not refused, such as
+  `ip6 like "::*169.254.*"`, because what that wildcard admits cannot be listed.
+
+What this does not catch is a wildcard pattern whose pieces are all plausible but whose prefix no
+address takes, such as `ip6 like "::ffff:a9fe:*"`. A mapped address is written with a dotted quad, so
+that pattern misses the mapped addresses it looks aimed at — but `::ffff:a9fe:a9fe:0` is a real
+address it does match, so the load cannot prove it inert. Check an `ip6` pattern against the table
+above.
+
+A `when temporal` clause is not judged either. History keeps the spelling each event was recorded
+with, so a temporal clause can still need an older one. Earlier shell events can carry an absolute
+`cwd` below the operator's home. A predicate on `~/project` does not match those events, and Box does
+not translate their stored values.
+
+An absolute `cwd` predicate below the operator home can match older events but misses new
+`shell:exec` and `shell:spawn` events. A `forbid` that depends on those matches can stop denying
+commands. The loader accepts these temporal predicates without a warning.
+
+Editing a history rule starts it with empty state, including edits that match both spellings.
+Plan how to preserve active budgets before upgrading a box with these predicates.
+
+**A box can hold address events that this vocabulary cannot read.** An event recorded by an earlier
+build carries one address field, and a predicate on `ip4` or `ip6` does not match it. There is no
+rewind, so a counting rule that spans such a build starts its count again.
+
 Two spellings load with a warning. The first compares `program` with a path. `program` holds the
 name the first word resolved to; a binary of the surrounding OS is a `shell:spawn`, and its resolved
 path is in `program_path`:
@@ -604,6 +743,48 @@ when { context.input.path like "*/Users/dev/project/*" };
 
 ```text
 rule @id("later_home") compares context.input.path with the pattern "*/Users/dev/project/*", which names the operator home after a wildcard; a path under the operator home is spelled ~/…, so the pattern may match nothing
+```
+
+### A rule that checks `context.input` for two kinds of action
+
+The same field name can mean different things on different actions. On `fs:read`, `path` is a
+file. On `http:request`, `path` is the path part of a URL. So a rule that checks `context.input`
+covers one kind of action, and the error calls that kind a family. This rule checks `path` for a
+file read and for an HTTP request, and it refuses to load:
+
+```text
+@id("no_secrets")
+forbid (principal, action in [Box::Action::"fs:read", Box::Action::"http:request"], resource)
+when { context.input.path like "*/secrets.env" };
+```
+
+```text
+policy reads the input without one action family: rule @id("no_secrets") reads context.input.path under actions of more than one family, and an input attribute means what the action makes it mean; write one rule for each family: [Box::Action::"fs:read"] and [Box::Action::"http:request"]
+```
+
+To fix it, write one rule for each family:
+
+```text
+@id("no_secrets_file")
+forbid (principal, action == Box::Action::"fs:read", resource)
+when { context.input.path like "*/secrets.env" };
+
+@id("no_secrets_url")
+forbid (principal, action == Box::Action::"http:request", resource)
+when { context.input.path like "*/secrets.env" };
+```
+
+Actions are in the same family when their names start the same way before the `:`. So
+`fs:read`, `fs:write`, and `fs:delete` can share one rule, and `net:connect` and `http:request`
+can't. Each MCP tool action is a family of its own.
+
+A rule that checks `context.input` and names no action gets the same error. Name the action the
+rule is for in its scope, as `action == Box::Action::"fs:read"`. A test such as
+`action == Box::Action::"fs:read"` inside `when` doesn't count, so this rule still gets the error:
+
+```text
+forbid(principal, action, resource)
+when { action == Box::Action::"fs:read" && context.input.path like "*/secrets.env" };
 ```
 
 ### One `@id` on two rules

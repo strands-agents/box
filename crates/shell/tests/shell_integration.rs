@@ -3162,9 +3162,60 @@ fn builder_timeout() {
     }));
 }
 
-// A zero timeout is rejected at build time rather than silently expiring
-// every command immediately. There is no "unlimited" sentinel — callers omit
-// the timeout for no limit.
+#[test]
+fn builder_timeout_can_be_disabled() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for builder in [
+            Shell::builder(),
+            Shell::builder().timeout(std::time::Duration::from_millis(10)),
+        ] {
+            let mut shell = builder.disable_timeout().build().unwrap();
+            assert_eq!(shell.config().timeout_secs, None);
+            for _ in 0..2 {
+                let out = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    shell.run("sleep 0.05; printf FINISHED"),
+                )
+                .await
+                .expect("an unlimited call must still finish its submitted work");
+                assert_eq!(out.status, 0, "{}", out.stderr);
+                assert_eq!(out.stdout, "FINISHED");
+            }
+        }
+    }));
+}
+
+#[test]
+fn builder_timeout_can_be_restored_after_disabling() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder()
+            .disable_timeout()
+            .timeout(std::time::Duration::from_millis(10))
+            .build()
+            .unwrap();
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            shell.run("sleep 0.05; printf TOO_LATE"),
+        )
+        .await
+        .expect("the restored deadline must return a timeout result");
+        assert_eq!(out.status, 1);
+        assert!(
+            out.stderr.contains("execution timeout exceeded"),
+            "{}",
+            out.stderr
+        );
+        assert!(!out.stdout.contains("TOO_LATE"));
+        assert_eq!(
+            shell.run("printf STILL_SERVING").await.stdout,
+            "STILL_SERVING"
+        );
+    }));
+}
+
+// A zero timeout is rejected at build time; disable_timeout selects no deadline.
 #[test]
 fn builder_zero_timeout_rejected() {
     let Err(err) = Shell::builder().timeout(std::time::Duration::ZERO).build() else {
@@ -3898,14 +3949,21 @@ fn builder_max_bg_jobs() {
 fn builder_max_input() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let mut shell = Shell::builder().max_input(5).build().unwrap();
-        let out = shell.run("echo hello world").await;
-        assert_eq!(out.status, 1);
-        assert!(
-            out.stderr.contains("input too large"),
-            "stderr: {}",
-            out.stderr
-        );
+        for input in ["printf OK ", "printf OK\n", "true\nprintf OK"] {
+            for (max_input, expected) in [
+                (input.len() - 1, (1, "", "strands-shell: input too large\n")),
+                (input.len(), (0, "OK", "")),
+                (0, (0, "OK", "")),
+            ] {
+                let mut shell = Shell::builder().max_input(max_input).build().unwrap();
+                let out = shell.run(input).await;
+                assert_eq!(
+                    (out.status, out.stdout.as_str(), out.stderr.as_str()),
+                    expected,
+                    "{input:?}, max_input={max_input}"
+                );
+            }
+        }
     }));
 }
 
@@ -4269,6 +4327,41 @@ fn subst_max_output_truncate() {
             .await;
         let len: usize = out.stdout.trim().parse().unwrap_or(999);
         assert!(len <= 10, "expected truncated, got len {}", len);
+    }));
+}
+
+// ── max_output truncation keeps multibyte characters whole ─────────
+
+async fn run_with_max_output(max: usize, script: &str) -> strands_shell::Output {
+    let mut shell = Shell::builder().max_output(max).build().unwrap();
+    shell.run(script).await
+}
+
+#[test]
+fn subst_max_output_truncate_multibyte() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_max_output(4, "X=$(printf abc; printf é); printf %s \"$X\"").await;
+        assert_eq!(out.stdout, "abc");
+        let out = run_with_max_output(4, "X=$(printf ab; printf é); printf %s \"$X\"").await;
+        assert_eq!(out.stdout, "abé");
+        let out = run_with_max_output(4, "X=$(printf abc; printf de); printf %s \"$X\"").await;
+        assert_eq!(out.stdout, "abcd");
+    }));
+}
+
+#[test]
+fn stdout_max_output_truncate_multibyte() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_max_output(4, "printf abc; printf é").await;
+        assert_eq!((out.stdout.as_str(), out.status), ("abc", 1));
+        let out = run_with_max_output(4, "printf ab; printf cé").await;
+        assert_eq!((out.stdout.as_str(), out.status), ("abc", 1));
+        let out = run_with_max_output(4, "printf abé").await;
+        assert_eq!((out.stdout.as_str(), out.status), ("abé", 0));
+        let out = run_with_max_output(4, "printf ab; printf cde").await;
+        assert_eq!((out.stdout.as_str(), out.status), ("abcd", 1));
     }));
 }
 

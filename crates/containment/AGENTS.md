@@ -95,7 +95,8 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   `[agent.filesystem]`, reaches `require_bounded_grant`. Two entry points serve it:
   `home_relative_path_refusal` judges an authored `~/`-relative spelling before a home is known, and
   `validate_grant(path, operator_home, operation, scope)` judges one composed grant and reports a
-  named-exactly credential store in its `bool`. Two lists in two crates was the divergence this merge removed,
+  named-exactly credential store in its `bool`. A refusal by a row carries the row's
+  `ForbiddenClass`, which `ContainmentError::forbidden_class` returns. Two lists in two crates was the divergence this merge removed,
   and `the_floor_covers_every_credential_path_the_pack_loader_held` is the guard. One case table,
   `the_list_refuses_what_it_claims_and_renders_what_it_must`, pins every classification; a per-entry
   witness cannot see that `/Users` renders a home only because no credential entry sits under it.
@@ -206,8 +207,8 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   `PathGrant::new` canonicalizes, so a write grant naming the exec grant's symlinked spelling resolves
   to the same target. **If a write cell ever gains an `original` rule, that arm under-refuses in
   silence** — extend it in the same change.
-- Linux selects `NamespaceBackend` on ARM64 and refuses every other architecture by name. Landlock
-  was considered and rejected, because it does not enforce `Network::Blocked`.
+- Linux selects `NamespaceBackend` on ARM64 and x86-64 and refuses every other architecture by
+  name. Landlock was considered and rejected, because it does not enforce `Network::Blocked`.
 - `cfg`-gate `backend/linux/` on its module declaration, and leave `backend/macos/` ungated so its
   conformance suite runs everywhere.
 
@@ -668,8 +669,8 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   existing file, not what the renderer emits, so removing the file cell's create deny leaves it green.
   Keep it — it catches a change that made the deny bite, which would break `> /dev/null` everywhere —
   but do not count it as the create deny's guard. `a_granted_file_itself_cannot_be_replaced` is that.
-- **The write cells name the leaves they need and never `file-write*`. That is the whole shape, and it
-  replaced five subtractive denies.** `WRITE_ROOT_LEAVES` in `seatbelt.rs` is the list — `data`,
+- **The write cells name the leaves they need and never `file-write*`, unless the `file-attributes`
+  switch is on. That is the whole shape, and it replaced five subtractive denies.** `WRITE_ROOT_LEAVES` in `seatbelt.rs` is the list — `data`,
   `create`, `unlink`, `xattr`, `mode`, `times` — and the `Write`+`File` cell names `data` alone. The
   flags, the access-control list, the owner, and the set-user-ID bit are **absent rather than denied**,
   so `(deny default)` refuses each. The bound operations were enumerated by compiling one profile per
@@ -689,12 +690,32 @@ by reading `src/` belongs in `src/` — the README describes the shape.
     `(allow file-read* file-write-data (literal "/dev/null"))` and holds 46 bare `file-write-data`
     allows. There is no Apple SBPL reference — `strings` over `libsandbox.1.dylib` and the Sandbox kext
     yields no operation table — so those profiles plus compile-and-measure are the authority.
-  - **`file-write-times` IS closable, by omission.** The earlier reading was that no leaf deny takes it
-    back, which is true and is not the same claim: `touch -t` succeeds under `(allow file-write* …)`
-    with `(deny file-write-times …)` rendered. Withholding the leaf refuses it outright. The leaf stays
-    granted on the write root anyway, because `utimes` is ordinary work, so the backdating residual is
-    a decision now rather than a limit.
-  - `finderinfo`, `mount`, and `unmount` are no longer granted at all, because no cell names them.
+  - **`file-write-times` covers `utimes(2)` and `futimes(2)` only.** `utimensat(2)`, which `touch`
+    calls, and `setattrlist(2)` with `ATTR_CMN_MODTIME` or `ATTR_CMN_ACCTIME` check the bare
+    `file-write*` family, so the six-leaf write root refuses them (box#273). That is also why
+    `touch -t` succeeds under `(allow file-write* …)` with `(deny file-write-times …)` rendered: the
+    leaf deny never reaches the bare check. The leaf stays granted on the write root, because `utimes`
+    is ordinary work, so the backdating residual through `utimes` is a decision rather than a limit.
+  - **The `file-attributes` switch is the one write cell that grants `file-write*`.** With
+    `allow_file_attributes`, the write root adds `(allow file-write* (subpath …))` and denies the four
+    members `WRITE_ROOT_LEAVES` withholds, `FILE_ATTRIBUTE_WITHHELD_LEAVES`: `flags`, `owner`, `acl`,
+    and `finderinfo`. A leaf deny beats the wildcard allow by specificity, so those four leaf operations
+    stay refused (`chflags`, `chown`, `acl_set_file`, and `setattrlist ATTR_CMN_FNDRINFO`).
+    `setugid`, `mount`, and `unmount` lie outside the family, so the wildcard does not reach them and
+    the cell renders no rule for them. `protect_write` and `refusals()` already render
+    `(deny file-write* …)`, which has the same name as the new allow and renders after it, so the
+    last matching rule is the deny. Measured 2026-11-03, macOS 26.7.1 arm64 at `euid` 503, in
+    `tests/contains_file_attributes.rs`: with the switch, `utimensat` and `setattrlist ATTR_CMN_MODTIME`
+    succeed; `chflags`, `acl_set_file`, `chown`, and `chmod` of a set-ID bit stay refused; a
+    protected object, a refused folder inside the root, and a path outside every root keep their
+    refusals. **The residual is pinned, not closed:** `setattrlist` `ATTR_CMN_ACCESSMASK` stores
+    the set-user-ID bit, `ATTR_CMN_GRPID` moves the group, `ATTR_CMN_OWNERID` passes the profile and
+    meets only the ownership check (so a root process gives a file away), and
+    `ATTR_CMN_EXTENDED_SECURITY` stores an ACL. Each rides the bare family check.
+    Without the switch, the cell renders byte for byte what it rendered before, and the goldens hold
+    it.
+  - `finderinfo`, `mount`, and `unmount` are no longer granted at all, because no cell names them
+    (the switch grants `finderinfo` through the wildcard and denies it again).
     `xattr` is named because ordinary work sets one, and `mode` because a workload tightens a file it
     created — Claude Code creates `.claude.json` at 644 and `chmod`s it to 600, and **swallows the
     failure**, so withholding the mode leaves a config holding `mcpServers` world-readable.
@@ -794,8 +815,114 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   and `AF_RDS` through.
 - **Deny `io_uring_setup` beside `socket(AF_INET)`**, because `IORING_OP_SOCKET` needs no `socket(2)`
   since 5.19 and seccomp cannot read a ring's SQEs.
-- **Take every number from `libc`**, never a hand-written `#ifdef` table. Fix a missing name upstream;
-  never `#[cfg]` it away.
+- **Take every number from `libc`**, never a hand-written `#ifdef` table.
+  The twenty legacy console requests in `terminal_control_rules` are an explicit exception when
+  `libc` lacks their names. Define those private `u32` constants from the pinned Linux UAPI `kd.h`
+  and `vt.h` headers. Verify production and independent test values against those headers when
+  changing the list. Upstream work is optional for this exception; no merge or release is required.
+  The x86 `ARCH_SET_FS` command and the independent thread-setup test's command values are another
+  explicit exception. `libc` 0.2.189 doesn't export these names. Take their fixed values from the
+  [Linux v6.12 x86 userspace API header](https://github.com/torvalds/linux/blob/v6.12/arch/x86/include/uapi/asm/prctl.h),
+  and keep the production value and independent test values checked against that header.
+  The system-call number still comes from `libc::SYS_arch_prctl`.
+  Fix other missing names upstream; never `#[cfg]` them away.
+
+### x86-64 runtime call measurements
+
+The early x86 call measurements used native Amazon Linux 2023 at
+`2893def22ddb198f6fb89f376c6497f6f64ccde0`. The first four rows below describe those historical traces;
+they aren't validation of a later revision. The `dup2` row records a later contained-workload trace.
+Each counterpart explains why the addition preserves operations already available to a workload.
+
+| x86 call | Measured observation | Existing permitted counterpart |
+| --- | --- | --- |
+| `getpgrp` | `/bin/sh` received `EPERM` during job-control initialization. The outside control returned its process group. | `getpgid(0)` |
+| `poll` | Box's `zsh` command alias received `EPERM` while checking descriptors 0, 1, and 2 during startup. | `ppoll` |
+| `readlink` | The same alias received `EPERM` when reading `/proc/self/exe`. | `readlinkat` |
+| `epoll_wait` | The alias reached its event loop and received `EPERM` while waiting for events. | `epoll_pwait` |
+| `dup2` | On November 11, 2026, the configured native Bash workload made six successful descriptor-duplication calls after filter installation. These included redirecting and restoring standard output. The same workload completed its permitted writes and refusal checks. | `dup3` |
+
+`arch_prctl(ARCH_SET_FS)` sets the per-thread storage base needed by the x86 runtime. The filtered
+kernel test checks that restoring the current base succeeds, while other architecture commands stay
+denied. Its deliberately changed controls detect a missing permission, an unrestricted command, and
+an incorrect 64-bit command comparison. This evidence is separate from the historical alias traces.
+
+On November 11, 2026, native x86 testing of `90c5d894e9eb88ed0849cf3f421dabdb8d4ad7d1` found another
+startup gap: the declared Git tool received `EPERM` from `access` while checking its global configuration.
+The same Git executable outside Box returned `ENOENT` for that absent path and started successfully.
+Linux implements `access` through the same file-access check as `faccessat(AT_FDCWD, ...)`, which the
+filter already permits; see [Linux v6.12 `fs/open.c`](https://github.com/torvalds/linux/blob/v6.12/fs/open.c#L539-L553).
+The `x86_access_distinguishes_readable_and_missing_files_under_the_filters` test checks an existing
+readable file and an absent file before and after filter installation. With `access` missing from the
+permit table, its outside control succeeds and its filtered existing-file check fails.
+
+Native tests of `54e9271b5fc52a1e07db0fd6a6e24bc272638b27` found seven more x86 calls that the
+permit filter refused. Outside controls used the same programs and completed the operations.
+
+| x86 call | Measured failure | Existing permitted counterpart |
+| --- | --- | --- |
+| `stat` | Codex could not read metadata for its configuration directory. | `newfstatat(AT_FDCWD, path, buffer, 0)` |
+| `mkdir` | Claude Code, Python directory creation, and Git initialization received `EPERM`. | `mkdirat(AT_FDCWD, path, mode)` |
+| `rename` | Python could not rename an owned file. | `renameat(AT_FDCWD, old, AT_FDCWD, new)` |
+| `unlink` | Python could not delete an owned file. | `unlinkat(AT_FDCWD, path, 0)` |
+| `chmod` | Python could not change an owned file to mode `0755`. | `fchmodat(AT_FDCWD, path, mode)` |
+| `symlink` | Python could not create a symbolic link. | `symlinkat(target, AT_FDCWD, link)` |
+| `pipe` | Bash could not create a pipeline. | `pipe2(descriptors, 0)` |
+
+Linux v6.12 implements these counterparts through the same operation helpers in
+[`fs/namei.c`](https://github.com/torvalds/linux/blob/v6.12/fs/namei.c),
+[`fs/open.c`](https://github.com/torvalds/linux/blob/v6.12/fs/open.c), and
+[`fs/pipe.c`](https://github.com/torvalds/linux/blob/v6.12/fs/pipe.c).
+The x86 `stat` entry calls `newstat` in
+[`fs/stat.c`](https://github.com/torvalds/linux/blob/v6.12/fs/stat.c), through `vfs_stat` and
+`vfs_fstatat` in [`include/linux/fs.h`](https://github.com/torvalds/linux/blob/v6.12/include/linux/fs.h).
+
+Keep `mkdir` and `chmod` argument-scoped. Their mode is zero-based argument 1, whereas `mkdirat`
+and `fchmodat` use argument 2. `direct_file_permissions_preserve_writes_and_refuse_special_modes`
+checks ordinary modes, each special bit, both bits, and nonzero upper argument bits through the
+production trampoline. For permitted modes, the x86 rows set special bits in the unused third
+argument. For refused modes, they clear that argument. Copying the `*at` argument index therefore
+fails the test.
+`legacy_syscalls_preserve_effects_and_filesystem_grants` checks raw call effects, hidden and
+read-only paths, and a symbolic link pointing outside the filesystem grants. These tests do not
+qualify every application or the x86 release process.
+
+After those seven additions, Codex passed its configuration-directory check but received `EPERM`
+from `open` when opening its temporary directory, creating a lock file, and reading
+`/etc/codex/requirements.toml`. The same requirements-file call outside Box returned `ENOENT`,
+which Codex handled. The same trace also showed `lstat` refused on its temporary directory.
+Linux implements `open` through the same `do_sys_open(AT_FDCWD, ...)` helper as `openat` in
+[`fs/open.c`](https://github.com/torvalds/linux/blob/v6.12/fs/open.c).
+`lstat` uses `newlstat`, `vfs_lstat`, and `vfs_fstatat` with `AT_SYMLINK_NOFOLLOW` in the metadata
+helpers linked above. Permit both spellings only on x86-64.
+
+For `open`, the zero-based mode argument is 2 and the flags argument is 1. Preserve the `openat`
+creation-flag condition so an unused mode cannot refuse a read. The permission probe covers
+ordinary creation, temporary creation, unused modes, and nonzero upper flags bits. The filesystem
+probe checks open effects in writable, read-only, and hidden directories and distinguishes
+`lstat` of a symbolic link from `stat` or `open` of its hidden target.
+
+Claude Code then reached the model but could not start its shell. A contained `pwd` attempt
+received `EPERM` from `vfork`; the outside control created the child and completed `pwd`.
+Linux v6.12 implements `vfork` by passing `CLONE_VM | CLONE_VFORK` and `SIGCHLD` to `kernel_clone`
+in [`kernel/fork.c`](https://github.com/torvalds/linux/blob/v6.12/kernel/fork.c). The existing
+unrestricted `clone` permission already admits that combination. The child inherits the syscall
+filters and namespaces through the same process-creation path.
+
+The raw `vfork` probe keeps the child entirely in one assembly block. It checks the inherited
+`setuid` refusal using the child's own UID, then exits without returning into Rust or changing the
+shared userspace stack. The outside control can set its unchanged UID. The parent checks the
+child's distinct exit status and reaps it. The test supervisor bounds the whole probe.
+Follow-up full-Box checks found that Python `os.rmdir`, Python `shutil.rmtree`, and `git clean -fd`
+could not remove their empty directories on x86: `rmdir` returned `EPERM`. All three outside
+controls and matched ARM64 checks completed cleanup; ARM64 used `unlinkat` with `AT_REMOVEDIR`. Linux v6.12 routes both calls through `do_rmdir`
+in the `fs/namei.c` source linked above. Permit `rmdir` only on x86. It has no mode argument and
+adds no operation beyond the existing `unlinkat` permission. The raw-call regression checks actual
+removal from a writable directory and preserves the empty directories in read-only and hidden
+scopes.
+
+The Claude trace also showed a nonfatal `link` maintenance failure. That entry remains unpermitted;
+this change does not expand hard-link access or claim warning-free CLI behavior.
 
 ### W^X
 
@@ -846,7 +973,17 @@ check what its wrapper returns on failure, and pin the *effect* rather than the 
   `mmap(PROT_EXEC)` from `execve`; a dependency beneath a planned exec-capable tree is not bound
   again. `a_read_root_on_a_loader_directory_is_bound_executable_and_read_only` and
   `a_dependency_a_loader_directory_covers_is_not_planned_twice` pin both.
+  If combined grants make that root writable, require a covering execution root or the leaf's
+  broad exec. Otherwise, refuse it.
+  `combined_loader_grants_require_execution_in_either_order_and_spelling` and
+  `a_writable_ancestor_cannot_make_a_loader_directory_executable` pin that refusal.
 - **`apply` returns in the workload process, namespace PID 2**, so depend on no stable `getpid()`.
+  Namespace PID 1 sets `PR_SET_DUMPABLE` to `0` before it forks the workload, so `/proc/1/mem`
+  refuses reads with `EACCES`. Its owner changes for a non-root launcher; root ownership can
+  remain unchanged. Writes fail with `EACCES` or `EROFS` on read-only procfs.
+  Root proof requires a verified host `kernel.yama.ptrace_scope=0`; the guard prints a skip
+  otherwise, because Yama alone can refuse the open without supervisor memory protection.
+  Guard: `supervisor_memory_linux::workload_cannot_write_namespace_supervisor_memory`.
   Namespace PID 1 forwards `SIGTERM` and `SIGINT`, stores the workload pid *before* installing the
   handlers, and reaps in a loop.
 - **`netns`:** a socket's namespace is fixed at creation, so bind inside and pass the descriptor out
@@ -935,19 +1072,21 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     process; neither stops a runtime reading a file and interpreting it. The AGENTS.md W^X section says
     the same thing in its own words: an exec view is safe only when no reachable program is
     universal over authored data, and the harness always is.
-- **`ioctl` is permitted wholesale on Linux, and nothing filters `TIOCSTI`. Unmeasured, and Linux is
-  the more exposed platform.** `ioctl` sits in `WORKLOAD_PERMITTED` with no `MEDIATED` entry, so no
-  request number is scoped. The workload's descriptor 0 is the operator's real controlling terminal on
-  both platforms: `terminal.rs` hands the terminal to the child's process group and the box calls no
-  `setsid`. On macOS Apple's kernel refuses `TIOCSTI` — measured, and by the platform rather than by
-  the profile. Linux's historic check permits it with **no capability** when the descriptor is the
-  caller's own controlling terminal, and the `dev.tty.legacy_tiocsti` sysctl that closes it arrived in
-  6.2. So the target kernel decides, and nobody has run the probe.
-  - **Measure before designing.** Drive `ioctl(0, TIOCSTI, &byte)` from a contained workload on a real
-    terminal, with an uncontained control, exactly as `tests/inherited_handles_macos.rs` does.
-  - **Unlike Seatbelt, seccomp can express the narrow denial.** The request number is `arg1`, a
-    scalar, so an `ArgumentScoped` entry is the same shape `mmap`, `mprotect`, and `execveat` already
-    use. That is a cheap floor whichever way the measurement goes.
+- **Linux terminal restrictions do not isolate the inherited terminal.** The filter refuses
+  `TIOCSTI`, `TIOCLINUX`, and `TIOCSETD` by their low 32 request bits. Normal terminal settings and
+  queries remain permitted. Keep the denial and successful-operation controls in `tests::terminal`.
+  - The workload can inherit the operator's controlling terminal. Keep virtual-console mode,
+    switching, deallocation, resizing, keyboard-lock, accent-table, font, palette, and screen-map
+    mutations refused. `VT_SETACTIVATE` combines mode changes and switching. `KDFONTOP` combines
+    reads and writes behind a pointer, so its read operation is refused too.
+  - Disposable pseudoterminals prove request refusal and unchanged line discipline and input.
+    They cannot reproduce virtual-console keyboard, display, or switching effects.
+    Test those effects only on a disposable console with separate recovery access.
+  - The private console constants follow Linux UAPI `include/uapi/linux/kd.h` and `vt.h`.
+    Check them against the headers when changing the list; keep independent values in the tests.
+    Do not require an unpublished dependency for constants already defined by the kernel.
+    Preserve successful-operation controls. Ordinary terminal settings and `TIOCSWINSZ` remain
+    permitted, so this is not full isolation.
 - **The reach modes have one legal value each.** Both backends refuse every non-default `SignalMode`,
   `ProcessInfoMode`, and `IpcMode`, so those four exported enums describe a widening the product does
   not offer. Kept deliberately for a future backend that honours them.
@@ -1019,9 +1158,10 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
 - `egress-gateway` asserts it writes no key material only in a `#[cfg(test)]` test.
 - **Two tests go vacuous if misconfigured:** the capability-drop test needs a user namespace, and
   `blocked_mode_leaves_no_route_at_all` must assert loopback is unreachable.
-- **Nothing here refuses or detects root.** `facade.rs` and `floors.rs` judge paths and never the
-  caller, and the one `geteuid` in the tree is a permitted-syscall table entry in
-  `backend/linux/namespace/syscall.rs` rather than a check. **A Seatbelt `deny` binds root**,
+- **macOS retains root creation inside granted directories.** Path denials govern the sandboxed
+  process's own access and do not change the owner of permitted new files. The Linux ownership
+  comparison did not test later privileged consumers on macOS.
+- **macOS continues to support root launches. A Seatbelt `deny` binds root**,
   measured 2026-08-31 with a control for each row, so the setuid bits, device nodes, both flag
   classes, the write root's own identity, and every ungranted path are all refused at `euid` 0.
   - **`file-write*` carried `file-write-owner`, and the leaf allowlist is what took it back. CLOSED
@@ -1077,11 +1217,43 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     (`FIXTURE_HOME_PARENT_TEXT` is `/var/tmp`). The source-reading guard beside it is deleted, and it
     was the weaker one: it read the config rather than the profile, and it still failed on a host
     where the two homes agree. So no test states the anchor itself.
-  - **The Linux launcher writes `uid_map` as `0 <uid> 1`**, which under real root is `0 0 1`, so the
-    workload's in-namespace uid 0 is host uid 0. Capabilities are still all dropped, so no flag or
-    mount authority survives — but nothing detects the collapse. Still open.
+  - **Linux root launches support sandbox directory write grants.** The identity map remains
+    `0 <uid> 1`, so permitted new files can belong to root in the surrounding OS.
+    The original comparison under root refused the workload's direct write outside its grants.
+    An unsandboxed root helper later wrote through a workload-created link to a file outside those grants.
+    It also wrote synthetic secret data into a readable file that the workload created.
+    Both operations used the helper's authority.
+    Root-owned output alone does not identify a failed Box control. See
+    [direct grants](../../docs/design/decisions.md#a-direct-grant-replaces-the-policy-decision).
+    `root_directory_grants_preserve_creation` covers root creation, cleared capabilities, refused
+    special permission bits, and refused outside access through direct paths and symbolic links.
+    `root_file_grants_preserve_private_access_and_temporary_storage` covers existing-file writes
+    and private temporary storage. `nonroot_directory_grants_preserve_creation` covers non-root creation.
+    Policy-mediated Shell and Python file creation retains the trusted process's file identity.
+    The box crate's [root-owned output contract](../box/AGENTS.md#root-owned-output) describes
+    those separate checks and the scope of later actions by another program.
+    Startup still clears every capability set. A nested user namespace can restore privileges
+    within that namespace. Seccomp still refuses `mount` and `fsopen`, as
+    `nested_user_namespaces_restore_scoped_capabilities_and_keep_mount_refusals` verifies.
   - **Linux: `fchmod` and `fchmodat` are permitted with no argument scoping**, and a bind shares its
     inode with the host, whose mount has no `nosuid`. So `MS_NOSUID` holds inside the view and the
     bit still lands outside it. Unmeasured — read from `syscall.rs` and `view.rs`, and no Linux
     target was exercised. Seccomp **can** scope this, unlike the macOS flag argument, because the
     mode is a scalar.
+
+
+### Native policy and filesystem-information notifications
+
+Kevin approved one receiver in the existing containment supervisor on November 11, 2026,
+including the private forwarding protocol in the native-policy integration work. The selected
+native adapter adds its operations to the existing notification filter. Do not install a second
+listener: Linux rejects a new listener when an ancestor filter already has one, even when their
+system-call sets differ. The standalone kernel control returned `EBUSY` for the second installation.
+
+The supervisor retains its scoped authority for sanitized `statfs` answers. For native operations,
+it forwards a fixed 80-byte, little-endian request on the private startup socket. Box receives a
+copy of the listener for validation, descriptor injection, and replies, but never calls notification
+receive on that copy. Finish the supervisor startup acknowledgment before allowing Box to read the
+forwarding stream. The workload must close its forwarding-socket copy before execution.
+Forwarding uses a bounded, nonblocking send: backpressure or a partial write terminates supervision.
+Keep the existing namespace lifetime chain so supervisor failure terminates the workload.

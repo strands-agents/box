@@ -1,0 +1,24 @@
+[package]
+name = "strands-box-ingress"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The Strands box's inbound relay: carries each caller to the contained workload's port."
+
+[lib]
+name = "ingress"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = "2"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt", "sync", "time"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+libc = "0.2"
+
+[lints.rust]
+unused_must_use = "deny"

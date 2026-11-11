@@ -1,19 +1,20 @@
 //! The accept loop and per-connection handler.
 
-use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
-use std::os::unix::net::{UnixListener, UnixStream};
+use std::io;
+use std::net::TcpStream;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::audit::RequestId;
 
+use super::BackendDial;
 use super::SharedState;
-use super::connect::{self, ConnectRequest};
+use super::connect::ConnectRequest;
+use super::l7::{self, WorkloadResponse};
 use super::resolve::PinnedDestination;
-use crate::audit::{Decision as AuditDecision, EgressDecision, NetworkAuditEvent};
+use crate::audit::Decision as AuditDecision;
 use crate::effect::{ClaimedEffectPermit, EffectAttempt, EffectOutcome};
-use crate::error::ProxyError;
+use crate::transport::socket::Socket;
 
 /// A counting semaphore bounding the number of in-flight connection threads, with no external
 /// dependency. `acquire` blocks the accept loop until a slot frees, so
@@ -66,12 +67,20 @@ impl Drop for Permit {
     }
 }
 
-/// Run the accept loop until `stop` is set. Each connection is handled on its own thread,
-/// **bounded** by `config.max_connections`: the loop blocks on a free slot before accepting more, so
-/// an untrusted workload cannot exhaust the host with unbounded threads.
-pub(super) fn accept_loop(listener: TcpListener, state: Arc<SharedState>, stop: Arc<AtomicBool>) {
+/// Run an accept loop over `incoming` until `stop` is set. Each connection is handled on its own
+/// thread, **bounded** by `config.max_connections`: the loop blocks on a free slot before accepting
+/// more, so an untrusted workload cannot exhaust the host with unbounded threads.
+///
+/// The TCP and AF_UNIX listeners share this loop. `connect_only` is set for AF_UNIX, whose workload
+/// is under the egress pin and has no plain-HTTP client.
+pub(super) fn accept_loop<S: Socket + Send + 'static>(
+    incoming: impl Iterator<Item = io::Result<S>>,
+    state: Arc<SharedState>,
+    stop: Arc<AtomicBool>,
+    connect_only: bool,
+) {
     let limiter = Arc::new(ConnectionLimiter::new(state.config.max_connections));
-    for incoming in listener.incoming() {
+    for incoming in incoming {
         if stop.load(Ordering::SeqCst) {
             break;
         }
@@ -86,271 +95,13 @@ pub(super) fn accept_loop(listener: TcpListener, state: Arc<SharedState>, stop: 
         std::thread::spawn(move || {
             // The permit lives for the duration of the connection; dropping it frees the slot.
             let _permit = permit;
-            if let Err(err) = dispatch_connection(stream, &state) {
-                // Never silently swallow a handler failure — record it (secret-free) so a broken
-                // connection is observable rather than a mystery. `host`/`port` are unknown this
-                // early, so the audit line names the failure with a placeholder target.
-                state.audit.push(NetworkAuditEvent::deny(
-                    "-",
-                    0,
-                    format!("connection handler error: {err}"),
-                    RequestId::new("egress-connection-error"),
-                ));
-            }
+            let _ = crate::proxy::server::serve_connection(stream, &state, connect_only);
         });
     }
-}
-
-/// Route one client connection by request shape, after reading its head.
-///
-/// A CONNECT opens the TLS interception path ([`handle_tls_connect`]); anything else is treated as a
-/// plain-HTTP absolute-form request ([`handle_plain_http`]). Reading the head is the only work shared
-/// before the split, so it lives here and each handler owns its transport and L7 path from there.
-fn dispatch_connection(mut client: TcpStream, state: &SharedState) -> Result<(), ProxyError> {
-    // A short read or a malformed head is a silent drop, as before.
-    let head = match read_until_headers_end(&mut client) {
-        Ok(head) => head,
-        Err(_) => return Ok(()),
-    };
-    match connect::parse_connect(&head) {
-        // HTTPS via CONNECT: terminate TLS and inspect.
-        Some(connect) => handle_tls_connect(client, connect, state),
-        // Not a CONNECT. Treat it as a plain-HTTP absolute-form request — the same controls apply
-        // (net:connect and the L7 legs), over plaintext with no CONNECT ack. The CONNECT-only
-        // v1 used to 400 here.
-        None => handle_plain_http(client, head, state),
-    }
-}
-
-/// Handle one CONNECT (HTTPS) connection: run the shared L4 controls, terminate TLS, run the L7 legs.
-fn handle_tls_connect(
-    mut client: TcpStream,
-    connect: ConnectRequest,
-    state: &SharedState,
-) -> Result<(), ProxyError> {
-    // Best-effort token check — never the primary defense.
-    if !connect::token_ok(
-        state.expected_token.as_deref(),
-        connect.proxy_authorization.as_deref(),
-    ) {
-        let _ = write_status(&mut client, 407, "proxy authentication required");
-        return Ok(());
-    }
-
-    let correlation = RequestId::unique();
-
-    // Shared L4: the pre-resolution `net:connect`, resolve-once/pin, and the per-address
-    // `net:connect` effect. Claimed and opened BEFORE the CONNECT ack, so a denial returns 403 without
-    // creating a socket or exposing a false tunnel.
-    let upstream = match open_governed_upstream(state, &connect, &correlation) {
-        Ok(upstream) => upstream,
-        Err(error) => {
-            error.write_response(&mut client, "CONNECT");
-            return Ok(());
-        }
-    };
-
-    // The upstream is open and its outcome was recorded; now let the client proceed.
-    client
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .map_err(|e| ProxyError::Io(format!("writing CONNECT ack: {e}")))?;
-
-    // Every connection is terminated and inspected. There is no un-inspected path: a
-    // connection whose plaintext the boundary cannot see could not raise `http:request`, so it would
-    // be exempt from the request authorization and would carry no credential decision either.
-    //
-    // **Two decisions, not three, and the actions are `net:connect` and `http:request`.** This named
-    // `net:request` and `net:response` and called them two of three authorizations. Neither action
-    // exists.
-    //
-    // The response leg takes **no decision**. `policy`'s egress adapter matches `ResponseRelease`
-    // and returns `Ok(())`, so a rule cannot refuse a release or budget on a response size. The
-    // reply reaches history once, on the request permit, as `output.status` of the one
-    // `http:request::response` an exchange records.
-    //
-    // The gateway would honour a refusal on that leg: `l7::intercept_tls` emits a deny event and
-    // withholds the bytes. The shipped interceptor never issues one.
-    //
-    // A handshake or pin failure hard-fails (drop), never a downgrade; the accept loop
-    // audits the error.
-    super::l7::intercept_tls(client, upstream, &connect, state, correlation)?;
-    Ok(())
-}
-
-/// Handle one plain-HTTP (non-CONNECT, absolute-form) client request end-to-end.
-///
-/// A workload dialing an `http://` URL through the proxy sends an absolute-form request rather than a
-/// CONNECT. This runs the identical controls as the CONNECT path — `net:connect`, and
-/// then the L7 request/response legs over plaintext (`http:request` + credential injection) — reusing
-/// [`open_governed_upstream`] and [`super::l7::forward_plain`]. There is no TLS termination and no
-/// CONNECT ack.
-fn handle_plain_http(
-    client: TcpStream,
-    head: String,
-    state: &SharedState,
-) -> Result<(), ProxyError> {
-    // A second handle on the same socket for writing responses; the original is consumed by the reader.
-    let mut writer = match client.try_clone() {
-        Ok(writer) => writer,
-        Err(_) => return Ok(()),
-    };
-    // Read the proxy token from the RAW head now: `read_request` below strips `Proxy-Authorization`
-    // (a hop-by-hop header), so reading it from the parsed request would always see nothing and the
-    // token check would silently accept every request.
-    let proxy_authorization = connect::proxy_authorization_from_head(&head);
-    // Re-feed the already-read head, so the hardened `read_request` parses head+body from one stream
-    // rather than a second HTTP parser.
-    let reader = std::io::Cursor::new(head.into_bytes()).chain(client);
-    let mut client_buf = std::io::BufReader::new(reader);
-    let parsed = match super::http1::read_request(
-        &mut client_buf,
-        state.config.response_limits.max_body_bytes,
-    ) {
-        Ok(parsed) => parsed,
-        Err(_) => {
-            let _ = write_status(&mut writer, 400, "bad request");
-            return Ok(());
-        }
-    };
-    // Absolute-form only: a plain-HTTP proxy request names the full URL. An origin-form target with no
-    // CONNECT has no destination and is refused.
-    let Some((host, port, origin_target)) = connect::parse_absolute_target(&parsed.target) else {
-        let _ = write_status(&mut writer, 400, "bad request");
-        return Ok(());
-    };
-    // A plain-HTTP proxy request may carry `Proxy-Authorization` too (RFC 7235), so the token check
-    // runs on this transport as well — using the value read from the raw head above.
-    let connect = ConnectRequest {
-        host,
-        port,
-        proxy_authorization,
-    };
-    // Best-effort token check — never the primary defense. Run here so the
-    // plain-HTTP path matches `handle_tls_connect` and `handle_connection_unix` rather than skipping
-    // the defense-in-depth layer silently.
-    if !connect::token_ok(
-        state.expected_token.as_deref(),
-        connect.proxy_authorization.as_deref(),
-    ) {
-        let _ = write_status(&mut writer, 407, "proxy authentication required");
-        return Ok(());
-    }
-    let correlation = RequestId::unique().with_headers(&parsed.headers);
-
-    // Shared L4: the pre-resolution `net:connect`, resolve-once/pin, and the per-address
-    // `net:connect` effect — identical to the CONNECT path. No CONNECT ack for a plain-HTTP request.
-    let upstream = match open_governed_upstream(state, &connect, &correlation) {
-        Ok(upstream) => upstream,
-        Err(error) => {
-            error.write_response(&mut writer, &parsed.method);
-            return Ok(());
-        }
-    };
-    // Run the L7 legs over plaintext, reusing request_leg/response_leg/effects.
-    super::l7::forward_plain(
-        &mut writer,
-        upstream,
-        &connect,
-        parsed,
-        origin_target,
-        state,
-        correlation,
-    )
-}
-
-/// Run the AF_UNIX accept loop until `stop` is set. A near-duplicate of
-/// [`accept_loop`] with `UnixStream` in place of `TcpStream`: same [`ConnectionLimiter`] backpressure,
-/// same per-connection thread model, same audit-on-handler-error. It exists because the workload under
-/// the AF_UNIX egress pin cannot create an `AF_INET` socket at all — a TCP listener would serve no one —
-/// so the proxy binds only the AF_UNIX socket and speaks the identical CONNECT/TLS/L7 protocol over it.
-/// It duplicates rather than adds a `TcpStream`/`UnixStream` trait, to keep the change local and
-/// the diff small (revisit if a third transport ever appears).
-pub(super) fn accept_loop_unix(
-    listener: UnixListener,
-    state: Arc<SharedState>,
-    stop: Arc<AtomicBool>,
-) {
-    let limiter = Arc::new(ConnectionLimiter::new(state.config.max_connections));
-    for incoming in listener.incoming() {
-        if stop.load(Ordering::SeqCst) {
-            break;
-        }
-        let stream = match incoming {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        // Same backpressure as the TCP loop: block on a free slot before accepting more.
-        let permit = limiter.acquire();
-        let state = state.clone();
-        std::thread::spawn(move || {
-            let _permit = permit;
-            if let Err(err) = handle_connection_unix(stream, &state) {
-                state.audit.push(NetworkAuditEvent::deny(
-                    "-",
-                    0,
-                    format!("connection handler error: {err}"),
-                    RequestId::new("egress-connection-error"),
-                ));
-            }
-        });
-    }
-}
-
-/// Handle one AF_UNIX client connection end-to-end. Mirrors [`handle_tls_connect`]
-/// step for step — read CONNECT head, best-effort token check, the shared L4 controls, then the L7
-/// legs — differing only in the client leg's type (`UnixStream`). It stays CONNECT-only: a non-CONNECT
-/// head is a 400, because the AF_UNIX pin has no plain-HTTP client. The shared L4 controls
-/// ([`open_governed_upstream`]) and the L7 path ([`super::l7::intercept_tls`]) are reused unchanged.
-fn handle_connection_unix(mut client: UnixStream, state: &SharedState) -> Result<(), ProxyError> {
-    // 1. Read the CONNECT head. Same byte-exact protocol as the TCP path.
-    let head = match read_until_headers_end(&mut client) {
-        Ok(head) => head,
-        Err(_) => return Ok(()),
-    };
-    let connect = match connect::parse_connect(&head) {
-        Some(c) => c,
-        None => {
-            let _ = write_status(&mut client, 400, "bad request");
-            return Ok(());
-        }
-    };
-
-    // 2. Best-effort token check — never the primary defense.
-    if !connect::token_ok(
-        state.expected_token.as_deref(),
-        connect.proxy_authorization.as_deref(),
-    ) {
-        let _ = write_status(&mut client, 407, "proxy authentication required");
-        return Ok(());
-    }
-
-    let correlation = RequestId::unique();
-
-    // Shared L4: the pre-resolution `net:connect`, resolve-once/pin, and the per-address
-    // `net:connect` effect — transport-agnostic, so the AF_UNIX path reuses it unchanged. Opened
-    // before the CONNECT ack, exactly as on the TCP client path.
-    let upstream = match open_governed_upstream(state, &connect, &correlation) {
-        Ok(upstream) => upstream,
-        Err(error) => {
-            error.write_response(&mut client, "CONNECT");
-            return Ok(());
-        }
-    };
-
-    // The upstream is open and its outcome was recorded; now let the client proceed.
-    client
-        .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-        .map_err(|e| ProxyError::Io(format!("writing CONNECT ack: {e}")))?;
-
-    // Same generic L7 interception as the TCP path — `intercept_tls` is generic over the client
-    // stream, so the `UnixStream` client flows through unchanged. Termination is
-    // unconditional here for the same reason as the TCP path.
-    super::l7::intercept_tls(client, upstream, &connect, state, correlation)?;
-    Ok(())
 }
 
 /// A failure before CONNECT can be acknowledged.
-enum OpenUpstreamError {
+pub(crate) enum OpenUpstreamError {
     /// The effect interceptor explicitly denied the socket open.
     Denied(io::Error),
     /// The interceptor, socket open, peer lookup, or outcome sink failed.
@@ -358,39 +109,29 @@ enum OpenUpstreamError {
 }
 
 impl OpenUpstreamError {
-    fn write_response(&self, stream: &mut impl Write, method: &str) {
+    pub(crate) fn response(&self) -> WorkloadResponse {
         match self {
-            Self::Denied(error) => super::l7::write_interceptor_error(stream, method, error, None),
-            Self::Failed => {
-                let _ = write_status(stream, 502, "bad gateway");
-            }
-        }
-    }
-
-    fn audit_reason(&self) -> &'static str {
-        match self {
-            Self::Denied(_) => "connect effect denied",
-            Self::Failed => "connect effect or outcome recording failed",
+            Self::Denied(error) => l7::interceptor_error(error, None),
+            Self::Failed => WorkloadResponse::bare(502),
         }
     }
 }
 
-/// Run the shared L4 controls for one destination and open the governed upstream.
+/// Run the connect decisions for one destination, for every transport and request shape, and
+/// open the pinned upstream socket. On refusal, return the refusal for the caller to answer.
 ///
-/// The pre-resolution `net:connect`, resolve-once/pin, and the per-address `net:connect`
-/// effect ([`open_upstream`]) are identical for every transport (TCP, AF_UNIX) and every request
-/// shape (CONNECT, plain HTTP), so all three handlers converge here. On refusal it pushes the audit
-/// event and returns the refusal the caller writes to its own client stream; on success
-/// it returns the open upstream socket. The caller owns acknowledging CONNECT (or not) and running
-/// the L7 legs.
-fn open_governed_upstream(
+/// When the destination re-routes to a backend, the returned [`BackendDial`] names the host the
+/// upstream leg must present (SNI, certificate, `Host`); `None` leaves the upstream leg on the
+/// original destination.
+pub(crate) fn open_governed_upstream(
     state: &SharedState,
     connect: &ConnectRequest,
     correlation: &RequestId,
-) -> std::result::Result<TcpStream, OpenUpstreamError> {
+) -> std::result::Result<(TcpStream, Option<BackendDial>), OpenUpstreamError> {
     // Policy decides the host before it is resolved, so a denied destination sends no DNS query: a
     // workload cannot carry data out in the labels of a name the gateway looks up and then refuses.
-    // The per-address `net:connect` below still decides every resolved address.
+    // The host decision is the ORIGINAL destination — the agent's intent — even when a backend
+    // re-routes the dial; the per-address `net:connect` below decides every resolved BACKEND address.
     let resolve = EffectAttempt::Resolve {
         host: &connect.host,
         port: connect.port,
@@ -410,21 +151,48 @@ fn open_governed_upstream(
             } else {
                 OpenUpstreamError::Failed
             };
-            state.audit.push(NetworkAuditEvent::deny(
-                &connect.host,
-                connect.port,
-                refusal.audit_reason().to_string(),
-                correlation.clone(),
-            ));
             return Err(refusal);
         }
     }
 
+    // A backend re-routes the dial to a different host and port. Box resolves and dials only the
+    // backend; it never resolves or dials the original destination. The host decision above already
+    // ran on the original, so the agent's intent is authorized exactly once
+    // (docs/design/decisions.md#a-re-route-is-authorized-on-the-original-destination). The
+    // supervisor DNS override applies to whichever host is actually resolved.
+    let backend = state.backend_for(&connect.host, connect.port).cloned();
+    // Fail closed when the host re-routes to a backend but this PORT matches no backend entry. A
+    // bare-host backend pattern covers only 443/80, so without this guard a `CONNECT host:8443` would
+    // fall through and dial the ORIGINAL destination directly — the one thing a re-route must never do
+    // (docs/design/decisions.md#a-re-route-is-authorized-on-the-original-destination).
+    if backend.is_none() && state.host_reroutes(&connect.host) {
+        let reason = format!(
+            "{}:{} re-routes to a backend, but no backend entry matches this port; refused rather \
+             than dial the original destination",
+            connect.host, connect.port
+        );
+        emit_connect_decision(
+            state,
+            connect,
+            AuditDecision::Deny,
+            &reason,
+            correlation.clone(),
+        );
+        return Err(OpenUpstreamError::Denied(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            reason,
+        )));
+    }
+    let (resolve_host, resolve_port) = match &backend {
+        Some(dial) => (dial.host.as_str(), dial.port),
+        None => (connect.host.as_str(), connect.port),
+    };
+
     // Resolve-once + pin, honoring any supervisor DNS override. A resolution failure
-    // is a hard 502, never a retry.
-    let override_ip = state.dns_override(&connect.host);
+    // is a hard 502, never a retry — and never a fallback to the original destination.
+    let override_ip = state.dns_override(resolve_host);
     let pinned =
-        match PinnedDestination::resolve_with_override(&connect.host, connect.port, override_ip) {
+        match PinnedDestination::resolve_with_override(resolve_host, resolve_port, override_ip) {
             Ok(pinned) => pinned,
             Err(error) => {
                 emit_connect_decision(
@@ -440,20 +208,11 @@ fn open_governed_upstream(
 
     // Authorization is Cedar's, enforced inside `open_upstream` through the `EffectInterceptor` seam
     // (`EffectAttempt::Connect`) before the socket opens — there is no allow/deny authority in this
-    // crate. Every connection is terminated and inspected; see `open_upstream`'s `http_visibility` for
-    // why no route is an opaque tunnel.
-    match open_upstream(state, connect, &pinned, correlation) {
-        Ok(upstream) => Ok(upstream),
-        Err(error) => {
-            state.audit.push(NetworkAuditEvent::deny(
-                &connect.host,
-                connect.port,
-                error.audit_reason().to_string(),
-                correlation.clone(),
-            ));
-            Err(error)
-        }
-    }
+    // crate. The Connect carries the ORIGINAL host and port; the backend address and port appear only
+    // in the dialled `address`. Every connection is terminated and inspected; see `open_upstream`'s
+    // `http_visibility` for why no route is an opaque tunnel.
+    let upstream = open_upstream(state, connect, &pinned, correlation)?;
+    Ok((upstream, backend))
 }
 
 /// Claim and perform pinned upstream socket attempts shared by TLS and opaque paths.
@@ -530,16 +289,13 @@ fn open_upstream(
         permit
             .record_outcome(EffectOutcome::Connected(peer))
             .map_err(|_| OpenUpstreamError::Failed)?;
-        upstream
-            .set_read_timeout(Some(state.config.upstream_read_deadline))
-            .and_then(|()| upstream.set_write_timeout(Some(state.config.upstream_read_deadline)))
-            .map_err(|_| OpenUpstreamError::Failed)?;
         return Ok(upstream);
     }
 
     Err(OpenUpstreamError::Failed)
 }
 
+/// Emit the connection decision for `connect`: no method, and the all-paths `/`.
 fn emit_connect_decision(
     state: &SharedState,
     connect: &ConnectRequest,
@@ -547,39 +303,7 @@ fn emit_connect_decision(
     reason: &str,
     correlation: RequestId,
 ) {
-    state.emitter.emit(EgressDecision {
-        host: connect.host.clone(),
-        port: connect.port,
-        method: String::new(),
-        path: "/".to_string(),
-        decision,
-        reason: reason.to_string(),
-        correlation,
-    });
-}
-
-/// Read the CONNECT head from `stream` up to the `\r\n\r\n` terminator (bounded), as a string.
-fn read_until_headers_end<S: Read>(stream: &mut S) -> std::io::Result<String> {
-    let mut buf = Vec::new();
-    let mut byte = [0u8; 1];
-    loop {
-        let n = stream.read(&mut byte)?;
-        if n == 0 {
-            break;
-        }
-        buf.push(byte[0]);
-        if buf.ends_with(b"\r\n\r\n") || buf.len() > 64 * 1024 {
-            break;
-        }
-    }
-    Ok(String::from_utf8_lossy(&buf).into_owned())
-}
-
-/// Write a minimal status line + empty body to the client (for a proxy-level refusal). Generic over
-/// any [`Write`] for the same reason as [`read_until_headers_end`].
-fn write_status<S: Write>(stream: &mut S, status: u16, msg: &str) -> std::io::Result<()> {
-    let body = format!("HTTP/1.1 {status} {msg}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-    stream.write_all(body.as_bytes())
+    l7::emit_decision(state, connect, ("", "/"), decision, reason, correlation);
 }
 
 #[cfg(test)]
@@ -823,12 +547,10 @@ mod tests {
         SharedState {
             controls: CapabilitySet::default(),
             config: super::super::MitmConfig::default(),
-            ca: None,
+            ca: super::super::ca::EphemeralCa::generate(None, None).unwrap(),
             upstream_config: Arc::new(super::super::tls::upstream_client_config(&[]).unwrap()),
-            audit: crate::audit::SharedAuditLog::new(),
             emitter: Box::new(StubEmitter::new()),
             effect_interceptor: policy,
-            expected_token: None,
         }
     }
 
@@ -836,7 +558,6 @@ mod tests {
         ConnectRequest {
             host: host.to_string(),
             port,
-            proxy_authorization: None,
         }
     }
 
@@ -1038,5 +759,198 @@ mod tests {
         assert_eq!(fixture.refused.addr.port(), fixture.dead.port());
         confirm_closed(fixture.dead).unwrap();
         fixture.refused.assert_live();
+    }
+
+    /// A [`SharedState`] whose config carries the given backend re-routes.
+    fn state_with_backends(
+        policy: Arc<dyn EffectInterceptor>,
+        backends: Vec<(credentials::DestinationPattern, BackendDial)>,
+    ) -> SharedState {
+        let config = super::super::MitmConfig {
+            backends,
+            ..super::super::MitmConfig::default()
+        };
+        SharedState {
+            controls: CapabilitySet::default(),
+            config,
+            ca: super::super::ca::EphemeralCa::generate(None, None).unwrap(),
+            upstream_config: Arc::new(super::super::tls::upstream_client_config(&[]).unwrap()),
+            emitter: Box::new(StubEmitter::new()),
+            effect_interceptor: policy,
+        }
+    }
+
+    /// A destination with a backend dials ONLY the backend address, and the per-address decision runs
+    /// on the backend address while the host decision stays on the original destination. The original
+    /// destination is never resolved or dialled.
+    #[test]
+    fn a_backend_reroutes_the_dial_to_the_backend_address() {
+        let backend = Recorder::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+        backend.assert_live();
+        let before = backend.accepted();
+        let backend_ip = backend.addr.ip();
+        let backend_port = backend.addr.port();
+
+        // The backend host is a literal IP, so it resolves to itself with no DNS — the dial lands on
+        // the recorder. The original destination is a name that MUST NOT be resolved; if it were, the
+        // test would hit the network. The policy permits only the backend IP.
+        let policy = AddressPolicy::permitting(backend_ip);
+        let dial = BackendDial {
+            host: backend_ip.to_string(),
+            port: backend_port,
+            tls: false,
+            path_prefix: String::new(),
+        };
+        let pattern = credentials::DestinationPattern::parse("api.github.com").unwrap();
+        let shared = state_with_backends(policy.clone(), vec![(pattern, dial)]);
+
+        let correlation = RequestId::new("test");
+        let (upstream, backend_leg) =
+            open_governed_upstream(&shared, &connect_to("api.github.com", 443), &correlation)
+                .ok()
+                .expect("the backend address connects");
+
+        // The dial landed on the backend recorder, not the original destination.
+        assert_eq!(
+            upstream.peer_addr().unwrap(),
+            SocketAddr::new(backend_ip, backend_port)
+        );
+        assert_eq!(
+            backend.accepted(),
+            before + 1,
+            "the backend was dialled once"
+        );
+        // The per-address decision saw the BACKEND address, never the original destination's.
+        assert_eq!(
+            policy.seen(),
+            vec![(SocketAddr::new(backend_ip, backend_port), true)],
+            "the address check runs on the backend address"
+        );
+        // The returned leg names the backend the upstream must present.
+        let leg = backend_leg.expect("a re-routed destination returns its backend leg");
+        assert_eq!(leg.host, backend_ip.to_string());
+        assert_eq!(leg.port, backend_port);
+        drop(upstream);
+    }
+
+    /// A backend whose address the policy denies is refused, with no dial and no fallback to the
+    /// original destination. This is how the metadata and private-range floor refuses a backend that
+    /// resolves to a forbidden address.
+    #[test]
+    fn a_backend_whose_address_is_denied_is_refused_with_no_dial() {
+        let backend = Recorder::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+        backend.assert_live();
+        let before = backend.accepted();
+        let backend_ip = backend.addr.ip();
+        let backend_port = backend.addr.port();
+
+        // The policy permits some OTHER address, so the backend's own address is denied.
+        let permitted_elsewhere = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 9));
+        let policy = AddressPolicy::permitting(permitted_elsewhere);
+        let dial = BackendDial {
+            host: backend_ip.to_string(),
+            port: backend_port,
+            tls: false,
+            path_prefix: String::new(),
+        };
+        let pattern = credentials::DestinationPattern::parse("api.github.com").unwrap();
+        let shared = state_with_backends(policy.clone(), vec![(pattern, dial)]);
+
+        let result = open_governed_upstream(
+            &shared,
+            &connect_to("api.github.com", 443),
+            &RequestId::new("t"),
+        );
+        assert!(
+            matches!(result, Err(OpenUpstreamError::Denied(_))),
+            "a denied backend address refuses the connect"
+        );
+        assert_eq!(
+            policy.seen(),
+            vec![(SocketAddr::new(backend_ip, backend_port), false)],
+            "the address check ran on the backend address and denied it"
+        );
+        assert_eq!(
+            backend.accepted(),
+            before,
+            "the denied backend was never dialled"
+        );
+    }
+
+    /// A backend that resolves to nothing fails closed, with no fallback to the original destination.
+    #[test]
+    fn a_backend_that_resolves_to_nothing_fails_closed() {
+        // `.invalid` is reserved to never resolve (RFC 2606), so this is deterministic and offline.
+        let dial = BackendDial {
+            host: "no-such-host.invalid".to_string(),
+            port: 443,
+            tls: true,
+            path_prefix: String::new(),
+        };
+        let pattern = credentials::DestinationPattern::parse("api.github.com").unwrap();
+        let shared = state_with_backends(AddressPolicy::permit_all(), vec![(pattern, dial)]);
+        let result = open_governed_upstream(
+            &shared,
+            &connect_to("api.github.com", 443),
+            &RequestId::new("t"),
+        );
+        assert!(
+            matches!(result, Err(OpenUpstreamError::Failed)),
+            "a backend that resolves to nothing fails closed"
+        );
+    }
+
+    /// A CONNECT to a backend host on a port no backend entry covers fails closed, rather than fall
+    /// through and dial the ORIGINAL destination. A bare-host pattern covers only 443/80, so `:8443`
+    /// matches no backend; without the guard the box would reach `api.github.com:8443` directly.
+    #[test]
+    fn a_backend_host_on_a_non_backend_port_fails_closed() {
+        let backend = Recorder::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+        backend.assert_live();
+        let before = backend.accepted();
+        let dial = BackendDial {
+            host: backend.addr.ip().to_string(),
+            port: backend.addr.port(),
+            tls: false,
+            path_prefix: String::new(),
+        };
+        // The pattern has no explicit port, so it re-routes `api.github.com` on 443/80 only.
+        let pattern = credentials::DestinationPattern::parse("api.github.com").unwrap();
+        let shared = state_with_backends(AddressPolicy::permit_all(), vec![(pattern, dial)]);
+
+        // The refusal is reached BEFORE any resolution, so the original host is never looked up.
+        let result = open_governed_upstream(
+            &shared,
+            &connect_to("api.github.com", 8443),
+            &RequestId::new("t"),
+        );
+        assert!(
+            matches!(result, Err(OpenUpstreamError::Denied(_))),
+            "a re-routed host on a non-backend port is refused, not dialled directly"
+        );
+        assert_eq!(
+            backend.accepted(),
+            before,
+            "the backend was not dialled either — the port matched no entry"
+        );
+    }
+
+    /// A destination with no backend returns no backend leg, so the upstream leg stays on the
+    /// original destination (today's behaviour).
+    #[test]
+    fn no_backend_returns_no_leg() {
+        let recorder = Recorder::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+        let port = recorder.addr.port();
+        let ip = recorder.addr.ip();
+        let policy = AddressPolicy::permitting(ip);
+        let shared = state(policy);
+        let correlation = RequestId::new("test");
+        // A literal-IP destination resolves to itself, so no DNS and no network.
+        let (upstream, backend_leg) =
+            open_governed_upstream(&shared, &connect_to(&ip.to_string(), port), &correlation)
+                .ok()
+                .expect("the destination connects directly");
+        assert!(backend_leg.is_none(), "no backend means no re-route leg");
+        drop(upstream);
     }
 }

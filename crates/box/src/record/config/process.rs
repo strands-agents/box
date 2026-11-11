@@ -6,6 +6,7 @@
 //! | `workspace` | the initial working directory; grants nothing |
 //! | `env` | the literal environment, with no host inheritance |
 //! | `filesystem` | the eight path lists the process's own syscalls reach |
+//! | `grammar` | the tool grammar a `[tool.<name>]` carries, behind `tool-grammars` |
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
@@ -14,7 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
 
-use super::env::{reserved_workload_environment, valid_environment_name};
+use super::env::{refusal_reason, refused_name, refused_value};
+use super::grammar::GrammarTable;
 
 /// One process declaration, shared by `[agent]` and every `[tool.<name>]`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -47,6 +49,13 @@ pub(crate) struct ProcessSpec {
     /// `[agent]` refuses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) network: Option<NetworkConfig>,
+
+    /// The tool grammar of a `[tool.<name>]`. Every other table refuses it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) grammar: Option<GrammarTable>,
+    /// Where callers reach the agent's servers, from `[[agent.ingress]]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) ingress: Vec<super::ingress::Ingress>,
 }
 
 #[cfg(all(
@@ -200,6 +209,39 @@ pub(crate) struct ContainedMcp {
 }
 
 impl ProcessSpec {
+    /// Refuse a `grammar` while `[experimental-features] tool-grammars` is off.
+    pub(crate) fn validate_grammar_selection(
+        &self,
+        table: &str,
+        enabled: bool,
+    ) -> Result<(), ConfigError> {
+        if self.grammar.is_some() && !enabled {
+            return Err(ConfigError::Process {
+                table: table.into(),
+                reason: "`grammar` is experimental: set `tool-grammars = true` in \
+                         `[experimental-features]` to load it"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_ingress_selection(
+        &self,
+        table: &str,
+        enabled: bool,
+    ) -> Result<(), ConfigError> {
+        if !self.ingress.is_empty() && !enabled {
+            return Err(ConfigError::Process {
+                table: table.into(),
+                reason: "`ingress` is experimental: set `ingress = true` in \
+                         `[experimental-features]` to load it"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_native_policy(
         &self,
         table: &str,
@@ -237,6 +279,15 @@ impl ProcessSpec {
             table: table.to_string(),
             reason,
         };
+        if !self.ingress.is_empty() {
+            if table != "[agent]" {
+                return Err(refuse(
+                    "`ingress` is supported on `[agent]` only; a tool's ingress is not built yet"
+                        .into(),
+                ));
+            }
+            super::ingress::validate_all(&self.ingress, table)?;
+        }
         if table == "[agent]" && self.network.is_some() {
             return Err(refuse(
                 "`network` is refused on `[agent]`: the agent always reaches the network through \
@@ -244,6 +295,12 @@ impl ProcessSpec {
                  `network.contain_egress`"
                     .into(),
             ));
+        }
+        if self.grammar.is_some() && !table.starts_with("[tool.") {
+            return Err(refuse(format!(
+                "`grammar` is refused on `{table}`: a tool grammar describes a program the hosted \
+                 Shell starts, so only a `[tool.<name>]` takes one"
+            )));
         }
         match self.command.first() {
             None => {
@@ -273,24 +330,13 @@ impl ProcessSpec {
             )));
         }
         for name in self.env.keys() {
-            if name.is_empty() || !valid_environment_name(name) {
-                return Err(refuse(format!(
-                    "`env` name {name:?} is not a valid environment-variable name"
-                )));
-            }
-            if reserved_workload_environment(name) {
-                return Err(refuse(format!(
-                    "`env` name {name:?} is set by the box itself, so a table cannot claim it"
-                )));
+            if let Some(kind) = refused_name(name) {
+                return Err(refuse(refusal_reason(kind, name, "")));
             }
         }
-        for name in ["HOME", "TMPDIR"] {
-            if let Some(value) = self.env.get(name)
-                && !Path::new(value).is_absolute()
-            {
-                return Err(refuse(format!(
-                    "`env.{name}` must be an absolute path: {value:?}"
-                )));
+        for (name, value) in &self.env {
+            if let Some(kind) = refused_value(name, value) {
+                return Err(refuse(refusal_reason(kind, name, value)));
             }
         }
         for kind in Grant::ALL {
@@ -393,6 +439,47 @@ mod tests {
                 Ok(()) => panic!("{text:?} must be refused"),
                 Err(error) => error.to_string(),
             },
+        }
+    }
+
+    /// **A runtime's own option variables are the operator's to set in `env`.**
+    #[test]
+    fn env_accepts_a_runtime_option_variable() {
+        for name in [
+            "NODE_OPTIONS",
+            "BASH_ENV",
+            "ENV",
+            "RUBYOPT",
+            "PERL5LIB",
+            "PERL5OPT",
+            "GEM_PATH",
+            "CLASSPATH",
+            "JAVA_TOOL_OPTIONS",
+            "_JAVA_OPTIONS",
+            "PYTHONPATH",
+            "PYTHONUNBUFFERED",
+        ] {
+            for table in ["[agent]", "[tool.x]", "[mcp.x]"] {
+                spec(&format!("command = [\"x\"]\nenv = {{ {name} = \"v\" }}"))
+                    .validate(table)
+                    .unwrap_or_else(|error| panic!("{table} env.{name} must load: {error}"));
+            }
+        }
+    }
+
+    /// **`LD_*` and `DYLD_*` stay refused in `env`, and the message names the dynamic loader.**
+    #[test]
+    fn env_refuses_a_dynamic_loader_variable_and_says_why() {
+        for name in ["LD_PRELOAD", "LD_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES"] {
+            let message = refusal(&format!("command = [\"x\"]\nenv = {{ {name} = \"v\" }}"));
+            assert!(
+                message.contains(name) && message.contains("dynamic loader"),
+                "{name} must be refused for the dynamic loader: {message}"
+            );
+            assert!(
+                !message.contains("set by the box itself"),
+                "the box does not set {name}: {message}"
+            );
         }
     }
 

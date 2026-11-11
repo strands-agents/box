@@ -3,10 +3,12 @@
 use std::sync::Arc;
 
 use credentials::{DestinationPattern, Inbound, Outbound, Vault};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
-use crate::boundary::{BodyRef, InterceptedRequest, InterceptedResponse, Mutation};
-use crate::capability::traits::{CapabilityContext, CapabilityOutcome, EgressCapability};
+use super::Outcome;
+use crate::boundary::{InterceptedRequest, InterceptedResponse, Mutation, Target};
+#[cfg(feature = "tls-intercept")]
+use {super::ResponseControls, crate::boundary::HeaderMap};
 
 /// The `accept-encoding` every credentialed request carries.
 const IDENTITY_ENCODING: &str = "identity";
@@ -22,56 +24,65 @@ impl CredentialCapability {
     pub fn new(pattern: DestinationPattern, store: Arc<Vault>) -> Self {
         Self { pattern, store }
     }
-}
 
-impl EgressCapability for CredentialCapability {
-    fn pattern(&self) -> &DestinationPattern {
+    /// The destination pattern selecting which requests this capability governs — a
+    /// `credentials::DestinationPattern`, so the proxy and the vault use the **same** matcher.
+    pub(super) fn pattern(&self) -> &DestinationPattern {
         &self.pattern
     }
 
-    fn on_request(
-        &self,
-        req: &mut InterceptedRequest,
-        _cx: &CapabilityContext,
-    ) -> CapabilityOutcome {
+    /// The edits that attach this credential to `req`. Reads the request, and writes only its
+    /// advisory note; the set applies the edits.
+    pub(super) fn on_request(&self, req: &mut InterceptedRequest) -> Outcome {
         // Not applicable to this request → no edits. A mutation capability simply does not act
         // off-route.
         if !self.pattern.matches(&req.target.as_destination()) {
-            return CapabilityOutcome::none();
+            return Ok(Vec::new());
         }
 
-        // The vault owns the whole decision: which binding, where the phantom is, whether it matches,
-        // and — for a signed route — the signature. There is no partial answer to mishandle here.
         // The vault signs these headers, so each one must already hold the value that goes on the
-        // wire, including the `accept-encoding` this capability forces below.
-        let mut headers: Vec<(String, String)> = req
-            .headers
-            .iter()
-            .filter(|(name, _)| !name.eq_ignore_ascii_case("accept-encoding"))
-            .map(|(name, value)| (name.to_string(), value.to_string()))
-            .collect();
-        headers.push(("accept-encoding".to_string(), IDENTITY_ENCODING.to_string()));
+        // wire, including the `accept-encoding` this capability forces.
+        let headers = headers_for_signing(req.headers.iter());
         let url = req.target.url();
         let outbound = Outbound {
             destination: req.target.as_destination(),
-            method: req.method.as_deref().unwrap_or("GET"),
+            method: &req.method,
             url: &url,
             query: &req.target.query,
             headers: &headers,
-            body: req.body.as_bytes(),
+            body: &req.body,
         };
+        // `headers` wipes its value copies on drop (`SigningHeaders`); it outlives this `Outbound`.
+        let (mutations, advisory) = self.edits_for(outbound)?;
+        // An advisory injection (secret attached without a matching placeholder) is a noteworthy
+        // allow. Set only when present, so a second matching control's normal swap cannot clobber it.
+        if let Some(reason) = advisory {
+            req.advisory_note = Some(reason);
+        }
+        Ok(mutations)
+    }
 
+    /// The SigV4 edits for a re-routed request whose `Host` the gateway has already rewritten to the
+    /// backend. `outbound` presents the BACKEND host and the forwarded path, so the backend vault's
+    /// signed route (keyed on the backend host) matches and signs over exactly the bytes the backend
+    /// receives. A backend carrying no signing auth matches nothing and returns no edits. Used only
+    /// by the `tls-intercept` backend signature pass.
+    #[cfg(feature = "tls-intercept")]
+    pub(super) fn on_backend_request(&self, outbound: Outbound<'_>) -> Outcome {
+        Ok(self.edits_for(outbound)?.0)
+    }
+
+    /// Turn the vault's `attach_for` result for `outbound` into mutations, plus the advisory reason
+    /// when the vault set one. Shared by the request leg and the post-rewrite backend signature.
+    fn edits_for(
+        &self,
+        outbound: Outbound<'_>,
+    ) -> std::result::Result<(Vec<Mutation>, Option<String>), String> {
         match self.store.attach_for(outbound) {
             // The vault governs no credential for this destination.
-            Ok(None) => CapabilityOutcome::none(),
+            Ok(None) => Ok((Vec::new(), None)),
             Ok(Some(attachment)) => {
-                // An advisory injection (secret attached without a matching placeholder) is a
-                // noteworthy allow. Carry the vault's non-secret reason to the driver, which journals
-                // it on the allow decision with the destination and requester correlation. Set only
-                // when present, so a second matching control's normal swap cannot clobber the note.
-                if let Some(reason) = attachment.advisory_reason() {
-                    req.advisory_note = Some(reason.to_string());
-                }
+                let advisory = attachment.advisory_reason().map(str::to_string);
                 let mut mutations = Vec::new();
                 // Strips first: the phantom must be gone before the real secret is set, and for a
                 // signed route every inbound signing artifact must be gone before the signature lands.
@@ -109,51 +120,51 @@ impl EgressCapability for CredentialCapability {
                     name: "accept-encoding".to_string(),
                     value: Zeroizing::new(IDENTITY_ENCODING.to_string()),
                 });
-                CapabilityOutcome::applied(mutations)
+                Ok((mutations, advisory))
             }
             // An ambiguous binding, a missing or mismatched phantom, an underivable signing scope, or a
             // signer error. Every one of them means the request must not go out carrying this
             // credential. The vault's messages are non-secret by construction.
-            Err(err) => CapabilityOutcome::unavailable(err.to_string()),
+            Err(err) => Err(err.to_string()),
         }
     }
 
-    fn on_response(
-        &self,
-        res: &mut InterceptedResponse,
-        cx: &CapabilityContext,
-    ) -> CapabilityOutcome {
-        // The request's destination (carried on the context) resolves the same binding whose secret to
-        // scan for — an upstream must not be able to echo the injected secret back to the workload.
+    /// The scrub of `res`, the response to a request for `target`. Rewrites the body in place and
+    /// returns the header edits.
+    pub(super) fn on_response(&self, res: &mut InterceptedResponse, target: &Target) -> Outcome {
+        // Off-route → no edits, so another destination's credential cannot emit a scrub that
+        // collides with the governing one's under a shared store.
+        if !self.pattern.matches(&target.as_destination()) {
+            return Ok(Vec::new());
+        }
+        // The request's destination resolves the same binding whose secret to scan for — an
+        // upstream must not be able to echo the injected secret back to the workload.
         let headers: Vec<(String, String)> = res
             .headers
             .iter()
             .map(|(name, value)| (name.to_string(), value.to_string()))
             .collect();
-        let body = res.body.as_bytes().to_vec();
-        if !body.is_empty()
+        if !res.body.is_empty()
             && let Some(encoding) = content_encoding(&res.headers)
         {
-            return CapabilityOutcome::unavailable(format!(
+            return Err(format!(
                 "the response to a credentialed request arrived with Content-Encoding {encoding}, \
                  which the leak-back scrub cannot read; it is refused rather than delivered unscanned"
             ));
         }
         let inbound = Inbound {
-            destination: cx.target.as_destination(),
+            destination: target.as_destination(),
             headers: &headers,
-            body: &body,
+            body: &res.body,
         };
 
         let Some(redactions) = self.store.redact_leaks(inbound) else {
-            return CapabilityOutcome::none();
+            return Ok(Vec::new());
         };
 
         // The body is rewritten in place (the interceptor owns the response bytes); header redactions
         // ride on mutations, as they always have.
-        if let Some(scrubbed) = redactions.body() {
-            res.body = BodyRef::Bytes(scrubbed.to_vec());
-        }
+        let scrubbed = redactions.body().map(<[u8]>::to_vec);
         // These values are non-secret by construction — a redaction is what remains *after* the
         // secret was removed. The wrap is to satisfy `SetHeader`'s type, not to protect these bytes.
         let mutations: Vec<Mutation> = redactions
@@ -163,31 +174,108 @@ impl EgressCapability for CredentialCapability {
                 value: Zeroizing::new(value.to_string()),
             })
             .collect();
-        CapabilityOutcome::applied(mutations)
+        if let Some(scrubbed) = scrubbed {
+            res.body = scrubbed;
+        }
+        Ok(mutations)
+    }
+
+    /// The header edits and body checks for a streamed response from this capability's destination.
+    #[cfg(feature = "tls-intercept")]
+    pub(super) fn response_controls(
+        &self,
+        headers: &HeaderMap,
+        target: &Target,
+    ) -> (Vec<Mutation>, ResponseControls) {
+        if !self.pattern.matches(&target.as_destination()) {
+            return (Vec::new(), ResponseControls::default());
+        }
+        let redactor = self.store.response_redactor(target.as_destination());
+        let edits = redactor
+            .iter()
+            .flat_map(|redactor| {
+                headers.iter().filter_map(move |(name, value)| {
+                    redactor
+                        .redact_header(value)
+                        .map(|value| Mutation::SetHeader {
+                            name: name.to_string(),
+                            value: Zeroizing::new(value),
+                        })
+                })
+            })
+            .collect();
+        (
+            edits,
+            ResponseControls {
+                redactors: redactor.into_iter().collect(),
+                requires_empty_body: content_encoding(headers).is_some(),
+            },
+        )
+    }
+}
+
+/// The request headers to sign over: every header except `accept-encoding` and `content-length`,
+/// then `identity` forced. The signer must cover exactly the headers that leave. `accept-encoding`
+/// is re-added as `identity` (the scrub needs an unencoded response). `content-length` is dropped
+/// because the forwarding layer owns it — `write_request` refreshes it, and omits it entirely on a
+/// bodyless request — so signing the workload's value would attest a header the request may not
+/// send, which a strict SigV4 verifier rejects. AWS SDKs likewise leave `content-length` unsigned.
+pub(super) fn headers_for_signing<'a>(
+    headers: impl Iterator<Item = (&'a str, &'a str)>,
+) -> SigningHeaders {
+    let mut out: Vec<(String, String)> = headers
+        .filter(|(name, _)| {
+            !name.eq_ignore_ascii_case("accept-encoding")
+                && !name.eq_ignore_ascii_case("content-length")
+        })
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+    out.push(("accept-encoding".to_string(), IDENTITY_ENCODING.to_string()));
+    SigningHeaders(out)
+}
+
+/// The signing headers, with every value copy wiped on drop. The signer needs a
+/// `&[(String, String)]` slice ([`Outbound::headers`](credentials::Outbound)), so the values cannot
+/// each be `Zeroizing`; a re-routed `env://` backend token can sit in a copied value, so the whole
+/// buffer is wiped on drop instead of freed un-scrubbed.
+pub(super) struct SigningHeaders(Vec<(String, String)>);
+
+impl std::ops::Deref for SigningHeaders {
+    type Target = [(String, String)];
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for SigningHeaders {
+    fn drop(&mut self) {
+        for (_, value) in &mut self.0 {
+            value.zeroize();
+        }
     }
 }
 
 /// The response's `Content-Encoding` when it names any coding other than `identity`.
-fn content_encoding(headers: &crate::boundary::HeaderMap) -> Option<String> {
+fn content_encoding(headers: &crate::boundary::HeaderMap) -> Option<&str> {
     let value = headers.get("content-encoding")?;
     value
         .split(',')
         .map(str::trim)
         .any(|coding| !coding.is_empty() && !coding.eq_ignore_ascii_case("identity"))
-        .then(|| value.trim().to_string())
+        .then(|| value.trim())
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     use credentials::{Backend, InjectMode, Locator, PhantomCheck, RouteSpec, VaultConfig};
 
     use super::*;
-    use crate::boundary::{HeaderMap, Target};
+    use crate::boundary::HeaderMap;
 
     /// Place `secret` in a uniquely-named environment variable and return its `env://` locator.
-    fn env_locator(secret: &str) -> Locator {
+    pub(in crate::capability) fn env_locator(secret: &str) -> Locator {
         static NEXT: AtomicU32 = AtomicU32::new(0);
         let name = format!(
             "CREDENTIAL_CAPABILITY_TEST_{}",
@@ -203,7 +291,10 @@ mod tests {
     }
 
     /// A capability over one opaque header route; returns it with the minted phantom.
-    fn header_capability(dest: &str, secret: &str) -> (CredentialCapability, String) {
+    pub(in crate::capability) fn header_capability(
+        dest: &str,
+        secret: &str,
+    ) -> (CredentialCapability, String) {
         let opened = Vault::open(
             VaultConfig::new(Backend::local(), "tenant").route(RouteSpec::opaque(
                 pattern(dest),
@@ -242,12 +333,8 @@ mod tests {
     }
 
     /// Assert that `outcome` swaps in the real secret and strips the placeholder location.
-    fn assert_swapped_to_real_secret(outcome: &CapabilityOutcome) {
-        assert!(
-            !outcome.is_unavailable(),
-            "advisory must inject, not refuse"
-        );
-        let edits = outcome.edits();
+    fn assert_swapped_to_real_secret(outcome: &Outcome) {
+        let edits = outcome.as_ref().expect("advisory must inject, not refuse");
         assert!(
             edits.iter().any(|m| matches!(
                 m,
@@ -267,15 +354,11 @@ mod tests {
     fn request(host: &str, headers: HeaderMap) -> InterceptedRequest {
         InterceptedRequest {
             target: Target::new(host, 443),
-            method: Some("GET".to_string()),
+            method: "GET".to_string(),
             headers,
-            body: BodyRef::Empty,
+            body: Vec::new(),
             advisory_note: None,
         }
-    }
-
-    fn context(host: &str) -> CapabilityContext {
-        CapabilityContext::new(crate::RequestId::new("turn-1"), 0, Target::new(host, 443))
     }
 
     /// The happy path: a request presenting the phantom gets the real secret, and the phantom is
@@ -287,10 +370,9 @@ mod tests {
         headers.append("Authorization", format!("Bearer {phantom}"));
         let mut req = request("api.github.com", headers);
 
-        let outcome = capability.on_request(&mut req, &context("api.github.com"));
+        let outcome = capability.on_request(&mut req);
 
-        assert!(!outcome.is_unavailable(), "the happy path produces edits");
-        let edits = outcome.edits();
+        let edits = outcome.expect("the happy path produces edits");
         assert!(
             edits.iter().any(|m| matches!(
                 m,
@@ -325,13 +407,12 @@ mod tests {
         headers.append("Authorization", "Bearer strands_box_not-the-right-phantom");
         let mut req = request("api.github.com", headers);
 
-        let outcome = capability.on_request(&mut req, &context("api.github.com"));
+        let outcome = capability.on_request(&mut req);
 
         assert!(
-            outcome.is_unavailable(),
+            outcome.is_err(),
             "an unrecognised placeholder must stop the exchange, not attach a secret"
         );
-        assert!(outcome.edits().is_empty(), "nothing may egress");
     }
 
     /// A request presenting **no** phantom is refused too: there is nothing to recognise, so attaching
@@ -341,11 +422,7 @@ mod tests {
         let (capability, _) = header_capability("api.github.com", "real-secret");
         let mut req = request("api.github.com", HeaderMap::new());
 
-        assert!(
-            capability
-                .on_request(&mut req, &context("api.github.com"))
-                .is_unavailable()
-        );
+        assert!(capability.on_request(&mut req).is_err());
     }
 
     /// An advisory route injects the real secret when the request presents no placeholder.
@@ -354,7 +431,7 @@ mod tests {
         let (capability, _) = advisory_header_capability("api.github.com", "real-secret");
         let mut req = request("api.github.com", HeaderMap::new());
 
-        let outcome = capability.on_request(&mut req, &context("api.github.com"));
+        let outcome = capability.on_request(&mut req);
         assert_swapped_to_real_secret(&outcome);
     }
 
@@ -366,7 +443,7 @@ mod tests {
         headers.append("Authorization", "Bearer strands_box_not-the-right-phantom");
         let mut req = request("api.github.com", headers);
 
-        let outcome = capability.on_request(&mut req, &context("api.github.com"));
+        let outcome = capability.on_request(&mut req);
         assert_swapped_to_real_secret(&outcome);
     }
 
@@ -378,7 +455,7 @@ mod tests {
         headers.append("Authorization", format!("Bearer {phantom}"));
         let mut req = request("api.github.com", headers);
 
-        let outcome = capability.on_request(&mut req, &context("api.github.com"));
+        let outcome = capability.on_request(&mut req);
         assert_swapped_to_real_secret(&outcome);
         assert!(
             req.advisory_note.is_none(),
@@ -392,7 +469,7 @@ mod tests {
         let (capability, _) = advisory_header_capability("api.github.com", "real-secret");
         let mut req = request("api.github.com", HeaderMap::new());
 
-        let _ = capability.on_request(&mut req, &context("api.github.com"));
+        let _ = capability.on_request(&mut req);
         let note = req
             .advisory_note
             .as_deref()
@@ -416,13 +493,13 @@ mod tests {
         let mut req = request("api.github.com", HeaderMap::new());
 
         // Advisory injection (absent placeholder) records the note.
-        let _ = advisory_cap.on_request(&mut req, &context("api.github.com"));
+        let _ = advisory_cap.on_request(&mut req);
         assert!(req.advisory_note.is_some(), "advisory records the note");
 
         // A second control that matches its own phantom is a normal swap and must not erase it.
         req.headers
             .append("Authorization", format!("Bearer {phantom}"));
-        let _ = strict_cap.on_request(&mut req, &context("api.github.com"));
+        let _ = strict_cap.on_request(&mut req);
         assert!(
             req.advisory_note.is_some(),
             "a normal swap must not clobber the advisory note"
@@ -435,8 +512,8 @@ mod tests {
         let (capability, _) = header_capability("api.github.com", "real-secret");
         let mut req = request("api.github.com", HeaderMap::new());
 
-        let outcome = capability.on_request(&mut req, &context("api.github.com"));
-        assert!(outcome.is_unavailable(), "strict fails closed");
+        let outcome = capability.on_request(&mut req);
+        assert!(outcome.is_err(), "strict fails closed");
         assert!(req.advisory_note.is_none(), "a refusal is not an allow");
     }
 
@@ -448,8 +525,8 @@ mod tests {
         headers.append("Authorization", format!("Bearer {phantom}"));
         let mut req = request("api.stripe.com", headers);
 
-        let outcome = capability.on_request(&mut req, &context("api.stripe.com"));
-        assert_eq!(outcome, CapabilityOutcome::none());
+        let outcome = capability.on_request(&mut req);
+        assert_eq!(outcome, Ok(Vec::new()));
     }
 
     /// A secret echoed back by the upstream is redacted out of the response body.
@@ -459,13 +536,13 @@ mod tests {
         let mut res = InterceptedResponse::http(
             200,
             HeaderMap::new(),
-            BodyRef::Bytes(b"{\"echo\":\"real-secret\"}".to_vec()),
+            b"{\"echo\":\"real-secret\"}".to_vec(),
         );
 
-        let outcome = capability.on_response(&mut res, &context("api.github.com"));
+        let outcome = capability.on_response(&mut res, &Target::new("api.github.com", 443));
 
-        assert!(!outcome.is_unavailable());
-        let body = String::from_utf8(res.body.as_bytes().to_vec()).unwrap();
+        assert!(!outcome.is_err());
+        let body = String::from_utf8(res.body.clone()).unwrap();
         assert!(!body.contains("real-secret"), "the secret leaked: {body}");
         assert!(body.contains("[REDACTED]"), "got {body}");
     }
@@ -479,16 +556,15 @@ mod tests {
         headers.append("Accept-Encoding", "gzip, br");
         let mut req = request("api.github.com", headers);
 
-        let outcome = capability.on_request(&mut req, &context("api.github.com"));
+        let outcome = capability.on_request(&mut req);
 
         assert!(
-            outcome.edits().iter().any(|m| matches!(
+            outcome.as_ref().unwrap().iter().any(|m| matches!(
                 m,
                 Mutation::SetHeader { name, value }
                     if name == "accept-encoding" && value.as_str() == "identity"
             )),
-            "the request must ask for identity: {:?}",
-            outcome.edits()
+            "the request must ask for identity: {outcome:?}"
         );
     }
 
@@ -500,9 +576,9 @@ mod tests {
         headers.append("Accept-Encoding", "gzip");
         let mut req = request("example.com", headers);
 
-        let outcome = capability.on_request(&mut req, &context("example.com"));
+        let outcome = capability.on_request(&mut req);
 
-        assert!(outcome.edits().is_empty(), "{:?}", outcome.edits());
+        assert_eq!(outcome, Ok(Vec::new()));
     }
 
     /// A compressed body on a credentialed route is refused, because the scrub cannot read it.
@@ -512,16 +588,12 @@ mod tests {
         for coding in ["gzip", "GZIP", "br", "deflate", "identity, gzip"] {
             let mut headers = HeaderMap::new();
             headers.append("Content-Encoding", coding);
-            let mut res = InterceptedResponse::http(
-                200,
-                headers,
-                BodyRef::Bytes(vec![0x1f, 0x8b, 0x08, 0x00]),
-            );
+            let mut res = InterceptedResponse::http(200, headers, vec![0x1f, 0x8b, 0x08, 0x00]);
 
-            let outcome = capability.on_response(&mut res, &context("api.github.com"));
+            let outcome = capability.on_response(&mut res, &Target::new("api.github.com", 443));
 
             assert!(
-                outcome.is_unavailable(),
+                outcome.is_err(),
                 "Content-Encoding {coding} must be refused"
             );
         }
@@ -533,14 +605,11 @@ mod tests {
         let (capability, _) = header_capability("api.github.com", "real-secret");
         let mut headers = HeaderMap::new();
         headers.append("Content-Encoding", "identity");
-        let mut plain = InterceptedResponse::http(
-            200,
-            headers,
-            BodyRef::Bytes(b"{\"echo\":\"real-secret\"}".to_vec()),
-        );
-        let outcome = capability.on_response(&mut plain, &context("api.github.com"));
-        assert!(!outcome.is_unavailable());
-        let body = String::from_utf8(plain.body.as_bytes().to_vec()).unwrap();
+        let mut plain =
+            InterceptedResponse::http(200, headers, b"{\"echo\":\"real-secret\"}".to_vec());
+        let outcome = capability.on_response(&mut plain, &Target::new("api.github.com", 443));
+        assert!(!outcome.is_err());
+        let body = String::from_utf8(plain.body.clone()).unwrap();
         assert!(
             !body.contains("real-secret"),
             "the identity body is still scrubbed: {body}"
@@ -548,11 +617,11 @@ mod tests {
 
         let mut headers = HeaderMap::new();
         headers.append("Content-Encoding", "gzip");
-        let mut empty = InterceptedResponse::http(304, headers, BodyRef::Empty);
+        let mut empty = InterceptedResponse::http(304, headers, Vec::new());
         assert!(
             !capability
-                .on_response(&mut empty, &context("api.github.com"))
-                .is_unavailable()
+                .on_response(&mut empty, &Target::new("api.github.com", 443))
+                .is_err()
         );
     }
 
@@ -562,11 +631,11 @@ mod tests {
         let (capability, _) = header_capability("api.github.com", "real-secret");
         let mut headers = HeaderMap::new();
         headers.append("X-Echo", "real-secret");
-        let mut res = InterceptedResponse::http(200, headers, BodyRef::Empty);
+        let mut res = InterceptedResponse::http(200, headers, Vec::new());
 
-        let outcome = capability.on_response(&mut res, &context("api.github.com"));
+        let outcome = capability.on_response(&mut res, &Target::new("api.github.com", 443));
 
-        assert!(outcome.edits().iter().any(|m| matches!(
+        assert!(outcome.unwrap().iter().any(|m| matches!(
             m,
             Mutation::SetHeader { name, value }
                 if name == "X-Echo" && value.contains("[REDACTED]")
@@ -577,14 +646,10 @@ mod tests {
     #[test]
     fn a_clean_response_gets_no_edits() {
         let (capability, _) = header_capability("api.github.com", "real-secret");
-        let mut res = InterceptedResponse::http(
-            200,
-            HeaderMap::new(),
-            BodyRef::Bytes(b"{\"ok\":true}".to_vec()),
-        );
+        let mut res = InterceptedResponse::http(200, HeaderMap::new(), b"{\"ok\":true}".to_vec());
 
-        let outcome = capability.on_response(&mut res, &context("api.github.com"));
-        assert_eq!(outcome, CapabilityOutcome::none());
-        assert_eq!(res.body.as_bytes(), b"{\"ok\":true}");
+        let outcome = capability.on_response(&mut res, &Target::new("api.github.com", 443));
+        assert_eq!(outcome, Ok(Vec::new()));
+        assert_eq!(res.body, b"{\"ok\":true}");
     }
 }

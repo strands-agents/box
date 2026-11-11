@@ -7,7 +7,8 @@ Endpoint Security is the macOS interface that lets a client decide selected oper
 
 ## Enable the experiment
 
-Build the product and its helpers:
+Signed macOS releases include the Cargo feature. The experiment still requires the compatible
+system described above and the runtime opt-in below. For a source build, build the product and its helpers:
 
 ```sh
 cargo build --release --locked -p strands-box -p strands-box-containment --features native-filesystem-policy
@@ -24,7 +25,7 @@ native-filesystem-policy = true
 Run the signed product with `run --config /absolute/path/box.toml`.
 An absent table or `false` leaves native interception disabled, including in an `--all-features` build.
 A selected but unavailable mechanism refuses startup. Box never silently disables the selected checks.
-Standard release artifacts exclude the experiment.
+Signed macOS release artifacts include the experiment's code; unsigned build artifacts do not establish its signing requirements.
 
 ## Select workloads
 
@@ -88,6 +89,11 @@ Production use still requires further review and tests for those failures.
 ## Filesystem operation meanings
 
 Native rename checks `fs:move` on both the source and destination, plus `fs:read` on the source.
+Linux outcome records use the same path spelling as their policy requests, including `~/` for paths under the workload home.
+A successful Linux rename records one completed `fs:move` on the destination, matching Shell.
+The source move check remains in history without a completion record; every permission check still runs.
+When Linux policy denies a required check, earlier checks remain without outcome records.
+Actual filesystem failures retain their error records.
 Replacing an existing destination also requires `fs:delete` and `fs:write` on that destination.
 Moving to a new name does not require destination `fs:write`.
 Filesystem grants still restrict every operation independently of these policy checks.
@@ -99,15 +105,35 @@ Policies that select directory opens by operation must use `enumerate` on both L
 
 ## Stored configuration and rollback
 
-Configurations without process overrides retain version 21 when disabled and version 22 when enabled.
-Any explicit process override requires record version 23.
-Older binaries refuse unsupported versions rather than silently losing the selection.
+When `[limits]` has no explicit settings, `file-attributes` is `false`, MCP argument wildcards
+are disabled, MCP executable names are bare, the agent declares no `[[agent.ingress]]`,
+and no egress destination has a backend,
+configurations without process overrides retain version 21 when disabled and version 22 when enabled.
+An explicit process override requires record version 23.
+Two stdio MCP servers that share a program require record version 24.
+Setting [`file-attributes`](config.md#file-attributes) to `true` requires record version 25.
+Enabling [MCP argument wildcards](mcp.md#argument-wildcards) on any server requires version 26.
+An explicit `limits.shell.timeout` requires record version 27, including `30` and `false`.
+An [absolute MCP executable path](mcp.md#select-an-executable-by-path) requires record version 28.
+A box whose agent declares `[[agent.ingress]]` requires record version 29.
+A box whose egress re-routes a destination to a [backend](egress.md) requires record version 30.
+An explicit `limits.shell.max_input` or `limits.shell.max_output` requires record version 31,
+including values equal to the defaults.
+When a configuration selects more than one of these features, it uses the highest required version
+and retains every selection. Older binaries refuse unsupported versions.
 
 To disable the experiment, change the global setting to `false`.
-Remove all process overrides before returning to a binary that supports only version 21.
-Run once with the native-capable build before returning to an older binary.
+Remove all process overrides and `[limits]` settings, give each stdio MCP server its own
+program, and set `file-attributes` to `false` before returning to a binary that supports only
+version 21.
+If MCP argument wildcards are enabled, replace the stars with concrete arguments and disable
+`argument_wildcards` on each server too.
+Replace each absolute MCP executable path with a bare program name that the server's `PATH`
+resolves to the intended executable.
+Remove any egress backends before returning to a binary that supports only version 21.
+Run once with the current build before switching binaries.
 This writes a version 21 record while retaining durable policy history.
-Changing TOML alone does not authorize an older binary to parse an existing version 22 or 23 record.
+Changing TOML alone does not rewrite an existing record.
 
 ## FAQ
 
@@ -127,7 +153,7 @@ Both restrictions apply. A policy permit cannot expand containment grants.
 ### Can I enable this through TOML alone?
 
 Only if you already have the compatible, signed build described in [Enable the experiment](#enable-the-experiment).
-Standard release artifacts exclude the experiment.
+Signed macOS releases include the adapter, but leave it disabled until you select it.
 The Cargo feature includes the adapter in a build.
 The TOML setting activates it for a box.
 
@@ -171,7 +197,7 @@ Tests cover normal detached-child cleanup, but not every shutdown failure or enf
 
 ### Can I immediately return to an older binary?
 
-No, if the box has a version 22 or 23 record that the older binary does not support.
+No, if the box has a version 22, 23, 24, 25, 26, 27, or 28 record that the older binary does not support.
 Follow [Stored configuration and rollback](#stored-configuration-and-rollback) before starting an older binary.
 Changing TOML alone does not rewrite the stored record.
 
@@ -188,10 +214,10 @@ Record the source revision, source changes, and signed executable hash beside th
 The test package requires the binary path and bounds each workload to 60 seconds.
 Ordinary workspace tests do not need a signing identity.
 
-The required native CI job builds the feature and runs adapter and configuration tests.
+The required macOS unit-test job builds the feature and runs adapter and configuration tests.
 It tests the receipt checker and reports receipt freshness as informational.
 An outdated or invalid receipt does not fail the job.
-The job summary distinguishes the automated adapter and startup tests from the full signed native enforcement suite.
+Its summary distinguishes the automated adapter and startup tests from the full signed native enforcement suite.
 That signed suite does not run in this job.
 Pull requests can merge without fresh signed native test evidence.
 The manual signed suite and receipt tool remain available.
@@ -220,10 +246,10 @@ python3 test-native-filesystem/receipt.py \
 Review the receipt with the test log.
 If you need a current receipt, relevant source changes require a new build and signed run.
 The receipt covers workspace package sources and assets, build configuration, lockfiles,
-the native test package, its shared capture helper, and the native workflow.
+the native test package, its shared capture helper, and the unit-test workflow.
 Cargo supplies the workspace package list, including nested packages.
 Separate crate tests, examples, benchmarks, documentation, and unrelated workflows do not invalidate that receipt.
-The required native workflow also runs startup-refusal tests with and without the Cargo feature.
+The required macOS unit-test job also runs startup-refusal tests with and without the Cargo feature.
 
 
 ## Run real-agent workloads

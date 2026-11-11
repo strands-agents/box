@@ -22,9 +22,19 @@ fn exercise(operation: &str, replacement: bool, policy: &str, allowed: bool) {
     std::fs::create_dir(&workspace).unwrap();
     let source = workspace.join("source");
     let destination = workspace.join("destination");
-    std::fs::write(&source, "original\n").unwrap();
+    if operation == "Frename" {
+        std::fs::create_dir(&source).unwrap();
+        std::fs::write(source.join("child"), "original\n").unwrap();
+        std::fs::write(&destination, "previous\n").unwrap();
+    } else {
+        std::fs::write(&source, "original\n").unwrap();
+    }
     if replacement {
         std::fs::write(&destination, "previous\n").unwrap();
+    }
+    if operation == "Fopen" {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&source, std::fs::Permissions::from_mode(0o400)).unwrap();
     }
     let workload = root.join("native-workload");
     std::fs::copy(env!("NATIVE_WORKLOAD"), &workload).unwrap();
@@ -79,9 +89,74 @@ fn exercise(operation: &str, replacement: bool, policy: &str, allowed: bool) {
         .filter_map(|line| line.strip_prefix("NATIVE_RESEARCH_EVENT="))
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(events.len(), 1, "{stderr}");
+    let moves = operation
+        .strip_prefix('R')
+        .or_else(|| operation.strip_prefix('S'))
+        .map_or(0, |count| count.parse::<usize>().unwrap());
+    let prior_opens = usize::from(operation == "Double");
+    let prior_attempts = usize::from(operation.starts_with('B') || operation.starts_with('F'));
     assert_eq!(
-        events[0]["outcome"],
+        events.len(),
+        moves + prior_opens + prior_attempts + 1,
+        "{stderr}"
+    );
+    if prior_attempts == 1 {
+        let denied = operation.starts_with('B');
+        assert_eq!(
+            events[0]["outcome"],
+            if denied { "denied" } else { "failed" },
+            "{stderr}"
+        );
+        let decisions = events[0]["decisions"].as_array().unwrap();
+        let operations: &[&str] = if operation.ends_with("open") {
+            &["ReadContent", "WriteContent"]
+        } else if replacement || operation == "Frename" {
+            &[
+                "Rename",
+                "ReadContent",
+                "RemoveFile",
+                "Rename",
+                "WriteContent",
+            ]
+        } else {
+            &["Rename", "ReadContent", "Rename"]
+        };
+        assert_eq!(decisions.len(), operations.len(), "{stderr}");
+        for (index, (decision, expected)) in decisions.iter().zip(operations).enumerate() {
+            assert_eq!(decision["operation"], *expected, "{stderr}");
+            assert_eq!(
+                decision["allow"],
+                !denied || index + 1 < decisions.len(),
+                "{stderr}"
+            );
+        }
+    }
+    if prior_opens == 1 {
+        assert_eq!(events[0]["outcome"], "descriptor_issued", "{stderr}");
+        assert_eq!(events[0]["decisions"][0]["allow"], true, "{stderr}");
+    }
+    for event in &events[..moves] {
+        assert_eq!(event["outcome"], "completed", "{stderr}");
+        let decisions = event["decisions"].as_array().unwrap();
+        let operations: &[&str] = if operation.starts_with('S') {
+            &[
+                "Rename",
+                "ReadContent",
+                "RemoveFile",
+                "Rename",
+                "WriteContent",
+            ]
+        } else {
+            &["Rename", "ReadContent", "Rename"]
+        };
+        assert_eq!(decisions.len(), operations.len(), "{stderr}");
+        for (decision, operation) in decisions.iter().zip(operations) {
+            assert_eq!(decision["operation"], *operation, "{stderr}");
+            assert_eq!(decision["allow"], true, "{stderr}");
+        }
+    }
+    assert_eq!(
+        events[moves + prior_opens + prior_attempts]["outcome"],
         if allowed {
             if operation == "move" {
                 "completed"
@@ -93,9 +168,12 @@ fn exercise(operation: &str, replacement: bool, policy: &str, allowed: bool) {
         },
         "{stderr}"
     );
-    if operation == "move" && allowed {
+    if (operation == "move" && allowed) || (operation.starts_with('R') && moves % 2 == 1) {
         assert!(!source.exists());
         assert_eq!(std::fs::read(&destination).unwrap(), b"original\n");
+    } else if operation == "Frename" {
+        assert_eq!(std::fs::read(source.join("child")).unwrap(), b"original\n");
+        assert_eq!(std::fs::read(&destination).unwrap(), b"previous\n");
     } else {
         assert_eq!(std::fs::read(&source).unwrap(), b"original\n");
         if replacement {
@@ -147,4 +225,118 @@ when { context.input.operation == Box::FsReadOperation::"enumerate" };"#;
     exercise("Pread", false, deny_content, false);
     exercise("enumerate", false, deny_listing, false);
     exercise("Pread", false, deny_listing, true);
+}
+
+fn move_limit(limit: usize) -> String {
+    format!(
+        r#"permit(principal, action, resource);
+forbid(principal, action == Box::Action::"fs:read", resource)
+when {{ context.input.operation == Box::FsReadOperation::"read_content" }}
+when temporal {{
+    exists (total: Long). (
+        (count for (t: Timepoint). where (
+            formerly within 1h (
+                Box::Action::"fs:move"::response{{
+                    input.path: _, input.operation: Box::FsMoveOperation::"rename"
+                }} && tp(t)
+            )
+        )) == total && total >= {limit}
+    )
+}};"#
+    )
+}
+
+#[test]
+fn one_rename_counts_as_one_completed_move() {
+    exercise("R0", false, &move_limit(1), true);
+    exercise("R1", false, &move_limit(2), true);
+    exercise("R1", false, &move_limit(1), false);
+}
+
+#[test]
+fn two_renames_reach_the_completed_move_limit() {
+    exercise("R2", false, &move_limit(2), false);
+}
+
+#[test]
+fn same_path_rename_retains_one_completed_move() {
+    exercise("S1", false, &move_limit(2), true);
+    exercise("S1", false, &move_limit(1), false);
+}
+
+fn deny_after_source_read(path: &str) -> String {
+    format!(
+        r#"permit(principal, action, resource);
+forbid(principal, action == Box::Action::"fs:read", resource)
+when {{ context.input.path == "~/workspace/{path}"
+    && context.input.operation == Box::FsReadOperation::"read_content" }}
+when temporal {{ formerly within 1h (
+    Box::Action::"fs:read"::response{{
+        input.path: "~/workspace/source",
+        input.operation: Box::FsReadOperation::"read_content"
+    }}
+) }};"#
+    )
+}
+
+#[test]
+fn rename_outcome_uses_the_policy_path() {
+    exercise("R1", false, &deny_after_source_read("destination"), false);
+}
+
+#[test]
+fn open_outcome_uses_the_policy_path() {
+    exercise("Double", false, &deny_after_source_read("source"), false);
+}
+
+fn deny_read_after_error(action: &str) -> String {
+    format!(
+        r#"permit(principal, action, resource);
+forbid(principal, action == Box::Action::"fs:read", resource)
+when {{ context.input.operation == Box::FsReadOperation::"read_content" }}
+when temporal {{ formerly within 1h (
+    Box::Action::"{action}"::error{{ input.path: _ }}
+) }};"#
+    )
+}
+
+#[test]
+fn denied_rename_leaves_earlier_checks_request_only() {
+    for (replacement, denied_action, prior_actions) in [
+        (false, "fs:move", &["fs:move", "fs:read"][..]),
+        (true, "fs:write", &["fs:move", "fs:read", "fs:delete"][..]),
+    ] {
+        for prior_action in prior_actions {
+            let policy = format!(
+                "{}\n{}",
+                destination_denial(denied_action),
+                deny_read_after_error(prior_action)
+            );
+            exercise("Brename", replacement, &policy, true);
+        }
+    }
+}
+
+#[test]
+fn denied_open_leaves_earlier_read_request_only() {
+    let policy = format!(
+        r#"{}
+forbid(principal, action == Box::Action::"fs:write", resource);"#,
+        deny_read_after_error("fs:read")
+    );
+    exercise("Bopen", false, &policy, true);
+}
+
+#[test]
+fn failed_rename_keeps_actual_failure_history() {
+    for action in ["fs:move", "fs:read", "fs:delete", "fs:write"] {
+        exercise("Frename", false, &deny_read_after_error(action), false);
+    }
+}
+
+#[test]
+fn failed_open_keeps_actual_failure_history() {
+    for action in ["fs:read", "fs:write"] {
+        exercise("Fopen", false, &deny_read_after_error(action), false);
+    }
 }

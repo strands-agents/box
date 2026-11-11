@@ -221,7 +221,7 @@ Out of the box, the shell is an empty sandbox — no files and no reachable inte
 - **Prefer `mode: "copy"` over `mode: "direct"` for source code.** Copy-on-create isolates the agent from your live files. Use `direct` only for output directories where the agent needs to persist results.
 - **Scope binds narrowly.** Bind `/my/project/src` rather than `/my/project` or `/`. The agent doesn't need your `.git/`, `.env`, or `node_modules/`.
 - **Authorize destinations at your egress boundary.** The SSRF floor only blocks internal ranges. The shell does not decide which public hosts the agent may reach, so decide that where the traffic leaves the host process — or call `disable_network()` and grant no egress at all.
-- **Keep the timeout.** The builder already bounds each command at 30 seconds. Set `timeout` only when a workload needs a different bound, and remember that a larger value lets one command hold the process longer.
+- **Keep the timeout.** The builder already bounds each command at 30 seconds. Set `timeout` when a workload needs a different bound. Rust embedders can call `disable_timeout()` to remove the execution deadline while retaining the other limits.
 - **Keep the limits.** `max_output` already caps one command's output at 1 MB, and `max_file_size` at 10 MB. Lower a cap for a tighter agent loop; raise one deliberately.
 
 ## Commands

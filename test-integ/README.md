@@ -37,48 +37,28 @@ In CI this is `.github/workflows/containment-deterministic.yml`, called from
 suite needs no secrets, so a fork PR runs it with a read-only token and no
 approval gate is required for safety.
 
-### macOS blocks; Linux is advisory
+### Both platforms block
 
-`continue-on-error` is set per platform:
-`continue-on-error: ${{ startsWith(matrix.os, 'ubuntu') }}`.
+The Ubuntu ARM64 and macOS jobs both affect `CI Gate`. The repository requires that status
+before merging. The Linux job runs on ARM64.
+The Linux job enables unprivileged user namespaces before the suite starts.
 
-**`macos-latest` — blocking.** This is the platform the suite was written
-against and the only one that binds `file-graft`, so a regression here is a real
-defect and stops the merge. No case is quarantined on macOS.
+Each job writes the per-case table to its summary and uploads the verdict and logs.
+A recorded platform exclusion remains a skip, not evidence that its assertions ran.
 
-**`ubuntu-24.04-arm` — advisory, and it must be an arm64 runner.** Linux
-containment is **aarch64-only by construction**. `crates/containment/src/facade.rs`
-maps `Platform::Linux if architecture == "aarch64"` to the namespace mechanism and
-refuses every other architecture, so on x86_64 the trampoline exits with
+## Test an installed Linux package
 
-```
-strands-box-contain-trampoline: platform Linux unsupported:
-  Linux containment supports ARM64 (aarch64), not x86_64
-```
+Use the [Linux target tests](../docs/dev/linux-target-tests.md) to check an installed package
+without Cargo or cloud credentials on the target. The runner reuses the Phase 3 lifecycle probe
+and writes separate deployment evidence. It does not replace this deterministic suite.
 
-and all 73 cases error at the harness's positive control rather than reporting
-vacuous passes. A first CI run on `ubuntu-latest` confirmed this — 57 errors, 0
-passes. The leg is advisory because no arm64 run has gone green yet, not because
-the platform is expected to fail. Make it blocking by deleting the expression
-above once it has a green baseline.
+## Native runtime helpers
 
-The AppArmor question is settled, and it was **not** the blocker. The workflow
-clears `kernel.apparmor_restrict_unprivileged_userns` and probes it with
-`unshare`, and that demonstrably works — the x86_64 run logged `before: 1` →
-`after: 0` and `unshare(CLONE_NEWUSER): OK` before failing on architecture. The
-step stays because Ubuntu 24.04 restricts unprivileged user namespaces on arm64
-too, and the cage needs that primitive on any Linux.
-
-### A red leg does not notify anyone
-
-Neither leg posts a comment, opens an issue, or sends mail on failure. The
-blocking leg fails `CI Gate`, which is visible on the PR; the advisory leg is
-visible only by opening the run. In both cases the per-case table is written to
-the job summary and the verdict plus logs upload as an artifact.
-
-`CI Gate` is not yet a *required* status check on the `block-main` ruleset, so a
-failure is visible but does not yet physically prevent a merge. Adding it is a
-repository-settings change and needs admin.
+`src/runtime.rs` owns native Python discovery, verified runtime grants, and developer-tool configuration.
+Its unit tests live in `src/runtime/tests.rs` beside that implementation.
+The library keeps the existing exported names, so integration cases retain their imports.
+These helper unit tests do not prove that a contained workload can use the selected runtime.
+The platform integration cases provide that separate evidence.
 
 ## Add a test case — one file in the right folder
 
@@ -135,7 +115,26 @@ fresh `DET_BOX_ROOT` in `~/.det-harness-boxes/` and removes it after the suite. 
 `cargo test` leaves its boxes in `~/.det-harness-boxes/`; remove that directory when no suite
 is running.
 
+### Extend shared helpers
+
+Keep each integration case in its category folder, with its own identifier and platform declaration.
+Use `src/scenarios.rs` for setup and expected results that several execution routes share.
+Keep commands, interpreter checks, and route-specific refusal checks in each case.
+`MoveReplacement` shows this pattern for Shell and Monty.
+
+`src/process.rs` owns concurrent workload execution and child cleanup.
+Cleanup first requests normal shutdown, so Box can stop its workload groups.
+After five seconds it force-stops the direct child. A timeout remains a failed result even if shutdown exits successfully.
+Its tests in `src/process/tests.rs` check helper behavior with local subprocesses.
+These are harness unit tests, not integration evidence for Box containment.
+
 ### The fixture API (`b: &BoxFixture`)
+
+The workspace and its `out/` directory stay writable. Configured tool commands use separate
+copies in the sibling `tools/` directory, outside every process's write grants. Native probes
+stay in `out/`; a case grants that directory execution with `with_exec_tree()`. Use
+`install_tool()` before declaring a compiled probe as a tool. For a native control, keep the
+original probe path so the control runs with the agent's grants.
 
 Two routes lead into the box, and a case must pick the one its enforcement point lives on:
 

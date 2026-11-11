@@ -239,6 +239,56 @@ fn an_env_key_sets_is_sandbox_for_the_workload() {
     );
 }
 
+/// **An `[agent] env` runtime option reaches the agent and no tool.**
+#[test]
+fn an_agent_runtime_option_reaches_the_agent_and_no_tool() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let links = fixture::short_temporary_home();
+    let bash = std::path::Path::new("/bin/bash")
+        .canonicalize()
+        .expect("bash exists");
+    std::os::unix::fs::symlink(&bash, links.path().join("probe")).expect("a link to bash");
+    let directory = links.path().display();
+    let policy = format!(
+        r#"
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:spawn", resource)
+when {{ context.input.program == "{directory}/probe" }};
+permit(principal, action == Box::Action::"fs:read", resource);
+"#
+    );
+
+    let box_ = Request::with_config(
+        "prog-env-runtime-option",
+        &policy,
+        &format!(
+            "[tool.probe]\ncommand = [\"{directory}/probe\"]\n\
+             [tool.probe.filesystem]\nread = [\"{directory}\"]\n"
+        ),
+    )
+    .agent_env("NODE_OPTIONS", "--agent-only")
+    .agent_read(&[links.path()])
+    .expect();
+
+    let agent = box_.bash(r#"printf "agent=[%s]" "$NODE_OPTIONS""#);
+    assert_workload_launched(&agent, "the agent");
+    assert!(
+        stdout(&agent).contains("agent=[--agent-only]"),
+        "the agent's own `env` must reach it: {agent:?}"
+    );
+
+    let tool = box_.bash(&format!(
+        r#"zsh -c '{directory}/probe -c "printf tool=[%s] \"\$NODE_OPTIONS\""'"#
+    ));
+    assert_workload_launched(&tool, "the tool");
+    assert!(
+        stdout(&tool).contains("tool=[]"),
+        "the agent's `env` must not reach a tool: {tool:?}"
+    );
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // The CALL level — Unix semantics within one submission
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -450,32 +500,33 @@ fn four_concurrent_requests_each_keep_their_own_state() {
     }
 }
 /// A stuck request does not block a healthy one.
-///
-/// The Lua interpreter never awaits, so it once pinned the runtime every request
-/// shared and a healthy sibling waited 27.73s. Each connection owns its thread now. Timed with
-/// bash's `SECONDS`, because the profile grants exec on the workload and the aliases and nothing
-/// else — there is no `date` in the cage.
 #[test]
 fn a_stuck_request_does_not_block_a_healthy_one() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let box_ = Request::with_policy("prog-stuck", PERMISSIVE).expect();
+    let box_ =
+        Request::with_config("prog-stuck", PERMISSIVE, "[limits]\nshell.timeout = 6\n").expect();
 
     let output = box_.bash(
         r#"
-zsh -c "lua -e 'while true do end'" &
-zsh -c "sleep 3"
 SECONDS=0
+zsh -c 'lua -e "local ready = assert(io.open(\"{box_home}/spinning\", \"w\")); ready:write(\"ready\"); ready:close(); while true do end"' &
+spinner=$!
+while [[ ! -s "{box_home}/spinning" ]]; do
+    (( SECONDS < 4 )) || { printf 'LUA_NOT_READY'; exit 1; }
+done
+# Lua's file close yields once; include its settling time in the measurement.
+zsh -c "sleep 0.1"
 zsh -c 'cd {box_home} && printf healthy > ok.txt && cat ok.txt'
 printf "|elapsed=%s" "$SECONDS"
+wait "$spinner"
+printf "|spinner_status=%s" "$?"
 "#,
     );
 
     let text = stdout(&output);
-    eprintln!(
-        "STUCK-SIBLING MEASURED: {text} (was 27.73s before each connection got its own thread)"
-    );
+    eprintln!("STUCK-SIBLING MEASURED: {text}");
 
     assert_workload_launched(&output, "the healthy request");
     assert!(
@@ -490,9 +541,14 @@ printf "|elapsed=%s" "$SECONDS"
         .parse()
         .expect("elapsed seconds parse");
     assert!(
-        elapsed < 15,
+        elapsed < 4,
         "a stuck request must not block a healthy one. If this regresses, the connections went \
          back onto one shared thread. elapsed={elapsed}s, output={output:?}"
+    );
+    assert!(
+        text.contains("|spinner_status=1")
+            && String::from_utf8_lossy(&output.stderr).contains("timeout"),
+        "the competing Lua request must run until its deadline: {output:?}"
     );
 }
 
@@ -599,6 +655,59 @@ permit(principal, action == Box::Action::"fs:write", resource);
         stderr(&output).contains("err:ARG"),
         "the tool's stderr must reach the harness: {output:?}"
     );
+}
+
+/// **A program called by one of two links to one file runs under the table of that link**, so the
+/// spawn selects by the spelling the caller used and not by the resolved file.
+#[test]
+fn a_program_called_by_a_link_runs_under_the_table_of_that_link() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let links = fixture::short_temporary_home();
+    let bash = std::path::Path::new("/bin/bash")
+        .canonicalize()
+        .expect("bash exists");
+    for name in ["first", "second"] {
+        std::os::unix::fs::symlink(&bash, links.path().join(name)).expect("a link to bash");
+    }
+    let directory = links.path().display();
+
+    // `PERMISSIVE` plus a spawn of the two links, and no other program.
+    let policy = format!(
+        r#"
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:spawn", resource)
+when {{ context.input.program == "{directory}/first" || context.input.program == "{directory}/second" }};
+permit(principal, action == Box::Action::"fs:read", resource);
+"#
+    );
+
+    let box_ = Request::with_config(
+        "prog-called-link",
+        &policy,
+        &format!(
+            "[tool.first]\ncommand = [\"{directory}/first\"]\nenv = {{ WHICH = \"first\" }}\n\
+             [tool.first.filesystem]\nread = [\"{directory}\"]\n\
+             [tool.second]\ncommand = [\"{directory}/second\"]\nenv = {{ WHICH = \"second\" }}\n\
+             [tool.second.filesystem]\nread = [\"{directory}\"]\n"
+        ),
+    )
+    .agent_read(&[links.path()])
+    .expect();
+
+    // Both links, so the test holds whichever table wins a tie that no name breaks.
+    for name in ["first", "second"] {
+        let output = box_.bash(&format!(
+            r#"zsh -c '{directory}/{name} -c "printf which=%s \"\$WHICH\""'"#
+        ));
+
+        assert_workload_launched(&output, "the linked tool");
+        assert!(
+            stdout(&output).contains(&format!("which={name}")),
+            "the program called as {name} must run under [tool.{name}]: {output:?}"
+        );
+    }
 }
 
 /// Redirection, appending, and reading back — the file semantics a build depends on.

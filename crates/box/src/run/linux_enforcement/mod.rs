@@ -193,15 +193,19 @@ impl Registration {
         }
         let mut header = [0_u8; 8];
         control.read_exact(&mut header)?;
-        if header != *b"BOXFS\0\x01\0" {
+        if header != *b"BOXFS\0\x02\0" {
             return Err(io::Error::other(
                 "unsupported native filesystem handoff version",
             ));
         }
-        let handles = notify::receive_handles(&control, 2)?;
+        let mut handles = notify::receive_handles(&control, 3)?;
         let mut closed = [0_u8; 1];
         control.read_exact(&mut closed)?;
         notify::validate_registration(&header, &handles, closed[0])?;
+        let mut forwarded = std::os::unix::net::UnixStream::from(
+            handles.pop().expect("validated forwarding handle"),
+        );
+        forwarded.set_read_timeout(Some(REQUEST_DEADLINE))?;
         let state = Arc::clone(&self.0);
         let busy = Arc::new(Mutex::new(None));
         let active = Arc::clone(&busy);
@@ -218,7 +222,7 @@ impl Registration {
                         let listener = handles[0].as_raw_fd();
                         let root = handles[1].as_raw_fd();
                         while !state.stopped.load(Ordering::Acquire) {
-                            let request = match notify::receive(listener) {
+                            let request = match notify::receive_forwarded(&mut forwarded) {
                                 Ok(request) => request,
                                 Err(error) if error.kind() == io::ErrorKind::TimedOut => continue,
                                 Err(error) if error.kind() == io::ErrorKind::BrokenPipe => break,
