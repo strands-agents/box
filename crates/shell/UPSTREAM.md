@@ -1886,10 +1886,11 @@ This copy adds `parser::Item::Negated`, which holds the compound that `!` invert
 
 `builtin_lua` read stdin to end-of-file before it ran a script from `-e` or a file, so it waited
 for a writer that kept stdin open even when the script never read it. Upstream would call this a
-hang. This copy reads stdin only when the script's text names `io.read`, `io.lines`, `io.stdin`,
-or indexes `io`. A script that reaches stdin another way, such as through `load` of built text,
-gets empty stdin. `tests/shell_integration.rs::a_lua_script_that_never_reads_stdin_is_not_held_by_it`
-fails without the change, and `a_lua_script_that_reads_stdin_still_gets_it` pins the read.
+hang. This copy reads stdin on the first call to `io.read` or to an `io.lines` iterator, both now
+async functions, however the script spells or aliases the call.
+`tests/shell_integration.rs::a_lua_script_that_never_reads_stdin_is_not_held_by_it` fails without
+the change; `a_lua_script_that_reads_stdin_still_gets_it` and
+`a_lua_script_reads_stdin_however_it_spells_the_call` pin the read.
 
 ## 2026-11-11 — `set -e` stopped at a command that `!` inverts
 

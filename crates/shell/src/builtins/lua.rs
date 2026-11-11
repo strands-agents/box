@@ -15,13 +15,6 @@ use crate::io as sio;
 use crate::mediate::Mediated;
 use crate::os::{self, OpenFlags, Process};
 
-/// Whether `code` can reach `io.read`, `io.lines`, or `io.stdin`, so the builtin must read stdin.
-fn names_stdin(code: &str) -> bool {
-    ["io.read", "io.lines", "io.stdin", "io[", "io ["]
-        .iter()
-        .any(|name| code.contains(name))
-}
-
 pub fn builtin_lua<'a>(
     os: &'a Mediated,
     proc: &'a mut Process,
@@ -99,18 +92,8 @@ pub fn builtin_lua<'a>(
                 })?
         };
 
-        // Pre-read stdin for io.read() when script comes from file or -e and can name stdin
-        let stdin_data = if (script_file.is_some() || eval_code.is_some()) && names_stdin(&code) {
-            if let Ok(mut r) = sio::stdin() {
-                os::read_to_string_limited(&mut r, proc.max_output)
-                    .await
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
+        // A script from a file or `-e` reads stdin on its first `io.read` or `io.lines` call.
+        let stdin_data = String::new();
 
         // Strip shebang
         let code = if code.starts_with("#!") {
@@ -529,18 +512,26 @@ fn setup_sandbox(
         })?,
     )?;
 
-    // io.read — reads from pre-buffered stdin
+    // io.read — reads stdin on its first call, unless the caller gave `stdin_data`
     let stdin_cursor = Rc::new(RefCell::new(std::io::Cursor::new(
         stdin_data.as_bytes().to_vec(),
     )));
-    let r = stdin_cursor.clone();
+    let stdin_loaded = Rc::new(std::cell::Cell::new(!stdin_data.is_empty()));
+    let max_stdin = proc.max_output;
+    let (r, loaded) = (stdin_cursor.clone(), stdin_loaded.clone());
     io_table.set(
         "read",
-        lua.create_function(move |lua, fmt: Option<LuaString>| read_cursor(lua, &r, fmt))?,
+        lua.create_async_function(move |lua, fmt: Option<LuaString>| {
+            let (r, loaded) = (r.clone(), loaded.clone());
+            async move {
+                load_stdin(&r, &loaded, max_stdin).await;
+                read_cursor(&lua, &r, fmt)
+            }
+        })?,
     )?;
 
     // io.lines (stdin)
-    let r = stdin_cursor.clone();
+    let (r, loaded) = (stdin_cursor.clone(), stdin_loaded.clone());
     io_table.set(
         "lines",
         lua.create_function(move |lua, path: Option<LuaString>| {
@@ -549,8 +540,14 @@ fn setup_sandbox(
                     "io.lines(filename) not supported; use io.open",
                 ));
             }
-            let r2 = r.clone();
-            lua.create_function(move |lua, ()| read_cursor_line(lua, &r2))
+            let (r2, loaded2) = (r.clone(), loaded.clone());
+            lua.create_async_function(move |lua, ()| {
+                let (r3, loaded3) = (r2.clone(), loaded2.clone());
+                async move {
+                    load_stdin(&r3, &loaded3, max_stdin).await;
+                    read_cursor_line(&lua, &r3)
+                }
+            })
         })?,
     )?;
 
@@ -1053,6 +1050,24 @@ fn read_cursor_line(lua: &Lua, c: &Rc<RefCell<std::io::Cursor<Vec<u8>>>>) -> Lua
         line.pop();
     }
     Ok(LuaValue::String(lua.create_string(&line)?))
+}
+
+/// Read the process's stdin into `cursor` once, on the first call.
+async fn load_stdin(
+    cursor: &Rc<RefCell<std::io::Cursor<Vec<u8>>>>,
+    loaded: &std::cell::Cell<bool>,
+    limit: usize,
+) {
+    if loaded.replace(true) {
+        return;
+    }
+    let data = match sio::stdin() {
+        Ok(mut reader) => os::read_to_string_limited(&mut reader, limit)
+            .await
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+    *cursor.borrow_mut() = std::io::Cursor::new(data.into_bytes());
 }
 
 fn read_cursor(

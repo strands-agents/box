@@ -8116,6 +8116,7 @@ fn stdin_left_unread_by_a_command_reaches_the_next_reader() {
             ("(cat </dev/null); cat", "REAL"),
             ("x=$(cat </dev/null); cat", "REAL"),
             ("dirname /a >/dev/null; cat", "REAL"),
+            ("x=$(printf inner | cat); cat", "REAL"),
         ] {
             let out = run_with_stdin(script, b"REAL").await;
             assert_eq!(
@@ -8133,3 +8134,19 @@ expect!(
     "set -e; ! { false; echo in; }; echo after",
     "in\nafter"
 );
+
+#[test]
+fn a_lua_script_reads_stdin_however_it_spells_the_call() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            r#"lua -e 'print(io . read("*a"))'"#,
+            r#"lua -e 'local r = io.read; print(r("*a"))'"#,
+            r#"lua -e 'for l in io.lines() do print(l) end'"#,
+        ] {
+            let out = run_with_stdin(script, b"payload\n").await;
+            assert_eq!(out.stdout.trim_end(), "payload", "{script}: {}", out.stderr);
+            assert_eq!(out.status, 0, "{script}");
+        }
+    }));
+}
