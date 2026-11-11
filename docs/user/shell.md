@@ -298,6 +298,7 @@ refuses makes `curl` exit non-zero.
 
 | Status | Meaning | stderr |
 |---|---|---|
+| `1` | Submitted command text exceeds 256 KiB, including text with line breaks. Split the text across several calls, for example by appending to a file. | `strands-shell: input too large` |
 | `1` | The Shell call exceeded its execution allowance. | `strands-shell: execution timeout exceeded` |
 | `125` | Box failed to serve the command. | The failure |
 | `125` | The call exceeded the broker's backup deadline, five seconds after its finite Shell allowance. | `strands-box: the call exceeded its deadline` |
