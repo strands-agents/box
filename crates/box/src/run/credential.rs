@@ -74,6 +74,82 @@ fn credential_groups(bindings: &[EgressRoute]) -> Vec<Vec<&EgressRoute>> {
     groups
 }
 
+/// What opening a backend entry's credential group produced.
+pub(crate) struct BackendProjection {
+    /// One capability per backend entry (one vault holding the entry's strip + box-owned routes).
+    pub(crate) capabilities: Vec<(credentials::DestinationPattern, Arc<Vault>)>,
+    /// The phantoms a strip-phantom destination secret provisions to the workload.
+    pub(crate) workload_environment: Vec<ProvisionedVariable>,
+}
+
+/// Open one vault per backend entry group, each holding that entry's strip-phantom destination
+/// secret and box-owned backend token together (one credential authority on one destination). The
+/// strip route provisions a phantom to the workload; the box-owned token is attached at the gateway
+/// and never placed in the workload environment. An absent credential is hard here.
+pub(crate) fn backend_capabilities(
+    groups: &[(credentials::DestinationPattern, Vec<EgressRoute>)],
+) -> Result<BackendProjection, BoxError> {
+    let mut capabilities = Vec::with_capacity(groups.len());
+    let mut workload_environment = Vec::new();
+    for (original, routes) in groups {
+        let Some(first) = routes.first() else {
+            continue;
+        };
+        let mut config = VaultConfig::new(
+            Backend::local(),
+            format!("strands-box-backend-{}", std::process::id()),
+        )
+        .require_every_route();
+        for route in routes {
+            config = config.route(route.to_route_spec()?);
+        }
+        let opened = Vault::open(config).map_err(|source| {
+            Internal::CredentialProjection(format!(
+                "backend credential for {host} did not resolve: {source}",
+                host = first.host()
+            ))
+        })?;
+        // A strip-phantom destination secret mints one phantom, provisioned to the workload under the
+        // destination secret's variable name. The box-owned token mints none.
+        let provisioned_name = routes.iter().find_map(EgressRoute::provisioned_name);
+        for phantom in opened.phantoms() {
+            if let Some(name) = provisioned_name {
+                workload_environment.push(ProvisionedVariable {
+                    name: name.to_string(),
+                    value: phantom.token().to_string(),
+                });
+            }
+        }
+        capabilities.push((original.clone(), Arc::new(opened.into_vault())));
+    }
+    Ok(BackendProjection {
+        capabilities,
+        workload_environment,
+    })
+}
+
+/// Combine the ordinary routes' provisioned variables with the backend entries' strip-phantom
+/// placeholders. A variable named by both an ordinary route and a backend entry's strip route keeps
+/// the ORDINARY route's phantom: that route's swap is Strict and needs its own placeholder present,
+/// while the backend strip is unconditional and removes whatever value the workload sent. So the two
+/// share one placeholder, and the backend's duplicate is dropped.
+pub(crate) fn merge_workload_environment(
+    ordinary: Vec<ProvisionedVariable>,
+    backend: Vec<ProvisionedVariable>,
+) -> Vec<ProvisionedVariable> {
+    let ordinary_names: std::collections::HashSet<String> = ordinary
+        .iter()
+        .map(|variable| variable.name.clone())
+        .collect();
+    let mut merged = ordinary;
+    for variable in backend {
+        if !ordinary_names.contains(&variable.name) {
+            merged.push(variable);
+        }
+    }
+    merged
+}
+
 /// Resolve every declared binding, minting one phantom per provisioned variable.
 pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError> {
     let mut capabilities = Vec::with_capacity(bindings.len());
@@ -316,6 +392,133 @@ mod tests {
         }
         // SAFETY: as above.
         unsafe { std::env::remove_var("STRANDS_BOX_SHARED_FOR_TESTS") };
+    }
+
+    /// A backend entry's credentials open as ONE vault (one control on one destination): the
+    /// box-owned backend token provisions no workload variable, and the strip-phantom destination
+    /// secret provisions exactly one.
+    #[test]
+    fn a_backend_entry_opens_one_capability_and_provisions_only_its_strip_phantom() {
+        // SAFETY: the variables are namespaced to this test.
+        unsafe {
+            std::env::set_var("STRANDS_BOX_BACKEND_FOR_TESTS", "gw-real-token");
+            std::env::set_var("STRANDS_BOX_DESTSECRET_FOR_TESTS", "dest-token");
+        }
+        let entry = target(
+            r#"
+            destinations = ["api.github.com"]
+            secret.ref = "env://STRANDS_BOX_DESTSECRET_FOR_TESTS"
+
+            [[backends]]
+            url = "https://gateway-1.example.com"
+            auth.ref = "env://STRANDS_BOX_BACKEND_FOR_TESTS"
+            "#,
+        );
+        let routes = entry
+            .backend_credential_routes()
+            .expect("the backend credential routes build");
+        assert_eq!(routes.len(), 2, "a strip route and a box-owned route");
+        let original = entry
+            .primary_destination()
+            .expect("pattern builds")
+            .expect("a backend entry has one destination");
+        let projection =
+            backend_capabilities(&[(original, routes)]).expect("the backend vault opens");
+        assert_eq!(
+            projection.capabilities.len(),
+            1,
+            "one control for the one destination"
+        );
+        assert_eq!(
+            projection.workload_environment.len(),
+            1,
+            "only the strip-phantom destination secret provisions a workload variable"
+        );
+        let variable = &projection.workload_environment[0];
+        assert_eq!(variable.name, "STRANDS_BOX_DESTSECRET_FOR_TESTS");
+        assert_ne!(variable.value, "dest-token", "the workload gets a phantom");
+        assert_ne!(variable.value, "gw-real-token", "never the backend token");
+        // SAFETY: as above.
+        unsafe {
+            std::env::remove_var("STRANDS_BOX_BACKEND_FOR_TESTS");
+            std::env::remove_var("STRANDS_BOX_DESTSECRET_FOR_TESTS");
+        }
+    }
+
+    /// A backend box launches with its destination secret UNSET: the strip-phantom route mints a
+    /// placeholder and strips it, so the box never reads the real value and does not require it. This
+    /// is the case a backend exists for — the operator has no destination token.
+    #[test]
+    fn a_backend_strip_phantom_opens_without_the_destination_secret_set() {
+        // SAFETY: the variable is namespaced to this test and is never set; remove it defensively so
+        // a stray value from another run cannot mask the property under test.
+        unsafe { std::env::remove_var("STRANDS_BOX_UNSET_DESTSECRET_FOR_TESTS") };
+        let entry = target(
+            r#"
+            destinations = ["api.github.com"]
+            secret.ref = "env://STRANDS_BOX_UNSET_DESTSECRET_FOR_TESTS"
+
+            [[backends]]
+            url = "https://gateway-1.example.com"
+            "#,
+        );
+        let routes = entry
+            .backend_credential_routes()
+            .expect("the backend credential routes build");
+        assert_eq!(routes.len(), 1, "only the strip-phantom destination secret");
+        let original = entry
+            .primary_destination()
+            .expect("pattern builds")
+            .expect("a backend entry has one destination");
+        let projection = backend_capabilities(&[(original, routes)])
+            .expect("the backend vault opens with the var unset");
+        assert_eq!(projection.capabilities.len(), 1);
+        assert_eq!(
+            projection.workload_environment.len(),
+            1,
+            "the strip-phantom route still provisions its placeholder"
+        );
+        let variable = &projection.workload_environment[0];
+        assert_eq!(variable.name, "STRANDS_BOX_UNSET_DESTSECRET_FOR_TESTS");
+        assert!(
+            !variable.value.is_empty(),
+            "the workload gets a minted phantom, not the unset real value"
+        );
+    }
+
+    /// A variable named by both an ordinary route and a backend entry's strip route resolves to ONE
+    /// placeholder — the ordinary route's, because its swap is Strict and the backend strip is
+    /// unconditional. So the workload holds one value both the direct and the re-routed host handle.
+    #[test]
+    fn a_shared_variable_keeps_the_ordinary_phantom_and_drops_the_backend_duplicate() {
+        let ordinary = vec![ProvisionedVariable {
+            name: "GITHUB_TOKEN".to_string(),
+            value: "ordinary-phantom".to_string(),
+        }];
+        let backend = vec![ProvisionedVariable {
+            name: "GITHUB_TOKEN".to_string(),
+            value: "backend-phantom".to_string(),
+        }];
+        let merged = merge_workload_environment(ordinary, backend);
+        assert_eq!(merged.len(), 1, "one placeholder for the one variable");
+        assert_eq!(
+            merged[0].value, "ordinary-phantom",
+            "the ordinary route's Strict-checked phantom survives; the backend strip is unconditional"
+        );
+    }
+
+    /// A backend-only variable (no ordinary route names it) is still provisioned.
+    #[test]
+    fn a_backend_only_variable_is_provisioned() {
+        let merged = merge_workload_environment(
+            Vec::new(),
+            vec![ProvisionedVariable {
+                name: "GW_TOKEN".to_string(),
+                value: "backend-phantom".to_string(),
+            }],
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].name, "GW_TOKEN");
     }
 
     /// A box that declares no egress resolves nothing.

@@ -27,6 +27,24 @@ pub(super) const LOADER_HOOKS: [&str; 10] = [
 
 /// Refuse an environment name the box cannot safely hand a phantom to.
 pub(crate) fn checked_provisioned_name(host: &str, name: &str) -> Result<String, BoxError> {
+    checked_provisioned_name_inner(host, name, true)
+}
+
+/// [`checked_provisioned_name`] without the value-presence check, for a strip-phantom route whose
+/// real value the box never reads: it provisions a placeholder under `name` and strips it, so a
+/// backend box with no destination token must still launch. The name itself is still validated.
+pub(crate) fn checked_provisioned_name_without_value(
+    host: &str,
+    name: &str,
+) -> Result<String, BoxError> {
+    checked_provisioned_name_inner(host, name, false)
+}
+
+fn checked_provisioned_name_inner(
+    host: &str,
+    name: &str,
+    require_value: bool,
+) -> Result<String, BoxError> {
     if name.is_empty() {
         return Err(Internal::CredentialProjection(format!(
             "credential for {host} has an empty environment variable name"
@@ -40,9 +58,10 @@ pub(crate) fn checked_provisioned_name(host: &str, name: &str) -> Result<String,
         .into());
     }
     // Whitespace-only, not merely empty: `Bearer   ` on the wire fails at the upstream in a way an
-    // operator reads as the box denying the call. It agrees with the vault's content rule
-    if std::env::var_os(name)
-        .is_none_or(|value| value.to_str().is_none_or(|value| value.trim().is_empty()))
+    // operator reads as the box denying the call. It agrees with the vault's content rule.
+    if require_value
+        && std::env::var_os(name)
+            .is_none_or(|value| value.to_str().is_none_or(|value| value.trim().is_empty()))
     {
         return Err(Internal::CredentialProjection(format!(
             "credential variable {name} is not set, or holds only whitespace"
