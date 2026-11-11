@@ -186,9 +186,9 @@ fn require_expressible(config: &ContainmentConfig) -> Result<()> {
         ));
     }
     match config.network() {
-        // Localhost with no inbound bind (the mediated default), or AllowAll (operator-declared
-        // native egress, contain_egress = false). A `listen` port is still unsupported on macOS.
-        Network::Localhost { listen, .. } if listen.is_empty() => {}
+        // Localhost, with or without inbound ports, or AllowAll (operator-declared native egress,
+        // contain_egress = false).
+        Network::Localhost { .. } => {}
         Network::AllowAll => {}
         _ => {
             return Err(unsupported(
@@ -847,10 +847,16 @@ pub(crate) fn render_profile_with_streams(
     }
 
     match config.network() {
-        Network::Localhost { connect, .. } => {
+        Network::Localhost { connect, listen } => {
             for port in connect {
                 cells.entry(CONNECT_PORTS).or_default().push_str(&format!(
                     "(allow network-outbound\n    (remote tcp \"localhost:{port}\"))\n"
+                ));
+            }
+            for port in listen {
+                cells.entry(CONNECT_PORTS).or_default().push_str(&format!(
+                    "(allow network-bind\n    (local tcp \"localhost:{port}\"))\n\
+                     (allow network-inbound\n    (local tcp \"localhost:{port}\"))\n"
                 ));
             }
         }

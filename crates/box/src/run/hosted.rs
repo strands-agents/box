@@ -1114,6 +1114,7 @@ mod tests {
                 filesystem: Default::default(),
                 network: None,
                 grammar: None,
+                ingress: Vec::new(),
             }),
             tool: Default::default(),
             egress: Default::default(),
@@ -1709,6 +1710,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             },
             network: None,
             grammar: None,
+            ingress: Vec::new(),
         };
         let mut record = record(&root);
         record.tool.insert("t".to_string(), tool(vendor.clone()));
@@ -1846,6 +1848,20 @@ permit (principal, action == alpha::Action::"read", resource);"#
             },
         )
         .await;
+        let ready = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::run::broker::protocol::read_frame::<crate::run::broker::protocol::Frame, _>(
+                &mut reader,
+            ),
+        )
+        .await
+        .expect("the MCP readiness response arrives")
+        .expect("the MCP readiness response reads")
+        .expect("the MCP readiness response is present");
+        assert!(matches!(
+            ready.body,
+            crate::run::broker::protocol::Body::McpReady
+        ));
         send_mcp_json(
             &mut writer,
             serde_json::json!({
@@ -2591,6 +2607,7 @@ while :; do :; done"#
             filesystem: Default::default(),
             network: None,
             grammar: None,
+            ingress: Vec::new(),
         };
         let agent = spec(&["/bin/sh"]);
         Record {
@@ -3073,6 +3090,7 @@ while :; do :; done"#
             filesystem: Default::default(),
             network: None,
             grammar: None,
+            ingress: Vec::new(),
         };
         tool.filesystem.read = vec![root_path.join("vendor")];
 

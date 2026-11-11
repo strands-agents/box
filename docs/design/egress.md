@@ -141,7 +141,13 @@ handshake with a certificate for that host, signed by the box's certificate auth
 Policy decides `http:request` for every request. It sees the host, the port, the method, the path,
 the body size, and whether the request came inside a `CONNECT`. The gateway puts the path in one
 canonical form first. It decodes percent-escapes only for unreserved characters, leaving `%2F`
-encoded. It removes `.` and `..` segments and omits the query.
+encoded. It removes `.` and `..` segments and omits the query from the policy path.
+
+The forwarded request retains its query, including an explicitly empty `?`. This applies to plain
+HTTP and intercepted HTTPS: `/report?` reaches the origin as `/report?`, while `/report` remains
+`/report`. Header or path edits preserve an empty query unless the replacement path supplies its
+own query. Credential edits can add or remove query parameters. Removing the last parameter from
+an originally nonempty query still removes the delimiter.
 
 After `http:request` permits the request, the gateway opens TLS to the server. It verifies the
 server's certificate against a compiled-in set of public root certificates, then forwards the

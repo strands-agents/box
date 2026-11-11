@@ -10,6 +10,7 @@
 //! | [`broker`] | the one socket, its protocol, and both interpreters |
 //! | [`configure`] | writing a validated authority to disk, for `run` |
 //! | [`contain`] | the ordered path from an argv to a contained process |
+//! | `descriptor_limit` | the box's raised open-file limit, and the limit each child starts with |
 //! | [`telemetry`] | this box's own collector and effective decision recorder |
 //! | `netns_relay` | splicing the workload's namespace-bound listeners to their sinks (Linux) |
 
@@ -18,6 +19,7 @@ pub(crate) mod commands;
 pub(crate) mod configure;
 pub(crate) mod contain;
 pub(crate) mod credential;
+pub(crate) mod descriptor_limit;
 #[cfg(unix)]
 pub(crate) mod diagnostics;
 pub(crate) mod hardening;

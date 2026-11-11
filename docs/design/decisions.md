@@ -529,6 +529,21 @@ server. A forbid or an absent permit leaves it unstarted, as
 `secret.ref` locator and never a literal token, and the box never parses a harness's own
 configuration file to find one.
 
+<a id="mcp-nonmatches-retain-ordinary-agent-execution"></a>
+### MCP non-matches retain ordinary execution inside the agent sandbox
+
+An MCP alias selects ordinary execution only after the broker reports a valid command non-match,
+so a shared launcher remains usable without new agent authority.
+Refusing every non-match makes a server declaration hide unrelated calls to the same launcher.
+The cost is that a mistyped server command can run under the agent's grants without Box's MCP tool
+checks, so the broker records the non-match as a `strands.box.mcp.unmatched` diagnostic.
+Policy denials, ambiguous matches, and invalid routing responses do not select this path, as
+`only_a_valid_nonmatch_response_can_execute_fallback` and the admission tests check.
+The alias uses direct execution, requires a shebang for scripts, and stops on unexpected lookup
+errors; it does not acquire an implicit shell to make a program run.
+`ordinary_fallback_keeps_agent_grants_and_never_receives_server_secrets` pins the retained sandbox
+and the absence of server credentials.
+
 <a id="mcp-executable-filenames-name-their-aliases"></a>
 ### MCP executable filenames name their aliases
 
@@ -1378,9 +1393,10 @@ reaches the operator as the serializer's parse-error text, reported verbatim.
 <a id="localhost-names-the-ports-the-workload-reaches"></a>
 ### Loopback network access names the ports the workload reaches, and no count bounds them
 
-The loopback network mode carries two lists, one for outbound connect and one for listen. Only
-`connect` renders. Both backends refuse a non-empty `listen`, so the field does not yet support
-inbound binds. Box refuses an empty connect list because it would select loopback access without
+The loopback network mode carries two lists, one for outbound connect and one for listen. Both
+render: Seatbelt port rules on macOS, and sockets from the namespace's PID 1 on Linux
+([ingress relay design](../../team/designs/0003-ingress-relay.md)). Box refuses an empty connect
+list because it would select loopback access without
 granting any. It also refuses repeated entries. No count bounds the lists, because a limit there
 would refuse a composition the caller authorized, at a layer that cannot see what was asked for.
 Every entry is loopback and policy still decides each request, so this list cannot become a
@@ -1934,18 +1950,25 @@ operator must read that disclosure. No tool grant can name the box directory, wh
 `a_tool_grant_cannot_expose_the_box_directory` pins.
 
 <a id="a-host-binary-resolves-on-the-operator-path"></a>
-### A host binary resolves against the operator's real `PATH`, and the longest command prefix selects the tool
+### A bare name that a tool answers to runs that tool's file, any other name resolves on the operator's `PATH`, and the longest command prefix selects the tool
 
-The Shell resolves a host binary against the operator's real host `PATH`, with `/usr/bin:/bin` as
-the fallback, so Box finds a tool under Homebrew, nvm, or mise. Each process searches its table's
-`env.PATH` if present. Otherwise, it uses the operator's real `PATH`, then the fallback if neither
-exists. Selection compares the canonical resolved path of each tool's program with the program the
-workload invoked, and compares the tool's fixed leading arguments with the head of the argv. The
-longest matching `command` wins, so `[tool.git-read]` and `[tool.git-push]` can differ only in their
-fixed arguments, which `the_longest_matching_command_prefix_selects_the_tool` pins. Box names a
-program by its canonical identity for the `shell:spawn` decision, for selection, and for
-credentials, and the spawn hook runs only an identity that was bound to an existing file when the decision was made. `shell:spawn` stays the one control on whether a program runs; a larger `PATH` changes
-only where Box finds a permitted program.
+A `[tool]` with no grammar, or whose grammar's `program` is that name, answers to the last
+component of its `command` element 0, unless the Shell implements that name. A bare name that a
+tool answers to runs the file that the tool opened at startup, through `Kernel::host_program`,
+whatever is first on `PATH`. A tool with fixed leading arguments claims its name too. When tools
+with different command paths answer to one name, the operator's `PATH` decides if it finds one of
+those paths, and else the tool whose label is the name runs. Any other bare name resolves against
+the operator's real `PATH`, or the table's own `env.PATH`. The table label as the name lost because
+it makes a label such as `brew_git` a command and changes what `python` runs for a
+`[tool.python]` on `python3`. The longest matching `command` prefix selects the tool, which
+`the_longest_matching_command_prefix_selects_the_tool` pins, and
+`a_bare_name_runs_the_tool_that_declares_it_when_another_file_is_first_on_path` pins the name rule.
+Box names a program by its canonical identity for the `shell:spawn` decision, for selection, and
+for credentials, and the spawn hook runs only an identity that was bound to an existing file when
+the decision was made. `shell:spawn`, or a grammar action, stays the one control on whether a
+program runs. A second program of a tool's name that the agent reaches through `exec` no longer
+runs by its bare name, which runs the tool's file or is refused, so it needs its own `[tool]` or its
+path.
 
 <a id="the-caller-spelling-becomes-argument-zero"></a>
 ### The identity selects the program, and the caller's spelling becomes `argv[0]`
@@ -2201,7 +2224,8 @@ separate OTLP collector with that vendor's exporter. Point an `otlp` target at t
 ### Every box records by default, to a file the workload cannot reach
 
 An absent `telemetry` key means one `file` target that takes every signal: every effective denial
-and permit, the box's own control-plane records, and the harness's relayed spans, logs, and metrics.
+and permit, the box's own control-plane records and MCP routing diagnostics, and the harness's
+relayed spans, logs, and metrics.
 A box that makes a thousand decisions without recording any cannot be audited. The default provides
 those records even when the operator has configured nothing. The file sits in the box's own private
 tree, which a deny-only floor refuses to the workload whatever a permit says. A declared target
@@ -2211,9 +2235,10 @@ replaces the default instead of adding to it. The file has no size bound or rota
 ### A target names a set of signals, and an absent list takes every signal
 
 `[telemetry.<label>] include` takes five words: `deny` and `permit` name the two effective verdicts,
-`trace` names the agent's relayed spans and the box's own control-plane records, and `logs` and
-`metrics` name the agent's relayed log and metric records. A target names a set, with no ordering,
-and no signal contains another. A target that names no `include` receives every signal, which
+`trace` names the agent's relayed spans and the box's own control-plane records. `logs` names the
+agent's relayed log records and the box's unmatched MCP routing diagnostics. `metrics` names the
+agent's relayed metric records. A target names a set, with no ordering, and no signal contains
+another. A target that names no `include` receives every signal, which
 `an_absent_include_takes_every_signal` pins. An empty list, a repeated word, and a misspelled word
 are each refused before the box exists. The box relays harness signals without producing them. The
 harness's exporter settings determine whether those records exist.
@@ -2269,7 +2294,7 @@ pass can permit what policy denied. The record names every policy that determine
 `forbidden`, `no_match`, `policy_pending`, `internal_fault`, and `enforcement`.
 
 <a id="every-box-record-is-both-a-span-and-a-log-record"></a>
-### Every box record is both a span and a log record
+### Each decision and control record is both a span and a log record
 
 Each effective decision produces one internal span and one audit log record that share a trace ID
 and a span ID. The span marks the instant the enforcement point submits the decision, so it measures
@@ -2278,6 +2303,8 @@ control-plane operation names that root as its parent, so one trace covers the b
 decision is exported even when the caller's parent is unsampled, because a sampling flag must not
 suppress policy evidence. `decisions_export_spans_and_matching_logs_with_request_parentage` pins the
 contract.
+An unmatched MCP route produces only a log record because it states neither a policy decision nor
+an execution outcome.
 
 <a id="correlation-context-is-a-hint-and-never-authority"></a>
 ### Correlation context is a hint, and never evidence of authority

@@ -53,6 +53,9 @@ pub(crate) struct ProcessSpec {
     /// The tool grammar of a `[tool.<name>]`. Every other table refuses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) grammar: Option<GrammarTable>,
+    /// Where callers reach the agent's servers, from `[[agent.ingress]]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) ingress: Vec<super::ingress::Ingress>,
 }
 
 /// The eight path lists. A directory entry is recursive, and a file entry is exact.
@@ -209,6 +212,22 @@ impl ProcessSpec {
         Ok(())
     }
 
+    pub(crate) fn validate_ingress_selection(
+        &self,
+        table: &str,
+        enabled: bool,
+    ) -> Result<(), ConfigError> {
+        if !self.ingress.is_empty() && !enabled {
+            return Err(ConfigError::Process {
+                table: table.into(),
+                reason: "`ingress` is experimental: set `ingress = true` in \
+                         `[experimental-features]` to load it"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_native_policy(
         &self,
         table: &str,
@@ -246,6 +265,15 @@ impl ProcessSpec {
             table: table.to_string(),
             reason,
         };
+        if !self.ingress.is_empty() {
+            if table != "[agent]" {
+                return Err(refuse(
+                    "`ingress` is supported on `[agent]` only; a tool's ingress is not built yet"
+                        .into(),
+                ));
+            }
+            super::ingress::validate_all(&self.ingress, table)?;
+        }
         if table == "[agent]" && self.network.is_some() {
             return Err(refuse(
                 "`network` is refused on `[agent]`: the agent always reaches the network through \
