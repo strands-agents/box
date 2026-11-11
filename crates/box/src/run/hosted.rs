@@ -23,7 +23,7 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard};
 
 use egress_gateway::{
     CapabilitySet, CredentialCapability, MitmConfig, MitmHandle, MitmInterceptor,
@@ -51,8 +51,19 @@ use crate::run::telemetry;
 type RunningPolicy = (Arc<PolicyEngine>, Arc<telemetry::Collector>);
 
 static RUNNING_POLICY: Mutex<Option<RunningPolicy>> = Mutex::new(None);
+static POLICY_ADMISSIONS: RwLock<()> = RwLock::new(());
+
+/// Keeps one complete request admission on the current policy.
+pub(crate) fn policy_admission() -> RwLockReadGuard<'static, ()> {
+    POLICY_ADMISSIONS
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 pub(crate) fn reload(sources: &[policy::Policy]) -> Result<(), BoxError> {
+    let _admissions = POLICY_ADMISSIONS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let running = RUNNING_POLICY
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -3147,3 +3158,6 @@ while :; do :; done"#
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) mod reload_test_support;

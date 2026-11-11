@@ -107,6 +107,7 @@ pub(super) fn admit_tool_call(
     server: &str,
     frame: &str,
 ) -> io::Result<McpRequestAdmission> {
+    let _admission = crate::run::hosted::policy_admission();
     let correlation = telemetry::Correlation::from_mcp(frame);
     correlation.during(|| {
         let Some(target) = McpTarget::of_stdio_request(frame.as_bytes())? else {
@@ -1581,3 +1582,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod reload_tests;
