@@ -300,6 +300,11 @@ What each caller records as a response:
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |
 | A tool grammar action, `Tool::<name>::Action::"<action>"` | When a program the Shell started ends | `status`, as on `shell:spawn` |
 | `mcp:call` | For `tools/call`, `prompts/get`, and `resources/read`: when the call completes or ends indeterminately over stdio, or when the upstream response completes, fails, or reaches its deadline over HTTP | none |
+| A per-tool action, `<server>::Action::"<tool>"` | Beside each `mcp:call::response` for a `tools/call` that the per-tool action decided and allowed. Its `input` is the call's arguments, as its `::request` recorded them | `reply`, a string: `result`, `tool_error`, or `protocol_error` for a stdio server's answer; `cancelled`; or `indeterminate` when the connection ended, and for every http call, because Box reads no http reply |
+
+An MCP outcome is always a response, so Box never records `mcp:call::error` or a per-tool
+`::error`. The load refuses a `when temporal` clause that names one, because it could never match.
+A `tools/call` to a tool that no per-tool action declares records only `mcp:call::response`.
 
 Each temporal operator carries a window of at most `24h`. A temporal predicate names exactly one
 action, so a budget that spans `fs:read` and `fs:write` is one clause per action.

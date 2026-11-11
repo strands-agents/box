@@ -546,6 +546,18 @@ when temporal {
 policy fails schema validation: temporal window `48h` exceeds the maximum allowed window `24h` set by the event schema's `max_window`; shorten this window to at most `24h`, or raise `max_window` in the event schema at line 3, column 3 (every temporal `within` window is capped by the event schema's `max_window` (default 24h); either shorten this window or raise the cap with a `max_window = <interval>` directive at the top of the event schema)
 ```
 
+An MCP call always records `::response`, even when the server replies with an error, so it never
+records `::error`. A predicate on `mcp:call::error`, or on a tool action's `::error`, can't match:
+
+```text
+forbid (principal, action == Box::Action::"shell:exec", resource)
+when temporal { formerly within 1h ( Box::Action::"mcp:call"::error{ input.server: "github" } ) };
+```
+
+```text
+policy uses an unsupported clause: the forbid rule with no @id (rule 1): a temporal predicate names Box::Action::"mcp:call"::error; Box records every MCP outcome as `::response`, so the predicate cannot match; name `::response` instead
+```
+
 ### A literal that nothing can match
 
 A path under the operator's home is reported `~/…`, and a directory is reported without a trailing

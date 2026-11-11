@@ -561,12 +561,13 @@ impl PolicyEngine {
         self.authority.warnings()
     }
 
-    /// The per-tool refinement for one `tools/call`.
+    /// The per-tool refinement for one `tools/call`, and the `::response` an allowed call owes.
     ///
     /// Returns `Allow` when the composed schema declares no per-tool action for the tool (it rides
     /// the coarse grant) or when no rule forbids it; returns `Deny` only on an explicit `forbid` or
     /// an evaluation fault. `arguments` is the raw `params.arguments`, typed against the composed
-    /// schema by the engine's request gate (`context_for`'s `from_json`).
+    /// schema by the engine's request gate (`context_for`'s `from_json`). The pending response is
+    /// present only when the call is allowed and its per-tool request was recorded.
     pub fn refine_tool_call(
         &self,
         governed: &GovernedBox,
@@ -574,7 +575,7 @@ impl PolicyEngine {
         server: &str,
         tool: &str,
         arguments: &serde_json::Value,
-    ) -> Decision {
+    ) -> (Decision, Option<crate::PendingToolResponse>) {
         let identity = crate::schema::ActionIdentity::mcp_tool(server, tool);
         let request = Request::McpCall {
             server,
@@ -584,10 +585,26 @@ impl PolicyEngine {
             uri: None,
             arguments: Some(arguments),
         };
-        let decision = self
+        let (decision, pending) = self
             .authority
             .refine_tool_call(governed, principal, &request, &identity);
-        self.conclude(&identity, request.resource(), decision)
+        (
+            self.conclude(&identity, request.resource(), decision),
+            pending,
+        )
+    }
+
+    /// Record the `::response` of one per-tool `tools/call`, beside its `mcp:call::response`.
+    ///
+    /// `reply` is how the call ended. A cancelled call, a call whose connection ended, and an
+    /// unread reply still record a response, so a budget counts them, and a precondition that
+    /// needs the server's answer requires `output.reply` to be `result`.
+    pub fn record_tool_response(
+        &self,
+        response: crate::PendingToolResponse,
+        reply: crate::McpReply,
+    ) -> Result<(), PolicyError> {
+        self.authority.record_tool_response(response, reply)
     }
 }
 
@@ -1261,13 +1278,15 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
         .expect("the policy opens")
         .observed_by(recording.clone());
 
-        let decision = authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "issues-mcp",
-            "read",
-            &serde_json::json!({"path": "/workspace/input"}),
-        );
+        let decision = authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "issues-mcp",
+                "read",
+                &serde_json::json!({"path": "/workspace/input"}),
+            )
+            .0;
 
         assert!(decision.is_allow());
         assert!(decision.attribution().is_empty());
@@ -1292,13 +1311,15 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
         .observed_by(recording.clone());
         let arguments = serde_json::json!({"path": "/workspace/input"});
 
-        let decision = authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "issues-mcp",
-            "read",
-            &arguments,
-        );
+        let decision = authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "issues-mcp",
+                "read",
+                &arguments,
+            )
+            .0;
 
         assert!(decision.is_allow());
         assert!(decision.attribution().is_empty());
@@ -1328,13 +1349,15 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
         .observed_by(recording.clone());
         let arguments = serde_json::json!({"path": "/workspace/input"});
 
-        let decision = authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "issues-mcp",
-            "read",
-            &arguments,
-        );
+        let decision = authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "issues-mcp",
+                "read",
+                &arguments,
+            )
+            .0;
 
         assert!(matches!(
             decision,
@@ -1363,13 +1386,15 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
         authority.authority.poison_live_for_test();
         let arguments = serde_json::json!({"path": "/workspace/input"});
 
-        let decision = authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "issues-mcp",
-            "read",
-            &arguments,
-        );
+        let decision = authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "issues-mcp",
+                "read",
+                &arguments,
+            )
+            .0;
 
         assert!(matches!(
             decision,
@@ -1414,13 +1439,15 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
 
         let arguments = serde_json::json!({"path": "/workspace/input"});
         assert!(matches!(
-            authority.refine_tool_call(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                "alpha",
-                "read",
-                &arguments,
-            ),
+            authority
+                .refine_tool_call(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    "alpha",
+                    "read",
+                    &arguments,
+                )
+                .0,
             Decision::Deny {
                 reason: crate::DenyReason::InternalFault,
                 ..
@@ -1538,13 +1565,15 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
     }
 
     fn read_tool(engine: &PolicyEngine, server: &str) -> Decision {
-        engine.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            server,
-            "read",
-            &serde_json::json!({"path": "/workspace/input"}),
-        )
+        engine
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                server,
+                "read",
+                &serde_json::json!({"path": "/workspace/input"}),
+            )
+            .0
     }
 
     /// During discovery, a reload that names a server whose tools have not arrived is refused,
