@@ -160,6 +160,11 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "faccessat2",
         number: libc::SYS_faccessat2,
     },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "access",
+        number: libc::SYS_access,
+    },
     PermittedSyscall {
         name: "chdir",
         number: libc::SYS_chdir,
@@ -1292,10 +1297,10 @@ mod tests {
     #[test]
     fn permit_filter_has_the_expected_workload_and_installer_entries() {
         let x86_entries = usize::from(cfg!(target_arch = "x86_64"));
-        assert_eq!(WORKLOAD_PERMITTED.len(), 113 + 5 * x86_entries);
+        assert_eq!(WORKLOAD_PERMITTED.len(), 113 + 6 * x86_entries);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 116 + 6 * x86_entries);
+        assert_eq!(rules.len(), 116 + 7 * x86_entries);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);

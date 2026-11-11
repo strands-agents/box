@@ -1291,8 +1291,8 @@ On Linux, Box builds the boundary from namespaces, a mount view, and a syscall p
 rejects Landlock as the baseline, because no Landlock right denies all network at any ABI version,
 so a contained child would keep unrestricted network. Box does not probe the kernel ABI version. A
 gate based on that probe once refused every kernel Box ships on. Platform and architecture alone
-select the mechanism. macOS uses Seatbelt, and Linux on ARM64 uses the namespace launcher. Box
-refuses every other Linux architecture by name.
+select the mechanism. macOS uses Seatbelt, and Linux on ARM64 or x86-64 uses the namespace launcher.
+Box refuses other Linux architectures by name.
 
 <a id="containment-ends-with-the-contained-process"></a>
 ### The sandbox ends with the contained process

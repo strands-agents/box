@@ -820,7 +820,41 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   `libc` lacks their names. Define those private `u32` constants from the pinned Linux UAPI `kd.h`
   and `vt.h` headers. Verify production and independent test values against those headers when
   changing the list. Upstream work is optional for this exception; no merge or release is required.
+  The x86 `ARCH_SET_FS` command and the independent thread-setup test's command values are another
+  explicit exception. `libc` 0.2.189 doesn't export these names. Take their fixed values from the
+  [Linux v6.12 x86 userspace API header](https://github.com/torvalds/linux/blob/v6.12/arch/x86/include/uapi/asm/prctl.h),
+  and keep the production value and independent test values checked against that header.
+  The system-call number still comes from `libc::SYS_arch_prctl`.
   Fix other missing names upstream; never `#[cfg]` them away.
+
+### x86-64 runtime call measurements
+
+The early x86 call measurements used native Amazon Linux 2023 at
+`2893def22ddb198f6fb89f376c6497f6f64ccde0`. The first four rows below describe those historical traces;
+they aren't validation of a later revision. The `dup2` row records a later contained-workload trace.
+Each counterpart explains why the addition preserves operations already available to a workload.
+
+| x86 call | Measured observation | Existing permitted counterpart |
+| --- | --- | --- |
+| `getpgrp` | `/bin/sh` received `EPERM` during job-control initialization. The outside control returned its process group. | `getpgid(0)` |
+| `poll` | Box's `zsh` command alias received `EPERM` while checking descriptors 0, 1, and 2 during startup. | `ppoll` |
+| `readlink` | The same alias received `EPERM` when reading `/proc/self/exe`. | `readlinkat` |
+| `epoll_wait` | The alias reached its event loop and received `EPERM` while waiting for events. | `epoll_pwait` |
+| `dup2` | On November 11, 2026, the configured native Bash workload made six successful descriptor-duplication calls after filter installation. These included redirecting and restoring standard output. The same workload completed its permitted writes and refusal checks. | `dup3` |
+
+`arch_prctl(ARCH_SET_FS)` sets the per-thread storage base needed by the x86 runtime. The filtered
+kernel test checks that restoring the current base succeeds, while other architecture commands stay
+denied. Its deliberately changed controls detect a missing permission, an unrestricted command, and
+an incorrect 64-bit command comparison. This evidence is separate from the historical alias traces.
+
+On November 11, 2026, native x86 testing of `90c5d894e9eb88ed0849cf3f421dabdb8d4ad7d1` found another
+startup gap: the declared Git tool received `EPERM` from `access` while checking its global configuration.
+The same Git executable outside Box returned `ENOENT` for that absent path and started successfully.
+Linux implements `access` through the same file-access check as `faccessat(AT_FDCWD, ...)`, which the
+filter already permits; see [Linux v6.12 `fs/open.c`](https://github.com/torvalds/linux/blob/v6.12/fs/open.c#L539-L553).
+The `x86_access_distinguishes_readable_and_missing_files_under_the_filters` test checks an existing
+readable file and an absent file before and after filter installation. With `access` missing from the
+permit table, its outside control succeeds and its filtered existing-file check fails.
 
 ### W^X
 
