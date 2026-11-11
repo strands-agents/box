@@ -551,33 +551,41 @@ fn setup_sandbox(
         })?,
     )?;
 
-    // A Lua coroutine would swallow the lazy read's internal yield, so a coroutine resumes only
-    // after stdin is loaded, and its own io.read never waits.
+    // A Lua coroutine would hand an async callback's internal pending yield back to the script.
+    // `coroutine.resume` and `coroutine.wrap` instead wait for that callback and resume again, so a
+    // read inside a coroutine waits for its input and a coroutine that never reads never waits.
     let coroutine: LuaTable = globals.get("coroutine")?;
     let resume: LuaFunction = coroutine.get("resume")?;
-    let (r, loaded) = (stdin_cursor.clone(), stdin_loaded.clone());
-    coroutine.set(
-        "resume",
+    let create: LuaFunction = coroutine.get("create")?;
+    let resume_waiting = {
+        let resume = resume.clone();
         lua.create_async_function(move |_, args: LuaMultiValue| {
-            let (r, loaded, resume) = (r.clone(), loaded.clone(), resume.clone());
-            async move {
-                load_stdin(&r, &loaded, max_stdin).await;
-                resume.call::<LuaMultiValue>(args)
-            }
-        })?,
-    )?;
-    let wrap: LuaFunction = coroutine.get("wrap")?;
-    let (r, loaded) = (stdin_cursor.clone(), stdin_loaded.clone());
+            let resume = resume.clone();
+            async move { resume_through_pending(&resume, args).await }
+        })?
+    };
+    coroutine.set("resume", resume_waiting)?;
     coroutine.set(
         "wrap",
         lua.create_function(move |lua, body: LuaFunction| {
-            let wrapped: LuaFunction = wrap.call(body)?;
-            let (r, loaded) = (r.clone(), loaded.clone());
+            let thread: LuaValue = create.call(body)?;
+            let resume = resume.clone();
             lua.create_async_function(move |_, args: LuaMultiValue| {
-                let (r, loaded, wrapped) = (r.clone(), loaded.clone(), wrapped.clone());
+                let (resume, thread) = (resume.clone(), thread.clone());
                 async move {
-                    load_stdin(&r, &loaded, max_stdin).await;
-                    wrapped.call::<LuaMultiValue>(args)
+                    let mut call = LuaMultiValue::new();
+                    call.push_back(thread);
+                    call.extend(args);
+                    let mut results = resume_through_pending(&resume, call).await?;
+                    match results.pop_front() {
+                        Some(LuaValue::Boolean(true)) => Ok(results),
+                        _ => Err(LuaError::external(
+                            results
+                                .pop_front()
+                                .map(|error| format!("{error:?}"))
+                                .unwrap_or_else(|| "cannot resume coroutine".to_string()),
+                        )),
+                    }
                 }
             })
         })?,
@@ -1082,6 +1090,40 @@ fn read_cursor_line(lua: &Lua, c: &Rc<RefCell<std::io::Cursor<Vec<u8>>>>) -> Lua
         line.pop();
     }
     Ok(LuaValue::String(lua.create_string(&line)?))
+}
+
+/// Call Lua's own `coroutine.resume` with `args`, and while the coroutine stops only because an
+/// async callback is pending, wait for that callback and resume the coroutine again.
+async fn resume_through_pending(
+    resume: &LuaFunction,
+    args: LuaMultiValue,
+) -> LuaResult<LuaMultiValue> {
+    let thread = args.front().cloned();
+    let mut results: LuaMultiValue = resume.call(args)?;
+    loop {
+        let pending = results.len() == 2
+            && matches!(results.front(), Some(LuaValue::Boolean(true)))
+            && matches!(results.back(), Some(LuaValue::LightUserData(marker)) if *marker == Lua::poll_pending());
+        if !pending {
+            return Ok(results);
+        }
+        // The callback registered this task's waker when it was polled inside the resume.
+        let mut waited = false;
+        std::future::poll_fn(|_| {
+            if waited {
+                std::task::Poll::Ready(())
+            } else {
+                waited = true;
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+        let mut again = LuaMultiValue::new();
+        if let Some(thread) = &thread {
+            again.push_back(thread.clone());
+        }
+        results = resume.call(again)?;
+    }
 }
 
 /// Read the process's stdin into `cursor` once, on the first call.

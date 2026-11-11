@@ -8201,3 +8201,51 @@ expect!(
     "set -e; ! { set +e; true; }; false; echo after",
     "after"
 );
+
+/// A coroutine that never reads stdin is not held by a stdin its writer keeps open.
+#[test]
+fn a_lua_coroutine_that_never_reads_stdin_is_not_held_by_it() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            r#"lua -e 'local c = coroutine.create(function() print(1) end); coroutine.resume(c)'"#,
+            r#"lua -e 'local f = coroutine.wrap(function() print(1) end); f()'"#,
+            r#"lua -e 'local c = coroutine.create(function(a) local b = coroutine.yield(a + 1); print(b) end); print(coroutine.resume(c, 1)); print(coroutine.resume(c, 5)); print(coroutine.status(c))'"#,
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            let (sender, receiver) = tokio::sync::mpsc::channel(4);
+            shell.proc.set_channel_reader(0, receiver);
+            let out = tokio::time::timeout(std::time::Duration::from_secs(5), shell.run(script))
+                .await
+                .unwrap_or_else(|_| panic!("{script} must not wait for stdin"));
+            assert_eq!(out.status, 0, "{script}: {}", out.stderr);
+            drop(sender);
+            if script.contains("yield") {
+                assert_eq!(out.stdout, "true\t2\n5\ntrue\ndead\n", "{script}");
+            } else {
+                assert_eq!(out.stdout, "1\n", "{script}");
+            }
+        }
+    }));
+}
+
+/// A call cancelled inside `!` leaves no errexit suppression for the next call on the same Shell.
+#[test]
+fn a_cancelled_negated_call_leaves_errexit_for_the_next_call() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            shell.run("set -e; ! { sleep 1; }; echo BEFORE"),
+        )
+        .await;
+        assert!(
+            cancelled.is_err(),
+            "the first call must be cancelled mid-sleep"
+        );
+        let out = shell.run("set -e; false; echo AFTER").await;
+        assert_eq!(out.stdout, "", "set -e must stop at false");
+        assert_eq!(out.status, 1);
+    }));
+}

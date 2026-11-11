@@ -1889,10 +1889,12 @@ This copy adds `parser::Item::Negated`, which holds the compound that `!` invert
 `builtin_lua` read stdin to end-of-file before it ran a script from `-e` or a file, so it waited
 for a writer that kept stdin open even when the script never read it. Upstream would call this a
 hang. This copy reads stdin on the first call to `io.read` or to an `io.lines` iterator, both now
-async functions, however the script spells or aliases the call. `coroutine.resume` and the
-functions `coroutine.wrap` returns load stdin before they run the coroutine, because a Lua
-coroutine would take the lazy read's internal yield as its own; a script that uses a coroutine
-therefore reads stdin at its first resume. `a_lua_coroutine_reads_stdin_that_arrives_late` pins it.
+async functions, however the script spells or aliases the call. A Lua coroutine would hand an
+async callback's internal pending yield back to the script, so `coroutine.resume` and the functions
+`coroutine.wrap` returns resume the coroutine again until no callback is pending. A read inside a
+coroutine waits for its input, and a coroutine that never reads never waits.
+`a_lua_coroutine_reads_stdin_that_arrives_late` and
+`a_lua_coroutine_that_never_reads_stdin_is_not_held_by_it` pin it.
 `tests/shell_integration.rs::a_lua_script_that_never_reads_stdin_is_not_held_by_it` fails without
 the change; `a_lua_script_that_reads_stdin_still_gets_it` and
 `a_lua_script_reads_stdin_however_it_spells_the_call` pin the read.
@@ -1904,7 +1906,8 @@ that `!` inverts. This copy treats an inverted pipeline or compound as tested, a
 enclosing inverted compound in `Process::errexit_tested`, which suppresses `set -e` without
 changing the option, so a `set -e` or `set +e` inside the compound still applies after it
 (`an_option_change_inside_a_negated_group_is_kept` and the three `errexit_*_negated_group*`
-tests). `tests/shell_integration.rs::errexit_ignores_a_negated_command`
+tests). `Shell::run` and `Shell::execute` reset the count, so a call cancelled inside `!` leaves no
+suppression for the next call (`a_cancelled_negated_call_leaves_errexit_for_the_next_call`). `tests/shell_integration.rs::errexit_ignores_a_negated_command`
 and `errexit_ignores_a_failure_inside_a_negated_group` fail without the change. A compound on
 the left of `&&` or `||` still applies `set -e` inside it, as at the pinned revision.
 
