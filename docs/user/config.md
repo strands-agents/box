@@ -795,11 +795,12 @@ explicit `auth.aws.service` and `auth.aws.region`, since a gateway host carries 
 The backend `url`'s path prefix joins in front of the agent's request path. An entry may keep its own
 `env://` `secret` beside a backend, phantom-only: the box provisions the placeholder and strips it,
 never injecting the real destination credential, so the named variable need not be set. The loader
-refuses more than one backend, a destination that is not one exact host, a `url` with a query,
-fragment, or a non-`http(s)` scheme, a `credsd://` `auth`, an `aws://` `auth` without
-`auth.aws.service`/`auth.aws.region` (or those keys on a non-`aws://` auth), a signed (`aws://` or
-`credsd://`) destination `secret`, a destination `secret` beside an `http` backend, and an `auth` on
-an `http` backend.
+refuses more than one backend, a destination that is not one exact host, a host with a backend that
+another entry also names (on any port), a `url` with a query,
+fragment, or a non-`http(s)` scheme, a `credsd://` `auth`, an `aws://` `auth` without a valid
+`auth.aws.service`/`auth.aws.region` (each non-empty and only lowercase `[a-z0-9-]`, or those keys on
+a non-`aws://` auth), a signed (`aws://` or `credsd://`) destination `secret`, a destination `secret`
+beside an `http` backend, and an `auth` on an `http` backend.
 [The egress table](egress.md#backends) describes the backend, and
 [egress design](../design/egress.md) describes how the box dials it.
 

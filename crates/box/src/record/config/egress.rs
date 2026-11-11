@@ -151,7 +151,7 @@ fn validate_pairs(entries: &[(Origin, &str, &EgressEntry)]) -> Result<(), Config
     // alone, so a host that names an MCP server may name nothing else; a collision is refused here
     // rather than mislabelled there. Keyed by the normalized host so a case- or IP-form-only
     // difference collides here as it does at run time.
-    let mut hosts: BTreeMap<String, (Origin, &str, Protocol)> = BTreeMap::new();
+    let mut hosts: BTreeMap<String, (Origin, &str, Protocol, bool)> = BTreeMap::new();
     // Which entry first named each `env://` variable, and the phantom prefix it asked for. Every
     // route that names one variable shares one phantom, and one variable holds one value.
     let mut variables: BTreeMap<&str, (&str, &str)> = BTreeMap::new();
@@ -207,19 +207,34 @@ fn validate_pairs(entries: &[(Origin, &str, &EgressEntry)]) -> Result<(), Config
             // traffic classified as this server's. Two non-MCP entries on one host are left to the
             // overlap check below, which is the credential-authority rule.
             let host = normalized_host(host_of(destination));
-            if let Some((earlier_origin, earlier, earlier_protocol)) =
-                hosts.insert(host.clone(), (origin, name, entry.protocol))
+            let has_backend = !entry.backends.is_empty();
+            if let Some((earlier_origin, earlier, earlier_protocol, earlier_has_backend)) =
+                hosts.insert(host.clone(), (origin, name, entry.protocol, has_backend))
                 && (earlier_origin, earlier) != (origin, name)
-                && (entry.protocol == Protocol::Mcp || earlier_protocol == Protocol::Mcp)
             {
-                return Err(ConfigError::Credential {
-                    host: host.clone(),
-                    reason: format!(
-                        "`{name}` and `{earlier}` both name host {host:?}; the gateway routes a \
-                         remote MCP server by host alone, so a host that names an MCP server may \
-                         name nothing else"
-                    ),
-                });
+                // An MCP server or a backend re-route is matched by host alone (port-blind) at run
+                // time, so a host that names either may name nothing else; a second entry on any port
+                // would otherwise load and then be misrouted or refused on every request.
+                if entry.protocol == Protocol::Mcp || earlier_protocol == Protocol::Mcp {
+                    return Err(ConfigError::Credential {
+                        host: host.clone(),
+                        reason: format!(
+                            "`{name}` and `{earlier}` both name host {host:?}; the gateway routes a \
+                             remote MCP server by host alone, so a host that names an MCP server may \
+                             name nothing else"
+                        ),
+                    });
+                }
+                if has_backend || earlier_has_backend {
+                    return Err(ConfigError::Credential {
+                        host: host.clone(),
+                        reason: format!(
+                            "`{name}` and `{earlier}` both name host {host:?}; a re-route is matched \
+                             by host alone on every port, so a host that re-routes to a backend may \
+                             name no other entry"
+                        ),
+                    });
+                }
             }
             let pattern = entry.pattern(destination)?;
             if let Some((earlier, host, _)) = patterns
@@ -978,12 +993,14 @@ impl EgressEntry {
                 if Self::signs_in_boundary(auth) {
                     match &auth.aws {
                         Some(scope)
-                            if !scope.service.trim().is_empty()
-                                && !scope.region.trim().is_empty() => {}
+                            if is_aws_scope_component(&scope.service)
+                                && is_aws_scope_component(&scope.region) => {}
                         _ => {
                             return refuse(
                                 "an aws:// backend auth requires an explicit aws.service and \
-                                 aws.region: the backend host carries no derivable AWS signing scope",
+                                 aws.region, each non-empty and only lowercase letters, digits, or \
+                                 '-' (the signer uses the value verbatim): the backend host carries \
+                                 no derivable AWS signing scope",
                             );
                         }
                     }
@@ -1285,6 +1302,16 @@ fn declared_port(destination: &str) -> Option<u16> {
 ///
 /// The gateway matches a connecting host against this to recognize a remote MCP server. It is the
 /// one host extractor, so the write and the match paths cannot derive a host two ways and drift.
+/// Whether an AWS signing-scope component (service or region) is well-formed: non-empty and only
+/// lowercase letters, digits, and `-`. The signer uses the value verbatim, so a trailing space or a
+/// wrong case would load cleanly and then fail every request with a signature error.
+fn is_aws_scope_component(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 pub(crate) fn host_of(destination: &str) -> &str {
     let after_scheme = destination
         .split_once("://")
@@ -2470,8 +2497,9 @@ mod tests {
     /// a request cannot match two backends.
     #[test]
     fn two_backend_entries_on_overlapping_destinations_are_refused() {
-        // Exact hosts that overlap: implicit vs explicit `:443`. Each is a valid single-host backend
-        // destination, so the overlap check, not the wildcard or multi-destination rule, is what fires.
+        // Two backend entries on one host (implicit vs explicit `:443`): a re-route is matched by
+        // host alone on every port, so the one-host-one-reroute rule refuses the pair before the
+        // pattern-overlap check, with a message naming that rule.
         let error = load(
             r#"
             [egress.a]
@@ -2485,10 +2513,11 @@ mod tests {
             url = "https://gw-b.example.com"
             "#,
         )
-        .expect_err("two backends on overlapping destinations have no unambiguous re-route");
+        .expect_err("two backends on one host have no unambiguous re-route");
         assert!(
-            error.to_string().contains("overlaps"),
-            "the overlap check covers secretless backend entries: {error}"
+            error.to_string().contains("re-routes to a backend")
+                && error.to_string().contains("no other entry"),
+            "two backend entries on one host are refused by the one-host-one-reroute rule: {error}"
         );
     }
 
@@ -2772,6 +2801,46 @@ mod tests {
         )
         .expect_err("aws scope on an env:// auth is refused");
         assert!(on_env.to_string().contains("aws.service"), "{on_env}");
+
+        // The signer uses the scope verbatim, so a value that is non-empty but malformed — a trailing
+        // space, uppercase, or a stray separator — must be refused at load, not accepted and then
+        // failing every request with a signature error.
+        for bad in ["us-east-1 ", "US-EAST-1", "us-east-1/x", ""] {
+            load(&format!(
+                "[egress.github]\ndestinations = [\"api.github.com\"]\n\n\
+                 [[egress.github.backends]]\nurl = \"https://gw.example.com\"\n\
+                 auth.ref = \"aws://default\"\nauth.aws.service = \"bedrock-agentcore\"\n\
+                 auth.aws.region = \"{bad}\"\n"
+            ))
+            .expect_err(&format!(
+                "a malformed aws.region {bad:?} is refused at load"
+            ));
+        }
+    }
+
+    /// A host that re-routes to a backend may name no other egress entry, on any port: the gateway
+    /// matches a backend by host alone (port-blind), so a sibling entry on another port would load
+    /// and then be refused on every request. The loader refuses it, as it does for an MCP host.
+    #[test]
+    fn a_backend_and_another_entry_on_one_host_are_refused() {
+        let error = load(
+            "[egress.gh]\ndestinations = [\"api.github.com\"]\nsecret.ref = \"env://GH\"\n\n\
+             [egress.gh_alt]\ndestinations = [\"api.github.com:8443\"]\n\n\
+             [[egress.gh_alt.backends]]\nurl = \"https://gw.example.com\"\n",
+        )
+        .expect_err("a backend host that also names a direct entry on another port is refused");
+        assert!(
+            error.to_string().contains("re-routes to a backend")
+                && error.to_string().contains("no other entry"),
+            "the refusal names the one-host-one-reroute rule: {error}"
+        );
+
+        // One backend entry alone on its host still loads.
+        load(
+            "[egress.gh]\ndestinations = [\"api.github.com\"]\n\n\
+             [[egress.gh.backends]]\nurl = \"https://gw.example.com\"\n",
+        )
+        .expect("a lone backend entry loads");
     }
 
     /// A backend auth needs an https backend, because a credential does not ride a plaintext upstream.
