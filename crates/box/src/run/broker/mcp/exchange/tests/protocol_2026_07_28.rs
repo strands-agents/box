@@ -486,7 +486,7 @@ fn a_cancelled_call_does_not_satisfy_a_result_precondition() {
             r#"{PERMIT_ALL_MCP}
             forbid (principal, action == issues_mcp::Action::"Search", resource)
             when {{ context.input has value && context.input.value == "continue" }}
-            unless temporal {{ formerly within 3600s (issues_mcp::Action::"Search"::response{{output.reply: Box::McpReply::"result"}}) }};"#
+            unless temporal {{ formerly within 3600s (issues_mcp::Action::"Search"::response{{output.reply: "result"}}) }};"#
         ));
         let log = tempfile::NamedTempFile::new().expect("frame log");
         let mut command = modern_server(log.path());
@@ -541,7 +541,7 @@ fn a_call_cut_off_by_its_connection_does_not_satisfy_a_result_precondition() {
             r#"{PERMIT_ALL_MCP}
             forbid (principal, action == issues_mcp::Action::"Search", resource)
             when {{ context.input has value && context.input.value == "continue" }}
-            unless temporal {{ formerly within 3600s (issues_mcp::Action::"Search"::response{{output.reply: Box::McpReply::"result"}}) }};"#
+            unless temporal {{ formerly within 3600s (issues_mcp::Action::"Search"::response{{output.reply: "result"}}) }};"#
         ));
         let log = tempfile::NamedTempFile::new().expect("frame log");
         let mut command = modern_server(log.path());
@@ -591,7 +591,7 @@ fn an_error_reply_does_not_satisfy_a_result_precondition() {
             r#"{PERMIT_ALL_MCP}
             forbid (principal, action == issues_mcp::Action::"Search", resource)
             when {{ context.input has value && context.input.value == "continue" }}
-            unless temporal {{ formerly within 3600s (issues_mcp::Action::"Search"::response{{output.reply: Box::McpReply::"result"}}) }};"#
+            unless temporal {{ formerly within 3600s (issues_mcp::Action::"Search"::response{{output.reply: "result"}}) }};"#
         ));
         let log = tempfile::NamedTempFile::new().expect("frame log");
         let mut command = modern_server(log.path());

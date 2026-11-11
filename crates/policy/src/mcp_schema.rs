@@ -888,7 +888,7 @@ fn declare_reply_output(value: &mut serde_json::Value) {
                     "type": "Record",
                     "required": false,
                     "attributes": {
-                        "reply": { "type": "Entity", "name": "Box::McpReply" }
+                        "reply": { "type": "String" }
                     }
                 }),
             );

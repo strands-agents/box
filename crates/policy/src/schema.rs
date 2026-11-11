@@ -92,8 +92,6 @@ pub(crate) const FS_OTHER_OPERATION_TYPE: &str = "Box::FsOtherOperation";
 /// The enum entity type carrying how an effect ended, on the `output` of every
 /// filesystem response event.
 pub(crate) const FS_RESPONSE_RESULT_TYPE: &str = "Box::FsResponseResult";
-/// The enum entity type an MCP tool's response carries on `output.reply`.
-pub(crate) const MCP_REPLY_TYPE: &str = "Box::McpReply";
 
 /// The fixed resource id. The resource carries no policy information.
 pub(crate) const UNUSED_RESOURCE_ID: &str = "unused";

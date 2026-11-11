@@ -314,13 +314,7 @@ impl DogwoodEngine {
             with_request_id(
                 with_output_fields(
                     with_input(identity.event_builder(KIND_RESPONSE), input),
-                    vec![(
-                        attr::REPLY,
-                        Value::Entity {
-                            ty: crate::schema::MCP_REPLY_TYPE.to_string(),
-                            id: reply.eid().to_string(),
-                        },
-                    )],
+                    vec![(attr::REPLY, Value::String(reply.eid().to_string()))],
                 ),
                 &request_id,
             )
@@ -772,6 +766,7 @@ pub(crate) fn expand_policy_source(source: &str) -> Result<Vec<ExpandedPolicy>, 
         .map_err(|error| parse_refused(source, &error, true))?;
     refuse_providers(&parsed, &[])?;
     refuse_unrecorded_mcp_errors(&parsed, &[])?;
+    refuse_unknown_mcp_replies(&parsed, &[])?;
     Ok(parsed
         .policies()
         .map(|policy| ExpandedPolicy {
@@ -1042,6 +1037,7 @@ pub(crate) fn check_against(
         .map_err(|error| parse_refused(source, &error, authored))?;
     refuse_providers(&parsed, positions)?;
     refuse_unrecorded_mcp_errors(&parsed, positions)?;
+    refuse_unknown_mcp_replies(&parsed, positions)?;
     let canonical_policies = parsed
         .policies()
         .map(|policy| policy.expanded_source())
@@ -1239,6 +1235,103 @@ fn parsed_rule_name(source: &str, id: Option<&str>) -> String {
         "permit"
     };
     format!("the {effect} rule with no @id")
+}
+
+/// Refuse a temporal predicate whose `output.reply` names a value Box never records.
+fn refuse_unknown_mcp_replies(
+    parsed: &dogwood_language::ParsedPolicySet,
+    positions: &[usize],
+) -> Result<(), Refused> {
+    let mut findings = Vec::new();
+    for policy in parsed.policies() {
+        let mut unknown = Vec::new();
+        for condition in policy.temporal_conditions() {
+            reply_literals(condition, &mut unknown);
+        }
+        unknown.dedup();
+        if unknown.is_empty() {
+            continue;
+        }
+        let index = authored_index(positions, policy.index());
+        let source = policy.expanded_source();
+        let id = annotated_id(&source);
+        findings.push(
+            Finding::new(format!(
+                "{} (rule {}): `output.reply` is {}, which Box never records",
+                parsed_rule_name(&source, id.as_deref()),
+                index.saturating_add(1),
+                unknown
+                    .iter()
+                    .map(|value| format!("{value:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+            .with_rules(vec![RuleRef::new(index, id)]),
+        );
+    }
+    if findings.is_empty() {
+        return Ok(());
+    }
+    let named = findings.iter().map(Finding::message).collect::<Vec<_>>();
+    Err(Refused::new(
+        PolicyError::UnsupportedClause(format!(
+            "{}; the predicate cannot match; use one of {}",
+            named.join("; "),
+            crate::McpReply::VALUES
+                .iter()
+                .map(|value| format!("{value:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+        findings,
+    ))
+}
+
+/// Collect every `output.reply` literal a temporal condition's predicates compare against that is
+/// not a value Box records.
+fn reply_literals(condition: &dogwood_language::temporal_ast::Condition, out: &mut Vec<String>) {
+    use dogwood_language::temporal_ast::{AggExprKind, ConditionKind, Term};
+    fn reply_terms(term: &Term, out: &mut Vec<String>) {
+        match term {
+            Term::Agg(aggregate) => match &aggregate.kind {
+                AggExprKind::Sum { body, .. } | AggExprKind::Count { body, .. } => {
+                    reply_literals(body, out);
+                }
+                AggExprKind::Call(_) => {}
+            },
+            Term::Array(items) => items.iter().for_each(|item| reply_terms(item, out)),
+            _ => {}
+        }
+    }
+    match &condition.kind {
+        ConditionKind::And { left, right }
+        | ConditionKind::Or { left, right }
+        | ConditionKind::Since { left, right, .. } => {
+            reply_literals(left, out);
+            reply_literals(right, out);
+        }
+        ConditionKind::Not { inner: body }
+        | ConditionKind::Formerly { body, .. }
+        | ConditionKind::Previous { body, .. }
+        | ConditionKind::Exists { body, .. }
+        | ConditionKind::Refine { base: body, .. } => reply_literals(body, out),
+        ConditionKind::Predicate(predicate) => {
+            for argument in &predicate.args {
+                if argument.field_path() == ["output", "reply"]
+                    && let Term::String(value) = &argument.value
+                    && !crate::McpReply::VALUES.contains(&value.as_str())
+                {
+                    out.push(value.clone());
+                }
+                reply_terms(&argument.value, out);
+            }
+        }
+        ConditionKind::Comparison { left, right, .. } => {
+            reply_terms(left, out);
+            reply_terms(right, out);
+        }
+        ConditionKind::Tp { .. } | ConditionKind::Call(_) | ConditionKind::SigilRef { .. } => {}
+    }
 }
 
 /// Whether a predicate's action is `mcp:call` or a per-tool MCP action.

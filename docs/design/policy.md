@@ -137,12 +137,15 @@ three kinds of event:
 An MCP call records only `::response`, both as `mcp:call` and, for a `tools/call` a per-tool action
 decided, as that tool's action with the request's `input`. A completed call is a response whatever
 the server replied, and so is a cancelled or uncertain one, so a budget over responses can't be
-escaped by making calls fail. The tool's response carries `output.reply`, a `Box::McpReply` that
-says how the call ended, so a precondition can require `result` and exclude a failed or abandoned
-call. Only a stdio reply frame records `result`, `tool_error`, or `protocol_error`. The gateway
-reads no http reply, and a streamed reply sends its status before the tool's result, so an http call
-records `indeterminate`. The load refuses a rule that reads an MCP `::error`, because nothing
-records one.
+escaped by making calls fail. The tool's response carries `output.reply`, a string that says how the
+call ended, so a precondition can require `result` and exclude a failed or abandoned call. Only a
+stdio reply frame records `result`, `tool_error`, or `protocol_error`. The gateway reads no http
+reply, and a streamed reply sends its status before the tool's result, so an http call records
+`indeterminate`. The load refuses a rule that reads an MCP `::error`, or an `output.reply` value Box
+never records. `output.reply` is a string rather than a Box enum type because each MCP server's
+generated schema is stored in the history, and the previous release validates it against its own Box
+schema at startup; a new Box type there would make it drop the schema and reset every per-tool
+rule's history.
 
 For an MCP command with [argument wildcards](../user/mcp.md#argument-wildcards) enabled, the
 `shell:spawn` request records the alias name and effective launch arguments, including the received

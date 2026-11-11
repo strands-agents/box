@@ -203,7 +203,7 @@ forbid (principal, action == servicenow::Action::"reset_password", resource)
 unless temporal {
   formerly within 1h (
     servicenow::Action::"verify_identity"::response{
-      input.user_name: context.input.user_name, output.reply: Box::McpReply::"result" }
+      input.user_name: context.input.user_name, output.reply: "result" }
   )
 };
 ```
@@ -220,7 +220,8 @@ Key it on `::response`, and require `output.reply` to be `result`:
 - Over an http server, Box doesn't read the reply, so `output.reply` is always `indeterminate`
   there, and a rule like this one refuses every reset. A budget over `::response` works on both.
 
-Box doesn't record `::error` for an MCP call, and the load refuses a rule that reads one.
+Box doesn't record `::error` for an MCP call, and the load refuses a rule that reads one, or that
+compares `output.reply` with a value other than the five above.
 
 The count carries over when the box restarts. That's also true of a rule written on a tool's own
 action, such as `github::Action::"create_issue"`, as long as the rule only decides tool calls and

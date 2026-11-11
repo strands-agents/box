@@ -1426,7 +1426,7 @@ mod tests {
             forbid(principal, action == demo::Action::"add", resource)
             when {{ context.input.a == 9 }}
             unless temporal {{
-              formerly within 3600s (demo::Action::"add"::response{{ output.reply: Box::McpReply::"result" }})
+              formerly within 3600s (demo::Action::"add"::response{{ output.reply: "result" }})
             }};"#
         ));
         fixture

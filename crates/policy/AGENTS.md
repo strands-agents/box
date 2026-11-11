@@ -114,7 +114,7 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Key a precondition on `::response`, because a `::request` predicate matches a denied attempt.
   Pinned by `tests/temporal_shell_e2e.rs::a_denied_attempt_satisfies_a_request_keyed_precondition`.
 - An MCP tool's `::response` also records a cancelled, cut-off, or unread call, so a precondition
-  on one also requires `output.reply: Box::McpReply::"result"`. Only a stdio reply frame records
+  on one also requires `output.reply: "result"`. Only a stdio reply frame records
   `result`, `tool_error`, or `protocol_error`; the gateway reads no http reply, so every http call
   records `indeterminate` until it does. Pinned by
   `crates/box/.../exchange/tests/protocol_2026_07_28.rs::a_cancelled_call_does_not_satisfy_a_result_precondition`,

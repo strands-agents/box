@@ -203,18 +203,35 @@ pub enum McpReply {
 
 impl McpReply {
     /// The value a JSON-RPC reply to a `tools/call` reports.
+    ///
+    /// Only a `result` that is an object, with an `isError` that is absent or a boolean, is a
+    /// `Result` or a `ToolError`. Any other shape is `Indeterminate`, so it cannot satisfy a
+    /// precondition that requires `result`.
     #[must_use]
     pub fn of_reply(reply: &serde_json::Value) -> Self {
         if reply.get("error").is_some() {
             return Self::ProtocolError;
         }
-        match reply.pointer("/result/isError") {
+        let Some(serde_json::Value::Object(result)) = reply.get("result") else {
+            return Self::Indeterminate;
+        };
+        match result.get("isError") {
+            None | Some(serde_json::Value::Bool(false)) => Self::Result,
             Some(serde_json::Value::Bool(true)) => Self::ToolError,
-            _ => Self::Result,
+            Some(_) => Self::Indeterminate,
         }
     }
 
-    /// The `Box::McpReply` entity id.
+    /// Every value, as a rule spells it on `output.reply`.
+    pub(crate) const VALUES: [&'static str; 5] = [
+        "result",
+        "tool_error",
+        "protocol_error",
+        "cancelled",
+        "indeterminate",
+    ];
+
+    /// The value as `output.reply` records it.
     pub(crate) fn eid(self) -> &'static str {
         match self {
             Self::Result => "result",

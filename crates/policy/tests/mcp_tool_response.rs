@@ -404,7 +404,7 @@ forbid(principal, action == desk::Action::"reset_password", resource)
 unless temporal {
     formerly within 1h (
         desk::Action::"verify_identity"::response{
-            input.user_name: context.input.user_name, output.reply: Box::McpReply::"result" }
+            input.user_name: context.input.user_name, output.reply: "result" }
     )
 };
 "#,
@@ -479,7 +479,45 @@ fn a_reply_frame_classifies_as_result_tool_error_or_protocol_error() {
             json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "x"}}),
             McpReply::ProtocolError,
         ),
+        (json!({"jsonrpc": "2.0", "id": 1}), McpReply::Indeterminate),
+        (
+            json!({"jsonrpc": "2.0", "id": 1, "result": null}),
+            McpReply::Indeterminate,
+        ),
+        (
+            json!({"jsonrpc": "2.0", "id": 1, "result": "done"}),
+            McpReply::Indeterminate,
+        ),
+        (
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"isError": "yes"}}),
+            McpReply::Indeterminate,
+        ),
     ] {
         assert_eq!(McpReply::of_reply(&frame), reply, "{frame}");
+    }
+}
+
+#[test]
+fn a_rule_on_an_output_reply_value_box_never_records_is_refused_at_load() {
+    for (value, loads) in [("result", true), ("resutl", false)] {
+        let policy = format!(
+            r#"{DESK_CALLS}
+forbid(principal, action == desk::Action::"reset_password", resource)
+unless temporal {{ formerly within 1h ( desk::Action::"verify_identity"::response{{ output.reply: "{value}" }} ) }};"#
+        );
+        let directory = tempfile::tempdir().expect("history directory");
+        let opened = PolicyEngine::open_staged(
+            &policy::Operator::unanchored(),
+            vec![source(&policy)],
+            &directory.path().join("dogwood.redb"),
+        );
+        assert_eq!(opened.is_ok(), loads, "{value}");
+        if !loads {
+            let refusal = opened.map(|_| ()).unwrap_err().to_string();
+            assert!(
+                refusal.contains("resutl") && refusal.contains("\"result\""),
+                "{refusal}"
+            );
+        }
     }
 }
