@@ -25,8 +25,10 @@ use tokio::task::{JoinError, JoinSet};
 
 use crate::error::{BoxError, ShellError};
 #[cfg(test)]
-use crate::record::config::limits::DEFAULT_SHELL_TIMEOUT;
-use crate::record::config::limits::SHELL_TIMEOUT_GRACE;
+use crate::record::config::limits::{
+    DEFAULT_SHELL_MAX_INPUT, DEFAULT_SHELL_MAX_OUTPUT, DEFAULT_SHELL_TIMEOUT,
+};
+use crate::record::config::limits::{SHELL_TIMEOUT_GRACE, ShellLimits};
 use crate::record::config::{AuthoritySource, Record};
 use crate::record::layout::BoxRoot;
 use crate::run::broker::invalid_input;
@@ -154,7 +156,7 @@ impl BrokerHost {
         registry: Arc<DiscoveryRegistry>,
         egress: Option<EgressRouting>,
         recorder: Arc<crate::run::telemetry::DecisionRecorder>,
-        host_spawner: Option<strands_shell::os::HostSpawner>,
+        host_spawner: Option<crate::run::hosted::ToolSpawner>,
         mcp_leaf_launcher: Option<Arc<crate::run::hosted::McpLeafLauncher>>,
         protected_sources: &[AuthoritySource],
         commands: Arc<crate::run::commands::ConfiguredCommands>,
@@ -180,7 +182,7 @@ impl BrokerHost {
         // The declared MCP servers, from the same record.
         let declared_mcp = Arc::new(record.mcp.clone());
         let spawn_credentials = record.tool_credential_paths();
-        let command_timeout = record.limits.shell.timeout();
+        let shell_limits = record.limits.shell.clone();
         // Resolved here, where the `BoxRoot` is in hand. `BoxRoot::open` created it.
         let mcp_working_directory = layout.mcp_working_directory();
         let mcp_working_directory_handle = Arc::new(layout.open_mcp_working_directory()?);
@@ -213,7 +215,7 @@ impl BrokerHost {
                     recorder,
                     host_spawner,
                     host_programs,
-                    command_timeout,
+                    shell_limits,
                     &ready_sender,
                     shutdown_receiver,
                 );
@@ -492,9 +494,9 @@ fn host(
     mcp_hosting: McpHosting,
     egress: Option<EgressRouting>,
     recorder: Arc<crate::run::telemetry::DecisionRecorder>,
-    host_spawner: Option<strands_shell::os::HostSpawner>,
+    host_spawner: Option<crate::run::hosted::ToolSpawner>,
     host_programs: strands_shell::os::HostPrograms,
-    command_timeout: Option<Duration>,
+    limits: ShellLimits,
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
     shutdown: oneshot::Receiver<()>,
 ) -> io::Result<()> {
@@ -514,8 +516,12 @@ fn host(
     let local = tokio::task::LocalSet::new();
     local.block_on(&runtime, async move {
         let spec = ShellSpec {
-            command_timeout,
-            request_timeout: command_timeout.map(|timeout| timeout + SHELL_TIMEOUT_GRACE),
+            max_input: limits.max_input(),
+            max_output: limits.max_output(),
+            command_timeout: limits.timeout(),
+            request_timeout: limits
+                .timeout()
+                .map(|timeout| timeout + SHELL_TIMEOUT_GRACE),
             reach,
             policy,
             governed,
@@ -1851,6 +1857,8 @@ done"#;
         }]);
         let mcp_registry = crate::run::broker::mcp::DiscoveryRegistry::testing(&mcp);
         Arc::new(ShellSpec {
+            max_input: DEFAULT_SHELL_MAX_INPUT,
+            max_output: DEFAULT_SHELL_MAX_OUTPUT,
             command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
             request_timeout: Some(SERVE_REQUEST_TIMEOUT),
             reach: Arc::new(
@@ -2100,6 +2108,8 @@ done"#;
         request_timeout: impl Into<Option<Duration>>,
     ) -> Arc<ShellSpec> {
         Arc::new(ShellSpec {
+            max_input: DEFAULT_SHELL_MAX_INPUT,
+            max_output: DEFAULT_SHELL_MAX_OUTPUT,
             command_timeout: command_timeout.into(),
             request_timeout: request_timeout.into(),
             reach: Arc::new(
@@ -2822,6 +2832,58 @@ done"#;
         }));
     }
 
+    #[test]
+    fn raised_input_limits_survive_repeated_calls_on_one_program() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                for (max_input, accepted) in [
+                    (DEFAULT_SHELL_MAX_INPUT, false),
+                    (512 * 1024, true),
+                    (0, true),
+                ] {
+                    let marker = tempfile::tempdir().expect("marker");
+                    let mut spec = connection_spec(marker.path());
+                    let limits = Arc::get_mut(&mut spec).expect("unshared spec");
+                    limits.max_input = max_input;
+                    limits.max_output = 4;
+                    let (_dir, socket) = serving_socket(spec);
+                    let (mut reader, mut writer) = transport(&socket).await;
+                    put(
+                        &mut writer,
+                        1,
+                        Body::Open {
+                            mode: Interpreter::Shell,
+                        },
+                    )
+                    .await;
+
+                    for call in 1..=2 {
+                        put(
+                            &mut writer,
+                            1,
+                            Body::Call {
+                                correlation: Default::default(),
+                                source: format!("printf OK #{}", "x".repeat(300 * 1024)),
+                            },
+                        )
+                        .await;
+                        let (text, status) = collect(&mut reader, 1).await;
+                        if accepted {
+                            assert_eq!(status, 0, "call {call}: {text}");
+                            assert_eq!(text, "OK", "call {call}");
+                        } else {
+                            assert_ne!(status, 0, "call {call}: {text}");
+                            assert!(text.contains("input too large"), "call {call}: {text}");
+                        }
+                    }
+                }
+            })
+            .await
+            .expect("the calls must finish within the test deadline");
+        }));
+    }
+
     /// A Program keeps its state across Calls on one connection.
     #[test]
     fn a_program_keeps_its_state_across_calls() {
@@ -3492,6 +3554,8 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                     .expect("the registry starts");
             let registry = discovery.registry();
             let spec = Arc::new(ShellSpec {
+                max_input: DEFAULT_SHELL_MAX_INPUT,
+                max_output: DEFAULT_SHELL_MAX_OUTPUT,
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
@@ -3807,6 +3871,8 @@ done"#,
                 crate::run::broker::mcp::DiscoveryRegistryHost::start(&mcp, Arc::clone(&policy))
                     .expect("the registry starts");
             let spec = Arc::new(ShellSpec {
+                max_input: DEFAULT_SHELL_MAX_INPUT,
+                max_output: DEFAULT_SHELL_MAX_OUTPUT,
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
@@ -3965,6 +4031,8 @@ done"#;
                 crate::run::broker::mcp::DiscoveryRegistryHost::start(&mcp, Arc::clone(&policy))
                     .expect("the registry starts");
             let spec = Arc::new(ShellSpec {
+                max_input: DEFAULT_SHELL_MAX_INPUT,
+                max_output: DEFAULT_SHELL_MAX_OUTPUT,
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(

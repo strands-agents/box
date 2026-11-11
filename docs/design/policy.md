@@ -134,6 +134,19 @@ three kinds of event:
 - `::response` for an operation that happened, or may have happened.
 - `::error` for an operation that definitely didn't happen.
 
+An MCP call records only `::response`, both as `mcp:call` and, for a `tools/call` a per-tool action
+decided, as that tool's action with the request's `input`. A completed call is a response whatever
+the server replied, and so is a cancelled or uncertain one, so a budget over responses can't be
+escaped by making calls fail. The tool's response carries `output.reply`, a string that says how the
+call ended, so a precondition can require `result` and exclude a failed or abandoned call. Only a
+stdio reply frame records `result`, `tool_error`, or `protocol_error`. The gateway reads no http
+reply, and a streamed reply sends its status before the tool's result, so an http call records
+`indeterminate`. The load refuses a rule that reads an MCP `::error`, or an `output.reply` value Box
+never records. `output.reply` is a string rather than a Box enum type because each MCP server's
+generated schema is stored in the history, and the previous release validates it against its own Box
+schema at startup; a new Box type there would make it drop the schema and reset every per-tool
+rule's history.
+
 For an MCP command with [argument wildcards](../user/mcp.md#argument-wildcards) enabled, the
 `shell:spawn` request records the alias name and effective launch arguments, including the received
 values in the `*` positions. The `program_path` field identifies the resolved executable file.
@@ -165,6 +178,24 @@ A filesystem rename also has separate checks for its source, source contents, de
 Each recorded outcome uses its own check's token. A check that records no outcome remains request-only.
 Existing events without identifiers remain unchanged; their other facts and recovered monitor state remain available.
 Those events cannot satisfy a predicate that requires `requestId`, because the missing association cannot be reconstructed.
+
+On `shell:exec`, `input.cwd` names the Shell's working directory. For programs launched through
+Strands Shell, Box selects the launch directory before the `shell:spawn` decision. The selected
+`[tool.<name>]` or `[agent]` table's `workspace` takes precedence. Otherwise, Box uses the caller's
+resolved directory inside the agent's workspace or the selected table's `read`, `write`, `list`,
+and `metadata` trees. Box uses the agent's workspace for other caller directories.
+
+Both actions use `~` for the operator's home and `~/…` for a directory below it. A directory outside
+that home stays absolute. The decision, request event, and outcome event use the same spelling.
+For `shell:spawn`, Box uses the selected absolute directory to start the program. A tool grammar maps
+a command line to a policy action for that tool. For programs launched through Strands Shell, that
+action uses the same selected launch directory, with an absolute `cwd` in decisions and history.
+
+If Box cannot select or resolve a directory for a Strands Shell launch, policy checks the Shell's
+original directory. The command then follows its existing dispatch and failure path. Before that
+program starts, Box checks that its launch directory matches the absolute directory retained from
+the policy check.
+The caller's Shell keeps its own working directory.
 
 Each caller fills in the outcome from what it saw. A filesystem response carries `output.result` as
 `completed`, `descriptor_issued`, or `indeterminate`, so a rule that counts certain completions can
@@ -227,6 +258,10 @@ stops a restart from resetting a budget. The history follows these rules:
 - The engine checkpoints as events accumulate and removes events outside the longest window. This
   bounds the file size by the window rather than the box's lifetime.
 
+Recovery preserves each event's path spelling. Older shell events can carry an absolute `cwd` below
+the operator's home. A temporal predicate on `~/project` does not match those events. Box does not
+translate those stored values.
+
 History is not an audit record and has no tamper evidence. It cannot be rewound or shared by boxes.
 The operation and its recorded outcome do not commit together. If the process stops between them,
 the history omits that outcome and a `::response` count is too low.
@@ -260,18 +295,20 @@ every rule it can prove will never match. See [a rule that can't fire is refused
 load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns). It also
 refuses a rule that reads `context.input` under actions of more than one family, or under no action,
 because a field means what the action makes it mean. See [a rule that reads the input names one
-action family](decisions.md#a-rule-that-reads-the-input-names-one-action-family).
+action family](decisions.md#a-rule-that-reads-the-input-names-one-action-family). It also refuses a
+temporal predicate on `mcp:call::error` or a per-tool `::error`, because an MCP call records only
+`::response`.
 
 The `run` verb validates the policy before it writes any box state. A box with no local MCP server
 validates against the complete action schema, and that check accepts and refuses exactly what the
 later load does, so a policy that passes it loads at the next run.
 
 A box with a local MCP server can finish the check only after the server reports its tools. Up
-front, `run` checks syntax, macro expansion, provider use, and the action family of each rule that
-reads `context.input`. The per-tool actions don't exist until a server reports its tools, so `run`
-stages each server's schema as it arrives and validates the whole policy once more when every server
-has reported. Until then a tool call for that server is denied without reaching the engine. See
-[discovery serves the schema-independent
+front, `run` checks syntax, macro expansion, provider use, MCP `::error` predicates, and the action
+family of each rule that reads `context.input`. The per-tool actions don't exist until a server
+reports its tools, so `run` stages each server's schema as it arrives and validates the whole policy
+once more when every server has reported. Until then a tool call for that server is denied without
+reaching the engine. See [discovery serves the schema-independent
 subset](decisions.md#discovery-serves-the-schema-independent-subset). A rule that names only tool
 grammar `Tool::<name>` actions doesn't wait for a server: the grammar's actions are in the schema
 from the start, so the rule loads at once or the box refuses it. If policy refuses a server's tool
@@ -316,6 +353,8 @@ The inert-rule check sorts each rule into one of three classes:
   A rule waiting for an MCP server's schema goes through the same checks when Box stages the schema.
   If the rule is provably inert, Box refuses the schema. Holding the rule for a later schema cannot
   make it match.
+  The path checks include `cwd` on `shell:exec` and `shell:spawn`: an absolute literal below the
+  operator's home must use `~/…` instead.
 
   The `ip` refusal is a check of Box's own, ahead of strict validation, and prevents a rule from
   loading without effect. `net:connect` carries `ip4` and `ip6` and no `ip`, so `context.input has

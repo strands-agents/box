@@ -88,7 +88,10 @@ which requests are governed.
 the execution timeout for each submitted Strands Shell call. The default is 30 seconds.
 For ten minutes, set `shell.timeout = 600`; for unlimited execution, set `shell.timeout = false`.
 The nested table `[limits.shell]` accepts the same values under `timeout`.
-Invalid or unrepresentable durations are load errors. Python retains its existing limits.
+`shell.max_input` and `shell.max_output` accept nonnegative integer byte counts, with defaults
+of 262144 and 65536. Shell applies the output limit to both output buffers and source-file reads.
+Set either size to `0` to disable that Shell limit, or omit it to keep its default.
+Invalid or unrepresentable durations and sizes are load errors. Python retains its existing limits.
 See [execution limits](../../docs/user/config.md#limits).
 
 **`[agent]` and each `[tool.<label>]` hold the same four fields.** `[agent]` is the process the
@@ -330,7 +333,9 @@ secret.ref   = "aws://prod"
 |---|---|---|
 | `destinations` | required | One or more destinations this secret is attached at. Each is an exact host, a `*.` suffix wildcard, an explicit `:port`, and a path prefix or `/*suffix`. Not a regex. |
 | `protocol` | `http` | What the destination speaks. `mcp` makes the gateway parse JSON-RPC frames and raise `mcp:call`; `http` is an ordinary request. |
-| `secret.ref` | required | `env://NAME` or `aws://profile`. No other scheme. An `aws://` profile must carry **static keys**; see below. |
+| `secret.ref` | required unless a backend is declared | `env://NAME`, `aws://profile` (static keys), or a bare `aws://` (the AWS default credential chain). No other scheme. See below. Beside a backend it must be `env://`, and it is phantom-only: the box provisions the placeholder and strips it, and never injects the real destination credential (the backend handles the destination's auth). |
+| `backends.url` | — | A single backend this destination re-routes to, as `scheme://host[:port][/prefix]` (`https` or `http`; a path prefix is allowed, a query or fragment is not). Box dials the backend, presents the backend host (SNI, certificate, and `Host`), prepends the `url`'s path prefix to the agent's path, and keeps the original destination and path in policy and audit. At most one. |
+| `backends.auth.ref` | — | `env://NAME` for the backend's own token. The box attaches it (no phantom; it takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `inject` or `phantom_prefix`). A signed (`aws://` or `credsd://`) auth is refused, and an auth needs an `https` backend. |
 | `secret.placement` | `header` | Where the credential lands: `header`, `basic_auth`, or `query_param`. |
 | `secret.header` | `Authorization` | The header the credential is attached under. `header` placement only. |
 | `secret.prefix` | `Bearer ` for `Authorization`, else empty | Literal text prepended to the credential in the header value. `header` placement only, and carries no braces. |
@@ -362,17 +367,22 @@ every phantom and every signing placeholder the box provisions. No table selects
 every process shares one gateway and the gateway cannot tell which process made a call. The box is
 the credential boundary: if a process must not get a credential, put it in another box.
 
-An `aws://` credential is a **signed route**. The box resolves the profile on the trusted side and
+An `aws://` credential is a **signed route**. The box resolves the identity on the trusted side and
 signs each request, so the workload holds no credential at all. It receives placeholder AWS
 credentials, and the signed leg strips whatever it signed with before signing again.
 
-**An `aws://` profile must carry static keys.** `credential_process` is **refused**, and the refusal
-names the command it would have run. Honouring it means the trusted `run` process executes a program named by
-`~/.aws/config`, outside containment and at the operator's uid. No floor defends that file, so a policy
-permitting writes across the home would turn an agent write into trusted-process code execution.
+**`aws://PROFILE` must carry static keys.** For a named profile, `credential_process` is **refused**,
+and the refusal names the command it would have run; a profile that assumes a role or uses SSO is
+refused too, because resolving one needs an STS call. Export `AWS_BEARER_TOKEN_BEDROCK` and bind
+that instead.
 
-A profile that assumes a role or uses SSO is refused too. Resolving one needs an HTTP call to STS, and
-the credentials crate carries no HTTP client. Export `AWS_BEARER_TOKEN_BEDROCK` and bind that instead.
+**A bare `aws://` (no profile) resolves the AWS SDK default credential provider chain** — the host's
+ambient identity — and the box warns on every signed request. Because that chain reads
+`credential_process`, which the trusted process runs outside containment, a bare `aws://` is a
+remote-code-execution path when the workload can write `~/.aws`; the shipped box has no setting that
+refuses the bare form. See
+[the egress guide](../../docs/user/egress.md#credential-sources) for the chain, the warning, and the
+`~/.aws` rule.
 
 **Only `env://` and `aws://` are accepted**, and the config load refuses the rest by
 name.
@@ -416,6 +426,12 @@ Refused, each at startup with the destination named:
 | `secret.header = "X-Bad: injected"` | An HTTP field name is a token (RFC 7230 §3.2.6). |
 | `heder = "x-api-key"` | An unknown key is a load error, not a silent drop. |
 | Two entries whose destinations overlap | Such a request has no unambiguous credential. Checked by overlap, not string equality. |
+| A signed (`aws://`/`credsd://`) `secret` beside a backend | A re-routed destination secret is phantom-only, so it must be `env://`; a signed secret mints no phantom to strip. |
+| Two `[[egress.x.backends]]` tables | At most one backend per destination in this version. |
+| A backend `url` with a query or fragment | A backend is an origin plus an optional path prefix; merging a query or sending a fragment is request rewriting. |
+| A backend entry whose destination is not one exact host (a path, a wildcard, or several destinations) | A re-route is matched per connection (host and port), and the box presents the backend host on the wire, so anything but one exact host would bypass the backend or reach it with the agent's host lost. |
+| A signed (`aws://`/`credsd://`) `backends.auth` | A re-route rewrites the `Host`, which invalidates a SigV4 signature. |
+| A `backends.auth` on an `http` backend | A credential does not ride a plaintext upstream. |
 
 `destinations = ["*.example.com"]` and `destinations = ["api.example.com/v1"]` are
 **accepted**. Both narrow which requests carry the credential, and neither makes a

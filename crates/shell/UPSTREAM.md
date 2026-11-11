@@ -17,6 +17,52 @@ constraint is held at 15, which shares the workspace's `unicode-width` version.
 
 ## Local divergence from the pinned revision
 
+### Backport: enforce the submitted input limit for multiline commands
+
+The guard matches [strands-agents/shell#178](https://github.com/strands-agents/shell/pull/178),
+merged on 2026-10-27 as `cff867ba10310b42fb4af135b999defc4ed78c6a`.
+The pinned revision predates that fix.
+
+`exec::execute` selected `execute_sourced` for input containing a newline, which skipped the
+`max_input` check in `execute_admitted_line`. Thus an oversized submission ran when it ended in
+a newline, while the same text without that newline was refused. This is an upstream limit
+enforcement bug.
+
+`execute` now checks the full input before choosing the evaluator. Its EXIT-trap handling remains
+after the result, and direct calls to `execute_with_reader` retain their check. Files loaded by
+`source` still use `max_output`; this change adds no `max_input` check to `execute_sourced`.
+`builder_max_input` covers single-line, trailing-newline, and multiline submissions at the limit,
+one byte over it, and with the existing `0` unlimited value. The trailing-newline assertion fails
+without the fix.
+
+### Local addition: bind a host spawn to its checked directory (2026-11-04)
+
+An embedding can select a program's launch directory independently of the caller's Shell directory.
+The effect permit previously carried no launch directory to dispatch. That left the embedding to
+check one directory and execute in another. This is a generic gap in Shell's admission contract.
+Box selects the tool and checks policy. Shell owns the path from admission to dispatch.
+
+The operator approved the default `EffectPermit::spawn_working_directory()` method and
+checked-directory transport on 2026-11-04 after the design review. Its default returns `None`, so
+existing permit implementations keep the caller's directory. An interceptor that selects another
+directory checks that directory before it returns it on the permit.
+
+Shell reads the accessor once and retains a copy in `CommandPermit`, beside the admitted
+`HostProgram`. Shell refuses a relative directory before dispatch. Shell passes that directory
+to `spawn_host_program` with the program. Dispatch changes only the child process directory.
+The parent Shell keeps its directory. Shell admits every program in a pipeline before any stage
+runs.
+
+Box selects and resolves the launch directory before policy checks `ShellSpawn`. Ordinary
+`shell:spawn` actions keep home-relative spelling. Tool grammar actions keep absolute spelling.
+If selection or resolution fails, Box checks the caller's original directory and retains its
+absolute path. A command-not-found failure keeps status `127`. A launch failure keeps status `126`.
+
+Before execution, Box compares the translated launch directory with the retained checked path and
+refuses a mismatch. This binds the checked directory path to dispatch. It does not pin the
+directory's filesystem identity. The change preserves stored-record and broker-protocol shapes, so
+it requires no version bump.
+
 ### Local addition: an embedder can disable the execution timeout
 
 `ShellBuilder::disable_timeout()` selects the engine's existing no-deadline mode. The builder

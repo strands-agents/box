@@ -411,13 +411,13 @@ fn refuse(proc: &mut Process, error: &std::io::Error) -> i32 {
 /// - **The environment is the Shell's own**, which the box composed. It is not the daemon's:
 ///   the daemon's environment holds the operator's real `env://` secrets, and a passthrough
 ///   binary must not inherit them.
-/// - **The working directory is the Shell's**, so a relative argument means what the decision's
-///   `cwd` said it meant.
+/// - **The working directory is the admission's**, or the Shell's when its permit supplies none.
 async fn spawn_host_program(
     os: &Mediated,
     name: &str,
     args: &[String],
     admitted: Option<HostProgram>,
+    working_directory: Option<std::path::PathBuf>,
 ) -> Option<i32> {
     let proc = CURRENT_PROCESS.with(|p| p.borrow().fork());
     // The identity the decision bound, carried rather than resolved again, beside the spelling the
@@ -432,7 +432,7 @@ async fn spawn_host_program(
         program: program.path.into(),
         invoked: program.spelling.into(),
         args: args.to_vec(),
-        cwd: proc.cwd.clone(),
+        cwd: working_directory.unwrap_or_else(|| proc.cwd.clone()),
         env: proc
             .env
             .iter()
@@ -546,7 +546,10 @@ async fn report_stage(permit: Option<CommandPermit>, proc: &mut Process, status:
 /// `find -exec`, `xargs`, the MCP `exec_shell` tool, the REPL, `sh <file>`, `source`, and a
 /// trap body.
 pub async fn execute(os: Arc<Mediated>, proc: &mut Process, input: &str) -> (i32, bool) {
-    let result = if input.contains('\n') {
+    let result = if proc.max_input > 0 && input.len() > proc.max_input {
+        proc.err_msg("strands-shell: input too large");
+        (1, false)
+    } else if input.contains('\n') {
         execute_sourced(os.clone(), proc, input, None).await
     } else {
         execute_with_reader(os.clone(), proc, input, &mut |_| None).await
@@ -3858,6 +3861,11 @@ async fn run_pipeline(
                 .get(i)
                 .and_then(Option::as_ref)
                 .and_then(|permit| permit.spawn_program().cloned());
+            let admitted_directory = permits.get(i).and_then(Option::as_ref).and_then(|permit| {
+                permit
+                    .spawn_working_directory()
+                    .map(std::path::Path::to_path_buf)
+            });
             handles.push((
                 i,
                 tokio::task::spawn_local(CURRENT_KERNEL.scope(
@@ -3891,6 +3899,7 @@ async fn run_pipeline(
                                 &name,
                                 &args,
                                 admitted_program,
+                                admitted_directory,
                             )
                             .await
                             {

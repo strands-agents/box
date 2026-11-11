@@ -2552,3 +2552,35 @@ fn a_tool_precondition_met_in_one_run_holds_in_the_next() {
         second_run[0]
     );
 }
+
+/// A one-call limit counted over the tool's own `::response` refuses the second call.
+#[test]
+fn a_limit_over_a_tools_own_response_refuses_the_next_call() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = RuntimeMcpBox::new("mcp-tool-response-limit");
+    let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready);
+    box_.install_server(&alpha);
+    let policy = format!(
+        "{}\n@id(\"one_read\")\n\
+         forbid (principal, action == alpha::Action::\"read\", resource)\n\
+         when temporal {{ formerly within 1h ( alpha::Action::\"read\"::response{{ input.value: \"first\" }} ) }};",
+        mcp_call_policy_for("alpha")
+    );
+    box_.write_workspace(&policy, &[alpha], BLOCKING_WORKLOAD);
+
+    let replies = run_and_call(&box_, &["first", "second"]);
+    assert!(replies[0].get("error").is_none(), "{}", replies[0]);
+    assert_eq!(
+        error_code(&replies[1]),
+        Some(-32001),
+        "the finished first call is recorded under the tool's own action: {}",
+        replies[1]
+    );
+    assert_eq!(
+        box_.call_count("alpha-mcp"),
+        1,
+        "the refused call never reached the server"
+    );
+}

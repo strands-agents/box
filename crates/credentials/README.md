@@ -100,7 +100,8 @@ returned secret and its lifetime.
 | `env://NAME` | A process environment variable. A nine-name denylist refuses `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN`, `AWS_CREDENTIAL_EXPIRATION`, `AWS_PROFILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `LD_PRELOAD`, and `LD_LIBRARY_PATH`, case-insensitively. | soft when the variable is unset |
 | `file:///path` | File contents, trailing newline stripped. | soft when the file is missing or unreadable |
 | `op://vault/item/field` | The authenticated 1Password CLI. | hard: `op read` returns one exit code for missing, locked, and signed-out, so there is no "absent" signal to trust |
-| `aws://profile` | Structured AWS session credentials for SigV4 signing. Not a single secret, so `Backend::resolve` rejects it. | hard |
+| `aws://profile` | Structured AWS session credentials for SigV4 signing, from the named profile's static keys. Not a single secret, so `Backend::resolve` rejects it. | hard |
+| `aws://` (no profile) | Structured AWS session credentials from the AWS SDK default credential provider chain (the host's ambient identity), driven on a worker thread and cached. Not a single secret, so `Backend::resolve` rejects it. | hard |
 
 A soft outcome means the vault comes up and the route appears in `skipped()`. A hard one aborts
 the open. A present value is always judged on content, so an empty, whitespace-only, non-UTF-8,

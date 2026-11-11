@@ -38,13 +38,14 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `Finding`, `Location`, `PolicyCheck`, `RuleRef`, `Decision`, `DenyReason`, `PolicyAttribution`,
   `RuleId`, `event_schema_source`, `PolicyDiagnostic`, `PolicyError`, `PolicyStagingError`,
   `McpSchemaError`, `compose_action_schema`, `generate_mcp_schema`,
-  `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `Outcome`,
-  `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`, `EffectivePolicy`, `Policy`,
-  `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`, `FsOperation`, `Principal`,
-  `Request`, `RequestId`, `GovernedBox`, `Operator`, `PolicyWarning`, `ToolGrammar`, `ToolGrammars`,
-  `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`, `HistoryFlusher`,
-  `HistoryFlushSnapshot`. That is 60 names with `--all-features` and 52 by default; recompute
-  it when you touch the façade. The two history-flush types require `experimental-idle-flush`.
+  `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `McpReply`,
+  `Outcome`, `PendingToolResponse`, `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`,
+  `EffectivePolicy`, `Policy`, `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`,
+  `FsOperation`, `Principal`, `Request`, `RequestId`, `GovernedBox`, `Operator`, `PolicyWarning`,
+  `ToolGrammar`, `ToolGrammars`, `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`,
+  `HistoryFlusher`, `HistoryFlushSnapshot`. That is 62 names with `--all-features` and 54 by
+  default; recompute it when you touch the façade. The two history-flush types require
+  `experimental-idle-flush`.
 - `check` and `validate` share one composition (`check_and_expand`), and the staged check repeats
   the steps of `open_staged_with_engine` with no engine. A finding keeps a span only when the span
   is an offset into the authored text: a Dogwood parse error and a Cedar validation error over
@@ -114,6 +115,13 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   Do not reintroduce a group action.
 - Key a precondition on `::response`, because a `::request` predicate matches a denied attempt.
   Pinned by `tests/temporal_shell_e2e.rs::a_denied_attempt_satisfies_a_request_keyed_precondition`.
+- An MCP tool's `::response` also records a cancelled, cut-off, or unread call, so a precondition
+  on one also requires `output.reply: "result"`. Only a stdio reply frame records
+  `result`, `tool_error`, or `protocol_error`; the gateway reads no http reply, so every http call
+  records `indeterminate` until it does. Pinned by
+  `crates/box/.../exchange/tests/protocol_2026_07_28.rs::a_cancelled_call_does_not_satisfy_a_result_precondition`,
+  `::an_error_reply_does_not_satisfy_a_result_precondition`, and
+  `adapters/egress.rs::a_remote_tool_call_never_satisfies_a_result_precondition`.
 - History is pruned to the deepest window, and the workload fills that window. State an
   availability bound.
 - Pin a destination on `host` and `port`, and refuse an address with a `forbid` on the string `ip4`
