@@ -1,7 +1,7 @@
 use std::process::Command;
 
 use strands_det_harness::mcp_fixture::{box_sibling, place_server, server_dir};
-use strands_det_harness::{BoxFixture, Platform, RunResult, det_case};
+use strands_det_harness::{BoxFixture, RunResult, det_case};
 
 // The native-egress downgrade is auditable: once a `[mcp.<name>.network] contain_egress = false`
 // server starts, the box writes one `egress:native` decision naming it to its telemetry,
@@ -24,7 +24,7 @@ fn with_fetch_server(config: String, native: bool) -> String {
     if native {
         tables.push_str("[mcp.fetch.network]\ncontain_egress = false\n");
     }
-    if Platform::current() == Platform::Macos {
+    {
         let dir = quote(&server_dir().display().to_string());
         tables.push_str(&format!("[mcp.fetch.filesystem]\nread = [{dir}]\n"));
     }

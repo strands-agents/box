@@ -284,3 +284,8 @@ and `.decisions()` for anything the assertions do not cover.
   the default file. A case that declares a target therefore takes the NATIVE route and
   invokes the `zsh` alias itself, then proves entry with `Journal::assert_mediated_entry` on
   the declared file. TL-F-04 and TL-F-05 both do this, and say so.
+
+The MCP server fixtures use a test-owned directory under `DET_BOX_ROOT`.
+The harness adds that directory to the operator PATH and grants each server read access.
+No fixture installation under `/usr/bin` or privileged preparation is required.
+The suite removes the directory with its other fixtures after the run.

@@ -113,11 +113,11 @@ fn with_fetch_server(config: String, b: &BoxFixture, native: bool, control: &Pat
     }
     let control = quote(&control.display().to_string());
     tables.push_str(&format!("[mcp.fetch.filesystem]\nwrite = [{control}]\n"));
-    if Platform::current() == Platform::Macos {
-        let dir = quote(&server_dir().display().to_string());
-        tables.push_str(&format!("read = [{dir}]\n"));
+    let dir = quote(&server_dir().display().to_string());
+    if Platform::current() == Platform::Linux {
+        tables.push_str(&format!("read = [{dir}, {control}]\n"));
     } else {
-        tables.push_str(&format!("read = [{control}]\n"));
+        tables.push_str(&format!("read = [{dir}]\n"));
     }
     config + &tables
 }
