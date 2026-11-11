@@ -78,6 +78,9 @@ const LEAF_OVERLAY: &str = "{{LEAF_OVERLAY}}";
 /// The `mDNSResponder` socket that `getaddrinfo` connects to.
 const SYSTEM_RESOLVER: &str = "/private/var/run/mDNSResponder";
 
+/// The services Apple's certificate trust evaluation asks, granted to native egress alone.
+const TRUST_SERVICES: [&str; 2] = ["com.apple.trustd.agent", "com.apple.SecurityServer"];
+
 /// The `file-write*` leaves a write root grants, and the set every overriding deny must also name.
 pub(crate) const WRITE_ROOT_LEAVES: [&str; 6] = [
     "file-write-data",
@@ -866,6 +869,16 @@ pub(crate) fn render_profile_with_streams(
                 "(allow network-outbound\n    (remote ip \"*:*\"))\n\
                  (allow network-outbound\n    (literal \"{SYSTEM_RESOLVER}\"))\n"
             ));
+            // The system's certificate check, which a direct connection meets the real server
+            // with. Through the gateway these add nothing: the gateway's CA is not in the keychain.
+            for service in TRUST_SERVICES {
+                cells
+                    .entry(RUNTIME_SERVICES)
+                    .or_default()
+                    .push_str(&format!(
+                        "(allow mach-lookup (global-name \"{service}\"))\n"
+                    ));
+            }
         }
         Network::Blocked => {}
     }
@@ -1658,6 +1671,48 @@ mod tests {
             leaf.contains(&literal),
             "the leaf keeps the enumerated literal (broad exec is additive): {leaf}"
         );
+    }
+
+    /// **Native egress, and only native egress, reaches the system's certificate check.** The same
+    /// leaf renders `com.apple.trustd.agent` and `com.apple.SecurityServer` with `AllowAll` and
+    /// neither through the gateway's localhost port.
+    #[test]
+    fn the_trust_services_render_only_with_native_egress() {
+        let home = tempfile::tempdir().expect("an operator home");
+        let home_path = home.path().canonicalize().expect("the home resolves");
+        let program = home_path.join("tool");
+        std::fs::write(&program, "tool").expect("an executable fixture");
+        let leaf = |network: Network| {
+            let config = ContainmentConfig::new()
+                .set_network(network)
+                .expect("the network")
+                .anchored_at(&home_path)
+                .allow(&program, Operation::Exec, Scope::File)
+                .expect("an executable")
+                .allow_runtime_services()
+                .allow_broad_exec();
+            render_profile(&config).expect("the leaf profile renders")
+        };
+        let rules: Vec<String> = TRUST_SERVICES
+            .iter()
+            .map(|service| format!("(allow mach-lookup (global-name \"{service}\"))"))
+            .collect();
+
+        let native = leaf(Network::AllowAll);
+        for rule in &rules {
+            assert_eq!(
+                native.matches(rule.as_str()).count(),
+                1,
+                "native egress renders {rule} once: {native}"
+            );
+        }
+        let gateway = leaf(Network::localhost().connect(33085));
+        for rule in &rules {
+            assert!(
+                !gateway.contains(rule.as_str()),
+                "gateway egress renders no {rule}: {gateway}"
+            );
+        }
     }
 
     /// **The map-exec allow is additive and wins by last-match.** The write cell's

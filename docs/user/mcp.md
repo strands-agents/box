@@ -288,7 +288,7 @@ A grant in this table is direct access, outside every `fs:*` decision.
 | Value | The server's own connections |
 |---|---|
 | `true` | Go through the egress gateway. The box sets `HTTPS_PROXY` for the server. Policy decides each `net:connect` and `http:request`, the gateway attaches credentials, and the decision log records each one. |
-| `false` | Can connect directly, outside gateway policy. Direct connections receive no gateway credential. The decision log records an `egress:native` entry when the server starts. |
+| `false` | Can connect directly, outside gateway policy. The box sets no proxy variable and no gateway CA, so the server checks the real certificate. Direct connections receive no gateway credential. The decision log records an `egress:native` entry when the server starts. |
 
 On Linux, `false` permits direct IPv4 connections through the surrounding OS. This includes
 reachable private networks, loopback services, and instance metadata endpoints.

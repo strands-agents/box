@@ -755,6 +755,15 @@ by reading `src/` belongs in `src/` — the README describes the shape.
     Adding one `(allow mach-lookup)` line let the inherited bootstrap right reach
     `com.apple.pasteboard.1`, `com.apple.system.notification_center`, and `com.apple.SecurityServer`
     with a live port. The uncontained control reaches all three, which is what attributes the refusal.
+  - **Apple's certificate check needs `com.apple.trustd.agent`, and Secure Transport also needs
+    `com.apple.SecurityServer`.** Measured on macOS 26 arm64 against `api.github.com`: with both
+    denied, Go 1.26, Go 1.27 with a 1.26 `go.mod`, and `reqwest` 0.13 with
+    `rustls-platform-verifier` fail with `OSStatus -26276`, and `native-tls` fails with `-9808`.
+    trustd alone fixes the first three, and SecurityServer fixes `native-tls`. A login-keychain
+    generic password stayed unreadable through `/usr/bin/security` with both allowed, because the
+    profile refuses the keychain files. Data-protection and iCloud items were not measured; `secd`
+    stays denied. Only `Network::AllowAll` renders the two, by
+    `the_trust_services_render_only_with_native_egress`.
   - **`TIOCSTI` on the inherited PTY slave is refused by the *platform*, not by the profile.** The
     uncontained control measured the same `EPERM`, so the `file-ioctl` grant is not what closes it.
     Re-measure with the control if a macOS release changes this; a restored `TIOCSTI` would be a write

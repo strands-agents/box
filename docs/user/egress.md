@@ -12,6 +12,14 @@ A tool or local MCP server with `network.contain_egress = false` can connect dir
 gateway policy. On Linux, this includes IPv4 access to reachable private networks, loopback
 services, and instance metadata endpoints. See [server network settings](./mcp.md#network).
 
+Such a program gets no proxy variables and no gateway CA, so it verifies the real server's
+certificate. On macOS, Box sets `SSL_CERT_FILE` to the system bundle, `/private/etc/ssl/cert.pem`,
+and lets the program ask the system's certificate services (`trustd` and `SecurityServer`). Keychain
+files stay unreadable. On Linux, the program uses its own default bundle; if that bundle is a link
+outside `/etc/ssl`, such as into `/etc/pki`, add a `read` entry for it. The startup report shows a
+`native trust:` line for the program. See
+[a native-egress process trusts the system's roots](../design/decisions.md#a-native-egress-process-trusts-the-systems-roots).
+
 ## Example
 
 A bearer token for GitHub, and an AWS profile for Bedrock:

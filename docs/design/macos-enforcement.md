@@ -84,6 +84,8 @@ Strands Shell, Monty, or a configured MCP server. Box permits the agent to conta
 
 A local MCP server can have `[mcp.<name>.network].contain_egress = false`. This selects [native egress](decisions.md#native-egress-is-an-operator-declared-leaf-escape), which bypasses the gateway and its network policy checks. A declared tool can have the same `[tool.<name>.network].contain_egress = false`. The agent's declaration refuses it.
 
+A native-egress profile also allows `(allow mach-lookup (global-name "com.apple.trustd.agent"))` and `(allow mach-lookup (global-name "com.apple.SecurityServer"))`, the services Apple's certificate check asks, and Box sets `SSL_CERT_FILE` to `/private/etc/ssl/cert.pem`. A gateway profile and the agent get neither service. `SecurityServer` also serves the keychain: a login-keychain generic password stayed unreadable with both services allowed, because the profile refuses the keychain files. Data-protection and iCloud keychain items were not tested, and their service, `secd`, stays denied. See [a native-egress process trusts the system's roots](decisions.md#a-native-egress-process-trusts-the-systems-roots).
+
 <a id="how-a-leaf-boxs-profile-differs"></a>
 ### How the profile for a tool or local MCP server differs
 
