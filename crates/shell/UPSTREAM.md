@@ -46,15 +46,15 @@ After the fix, it runs as `printf '<%s>\n' first second` and returns exit status
 ```
 
 The source executor now collects continued lines before executing commands or reading heredocs.
-The lexer omits words emptied by continuation removal while preserving quoted empty arguments
-and end-of-input escape handling. Alias expansion handles empty replacements without cursor
-underflow.
+The lexer omits words emptied by continuation removal and retains quoted empty words as tokens.
+End-of-input escape handling is unchanged. Alias expansion handles empty replacements without
+cursor underflow.
 
 `line_continuations_join_source_lines`, `line_continuations_do_not_create_words`, and
 `line_continuations_preserve_quoting_and_input_boundaries` cover execution, argument boundaries,
 quoting, heredocs, aliases, and end of input.
 
-Existing limitations remain: quoted empty parameter expansions can lose arguments, large source
+Existing limitations remain: some quoted empty arguments are lost during execution, large source
 statements incur repeated parsing, and continuations within operators or variable names are
 unsupported.
 
