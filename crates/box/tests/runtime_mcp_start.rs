@@ -78,6 +78,62 @@ fn assert_start_refused(box_: &RuntimeMcpBox, program: &str, rule: Option<&str>)
     );
 }
 
+fn log_records(text: &str, scope_name: &str) -> Vec<serde_json::Value> {
+    let mut records = Vec::new();
+    for line in text.lines() {
+        let payload: serde_json::Value = serde_json::from_str(line).expect("telemetry JSON");
+        for resource in payload["resourceLogs"].as_array().into_iter().flatten() {
+            for scope in resource["scopeLogs"].as_array().into_iter().flatten() {
+                if scope["scope"]["name"] == scope_name {
+                    records.extend(
+                        scope["logRecords"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .cloned(),
+                    );
+                }
+            }
+        }
+    }
+    records
+}
+
+fn attribute<'a>(record: &'a serde_json::Value, key: &str) -> Option<&'a serde_json::Value> {
+    record["attributes"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["key"] == key)
+        .map(|entry| &entry["value"])
+}
+
+fn unmatched_diagnostic(text: &str, program: &str) -> serde_json::Value {
+    assert!(!text.contains("enforcement:mcp-unmatched"), "{text}");
+    let records = log_records(text, "strands-box.mcp");
+    assert_eq!(records.len(), 1, "{text}");
+    let record = records.into_iter().next().unwrap();
+    assert_eq!(record["eventName"], "strands.box.mcp.unmatched", "{record}");
+    assert_eq!(
+        attribute(&record, "process.command"),
+        Some(&json!({"stringValue": program})),
+        "{record}"
+    );
+    assert!(
+        record["attributes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| !entry["key"]
+                .as_str()
+                .unwrap()
+                .starts_with("strands.box.policy.")),
+        "{record}"
+    );
+    assert_ne!(record["severityText"], "deny", "{record}");
+    assert_ne!(record["severityText"], "permit", "{record}");
+    record
+}
+
 #[test]
 fn absent_start_permit_refuses_the_server_and_it_never_runs() {
     if !fixture::namespace_launcher_is_usable() {
@@ -96,6 +152,26 @@ fn absent_start_permit_refuses_the_server_and_it_never_runs() {
     box_.release_workload();
     let output = run.wait(SHUTDOWN);
     assert!(output.status.success(), "{output:?}");
+    let records =
+        std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl")).unwrap();
+    assert!(
+        log_records(&records, "strands-box.policy")
+            .iter()
+            .any(|record| {
+                attribute(record, "strands.box.policy.action")
+                    == Some(&json!({"stringValue": "shell:spawn"}))
+                    && attribute(record, "strands.box.policy.resource")
+                        .and_then(|value| value["stringValue"].as_str())
+                        .is_some_and(|resource| resource.ends_with("/alpha-mcp"))
+                    && attribute(record, "strands.box.policy.verdict")
+                        == Some(&json!({"stringValue": "deny"}))
+            }),
+        "{records}"
+    );
+    assert!(
+        log_records(&records, "strands-box.mcp").is_empty(),
+        "{records}"
+    );
 }
 
 #[test]
@@ -396,64 +472,160 @@ fn two_servers_on_one_launcher_each_start_through_their_own_full_command() {
 }
 
 #[test]
-fn a_launch_matching_no_declared_command_starts_no_server() {
+fn an_unmatched_launch_without_agent_exec_grants_starts_no_server() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
     let box_ = RuntimeMcpBox::new("mcp-wrong-server");
     let alpha = through_env(&box_, "alpha", "alpha-mcp", "read");
-    // Installed for the operator, and declared nowhere in box.toml.
     let beta = through_env(&box_, "beta", "beta-mcp", "write");
     box_.install_server(&alpha);
     box_.install_server(&beta);
-    box_.write_workspace(&call_policy(&["alpha"]), &[alpha], BLOCKING_WORKLOAD);
-
+    let script = box_.server_executable("beta-mcp");
+    let workload = format!(
+        "env '{}' --declared beta --token=unmatched-secret > \"$HOME/result\" 2> \"$HOME/error\"\nprintf '%s' \"$?\" > \"$HOME/status\"\n{BLOCKING_WORKLOAD}",
+        script.display()
+    );
+    box_.write_workspace(&call_policy(&["alpha"]), &[alpha], &workload);
     let mut run = box_.spawn();
-    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
-    let launched = env_arguments(&box_, "beta", "beta-mcp");
-    let refusal = assert_launch_refused(&box_, "env", &launched);
-    assert!(
-        refusal.contains(&format!(
-            "no MCP server declares \"env {}\"",
-            launched.join(" ")
-        )),
-        "the refusal must name the command it received: {refusal}"
-    );
-    assert!(
-        refusal.contains("; servers on env: alpha"),
-        "the refusal must name the servers declared on the program: {refusal}"
-    );
-    assert!(
-        !refusal.contains("alpha-mcp --declared alpha"),
-        "the refusal must not print a declared command: {refusal}"
-    );
+    run.wait_for_through_alias(box_.workload_path("workload.started"), BOX_STARTUP);
     assert_eq!(
-        box_.invocation_count("alpha-mcp"),
-        0,
-        "no declared server starts in place of the one the harness asked for"
+        std::fs::read_to_string(box_.workload_path("status")).unwrap(),
+        if cfg!(target_os = "linux") {
+            "127"
+        } else {
+            "126"
+        }
     );
+    assert_eq!(box_.invocation_count("alpha-mcp"), 0);
     assert_eq!(box_.invocation_count("beta-mcp"), 0);
-    assert!(run.is_running(), "a refused launch must not stop the box");
-
     box_.release_workload();
     let output = run.wait(SHUTDOWN);
     assert!(output.status.success(), "{output:?}");
-    let records = std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl"))
-        .expect("read the drained policy telemetry");
-    assert!(
-        records
-            .lines()
-            .any(|line| line.contains("\"enforcement:mcp-command\"")
-                && line.contains("shell:spawn")
-                && line.contains("no MCP server declares")
-                && line.contains("servers on env: alpha")),
-        "the refused launch is recorded beside policy decisions, with the refusal the harness \
-         received: {records}"
+    let records =
+        std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl")).unwrap();
+    assert!(!records.contains("enforcement:mcp-command"), "{records}");
+    let record = unmatched_diagnostic(&records, "env");
+    assert_eq!(
+        attribute(&record, "process.command_args"),
+        Some(&json!({"arrayValue": {"values": [
+            {"stringValue": "env"},
+            {"stringValue": "<redacted>"},
+            {"stringValue": "--declared"},
+            {"stringValue": "<redacted>"},
+            {"stringValue": "--token=<redacted>"}
+        ]}})),
+        "{record}"
+    );
+    assert!(!records.contains("unmatched-secret"), "{records}");
+}
+
+#[test]
+fn ordinary_fallback_keeps_agent_grants_and_never_receives_server_secrets() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let mut box_ = RuntimeMcpBox::new("mcp-fallback-grants");
+    box_.set_agent_env("ORDINARY_VALUE", "agent-value");
+    let secret = box_.event("npx", "secret");
+    let server_read = box_.event("npx", "read");
+    let server_env = box_.event("npx", "env");
+    std::fs::write(&secret, "server-file-secret\n").unwrap();
+    let interpreter = std::path::Path::new("/bin/bash").canonicalize().unwrap();
+    let script = format!(
+        r#"#!{}
+if [ "$1" = "--declared" ]; then
+    IFS= read -r value < '{}'
+    printf '%s' "$value" > '{}'
+    printf '%s' "$SERVER_SECRET" > '{}'
+    while IFS= read -r line; do :; done
+else
+    IFS= read -r input
+    printf '%s\n' "$input" "$1" "$ORDINARY_VALUE" "${{SERVER_SECRET-absent}}"
+    if IFS= read -r value < '{}'; then
+        printf 'LEAKED:%s\n' "$value"
+    else
+        printf 'secret-refused\n'
+    fi
+    exit 23
+fi
+"#,
+        interpreter.display(),
+        secret.display(),
+        server_read.display(),
+        server_env.display(),
+        secret.display()
+    );
+    let program = box_.install_program("npx", &script);
+    let alpha = Server::new("alpha", "npx", "read", DiscoveryBehavior::Ready)
+        .with_env("SERVER_SECRET", "server-env-secret");
+    let workload = format!(
+        "printf 'input-bytes\\n' | npx 'two words' > \"$HOME/result\" 2> \"$HOME/error\"\nprintf '%s' \"$?\" > \"$HOME/status\"\n{BLOCKING_WORKLOAD}"
+    );
+    box_.write_workspace(&call_policy(&["alpha"]), &[alpha], &workload);
+    let config = box_.operator_home().join("workspace/.strands-box/box.toml");
+    let mut value: toml::Value =
+        toml::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+    let path = program.canonicalize().unwrap().display().to_string();
+    let filesystem = value["agent"]["filesystem"].as_table_mut().unwrap();
+    filesystem.insert(
+        "read_file".into(),
+        toml::Value::Array(vec![path.clone().into()]),
+    );
+    filesystem.insert("exec".into(), toml::Value::Array(vec![path.into()]));
+    value["mcp"]["alpha"]["filesystem"]
+        .as_table_mut()
+        .unwrap()
+        .entry("read_file")
+        .or_insert_with(|| toml::Value::Array(Vec::new()))
+        .as_array_mut()
+        .unwrap()
+        .push(interpreter.display().to_string().into());
+    std::fs::write(config, toml::to_string(&value).unwrap()).unwrap();
+
+    let mut run = box_.spawn();
+    run.wait_for_through_alias(box_.workload_path("workload.started"), BOX_STARTUP);
+    let error = std::fs::read_to_string(box_.workload_path("error")).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(box_.workload_path("status")).unwrap(),
+        "23",
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(box_.workload_path("result")).unwrap(),
+        "input-bytes\ntwo words\nagent-value\nabsent\nsecret-refused\n",
+        "{error}"
     );
     assert!(
-        !records.contains("alpha-mcp --declared alpha"),
-        "the record must not print a declared command: {records}"
+        !server_read.exists(),
+        "fallback must not start the declared server"
     );
+    let client = box_.open_client("npx");
+    run.wait_for_through_alias(&server_env, STARTUP);
+    assert_eq!(
+        std::fs::read_to_string(server_read).unwrap(),
+        "server-file-secret"
+    );
+    assert_eq!(
+        std::fs::read_to_string(server_env).unwrap(),
+        "server-env-secret"
+    );
+    drop(client);
+    box_.release_workload();
+    let output = run.wait(SHUTDOWN);
+    assert!(output.status.success(), "{output:?}");
+    let records =
+        std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl")).unwrap();
+    let record = unmatched_diagnostic(&records, "npx");
+    assert_eq!(
+        attribute(&record, "process.command_args"),
+        Some(&json!({"arrayValue": {"values": [
+            {"stringValue": "npx"},
+            {"stringValue": "<redacted>"}
+        ]}})),
+        "{record}"
+    );
+    assert!(!records.contains("server-env-secret"), "{records}");
 }
 
 /// **An `[agent] env` runtime option does not reach a stdio MCP server.**
@@ -496,7 +668,7 @@ fn an_agent_runtime_option_does_not_reach_an_mcp_server() {
 }
 
 #[test]
-fn a_launch_by_the_program_name_alone_is_refused() {
+fn an_unmatched_program_without_an_ordinary_executable_is_refused() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
@@ -510,7 +682,7 @@ fn a_launch_by_the_program_name_alone_is_refused() {
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let refusal = assert_launch_refused(&box_, "alpha-mcp", &[]);
     assert!(
-        refusal.contains("no MCP server declares \"alpha-mcp\"; servers on alpha-mcp: alpha")
+        refusal.contains("no ordinary executable for \"alpha-mcp\"")
             && !refusal.contains("--declared"),
         "a harness that runs only the program is refused, with the server name only: {refusal}"
     );

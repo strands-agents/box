@@ -85,6 +85,9 @@ pub(super) struct ShellSpec {
     /// The hook that runs a host binary in a contained leaf box. `None` leaves the
     /// vendored crate's built-in spawn, which the box never wants; the box always installs it.
     pub(super) host_spawner: Option<strands_shell::os::HostSpawner>,
+
+    /// The `[tool]` file each declared bare name runs, in place of a host `PATH` lookup.
+    pub(super) host_programs: strands_shell::os::HostPrograms,
 }
 
 impl ShellSpec {
@@ -119,6 +122,7 @@ impl ShellSpec {
         backend.network_enabled = false;
         backend.script_interpreter = Some(self.script_interpreter());
         backend.host_spawner = self.host_spawner.clone();
+        backend.host_programs = Arc::clone(&self.host_programs);
         Ok(Arc::new(backend))
     }
 

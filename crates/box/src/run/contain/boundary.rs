@@ -262,6 +262,10 @@ pub(crate) struct Boundary {
     /// Every localhost port the containment config grants, in grant order, for the Linux relay.
     #[cfg(target_os = "linux")]
     served_ports: Vec<u16>,
+
+    /// Where the box listens for the agent, and the agent's own port, one pair per
+    /// `[[agent.ingress]]` entry.
+    ingress: Vec<(std::net::SocketAddr, u16)>,
 }
 
 /// Every absolute directory the operator's own `PATH` names.
@@ -321,6 +325,9 @@ impl Boundary {
         let home = declared_home.unwrap_or_else(|| operator_home.clone());
         let declared_search_path: OsString = spec.search_path();
         let mediated = launch.runtime_reach == RuntimeReach::Agent;
+        // Only the agent is reached from outside.
+        let ingress: &[crate::record::config::ingress::Ingress] =
+            if mediated { &spec.ingress } else { &[] };
         // A leaf resolves its shebang hops on the search path its own `PATH` holds.
         let interpreter_search_path: OsString = if mediated {
             declared_search_path.clone()
@@ -424,7 +431,10 @@ impl Boundary {
             EgressMode::Native => Network::AllowAll,
             EgressMode::Gateway => Network::Localhost {
                 connect: served_ports.clone(),
-                listen: Vec::new(),
+                listen: ingress
+                    .iter()
+                    .map(|ingress| ingress.workload_port)
+                    .collect(),
             },
         };
         let mut containment = ContainmentConfig::new().set_network(network)?;
@@ -795,6 +805,10 @@ impl Boundary {
             disclosure,
             #[cfg(target_os = "linux")]
             served_ports: served_ports.clone(),
+            ingress: ingress
+                .iter()
+                .filter_map(|ingress| Some((ingress.listen_address()?, ingress.workload_port)))
+                .collect(),
         })
     }
 
@@ -865,6 +879,11 @@ impl Boundary {
     /// What the caller prints on stderr before the process starts.
     pub(crate) fn disclosure(&self) -> &str {
         &self.disclosure
+    }
+
+    /// Where the box listens for the agent, and the agent's own port, one pair per entry.
+    pub(crate) fn ingress(&self) -> &[(std::net::SocketAddr, u16)] {
+        &self.ingress
     }
 
     /// Every port the Linux relay must receive a descriptor for, in grant order.
@@ -1884,6 +1903,7 @@ mod tests {
                 },
                 network: None,
                 grammar: None,
+                ingress: Vec::new(),
             }
         }
 
@@ -2717,6 +2737,49 @@ mod tests {
             !leaf.iter().any(|(path, _, _)| *path == bin),
             "a leaf holds no cell on the alias directory: {leaf:?}"
         );
+    }
+
+    /// **`[[agent.ingress]]` reaches the agent and no tool**: the agent's boundary listens on every
+    /// `workload_port`, and the box binds every `listen`.
+    #[test]
+    fn the_ingress_reaches_the_agent_and_no_tool() {
+        let fixture = Fixture::new();
+        let mut declared = fixture.spec();
+        declared.ingress = vec![
+            crate::record::config::ingress::Ingress {
+                listen: "127.0.0.1:8080".to_string(),
+                workload_port: 8081,
+            },
+            crate::record::config::ingress::Ingress {
+                listen: "127.0.0.1:8000".to_string(),
+                workload_port: 8001,
+            },
+        ];
+        let listening = |boundary: &Boundary| {
+            let config = ContainmentConfig::from_json(&boundary.containment_config_text())
+                .expect("the translated config");
+            match config.network() {
+                Network::Localhost { listen, .. } => listen.clone(),
+                other => panic!("the boundary routes through the gateway: {other:?}"),
+            }
+        };
+
+        let agent = fixture.translate_with_reach(&declared, "[agent]", RuntimeReach::Agent);
+        assert_eq!(
+            agent.ingress(),
+            [
+                ("127.0.0.1:8080".parse().expect("an address"), 8081),
+                ("127.0.0.1:8000".parse().expect("an address"), 8001),
+            ]
+        );
+        assert_eq!(listening(&agent), vec![8081, 8001]);
+
+        let tool = fixture.translate_with_reach(&declared, "[tool.git]", RuntimeReach::Leaf);
+        assert!(
+            tool.ingress().is_empty(),
+            "a leaf ignores an ingress in its spec"
+        );
+        assert!(listening(&tool).is_empty(), "a tool listens on nothing");
     }
 
     /// **The alias directory's existence allow renders beneath the home deny and reaches no other

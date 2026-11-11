@@ -613,6 +613,11 @@ impl Mediated {
         self.kernel.run_script(source).await
     }
 
+    /// The file a bare `name` runs, when the kernel declares one.
+    pub(crate) fn host_program(&self, name: &str) -> Option<PathBuf> {
+        self.kernel.host_program(name)
+    }
+
     /// Run a host binary through the embedder's hook, or the built-in spawn.
     ///
     /// Raises no admission, for the same reason [`run_script`](Self::run_script) does not: the
