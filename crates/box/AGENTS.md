@@ -90,6 +90,15 @@ now, because `run` takes one `--config` path and searches nowhere. **That direct
   and hands off to `dispatch`, which takes one verb per arm. A fifth step, or an inline
   `insert`/`join`/`if let`, belongs in a phase. If either file grows, the phase boundary is
   wrong.
+- **Linux x86 command execution requires explicit operator consent.** `command::execute` calls
+  `platform::preflight` before hardening, runtime creation, host callbacks, or configuration reads.
+  The operator must set `EXPERIMENTAL_X86_SUPPORT` to the exact value `TRUE`. This check covers
+  the CLI and the library's `run` and `generate_policy_schema` calls. Help and version output
+  finish during argument parsing, before this check. ARM and other targets retain their startup
+  behavior. `EXPERIMENTAL_LINUX_SUPPORT` remains unused. The opt-in changes no containment
+  control and is not inherited into the workload environment.
+  `linux_startup::linux_commands_require_exact_x86_opt_in_only_on_x86` and
+  `box_library::x86_startup_matrix` cover admission and refusal through both entry paths.
 - **No stringly-typed catch-all error.** A new failure gets a variant on the owning phase's
   enum, never a `format!` into a general one.
 

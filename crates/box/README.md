@@ -38,6 +38,13 @@ strands-box run    --config <file> [-- <args>...]
 strands-box policy generate-schema --config <file> --output-dir <dir>
 ```
 
+On Linux x86-64, both verbs require the operator environment variable
+`EXPERIMENTAL_X86_SUPPORT=TRUE`. If the variable is unset or has any other value,
+Box refuses execution before reading the configuration or starting a workload. `--help` and `--version`
+remain available. The same check applies to the Rust library functions `run` and
+`generate_policy_schema`; set the variable before starting the host application.
+ARM64 does not require the flag. This startup opt-in does not change sandbox permissions.
+
 There are two verbs. The caller that created `box_dir` owns its lifecycle: it holds the path, so it
 stops a box by ending the `run` process and deletes one by removing the directory.
 
