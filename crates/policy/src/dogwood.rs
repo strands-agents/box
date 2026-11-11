@@ -2721,7 +2721,7 @@ when temporal {
     /// The number of production open paths that [`open_by_path`] covers.
     const OPEN_PATHS: usize = 4;
 
-    /// Open `path` on the system wall clock through production open path `mode`.
+    /// Open `path` on the system wall clock through open path `mode`.
     fn open_by_path(mode: usize, path: &Path) -> Result<DogwoodEngine, String> {
         match mode {
             0 => DogwoodEngine::open(BUDGET, path).map_err(|error| error.to_string()),
@@ -2783,6 +2783,52 @@ when temporal {
                 "open mode {mode} must refuse for clock skew: {error}"
             );
         }
+    }
+
+    #[test]
+    fn a_clock_behind_history_beyond_the_skew_bound_denies_until_it_returns_within_it() {
+        let history = tempfile::tempdir().expect("history directory");
+        let engine = DogwoodEngine::open_with_test_clock(
+            BUDGET,
+            &history.path().join("dogwood.redb"),
+            1_000_000,
+        )
+        .expect("policy loads");
+        let decide = || {
+            engine
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http()),
+                )
+                .0
+        };
+        let is_internal_fault = |decision: &Decision| {
+            matches!(
+                decision,
+                Decision::Deny {
+                    reason: DenyReason::InternalFault,
+                    ..
+                }
+            )
+        };
+        permitted_http_request(&engine);
+
+        engine.advance_clock(-200);
+        assert!(
+            !is_internal_fault(&decide()),
+            "a clock 200 s behind history is within the bound and is decided"
+        );
+        engine.advance_clock(-200);
+        assert!(
+            is_internal_fault(&decide()),
+            "a clock 400 s behind history is beyond the bound and denies"
+        );
+        engine.advance_clock(200);
+        assert!(
+            !is_internal_fault(&decide()),
+            "the refusal does not persist once the clock is within the bound again"
+        );
     }
 
     #[test]

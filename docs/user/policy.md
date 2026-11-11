@@ -886,11 +886,14 @@ The run also refuses history stamped more than five minutes ahead of the system 
 happens when the clock moved back after the box last ran, or when someone edited the history file:
 
 ```text
-strands-box: error: policy staging failed: durable timestamp <t> is <n> ns ahead of the current clock <now>, exceeding the maximum allowed future skew of 300000000000 ns; refusing the operation rather than issuing future-dated timestamps
+strands-box: error: policy staging failed: policy staging history failure: durable timestamp <t> is <n> ns ahead of the current clock <now>, exceeding the maximum allowed future skew of 300000000000 ns; refusing the operation rather than issuing future-dated timestamps
 ```
 
-If the clock moves back more than five minutes during a run, the box denies every request until the
-clock catches up. Correct the system clock and wait, or wipe the box directory to start again.
+If the clock moves back more than five minutes during a run, the box denies each request and prints
+`policy: warn: durable timestamp ...; denying` on stderr. Requests are decided again once the clock
+is within five minutes of the newest history timestamp. A time-zone change does not move this clock.
+Correct the system clock, or remove the box directory to start again, as
+[getting started](getting-started.md#clean-up) describes.
 
 ## See also
 
