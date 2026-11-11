@@ -46,7 +46,7 @@ pub(crate) struct ProgramControl {
 /// Why [`ProgramControl::feed_stdin`] refused input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum InputRefusal {
-    /// The stdin was already closed.
+    /// Nothing reads the stdin any more, or it was already closed; the bytes are dropped.
     Closed,
     /// The Program's stdin budget would be exceeded.
     OverBudget,
@@ -190,7 +190,7 @@ impl ProgramControl {
     /// every later one.
     pub(crate) fn feed_stdin(&self, data: &[u8]) -> Result<(), InputRefusal> {
         let refusal = self.try_feed(data);
-        if refusal.is_err() {
+        if matches!(refusal, Err(InputRefusal::Full | InputRefusal::OverBudget)) {
             self.refuse_input();
         }
         refusal
@@ -208,7 +208,10 @@ impl ProgramControl {
             .ok_or(InputRefusal::OverBudget)?;
         sender
             .try_send(Bytes::copy_from_slice(data))
-            .map_err(|_| InputRefusal::Full)?;
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => InputRefusal::Full,
+                mpsc::error::TrySendError::Closed(_) => InputRefusal::Closed,
+            })?;
         self.input_received.store(total, Ordering::SeqCst);
         Ok(())
     }

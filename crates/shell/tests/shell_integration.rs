@@ -8098,3 +8098,38 @@ expect!(
     "set -e; ! true; ! (true); ! { true; }; echo after",
     "after"
 );
+
+/// Commands that do not read stdin leave it for a later command, in a substitution, a subshell, or
+/// a redirected stage.
+#[test]
+fn stdin_left_unread_by_a_command_reaches_the_next_reader() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, expected) in [
+            ("x=$(jq -n 1); cat", "REAL"),
+            ("x=$(date +%s); cat", "REAL"),
+            ("(echo a | cat); cat", "a\nREAL"),
+            (
+                r#"d=$(dirname /a/b); x=$(cat); printf '[%s]' "$x""#,
+                "[REAL]",
+            ),
+            ("(cat </dev/null); cat", "REAL"),
+            ("x=$(cat </dev/null); cat", "REAL"),
+            ("dirname /a >/dev/null; cat", "REAL"),
+        ] {
+            let out = run_with_stdin(script, b"REAL").await;
+            assert_eq!(
+                out.stdout.trim_end(),
+                expected,
+                "{script}: stderr={}",
+                out.stderr
+            );
+        }
+    }));
+}
+
+expect!(
+    errexit_ignores_a_failure_inside_a_negated_group,
+    "set -e; ! { false; echo in; }; echo after",
+    "in\nafter"
+);

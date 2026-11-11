@@ -1155,7 +1155,9 @@ async fn serve_transport(
                             )
                             .await?;
                         }
-                        Err(InputRefusal::Full | InputRefusal::Closed) => {
+                        // Nothing reads this stdin any more, so the bytes have no reader.
+                        Err(InputRefusal::Closed) => {}
+                        Err(InputRefusal::Full) => {
                             deny(
                                 &frames,
                                 id,
@@ -1184,9 +1186,10 @@ async fn serve_transport(
                     python.remove(&id);
                     // A Program mid-Call cannot be dropped here: its slot lives in the Call task. Ask
                     // that Call to end and close its stdin, so the task finishes and drops the Shell
+                    // Signal only: closing stdin would let the Call read end-of-file on part of its
+                    // input before it sees the cancel.
                     if let Some(current) = running.remove(&id) {
                         current.control.signal();
-                        current.control.close_stdin();
                     }
                 }
                 // Refused above; unreachable, and kept explicit so a new daemon body cannot fall
@@ -3374,6 +3377,109 @@ done"#;
                 }
             }
             assert!(!out.exists(), "the Call must not act on part of its input");
+        }));
+    }
+
+    /// Input that arrives after the Shell stopped reading stdin is dropped, and the Call goes on.
+    #[test]
+    fn late_input_for_a_command_that_does_not_read_is_dropped() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let (mut reader, mut writer) = transport(&socket).await;
+            put(
+                &mut writer,
+                1,
+                Body::Open {
+                    mode: Interpreter::Shell,
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Call {
+                    correlation: Default::default(),
+                    source: "dirname /a >/dev/null; sleep 0.2; printf done".to_string(),
+                },
+            )
+            .await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            put(
+                &mut writer,
+                1,
+                Body::Input {
+                    data: encode_payload(b"{}"),
+                },
+            )
+            .await;
+            put(&mut writer, 1, Body::InputEof).await;
+            assert_eq!(collect_bytes(&mut reader, 1).await, (b"done".to_vec(), 0));
+        }));
+    }
+
+    /// A Signal while a command waits on stdin stops it before it acts on the input it has.
+    #[test]
+    fn a_signal_stops_a_command_waiting_on_part_of_its_input() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let out = marker.path().join("out");
+            let (mut reader, mut writer) = transport(&socket).await;
+            put(
+                &mut writer,
+                1,
+                Body::Open {
+                    mode: Interpreter::Shell,
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Call {
+                    correlation: Default::default(),
+                    source: format!(r#"x=$(cat); printf %s "$x" > {}"#, out.display()),
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Input {
+                    data: encode_payload(&vec![b'x'; MAX_CHUNK_BYTES]),
+                },
+            )
+            .await;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            put(
+                &mut writer,
+                1,
+                Body::Signal {
+                    kind: SignalKind::Interrupt,
+                },
+            )
+            .await;
+            loop {
+                let frame = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    read_frame::<Frame, _>(&mut reader),
+                )
+                .await
+                .expect("the Call ends")
+                .expect("a frame")
+                .expect("the daemon answers");
+                if let Body::Exit { status } = frame.body {
+                    assert_ne!(status, 0);
+                    break;
+                }
+            }
+            assert!(
+                !out.exists(),
+                "a stopped Call must not act on part of its input"
+            );
         }));
     }
 

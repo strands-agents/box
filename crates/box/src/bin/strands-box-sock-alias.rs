@@ -287,14 +287,14 @@ async fn pump_input(
                 if let Ok(mut slot) = refused.lock() {
                     *slot = Some(reason);
                 }
-                write_alias_frame(
+                // No `InputEof`: the Call would read end-of-file on part of its input.
+                return write_alias_frame(
                     writer,
                     Body::Signal {
                         kind: SignalKind::Interrupt,
                     },
                 )
-                .await?;
-                return write_alias_frame(writer, Body::InputEof).await;
+                .await;
             }
         }
     }
@@ -1407,6 +1407,11 @@ mod tests {
                 let seen = broker.await.unwrap();
                 assert!(seen.input.len() <= MAX_PROGRAM_INPUT_BYTES);
                 assert_eq!(seen.kinds.last(), Some(&"signal"));
+                assert!(
+                    !seen.kinds.contains(&"eof"),
+                    "a refused stdin must not end in end-of-file: {:?}",
+                    seen.kinds
+                );
             })
             .await
             .expect("the test finishes within its limit");

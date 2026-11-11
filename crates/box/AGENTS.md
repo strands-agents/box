@@ -686,15 +686,16 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   rest of an inherited file. The alias returns on `Exit`, so a writer that keeps the pipe open holds nothing:
   Claude Code 2.1.292 gives its Bash tool such a stdin, and collecting to EOF before the Call made
   every agent command wait 10 s and fail. A command that reads such a stdin waits until the Shell
-  deadline. Over `MAX_PROGRAM_INPUT_BYTES`, or on a read error, the alias sends `Signal`, the
+  deadline. Over `MAX_PROGRAM_INPUT_BYTES`, or on a read error, the alias sends `Signal` and no `InputEof`, the
   broker drops the Call so `ProcessGroup::drop` kills and reaps each process it started, and the
   alias exits 125. The command may have started by then. The cap equals
   `MAX_CAPTURE_STREAM_BYTES`, because the hosted `jq` and `xargs` read at most that much. The broker
   enforces the same cap per Program and `MAX_CONNECTION_INPUT_BYTES` per connection, and it adds no
   buffer: input waits in the Program's existing stdin channel. It refuses an `Input` longer than `MAX_ENCODED_CHUNK_BYTES`
-  before it decodes it, and after a refused `Input` signals the running `Call`, leaves stdin open
+  before it decodes it, and after a refused `Input` signals the running `Call`, leaves stdin open (`Close` also signals
+  and leaves stdin open)
   so the Call never reads end-of-file on part of its input, and refuses each later `Call` on that
-  Program. Python and MCP aliases read no stdin here, and a tool leaf still gets
+  Program. Input for a Program whose Shell no longer reads stdin is dropped. Python and MCP aliases read no stdin here, and a tool leaf still gets
   `Stdio::null()`.
 - **The alias must send `StdinEof`.** A Shell alias's `forward` sends `Open`, `Call`, each `Input`,
   and **`StdinEof`**. The EOF frame is not optional. A harness invoking `zsh -c` often supplies nothing on stdin, so without the EOF

@@ -1860,7 +1860,10 @@ wrong: a script that reads its input with `$(cat)` sees an empty string.
 
 This copy moves the caller's stdin into the child for the span of the substitution or subshell,
 and back when it ends. The caller waits for the child, so only one of them reads at a time, and
-input the child does not read stays for the caller.
+input the child does not read stays for the caller. A pipeline's first stage hands the stdin it
+did not take back to the caller when it ends, and a stdin redirect on that stage sets the caller's
+stdin aside instead of dropping it, so `x=$(date); cat` and `(cat </dev/null); cat` leave the
+input for `cat`. `stdin_left_unread_by_a_command_reaches_the_next_reader` fails without it.
 `tests/shell_integration.rs::a_command_substitution_reads_the_shells_stdin`,
 `a_subshell_reads_the_shells_stdin`, and
 `stdin_read_in_part_by_a_substitution_leaves_the_rest_to_the_shell` fail without the change.
@@ -1891,8 +1894,10 @@ fails without the change, and `a_lua_script_that_reads_stdin_still_gets_it` pins
 ## 2026-11-11 — `set -e` stopped at a command that `!` inverts
 
 `set -e` exited at `! true`, and with `Item::Negated` also at `! (true)`. POSIX exempts a command
-that `!` inverts. This copy treats an inverted pipeline or compound as tested.
-`tests/shell_integration.rs::errexit_ignores_a_negated_command` fails without the change.
+that `!` inverts. This copy treats an inverted pipeline or compound as tested, and turns `set -e`
+off inside an inverted compound. `tests/shell_integration.rs::errexit_ignores_a_negated_command`
+and `errexit_ignores_a_failure_inside_a_negated_group` fail without the change. A compound on
+the left of `&&` or `||` still applies `set -e` inside it, as at the pinned revision.
 
 A substitution or subshell that a cancelled Call drops takes the borrowed stdin with it, so a later
 Call on the same Program reads no stdin. A Shell alias opens one Program for one Call, so it is not
