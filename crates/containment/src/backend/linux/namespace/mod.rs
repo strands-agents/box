@@ -1395,6 +1395,43 @@ mod tests {
         libc::WEXITSTATUS(status)
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn x86_thread_setup_is_permitted_without_other_arch_commands() {
+        let mut fs_base: libc::c_ulong = 0;
+        // SAFETY: the kernel writes the current thread's base into a valid output slot.
+        let current = unsafe { libc::syscall(libc::SYS_arch_prctl, 0x1003_u64, &mut fs_base) };
+        assert_eq!(current, 0, "the unfiltered thread-state query must work");
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        let outcome = in_filtered_child(&filters, || {
+            for high in [0_u64, 1_u64 << 32] {
+                // SAFETY: restoring the existing base preserves this child's thread-local state.
+                if unsafe { libc::syscall(libc::SYS_arch_prctl, high | 0x1002, fs_base) } != 0 {
+                    return 10;
+                }
+                for operation in [0x1003_u64, 0x1004_u64, 0x7fff_ffff_u64] {
+                    let mut observed: libc::c_ulong = 0;
+                    // SAFETY: queries receive a valid output slot; the unknown command has no effect.
+                    let result = unsafe {
+                        libc::syscall(libc::SYS_arch_prctl, high | operation, &mut observed)
+                    };
+                    if result != -1
+                        || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
+                    {
+                        return 11;
+                    }
+                }
+            }
+            0
+        });
+        assert_eq!(
+            outcome, 0,
+            "10 = thread setup refused, 11 = another architecture command was not denied, 40 = filter installation failed"
+        );
+    }
+
     #[test]
     fn the_event_loop_timer_call_is_permitted_under_the_filters() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)

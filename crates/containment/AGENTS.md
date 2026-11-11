@@ -207,8 +207,8 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   `PathGrant::new` canonicalizes, so a write grant naming the exec grant's symlinked spelling resolves
   to the same target. **If a write cell ever gains an `original` rule, that arm under-refuses in
   silence** — extend it in the same change.
-- Linux selects `NamespaceBackend` on ARM64 and refuses every other architecture by name. Landlock
-  was considered and rejected, because it does not enforce `Network::Blocked`.
+- Linux selects `NamespaceBackend` on ARM64 and x86-64 and refuses every other architecture by
+  name. Landlock was considered and rejected, because it does not enforce `Network::Blocked`.
 - `cfg`-gate `backend/linux/` on its module declaration, and leave `backend/macos/` ungated so its
   conformance suite runs everywhere.
 

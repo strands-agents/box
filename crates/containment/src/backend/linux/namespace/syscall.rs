@@ -82,6 +82,11 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "epoll_pwait",
         number: libc::SYS_epoll_pwait,
     },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "epoll_wait",
+        number: libc::SYS_epoll_wait,
+    },
     PermittedSyscall {
         name: "dup",
         number: libc::SYS_dup,
@@ -89,6 +94,11 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
     PermittedSyscall {
         name: "dup3",
         number: libc::SYS_dup3,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "dup2",
+        number: libc::SYS_dup2,
     },
     PermittedSyscall {
         name: "fcntl",
@@ -216,9 +226,19 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "ppoll",
         number: libc::SYS_ppoll,
     },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "poll",
+        number: libc::SYS_poll,
+    },
     PermittedSyscall {
         name: "readlinkat",
         number: libc::SYS_readlinkat,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "readlink",
+        number: libc::SYS_readlink,
     },
     PermittedSyscall {
         name: "newfstatat",
@@ -327,6 +347,11 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
     PermittedSyscall {
         name: "getpgid",
         number: libc::SYS_getpgid,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "getpgrp",
+        number: libc::SYS_getpgrp,
     },
     PermittedSyscall {
         name: "uname",
@@ -1068,6 +1093,13 @@ fn build_permit_rules(
         libc::SYS_setresgid,
         setresgid_rules()?,
     )?;
+    #[cfg(target_arch = "x86_64")]
+    insert_permitted_scoped(
+        &mut rules,
+        "arch_prctl",
+        libc::SYS_arch_prctl,
+        x86_thread_setup_rules()?,
+    )?;
     if include_installer && rules.insert(libc::SYS_seccomp, Vec::new()).is_some() {
         return Err(filter_error(
             "installer-only seccomp duplicates a workload permit",
@@ -1093,6 +1125,20 @@ fn insert_permitted_scoped(
         )));
     }
     Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
+fn x86_thread_setup_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
+    // Linux x86's asm/prctl.h defines this operation for setting the calling thread's FS base.
+    const ARCH_SET_FS: u64 = 0x1002;
+    Ok(vec![
+        SeccompRule::new(vec![
+            // The kernel reads the operation as an int, so match its low 32 bits.
+            SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, ARCH_SET_FS)
+                .map_err(filter_error)?,
+        ])
+        .map_err(filter_error)?,
+    ])
 }
 
 fn setresuid_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
@@ -1244,11 +1290,12 @@ mod tests {
     }
 
     #[test]
-    fn permit_filter_has_113_workload_entries_and_one_installer_entry() {
-        assert_eq!(WORKLOAD_PERMITTED.len(), 113);
+    fn permit_filter_has_the_expected_workload_and_installer_entries() {
+        let x86_entries = usize::from(cfg!(target_arch = "x86_64"));
+        assert_eq!(WORKLOAD_PERMITTED.len(), 113 + 5 * x86_entries);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 116);
+        assert_eq!(rules.len(), 116 + 6 * x86_entries);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
