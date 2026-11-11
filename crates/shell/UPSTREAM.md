@@ -28,9 +28,6 @@ printf '<%s>\n' first \
   second
 ```
 
-The format prints each argument between `<` and `>` on its own line. The final `\` continues
-the command, while `\n` inside the format tells `printf` to print a newline.
-
 Before the fix, the first line ran too early with `first` and an unintended empty argument:
 
 ```text
