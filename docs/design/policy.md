@@ -179,6 +179,24 @@ Each recorded outcome uses its own check's token. A check that records no outcom
 Existing events without identifiers remain unchanged; their other facts and recovered monitor state remain available.
 Those events cannot satisfy a predicate that requires `requestId`, because the missing association cannot be reconstructed.
 
+On `shell:exec`, `input.cwd` names the Shell's working directory. For programs launched through
+Strands Shell, Box selects the launch directory before the `shell:spawn` decision. The selected
+`[tool.<name>]` or `[agent]` table's `workspace` takes precedence. Otherwise, Box uses the caller's
+resolved directory inside the agent's workspace or the selected table's `read`, `write`, `list`,
+and `metadata` trees. Box uses the agent's workspace for other caller directories.
+
+Both actions use `~` for the operator's home and `~/…` for a directory below it. A directory outside
+that home stays absolute. The decision, request event, and outcome event use the same spelling.
+For `shell:spawn`, Box uses the selected absolute directory to start the program. A tool grammar maps
+a command line to a policy action for that tool. For programs launched through Strands Shell, that
+action uses the same selected launch directory, with an absolute `cwd` in decisions and history.
+
+If Box cannot select or resolve a directory for a Strands Shell launch, policy checks the Shell's
+original directory. The command then follows its existing dispatch and failure path. Before that
+program starts, Box checks that its launch directory matches the absolute directory retained from
+the policy check.
+The caller's Shell keeps its own working directory.
+
 Each caller fills in the outcome from what it saw. A filesystem response carries `output.result` as
 `completed`, `descriptor_issued`, or `indeterminate`, so a rule that counts certain completions can
 leave the other two out. A shell response carries the command's exit status as `output.status`, and
@@ -239,6 +257,10 @@ stops a restart from resetting a budget. The history follows these rules:
   outcome fails, the caller warns on stderr and nothing retries it.
 - The engine checkpoints as events accumulate and removes events outside the longest window. This
   bounds the file size by the window rather than the box's lifetime.
+
+Recovery preserves each event's path spelling. Older shell events can carry an absolute `cwd` below
+the operator's home. A temporal predicate on `~/project` does not match those events. Box does not
+translate those stored values.
 
 History is not an audit record and has no tamper evidence. It cannot be rewound or shared by boxes.
 The operation and its recorded outcome do not commit together. If the process stops between them,
@@ -312,6 +334,8 @@ The inert-rule check sorts each rule into one of three classes:
   A rule waiting for an MCP server's schema goes through the same checks when Box stages the schema.
   If the rule is provably inert, Box refuses the schema. Holding the rule for a later schema cannot
   make it match.
+  The path checks include `cwd` on `shell:exec` and `shell:spawn`: an absolute literal below the
+  operator's home must use `~/…` instead.
 
   The `ip` refusal is a check of Box's own, ahead of strict validation, and prevents a rule from
   loading without effect. `net:connect` carries `ip4` and `ip6` and no `ip`, so `context.input has
