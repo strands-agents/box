@@ -47,6 +47,85 @@ env:
   RUSTFLAGS: "-C debuginfo=0"
 
 jobs:
+  default-crash-recovery:
+    name: Default crash recovery (${{ matrix.os }})
+    # Keep the default durability assertion covered independently of all-feature builds.
+    if: ${{ inputs.filter == '' }}
+    permissions:
+      contents: read
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ${{ fromJSON(inputs.os) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Require Linux namespace support
+        if: runner.os == 'Linux'
+        run: |
+          test "$(uname -m)" = aarch64
+          knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$knob" ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-root-user --mount --pid --fork --mount-proc true
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: default-crash-recovery
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Build default Box and launcher binaries
+        run: cargo build --locked -p strands-box -p strands-box-containment --bins
+
+      - name: Install launcher images beside test binaries (Linux only)
+        if: runner.os == 'Linux'
+        run: |
+          install -m 0755 target/debug/strands-box-sock-alias target/debug/deps/strands-box-sock-alias
+          install -m 0755 target/debug/strands-box-contain-trampoline target/debug/deps/strands-box-contain-trampoline
+
+      - name: Test default crash durability
+        shell: bash
+        run: |
+          set -o pipefail
+          set +e
+          cargo test --locked -p strands-box --test box_killed_run -- --show-output \
+            2>&1 | tee default-crash-recovery.log
+          test_status=$?
+          set -e
+          if [ "$test_status" -ne 0 ]; then
+            exit "$test_status"
+          fi
+          if [ "$RUNNER_OS" = Linux ]; then
+            python3 scripts/check-linux-test-output.py default-crash-recovery.log | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import re
+
+          output = Path("default-crash-recovery.log").read_text()
+          output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+          results = re.findall(r"^test result:.*$", output, re.MULTILINE)
+          expected = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;"
+          if len(results) != 1 or not results[0].startswith(expected):
+              raise SystemExit("Expected one passing crash-recovery test with no ignored or filtered cases.")
+          PYTHON
+
+      - name: Upload default crash-recovery output
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: default-crash-recovery-${{ matrix.os }}
+          path: default-crash-recovery.log
+          if-no-files-found: warn
+
   unit-test:
     name: Unit Tests (${{ matrix.os }})
     permissions:

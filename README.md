@@ -259,6 +259,17 @@ just test-all      # workspace tests and box example checks
 `--all-features` to run the `box_shell` and `box_credentials` suites, which require
 the `test-support` feature.
 
+Continuous integration also runs `box_killed_run` with default features in separate
+Linux ARM64 and macOS jobs. The test kills a running Box process and checks that
+recovery retains the history of every request allowed before the kill. These jobs
+run independently of the all-feature build.
+Run the same default-durability check locally with:
+
+```sh
+cargo build --locked -p strands-box -p strands-box-containment --bins
+cargo test --locked -p strands-box --test box_killed_run -- --show-output
+```
+
 In pull-request CI, changes to `docs/site-manifest.json`,
 `docs/site-manifest-retirements.json`, or a publishable page under `docs/user/` run the focused
 site-manifest contract test instead of the full Rust test matrix. The test compares the base
