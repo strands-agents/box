@@ -21,7 +21,17 @@ constraint is held at 15, which shares the workspace's `unicode-width` version.
 
 Two upstream parsing defects caused backslash-newline continuations to execute commands
 prematurely or introduce empty words. This could alter arguments or reject valid grouped
-commands, as seen in scripts such as `nvm.sh`.
+commands. For example, this continued command prints two arguments:
+
+```sh
+printf '<%s>\n' first \
+  second
+```
+
+```text
+<first>
+<second>
+```
 
 The source executor now collects continued lines before executing commands or reading heredocs.
 The lexer omits words emptied by continuation removal while preserving quoted empty arguments
