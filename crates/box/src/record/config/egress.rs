@@ -1053,6 +1053,18 @@ impl EgressEntry {
                      credential-matched request; use an https backend",
                 );
             }
+            // A re-routed destination `secret` is phantom-only — the box provisions the placeholder
+            // and strips it, never injecting the real credential — so `secret.inject` (`always` or
+            // `phantom`) has no effect. Refuse it at load so the config states what the box does.
+            if let Some(secret) = &self.secret
+                && secret.inject.is_some()
+            {
+                return refuse(
+                    "a destination secret.inject has no effect beside a backend: the re-routed \
+                     destination secret is phantom-only (provisioned to the workload and stripped, \
+                     never injected); remove secret.inject",
+                );
+            }
         }
 
         let Some(secret) = &self.secret else {
@@ -2956,6 +2968,30 @@ mod tests {
             error.to_string().contains("http backend") && error.to_string().contains("plaintext"),
             "the refusal names the plaintext http backend: {error}"
         );
+    }
+
+    /// A re-routed destination secret is phantom-only, so `secret.inject` has no effect; both
+    /// `always` and `phantom` are refused at load rather than silently ignored.
+    #[test]
+    fn a_destination_secret_inject_beside_a_backend_is_refused() {
+        for mode in ["always", "phantom"] {
+            let error = load(&format!(
+                "[egress.github]\ndestinations = [\"api.github.com\"]\n\
+                 secret.ref = \"env://GH\"\nsecret.inject = \"{mode}\"\n\n\
+                 [[egress.github.backends]]\nurl = \"https://gw.example.com\"\n"
+            ))
+            .expect_err("secret.inject beside a backend is refused");
+            assert!(
+                error.to_string().contains("secret.inject has no effect"),
+                "the refusal names the dead inject ({mode}): {error}"
+            );
+        }
+        // Without `inject`, the same re-route loads: the destination secret is phantom-only.
+        load(
+            "[egress.github]\ndestinations = [\"api.github.com\"]\nsecret.ref = \"env://GH\"\n\n\
+             [[egress.github.backends]]\nurl = \"https://gw.example.com\"\n",
+        )
+        .expect("a re-routed destination secret without inject loads");
     }
 
     /// `url` is required, and an unknown field inside a backend table is refused by serde.

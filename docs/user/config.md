@@ -800,7 +800,8 @@ another entry also names (on any port), a `url` with a query,
 fragment, or a non-`http(s)` scheme, a `credsd://` `auth`, an `aws://` `auth` without a valid
 `auth.aws.service`/`auth.aws.region` (each non-empty and only lowercase `[a-z0-9-]`, or those keys on
 a non-`aws://` auth), a signed (`aws://` or `credsd://`) destination `secret`, a destination `secret`
-beside an `http` backend, and an `auth` on an `http` backend.
+beside an `http` backend, a destination `secret.inject` beside a backend (the re-routed secret is
+phantom-only, so `inject` has no effect), and an `auth` on an `http` backend.
 [The egress table](egress.md#backends) describes the backend, and
 [egress design](../design/egress.md) describes how the box dials it.
 
