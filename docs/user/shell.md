@@ -28,9 +28,15 @@ no input. A command that does not read its input is not held by it: the alias re
 command exits, even when the writer keeps the pipe open. A command that does read such an input
 waits for it until the Shell's timeout.
 
-The alias stops the command and exits with status `125` when the input is more than 64 KiB, or when
-reading it fails, even if the command does not read its input. The command may have started by
-then. The alias reads the input whether or not the command reads it.
+The alias forwards at most 64 KiB. Past that it forwards nothing more and reads and discards the
+rest, so the writer never blocks and never gets a broken pipe. A command that does not read its
+input is not affected. A command that reads past the first 64 KiB gets no end of input: it waits
+until the Shell's timeout and then fails, rather than acting on part of its input. If reading the
+input fails, the alias stops the command and exits with status `125`.
+
+This limit applies only to input piped into the alias from outside the Shell, such as a hook's
+event or a program that starts `bash` with input. A pipe inside a command, such as
+`cat big.json | jq .`, is not affected.
 
 Only commands that the Shell runs itself, such as `cat`, `read`, or `jq`, receive the input. A
 program that the Shell starts in its own sandbox gets no input. Text that a command reads from its

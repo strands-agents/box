@@ -3483,6 +3483,77 @@ done"#;
         }));
     }
 
+    /// A command that reads a stdin with no end-of-file waits for the Shell deadline, and then
+    /// fails loudly, rather than acting on part of its input.
+    #[test]
+    fn a_command_that_reads_past_the_input_it_got_fails_at_the_deadline() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(short_connection_spec(marker.path()));
+            let out = marker.path().join("out");
+            let (mut reader, mut writer) = transport(&socket).await;
+            put(
+                &mut writer,
+                1,
+                Body::Open {
+                    mode: Interpreter::Shell,
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Call {
+                    correlation: Default::default(),
+                    source: format!(r#"x=$(cat); printf %s "$x" > {}"#, out.display()),
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Input {
+                    data: encode_payload(b"first part"),
+                },
+            )
+            .await;
+            let mut stderr = Vec::new();
+            let status = loop {
+                let frame = tokio::time::timeout(
+                    Duration::from_secs(20),
+                    read_frame::<Frame, _>(&mut reader),
+                )
+                .await
+                .expect("the deadline ends the Call")
+                .expect("a frame")
+                .expect("the daemon answers");
+                match frame.body {
+                    Body::Output {
+                        stream: Stream::Stderr,
+                        data,
+                    } => stderr.extend(decode_payload(&data).expect("valid payload")),
+                    Body::Exit { status } => break status,
+                    Body::Denied { kind, .. } => {
+                        assert_eq!(kind, DeniedKind::Timeout);
+                        break 125;
+                    }
+                    _ => {}
+                }
+            };
+            assert_ne!(status, 0);
+            assert!(
+                status == 125 || String::from_utf8_lossy(&stderr).contains("timeout"),
+                "the failure must say why: {}",
+                String::from_utf8_lossy(&stderr)
+            );
+            assert!(
+                !out.exists(),
+                "the command must not act on part of its input"
+            );
+        }));
+    }
+
     /// A command that never reads its stdin still finishes.
     #[test]
     fn a_command_that_never_reads_its_stdin_finishes() {

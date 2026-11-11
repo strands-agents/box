@@ -686,9 +686,11 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   rest of an inherited file. The alias returns on `Exit`, so a writer that keeps the pipe open holds nothing:
   Claude Code 2.1.292 gives its Bash tool such a stdin, and collecting to EOF before the Call made
   every agent command wait 10 s and fail. A command that reads such a stdin waits until the Shell
-  deadline. Over `MAX_PROGRAM_INPUT_BYTES`, or on a read error, the alias sends `Signal` and no `InputEof`, the
-  broker drops the Call so `ProcessGroup::drop` kills and reaps each process it started, and the
-  alias exits 125. The command may have started by then. The cap equals
+  deadline. Past `MAX_PROGRAM_INPUT_BYTES` the alias forwards exactly the cap, sends no
+  `InputEof`, and drains the rest, so the writer never blocks or gets EPIPE: a command that does not
+  read is unaffected, and one that reads past the cap waits for the Shell deadline and fails. On a
+  read error the alias sends `Signal` and no `InputEof`, the broker drops the Call so
+  `ProcessGroup::drop` kills and reaps each process it started, and the alias exits 125. The cap equals
   `MAX_CAPTURE_STREAM_BYTES`, because the hosted `jq` and `xargs` read at most that much. The broker
   enforces the same cap per Program and `MAX_CONNECTION_INPUT_BYTES` per connection, and it adds no
   buffer: input waits in the Program's existing stdin channel. It refuses an `Input` longer than `MAX_ENCODED_CHUNK_BYTES`
