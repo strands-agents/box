@@ -21,12 +21,27 @@ constraint is held at 15, which shares the workspace's `unicode-width` version.
 
 Two upstream parsing defects caused backslash-newline continuations to execute commands
 prematurely or introduce empty words. This could alter arguments or reject valid grouped
-commands. For example, this continued command prints two arguments:
+commands. For example, this is one command written across two physical lines:
 
 ```sh
 printf '<%s>\n' first \
   second
 ```
+
+The format prints each argument between `<` and `>` on its own line. The final `\` continues
+the command, while `\n` inside the format tells `printf` to print a newline.
+
+Before the fix, the first line ran too early with `first` and an unintended empty argument:
+
+```text
+<first>
+<>
+```
+
+The shell then treated `second` as a separate command, reported
+`strands-shell: second: command not found`, and returned exit status 127.
+
+After the fix, it runs as `printf '<%s>\n' first second` and returns exit status 0:
 
 ```text
 <first>
