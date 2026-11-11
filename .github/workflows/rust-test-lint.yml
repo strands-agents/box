@@ -56,6 +56,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     # Dispatched runs can select a different revision; deny cache writes from that code.
     cache-mode: read
+    env:
+      CARGO_INCREMENTAL: "0"
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -77,12 +79,6 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
           unshare --user --map-root-user --mount --pid --fork --mount-proc true
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          key: default-crash-recovery
-          save-if: false
 
       - name: Build default Box and launcher binaries
         run: cargo build --locked -p strands-box -p strands-box-containment --bins
