@@ -74,43 +74,45 @@ fn credential_groups(bindings: &[EgressRoute]) -> Vec<Vec<&EgressRoute>> {
     groups
 }
 
-/// What opening a backend entry's credential group produced.
-pub(crate) struct BackendProjection {
-    /// One capability per backend entry (one vault holding the entry's strip + box-owned routes).
-    pub(crate) capabilities: Vec<(credentials::DestinationPattern, Arc<Vault>)>,
-    /// The phantoms a strip-phantom destination secret provisions to the workload.
-    pub(crate) workload_environment: Vec<ProvisionedVariable>,
+/// Open one vault over a group of routes that share one credential authority, failing closed if any
+/// route does not resolve. `label` names the vault's tenant; `subject` names the host(s) for an
+/// error. Both projection paths open through here, so the fail-closed stance has one home.
+fn open_vault<'a>(
+    label: &str,
+    subject: &str,
+    routes: impl IntoIterator<Item = &'a EgressRoute>,
+) -> Result<credentials::Opened, BoxError> {
+    let mut config = VaultConfig::new(Backend::local(), format!("{label}-{}", std::process::id()))
+        .require_every_route();
+    for route in routes {
+        config = config.route(route.to_route_spec()?);
+    }
+    Vault::open(config).map_err(|source| {
+        Internal::CredentialProjection(format!(
+            "credential for {subject} did not resolve: {source}"
+        ))
+        .into()
+    })
 }
 
 /// Open one vault per backend entry group, each holding that entry's strip-phantom destination
 /// secret and box-owned backend token together (one credential authority on one destination). The
-/// strip route provisions a phantom to the workload; the box-owned token is attached at the gateway
-/// and never placed in the workload environment. An absent credential is hard here.
+/// strip route provisions a phantom to the workload; the box-owned token and a signed `aws://` auth
+/// are attached at the gateway and placed in no workload environment. An absent credential is hard
+/// here. A backend entry keeps its routes in ONE vault, so this groups per entry rather than by
+/// provisioned variable the way [`workspace`] does.
 pub(crate) fn backend_capabilities(
     groups: &[(credentials::DestinationPattern, Vec<EgressRoute>)],
-) -> Result<BackendProjection, BoxError> {
+) -> Result<Projection, BoxError> {
     let mut capabilities = Vec::with_capacity(groups.len());
     let mut workload_environment = Vec::new();
     for (original, routes) in groups {
         let Some(first) = routes.first() else {
             continue;
         };
-        let mut config = VaultConfig::new(
-            Backend::local(),
-            format!("strands-box-backend-{}", std::process::id()),
-        )
-        .require_every_route();
-        for route in routes {
-            config = config.route(route.to_route_spec()?);
-        }
-        let opened = Vault::open(config).map_err(|source| {
-            Internal::CredentialProjection(format!(
-                "backend credential for {host} did not resolve: {source}",
-                host = first.host()
-            ))
-        })?;
+        let opened = open_vault("strands-box-backend", first.host(), routes)?;
         // A strip-phantom destination secret mints one phantom, provisioned to the workload under the
-        // destination secret's variable name. The box-owned token mints none.
+        // destination secret's variable name. The box-owned token and a signed `aws://` auth mint none.
         let provisioned_name = routes.iter().find_map(EgressRoute::provisioned_name);
         for phantom in opened.phantoms() {
             if let Some(name) = provisioned_name {
@@ -122,7 +124,7 @@ pub(crate) fn backend_capabilities(
         }
         capabilities.push((original.clone(), Arc::new(opened.into_vault())));
     }
-    Ok(BackendProjection {
+    Ok(Projection {
         capabilities,
         workload_environment,
     })
@@ -161,20 +163,7 @@ pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError
             .map(|binding| binding.host())
             .collect::<Vec<_>>()
             .join(", ");
-        // `require_every_route` is the box's fail-closed stance, now owned by the vault:
-        let mut config = VaultConfig::new(
-            Backend::local(),
-            format!("strands-box-{}", std::process::id()),
-        )
-        .require_every_route();
-        for member in &group {
-            config = config.route(member.to_route_spec()?);
-        }
-        let opened = Vault::open(config).map_err(|source| {
-            Internal::CredentialProjection(format!(
-                "credential for {hosts} did not resolve: {source}"
-            ))
-        })?;
+        let opened = open_vault("strands-box", &hosts, group.iter().copied())?;
 
         // A signed binding mints no phantom (nothing is placed for the proxy to
         // match); the routes of one variable share exactly one.
@@ -189,8 +178,10 @@ pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError
                 });
             }
             // A signed route mints nothing to place. It does need the process to believe it holds
-            // credentials, which `SIGNING_PLACEHOLDERS` supplies, once per signed route.
-            (None, []) => {
+            // credentials, which `SIGNING_PLACEHOLDERS` supplies, once per signed route. `signs()` is
+            // asked directly, rather than inferred from the absent name, so a box-owned backend token
+            // — which also has no name and no phantom — is never mistaken for a signed route.
+            (None, []) if binding.signs() => {
                 for (name, value) in SIGNING_PLACEHOLDERS {
                     workload_environment.push(ProvisionedVariable {
                         name: name.to_string(),
@@ -198,6 +189,9 @@ pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError
                     });
                 }
             }
+            // A box-owned token (a backend's own credential): no name, no phantom, and nothing placed
+            // in the workload environment, because the box attaches it at the gateway.
+            (None, []) => {}
             // A minted phantom this crate cannot deliver. Unreachable today — `validate` admits
             // only `env://` (which names a variable) and `aws://` (which mints none), so the two
             (None, phantoms) => {

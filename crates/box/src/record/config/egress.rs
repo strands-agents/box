@@ -370,6 +370,14 @@ impl EgressRoute {
         self.provisioned_name.as_deref()
     }
 
+    /// Whether this route signs in the boundary — an `aws://` or `credsd://` credential, which has no
+    /// single attach location and mints no phantom. A box-owned backend token also has no provisioned
+    /// name and mints no phantom, so projection asks this rather than inferring "signs" from the
+    /// absence of a name.
+    pub(crate) fn signs(&self) -> bool {
+        matches!(self.placement, Placement::SignedInBoundary)
+    }
+
     #[cfg(test)]
     pub(crate) fn phantom(&self) -> PhantomCheck {
         self.phantom
