@@ -8275,3 +8275,14 @@ fn a_lua_read_from_a_callback_gets_late_stdin_and_coroutine_errors_keep_their_va
         }
     }));
 }
+
+expect!(
+    a_wrapped_coroutine_error_keeps_its_table_identity,
+    "lua -e 'local token = {retry = true}; local f = coroutine.wrap(function() error(token) end); local ok, e = pcall(f); print(ok, type(e), e == token)'",
+    "false\ttable\ttrue"
+);
+expect!(
+    a_wrapped_coroutine_error_keeps_a_number_and_a_string,
+    "lua -e 'print(select(2, pcall(coroutine.wrap(function() error(42) end)))); print(type(select(2, pcall(coroutine.wrap(function() error(\"boom\", 0) end)))))'",
+    "42\nstring"
+);
