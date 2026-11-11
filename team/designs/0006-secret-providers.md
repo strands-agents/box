@@ -15,11 +15,16 @@ This proposal focuses on the placeholder swap. Customers who already have a vaul
 I propose one command contract for reading secrets through a vendor's CLI, starting with 1Password. The operator specifies the secret, the vendor handles authentication, and Box fetches it at startup. Additional providers will come through packs.
 
 ```mermaid
-flowchart LR
-    Provider["Vendor CLI"] -->|"secret at startup"| Box["Box"]
-    Box -->|"placeholder"| Agent["Agent"]
-    Agent -->|"request with placeholder"| Box
-    Box -->|"permitted request with secret"| API["API"]
+sequenceDiagram
+    participant Agent
+    participant Boundary as Box
+    participant Provider as Vendor CLI
+    participant API
+    Boundary->>Provider: "Fetch configured secret at startup"
+    Provider-->>Boundary: "Secret"
+    Boundary->>Agent: "Start with placeholder"
+    Agent->>Boundary: "Request with placeholder"
+    Boundary->>API: "If policy permits, forward with real secret"
 ```
 
 A pack in Box CLI is a reusable set of TOML configuration: `box/claude` describes how to run Claude Code, and `box/anthropic` configures its connection to the Anthropic API. The operator's profile selects packs and supplies their own settings. Box CLI merges these into the `box.toml` that Box Core reads.
