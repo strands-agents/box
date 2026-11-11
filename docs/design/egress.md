@@ -42,8 +42,7 @@ gateway. See [local MCP servers](./containment.md#local-mcp-servers).
 Strands Shell's `curl` and Monty's `fetch()` run in the box's trusted process, and both send their
 requests through the same gateway, trusting only its certificate authority. Before they do, each
 refuses a URL that isn't `http` or `https`, or that names `localhost` or a literal loopback,
-private, link-local, `0.0.0.0/8`, or cloud metadata address, or an IPv6 address that carries one
-of these.
+private, link-local, or `0.0.0.0/8`, or one of two cloud metadata addresses outside `169.254.0.0/16`, or an IPv4-mapped, IPv4-compatible, IPv4-translated, 6to4, Teredo, or `64:ff9b::/96` NAT64 address that carries one of these, or any `64:ff9b:1::/48` address. A NAT64 address under a network's own prefix is not covered.
 
 ```mermaid
 flowchart LR

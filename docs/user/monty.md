@@ -165,7 +165,7 @@ Example output:
 | Error | Cause |
 |---|---|
 | `TypeError` | No `url`, an argument of the wrong type, an unknown keyword, more than four positional arguments, or one argument given twice. Nothing is sent. |
-| `OSError: access denied: <host>` | The URL's scheme is not `http` or `https`, or its host is `localhost`, a literal loopback, private, link-local, `0.0.0.0/8`, or cloud metadata address, or an IPv6 address that carries one of these. Nothing is sent. |
+| `OSError: access denied: <host>` | The URL's scheme is not `http` or `https`, or its host is `localhost`, a literal loopback, private, link-local, `0.0.0.0/8`, or one of two cloud metadata addresses outside `169.254.0.0/16`, or an IPv4-mapped, IPv4-compatible, IPv4-translated, 6to4, Teredo, or `64:ff9b::/96` NAT64 address that carries one of these, or any `64:ff9b:1::/48` address. A NAT64 address under a network's own prefix is not covered. Nothing is sent. |
 | `OSError` | The response body is larger than 1 MiB. |
 | Status `403`, with header `x-strands-box-egress: refused` | The gateway refused the request, and the body says why. The script receives it as a response, and must check `status`. A `403` without the header comes from the server. |
 
