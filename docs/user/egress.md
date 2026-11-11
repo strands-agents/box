@@ -147,9 +147,10 @@ A backend entry names exactly one destination with an exact host: no path, no wi
 several destinations. The box presents the backend host on the wire, so distinct origins sent to one
 backend would reach it as the same bytes with the agent's host lost. Write one entry per host.
 
-A host that re-routes to a backend may name no other entry, on any port. The box matches a re-route
-by host alone, so a sibling entry on that host — a direct entry on another port, or a second
-backend — would load and then be refused on every request. The loader refuses the pair instead.
+A host that re-routes to a backend may be named by no other entry, on any port. The box matches a
+re-route by host alone, so any other entry that covers the host — a direct entry on another port, a
+second backend, or a `*`/`*.suffix` wildcard that spans it — would load and then be refused on every
+request. The loader refuses the pair instead.
 
 This version re-routes to one backend. More than one backend and routing rules are not yet
 available.

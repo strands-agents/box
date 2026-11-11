@@ -252,6 +252,38 @@ fn validate_pairs(entries: &[(Origin, &str, &EgressEntry)]) -> Result<(), Config
             patterns.push((name, destination.clone(), pattern));
         }
     }
+    // A host that re-routes to a backend may be covered by no other entry, on any port, because the
+    // gateway matches a re-route by host alone (port-blind). The exact-host collision is caught in the
+    // loop above; this also catches a `*` or `*.suffix` entry that covers the backend host on a
+    // non-backend port, which the port-sensitive overlap check lets through. Without it the gateway
+    // loads the config and then refuses the covering entry's requests to that host.
+    for &(origin, name, entry) in entries {
+        if entry.backends.is_empty() {
+            continue;
+        }
+        let Some(backend_host) = entry.destinations.first().map(|d| host_of(d)) else {
+            continue;
+        };
+        for &(other_origin, other_name, other) in entries {
+            if (other_origin, other_name) == (origin, name) {
+                continue;
+            }
+            if other
+                .destinations
+                .iter()
+                .any(|d| host_pattern_covers(d, backend_host))
+            {
+                return Err(ConfigError::Credential {
+                    host: normalized_host(backend_host),
+                    reason: format!(
+                        "`{other_name}` covers host {backend_host:?}, which `{name}` re-routes to a \
+                         backend; a re-route is matched by host alone on every port, so a host that \
+                         re-routes may be named by no other entry"
+                    ),
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1298,10 +1330,6 @@ fn declared_port(destination: &str) -> Option<u16> {
     authority.rsplit_once(':')?.1.parse().ok()
 }
 
-/// The host of a destination: its authority with any scheme, path, port, or IPv6 brackets stripped.
-///
-/// The gateway matches a connecting host against this to recognize a remote MCP server. It is the
-/// one host extractor, so the write and the match paths cannot derive a host two ways and drift.
 /// Whether an AWS signing-scope component (service or region) is well-formed: non-empty and only
 /// lowercase letters, digits, and `-`. The signer uses the value verbatim, so a trailing space or a
 /// wrong case would load cleanly and then fail every request with a signature error.
@@ -1312,6 +1340,27 @@ fn is_aws_scope_component(value: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// Whether the destination `pattern`'s host-half covers `host`, ignoring port — an exact host (equal
+/// after normalization), a `*.suffix` wildcard (a strict sub-domain, label-boundary), or `*` (all).
+/// A re-route is matched by host alone, so a backend host covered by any other entry here would load
+/// and then be refused on every request; the loader uses this to refuse the pair.
+fn host_pattern_covers(pattern: &str, host: &str) -> bool {
+    let host = normalized_host(host);
+    let pattern_host = host_of(pattern);
+    if pattern_host == "*" {
+        return true;
+    }
+    if let Some(suffix) = pattern_host.strip_prefix("*.") {
+        let dotted = format!(".{}", normalized_host(suffix));
+        return host.len() > dotted.len() && host.ends_with(&dotted);
+    }
+    normalized_host(pattern_host) == host
+}
+
+/// The host of a destination: its authority with any scheme, path, port, or IPv6 brackets stripped.
+///
+/// The gateway matches a connecting host against this to recognize a remote MCP server. It is the
+/// one host extractor, so the write and the match paths cannot derive a host two ways and drift.
 pub(crate) fn host_of(destination: &str) -> &str {
     let after_scheme = destination
         .split_once("://")
@@ -2833,6 +2882,19 @@ mod tests {
             error.to_string().contains("re-routes to a backend")
                 && error.to_string().contains("no other entry"),
             "the refusal names the one-host-one-reroute rule: {error}"
+        );
+
+        // A wildcard entry that covers the backend host on another port escapes the exact-host and
+        // the port-sensitive overlap checks, but is still refused: a re-route is host-level.
+        let wild = load(
+            "[egress.wild]\ndestinations = [\"*.github.com:8443\"]\nsecret.ref = \"env://GH\"\n\n\
+             [egress.gh]\ndestinations = [\"api.github.com\"]\n\n\
+             [[egress.gh.backends]]\nurl = \"https://gw.example.com\"\n",
+        )
+        .expect_err("a wildcard covering a backend host on another port is refused");
+        assert!(
+            wild.to_string().contains("covers host") && wild.to_string().contains("no other entry"),
+            "the refusal names the host-coverage rule: {wild}"
         );
 
         // One backend entry alone on its host still loads.
