@@ -426,6 +426,12 @@ fn signing_name(endpoint_prefix: &str) -> String {
 mod tests {
     use super::*;
 
+    // `sign_aws`'s warn-on-bare / no-warn-on-scoped behaviour is pinned hermetically at the
+    // acquisition level by `aws::tests::default_chain_acquisition_warns` and
+    // `scoped_profile_acquisition_does_not_warn`: `sign_aws` warns exactly when
+    // `resolution.acquisition.warning()` is `Some`. An end-to-end test through `Vault::sign_aws`
+    // would have to drive the real SDK chain and the process-wide provider, which is not hermetic.
+
     #[test]
     fn regional_and_global_hosts_derive_their_scope() {
         assert_eq!(

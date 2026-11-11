@@ -4003,14 +4003,21 @@ fn builder_max_bg_jobs() {
 fn builder_max_input() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let mut shell = Shell::builder().max_input(5).build().unwrap();
-        let out = shell.run("echo hello world").await;
-        assert_eq!(out.status, 1);
-        assert!(
-            out.stderr.contains("input too large"),
-            "stderr: {}",
-            out.stderr
-        );
+        for input in ["printf OK ", "printf OK\n", "true\nprintf OK"] {
+            for (max_input, expected) in [
+                (input.len() - 1, (1, "", "strands-shell: input too large\n")),
+                (input.len(), (0, "OK", "")),
+                (0, (0, "OK", "")),
+            ] {
+                let mut shell = Shell::builder().max_input(max_input).build().unwrap();
+                let out = shell.run(input).await;
+                assert_eq!(
+                    (out.status, out.stdout.as_str(), out.stderr.as_str()),
+                    expected,
+                    "{input:?}, max_input={max_input}"
+                );
+            }
+        }
     }));
 }
 

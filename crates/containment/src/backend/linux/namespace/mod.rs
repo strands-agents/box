@@ -1395,6 +1395,84 @@ mod tests {
         libc::WEXITSTATUS(status)
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn x86_access_distinguishes_readable_and_missing_files_under_the_filters() {
+        let directory = tempfile::tempdir().expect("create the access fixture");
+        let present = directory.path().join("present");
+        std::fs::write(&present, b"readable").expect("write the access fixture");
+        let present = std::ffi::CString::new(present.as_os_str().as_encoded_bytes()).unwrap();
+        let missing = std::ffi::CString::new(
+            directory
+                .path()
+                .join("missing")
+                .as_os_str()
+                .as_encoded_bytes(),
+        )
+        .unwrap();
+        let probe = || {
+            for mode in [libc::F_OK, libc::R_OK] {
+                // SAFETY: the live C string names this test's existing readable file.
+                if unsafe { libc::syscall(libc::SYS_access, present.as_ptr(), mode) } != 0 {
+                    return 10;
+                }
+            }
+            // SAFETY: the live C string names an absent child of the same test directory.
+            let result = unsafe { libc::syscall(libc::SYS_access, missing.as_ptr(), libc::F_OK) };
+            if result != -1 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT)
+            {
+                return 11;
+            }
+            0
+        };
+        assert_eq!(probe(), 0, "the unfiltered access control must work");
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        assert_eq!(
+            in_filtered_child(&filters, probe),
+            0,
+            "10 = an existing readable file was refused, 11 = a missing file did not report ENOENT, 40 = filter installation failed"
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn x86_thread_setup_is_permitted_without_other_arch_commands() {
+        let mut fs_base: libc::c_ulong = 0;
+        // SAFETY: the kernel writes the current thread's base into a valid output slot.
+        let current = unsafe { libc::syscall(libc::SYS_arch_prctl, 0x1003_u64, &mut fs_base) };
+        assert_eq!(current, 0, "the unfiltered thread-state query must work");
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        let outcome = in_filtered_child(&filters, || {
+            for high in [0_u64, 1_u64 << 32] {
+                // SAFETY: restoring the existing base preserves this child's thread-local state.
+                if unsafe { libc::syscall(libc::SYS_arch_prctl, high | 0x1002, fs_base) } != 0 {
+                    return 10;
+                }
+                for operation in [0x1003_u64, 0x1004_u64, 0x7fff_ffff_u64] {
+                    let mut observed: libc::c_ulong = 0;
+                    // SAFETY: queries receive a valid output slot; the unknown command has no effect.
+                    let result = unsafe {
+                        libc::syscall(libc::SYS_arch_prctl, high | operation, &mut observed)
+                    };
+                    if result != -1
+                        || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
+                    {
+                        return 11;
+                    }
+                }
+            }
+            0
+        });
+        assert_eq!(
+            outcome, 0,
+            "10 = thread setup refused, 11 = another architecture command was not denied, 40 = filter installation failed"
+        );
+    }
+
     #[test]
     fn the_event_loop_timer_call_is_permitted_under_the_filters() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)

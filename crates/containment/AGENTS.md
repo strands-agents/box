@@ -207,8 +207,8 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   `PathGrant::new` canonicalizes, so a write grant naming the exec grant's symlinked spelling resolves
   to the same target. **If a write cell ever gains an `original` rule, that arm under-refuses in
   silence** — extend it in the same change.
-- Linux selects `NamespaceBackend` on ARM64 and refuses every other architecture by name. Landlock
-  was considered and rejected, because it does not enforce `Network::Blocked`.
+- Linux selects `NamespaceBackend` on ARM64 and x86-64 and refuses every other architecture by
+  name. Landlock was considered and rejected, because it does not enforce `Network::Blocked`.
 - `cfg`-gate `backend/linux/` on its module declaration, and leave `backend/macos/` ungated so its
   conformance suite runs everywhere.
 
@@ -820,7 +820,109 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   `libc` lacks their names. Define those private `u32` constants from the pinned Linux UAPI `kd.h`
   and `vt.h` headers. Verify production and independent test values against those headers when
   changing the list. Upstream work is optional for this exception; no merge or release is required.
+  The x86 `ARCH_SET_FS` command and the independent thread-setup test's command values are another
+  explicit exception. `libc` 0.2.189 doesn't export these names. Take their fixed values from the
+  [Linux v6.12 x86 userspace API header](https://github.com/torvalds/linux/blob/v6.12/arch/x86/include/uapi/asm/prctl.h),
+  and keep the production value and independent test values checked against that header.
+  The system-call number still comes from `libc::SYS_arch_prctl`.
   Fix other missing names upstream; never `#[cfg]` them away.
+
+### x86-64 runtime call measurements
+
+The early x86 call measurements used native Amazon Linux 2023 at
+`2893def22ddb198f6fb89f376c6497f6f64ccde0`. The first four rows below describe those historical traces;
+they aren't validation of a later revision. The `dup2` row records a later contained-workload trace.
+Each counterpart explains why the addition preserves operations already available to a workload.
+
+| x86 call | Measured observation | Existing permitted counterpart |
+| --- | --- | --- |
+| `getpgrp` | `/bin/sh` received `EPERM` during job-control initialization. The outside control returned its process group. | `getpgid(0)` |
+| `poll` | Box's `zsh` command alias received `EPERM` while checking descriptors 0, 1, and 2 during startup. | `ppoll` |
+| `readlink` | The same alias received `EPERM` when reading `/proc/self/exe`. | `readlinkat` |
+| `epoll_wait` | The alias reached its event loop and received `EPERM` while waiting for events. | `epoll_pwait` |
+| `dup2` | On November 11, 2026, the configured native Bash workload made six successful descriptor-duplication calls after filter installation. These included redirecting and restoring standard output. The same workload completed its permitted writes and refusal checks. | `dup3` |
+
+`arch_prctl(ARCH_SET_FS)` sets the per-thread storage base needed by the x86 runtime. The filtered
+kernel test checks that restoring the current base succeeds, while other architecture commands stay
+denied. Its deliberately changed controls detect a missing permission, an unrestricted command, and
+an incorrect 64-bit command comparison. This evidence is separate from the historical alias traces.
+
+On November 11, 2026, native x86 testing of `90c5d894e9eb88ed0849cf3f421dabdb8d4ad7d1` found another
+startup gap: the declared Git tool received `EPERM` from `access` while checking its global configuration.
+The same Git executable outside Box returned `ENOENT` for that absent path and started successfully.
+Linux implements `access` through the same file-access check as `faccessat(AT_FDCWD, ...)`, which the
+filter already permits; see [Linux v6.12 `fs/open.c`](https://github.com/torvalds/linux/blob/v6.12/fs/open.c#L539-L553).
+The `x86_access_distinguishes_readable_and_missing_files_under_the_filters` test checks an existing
+readable file and an absent file before and after filter installation. With `access` missing from the
+permit table, its outside control succeeds and its filtered existing-file check fails.
+
+Native tests of `54e9271b5fc52a1e07db0fd6a6e24bc272638b27` found seven more x86 calls that the
+permit filter refused. Outside controls used the same programs and completed the operations.
+
+| x86 call | Measured failure | Existing permitted counterpart |
+| --- | --- | --- |
+| `stat` | Codex could not read metadata for its configuration directory. | `newfstatat(AT_FDCWD, path, buffer, 0)` |
+| `mkdir` | Claude Code, Python directory creation, and Git initialization received `EPERM`. | `mkdirat(AT_FDCWD, path, mode)` |
+| `rename` | Python could not rename an owned file. | `renameat(AT_FDCWD, old, AT_FDCWD, new)` |
+| `unlink` | Python could not delete an owned file. | `unlinkat(AT_FDCWD, path, 0)` |
+| `chmod` | Python could not change an owned file to mode `0755`. | `fchmodat(AT_FDCWD, path, mode)` |
+| `symlink` | Python could not create a symbolic link. | `symlinkat(target, AT_FDCWD, link)` |
+| `pipe` | Bash could not create a pipeline. | `pipe2(descriptors, 0)` |
+
+Linux v6.12 implements these counterparts through the same operation helpers in
+[`fs/namei.c`](https://github.com/torvalds/linux/blob/v6.12/fs/namei.c),
+[`fs/open.c`](https://github.com/torvalds/linux/blob/v6.12/fs/open.c), and
+[`fs/pipe.c`](https://github.com/torvalds/linux/blob/v6.12/fs/pipe.c).
+The x86 `stat` entry calls `newstat` in
+[`fs/stat.c`](https://github.com/torvalds/linux/blob/v6.12/fs/stat.c), through `vfs_stat` and
+`vfs_fstatat` in [`include/linux/fs.h`](https://github.com/torvalds/linux/blob/v6.12/include/linux/fs.h).
+
+Keep `mkdir` and `chmod` argument-scoped. Their mode is zero-based argument 1, whereas `mkdirat`
+and `fchmodat` use argument 2. `direct_file_permissions_preserve_writes_and_refuse_special_modes`
+checks ordinary modes, each special bit, both bits, and nonzero upper argument bits through the
+production trampoline. For permitted modes, the x86 rows set special bits in the unused third
+argument. For refused modes, they clear that argument. Copying the `*at` argument index therefore
+fails the test.
+`legacy_syscalls_preserve_effects_and_filesystem_grants` checks raw call effects, hidden and
+read-only paths, and a symbolic link pointing outside the filesystem grants. These tests do not
+qualify every application or the x86 release process.
+
+After those seven additions, Codex passed its configuration-directory check but received `EPERM`
+from `open` when opening its temporary directory, creating a lock file, and reading
+`/etc/codex/requirements.toml`. The same requirements-file call outside Box returned `ENOENT`,
+which Codex handled. The same trace also showed `lstat` refused on its temporary directory.
+Linux implements `open` through the same `do_sys_open(AT_FDCWD, ...)` helper as `openat` in
+[`fs/open.c`](https://github.com/torvalds/linux/blob/v6.12/fs/open.c).
+`lstat` uses `newlstat`, `vfs_lstat`, and `vfs_fstatat` with `AT_SYMLINK_NOFOLLOW` in the metadata
+helpers linked above. Permit both spellings only on x86-64.
+
+For `open`, the zero-based mode argument is 2 and the flags argument is 1. Preserve the `openat`
+creation-flag condition so an unused mode cannot refuse a read. The permission probe covers
+ordinary creation, temporary creation, unused modes, and nonzero upper flags bits. The filesystem
+probe checks open effects in writable, read-only, and hidden directories and distinguishes
+`lstat` of a symbolic link from `stat` or `open` of its hidden target.
+
+Claude Code then reached the model but could not start its shell. A contained `pwd` attempt
+received `EPERM` from `vfork`; the outside control created the child and completed `pwd`.
+Linux v6.12 implements `vfork` by passing `CLONE_VM | CLONE_VFORK` and `SIGCHLD` to `kernel_clone`
+in [`kernel/fork.c`](https://github.com/torvalds/linux/blob/v6.12/kernel/fork.c). The existing
+unrestricted `clone` permission already admits that combination. The child inherits the syscall
+filters and namespaces through the same process-creation path.
+
+The raw `vfork` probe keeps the child entirely in one assembly block. It checks the inherited
+`setuid` refusal using the child's own UID, then exits without returning into Rust or changing the
+shared userspace stack. The outside control can set its unchanged UID. The parent checks the
+child's distinct exit status and reaps it. The test supervisor bounds the whole probe.
+Follow-up full-Box checks found that Python `os.rmdir`, Python `shutil.rmtree`, and `git clean -fd`
+could not remove their empty directories on x86: `rmdir` returned `EPERM`. All three outside
+controls and matched ARM64 checks completed cleanup; ARM64 used `unlinkat` with `AT_REMOVEDIR`. Linux v6.12 routes both calls through `do_rmdir`
+in the `fs/namei.c` source linked above. Permit `rmdir` only on x86. It has no mode argument and
+adds no operation beyond the existing `unlinkat` permission. The raw-call regression checks actual
+removal from a writable directory and preserves the empty directories in read-only and hidden
+scopes.
+
+The Claude trace also showed a nonfatal `link` maintenance failure. That entry remains unpermitted;
+this change does not expand hard-link access or claim warning-free CLI behavior.
 
 ### W^X
 

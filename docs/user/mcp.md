@@ -324,7 +324,7 @@ to the server in both modes.
 |---|---|---|---|
 | `type` | string | required | `"http"`. |
 | `destinations` | string array | required | The server's hosts. Each is a host, `host:port`, a host with a path prefix, or a `*.` wildcard host. |
-| `secret.ref` | string | none | The credential the gateway attaches to each request to the server: `env://NAME` or `aws://PROFILE`. |
+| `secret.ref` | string | none | The credential the gateway attaches to each request to the server: `env://NAME`, `aws://PROFILE`, or a bare `aws://` for the AWS default credential chain. |
 | `secret.header` | string | `Authorization` | The header the credential goes in. |
 | `secret.prefix` | string | `Bearer ` on `Authorization` | The text before the credential. |
 | `secret.placement` | string | `header` | `header`, `basic_auth`, or `query_param`. |
