@@ -88,7 +88,9 @@ which requests are governed.
 the execution timeout for each submitted Strands Shell call. The default is 30 seconds.
 For ten minutes, set `shell.timeout = 600`; for unlimited execution, set `shell.timeout = false`.
 The nested table `[limits.shell]` accepts the same values under `timeout`.
-Invalid or unrepresentable durations are load errors. Python retains its existing limits.
+`shell.max_input` and `shell.max_output` accept positive integer byte counts, with defaults
+of 262144 and 65536. Shell applies the output limit to both output buffers and source-file reads.
+Invalid or unrepresentable durations and sizes are load errors. Python retains its existing limits.
 See [execution limits](../../docs/user/config.md#limits).
 
 **`[agent]` and each `[tool.<label>]` hold the same four fields.** `[agent]` is the process the

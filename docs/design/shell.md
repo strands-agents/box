@@ -235,7 +235,13 @@ The Shell uses distinct exit statuses so a harness can identify the outcome: `12
 fails the command the way the operation's own error would. The
 [reference](../user/shell.md#exit-statuses) lists each status and its message.
 
-## Execution deadlines
+<a id="execution-deadlines"></a>
+## Execution limits
+
+The stored configuration supplies `max_input` and `max_output` whenever the broker constructs
+Strands Shell, including each new call. Omitted sizes retain the 256 KiB input and 64 KiB output
+defaults. The output limit also bounds script files that Shell loads with `source`.
+The broker's framing and streamed-output budgets remain separate.
 
 **Each call uses the operator's execution limit.** The operator sets
 [`limits.shell.timeout`](../user/config.md#limits), keeps the 30-second default, or selects

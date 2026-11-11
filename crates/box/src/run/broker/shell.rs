@@ -15,13 +15,10 @@ use strands_shell::{
 
 use crate::run::broker::invalid_input;
 use crate::run::broker::mcp::DiscoveryRegistry;
-use crate::run::broker::protocol::MAX_CAPTURE_STREAM_BYTES;
 use crate::run::broker::reach::{Reach, Refused};
 use crate::run::contain::boundary::environment::WORKLOAD_USER;
 use crate::run::telemetry::{DecisionRecorder, EffectiveDecision, ObservationCapture};
 
-/// The most command text the broker will accept into the Shell.
-const SHELL_MAX_INPUT: usize = 256 * 1024;
 const SHELL_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
 const SHELL_MAX_INODES: usize = 10_000;
 
@@ -43,6 +40,8 @@ pub(crate) struct EgressRouting {
 
 /// Everything needed to build the hosted Shell, kept so one can be rebuilt.
 pub(super) struct ShellSpec {
+    pub(super) max_input: usize,
+    pub(super) max_output: usize,
     /// The Shell's own bound on one submitted Shell call.
     pub(super) command_timeout: Option<Duration>,
     /// The broker's backstop deadline on one Call, distinct from `command_timeout`. The Shell's own
@@ -165,8 +164,8 @@ impl ShellSpec {
         }
         let builder = builder
             .effect_interceptor(interceptor)
-            .max_input(SHELL_MAX_INPUT)
-            .max_output(MAX_CAPTURE_STREAM_BYTES)
+            .max_input(self.max_input)
+            .max_output(self.max_output)
             .max_file_size(SHELL_MAX_FILE_SIZE)
             .max_inodes(SHELL_MAX_INODES);
         let builder = match self.command_timeout {

@@ -641,6 +641,7 @@ const LIMITS_RECORD_VERSION: u32 = 27;
 const MCP_ABSOLUTE_COMMAND_RECORD_VERSION: u32 = 28;
 /// The record version of a record whose agent declares an ingress.
 const INGRESS_RECORD_VERSION: u32 = 29;
+const SHELL_SIZE_LIMITS_RECORD_VERSION: u32 = 30;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -691,7 +692,9 @@ fn record_version<'a>(
     mcp: &[crate::record::config::mcp::McpServer],
     ingress: bool,
 ) -> u32 {
-    if ingress {
+    if limits.shell.has_size_limits() {
+        SHELL_SIZE_LIMITS_RECORD_VERSION
+    } else if ingress {
         INGRESS_RECORD_VERSION
     } else if mcp
         .iter()
@@ -957,6 +960,7 @@ impl Record {
             LIMITS_RECORD_VERSION,
             MCP_ABSOLUTE_COMMAND_RECORD_VERSION,
             INGRESS_RECORD_VERSION,
+            SHELL_SIZE_LIMITS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1392,9 +1396,14 @@ mod tests {
         stored.contained_mcp = mcp::contained_specs(&config.mcp);
         for file_attributes in [false, true] {
             for wildcard in [false, true] {
-                for limits in [
-                    Limits::default(),
-                    toml::from_str("[shell]\ntimeout = 600").unwrap(),
+                for (limits, expected_version) in [
+                    (Limits::default(), 28),
+                    (toml::from_str("[shell]\ntimeout = 600").unwrap(), 28),
+                    (toml::from_str("[shell]\nmax_input = 262144").unwrap(), 30),
+                    (
+                        toml::from_str("[shell]\nmax_output = 65536\ntimeout = false").unwrap(),
+                        30,
+                    ),
                 ] {
                     stored.mcp[0].argument_wildcards = wildcard;
                     stored.file_attributes = file_attributes;
@@ -1408,16 +1417,16 @@ mod tests {
                             &stored.mcp,
                             false
                         ),
-                        28
+                        expected_version
                     );
-                    for old in RECORD_VERSION..=27 {
+                    for old in RECORD_VERSION..expected_version {
                         stored.version = old;
                         assert!(matches!(
                             Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
-                            Err(ConfigError::RecordVersion { found, expected: 28 }) if found == old
+                            Err(ConfigError::RecordVersion { found, expected }) if found == old && expected == expected_version
                         ));
                     }
-                    stored.version = 28;
+                    stored.version = expected_version;
                     assert_eq!(
                         Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml"))
                             .unwrap(),
@@ -1591,6 +1600,33 @@ mod tests {
             mcp: Vec::new(),
             contained_mcp: BTreeMap::new(),
             telemetry: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn explicit_shell_sizes_require_their_record_version() {
+        for limits in [
+            "[limits]\nshell.max_input = 262144\n",
+            "[limits.shell]\nmax_output = 65536\n",
+            "[limits.shell]\nmax_input = 524288\nmax_output = 262144\ntimeout = false\n",
+        ] {
+            let mut stored = pinned_record(limits);
+            assert_eq!(stored.version, 30, "{limits}");
+            let text = stored.to_toml().unwrap();
+            assert_eq!(
+                Record::parse(&text, Path::new("record.toml")).unwrap(),
+                stored
+            );
+            for version in 21..=29 {
+                stored.version = version;
+                assert!(
+                    matches!(
+                        Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                        Err(ConfigError::RecordVersion { found, expected: 30 }) if found == version
+                    ),
+                    "{limits}: version {version}"
+                );
+            }
         }
     }
 
@@ -2653,7 +2689,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, INGRESS_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, SHELL_SIZE_LIMITS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -3514,7 +3550,7 @@ command = ["mcp-server-fetch"]
         ));
     }
 
-    /// An agent ingress takes the newest record version, even beside servers that share a program.
+    /// An agent ingress determines the version beside servers that share a program.
     #[test]
     fn an_agent_ingress_beside_a_shared_program_stores_the_ingress_version() {
         let ingress = "[agent]\ncommand = [\"/bin/sh\"]\n\
@@ -3528,7 +3564,7 @@ command = ["mcp-server-fetch"]
         );
     }
 
-    /// An agent ingress takes the newest record version beside an absolute MCP command.
+    /// An agent ingress determines the version beside an absolute MCP command.
     #[test]
     fn an_agent_ingress_beside_an_absolute_mcp_command_stores_the_ingress_version() {
         let body = "[mcp.local]\ntype = \"stdio\"\ncommand = [\"/usr/bin/true\", \"--stdio\"]\n\
@@ -3541,6 +3577,27 @@ command = ["mcp-server-fetch"]
                 .expect("this build reads its own record"),
             stored
         );
+    }
+
+    #[test]
+    fn shell_sizes_beside_an_agent_ingress_store_the_shell_size_version() {
+        let body = "[agent]\ncommand = [\"/bin/sh\"]\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n\
+             [limits.shell]\nmax_output = 262144\n";
+        let mut stored = pinned_record(&format!("{body}{INGRESS_ON}"));
+        assert_eq!(stored.version, SHELL_SIZE_LIMITS_RECORD_VERSION);
+        assert_eq!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+            stored
+        );
+        stored.version = INGRESS_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: INGRESS_RECORD_VERSION,
+                expected: SHELL_SIZE_LIMITS_RECORD_VERSION
+            })
+        ));
     }
 
     /// An agent ingress stores its own record version, so an earlier build refuses the box, and a
