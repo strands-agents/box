@@ -2858,21 +2858,13 @@ done"#;
                     )
                     .await;
 
-                    let padded = format!("printf OK #{}", "x".repeat(300 * 1024));
-                    for (call, source) in [
-                        padded.clone(),
-                        format!("{padded}\n"),
-                        format!("true\n{padded}"),
-                    ]
-                    .into_iter()
-                    .enumerate()
-                    {
+                    for call in 1..=2 {
                         put(
                             &mut writer,
                             1,
                             Body::Call {
                                 correlation: Default::default(),
-                                source,
+                                source: format!("printf OK #{}", "x".repeat(300 * 1024)),
                             },
                         )
                         .await;

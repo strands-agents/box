@@ -17,19 +17,6 @@ constraint is held at 15, which shares the workspace's `unicode-width` version.
 
 ## Local divergence from the pinned revision
 
-### Upstream bug: a newline bypassed the submitted input limit
-
-`exec::execute` selected `execute_sourced` for input containing a newline, which skipped the
-`max_input` check in `execute_admitted_line`. Thus an oversized submission ran when it ended in
-a newline, while the same text without that newline was refused. This is an upstream limit
-enforcement bug.
-
-`execute` now checks the full input before choosing the evaluator. Its EXIT-trap handling remains
-after the result, and direct calls to `execute_with_reader` retain their check. Files loaded by
-`source` still use `max_output`; this change adds no `max_input` check to `execute_sourced`.
-`builder_max_input` covers single-line, trailing-newline, and multiline submissions and the
-existing `0` unlimited value. The trailing-newline assertion fails without the fix.
-
 ### Local addition: an embedder can disable the execution timeout
 
 `ShellBuilder::disable_timeout()` selects the engine's existing no-deadline mode. The builder

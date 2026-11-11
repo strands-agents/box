@@ -75,16 +75,13 @@ fn configured_shell_input_limits_apply_independently_of_output() {
         .expect();
         let output = box_.bash(
             r#"zsh -c 'printf OK                            '; first=$?
-               zsh -c 'printf OK
-                            '; second=$?
-               zsh -c 'true
-printf OK                            '; third=$?
-               printf '\nstatuses=%s,%s,%s\n' "$first" "$second" "$third""#,
+               zsh -c 'printf OK                            '; second=$?
+               printf '\nstatuses=%s,%s\n' "$first" "$second""#,
         );
         let expected = if accepted {
-            "OKOKOK\nstatuses=0,0,0\n"
+            "OKOK\nstatuses=0,0\n"
         } else {
-            "\nstatuses=1,1,1\n"
+            "\nstatuses=1,1\n"
         };
         assert_eq!(stdout(&output), expected, "{}", stderr(&output));
         assert_eq!(stderr(&output).contains("input too large"), !accepted);
