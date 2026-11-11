@@ -780,13 +780,30 @@ requests out. The current reference for this table is
 The example takes every default: the key lands in the `Authorization` header with a `Bearer `
 prefix, and only a request that carries the placeholder gets it.
 
-An entry needs a `secret`. One without is refused: `an entry with no secret declares only a
-destination, which policy already decides; give it a secret, or set protocol = "mcp" for a remote
-MCP server`. `protocol` on this table takes `http` alone; declare a remote MCP server as
-`[mcp.<name>]` with `type = "http"`, which the next section describes.
+An entry needs a `secret` or a backend. One with neither is refused: `an entry with no secret
+declares only a destination, which policy already decides; give it a secret, add a backend, or set
+protocol = "mcp" for a remote MCP server`. `protocol` on this table takes `http` alone; declare a
+remote MCP server as `[mcp.<name>]` with `type = "http"`, which the next section describes.
 
 An `aws://` route signs inside the box, so it takes no `header`, `prefix`, `placement`, `param`,
 `inject`, or `phantom_prefix`. Setting one is refused when the configuration loads.
+
+An entry re-routes to a backend with one `[[egress.<name>.backends]]` table, holding a `url`
+(`scheme://host[:port][/prefix]`, `https` or `http`) and an optional `auth` — the backend's own
+credential, an `env://` token or an `aws://` profile SigV4-signed over the backend host (with an
+explicit `auth.aws.service` and `auth.aws.region`, since a gateway host carries no derivable scope).
+The backend `url`'s path prefix joins in front of the agent's request path. An entry may keep its own
+`env://` `secret` beside a backend, phantom-only: the box provisions the placeholder and strips it,
+never injecting the real destination credential, so the named variable need not be set. The loader
+refuses more than one backend, a destination that is not one exact host, a host with a backend that
+another entry also names (on any port), a `url` with a query,
+fragment, or a non-`http(s)` scheme, a `credsd://` `auth`, an `aws://` `auth` without a valid
+`auth.aws.service`/`auth.aws.region` (each non-empty and only lowercase `[a-z0-9-]`, or those keys on
+a non-`aws://` auth), a signed (`aws://` or `credsd://`) destination `secret`, a destination `secret`
+beside an `http` backend, a destination `secret.inject` beside a backend (the re-routed secret is
+phantom-only, so `inject` has no effect), and an `auth` on an `http` backend.
+[The egress table](egress.md#backends) describes the backend, and
+[egress design](../design/egress.md) describes how the box dials it.
 
 ## `[mcp.<name>]`
 
