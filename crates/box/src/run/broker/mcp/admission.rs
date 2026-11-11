@@ -3,7 +3,9 @@
 use std::io;
 
 use egress_gateway::McpTarget;
-use policy::{Decision, GovernedBox, PolicyEngine, Principal, Request, RequestId};
+use policy::{
+    Decision, GovernedBox, PendingToolResponse, PolicyEngine, Principal, Request, RequestId,
+};
 use serde_json::Value;
 
 use crate::record::config::mcp::McpServer;
@@ -163,8 +165,12 @@ pub(super) fn admit_tool_call(
                     format!("MCP tool arguments are not valid JSON: {error}"),
                 )
             })?;
+            let mut tool_response = None;
             let (refined, refined_action) = capture_policy_action(|| {
-                policy.refine_tool_call(governed, principal, server, tool, &arguments)
+                let (decision, pending) =
+                    policy.refine_tool_call(governed, principal, server, tool, &arguments);
+                tool_response = pending;
+                decision
             });
             match &refined {
                 Decision::Deny { .. } => {
@@ -187,12 +193,19 @@ pub(super) fn admit_tool_call(
                             &refined,
                         ),
                         request_id,
+                        tool_response,
                     ));
                 }
-                Decision::Allow { .. } => {}
+                Decision::Allow { .. } => {
+                    return Ok(McpRequestAdmission::Allowed(
+                        coarse,
+                        request_id,
+                        tool_response,
+                    ));
+                }
             }
         }
-        Ok(McpRequestAdmission::Allowed(coarse, request_id))
+        Ok(McpRequestAdmission::Allowed(coarse, request_id, None))
     })
 }
 
@@ -216,7 +229,8 @@ pub(super) fn request_refusal(decision: &Decision, method: &str) -> io::Error {
 
 pub(super) enum McpRequestAdmission {
     Undecided,
-    Allowed(EffectiveDecision, RequestId),
+    /// The coarse `mcp:call` request, and the per-tool response an allowed `tools/call` owes.
+    Allowed(EffectiveDecision, RequestId, Option<PendingToolResponse>),
     PolicyPending(EffectiveDecision, io::Error),
     Denied {
         decision: EffectiveDecision,
@@ -894,7 +908,7 @@ mod tests {
 
         // Two calls under the cap: each admitted, each records a `mcp:call::response`.
         for _ in 0..2 {
-            let McpRequestAdmission::Allowed(_, request_id) = admit_tool_call(
+            let McpRequestAdmission::Allowed(_, request_id, _) = admit_tool_call(
                 &engine,
                 &governed,
                 &Principal::agent(),
@@ -941,7 +955,7 @@ mod tests {
             SEARCH,
         )
         .expect("the tool call is valid");
-        let McpRequestAdmission::Allowed(decision, _) = admission else {
+        let McpRequestAdmission::Allowed(decision, ..) = admission else {
             panic!("the coarse permit must be the final permit");
         };
         let (action, resource, rule, verdict, reason) = decision.parts();
@@ -1075,7 +1089,7 @@ mod tests {
                @id("tool") @description("tool permit")
                permit(principal, action == issues_mcp::Action::"SearchIssues", resource);"#,
         );
-        let McpRequestAdmission::Allowed(decision, _) = admit_tool_call(
+        let McpRequestAdmission::Allowed(decision, ..) = admit_tool_call(
             &policy,
             &GovernedBox::assigned("test-box"),
             &Principal::agent(),

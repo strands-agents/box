@@ -303,13 +303,15 @@ when { context.input.path == "/workspace/secret" };
         "the later listing completes the bundle"
     );
 
-    let forbidden = authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        "alpha",
-        "read",
-        &json!({"path": "/workspace/secret"}),
-    );
+    let forbidden = authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            "read",
+            &json!({"path": "/workspace/secret"}),
+        )
+        .0;
     assert!(
         matches!(
             forbidden,
@@ -322,13 +324,15 @@ when { context.input.path == "/workspace/secret" };
          forbid rather than from a stale degraded mark: {forbidden:?}"
     );
 
-    let permitted = authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        "alpha",
-        "read",
-        &json!({"path": "/workspace/input"}),
-    );
+    let permitted = authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            "read",
+            &json!({"path": "/workspace/input"}),
+        )
+        .0;
     assert!(
         matches!(&permitted, Decision::Allow { rule, .. } if rule.as_str() != RuleId::DEFAULT_DENY),
         "a path the forbid does not name must stay allowed by the staged per-tool permit itself, \
@@ -375,13 +379,15 @@ when { context.input.env == "prod" };
         "the tool whose rule never staged degrades its server"
     );
 
-    let decision = authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        "alpha",
-        "deploy",
-        &json!({"env": "prod"}),
-    );
+    let decision = authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            "deploy",
+            &json!({"env": "prod"}),
+        )
+        .0;
     // Not merely "not allowed": the refusal is the degraded mark's, not the transient hold a
     // pending tool takes, because discovery finished without this rule.
     assert!(
@@ -425,13 +431,15 @@ when { context.input.env == "prod" };
         "the tool whose rule never staged degrades its server"
     );
 
-    let decision = authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        "alpha",
-        "status",
-        &json!({}),
-    );
+    let decision = authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            "status",
+            &json!({}),
+        )
+        .0;
     assert!(
         matches!(decision, Decision::Allow { .. }),
         "a tool the catalog never declared and no rule names must ride the coarse permit, \
@@ -459,13 +467,15 @@ when { context.input.env == "prod" };
         &history.path().join("dogwood.redb"),
     );
 
-    let held = authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        "alpha",
-        "deploy",
-        &json!({"env": "prod"}),
-    );
+    let held = authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            "deploy",
+            &json!({"env": "prod"}),
+        )
+        .0;
     assert!(
         matches!(
             held,
@@ -484,13 +494,15 @@ when { context.input.env == "prod" };
         .finish_mcp_discovery()
         .expect("completion degrades rather than fataling");
 
-    let refused = authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        "alpha",
-        "deploy",
-        &json!({"env": "prod"}),
-    );
+    let refused = authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            "deploy",
+            &json!({"env": "prod"}),
+        )
+        .0;
     assert!(
         matches!(
             refused,
@@ -532,13 +544,15 @@ permit(principal, action == alpha::Action::"{literal}", resource);
 
         let arguments = json!({"path": "/secret/x"});
         let call = |authority: &PolicyEngine| {
-            authority.refine_tool_call(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                "alpha",
-                raw,
-                &arguments,
-            )
+            authority
+                .refine_tool_call(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    "alpha",
+                    raw,
+                    &arguments,
+                )
+                .0
         };
 
         assert!(
@@ -590,13 +604,15 @@ forbid(principal, action, resource) when { action == srv::Action::"read" };
 
     let arguments = json!({"path": "/secret/x"});
     let call = || {
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "srv",
-            "read",
-            &arguments,
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "srv",
+                "read",
+                &arguments,
+            )
+            .0
     };
     assert!(
         matches!(
@@ -666,13 +682,15 @@ forbid(principal, action, resource) when {{ action == srv::Action::"{literal}" }
 
         let arguments = json!({"path": "/secret/x"});
         let call = || {
-            authority.refine_tool_call(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                "srv",
-                raw,
-                &arguments,
-            )
+            authority
+                .refine_tool_call(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    "srv",
+                    raw,
+                    &arguments,
+                )
+                .0
         };
         assert!(
             matches!(
@@ -735,13 +753,15 @@ when { context.input.server == "srv" };"#;
 
     let arguments = json!({"path": "/secret/x"});
     let call = |authority: &PolicyEngine| {
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "srv",
-            raw,
-            &arguments,
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "srv",
+                raw,
+                &arguments,
+            )
+            .0
     };
 
     assert_eq!(
@@ -960,13 +980,15 @@ unless temporal {{
         );
 
         let call = |server: &str, tool: &str, arguments: serde_json::Value| {
-            authority.refine_tool_call(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                server,
-                tool,
-                &arguments,
-            )
+            authority
+                .refine_tool_call(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    server,
+                    tool,
+                    &arguments,
+                )
+                .0
         };
 
         assert!(
@@ -1059,13 +1081,15 @@ unless temporal {
     );
 
     let call = |tool: &str, arguments: serde_json::Value| {
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "svc",
-            tool,
-            &arguments,
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "svc",
+                tool,
+                &arguments,
+            )
+            .0
     };
 
     assert!(
@@ -1133,13 +1157,15 @@ unless temporal {
     );
 
     let call = |server: &str, tool: &str, arguments: serde_json::Value| {
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            server,
-            tool,
-            &arguments,
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                server,
+                tool,
+                &arguments,
+            )
+            .0
     };
 
     assert_eq!(
@@ -1386,13 +1412,15 @@ unless temporal {{
             ),
             &history.path().join("dogwood.redb"),
         );
-        let decision = authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            server,
-            tool,
-            &json!({"id": "x"}),
-        );
+        let decision = authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                server,
+                tool,
+                &json!({"id": "x"}),
+            )
+            .0;
         assert_eq!(
             matches!(
                 decision,
@@ -1428,13 +1456,15 @@ when { context.input.server == "svc" && context.input.tool == "approve" };
         .expect("svc stages");
 
     let call = |server: &str, tool: &str| {
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            server,
-            tool,
-            &json!({"id": "x"}),
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                server,
+                tool,
+                &json!({"id": "x"}),
+            )
+            .0
     };
 
     assert!(
@@ -1474,13 +1504,15 @@ unless temporal {
     );
 
     let call = || {
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "ghost",
-            "wipe",
-            &json!({"id": "x"}),
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "ghost",
+                "wipe",
+                &json!({"id": "x"}),
+            )
+            .0
     };
 
     assert!(
@@ -1564,13 +1596,15 @@ permit(principal, action == alpha::Action::"foo\"bar", resource);
 
     let refine = |path: &str| {
         let arguments = json!({"path": path});
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "alpha",
-            tool,
-            &arguments,
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "alpha",
+                tool,
+                &arguments,
+            )
+            .0
     };
     assert!(
         matches!(
@@ -1646,13 +1680,15 @@ permit(principal, action == deepwiki::Action::"ask_wiki_question", resource);
     );
 
     let decide = |repo_name: serde_json::Value| {
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "deepwiki",
-            "ask_wiki_question",
-            &json!({"repoName": repo_name, "question": "How does it work?"}),
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "deepwiki",
+                "ask_wiki_question",
+                &json!({"repoName": repo_name, "question": "How does it work?"}),
+            )
+            .0
     };
     assert!(
         decide(json!("strands-agents/sdk-python")).is_allow(),
@@ -1762,13 +1798,15 @@ permit(principal, action == events::Action::"count_events", resource);
     );
 
     let decide = |tool: &str, since: &str| {
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "events",
-            tool,
-            &json!({"since": since}),
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "events",
+                tool,
+                &json!({"since": since}),
+            )
+            .0
     };
     assert!(
         decide("count_events", "2025-06-01T00:00:00Z").is_allow(),
@@ -2888,6 +2926,7 @@ when temporal {
                     tool,
                     &arguments,
                 )
+                .0
                 .is_allow()
         );
     }
@@ -3308,13 +3347,15 @@ when { context.input.path == "/workspace/secret" };
 
 /// One server's `read` of `path`, through the per-tool refinement.
 fn read(authority: &PolicyEngine, server: &str, path: &str) -> Decision {
-    authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        server,
-        "read",
-        &json!({ "path": path }),
-    )
+    authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            server,
+            "read",
+            &json!({ "path": path }),
+        )
+        .0
 }
 
 /// With two schemas missing, a late list from either server is `Rejected` in either order, and
@@ -3564,13 +3605,15 @@ fn call_alpha_read(authority: &PolicyEngine, path: &str) -> Decision {
     if !decision.is_allow() {
         return decision;
     }
-    authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        "alpha",
-        "read",
-        &json!({ "path": path }),
-    )
+    authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            "read",
+            &json!({ "path": path }),
+        )
+        .0
 }
 
 fn allows(authority: &PolicyEngine, request: &Request<'_>) -> bool {
@@ -3823,13 +3866,15 @@ fn call_tool(authority: &PolicyEngine, server: &str, tool: &str, path: &str) -> 
     if !decision.is_allow() {
         return decision;
     }
-    authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        server,
-        tool,
-        &json!({ "path": path }),
-    )
+    authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            server,
+            tool,
+            &json!({ "path": path }),
+        )
+        .0
 }
 
 #[test]

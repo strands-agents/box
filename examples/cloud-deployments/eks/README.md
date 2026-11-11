@@ -26,10 +26,23 @@ For Claude, `--exercise deployment-cooldown` selects the default deployment task
 Use `--exercise boundaries` for the coding and file-permission task.
 The [Claude README](claude/README.md) explains both examples and how to test them without a model.
 
+## Cluster requirements
+
+Use the [cluster baseline](../../../docs/user/tutorials/eks.md#cluster-baseline) before building or deploying.
+It lists the tested worker configuration, required settings, admission requirements, and older-cluster limits.
+`run.py` stops before Job creation if Kubernetes removes required settings during a server dry run.
+It also checks the created Job and Pods.
+A preserved setting does not prove that the worker runtime can implement it.
+
 ## Tested configuration
 
 The Box source pin is `f0dc6f49ea8bb8608502afffa50c8748f6c24ca2`.
-Recorded EKS checks used Kubernetes 1.35, Amazon Linux 2023 ARM64, kernel 6.12.111, and containerd 2.3.5.
+The scripted example passed all 11 checks on EKS 1.33.13 with Amazon Linux 2023 ARM64 managed workers,
+kernel 6.12.113, and containerd 2.3.7.
+On the tested EKS 1.31.14 cluster, the server dry run removed `hostUsers` and changed `procMount` to `Default`;
+the deployment script reported the mismatch without creating a Job.
+
+The EKS 1.35 checks used Amazon Linux 2023 ARM64, kernel 6.12.111, and containerd 2.3.5.
 The fixed coding example passed 11 checks. The Claude Code 2.1.305 coding and file-permission example passed 23 checks.
 
 The Claude Code 2.1.305 deployment example passed seven checks on EKS, with kernel `6.12.111-136.204.amzn2023.aarch64`.
