@@ -17,7 +17,11 @@ constraint is held at 15, which shares the workspace's `unicode-width` version.
 
 ## Local divergence from the pinned revision
 
-### Upstream bug: a newline bypassed the submitted input limit
+### Backport: enforce the submitted input limit for multiline commands
+
+The guard matches [strands-agents/shell#178](https://github.com/strands-agents/shell/pull/178),
+merged on 2026-10-27 as `cff867ba10310b42fb4af135b999defc4ed78c6a`.
+The pinned revision predates that fix.
 
 `exec::execute` selected `execute_sourced` for input containing a newline, which skipped the
 `max_input` check in `execute_admitted_line`. Thus an oversized submission ran when it ended in
