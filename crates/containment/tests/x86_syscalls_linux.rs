@@ -281,6 +281,10 @@ fn legacy_syscall_probe() {
         report
             .calls
             .insert(format!("{scope}/unlink"), error(result));
+        let removed_directory = name(&directory.join("rmdir-source"));
+        // SAFETY: removed_directory is a live, terminated path to an owned empty directory.
+        let result = unsafe { libc::syscall(libc::SYS_rmdir, removed_directory.as_ptr()) };
+        report.calls.insert(format!("{scope}/rmdir"), error(result));
         report.calls.insert(
             format!("{scope}/symlink"),
             two_paths(
@@ -464,7 +468,7 @@ fn legacy_syscalls_preserve_effects_and_filesystem_grants() {
     let identity = user_ids();
     assert!(
         identity.iter().all(|uid| *uid == identity[0]),
-        "same-UID setuid needs an unchanged-identity outside control: {identity:?}"
+        "same-UID setuid needs an unchanged-identity outside control"
     );
     for contained in [false, true] {
         let fixture = tempfile::tempdir().unwrap();
@@ -475,6 +479,9 @@ fn legacy_syscalls_preserve_effects_and_filesystem_grants() {
         for scope in SCOPES {
             let directory = root.join(scope);
             fs::create_dir(&directory).unwrap();
+            let removed_directory = directory.join("rmdir-source");
+            fs::create_dir(&removed_directory).unwrap();
+            assert!(fs::read_dir(&removed_directory).unwrap().next().is_none());
             for filename in ["stat-file", "rename-source", "unlink-source", "chmod-file"] {
                 fs::write(directory.join(filename), CONTENT).unwrap();
             }
@@ -511,7 +518,7 @@ fn legacy_syscalls_preserve_effects_and_filesystem_grants() {
         let report = run_probe(root, contained);
         assert_eq!(
             report.calls.len(),
-            39,
+            42,
             "every probe must report: {report:?}"
         );
         for scope in SCOPES {
@@ -560,6 +567,28 @@ fn legacy_syscalls_preserve_effects_and_filesystem_grants() {
                 libc::ENOENT,
                 "{report:?}"
             );
+            let rmdir_after = stored_files(&directory).remove("rmdir-source");
+            if writable {
+                assert_eq!(
+                    rmdir_after,
+                    None,
+                    "{scope}/rmdir must remove its original empty directory; errno={}",
+                    report.calls[&format!("{scope}/rmdir")]
+                );
+            } else {
+                assert_eq!(
+                    rmdir_after.as_ref(),
+                    Some(&protected_before[scope]["rmdir-source"]),
+                    "{scope}/rmdir changed the original directory or its inode"
+                );
+                assert!(
+                    fs::read_dir(directory.join("rmdir-source"))
+                        .unwrap()
+                        .next()
+                        .is_none(),
+                    "{scope}/rmdir changed the empty directory's contents"
+                );
+            }
             let expected_error = if writable {
                 0
             } else if visible {
@@ -570,6 +599,7 @@ fn legacy_syscalls_preserve_effects_and_filesystem_grants() {
             for operation in [
                 "rename",
                 "unlink",
+                "rmdir",
                 "symlink",
                 "mkdir",
                 "chmod",
@@ -677,9 +707,8 @@ fn legacy_syscalls_preserve_effects_and_filesystem_grants() {
             );
         }
     }
-    assert_eq!(
-        user_ids(),
-        identity,
+    assert!(
+        user_ids() == identity,
         "the parent identity must remain unchanged"
     );
 }

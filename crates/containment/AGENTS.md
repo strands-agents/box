@@ -913,8 +913,16 @@ The raw `vfork` probe keeps the child entirely in one assembly block. It checks 
 `setuid` refusal using the child's own UID, then exits without returning into Rust or changing the
 shared userspace stack. The outside control can set its unchanged UID. The parent checks the
 child's distinct exit status and reaps it. The test supervisor bounds the whole probe.
-The same Claude trace showed nonfatal `link` and `rmdir` maintenance failures. Those entries remain
-unpermitted; this change does not expand hard-link access or claim warning-free CLI behavior.
+Follow-up full-Box checks found that Python `os.rmdir`, Python `shutil.rmtree`, and `git clean -fd`
+could not remove their empty directories on x86: `rmdir` returned `EPERM`. All three outside
+controls and matched ARM64 checks completed cleanup; ARM64 used `unlinkat` with `AT_REMOVEDIR`. Linux v6.12 routes both calls through `do_rmdir`
+in the `fs/namei.c` source linked above. Permit `rmdir` only on x86. It has no mode argument and
+adds no operation beyond the existing `unlinkat` permission. The raw-call regression checks actual
+removal from a writable directory and preserves the empty directories in read-only and hidden
+scopes.
+
+The Claude trace also showed a nonfatal `link` maintenance failure. That entry remains unpermitted;
+this change does not expand hard-link access or claim warning-free CLI behavior.
 
 ### W^X
 
