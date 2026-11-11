@@ -8075,11 +8075,13 @@ fn a_lua_script_that_never_reads_stdin_is_not_held_by_it() {
         shell.proc.set_channel_reader(0, receiver);
         let out = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            shell.run("lua -e 'print(1)'"),
+            shell.run(
+                "lua -e 'print(\"ready\"); print(#\"thread\"); io.write(\"lined\" .. \"\\n\")'",
+            ),
         )
         .await
         .expect("lua must not wait for stdin it never reads");
-        assert_eq!(out.stdout.trim(), "1");
+        assert_eq!(out.stdout.trim(), "ready\n6\nlined", "{}", out.stderr);
         drop(sender);
     }));
 }
@@ -8147,6 +8149,10 @@ fn a_lua_script_reads_stdin_however_it_spells_the_call() {
             r#"lua -e 'print(io . read("*a"))'"#,
             r#"lua -e 'local r = io.read; print(r("*a"))'"#,
             r#"lua -e 'for l in io.lines() do print(l) end'"#,
+            r#"lua -e 'print(io["r".."ead"]("*a"))'"#,
+            r#"lua -e 'local m = io; print(m["r".."ead"]("*a"))'"#,
+            r#"lua -e 'print(_G["i".."o"]["r".."ead"]("*a"))'"#,
+            r#"lua -e 'for k, f in pairs(io) do if k == "r".."ead" then print(f("*a")) end end'"#,
         ] {
             let out = run_with_stdin(script, b"payload\n").await;
             assert_eq!(out.stdout.trim_end(), "payload", "{script}: {}", out.stderr);
