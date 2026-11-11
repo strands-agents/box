@@ -36,6 +36,7 @@ packs = ["box/claude", "box/anthropic", "box/1password"]
 
 [egress.anthropic.secret]
 ref = "op://Private/Anthropic/credential"
+env = "ANTHROPIC_API_KEY"
 ```
 
 At startup, Box launches the CLI as a separate host process, once per distinct reference, before starting the workload. It passes arguments directly and composes the environment from `HOME`, a fixed `PATH`, and explicitly named host variables. Any failed fetch stops startup.
@@ -65,17 +66,23 @@ Existing configurations keep their behavior.
 
 We add `[secret-source.<scheme>]` with `protocol`, `command`, `args`, `pass-env`, `reads`, and `deny`. Protocol `box.secret-source.v1` substitutes one `{ref}` argument and reads the secret from stdout. The `reads` and `deny` fields identify paths to protect from workloads.
 
+The command gets no stdin, has a timeout and output limits, and a non-zero exit stops startup. We strip one trailing `\n` or `\r\n` before validating the secret. Error diagnostics are bounded and redacted.
+
 #### Egress and remote MCP secrets
 
 We add `secret.env` to name the placeholder variable. It is required for declared providers. On an `env://NAME` route, it is optional and must equal `NAME`.
 
+This revises the [current `op://` refusal](../../docs/design/decisions.md#an-undeliverable-credential-is-refused-at-load) and its `an_undeliverable_credential_scheme_is_refused` test: a provider route becomes valid only when its provider is declared.
+
 #### Stored record and credentials API
 
-The stored record gains provider declarations and the checked executable identity, which requires a record version change. The credentials API adds `SecretSourceCommand`, the reference-argument constant, and a backend constructor for declared providers.
+The stored record gains provider declarations and the checked executable identity, which requires a record version change. Each run checks the executable afresh and records its identity, so a CLI update between runs does not require recreating the box. A replacement after that check stops the fetch.
+
+The credentials API adds `SecretSourceCommand`, the reference-argument constant, and a backend constructor for declared providers. That backend uses a declared provider in place of the built-in source for the same scheme; it never registers both. Existing callers of `Backend::local()` keep the built-in `op://` source.
 
 #### Box CLI
 
-Box CLI accepts provider declarations in profiles and shared packs, refuses them in tool packs, and shows them in `box profile show`. We ship `box/1password` as the first secret provider pack.
+Box CLI accepts provider declarations in profiles and shared packs, refuses them in tool packs, and shows them in `box profile show`. We ship `box/1password` as the first secret provider pack. The profile supplies `secret.env`; existing model packs keep their defaults, so profiles that override `env://` references still work.
 
 #### Telemetry
 
