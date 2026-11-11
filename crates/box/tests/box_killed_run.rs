@@ -218,8 +218,11 @@ fn lifetime_permits(policy: &str) -> usize {
     3 + metered
 }
 
-/// **A `run` killed mid-decision leaves a history whose recovered count lies between the permits
-/// the workload received and the requests it had issued, and nothing is permitted after the kill.**
+/// A killed run grants nothing after the kill and recovers no more requests than were issued.
+/// Default durability also preserves every returned permit. Experimental periodic durability can
+/// lose events before a completed flush. The completed-flush guarantee is checked by
+/// `idle_timer_preserves_history_after_sigkill` in `crates/policy/tests/idle_history_flush.rs`;
+/// that test waits for a successful flush before killing and reopening the engine.
 #[test]
 fn a_run_killed_mid_decision_leaves_a_recoverable_count_and_grants_nothing_after_the_kill() {
     if !fixture::namespace_launcher_is_usable() {
@@ -293,13 +296,24 @@ fn a_run_killed_mid_decision_leaves_a_recoverable_count_and_grants_nothing_after
         );
 
         let metered = permits_metered(&box_, &format!("round {round}"));
-        let recovered = lifetime as i64 - metered as i64;
+        let recovered = lifetime.checked_sub(metered).unwrap_or_else(|| {
+            panic!(
+                "round {round}: the restarted box granted more than a fresh lifetime budget: \
+                 lifetime={lifetime} metered={metered}"
+            )
+        });
         assert!(
-            recovered >= permitted as i64 && recovered <= issued as i64,
-            "round {round}: the recovered count must lie between the permits returned and the \
-             requests issued: recovered={recovered} permitted={permitted} issued={issued} \
-             metered={metered}"
+            recovered <= issued,
+            "round {round}: the recovered count must not exceed the requests issued: \
+             recovered={recovered} permitted={permitted} issued={issued} metered={metered}"
         );
+        if !cfg!(feature = "experimental-idle-flush") {
+            assert!(
+                recovered >= permitted,
+                "round {round}: default durability must recover every returned permit: \
+                 recovered={recovered} permitted={permitted} issued={issued} metered={metered}"
+            );
+        }
     }
     assert!(
         rounds > 0,

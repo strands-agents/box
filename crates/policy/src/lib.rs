@@ -18,6 +18,8 @@ mod error;
     )
 )]
 mod grammar;
+#[cfg(feature = "experimental-idle-flush")]
+mod history_flush;
 mod mcp_input;
 mod mcp_schema;
 mod observe;
@@ -66,3 +68,6 @@ pub use policy::{
 pub use request::{FsAccess, FsOperation, Principal, Request, RequestId};
 pub use schema::GovernedBox;
 pub use spelling::{Operator, PolicyWarning};
+
+#[cfg(feature = "experimental-idle-flush")]
+pub use history_flush::{HistoryFlushSnapshot, HistoryFlusher};
