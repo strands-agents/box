@@ -1210,9 +1210,10 @@ async fn serve_transport(
     }
     .await;
 
+    // Signal only: closing stdin would let a Call read end-of-file on part of its input before it
+    // sees the cancel.
     for current in running.values() {
         current.control.signal();
-        current.control.close_stdin();
     }
     let cleanup = finish_mcp_servers(&mut mcp).await;
     drop(frames);
@@ -3617,6 +3618,51 @@ done"#;
                 }
             }
             assert!(!out.exists(), "the Call must not act on part of its input");
+        }));
+    }
+
+    /// A client that disconnects mid-input stops its Call, which never acts on the part it got.
+    #[test]
+    fn a_disconnect_mid_input_never_runs_the_command_after_the_read() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let acted = marker.path().join("acted");
+            {
+                let (_reader, mut writer) = transport(&socket).await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Open {
+                        mode: Interpreter::Shell,
+                    },
+                )
+                .await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Call {
+                        correlation: Default::default(),
+                        source: format!(r#"x=$(cat); printf ACTED > {}"#, acted.display()),
+                    },
+                )
+                .await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Input {
+                        data: encode_payload(b"part"),
+                    },
+                )
+                .await;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            assert!(
+                !acted.exists(),
+                "a disconnected Call must not act on part of its input"
+            );
         }));
     }
 

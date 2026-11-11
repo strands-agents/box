@@ -8117,6 +8117,10 @@ fn stdin_left_unread_by_a_command_reaches_the_next_reader() {
             ("x=$(cat </dev/null); cat", "REAL"),
             ("dirname /a >/dev/null; cat", "REAL"),
             ("x=$(printf inner | cat); cat", "REAL"),
+            ("(printf x </dev/null); cat", "xREAL"),
+            ("v=$(printf x </dev/null); cat", "REAL"),
+            ("(printf x </absent); cat", "REAL"),
+            ("printf x </dev/null; cat", "xREAL"),
         ] {
             let out = run_with_stdin(script, b"REAL").await;
             assert_eq!(
@@ -8150,3 +8154,50 @@ fn a_lua_script_reads_stdin_however_it_spells_the_call() {
         }
     }));
 }
+
+/// Stdin that arrives after the script starts reaches io.read inside a coroutine.
+#[test]
+fn a_lua_coroutine_reads_stdin_that_arrives_late() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for script in [
+            r#"lua -e 'local c = coroutine.create(function() print(io.read("*a")) end); print(coroutine.resume(c)); print(coroutine.status(c))'"#,
+            r#"lua -e 'local f = coroutine.wrap(function() for l in io.lines() do print(l) end end); f(); print("done")'"#,
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            let (sender, receiver) = tokio::sync::mpsc::channel(4);
+            shell.proc.set_channel_reader(0, receiver);
+            tokio::task::spawn_local(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                let _ = sender.send(bytes::Bytes::from_static(b"DELAYED_INPUT\n")).await;
+            });
+            let out = shell.run(script).await;
+            assert!(out.stdout.contains("DELAYED_INPUT"), "{script}: {:?} {}", out.stdout, out.stderr);
+            assert!(!out.stdout.contains("suspended"), "{script}: {:?}", out.stdout);
+        }
+    }));
+}
+
+expect!(
+    an_option_change_inside_a_negated_group_is_kept,
+    "set +e; ! { set -e; true; }; case $- in *e*) echo on;; *) echo off;; esac",
+    "on"
+);
+expect!(
+    errexit_stays_suppressed_inside_a_negated_group_that_sets_it,
+    "set -e; ! { set -e; false; echo inner; }; echo after",
+    "inner\nafter"
+);
+shell_test!(
+    errexit_set_inside_a_negated_group_applies_after_it,
+    "set +e; ! { set -e; true; }; false; echo after",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert!(!out.stdout.contains("after"), "{}", out.stdout);
+        assert_eq!(out.status, 1);
+    }
+);
+expect!(
+    errexit_cleared_inside_a_negated_group_stays_cleared,
+    "set -e; ! { set +e; true; }; false; echo after",
+    "after"
+);

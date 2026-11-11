@@ -1863,7 +1863,9 @@ and back when it ends. The caller waits for the child, so only one of them reads
 input the child does not read stays for the caller. A pipeline's first stage hands the stdin it
 did not take back to the caller when it ends, and a stdin redirect on that stage sets the caller's
 stdin aside instead of dropping it, so `x=$(date); cat` and `(cat </dev/null); cat` leave the
-input for `cat`. `stdin_left_unread_by_a_command_reaches_the_next_reader` fails without it.
+input for `cat`. A single builtin with a stdin redirect, such as `printf x </dev/null`, keeps the
+caller's stdin aside the same way, on success and on a redirect error.
+`stdin_left_unread_by_a_command_reaches_the_next_reader` fails without it.
 `tests/shell_integration.rs::a_command_substitution_reads_the_shells_stdin`,
 `a_subshell_reads_the_shells_stdin`, and
 `stdin_read_in_part_by_a_substitution_leaves_the_rest_to_the_shell` fail without the change.
@@ -1887,7 +1889,10 @@ This copy adds `parser::Item::Negated`, which holds the compound that `!` invert
 `builtin_lua` read stdin to end-of-file before it ran a script from `-e` or a file, so it waited
 for a writer that kept stdin open even when the script never read it. Upstream would call this a
 hang. This copy reads stdin on the first call to `io.read` or to an `io.lines` iterator, both now
-async functions, however the script spells or aliases the call.
+async functions, however the script spells or aliases the call. `coroutine.resume` and the
+functions `coroutine.wrap` returns load stdin before they run the coroutine, because a Lua
+coroutine would take the lazy read's internal yield as its own; a script that uses a coroutine
+therefore reads stdin at its first resume. `a_lua_coroutine_reads_stdin_that_arrives_late` pins it.
 `tests/shell_integration.rs::a_lua_script_that_never_reads_stdin_is_not_held_by_it` fails without
 the change; `a_lua_script_that_reads_stdin_still_gets_it` and
 `a_lua_script_reads_stdin_however_it_spells_the_call` pin the read.
@@ -1895,8 +1900,11 @@ the change; `a_lua_script_that_reads_stdin_still_gets_it` and
 ## 2026-11-11 — `set -e` stopped at a command that `!` inverts
 
 `set -e` exited at `! true`, and with `Item::Negated` also at `! (true)`. POSIX exempts a command
-that `!` inverts. This copy treats an inverted pipeline or compound as tested, and turns `set -e`
-off inside an inverted compound. `tests/shell_integration.rs::errexit_ignores_a_negated_command`
+that `!` inverts. This copy treats an inverted pipeline or compound as tested, and counts each
+enclosing inverted compound in `Process::errexit_tested`, which suppresses `set -e` without
+changing the option, so a `set -e` or `set +e` inside the compound still applies after it
+(`an_option_change_inside_a_negated_group_is_kept` and the three `errexit_*_negated_group*`
+tests). `tests/shell_integration.rs::errexit_ignores_a_negated_command`
 and `errexit_ignores_a_failure_inside_a_negated_group` fail without the change. A compound on
 the left of `&&` or `||` still applies `set -e` inside it, as at the pinned revision.
 

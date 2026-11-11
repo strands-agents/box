@@ -551,6 +551,38 @@ fn setup_sandbox(
         })?,
     )?;
 
+    // A Lua coroutine would swallow the lazy read's internal yield, so a coroutine resumes only
+    // after stdin is loaded, and its own io.read never waits.
+    let coroutine: LuaTable = globals.get("coroutine")?;
+    let resume: LuaFunction = coroutine.get("resume")?;
+    let (r, loaded) = (stdin_cursor.clone(), stdin_loaded.clone());
+    coroutine.set(
+        "resume",
+        lua.create_async_function(move |_, args: LuaMultiValue| {
+            let (r, loaded, resume) = (r.clone(), loaded.clone(), resume.clone());
+            async move {
+                load_stdin(&r, &loaded, max_stdin).await;
+                resume.call::<LuaMultiValue>(args)
+            }
+        })?,
+    )?;
+    let wrap: LuaFunction = coroutine.get("wrap")?;
+    let (r, loaded) = (stdin_cursor.clone(), stdin_loaded.clone());
+    coroutine.set(
+        "wrap",
+        lua.create_function(move |lua, body: LuaFunction| {
+            let wrapped: LuaFunction = wrap.call(body)?;
+            let (r, loaded) = (r.clone(), loaded.clone());
+            lua.create_async_function(move |_, args: LuaMultiValue| {
+                let (r, loaded, wrapped) = (r.clone(), loaded.clone(), wrapped.clone());
+                async move {
+                    load_stdin(&r, &loaded, max_stdin).await;
+                    wrapped.call::<LuaMultiValue>(args)
+                }
+            })
+        })?,
+    )?;
+
     // io.open — async, reads/writes through kernel
     let k = kernel.clone();
     let cwd = proc.cwd.to_string_lossy().to_string();

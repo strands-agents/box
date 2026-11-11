@@ -215,6 +215,8 @@ pub struct Process {
     pub args: Vec<String>,
     /// Shell option flags.
     pub opt_errexit: bool,
+    /// How many enclosing tested contexts, such as a command that `!` inverts, suppress `set -e`.
+    pub errexit_tested: u32,
     pub opt_nounset: bool,
     pub opt_xtrace: bool,
     /// Set when a nounset error occurs during expansion.
@@ -372,6 +374,7 @@ impl Process {
             arg0: "lash".into(),
             args: Vec::new(),
             opt_errexit: false,
+            errexit_tested: 0,
             opt_nounset: false,
             opt_xtrace: false,
             nounset_error: false,
@@ -415,6 +418,7 @@ impl Process {
             arg0: String::new(),
             args: Vec::new(),
             opt_errexit: false,
+            errexit_tested: 0,
             opt_nounset: false,
             opt_xtrace: false,
             nounset_error: false,
@@ -468,6 +472,7 @@ impl Process {
             arg0: self.arg0.clone(),
             args: self.args.clone(),
             opt_errexit: self.opt_errexit,
+            errexit_tested: self.errexit_tested,
             opt_nounset: self.opt_nounset,
             opt_xtrace: self.opt_xtrace,
             nounset_error: false,

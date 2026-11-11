@@ -2164,10 +2164,10 @@ async fn run_capturing_status(
                 }
                 Item::Negated(inner) => {
                     let inner_cl = vec![(*inner.clone(), None)];
-                    let errexit = std::mem::replace(&mut proc.opt_errexit, false);
+                    proc.errexit_tested += 1;
                     let (s, exit) =
                         Box::pin(run_capturing_status(os.clone(), proc, &inner_cl)).await;
-                    proc.opt_errexit = errexit;
+                    proc.errexit_tested -= 1;
                     (if exit == 0 { 1 } else { 0 }, s)
                 }
                 Item::Subshell(cl) => {
@@ -2492,7 +2492,7 @@ async fn execute_command_line_inner(
             proc.last_exit = last_exit;
 
             // errexit: if set -e is active and command failed and not in tested context
-            if proc.opt_errexit && last_exit != 0 && !tested {
+            if proc.opt_errexit && proc.errexit_tested == 0 && last_exit != 0 && !tested {
                 return Err(ControlFlow::Exit(last_exit));
             }
         }
@@ -2564,9 +2564,9 @@ async fn execute_item_unsettled(
             Ok(exit)
         }
         Item::Negated(inner) => {
-            let errexit = std::mem::replace(&mut proc.opt_errexit, false);
+            proc.errexit_tested += 1;
             let exit = Box::pin(execute_item(os, proc, inner)).await;
-            proc.opt_errexit = errexit;
+            proc.errexit_tested -= 1;
             Ok(if exit? == 0 { 1 } else { 0 })
         }
         Item::Group(cl) => Box::pin(execute_command_line_inner(os, proc, cl)).await,
@@ -3537,8 +3537,16 @@ async fn run_pipeline(
             let args: Vec<String> = expanded_args[0][1..].to_vec();
 
             let mut io_proc = shell_proc.fork();
-            // Inherit stdin from shell_proc if present (e.g. CompoundPipeline).
+            // Inherit stdin from shell_proc if present (e.g. CompoundPipeline). A stdin redirect
+            // keeps the caller's stdin aside, so it survives the redirect.
             shell_proc.transfer_fd(STDIN, &mut io_proc);
+            let mut kept_stdin = Process::empty();
+            let redirects_stdin = expanded_redirects[0]
+                .iter()
+                .any(|(redirect, _)| reads_stdin(redirect));
+            if redirects_stdin {
+                io_proc.transfer_fd(STDIN, &mut kept_stdin);
+            }
             // Inherit an embedder's output sinks the same way, and for the same reason.
             //
             // `fork` starts with an empty descriptor table, so the pipes installed below used to
@@ -3603,6 +3611,11 @@ async fn run_pipeline(
                     None => shell_proc.clear_err_tx(),
                 }
                 shell_proc.err_msg(&format!("strands-shell: {e}"));
+                if redirects_stdin {
+                    kept_stdin.transfer_fd(STDIN, shell_proc);
+                } else {
+                    io_proc.transfer_fd(STDIN, shell_proc);
+                }
                 return (1, String::new());
             }
 
@@ -3682,8 +3695,13 @@ async fn run_pipeline(
                     os.clone(),
                     CURRENT_PROCESS.scope(io_cell, async {
                         let r = f(os.as_ref(), shell_proc, &args).await;
-                        // Transfer stdin back so it survives across loop iterations
-                        CURRENT_PROCESS.with(|p| p.borrow_mut().transfer_fd(STDIN, shell_proc));
+                        // Transfer stdin back so it survives across loop iterations, unless a
+                        // redirect replaced it, which then gives back the caller's own.
+                        if redirects_stdin {
+                            kept_stdin.transfer_fd(STDIN, shell_proc);
+                        } else {
+                            CURRENT_PROCESS.with(|p| p.borrow_mut().transfer_fd(STDIN, shell_proc));
+                        }
                         r
                     }),
                 )
