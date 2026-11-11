@@ -78,7 +78,7 @@ This revises the [current `op://` refusal](../../docs/design/decisions.md#an-und
 
 The stored record gains provider declarations and the checked executable identity, which requires a record version change. Each run checks the executable afresh and records its identity, so a CLI update between runs does not require recreating the box. A replacement after that check stops the fetch.
 
-The credentials API adds `SecretSourceCommand`, the reference-argument constant, and a backend constructor for declared providers. That backend uses a declared provider in place of the built-in source for the same scheme; it never registers both. Existing callers of `Backend::local()` keep the built-in `op://` source.
+The credentials API adds `SecretSourceCommand`, the reference-argument constant, and a backend constructor for declared providers. That backend uses a declared provider in place of the built-in source for the same scheme; it never registers both. Box's `policy generate-schema` uses the same provider declarations and checks for remote MCP authentication. `Backend::local()` keeps its built-in `op://` source for callers without provider declarations.
 
 #### Box CLI
 
