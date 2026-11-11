@@ -82,6 +82,8 @@ pub fn builtin_lua<'a>(
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                     format!("lua: {path}: {e}").into()
                 })?
+        } else if sio::stdin_is_outside() {
+            String::new()
         } else {
             // Read from stdin
             let mut reader = sio::stdin()?;

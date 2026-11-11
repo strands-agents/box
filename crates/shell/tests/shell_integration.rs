@@ -8164,11 +8164,12 @@ fn lua_reads_input_from_outside_the_shell_as_empty_and_never_waits() {
         for (script, expected) in [
             ("lua -e 'print(1)'", "1"),
             ("lua -e 'print(\"[\" .. io.read(\"*a\") .. \"]\")'", "[]"),
+            ("lua; echo after", "after"),
         ] {
             let mut shell = Shell::builder().build().unwrap();
             let (sender, receiver) = tokio::sync::mpsc::channel(4);
             sender
-                .send(bytes::Bytes::from_static(b"OUTSIDE"))
+                .send(bytes::Bytes::from_static(b"print('OUTSIDE')"))
                 .await
                 .unwrap();
             shell.proc.set_outside_reader(0, receiver);
@@ -8181,21 +8182,23 @@ fn lua_reads_input_from_outside_the_shell_as_empty_and_never_waits() {
     }));
 }
 
-/// A pipe inside one Shell command still reaches Lua's stdin.
+/// A pipe inside one Shell command still reaches Lua's stdin, as input or as source.
 #[test]
 fn lua_reads_a_pipe_inside_a_shell_command() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let mut shell = Shell::builder().build().unwrap();
-        let (sender, receiver) = tokio::sync::mpsc::channel(4);
-        shell.proc.set_outside_reader(0, receiver);
-        let out = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            shell.run("echo x | lua -e 'print(io.read())'"),
-        )
-        .await
-        .expect("the pipe ends");
-        assert_eq!(out.stdout.trim(), "x", "{}", out.stderr);
-        drop(sender);
+        for (script, expected) in [
+            ("echo x | lua -e 'print(io.read())'", "x"),
+            ("echo 'print(7)' | lua", "7"),
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            let (sender, receiver) = tokio::sync::mpsc::channel(4);
+            shell.proc.set_outside_reader(0, receiver);
+            let out = tokio::time::timeout(std::time::Duration::from_secs(5), shell.run(script))
+                .await
+                .expect("the pipe ends");
+            assert_eq!(out.stdout.trim(), expected, "{script}: {}", out.stderr);
+            drop(sender);
+        }
     }));
 }

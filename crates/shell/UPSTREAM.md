@@ -1917,7 +1917,8 @@ This copy adds `parser::Item::Negated`, which holds the compound that `!` invert
 `builtin_lua` reads stdin to end of input before it runs a script from `-e` or a file. When the
 embedder feeds stdin from outside the Shell and keeps it open, every such script waits for it.
 Upstream has no such input, so this is box's, not upstream's. `Process::set_outside_reader` marks
-that input, and `builtin_lua` reads it as empty, as it read before box forwarded any. A pipe or a
+that input, and `builtin_lua` reads it as empty, as source and as input, as it read before box
+forwarded any. A pipe or a
 redirect inside a command still reaches Lua. `io.read` and `io.lines` are unchanged.
 `tests/shell_integration.rs::lua_reads_input_from_outside_the_shell_as_empty_and_never_waits` fails
 without the change; `lua_reads_a_pipe_inside_a_shell_command` pins the pipe.
