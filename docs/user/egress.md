@@ -54,7 +54,7 @@ when { context.input.host == "api.github.com" };
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `destinations` | string array | required | The destinations the credential goes to. See [Destinations](#destinations). |
-| `secret.ref` | string | required, unless the entry declares a backend | Where the credential comes from: `env://NAME` or `aws://PROFILE`. See [Credential sources](#credential-sources). |
+| `secret.ref` | string | required, unless the entry declares a backend | Where the credential comes from: `env://NAME`, `aws://PROFILE`, or a bare `aws://` for the default credential chain. See [Credential sources](#credential-sources). |
 | `backends` | table array | none | A destination to re-route this entry's requests to. At most one. See [Backends](#backends). |
 | `secret.placement` | string | `header` | For `env://`: where the credential goes. `header`, `basic_auth`, or `query_param`. |
 | `secret.header` | string | `Authorization` | For `env://` with `placement = "header"`: the header name. |
@@ -161,11 +161,48 @@ available.
 |---|---|---|
 | `env://NAME` | The variable `NAME` in the environment of `box run` | Once, when the box starts. The agent and each tool and MCP server get a placeholder in `NAME`. Every destination that names `NAME`, in one route or in several, accepts the same placeholder. |
 | `aws://PROFILE` | The static access keys of `PROFILE` in the operator's AWS configuration | On each request. The gateway signs the request with SigV4. |
+| `aws://` (no profile) | The AWS SDK default credential provider chain on the host | On each request. The gateway signs the request with SigV4, under the host's ambient identity. |
 
 An `aws://` route takes no placement, `header`, `prefix`, `param`, `inject`, or
-`phantom_prefix`. The agent gets placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
-values, and the gateway signs each request to the destinations. The service and region come from
-the host, which ends in `.amazonaws.com` or `.api.aws`.
+`phantom_prefix`. The gateway signs each request to the destinations. The service and region come
+from the host, which ends in `.amazonaws.com` or `.api.aws`.
+
+A bare `aws://` with no profile signs with the host's **ambient** AWS identity. It resolves the AWS
+SDK default credential provider chain, in order: the `AWS_*` environment variables, the profile
+files (including `credential_process`), web identity, the ECS or EKS container endpoint, then EC2
+instance metadata. `aws://PROFILE` instead reads the static keys of one named profile and nothing
+else.
+
+This build does **not** resolve **AWS SSO** or `aws login` profiles (the SDK's `sso` provider is
+compiled out to keep the dependency surface small). A default profile from `aws configure sso` is
+refused, and the refusal names the missing provider. If your ambient identity is SSO, log in with a
+tool that writes static or session keys to `~/.aws/credentials`, or bind `aws://PROFILE` to a
+profile that carries keys.
+
+Because a bare `aws://` signs with whatever identity the host carries, the box prints a warning on
+**every** request it signs that way:
+
+```
+strands-box credentials [<tenant>]: signing with the host's ambient AWS identity: a bare aws://
+resolved the default credential provider chain, not a declared scoped profile. Prefer aws://PROFILE
+to pin the identity, and grant the workload no write access to ~/.aws
+```
+
+To pin the identity, name a profile: `aws://PROFILE` reads one profile's static keys, never the
+ambient chain, and never warns. The shipped box has no setting that refuses a bare `aws://` outright
+— it always signs with a warning — so a deployment that must not sign with an ambient identity
+writes `aws://PROFILE` rather than a bare `aws://`.
+
+> **Writable `~/.aws` is a remote-code-execution path.** The default chain reads the profile files,
+> which include the `credential_process` setting — a program the AWS SDK **executes** to obtain
+> credentials. That program runs inside the box's trusted process, **outside** the sandbox. So if a
+> filesystem list grants the workload (the agent, a tool, the interpreter, or the Shell) write
+> access to `~/.aws` or any parent of it, the workload can write
+> `credential_process = /path/to/its-own-program` and have the box run it outside containment on the
+> next bare-`aws://` request. **Grant write access to `~/.aws` only when every process that can write
+> there is trusted** — this is the box's only mitigation for a bare `aws://`. `aws://PROFILE` does
+> not read `credential_process`, so a named profile is not exposed to this path; prefer one when the
+> workload may reach `~/.aws`.
 
 The gateway adds a credential only over HTTPS. A plain `http://` request to a destination a route
 names is refused.
@@ -203,7 +240,7 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 | Body | Cause |
 |---|---|
 | The policy decision, naming the rule | `net:connect` or `http:request` refused the request. |
-| `blocked by egress control` | A request to a route's destinations lacks the placeholder, carries a different value, or can't be signed. |
+| `blocked by egress control` | A request to a route's destinations lacks the placeholder, carries a different value, or can't be signed. A bare `aws://` route whose default chain resolves no credentials can't be signed and refuses here. |
 | `credential not permitted on a plaintext request` | A plain `http://` request went to a route's destination. |
 | `request authority rejected` | The request inside a `CONNECT` named a different host. |
 | `response blocked by egress control` | The server sent a compressed response to a credentialed request. |

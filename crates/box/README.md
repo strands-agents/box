@@ -308,7 +308,7 @@ secret.ref   = "aws://prod"
 |---|---|---|
 | `destinations` | required | One or more destinations this secret is attached at. Each is an exact host, a `*.` suffix wildcard, an explicit `:port`, and a path prefix or `/*suffix`. Not a regex. |
 | `protocol` | `http` | What the destination speaks. `mcp` makes the gateway parse JSON-RPC frames and raise `mcp:call`; `http` is an ordinary request. |
-| `secret.ref` | required unless a backend is declared | `env://NAME` or `aws://profile`. No other scheme. An `aws://` profile must carry **static keys**; see below. Beside a backend it must be `env://`, and it is phantom-only: the box provisions the placeholder and strips it, and never injects the real destination credential (the backend handles the destination's auth). |
+| `secret.ref` | required unless a backend is declared | `env://NAME`, `aws://profile` (static keys), or a bare `aws://` (the AWS default credential chain). No other scheme. See below. Beside a backend it must be `env://`, and it is phantom-only: the box provisions the placeholder and strips it, and never injects the real destination credential (the backend handles the destination's auth). |
 | `backends.url` | — | A single backend this destination re-routes to, as `scheme://host[:port][/prefix]` (`https` or `http`; a path prefix is allowed, a query or fragment is not). Box dials the backend, presents the backend host (SNI, certificate, and `Host`), prepends the `url`'s path prefix to the agent's path, and keeps the original destination and path in policy and audit. At most one. |
 | `backends.auth.ref` | — | `env://NAME` for the backend's own token. The box attaches it (no phantom; it takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `inject` or `phantom_prefix`). A signed (`aws://` or `credsd://`) auth is refused, and an auth needs an `https` backend. |
 | `secret.placement` | `header` | Where the credential lands: `header`, `basic_auth`, or `query_param`. |
@@ -342,17 +342,22 @@ every phantom and every signing placeholder the box provisions. No table selects
 every process shares one gateway and the gateway cannot tell which process made a call. The box is
 the credential boundary: if a process must not get a credential, put it in another box.
 
-An `aws://` credential is a **signed route**. The box resolves the profile on the trusted side and
+An `aws://` credential is a **signed route**. The box resolves the identity on the trusted side and
 signs each request, so the workload holds no credential at all. It receives placeholder AWS
 credentials, and the signed leg strips whatever it signed with before signing again.
 
-**An `aws://` profile must carry static keys.** `credential_process` is **refused**, and the refusal
-names the command it would have run. Honouring it means the trusted `run` process executes a program named by
-`~/.aws/config`, outside containment and at the operator's uid. No floor defends that file, so a policy
-permitting writes across the home would turn an agent write into trusted-process code execution.
+**`aws://PROFILE` must carry static keys.** For a named profile, `credential_process` is **refused**,
+and the refusal names the command it would have run; a profile that assumes a role or uses SSO is
+refused too, because resolving one needs an STS call. Export `AWS_BEARER_TOKEN_BEDROCK` and bind
+that instead.
 
-A profile that assumes a role or uses SSO is refused too. Resolving one needs an HTTP call to STS, and
-the credentials crate carries no HTTP client. Export `AWS_BEARER_TOKEN_BEDROCK` and bind that instead.
+**A bare `aws://` (no profile) resolves the AWS SDK default credential provider chain** — the host's
+ambient identity — and the box warns on every signed request. Because that chain reads
+`credential_process`, which the trusted process runs outside containment, a bare `aws://` is a
+remote-code-execution path when the workload can write `~/.aws`; the shipped box has no setting that
+refuses the bare form. See
+[the egress guide](../../docs/user/egress.md#credential-sources) for the chain, the warning, and the
+`~/.aws` rule.
 
 **Only `env://` and `aws://` are accepted**, and the config load refuses the rest by
 name.

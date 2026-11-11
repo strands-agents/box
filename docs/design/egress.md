@@ -240,6 +240,7 @@ forward each request. The route specifies which credential to add and grants no 
 |---|---|---|
 | An environment variable | `env://NAME` | Reads `NAME` from the environment of `box run` once, at startup, and swaps it in for a placeholder |
 | An AWS profile | `aws://PROFILE` | Signs each request with SigV4, from the profile's static keys |
+| The AWS default chain | `aws://` (no profile) | Signs each request with SigV4, from the AWS SDK default credential provider chain (the host's ambient identity), and warns on every signed request |
 
 ### The placeholder swap
 
@@ -290,6 +291,12 @@ region from the host, for example `bedrock` and `us-west-2` from
 `bedrock-runtime.us-west-2.amazonaws.com`, and refuses a host it can't read them from. The process
 gets placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` values, so an AWS SDK builds its
 request, and the gateway replaces the signature.
+
+`aws://PROFILE` resolves the named profile's static keys; a bare `aws://` resolves the AWS SDK
+default credential provider chain, the host's ambient identity, which the box warns about on every
+request. The decision
+[An AWS binding resolves a named profile's static keys, and a bare aws:// resolves the full chain](decisions.md#a-bare-aws-resolves-the-default-credential-chain)
+states both forms and the writable-`~/.aws` cost.
 
 ## Example: a GitHub API request
 
