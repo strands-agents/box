@@ -68,12 +68,12 @@ constrains what the program does.
 ## The box
 
 <a id="linux-evaluation-requires-explicit-consent"></a>
-### Linux startup does not require an environment opt-in
+### Linux ARM64 startup does not require an environment opt-in
 
-The Linux command line and library validate configuration without an environment opt-in.
+The Linux ARM64 command line and library validate configuration without an environment opt-in.
 `EXPERIMENTAL_LINUX_SUPPORT` has no effect, including when an existing script sets it to `TRUE`. An
-extra environment gate would require every caller and test to supply consent separately from
-configuration. The cost is that the variable no longer prevents accidental Linux use. Host
+extra environment gate would require every ARM64 caller and test to supply consent separately from
+configuration. The cost is that the variable no longer prevents accidental Linux ARM64 use. Host
 requirements, process hardening, filesystem grants, and containment checks still apply. A missing or
 invalid configuration still fails before a workload starts.
 
@@ -84,6 +84,21 @@ publishing its archive. Linux previews always include ARM64 Linux and leave the 
 release unchanged. Removing the startup flag does not authorize a release or establish security
 acceptance. The native filesystem policy experiment retains its separate configuration and Cargo
 feature controls.
+
+<a id="linux-x86-startup-requires-explicit-consent"></a>
+### Linux x86-64 startup requires an explicit experimental opt-in
+
+Box requires `EXPERIMENTAL_X86_SUPPORT=TRUE` in its operator environment before executing a command
+on Linux x86-64. When the variable is missing or has any other value, Box refuses `run` and
+`policy generate-schema` before configuration reads, host callbacks, process hardening, or workload
+startup. The same check applies to the Rust library functions `run` and `generate_policy_schema`.
+Help and version output remain available.
+
+We accept the separate consent step for x86-64 callers and tests while support remains experimental.
+Enabling it by default would run workloads on x86-64 before the remaining compatibility and release
+checks are complete. This gate does not change filesystem grants, syscall permissions, or release
+readiness. It does not apply to ARM64, macOS, or the standalone containment library. The retired
+`EXPERIMENTAL_LINUX_SUPPORT` variable remains inactive.
 
 <a id="native-filesystem-policy-requires-explicit-selection"></a>
 ### Native filesystem policy requires explicit selection
