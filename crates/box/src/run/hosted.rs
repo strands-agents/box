@@ -1614,6 +1614,231 @@ mod tests {
             .expect("the program is executable");
     }
 
+    mod missing_server_checks {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        const PERMITS: &str = r#"
+            permit (principal, action == Box::Action::"shell:spawn", resource);
+            permit (principal, action == Tool::git::Action::"status", resource);
+        "#;
+
+        fn fixture() -> (tempfile::TempDir, BoxRoot, Record, PathBuf) {
+            let home = tempfile::tempdir().expect("operator home");
+            let root = crate::record::layout::testing::box_root(home.path(), "missing-server");
+            let trusted = home.path().join("trusted");
+            let writable = home.path().join("writable");
+            std::fs::create_dir(&trusted).expect("trusted directory");
+            std::fs::create_dir(&writable).expect("writable directory");
+            let program = trusted.join("git");
+            install_program(&program);
+            let mut record = grammar_record(&root, &program);
+            record.contained_mcp.insert(
+                "repo".to_string(),
+                crate::record::config::process::ContainedMcp {
+                    spec: toml::from_str(&format!(
+                        "command = [\"git\"]\n[env]\nPATH = {:?}\n",
+                        writable.display().to_string()
+                    ))
+                    .expect("server with a declared search directory"),
+                },
+            );
+            (home, root, record, writable.join("git"))
+        }
+
+        fn bind(root: &BoxRoot, record: &Record, text: &str) -> Arc<PolicyEngine> {
+            let commands = ConfiguredCommands::load(record).expect("tool command loads");
+            bound_engine(root, record, &commands, text)
+        }
+
+        async fn start(
+            engine: &Arc<PolicyEngine>,
+            spec: &ProcessSpec,
+            argument: &str,
+        ) -> Result<(), String> {
+            let program =
+                crate::run::contain::executable::resolve(spec.program(), &spec.search_path())
+                    .expect("the requested server resolves");
+            let args = vec![argument.to_string()];
+            policy::ShellPolicyInterceptor::into_server_start_handle(
+                Arc::clone(engine),
+                Principal::agent(),
+                GovernedBox::assigned("codex"),
+                None,
+                Default::default(),
+            )
+            .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+                command: spec.program(),
+                program: spec.program(),
+                program_path: &program.granted_path().display().to_string(),
+                args: &args,
+                literal: &[],
+                cwd: "/",
+            })
+            .await
+            .map(drop)
+            .map_err(|error| error.to_string())
+        }
+
+        #[test]
+        fn a_missing_matched_server_keeps_startup_lazy() {
+            let (_home, root, record, server) = fixture();
+            assert!(!server.exists(), "the server is absent at startup");
+            bind(&root, &record, PERMITS);
+        }
+
+        #[tokio::test]
+        async fn an_unreadable_server_cannot_later_claim_a_grammar_permit() {
+            let (_home, root, record, server) = fixture();
+            install_program(&server);
+            std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o111))
+                .expect("execute-only server");
+            let spec = &record.contained_mcp["repo"].spec;
+            assert!(
+                crate::run::contain::executable::resolve(spec.program(), &spec.search_path())
+                    .is_ok(),
+                "the unreadable server remains executable"
+            );
+            assert!(
+                crate::record::layout::open_without_following(&server).is_err(),
+                "this control requires a server file the test user cannot read"
+            );
+            let engine = bind(&root, &record, PERMITS);
+            std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755))
+                .expect("the server becomes readable after binding");
+
+            let refused = start(&engine, spec, "status")
+                .await
+                .expect_err("the server file was never approved");
+            assert!(
+                refused.contains("tool grammar requires an approved program file"),
+                "{refused}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_new_server_cannot_claim_spawn_or_grammar_permits() {
+            let (_home, root, record, server) = fixture();
+            assert!(!server.exists(), "the server is absent at startup");
+            let engine = bind(&root, &record, PERMITS);
+            install_program(&server);
+
+            for argument in ["push", "status"] {
+                let refused = start(&engine, &record.contained_mcp["repo"].spec, argument)
+                    .await
+                    .expect_err("a later file cannot claim either permit");
+                assert!(
+                    refused.contains("tool grammar requires an approved program file"),
+                    "{argument}: {refused}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn an_existing_server_keeps_its_grammar_denial() {
+            let (_home, root, record, server) = fixture();
+            install_program(&server);
+            let engine = bind(&root, &record, PERMITS);
+            let capture = telemetry::ObservationCapture::begin();
+
+            let refused = start(&engine, &record.contained_mcp["repo"].spec, "push")
+                .await
+                .expect_err("the general spawn permit does not admit a grammar-denied command");
+            assert!(refused.contains("[default-deny]"), "{refused}");
+            assert_eq!(
+                capture.last().expect("the start was decided").action(),
+                r#"Tool::git::Action::"push""#
+            );
+        }
+
+        #[tokio::test]
+        async fn an_existing_server_keeps_its_grammar_permit() {
+            let (_home, root, record, server) = fixture();
+            install_program(&server);
+            let engine = bind(
+                &root,
+                &record,
+                r#"permit (principal, action == Tool::git::Action::"status", resource);"#,
+            );
+            let capture = telemetry::ObservationCapture::begin();
+
+            start(&engine, &record.contained_mcp["repo"].spec, "status")
+                .await
+                .expect("the grammar permits status without a general spawn permit");
+            assert_eq!(
+                capture.last().expect("the start was decided").action(),
+                r#"Tool::git::Action::"status""#
+            );
+        }
+
+        #[tokio::test]
+        async fn a_replaced_server_cannot_claim_the_grammar_permit() {
+            let (_home, root, record, server) = fixture();
+            install_program(&server);
+            let engine = bind(&root, &record, PERMITS);
+            let replacement = server.with_extension("replacement");
+            install_program(&replacement);
+            std::fs::rename(&replacement, &server).expect("replace with a different file");
+
+            let refused = start(&engine, &record.contained_mcp["repo"].spec, "status")
+                .await
+                .expect_err("the replacement cannot claim the approved file's permit");
+            assert!(refused.contains("[tool-grammar]"), "{refused}");
+        }
+
+        #[tokio::test]
+        async fn an_unrelated_missing_server_keeps_lazy_start_and_spawn_permission() {
+            let (_home, root, mut record, server) = fixture();
+            let server = server.with_file_name("unrelated-server");
+            record.contained_mcp.get_mut("repo").unwrap().spec.command[0] =
+                "unrelated-server".to_string();
+            assert!(
+                !server.exists(),
+                "the unrelated server is absent at startup"
+            );
+            let engine = bind(&root, &record, PERMITS);
+            install_program(&server);
+            let capture = telemetry::ObservationCapture::begin();
+
+            start(&engine, &record.contained_mcp["repo"].spec, "status")
+                .await
+                .expect("the general spawn permit admits the unrelated server");
+            assert_eq!(
+                capture.last().expect("the start was decided").action(),
+                r#"Box::Action::"shell:spawn""#
+            );
+        }
+
+        #[tokio::test]
+        async fn a_refused_late_server_can_retry_with_an_already_bound_program() {
+            let (_home, root, record, server) = fixture();
+            let engine = bind(&root, &record, PERMITS);
+            install_program(&server);
+            let spec = &record.contained_mcp["repo"].spec;
+            let refused = start(&engine, spec, "status")
+                .await
+                .expect_err("the new file has no approved identity");
+            assert!(
+                refused.contains("tool grammar requires an approved program file"),
+                "{refused}"
+            );
+            let approved = Path::new(record.tool["git"].program());
+            let replacement = server.with_extension("approved");
+            std::os::unix::fs::symlink(approved, &replacement)
+                .expect("the replacement names the approved git file");
+            std::fs::rename(&replacement, &server).expect("the server now names the approved file");
+            let capture = telemetry::ObservationCapture::begin();
+
+            start(&engine, spec, "status")
+                .await
+                .expect("the same engine admits a retry with the approved file and called name");
+            assert_eq!(
+                capture.last().expect("the retry was decided").action(),
+                r#"Tool::git::Action::"status""#
+            );
+        }
+    }
+
     /// The operator home a test root sits under, which is also the agent's workspace here.
     fn workspace_of(root: &BoxRoot) -> PathBuf {
         root.operator_home()

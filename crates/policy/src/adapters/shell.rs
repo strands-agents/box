@@ -1904,8 +1904,7 @@ mod tests {
         assert!(refused.to_string().contains("[tool-grammar]"), "{refused}");
     }
 
-    /// **With empty bindings, every spawn decides exactly as `shell:spawn` decides it today**, and
-    /// so does every spawn that no binding covers.
+    /// Agent spawns with empty or nonmatching bindings use the `shell:spawn` policy path.
     #[tokio::test]
     async fn empty_bindings_decide_every_spawn_as_the_shell_spawn_path_does() {
         const POLICY: &str = r#"

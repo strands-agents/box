@@ -193,7 +193,7 @@ impl PolicyEngine {
         spelling: &str,
         starter: crate::grammar::Starter,
     ) -> Option<crate::grammar::GrammarCoverage<'_>> {
-        if self.bindings.is_empty() {
+        if self.bindings.is_empty() && !self.bindings.requires_binding(spelling, starter) {
             return None;
         }
         self.bindings.coverage_for(
@@ -618,6 +618,44 @@ mod tests {
 
     use super::*;
     use crate::path::ApprovedPath;
+
+    #[cfg(feature = "shell-adapter")]
+    #[test]
+    fn a_server_requires_its_grammar_before_the_engine_has_any_bindings() {
+        let directory = tempfile::tempdir().expect("a history directory");
+        let engine = PolicyEngine::open_with_tool_grammars(
+            Vec::new(),
+            ToolGrammars::corpus(&["git"]),
+            &directory.path().join("history.redb"),
+        )
+        .expect("the policy opens without program bindings");
+        let program = directory.path().join("git");
+        std::fs::write(&program, "a newly created program").expect("the program is created");
+        let path = program.to_str().expect("a UTF-8 program path");
+        let coverage = engine.grammar_coverage(path, "git", crate::grammar::Starter::Server);
+        let Some(crate::grammar::GrammarCoverage::Refused(refusal)) = coverage else {
+            panic!("an empty binding table must not bypass the server's required grammar");
+        };
+        assert_eq!(
+            refusal,
+            crate::grammar::CoverageRefusal::UnboundServer {
+                name: "git".into(),
+                program_path: program
+                    .canonicalize()
+                    .expect("the program path is canonical"),
+            }
+        );
+        assert!(
+            engine
+                .grammar_coverage(path, "git", crate::grammar::Starter::Agent)
+                .is_none()
+        );
+        assert!(
+            engine
+                .grammar_coverage(path, "notes", crate::grammar::Starter::Server)
+                .is_none()
+        );
+    }
 
     struct PolicyFixture {
         authority: PolicyEngine,

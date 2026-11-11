@@ -294,16 +294,26 @@ Links, other names, and copies are decided as follows:
   `[mcp.<name>]` runs a bound file under a name that no `[tool]` declares, `shell:spawn` decides the
   server's start. If the agent calls the file by that name, Box refuses the spawn, and no policy can
   permit it, because the server's start and the agent's spawn would otherwise make the same
-  `shell:spawn` request. A server on a file that no grammar binds isn't affected.
+  `shell:spawn` request. This restriction on agent commands does not apply when no grammar binds
+  the file. Server starts still follow the required-binding check below.
 - **A replaced file is refused.** If the file at a bound path changes while the box runs, for
   example after an update, its bound names stay refused until the box restarts. Box also
   refuses a bare name, such as `git`, when the file bound under that name is gone or replaced. The
   denial has `[tool-grammar]` where a rule `@id` would be, and ends with `No policy can permit it.`
-- **A copy at another path is a different file.** When no `[tool]` runs a copy of `git` at another
-  path, Box decides that copy as `shell:spawn`, and the grammar doesn't decide it.
+- **A local server must satisfy its required grammar binding.** When a stdio server's configured
+  program name matches an installed grammar, its start must use a file Box bound under that name
+  before the workload started. A missing or unreadable server program does not prevent Box startup.
+  When the server is requested, Box refuses its start if that binding is unavailable. A general
+  `shell:spawn` permit cannot replace this check. The rest of Box keeps running.
+  A later link to an already-bound file can satisfy the same file-and-name check on a retry.
+  To use a new or previously unreadable executable, make it readable and executable by the user
+  running Box, then restart Box.
+- **A copy at another path is a different file.** For an ordinary agent command, when no `[tool]`
+  runs a copy of `git` at another path, Box decides that copy as `shell:spawn`.
+  A local server whose program name requires a grammar must satisfy the binding check above.
 
-So a broad `shell:spawn` permit lets another name or a copy of `git` past a `Tool::git` forbid. A
-link such as `g` resolves to the bound file, so a permit that matches only the bound file's
+For ordinary agent commands, a broad `shell:spawn` permit lets another name or a copy of `git` past a
+`Tool::git` forbid. A link such as `g` resolves to the bound file, so a permit that matches only the bound file's
 `context.input.program_path` admits every other name of it. Pin each `shell:spawn` permit on
 both `context.input.program` and `context.input.program_path`, such as `program == "make"` with
 `program_path == "/usr/bin/make"`.
@@ -354,9 +364,13 @@ safe when a command does more than its words say.
 
 ## Startup refusals
 
-`run` refuses a grammar problem before the workload starts, and each message says what is wrong.
-Most refusals come before it writes any box state. The check that `program` on `PATH` reaches the
+`run` refuses invalid grammar definitions and tool configuration before the workload starts.
+Each message says what is wrong. Most of these refusals come before it writes any box state. The check that `program` on `PATH` reaches the
 tool's file comes after `run` opens each tool's program file. [`[tool.<name>.grammar]`](config.md#toolnamegrammar) lists each refusal with its message.
+
+An unavailable server program does not stop startup. A later server-start request can be refused
+when its required grammar binding is unavailable, as described in
+[which program files a grammar binds](#which-program-files-a-grammar-binds).
 
 ## See also
 
