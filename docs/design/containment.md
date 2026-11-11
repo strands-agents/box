@@ -12,6 +12,14 @@ mechanism.
 > Platform scope. Unless a section explicitly states Linux behavior, this page describes operating
 > system enforcement and guarantees on macOS.
 
+Before reading configuration, the Box command and the Rust library functions `run`
+and `generate_policy_schema` require `EXPERIMENTAL_X86_SUPPORT=TRUE` in the
+operator environment on Linux x86-64.
+Without that exact value, Box refuses command execution before starting a workload
+or schema-discovery server. Help and version output remain available. ARM64 startup
+and the standalone containment library do not require this opt-in. Once enabled,
+x86-64 uses the Linux namespace launcher and its existing restrictions.
+
 ## Two kinds of enforcement
 
 Box restricts the agent in two ways, and they cover different paths to a resource:
