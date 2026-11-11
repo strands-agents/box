@@ -17,6 +17,30 @@ constraint is held at 15, which shares the workspace's `unicode-width` version.
 
 ## Local divergence from the pinned revision
 
+### Continued source lines and empty lexer words
+
+Two upstream parsing defects affected backslash-newline continuations. A sourced command ran
+before its next physical line was read, and a continuation followed by whitespace could emit an
+empty word. The latter also made the group condition in nvm 0.41.0 fail with `unexpected 'then'`.
+
+The source executor now tells the shared parser whether more physical lines remain. An unquoted
+escape at that boundary is incomplete, so the executor collects the next line before it runs the
+command or reads a heredoc body. Parsing at end of input keeps its previous escape handling.
+The lexer omits a word with no parts; explicitly quoted empty arguments still have parts.
+Alias expansion also bounds its cursor adjustment at zero when empty replacements remove words.
+
+`line_continuations_join_source_lines` covers command and word joining, pipeline input, and
+short-circuit evaluation through direct execution, `.` and `sh`. The parser test
+`line_continuations_do_not_create_words` covers argument boundaries, the reduced nvm condition,
+and quoted empty arguments. `line_continuations_preserve_quoting_and_input_boundaries` covers
+quotes, escaped backslashes, comments, a quoted heredoc, end of input, and empty alias replacements.
+
+An optimized build sources nvm 0.41.0 with `--no-use` and prints its version. Automatic
+initialization still fails: a quoted empty parameter expansion loses its argument position.
+That expansion defect also reproduces without continuations in the unchanged library.
+This change does not remove the repeated parsing cost of a large source statement. Continuations
+that split an operator or a variable name also remain unsupported by their separate collectors.
+
 ### Local addition: an embedder can disable the execution timeout
 
 `ShellBuilder::disable_timeout()` selects the engine's existing no-deadline mode. The builder
