@@ -761,6 +761,11 @@ async fn forward(
                 }
             }
             Body::Exit { status } => {
+                if status != 0
+                    && let Some(note) = capped.lock().ok().and_then(|note| note.clone())
+                {
+                    eprintln!("strands-box-sock-alias: {note}");
+                }
                 return match refusal() {
                     Some(reason) => Err(invalid_input(reason)),
                     None => Ok(Outcome::Status(status)),

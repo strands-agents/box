@@ -92,8 +92,21 @@ pub fn builtin_lua<'a>(
                 })?
         };
 
-        // A script from a file or `-e` reads stdin on its first `io.read` or `io.lines` call.
-        let stdin_data = String::new();
+        // A script from a file or `-e` reads stdin before it runs, and only when its text names
+        // `read` or `lines`, so a script that cannot reach io.read never waits for stdin.
+        let stdin_data = if (script_file.is_some() || eval_code.is_some())
+            && (code.contains("read") || code.contains("lines"))
+        {
+            if let Ok(mut r) = sio::stdin() {
+                os::read_to_string_limited(&mut r, proc.max_output)
+                    .await
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
 
         // Strip shebang
         let code = if code.starts_with("#!") {
@@ -512,26 +525,18 @@ fn setup_sandbox(
         })?,
     )?;
 
-    // io.read — reads stdin on its first call, unless the caller gave `stdin_data`
+    // io.read — reads from pre-buffered stdin
     let stdin_cursor = Rc::new(RefCell::new(std::io::Cursor::new(
         stdin_data.as_bytes().to_vec(),
     )));
-    let stdin_loaded = Rc::new(std::cell::Cell::new(!stdin_data.is_empty()));
-    let max_stdin = proc.max_output;
-    let (r, loaded) = (stdin_cursor.clone(), stdin_loaded.clone());
+    let r = stdin_cursor.clone();
     io_table.set(
         "read",
-        lua.create_async_function(move |lua, fmt: Option<LuaString>| {
-            let (r, loaded) = (r.clone(), loaded.clone());
-            async move {
-                load_stdin(&r, &loaded, max_stdin).await;
-                read_cursor(&lua, &r, fmt)
-            }
-        })?,
+        lua.create_function(move |lua, fmt: Option<LuaString>| read_cursor(lua, &r, fmt))?,
     )?;
 
     // io.lines (stdin)
-    let (r, loaded) = (stdin_cursor.clone(), stdin_loaded.clone());
+    let r = stdin_cursor.clone();
     io_table.set(
         "lines",
         lua.create_function(move |lua, path: Option<LuaString>| {
@@ -540,54 +545,8 @@ fn setup_sandbox(
                     "io.lines(filename) not supported; use io.open",
                 ));
             }
-            let (r2, loaded2) = (r.clone(), loaded.clone());
-            lua.create_async_function(move |lua, ()| {
-                let (r3, loaded3) = (r2.clone(), loaded2.clone());
-                async move {
-                    load_stdin(&r3, &loaded3, max_stdin).await;
-                    read_cursor_line(&lua, &r3)
-                }
-            })
-        })?,
-    )?;
-
-    // A Lua coroutine would hand an async callback's internal pending yield back to the script.
-    // `coroutine.resume` and `coroutine.wrap` instead wait for that callback and resume again, so a
-    // read inside a coroutine waits for its input and a coroutine that never reads never waits.
-    let coroutine: LuaTable = globals.get("coroutine")?;
-    let resume: LuaFunction = coroutine.get("resume")?;
-    let create: LuaFunction = coroutine.get("create")?;
-    let resume_waiting = {
-        let resume = resume.clone();
-        lua.create_async_function(move |_, args: LuaMultiValue| {
-            let resume = resume.clone();
-            async move { resume_through_pending(&resume, args).await }
-        })?
-    };
-    coroutine.set("resume", resume_waiting)?;
-    coroutine.set(
-        "wrap",
-        lua.create_function(move |lua, body: LuaFunction| {
-            let thread: LuaValue = create.call(body)?;
-            let resume = resume.clone();
-            lua.create_async_function(move |_, args: LuaMultiValue| {
-                let (resume, thread) = (resume.clone(), thread.clone());
-                async move {
-                    let mut call = LuaMultiValue::new();
-                    call.push_back(thread);
-                    call.extend(args);
-                    let mut results = resume_through_pending(&resume, call).await?;
-                    match results.pop_front() {
-                        Some(LuaValue::Boolean(true)) => Ok(results),
-                        _ => Err(LuaError::external(
-                            results
-                                .pop_front()
-                                .map(|error| format!("{error:?}"))
-                                .unwrap_or_else(|| "cannot resume coroutine".to_string()),
-                        )),
-                    }
-                }
-            })
+            let r2 = r.clone();
+            lua.create_function(move |lua, ()| read_cursor_line(lua, &r2))
         })?,
     )?;
 
@@ -1090,58 +1049,6 @@ fn read_cursor_line(lua: &Lua, c: &Rc<RefCell<std::io::Cursor<Vec<u8>>>>) -> Lua
         line.pop();
     }
     Ok(LuaValue::String(lua.create_string(&line)?))
-}
-
-/// Call Lua's own `coroutine.resume` with `args`, and while the coroutine stops only because an
-/// async callback is pending, wait for that callback and resume the coroutine again.
-async fn resume_through_pending(
-    resume: &LuaFunction,
-    args: LuaMultiValue,
-) -> LuaResult<LuaMultiValue> {
-    let thread = args.front().cloned();
-    let mut results: LuaMultiValue = resume.call(args)?;
-    loop {
-        let pending = results.len() == 2
-            && matches!(results.front(), Some(LuaValue::Boolean(true)))
-            && matches!(results.back(), Some(LuaValue::LightUserData(marker)) if *marker == Lua::poll_pending());
-        if !pending {
-            return Ok(results);
-        }
-        // The callback registered this task's waker when it was polled inside the resume.
-        let mut waited = false;
-        std::future::poll_fn(|_| {
-            if waited {
-                std::task::Poll::Ready(())
-            } else {
-                waited = true;
-                std::task::Poll::Pending
-            }
-        })
-        .await;
-        let mut again = LuaMultiValue::new();
-        if let Some(thread) = &thread {
-            again.push_back(thread.clone());
-        }
-        results = resume.call(again)?;
-    }
-}
-
-/// Read the process's stdin into `cursor` once, on the first call.
-async fn load_stdin(
-    cursor: &Rc<RefCell<std::io::Cursor<Vec<u8>>>>,
-    loaded: &std::cell::Cell<bool>,
-    limit: usize,
-) {
-    if loaded.replace(true) {
-        return;
-    }
-    let data = match sio::stdin() {
-        Ok(mut reader) => os::read_to_string_limited(&mut reader, limit)
-            .await
-            .unwrap_or_default(),
-        Err(_) => String::new(),
-    };
-    *cursor.borrow_mut() = std::io::Cursor::new(data.into_bytes());
 }
 
 fn read_cursor(

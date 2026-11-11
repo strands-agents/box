@@ -26,12 +26,15 @@ When the alias's standard input is a pipe, a file, or a socket, the command read
 standard input while it runs. Bytes arrive unchanged. A terminal or `/dev/null` gives the command
 no input. A command that does not read its input is not held by it: the alias returns when the
 command exits, even when the writer keeps the pipe open. A command that does read such an input
-waits for it until the Shell's timeout.
+waits for it until the Shell's timeout, or, with `shell.timeout = false`, until its caller stops
+it.
 
 The alias forwards at most 64 KiB. Past that it forwards nothing more and reads and discards the
 rest, so the writer never blocks and never gets a broken pipe. A command that does not read its
 input is not affected. A command that reads past the first 64 KiB gets no end of input: it waits
-until the Shell's timeout and then fails, rather than acting on part of its input. If reading the
+until the Shell's timeout and then fails, rather than acting on part of its input, and the alias
+prints that its input was cut. With `shell.timeout = false`, such a command waits until its caller
+stops it. If reading the
 input fails, the alias stops the command and exits with status `125`.
 
 This limit applies only to input piped into the alias from outside the Shell, such as a hook's

@@ -8249,3 +8249,29 @@ fn a_cancelled_negated_call_leaves_errexit_for_the_next_call() {
         assert_eq!(out.status, 1);
     }));
 }
+
+/// A read from a C callback or a coroutine gets stdin that arrives late, and coroutine errors keep
+/// their values.
+#[test]
+fn a_lua_read_from_a_callback_gets_late_stdin_and_coroutine_errors_keep_their_value() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, expected) in [
+            (r#"lua -e 'print((string.gsub("x", "x", function() return io.read("l") end)))'"#, "payload"),
+            (r#"lua -e 'local t = {2, 1}; table.sort(t, function(a, b) io.read("l"); return a < b end); print(t[1], t[2])'"#, "1\t2"),
+            (r#"lua -e 'local co = coroutine.wrap(function() return io.read("l") end); print(co())'"#, "payload"),
+            (r#"lua -e 'local ok, e = pcall(coroutine.wrap(function() error({code = 42}) end)); print(type(e), e.code)'"#, "table\t42"),
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            let (sender, receiver) = tokio::sync::mpsc::channel(4);
+            shell.proc.set_channel_reader(0, receiver);
+            tokio::task::spawn_local(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                let _ = sender.send(bytes::Bytes::from_static(b"payload\nline2\n")).await;
+            });
+            let out = shell.run(script).await;
+            assert_eq!(out.stdout.trim_end(), expected, "{script}: {}", out.stderr);
+            assert_eq!(out.status, 0, "{script}: {}", out.stderr);
+        }
+    }));
+}

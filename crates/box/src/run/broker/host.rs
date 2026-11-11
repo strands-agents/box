@@ -3666,6 +3666,51 @@ done"#;
         }));
     }
 
+    /// A Call holding exactly the capped input with no end-of-file, whose client then goes away,
+    /// never acts on that input.
+    #[test]
+    fn a_capped_input_whose_client_leaves_is_never_acted_on() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let out = marker.path().join("out");
+            {
+                let (_reader, mut writer) = transport(&socket).await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Open {
+                        mode: Interpreter::Shell,
+                    },
+                )
+                .await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Call {
+                        correlation: Default::default(),
+                        source: format!(r#"x=$(cat); printf %s "$x" > {}"#, out.display()),
+                    },
+                )
+                .await;
+                for chunk in vec![b'x'; MAX_PROGRAM_INPUT_BYTES].chunks(MAX_CHUNK_BYTES) {
+                    put(
+                        &mut writer,
+                        1,
+                        Body::Input {
+                            data: encode_payload(chunk),
+                        },
+                    )
+                    .await;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            assert!(!out.exists(), "a Call must not act on its capped input");
+        }));
+    }
+
     /// A command that never reads its stdin still finishes.
     #[test]
     fn a_command_that_never_reads_its_stdin_finishes() {

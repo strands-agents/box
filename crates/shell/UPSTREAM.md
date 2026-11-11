@@ -1888,16 +1888,14 @@ This copy adds `parser::Item::Negated`, which holds the compound that `!` invert
 
 `builtin_lua` read stdin to end-of-file before it ran a script from `-e` or a file, so it waited
 for a writer that kept stdin open even when the script never read it. Upstream would call this a
-hang. This copy reads stdin on the first call to `io.read` or to an `io.lines` iterator, both now
-async functions, however the script spells or aliases the call. A Lua coroutine would hand an
-async callback's internal pending yield back to the script, so `coroutine.resume` and the functions
-`coroutine.wrap` returns resume the coroutine again until no callback is pending. A read inside a
-coroutine waits for its input, and a coroutine that never reads never waits.
-`a_lua_coroutine_reads_stdin_that_arrives_late` and
-`a_lua_coroutine_that_never_reads_stdin_is_not_held_by_it` pin it.
-`tests/shell_integration.rs::a_lua_script_that_never_reads_stdin_is_not_held_by_it` fails without
-the change; `a_lua_script_that_reads_stdin_still_gets_it` and
-`a_lua_script_reads_stdin_however_it_spells_the_call` pin the read.
+hang. This copy pre-reads stdin only when the script's text contains `read` or `lines`, the names
+of the two functions that read it. `io.read` and `io.lines` stay synchronous, so a read from a
+coroutine or from a C callback such as `string.gsub` works as at the pinned revision. A script
+that reaches them only through text it builds at run time gets empty stdin.
+`tests/shell_integration.rs::a_lua_script_that_never_reads_stdin_is_not_held_by_it` and
+`a_lua_coroutine_that_never_reads_stdin_is_not_held_by_it` fail without the change;
+`a_lua_script_reads_stdin_however_it_spells_the_call`, `a_lua_coroutine_reads_stdin_that_arrives_late`,
+and `a_lua_read_from_a_callback_gets_late_stdin_and_coroutine_errors_keep_their_value` pin the read.
 
 ## 2026-11-11 — `set -e` stopped at a command that `!` inverts
 
