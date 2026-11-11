@@ -1876,9 +1876,17 @@ Upstream would call this a bug, because its security policy names this floor as 
 
 This copy applies the IPv4 checks to the address inside the NAT64 and IPv4-translated prefixes,
 refuses the whole RFC 8215 local-use prefix `64:ff9b:1::/48`, and refuses `0.0.0.0/8`,
-`168.63.129.16`, and `100.100.100.200`. A NAT64 address that carries a public IPv4 address, and
-the rest of `100.64.0.0/10`, stay allowed. The same change is proposed upstream in
-[strands-agents/shell#240](https://github.com/strands-agents/shell/pull/240).
+`168.63.129.16`, and `100.100.100.200`. A `64:ff9b::/96` address that carries a public IPv4
+address stays allowed, and so does the rest of `100.64.0.0/10`. An address in `64:ff9b:1::/48` is
+refused even when a translator maps it to a public IPv4 address, because that prefix is never
+globally routed and its embedding offset is chosen by the network. `0.0.0.0/8` is refused because
+it is reserved and not globally reachable; `allowed_urls` can still permit it.
+
+Upstream has the same change:
+[strands-agents/shell#240](https://github.com/strands-agents/shell/pull/240) merged as
+`def7ab7`, and [strands-agents/shell#244](https://github.com/strands-agents/shell/pull/244)
+corrects the `0.0.0.0/8` comment. When the vendor revision moves past both, this entry can be
+removed.
 
 `vfs_kernel.rs::url_safety_tests::check_url_safe_blocks_translated_and_platform_metadata_addresses`
 fails without the change and passes with it.
