@@ -2484,8 +2484,7 @@ fn is_ip_blocked(ip: std::net::IpAddr) -> bool {
                 || v4.is_link_local()
                 || v4.is_unspecified()
                 || v4.octets()[..2] == [169, 254]
-                // 0.0.0.0/8 ("this network") is reserved and not globally reachable,
-                // so curl refuses it by default; allowed_urls can still permit it.
+                // 0.0.0.0/8 ("this network") is reserved and not globally reachable.
                 || v4.octets()[0] == 0
                 // Platform metadata endpoints outside the ranges above.
                 || v4 == std::net::Ipv4Addr::new(168, 63, 129, 16) // Azure WireServer

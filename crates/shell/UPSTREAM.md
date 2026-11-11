@@ -1880,7 +1880,8 @@ refuses the whole RFC 8215 local-use prefix `64:ff9b:1::/48`, and refuses `0.0.0
 address stays allowed, and so does the rest of `100.64.0.0/10`. An address in `64:ff9b:1::/48` is
 refused even when a translator maps it to a public IPv4 address, because that prefix is never
 globally routed and its embedding offset is chosen by the network. `0.0.0.0/8` is refused because
-it is reserved and not globally reachable; `allowed_urls` can still permit it.
+it is reserved and not globally reachable. This copy has no `allowed_urls`, so nothing permits
+it here; upstream's comment also mentions `allowed_urls`, which arrives with the vendor move.
 
 Upstream has the same change:
 [strands-agents/shell#240](https://github.com/strands-agents/shell/pull/240) merged as
