@@ -298,10 +298,11 @@ impl DogwoodEngine {
         self.tool_actions.contains(action)
     }
 
-    /// Record the `::response` of one per-tool `tools/call`, with the `input` its request recorded.
+    /// Record the `::response` of one per-tool `tools/call`, with its request's `input` and `output.reply`.
     pub(crate) fn observe_tool_response(
         &self,
         response: crate::PendingToolResponse,
+        reply: crate::McpReply,
     ) -> Result<(), PolicyError> {
         let crate::PendingToolResponse {
             request_id,
@@ -311,7 +312,16 @@ impl DogwoodEngine {
         self.verify_request_id(&request_id)?;
         self.submit(|_| {
             with_request_id(
-                with_input(identity.event_builder(KIND_RESPONSE), input),
+                with_output_fields(
+                    with_input(identity.event_builder(KIND_RESPONSE), input),
+                    vec![(
+                        attr::REPLY,
+                        Value::Entity {
+                            ty: crate::schema::MCP_REPLY_TYPE.to_string(),
+                            id: reply.eid().to_string(),
+                        },
+                    )],
+                ),
                 &request_id,
             )
         })

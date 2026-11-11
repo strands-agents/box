@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 
 use dogwood_local_engine::{DurableLog, Record};
 use policy::{
-    Decision, GovernedBox, Outcome, PendingToolResponse, Policy, PolicyEngine, PolicyError,
-    PolicyStagingError, Principal, Request, SchemaStage, generate_mcp_schema,
+    Decision, GovernedBox, McpReply, Outcome, PendingToolResponse, Policy, PolicyEngine,
+    PolicyError, PolicyStagingError, Principal, Request, SchemaStage, generate_mcp_schema,
 };
 use serde_json::{Value, json};
 
@@ -60,6 +60,17 @@ fn call(authority: &PolicyEngine, tool: &str, arguments: Value) -> Decision {
 
 /// [`call`] on any server.
 fn call_on(authority: &PolicyEngine, server: &str, tool: &str, arguments: Value) -> Decision {
+    call_ending(authority, server, tool, arguments, McpReply::Result)
+}
+
+/// [`call_on`], ending the way `reply` says.
+fn call_ending(
+    authority: &PolicyEngine,
+    server: &str,
+    tool: &str,
+    arguments: Value,
+    reply: McpReply,
+) -> Decision {
     let governed = GovernedBox::assigned("test-box");
     let (decision, request_id) = authority.decide(
         &governed,
@@ -98,7 +109,7 @@ fn call_on(authority: &PolicyEngine, server: &str, tool: &str, arguments: Value)
         .expect("the coarse response records");
     if let Some(pending) = pending {
         authority
-            .record_tool_response(pending)
+            .record_tool_response(pending, reply)
             .expect("the tool response records");
     }
     refined
@@ -110,33 +121,10 @@ fn events(history: &Path) -> Vec<(String, String, String, String)> {
     let mut out = Vec::new();
     log.scan_from(0, |_, bytes| {
         if let Record::Event(event) = Record::decode(bytes).expect("the record decodes") {
-            let text = format!("{event:?}");
-            let field = |name: &str| {
-                text.split(&format!("\"{name}\": "))
-                    .nth(1)
-                    .map(|rest| rest.split(", \"").next().unwrap_or_default().to_string())
-                    .unwrap_or_default()
-            };
-            let namespace = text
-                .split("namespace: [")
-                .nth(1)
-                .and_then(|rest| rest.split(']').next())
-                .unwrap_or_default()
-                .replace('"', "");
-            let action = text
-                .split("action: \"")
-                .nth(1)
-                .and_then(|rest| rest.split('"').next())
-                .unwrap_or_default();
-            let kind = text
-                .split("kind: \"")
-                .nth(1)
-                .and_then(|rest| rest.split('"').next())
-                .unwrap_or_default()
-                .to_string();
+            let field = |name: &str| format!("{:?}", event.field_path(&[name.to_string()]));
             out.push((
-                format!("{}::{action}", namespace.replace(", ", "::")),
-                kind,
+                format!("{}::{}", event.namespace().join("::"), event.action()),
+                event.kind().to_string(),
                 field("input"),
                 field("requestId"),
             ));
@@ -402,4 +390,96 @@ unless temporal { formerly within 1h
         call_on(&authority, "refs", "close", arguments).is_allow(),
         "the response records the argument as the request did, so the join matches"
     );
+}
+
+#[test]
+fn a_call_that_ended_without_a_reply_does_not_satisfy_a_result_precondition() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let authority = desk(
+        r#"
+permit(principal, action == desk::Action::"verify_identity", resource);
+permit(principal, action == desk::Action::"reset_password", resource);
+@id("reset_after_verify")
+forbid(principal, action == desk::Action::"reset_password", resource)
+unless temporal {
+    formerly within 1h (
+        desk::Action::"verify_identity"::response{
+            input.user_name: context.input.user_name, output.reply: Box::McpReply::"result" }
+    )
+};
+"#,
+        &directory.path().join("dogwood.redb"),
+    );
+    assert!(
+        call_ending(
+            &authority,
+            "desk",
+            "verify_identity",
+            json!({ "user_name": "u" }),
+            McpReply::Cancelled
+        )
+        .is_allow()
+    );
+    assert!(
+        !call(&authority, "reset_password", json!({ "user_name": "u" })).is_allow(),
+        "a cancelled or uncertain verification is not an answered one"
+    );
+    assert!(call(&authority, "verify_identity", json!({ "user_name": "u" })).is_allow());
+    assert!(
+        call(&authority, "reset_password", json!({ "user_name": "u" })).is_allow(),
+        "a verification the server answered allows the reset"
+    );
+}
+
+#[test]
+fn a_call_that_ended_without_a_reply_still_counts_toward_a_budget() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let authority = desk(
+        r#"
+permit(principal, action == desk::Action::"reset_password", resource);
+forbid(principal, action == desk::Action::"reset_password", resource)
+when temporal {
+    formerly within 1h ( desk::Action::"reset_password"::response{ input.user_name: _ } )
+};
+"#,
+        &directory.path().join("dogwood.redb"),
+    );
+    assert!(
+        call_ending(
+            &authority,
+            "desk",
+            "reset_password",
+            json!({ "user_name": "u" }),
+            McpReply::Cancelled
+        )
+        .is_allow()
+    );
+    assert!(
+        !call(&authority, "reset_password", json!({ "user_name": "v" })).is_allow(),
+        "a cancelled reset still counts, so cancelling cannot escape the budget"
+    );
+}
+
+#[test]
+fn a_reply_frame_classifies_as_result_tool_error_or_protocol_error() {
+    for (frame, reply) in [
+        (
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"content": []}}),
+            McpReply::Result,
+        ),
+        (
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"content": [], "isError": false}}),
+            McpReply::Result,
+        ),
+        (
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"content": [], "isError": true}}),
+            McpReply::ToolError,
+        ),
+        (
+            json!({"jsonrpc": "2.0", "id": 1, "error": {"code": -32000, "message": "x"}}),
+            McpReply::ProtocolError,
+        ),
+    ] {
+        assert_eq!(McpReply::of_reply(&frame), reply, "{frame}");
+    }
 }

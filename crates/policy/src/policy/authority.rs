@@ -594,12 +594,13 @@ impl Authority {
     pub(super) fn record_tool_response(
         &self,
         response: PendingToolResponse,
+        reply: crate::McpReply,
     ) -> Result<(), PolicyError> {
         let live = self
             .live
             .lock()
             .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?;
-        live.engine.observe_tool_response(response)
+        live.engine.observe_tool_response(response, reply)
     }
 
     #[cfg(test)]

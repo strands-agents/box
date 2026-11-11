@@ -595,11 +595,16 @@ impl PolicyEngine {
     }
 
     /// Record the `::response` of one per-tool `tools/call`, beside its `mcp:call::response`.
+    ///
+    /// `reply` is how the call ended. A cancelled call, a call whose connection ended, and an
+    /// unread reply still record a response, so a budget counts them, and a precondition that
+    /// needs the server's answer requires `output.reply` to be `result`.
     pub fn record_tool_response(
         &self,
         response: crate::PendingToolResponse,
+        reply: crate::McpReply,
     ) -> Result<(), PolicyError> {
-        self.authority.record_tool_response(response)
+        self.authority.record_tool_response(response, reply)
     }
 }
 

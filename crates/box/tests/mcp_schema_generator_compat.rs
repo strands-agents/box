@@ -4,7 +4,10 @@ use cedar_policy::{
 use policy::{generate_mcp_schema, validate_mcp_schema_composition};
 
 const ACTION: &str = r#"issues_mcp::Action::"read_wiki""#;
-const GLOBAL_ENTITIES: &str = "namespace Box { entity Agent; entity Resource; }";
+/// The Box declarations a generated fragment names: the principal, the resource, and the
+/// `McpReply` enum each tool action's `output.reply` reads.
+const GLOBAL_ENTITIES: &str = r#"namespace Box { entity Agent; entity Resource;
+entity McpReply enum ["result", "tool_error", "protocol_error", "cancelled", "indeterminate"]; }"#;
 
 const TOOLS: &str = r#"
 {

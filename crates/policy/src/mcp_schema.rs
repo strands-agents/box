@@ -220,6 +220,7 @@ pub fn generate_mcp_schema(server: &str, tools_list: &str) -> Result<String, Mcp
             }
         })?;
         use_box_entities(&mut definition_value, &server_namespace);
+        declare_reply_output(&mut definition_value);
         *definition = serde_json::from_value(definition_value).map_err(|_| {
             McpSchemaError::GeneratedShape {
                 server: server.to_string(),
@@ -865,6 +866,33 @@ fn rewrite_schema_name_list(value: &mut serde_json::Value, renames: &BTreeMap<St
             continue;
         };
         *name = serde_json::Value::String(repaired.clone());
+    }
+}
+
+/// Declare the Box-owned `output.reply` on every generated tool action's context.
+fn declare_reply_output(value: &mut serde_json::Value) {
+    let Some(actions) = value
+        .get_mut("actions")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    for action in actions.values_mut() {
+        if let Some(attributes) = action
+            .pointer_mut("/appliesTo/context/attributes")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            attributes.insert(
+                "output".to_string(),
+                serde_json::json!({
+                    "type": "Record",
+                    "required": false,
+                    "attributes": {
+                        "reply": { "type": "Entity", "name": "Box::McpReply" }
+                    }
+                }),
+            );
+        }
     }
 }
 

@@ -8,8 +8,8 @@ use std::time::Instant;
 
 use egress_gateway::McpTarget;
 use policy::{
-    Decision, DiscoveryFailure, GovernedBox, ListPage, Outcome, PendingToolResponse, PolicyEngine,
-    Principal, Request, RequestId, ServerDiscovery,
+    Decision, DiscoveryFailure, GovernedBox, ListPage, McpReply, Outcome, PendingToolResponse,
+    PolicyEngine, Principal, Request, RequestId, ServerDiscovery,
 };
 use serde_json::Value;
 
@@ -428,7 +428,11 @@ async fn run_mcp_program(
     };
     let mut recorded = Ok(());
     for call in pending.into_values() {
-        recorded = recorded.and(record_response_leg(&exchange, call));
+        recorded = recorded.and(record_response_leg(
+            &exchange,
+            call,
+            McpReply::Indeterminate,
+        ));
     }
     result.and(cleanup).and(recorded)
 }
@@ -1129,13 +1133,18 @@ async fn forward_server_frame(
     }
     let response_leg = exchange.connection.decided_calls.remove(&key);
     if let Some(call) = response_leg.filter(|_| terminal) {
-        record_response_leg(exchange, call)?;
+        record_response_leg(exchange, call, McpReply::of_reply(&response))?;
     }
     emit_text(exchange.frames, exchange.program, raw, None).await?;
     Ok(ProgramAction::Continue)
 }
 
-fn record_response_leg(exchange: &Exchange<'_>, call: RecordedCall) -> io::Result<()> {
+/// Record a call's response legs; `reply` is how the call ended.
+fn record_response_leg(
+    exchange: &Exchange<'_>,
+    call: RecordedCall,
+    reply: McpReply,
+) -> io::Result<()> {
     exchange
         .connection
         .policy
@@ -1153,7 +1162,10 @@ fn record_response_leg(exchange: &Exchange<'_>, call: RecordedCall) -> io::Resul
         )
         .and_then(|()| {
             call.tool_response.map_or(Ok(()), |response| {
-                exchange.connection.policy.record_tool_response(response)
+                exchange
+                    .connection
+                    .policy
+                    .record_tool_response(response, reply)
             })
         })
         .map_err(|error| {

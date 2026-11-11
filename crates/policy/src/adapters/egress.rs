@@ -17,8 +17,8 @@ use crate::{
     CatalogRefusal, CatalogStage, DiscoveryFailure, ListPage, McpServerKind, ToolCatalogs,
 };
 use crate::{
-    Decision, Delivery, DenyReason, Outcome, PendingToolResponse, PolicyEngine, Principal, Request,
-    RequestId,
+    Decision, Delivery, DenyReason, McpReply, Outcome, PendingToolResponse, PolicyEngine,
+    Principal, Request, RequestId,
 };
 
 /// Binds one policy and egress principal to outbound effect interception.
@@ -540,7 +540,11 @@ impl LocalPolicyEffectPermit {
                                     // A failed coarse record surfaces before the tool's leg,
                                     // so the tool never counts a call `mcp:call` missed.
                                     tool_response.map_or(Ok(()), |response| {
-                                        self.policy.record_tool_response(response)
+                                        // The gateway reads no reply body, and a streamed reply
+                                        // sends its status before the tool's result, so how an
+                                        // http call ended is not known.
+                                        self.policy
+                                            .record_tool_response(response, McpReply::Indeterminate)
                                     })
                                 }),
                         ),
@@ -1410,6 +1414,37 @@ mod tests {
                 .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
                 .is_err(),
             "two indeterminate deliveries record the per-tool ::response and fire the cap"
+        );
+    }
+
+    /// A remote tool call records `output.reply` as `indeterminate`, because the gateway cannot
+    /// tell that the tool's result arrived, so a precondition that requires `result` stays unmet.
+    #[test]
+    fn a_remote_tool_call_never_satisfies_a_result_precondition() {
+        let fixture = tracked_interceptor(&format!(
+            r#"{DEMO_PERMITS}
+            forbid(principal, action == demo::Action::"add", resource)
+            when {{ context.input.a == 9 }}
+            unless temporal {{
+              formerly within 3600s (demo::Action::"add"::response{{ output.reply: Box::McpReply::"result" }})
+            }};"#
+        ));
+        fixture
+            .stage_mcp_catalog("demo", root_reply(DEMO_TOOLS.as_bytes()))
+            .expect("the demo catalog stages");
+        fixture
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+            .expect("an ordinary call is admitted")
+            .record_outcome(EgressEffectOutcome::Replied {
+                accepted_bytes: 4,
+                status: 200,
+            })
+            .expect("the answered call records");
+        assert!(
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":9,"b":1}"#))
+                .is_err(),
+            "a 200 status does not show that the tool's result arrived"
         );
     }
 

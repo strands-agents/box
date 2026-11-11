@@ -18,7 +18,7 @@ enforcement point.
 
 ## Public Interface
 
-The façade exports **59 names with `--all-features`, and 53 by default.** The adapter features add
+The façade exports **60 names with `--all-features`, and 54 by default.** The adapter features add
 the six names in the last row.
 
 `PrincipalKind` left on 2026-08-18. The three enforcement-point principals collapsed into one
@@ -35,7 +35,7 @@ the six names in the last row.
 | `ApprovedPath`, `PathResolver`, `PathRefusal` | The resolved path a `Request::Fs` demands, the only public minter of one, and why a mint fails. |
 | `Decision`, `DenyReason`, `RuleId` | Authorization verdict and determining rule. |
 | `Outcome`, `Delivery`, `FsResult` | One completed effect, submitted as history. |
-| `PendingToolResponse` | The per-tool `::response` an allowed `tools/call` owes, from `refine_tool_call` to `record_tool_response`. |
+| `PendingToolResponse`, `McpReply` | The per-tool `::response` an allowed `tools/call` owes, from `refine_tool_call` to `record_tool_response`, and how the call ended. |
 | `EffectivePolicy`, `ENGINE_ID` | Active engine and source identity. |
 | `PolicyError` | Startup and history-recording errors. |
 | `PolicyCheck`, `Finding`, `RuleRef`, `Location` | What `check` finds in a policy: each finding's message, rules, source location, and help. |

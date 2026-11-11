@@ -80,6 +80,11 @@ entity FsOtherOperation enum [
 // counts completed effects reads `output.result` and excludes both.
 entity FsResponseResult enum ["completed", "descriptor_issued", "indeterminate"];
 
+// How an MCP tool call ended, on the `output` of the tool's own response event. Every end is a
+// response, so a budget counts it; a precondition that needs the server's answer reads
+// `output.reply` and requires `result`.
+entity McpReply enum ["result", "tool_error", "protocol_error", "cancelled", "indeterminate"];
+
 type FsResponseOutput = {
   result: FsResponseResult
 };

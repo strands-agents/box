@@ -185,3 +185,43 @@ impl std::fmt::Debug for PendingToolResponse {
             .finish_non_exhaustive()
     }
 }
+
+/// How one MCP tool call ended, recorded on its own `::response` as `output.reply`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpReply {
+    /// The server answered with a result that does not report an error.
+    Result,
+    /// The server answered with a result that sets `isError`.
+    ToolError,
+    /// The server answered with a JSON-RPC error.
+    ProtocolError,
+    /// The client cancelled the call.
+    Cancelled,
+    /// The call's end is uncertain: its connection ended, or the reply was not read.
+    Indeterminate,
+}
+
+impl McpReply {
+    /// The value a JSON-RPC reply to a `tools/call` reports.
+    #[must_use]
+    pub fn of_reply(reply: &serde_json::Value) -> Self {
+        if reply.get("error").is_some() {
+            return Self::ProtocolError;
+        }
+        match reply.pointer("/result/isError") {
+            Some(serde_json::Value::Bool(true)) => Self::ToolError,
+            _ => Self::Result,
+        }
+    }
+
+    /// The `Box::McpReply` entity id.
+    pub(crate) fn eid(self) -> &'static str {
+        match self {
+            Self::Result => "result",
+            Self::ToolError => "tool_error",
+            Self::ProtocolError => "protocol_error",
+            Self::Cancelled => "cancelled",
+            Self::Indeterminate => "indeterminate",
+        }
+    }
+}
