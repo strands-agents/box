@@ -112,6 +112,11 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "pipe2",
         number: libc::SYS_pipe2,
     },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "pipe",
+        number: libc::SYS_pipe,
+    },
     PermittedSyscall {
         name: "inotify_init1",
         number: libc::SYS_inotify_init1,
@@ -132,9 +137,19 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "mkdirat",
         number: libc::SYS_mkdirat,
     },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "mkdir",
+        number: libc::SYS_mkdir,
+    },
     PermittedSyscall {
         name: "unlinkat",
         number: libc::SYS_unlinkat,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "unlink",
+        number: libc::SYS_unlink,
     },
     PermittedSyscall {
         name: "linkat",
@@ -144,9 +159,19 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "symlinkat",
         number: libc::SYS_symlinkat,
     },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "symlink",
+        number: libc::SYS_symlink,
+    },
     PermittedSyscall {
         name: "renameat",
         number: libc::SYS_renameat,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "rename",
+        number: libc::SYS_rename,
     },
     PermittedSyscall {
         name: "ftruncate",
@@ -173,6 +198,11 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "fchmod",
         number: libc::SYS_fchmod,
     },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "chmod",
+        number: libc::SYS_chmod,
+    },
     PermittedSyscall {
         name: "fchmodat",
         number: libc::SYS_fchmodat,
@@ -194,6 +224,11 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
     PermittedSyscall {
         name: "openat",
         number: libc::SYS_openat,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "open",
+        number: libc::SYS_open,
     },
     PermittedSyscall {
         name: "close",
@@ -248,6 +283,16 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
     PermittedSyscall {
         name: "newfstatat",
         number: libc::SYS_newfstatat,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "stat",
+        number: libc::SYS_stat,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "lstat",
+        number: libc::SYS_lstat,
     },
     PermittedSyscall {
         name: "fstat",
@@ -470,6 +515,11 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "clone",
         number: libc::SYS_clone,
     },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "vfork",
+        number: libc::SYS_vfork,
+    },
     PermittedSyscall {
         name: "execve",
         number: libc::SYS_execve,
@@ -641,6 +691,13 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
         disposition: Disposition::ArgumentScoped,
         reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
     },
+    #[cfg(target_arch = "x86_64")]
+    MediatedSyscall {
+        name: "chmod",
+        number: libc::SYS_chmod,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
     MediatedSyscall {
         name: "fchmodat",
         number: libc::SYS_fchmodat,
@@ -659,11 +716,25 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
         disposition: Disposition::ArgumentScoped,
         reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
     },
+    #[cfg(target_arch = "x86_64")]
+    MediatedSyscall {
+        name: "open",
+        number: libc::SYS_open,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
     // This checks explicit directory modes, so ordinary subdirectories can still
     // inherit the parent's group and set-group-ID bit.
     MediatedSyscall {
         name: "mkdirat",
         number: libc::SYS_mkdirat,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    #[cfg(target_arch = "x86_64")]
+    MediatedSyscall {
+        name: "mkdir",
+        number: libc::SYS_mkdir,
         disposition: Disposition::ArgumentScoped,
         reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
     },
@@ -897,6 +968,10 @@ impl SyscallPolicy {
         if entry.number == libc::SYS_fchmod {
             return special_file_mode_rules(1, None);
         }
+        #[cfg(target_arch = "x86_64")]
+        if entry.number == libc::SYS_chmod || entry.number == libc::SYS_mkdir {
+            return special_file_mode_rules(1, None);
+        }
         if entry.number == libc::SYS_fchmodat || entry.number == FCHMODAT2 {
             return special_file_mode_rules(2, None);
         }
@@ -905,6 +980,10 @@ impl SyscallPolicy {
         }
         if entry.number == libc::SYS_openat {
             return special_file_mode_rules(3, Some(2));
+        }
+        #[cfg(target_arch = "x86_64")]
+        if entry.number == libc::SYS_open {
+            return special_file_mode_rules(2, Some(1));
         }
         if entry.number == libc::SYS_ioctl {
             return terminal_control_rules();
@@ -1297,10 +1376,10 @@ mod tests {
     #[test]
     fn permit_filter_has_the_expected_workload_and_installer_entries() {
         let x86_entries = usize::from(cfg!(target_arch = "x86_64"));
-        assert_eq!(WORKLOAD_PERMITTED.len(), 113 + 6 * x86_entries);
+        assert_eq!(WORKLOAD_PERMITTED.len(), 113 + 16 * x86_entries);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 116 + 7 * x86_entries);
+        assert_eq!(rules.len(), 116 + 17 * x86_entries);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);

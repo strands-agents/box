@@ -331,7 +331,10 @@ it does not prevent them from being stored on that file.
 
 The syscall restriction filter rejects either bit in `fchmod`, `fchmodat`, and `fchmodat2`. It also
 rejects either bit in `mkdirat` and in the creation mode of `openat` when `O_CREAT` or `O_TMPFILE`
-is present. It checks the low 32 bits that the kernel uses. An `openat` call without creation flags
+is present. On x86-64, the same restrictions apply to `chmod` and `mkdir`. Their mode is the
+second argument; the `*at` calls take it in the third argument. The same creation checks apply to
+x86-64 `open`, whose flags and mode precede their `openat` positions by one argument. The filter
+checks the low 32 bits that the kernel uses. An `open` or `openat` call without creation flags
 ignores the mode argument, so that unused argument does not cause a refusal. The permit filter
 continues to exclude ownership-changing calls, `openat2`, and `mknodat`. Ordinary writes and
 permitted compiler output remain available. Executable-bit changes require a requested mode without

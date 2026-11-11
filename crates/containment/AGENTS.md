@@ -856,6 +856,66 @@ The `x86_access_distinguishes_readable_and_missing_files_under_the_filters` test
 readable file and an absent file before and after filter installation. With `access` missing from the
 permit table, its outside control succeeds and its filtered existing-file check fails.
 
+Native tests of `54e9271b5fc52a1e07db0fd6a6e24bc272638b27` found seven more x86 calls that the
+permit filter refused. Outside controls used the same programs and completed the operations.
+
+| x86 call | Measured failure | Existing permitted counterpart |
+| --- | --- | --- |
+| `stat` | Codex could not read metadata for its configuration directory. | `newfstatat(AT_FDCWD, path, buffer, 0)` |
+| `mkdir` | Claude Code, Python directory creation, and Git initialization received `EPERM`. | `mkdirat(AT_FDCWD, path, mode)` |
+| `rename` | Python could not rename an owned file. | `renameat(AT_FDCWD, old, AT_FDCWD, new)` |
+| `unlink` | Python could not delete an owned file. | `unlinkat(AT_FDCWD, path, 0)` |
+| `chmod` | Python could not change an owned file to mode `0755`. | `fchmodat(AT_FDCWD, path, mode)` |
+| `symlink` | Python could not create a symbolic link. | `symlinkat(target, AT_FDCWD, link)` |
+| `pipe` | Bash could not create a pipeline. | `pipe2(descriptors, 0)` |
+
+Linux v6.12 implements these counterparts through the same operation helpers in
+[`fs/namei.c`](https://github.com/torvalds/linux/blob/v6.12/fs/namei.c),
+[`fs/open.c`](https://github.com/torvalds/linux/blob/v6.12/fs/open.c), and
+[`fs/pipe.c`](https://github.com/torvalds/linux/blob/v6.12/fs/pipe.c).
+The x86 `stat` entry calls `newstat` in
+[`fs/stat.c`](https://github.com/torvalds/linux/blob/v6.12/fs/stat.c), through `vfs_stat` and
+`vfs_fstatat` in [`include/linux/fs.h`](https://github.com/torvalds/linux/blob/v6.12/include/linux/fs.h).
+
+Keep `mkdir` and `chmod` argument-scoped. Their mode is zero-based argument 1, whereas `mkdirat`
+and `fchmodat` use argument 2. `direct_file_permissions_preserve_writes_and_refuse_special_modes`
+checks ordinary modes, each special bit, both bits, and nonzero upper argument bits through the
+production trampoline. For permitted modes, the x86 rows set special bits in the unused third
+argument. For refused modes, they clear that argument. Copying the `*at` argument index therefore
+fails the test.
+`legacy_syscalls_preserve_effects_and_filesystem_grants` checks raw call effects, hidden and
+read-only paths, and a symbolic link pointing outside the filesystem grants. These tests do not
+qualify every application or the x86 release process.
+
+After those seven additions, Codex passed its configuration-directory check but received `EPERM`
+from `open` when opening its temporary directory, creating a lock file, and reading
+`/etc/codex/requirements.toml`. The same requirements-file call outside Box returned `ENOENT`,
+which Codex handled. The same trace also showed `lstat` refused on its temporary directory.
+Linux implements `open` through the same `do_sys_open(AT_FDCWD, ...)` helper as `openat` in
+[`fs/open.c`](https://github.com/torvalds/linux/blob/v6.12/fs/open.c).
+`lstat` uses `newlstat`, `vfs_lstat`, and `vfs_fstatat` with `AT_SYMLINK_NOFOLLOW` in the metadata
+helpers linked above. Permit both spellings only on x86-64.
+
+For `open`, the zero-based mode argument is 2 and the flags argument is 1. Preserve the `openat`
+creation-flag condition so an unused mode cannot refuse a read. The permission probe covers
+ordinary creation, temporary creation, unused modes, and nonzero upper flags bits. The filesystem
+probe checks open effects in writable, read-only, and hidden directories and distinguishes
+`lstat` of a symbolic link from `stat` or `open` of its hidden target.
+
+Claude Code then reached the model but could not start its shell. A contained `pwd` attempt
+received `EPERM` from `vfork`; the outside control created the child and completed `pwd`.
+Linux v6.12 implements `vfork` by passing `CLONE_VM | CLONE_VFORK` and `SIGCHLD` to `kernel_clone`
+in [`kernel/fork.c`](https://github.com/torvalds/linux/blob/v6.12/kernel/fork.c). The existing
+unrestricted `clone` permission already admits that combination. The child inherits the syscall
+filters and namespaces through the same process-creation path.
+
+The raw `vfork` probe keeps the child entirely in one assembly block. It checks the inherited
+`setuid` refusal using the child's own UID, then exits without returning into Rust or changing the
+shared userspace stack. The outside control can set its unchanged UID. The parent checks the
+child's distinct exit status and reaps it. The test supervisor bounds the whole probe.
+The same Claude trace showed nonfatal `link` and `rmdir` maintenance failures. Those entries remain
+unpermitted; this change does not expand hard-link access or claim warning-free CLI behavior.
+
 ### W^X
 
 W^X closes three routes. Every writable mount, including `/tmp`, uses `MS_NOEXEC`. The permit filter
