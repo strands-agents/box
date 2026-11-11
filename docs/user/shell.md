@@ -61,7 +61,7 @@ command substitution, `eval`, `source`, `find -exec`, `xargs`, or Lua's `io.pope
 | `context.input.program` | String | Always | The first word after expansion, such as `grep`. |
 | `context.input.arg1`, `arg2` | String | When the command has that many arguments | The first and second arguments. Test each with `has` first. |
 | `context.input.arg_count` | Long | Always | The number of arguments. |
-| `context.input.cwd` | String | Always | The Shell's working directory. |
+| `context.input.cwd` | String | Always | The Shell's working directory: `~` for the operator's home, `~/…` below it, and an absolute path elsewhere. |
 | `context.output.status` | Long | On a `::response` event | The command's exit status. A program that a signal ends records 128 plus the signal number. |
 
 ```cedar
@@ -81,6 +81,17 @@ of `shell:exec`, with these differences:
 | `context.input.program` | String | Always | The first word after expansion, such as `git` or `./target/debug/app`. |
 | `context.input.program_path` | String | Always | The file that runs, with every link resolved. A path under the operator's home starts with `~/`. |
 | `context.input.credential_reads` | Set of String | When the matching `[tool.<name>]` lists name a credential store | Each credential store those lists name, such as `~/.aws`. Test it with `has` first. |
+| `context.input.cwd` | String | Always | The program's launch directory, with the same home-relative spelling as `shell:exec`. |
+
+Box selects this directory before policy decides, following the `workspace` rule in
+[Configuration](#configuration). The decision, request, and outcome use the same `cwd` spelling.
+The program starts in the corresponding absolute directory. If Box cannot select or resolve a
+launch directory, `cwd` names the Shell's original directory. A program starts only when its
+resolved launch directory matches the directory policy checked.
+
+A tool grammar maps a command line to a policy action for that tool. A program with a tool grammar
+uses that action. Its `cwd` names the same selected launch directory and stays absolute in decisions
+and history.
 
 ```cedar
 @id("built_programs")
@@ -178,7 +189,7 @@ execution can delay timeout reporting. The direct `python` and `python3` aliases
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `command` | string array | required | Element 0 is the program, and the rest are fixed leading arguments. A bare name resolves on the table's `env.PATH`, else on the `PATH` of `box run`. The last part of element 0 is the name the agent types to run it in the Shell, as [`PATH`](#path) states. |
-| `workspace` | path | the Shell's working directory when it is inside the agent's workspace or a path the tool's lists name, else the agent's workspace | The program's initial working directory. |
+| `workspace` | path | the Shell's resolved working directory inside the agent's workspace or the tool's `read`, `write`, `list`, or `metadata` trees, else the agent's workspace | The program's initial working directory. An explicit value takes precedence. |
 | `env` | table | empty | Variables the program receives. |
 | `filesystem` | table | empty | `read`, `write`, `read_file`, `write_file`, `list`, and `deny`: the paths the program's own system calls reach. |
 | `network.contain_egress` | bool | `true` | How the program reaches the network. See [`[tool.<name>.network]`](#toolnamenetwork). |
@@ -230,6 +241,9 @@ A program that no `[tool.<name>]` table names runs with the agent's own filesyst
 `exec` entry covers it and no `deny` entry covers it. An entry is a file, or a directory that
 covers every file under it.
 
+The agent's explicit `workspace` selects the program's launch directory. Otherwise, Box applies
+the tool `workspace` default with the agent's filesystem lists.
+
 ```toml
 [agent.filesystem]
 exec = ["~/src/project/target/debug"]
@@ -279,7 +293,7 @@ refuses makes `curl` exit non-zero.
 
 | Status | Meaning | stderr |
 |---|---|---|
-| `1` | Submitted command text exceeds the Shell input limit, including when it contains line breaks. | `strands-shell: input too large` |
+| `1` | Submitted command text exceeds 256 KiB, including text with line breaks. Split the text across several calls, for example by appending to a file. | `strands-shell: input too large` |
 | `1` | The Shell call exceeded its execution allowance. | `strands-shell: execution timeout exceeded` |
 | `125` | Box failed to serve the command. | The failure |
 | `125` | The call exceeded the broker's backup deadline, five seconds after its finite Shell allowance. | `strands-box: the call exceeded its deadline` |
@@ -287,6 +301,7 @@ refuses makes `curl` exit non-zero.
 | `126` | Policy refused the command. | `strands-shell: effect denied: policy denied this operation on '<program>'`, then `[policy: <id>]` or `[default-deny]`. A tool grammar action reads the same way. |
 | `126` | A tool grammar binds the program file, and Box refused the spawn before any rule decided it. | `strands-shell: effect denied: policy denied this operation on '<program>' [tool-grammar]: <reason>. No policy can permit it.` |
 | `126` | Policy permitted a program, and nothing in [Configuration](#configuration) covers it. | ``strands-shell: <program>: no tool runs <path>: no `[tool.<name>] command` matches this program and its leading arguments`` |
+| `126` | The launch directory differs from the directory policy checked. Run the command again. | `strands-shell: <program>: the tool working directory does not match the policy-approved directory` |
 | `127` | The program is not in the Shell, and not on the `PATH`. | `strands-shell: <program>: command not found` |
 | Any other | The command's own status. A refused file operation fails the command that made it, for example `cat` with `1`. | `policy denied this operation on '<path>'`, then `[policy: <id>]` or `[default-deny]` |
 | Any other | The path changed between the check and the operation, for example a directory was swapped for a symlink. The Shell refuses rather than act on a file policy didn't judge. Run the command again. | `strands-shell: <command>: filesystem identity changed during effect admission` |

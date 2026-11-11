@@ -193,6 +193,36 @@ when temporal {
 `::request` counts every attempt, including a refused one. `::response` counts calls that reached
 the server.
 
+A rule can also require that another tool call finished first, for the same argument. This rule
+refuses a password reset unless the server returned a result for a `verify_identity` of the same
+user in the last hour:
+
+```cedar
+@id("reset_after_verify")
+forbid (principal, action == servicenow::Action::"reset_password", resource)
+unless temporal {
+  formerly within 1h (
+    servicenow::Action::"verify_identity"::response{
+      input.user_name: context.input.user_name, output.reply: "result" }
+  )
+};
+```
+
+Key it on `::response`, and require `output.reply` to be `result`:
+
+- A refused `verify_identity` still records `::request`, so a rule on `::request` is met by asking.
+- Every call that ends records `::response`, so a budget counts it. `output.reply` says how it
+  ended: `result`, `tool_error` when the result sets `isError`, `protocol_error` for a JSON-RPC
+  error, `cancelled`, or `indeterminate` when its connection ended or Box didn't read the reply.
+  Requiring `result` means this rule isn't met by a call that failed, or that the agent started and
+  abandoned.
+- A `result` shows that the server answered without an error, not that the verification passed.
+- Over an http server, Box doesn't read the reply, so `output.reply` is always `indeterminate`
+  there, and a rule like this one refuses every reset. A budget over `::response` works on both.
+
+Box doesn't record `::error` for an MCP call, and the load refuses a rule that reads one, or that
+compares `output.reply` with a value other than the five above.
+
 The count carries over when the box restarts. That's also true of a rule written on a tool's own
 action, such as `github::Action::"create_issue"`, as long as the rule only decides tool calls and
 you didn't edit it. Box keeps that rule while the server lists its tools again. It starts with an
