@@ -119,6 +119,8 @@ pub enum Item {
         item: Box<Item>,
         redirects: Vec<Redirect>,
     },
+    /// A compound command whose status `!` inverts: `! { cmd; }`, `! (cmd) > file`
+    Negated(Box<Item>),
     Group(CommandLine),
     Subshell(CommandLine),
     If {
@@ -381,6 +383,11 @@ fn resolve_heredocs(
                         }
                     }
                 }
+            }
+            Item::Negated(item) => {
+                let mut inner_cl = vec![(*item.clone(), None)];
+                resolve_heredocs(&mut inner_cl, read_line)?;
+                **item = inner_cl.into_iter().next().unwrap().0;
             }
             Item::CompoundRedirect { item, redirects } => {
                 let mut inner_cl = vec![(*item.clone(), None)];
@@ -1300,6 +1307,8 @@ fn collect_compound_pipe(
             tail,
             negated,
         })
+    } else if negated && !matches!(item, Item::PipelineIntoCompound { .. }) {
+        Ok(Item::Negated(Box::new(item)))
     } else {
         Ok(item)
     }

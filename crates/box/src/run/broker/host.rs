@@ -31,11 +31,14 @@ use crate::record::config::{AuthoritySource, Record};
 use crate::record::layout::BoxRoot;
 use crate::run::broker::invalid_input;
 use crate::run::broker::mcp::DiscoveryRegistry;
-use crate::run::broker::program::{Chunk, DrainOutcome, Program, ProgramControl, ProgramOutput};
+use crate::run::broker::program::{
+    Chunk, DrainOutcome, InputRefusal, Program, ProgramControl, ProgramOutput,
+};
 use crate::run::broker::protocol::{
-    BOUNDARY_FAILURE_STATUS, Body, DeniedKind, Frame, Interpreter, MAX_PROGRAMS_PER_CONNECTION,
-    PROTOCOL_VERSION, ProgramId, SignalKind, Stream, decode_payload, encode_payload, read_frame,
-    write_frame,
+    BOUNDARY_FAILURE_STATUS, Body, DeniedKind, Frame, Interpreter, MAX_CHUNK_BYTES,
+    MAX_CONNECTION_INPUT_BYTES, MAX_ENCODED_CHUNK_BYTES, MAX_PROGRAM_INPUT_BYTES,
+    MAX_PROGRAMS_PER_CONNECTION, PROTOCOL_VERSION, ProgramId, SignalKind, Stream, decode_payload,
+    encode_payload, read_frame, write_frame,
 };
 use crate::run::broker::reach::Reach;
 use crate::run::broker::shell::{EgressRouting, ShellSpec};
@@ -714,6 +717,9 @@ async fn serve_transport(
     // Counts the Calls accepted on this connection, so each carries an identity its own
     // completion can be matched against. Never reused and never reset.
     let mut calls_accepted: u64 = 0;
+    // The stdin bytes this connection's Shell Programs accepted, against
+    // `MAX_CONNECTION_INPUT_BYTES`.
+    let mut input_accepted: usize = 0;
     // Counts successful MCP opens for the same reason. A closed id can be opened again before its
     // old completion reaches this loop.
     let mut mcp_opened: u64 = 0;
@@ -1004,6 +1010,17 @@ async fn serve_transport(
                         .await?;
                         continue;
                     };
+                    if slot.control.input_refused() {
+                        programs.insert(id, slot);
+                        deny(
+                            &frames,
+                            id,
+                            DeniedKind::OverBudget,
+                            "the program's input was refused, so the call does not run",
+                        )
+                        .await?;
+                        continue;
+                    }
                     let recorder = spec.recorder.for_request(correlation.clone());
                     match spec.build_on(Arc::clone(&slot.backend), &recorder) {
                         Ok(shell) => slot.program.use_shell(shell),
@@ -1087,7 +1104,17 @@ async fn serve_transport(
                 .await?;
                 }
                 Body::Input { data } => {
+                    if data.len() > MAX_ENCODED_CHUNK_BYTES {
+                        refuse_input(&frames, &programs, &running, id, "an input frame is too long")
+                            .await?;
+                        continue;
+                    }
                     let bytes = decode_payload(&data)?;
+                    if bytes.len() > MAX_CHUNK_BYTES {
+                        refuse_input(&frames, &programs, &running, id, "an input frame is too long")
+                            .await?;
+                        continue;
+                    }
                     // **Denied rather than fatal, and this one was measured.** An `Err` here takes the
                     // whole connection down, and that is exactly what happened to a denied MCP server:
                     let Some(control) = control_for(&programs, &running, id) else {
@@ -1102,14 +1129,41 @@ async fn serve_transport(
                     };
                     // A full stdin channel is the client outrunning its own program; report it rather
                     // than dropping the bytes silently.
-                    if control.feed_stdin(&bytes).is_err() {
-                        deny(
+                    if input_accepted.saturating_add(bytes.len()) > MAX_CONNECTION_INPUT_BYTES {
+                        refuse_input(
                             &frames,
+                            &programs,
+                            &running,
                             id,
-                            DeniedKind::FlowControl,
-                            "the program is not reading input fast enough",
+                            &format!(
+                                "the connection's input is more than {MAX_CONNECTION_INPUT_BYTES} bytes"
+                            ),
                         )
                         .await?;
+                        continue;
+                    }
+                    match control.feed_stdin(&bytes) {
+                        Ok(()) => input_accepted += bytes.len(),
+                        Err(InputRefusal::OverBudget) => {
+                            deny(
+                                &frames,
+                                id,
+                                DeniedKind::OverBudget,
+                                &format!(
+                                    "the program's input is more than {MAX_PROGRAM_INPUT_BYTES} bytes"
+                                ),
+                            )
+                            .await?;
+                        }
+                        Err(InputRefusal::Full | InputRefusal::Closed) => {
+                            deny(
+                                &frames,
+                                id,
+                                DeniedKind::FlowControl,
+                                "the program is not reading input fast enough",
+                            )
+                            .await?;
+                        }
                     }
                 }
                 Body::InputEof => {
@@ -1317,6 +1371,20 @@ fn control_for<'a>(
         .get(&id)
         .map(|slot| &slot.control)
         .or_else(|| running.get(&id).map(|current| &current.control))
+}
+
+/// Refuse one Shell Program's input frame, so no later Call runs on partial input.
+async fn refuse_input(
+    frames: &tokio::sync::mpsc::Sender<OutboundFrame>,
+    programs: &HashMap<ProgramId, ProgramSlot>,
+    running: &HashMap<ProgramId, RunningCall>,
+    id: ProgramId,
+    reason: &str,
+) -> io::Result<()> {
+    if let Some(control) = control_for(programs, running, id) {
+        control.refuse_input();
+    }
+    deny(frames, id, DeniedKind::OverBudget, reason).await
 }
 
 /// Report a transport refusal, which never carries a policy decision.
@@ -3023,6 +3091,444 @@ done"#;
                 "the Program must continue after receiving input: {output:?}"
             );
             assert_eq!(status, 0, "the Program must exit cleanly: {output:?}");
+        }));
+    }
+
+    /// A connection spec whose policy is the given text.
+    fn connection_spec_under(marker_directory: &Path, policy: &str) -> Arc<ShellSpec> {
+        let mut spec = connection_spec(marker_directory);
+        Arc::get_mut(&mut spec)
+            .expect("a fresh spec has one owner")
+            .policy = open_policy_text(policy);
+        spec
+    }
+
+    /// Open one Shell Program, send `input` and end-of-file, then run `source`, as the alias does.
+    async fn call_with_input(
+        socket: &Path,
+        input: &[u8],
+        source: &str,
+    ) -> (
+        tokio::net::unix::OwnedReadHalf,
+        tokio::net::unix::OwnedWriteHalf,
+    ) {
+        let (reader, mut writer) = transport(socket).await;
+        put(
+            &mut writer,
+            1,
+            Body::Open {
+                mode: Interpreter::Shell,
+            },
+        )
+        .await;
+        for chunk in input.chunks(MAX_CHUNK_BYTES) {
+            put(
+                &mut writer,
+                1,
+                Body::Input {
+                    data: encode_payload(chunk),
+                },
+            )
+            .await;
+        }
+        put(&mut writer, 1, Body::InputEof).await;
+        put(
+            &mut writer,
+            1,
+            Body::Call {
+                correlation: Default::default(),
+                source: source.to_string(),
+            },
+        )
+        .await;
+        (reader, writer)
+    }
+
+    /// Read frames until this Program exits, returning its raw stdout and status.
+    async fn collect_bytes(
+        reader: &mut tokio::net::unix::OwnedReadHalf,
+        program: ProgramId,
+    ) -> (Vec<u8>, i32) {
+        let mut out = Vec::new();
+        loop {
+            let frame = read_frame::<Frame, _>(reader)
+                .await
+                .expect("read a transport frame")
+                .expect("the daemon must answer before closing");
+            assert_eq!(frame.program, program, "a frame named another program");
+            match frame.body {
+                Body::Output {
+                    stream: Stream::Stdout,
+                    data,
+                } => out.extend_from_slice(&decode_payload(&data).expect("valid payload")),
+                Body::Output { data, .. } => eprintln!(
+                    "stderr: {}",
+                    String::from_utf8_lossy(&decode_payload(&data).expect("valid payload"))
+                ),
+                Body::Exit { status } => return (out, status),
+                Body::Denied { reason, .. } => panic!("unexpected denial: {reason}"),
+                other => panic!("unexpected body: {other:?}"),
+            }
+        }
+    }
+
+    /// Read frames until the first denial, failing on an exit.
+    async fn expect_denial(
+        reader: &mut tokio::net::unix::OwnedReadHalf,
+        program: ProgramId,
+    ) -> (DeniedKind, String) {
+        loop {
+            let frame =
+                tokio::time::timeout(Duration::from_secs(10), read_frame::<Frame, _>(reader))
+                    .await
+                    .expect("the daemon must answer before the test deadline")
+                    .expect("read a transport frame")
+                    .expect("the daemon must answer before closing");
+            assert_eq!(frame.program, program, "a frame named another program");
+            match frame.body {
+                Body::Denied { kind, reason } => return (kind, reason),
+                Body::Output { .. } => {}
+                other => panic!("expected a denial, got {other:?}"),
+            }
+        }
+    }
+
+    /// A command gets all of its stdin, byte for byte, when every Input precedes the Call.
+    #[test]
+    fn a_command_gets_its_full_stdin_before_the_call() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let input: Vec<u8> = (0..MAX_PROGRAM_INPUT_BYTES)
+                .map(|index| (index % 256) as u8)
+                .collect();
+            let (mut reader, _writer) = call_with_input(&socket, &input, "cat").await;
+            let (out, status) = collect_bytes(&mut reader, 1).await;
+            assert_eq!(status, 0);
+            assert_eq!(out.len(), input.len(), "every byte must arrive");
+            assert!(
+                out == input,
+                "the bytes, NUL and non-UTF-8 included, must not change"
+            );
+        }));
+    }
+
+    /// Input sent after the Call reaches the running command, as the Shell alias sends it.
+    #[test]
+    fn input_sent_after_the_call_reaches_the_running_command() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let (mut reader, mut writer) = transport(&socket).await;
+            put(
+                &mut writer,
+                1,
+                Body::Open {
+                    mode: Interpreter::Shell,
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Call {
+                    correlation: Default::default(),
+                    source: r#"input=$(cat); printf '[%s]' "$input""#.to_string(),
+                },
+            )
+            .await;
+            for part in [b"{\"event\":".as_slice(), b"\"Stop\"}".as_slice()] {
+                put(
+                    &mut writer,
+                    1,
+                    Body::Input {
+                        data: encode_payload(part),
+                    },
+                )
+                .await;
+            }
+            put(&mut writer, 1, Body::InputEof).await;
+            assert_eq!(
+                collect_bytes(&mut reader, 1).await,
+                (b"[{\"event\":\"Stop\"}]".to_vec(), 0)
+            );
+        }));
+    }
+
+    /// The input of one connection's Programs together is capped, and the Program that crosses
+    /// the cap runs no Call.
+    #[test]
+    fn a_connections_input_is_capped_across_its_programs() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let (mut reader, mut writer) = transport(&socket).await;
+            let programs = MAX_CONNECTION_INPUT_BYTES / MAX_PROGRAM_INPUT_BYTES;
+            for id in 1..=programs as u32 {
+                put(
+                    &mut writer,
+                    id,
+                    Body::Open {
+                        mode: Interpreter::Shell,
+                    },
+                )
+                .await;
+                for chunk in vec![b'x'; MAX_PROGRAM_INPUT_BYTES].chunks(MAX_CHUNK_BYTES) {
+                    put(
+                        &mut writer,
+                        id,
+                        Body::Input {
+                            data: encode_payload(chunk),
+                        },
+                    )
+                    .await;
+                }
+                put(&mut writer, id, Body::Close).await;
+            }
+            let over = programs as u32 + 1;
+            put(
+                &mut writer,
+                over,
+                Body::Open {
+                    mode: Interpreter::Shell,
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                over,
+                Body::Input {
+                    data: encode_payload(b"x"),
+                },
+            )
+            .await;
+            let (kind, reason) = expect_denial(&mut reader, over).await;
+            assert_eq!(kind, DeniedKind::OverBudget, "{reason}");
+            assert!(reason.contains("connection"), "{reason}");
+        }));
+    }
+
+    /// A refused `Input` stops the Call that is running, so it never acts on part of its input.
+    #[test]
+    fn a_refused_input_stops_the_running_call_before_it_acts() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let out = marker.path().join("out");
+            let (mut reader, mut writer) = transport(&socket).await;
+            put(
+                &mut writer,
+                1,
+                Body::Open {
+                    mode: Interpreter::Shell,
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Call {
+                    correlation: Default::default(),
+                    source: format!(r#"x=$(cat); printf %s "$x" > {}"#, out.display()),
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Input {
+                    data: encode_payload(b"abc"),
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Input {
+                    data: "A".repeat(MAX_ENCODED_CHUNK_BYTES + 1),
+                },
+            )
+            .await;
+            let (kind, reason) = expect_denial(&mut reader, 1).await;
+            assert_eq!(kind, DeniedKind::OverBudget, "{reason}");
+            assert!(
+                reason.contains("too long"),
+                "refused before decoding: {reason}"
+            );
+            loop {
+                let frame = tokio::time::timeout(
+                    Duration::from_secs(10),
+                    read_frame::<Frame, _>(&mut reader),
+                )
+                .await
+                .expect("the Call ends")
+                .expect("a frame")
+                .expect("the daemon answers");
+                if let Body::Exit { status } = frame.body {
+                    assert_ne!(status, 0, "a stopped Call does not succeed");
+                    break;
+                }
+            }
+            assert!(!out.exists(), "the Call must not act on part of its input");
+        }));
+    }
+
+    /// A command that never reads its stdin still finishes.
+    #[test]
+    fn a_command_that_never_reads_its_stdin_finishes() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let (mut reader, _writer) =
+                call_with_input(&socket, b"unread input\n", "printf done").await;
+            let (out, status) =
+                tokio::time::timeout(Duration::from_secs(10), collect_bytes(&mut reader, 1))
+                    .await
+                    .expect("a command that ignores stdin must not wait for it");
+            assert_eq!((out.as_slice(), status), (b"done".as_slice(), 0));
+        }));
+    }
+
+    /// Input over the Program's budget is refused at the broker, and the Call then never runs.
+    #[test]
+    fn oversized_input_is_refused_at_the_broker_and_the_call_does_not_run() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let ran = marker.path().join("ran");
+            let (mut reader, _writer) = call_with_input(
+                &socket,
+                &vec![b'x'; MAX_PROGRAM_INPUT_BYTES + 1],
+                &format!("cat > /dev/null; printf ran > {}", ran.display()),
+            )
+            .await;
+            let (kind, reason) = expect_denial(&mut reader, 1).await;
+            assert_eq!(kind, DeniedKind::OverBudget, "{reason}");
+            let (kind, reason) = expect_denial(&mut reader, 1).await;
+            assert_eq!(kind, DeniedKind::OverBudget, "{reason}");
+            assert!(reason.contains("does not run"), "{reason}");
+            assert!(!ran.exists(), "a Call after refused input must not run");
+        }));
+    }
+
+    /// An `Input` frame longer than one encoded chunk is refused before it is decoded.
+    #[test]
+    fn an_overlong_input_frame_is_refused_and_the_call_does_not_run() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let ran = marker.path().join("ran");
+            let (mut reader, mut writer) = transport(&socket).await;
+            put(
+                &mut writer,
+                1,
+                Body::Open {
+                    mode: Interpreter::Shell,
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Input {
+                    data: encode_payload(&vec![b'x'; MAX_CHUNK_BYTES + 1]),
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Call {
+                    correlation: Default::default(),
+                    source: format!("printf ran > {}", ran.display()),
+                },
+            )
+            .await;
+            let (kind, reason) = expect_denial(&mut reader, 1).await;
+            assert_eq!(kind, DeniedKind::OverBudget, "{reason}");
+            assert!(reason.contains("too long"), "{reason}");
+            let (kind, _) = expect_denial(&mut reader, 1).await;
+            assert_eq!(kind, DeniedKind::OverBudget);
+            assert!(!ran.exists(), "a Call after refused input must not run");
+        }));
+    }
+
+    /// A command that `eval`s its stdin is still decided by policy, command by command.
+    #[test]
+    fn a_command_evaluated_from_stdin_is_decided_by_policy() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let spec = connection_spec_under(
+                marker.path(),
+                r#"permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
+                   permit(principal == Box::Agent::"self", action == Box::Action::"fs:read", resource);
+                   permit(principal == Box::Agent::"self", action == Box::Action::"fs:write", resource);
+                   forbid(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource)
+                   when { context.input.program == "touch" };"#,
+            );
+            let (_dir, socket) = serving_socket(spec);
+            let evaled = marker.path().join("evaled");
+            let (mut reader, _writer) = call_with_input(
+                &socket,
+                format!("touch {}", evaled.display()).as_bytes(),
+                r#"eval "$(cat)""#,
+            )
+            .await;
+            let (_, status) = collect_bytes(&mut reader, 1).await;
+            assert_ne!(status, 0, "a forbidden command fed on stdin must fail");
+            assert!(!evaled.exists(), "a forbidden command fed on stdin must not run");
+
+            let (mut reader, _writer) =
+                call_with_input(&socket, b"printf permitted", r#"eval "$(cat)""#).await;
+            assert_eq!(
+                collect_bytes(&mut reader, 1).await,
+                (b"permitted".to_vec(), 0),
+                "a permitted command fed on stdin runs"
+            );
+        }));
+    }
+
+    /// A file named on stdin still needs its own `fs:read` permit.
+    #[test]
+    fn a_file_read_named_on_stdin_needs_its_own_permit() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let secret = marker.path().join("secret");
+            std::fs::write(&secret, "SECRET-CONTENT").expect("a fixture file");
+            let secret = secret.canonicalize().expect("the fixture resolves");
+            let shell_only = connection_spec_under(
+                marker.path(),
+                r#"permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);"#,
+            );
+            let (_dir, socket) = serving_socket(shell_only);
+            let (mut reader, _writer) =
+                call_with_input(&socket, secret.to_str().unwrap().as_bytes(), r#"cat "$(cat)""#)
+                    .await;
+            let (out, status) = collect_bytes(&mut reader, 1).await;
+            assert_ne!(status, 0, "a read with no fs:read permit must fail");
+            assert!(
+                !String::from_utf8_lossy(&out).contains("SECRET-CONTENT"),
+                "stdin must not carry a read the policy did not permit: {out:?}"
+            );
+
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let (mut reader, _writer) =
+                call_with_input(&socket, secret.to_str().unwrap().as_bytes(), r#"cat "$(cat)""#)
+                    .await;
+            assert_eq!(
+                collect_bytes(&mut reader, 1).await,
+                (b"SECRET-CONTENT".to_vec(), 0),
+                "the same read runs once fs:read permits it"
+            );
         }));
     }
 

@@ -1835,3 +1835,65 @@ each `Kernel` must forward them and cannot hide the refusal. `is_executable`, `f
 outcome, because admission refuses it first.
 `tests/kernel_effect_interception.rs::an_answered_probe_reports_a_completed_effect` and
 `a_probe_the_admission_window_refuses_reports_a_failure` pin the change.
+
+## 2026-11-11 — a redirected group reported status 0
+
+A group with an output redirect, such as `{ false; } > f`, reported status 0 at the pinned revision.
+`exec::execute_item_unsettled` ran the group through `run_capturing`, which drops the group's
+status, and then returned `proc.last_exit`, which the group did not set. A condition such as
+`if { false; } > f; then ...` took its success branch. Upstream would call this a bug, because the
+status is wrong.
+
+This copy runs the group through `run_capturing_status` and returns the group's own status. A
+failed redirect write or a stderr diversion over its size limit still reports status 1.
+`tests/shell_integration.rs::a_redirected_group_keeps_its_failure_status`,
+`a_redirected_group_keeps_its_last_command_status`,
+`a_condition_on_a_redirected_group_takes_the_failure_branch`, and
+`a_redirected_group_is_the_calls_status` fail without the change.
+
+## 2026-11-11 — a command substitution and a subshell read no stdin
+
+At the pinned revision, `Process::fork` gives the child an empty descriptor table, and a command
+substitution and a subshell run in such a child. So `input=$(cat)` and `(cat)` read nothing, while
+a POSIX shell gives both the caller's stdin. Upstream would call this a bug, because the result is
+wrong: a script that reads its input with `$(cat)` sees an empty string.
+
+This copy moves the caller's stdin into the child for the span of the substitution or subshell,
+and back when it ends. The caller waits for the child, so only one of them reads at a time, and
+input the child does not read stays for the caller.
+`tests/shell_integration.rs::a_command_substitution_reads_the_shells_stdin`,
+`a_subshell_reads_the_shells_stdin`, and
+`stdin_read_in_part_by_a_substitution_leaves_the_rest_to_the_shell` fail without the change.
+
+## 2026-11-11 — `!` before a compound command was ignored
+
+At the pinned revision, the parser kept `!` only for a simple pipeline and for a compound piped into
+a pipeline. `! (false)`, `! { false; }`, and `! if ...; fi` reported the compound's own status.
+Upstream would call this a bug, because the status is wrong. The wrong redirect status above hid
+this defect in `if ! (cmd) >/dev/null 2>&1; then`, which Claude Code's shell snapshot uses: with only
+the redirect fix, `tests/claude_code_preamble.rs` fails. The two fixes ship together.
+
+This copy adds `parser::Item::Negated`, which holds the compound that `!` inverts, and
+`exec::execute_item_unsettled` and `run_capturing_status` invert its status.
+`tests/shell_integration.rs::negation_inverts_a_subshell`, `negation_inverts_a_group`,
+`negation_inverts_a_redirected_compound`, `negation_inverts_an_if_compound`, and
+`negation_inverts_a_compound_inside_a_substitution` fail without the change.
+
+## 2026-11-11 — `lua -e` waited for stdin it never read
+
+`builtin_lua` read stdin to end-of-file before it ran a script from `-e` or a file, so it waited
+for a writer that kept stdin open even when the script never read it. Upstream would call this a
+hang. This copy reads stdin only when the script's text names `io.read`, `io.lines`, `io.stdin`,
+or indexes `io`. A script that reaches stdin another way, such as through `load` of built text,
+gets empty stdin. `tests/shell_integration.rs::a_lua_script_that_never_reads_stdin_is_not_held_by_it`
+fails without the change, and `a_lua_script_that_reads_stdin_still_gets_it` pins the read.
+
+## 2026-11-11 — `set -e` stopped at a command that `!` inverts
+
+`set -e` exited at `! true`, and with `Item::Negated` also at `! (true)`. POSIX exempts a command
+that `!` inverts. This copy treats an inverted pipeline or compound as tested.
+`tests/shell_integration.rs::errexit_ignores_a_negated_command` fails without the change.
+
+A substitution or subshell that a cancelled Call drops takes the borrowed stdin with it, so a later
+Call on the same Program reads no stdin. A Shell alias opens one Program for one Call, so it is not
+affected.

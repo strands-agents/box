@@ -633,9 +633,9 @@ fails with `EPERM: operation not permitted, posix_spawn '/bin/sh'` for every hoo
 reaches stderr, and `run` exits 0, so the operator sees no failure. Granting `process-exec` on
 `/bin/sh` would make it work, but the commands the hook issues would then raise no decision, so an
 authored `forbid` would never see them. Once rewritten, each hook command reaches the mediated Shell
-and raises `shell:exec`, and each file it touches raises its own `fs:*`. Two limits remain. A hook
-that reads its payload on stdin sees nothing because the alias forwards no input. Plugin hooks
-remain broken because most of them exec a script.
+and raises `shell:exec`, and each file it touches raises its own `fs:*`. The alias forwards a hook's finite stdin to the Shell, so a hook reads its payload with a Shell
+command such as `cat` or `jq`. A program that the Shell starts in its own sandbox still reads no
+stdin. Plugin hooks remain broken because most of them exec a script.
 
 ## Policy
 

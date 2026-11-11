@@ -7959,3 +7959,142 @@ fn find_python3() -> Option<String> {
         .map(|d| format!("{d}/python3"))
         .find(|p| std::path::Path::new(p).is_file())
 }
+
+// ── Status of a redirected group ────────────────────────────────────
+
+expect!(
+    a_redirected_group_keeps_its_failure_status,
+    "{ false; } > /tmp/rgs1; echo $?",
+    "1"
+);
+expect!(
+    a_redirected_group_keeps_its_success_status,
+    "{ true; } > /tmp/rgs2; echo $?",
+    "0"
+);
+expect!(
+    a_redirected_group_keeps_its_last_command_status,
+    "{ echo out; (exit 7); } > /tmp/rgs3; echo $?; cat /tmp/rgs3",
+    "7\nout"
+);
+expect!(
+    a_condition_on_a_redirected_group_takes_the_failure_branch,
+    "if { false; } > /tmp/rgs4; then echo allow; else echo deny; fi",
+    "deny"
+);
+shell_test!(
+    a_redirected_group_is_the_calls_status,
+    "{ false; } 2> /tmp/rgs5",
+    |_shell: &mut Shell, out: strands_shell::Output| {
+        assert_eq!(out.status, 1, "the call must report the group's status");
+    }
+);
+
+// ── Standard input reaches a command substitution and a subshell ────
+
+/// Run `command` with `input` on the shell's standard input, then end-of-file.
+async fn run_with_stdin(command: &str, input: &[u8]) -> strands_shell::Output {
+    let mut shell = Shell::builder().build().unwrap();
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    sender
+        .send(bytes::Bytes::copy_from_slice(input))
+        .await
+        .unwrap();
+    drop(sender);
+    shell.proc.set_channel_reader(0, receiver);
+    shell.run(command).await
+}
+
+#[test]
+fn a_command_substitution_reads_the_shells_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin(r#"input=$(cat); printf '[%s]' "$input""#, b"{\"a\":1}\n").await;
+        assert_eq!(out.stdout, "[{\"a\":1}]");
+        assert_eq!(out.status, 0);
+    }));
+}
+
+#[test]
+fn a_subshell_reads_the_shells_stdin() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin("(cat)", b"through a subshell").await;
+        assert_eq!(out.stdout, "through a subshell");
+    }));
+}
+
+#[test]
+fn stdin_read_in_part_by_a_substitution_leaves_the_rest_to_the_shell() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin(
+            r#"first=$(read -r line; printf '%s' "$line"); rest=$(cat); printf '%s|%s' "$first" "$rest""#,
+            b"one\ntwo\n",
+        )
+        .await;
+        assert_eq!(out.stdout, "one|two");
+    }));
+}
+
+// ── `!` before a compound command ───────────────────────────────────
+
+expect!(
+    negation_inverts_a_subshell,
+    "! (false); echo $?; ! (true); echo $?",
+    "0\n1"
+);
+expect!(
+    negation_inverts_a_group,
+    "! { false; }; echo $?; ! { true; }; echo $?",
+    "0\n1"
+);
+expect!(
+    negation_inverts_a_redirected_compound,
+    "if ! (false) > /tmp/neg1; then echo then; else echo else; fi; ! { true; } 2> /tmp/neg2; echo $?",
+    "then\n1"
+);
+expect!(
+    negation_inverts_an_if_compound,
+    "! if true; then true; fi; echo $?",
+    "1"
+);
+expect!(
+    negation_inverts_a_compound_inside_a_substitution,
+    "out=$(! { false; } && echo ran); echo \"$out\"",
+    "ran"
+);
+
+/// A Lua script that never names stdin does not wait for a stdin its writer holds open.
+#[test]
+fn a_lua_script_that_never_reads_stdin_is_not_held_by_it() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        shell.proc.set_channel_reader(0, receiver);
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            shell.run("lua -e 'print(1)'"),
+        )
+        .await
+        .expect("lua must not wait for stdin it never reads");
+        assert_eq!(out.stdout.trim(), "1");
+        drop(sender);
+    }));
+}
+
+#[test]
+fn a_lua_script_that_reads_stdin_still_gets_it() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let out = run_with_stdin("lua -e 'print(io.read(\"*a\"))'", b"from stdin").await;
+        assert_eq!(out.stdout.trim(), "from stdin");
+    }));
+}
+
+expect!(
+    errexit_ignores_a_negated_command,
+    "set -e; ! true; ! (true); ! { true; }; echo after",
+    "after"
+);

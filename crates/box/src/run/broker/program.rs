@@ -8,16 +8,17 @@
 
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use strands_shell::os::{STDERR, STDIN, STDOUT};
 use tokio::sync::mpsc;
 
-use super::protocol::{MAX_CALL_OUTPUT_BYTES, MAX_CHUNK_BYTES, Stream};
+use super::protocol::{MAX_CALL_OUTPUT_BYTES, MAX_CHUNK_BYTES, MAX_PROGRAM_INPUT_BYTES, Stream};
 
-/// The stdin channel depth. One frame in flight is enough; the client waits for progress.
-const INPUT_CHANNEL_DEPTH: usize = 16;
+/// The stdin channel depth, in frames. The bytes they hold stay under
+/// [`MAX_PROGRAM_INPUT_BYTES`].
+const INPUT_CHANNEL_DEPTH: usize = 256;
 
 /// The output channel depth, per stream. Bounded, so a Program that outruns its client stalls
 /// itself rather than growing a queue inside the daemon.
@@ -36,6 +37,21 @@ pub(crate) struct ProgramControl {
     /// Set when a `Signal` arrives, and read by the Call loop, which stops by **dropping** the Call
     /// future.
     cancel: Arc<AtomicBool>,
+    /// The stdin bytes accepted so far, against [`MAX_PROGRAM_INPUT_BYTES`].
+    input_received: Arc<AtomicUsize>,
+    /// Set when input was refused, so no later Call runs on partial input.
+    input_refused: Arc<AtomicBool>,
+}
+
+/// Why [`ProgramControl::feed_stdin`] refused input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InputRefusal {
+    /// The stdin was already closed.
+    Closed,
+    /// The Program's stdin budget would be exceeded.
+    OverBudget,
+    /// The stdin queue is full.
+    Full,
 }
 
 /// One piece of a Program's output, tagged with the stream that produced it.
@@ -87,6 +103,8 @@ impl Program {
             ProgramControl {
                 stdin_tx: Arc::new(std::sync::Mutex::new(Some(stdin_tx))),
                 cancel,
+                input_received: Arc::new(AtomicUsize::new(0)),
+                input_refused: Arc::new(AtomicBool::new(false)),
             },
         ))
     }
@@ -160,11 +178,6 @@ impl ProgramOutput {
     }
 }
 
-/// A `ProgramControl` lock poisoned by a panic in another holder.
-fn poisoned() -> io::Error {
-    io::Error::other("the program's stdin lock is poisoned")
-}
-
 /// Whether a drain stayed inside the Program's output budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DrainOutcome {
@@ -173,15 +186,43 @@ pub(crate) enum DrainOutcome {
 }
 
 impl ProgramControl {
-    /// Feed bytes to the Program's standard input.
-    pub(crate) fn feed_stdin(&self, data: &[u8]) -> io::Result<()> {
-        let guard = self.stdin_tx.lock().map_err(|_| poisoned())?;
-        let sender = guard
-            .as_ref()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "stdin is closed"))?;
+    /// Feed bytes to the Program's standard input. A refusal stops the running Call and refuses
+    /// every later one.
+    pub(crate) fn feed_stdin(&self, data: &[u8]) -> Result<(), InputRefusal> {
+        let refusal = self.try_feed(data);
+        if refusal.is_err() {
+            self.refuse_input();
+        }
+        refusal
+    }
+
+    fn try_feed(&self, data: &[u8]) -> Result<(), InputRefusal> {
+        let Ok(guard) = self.stdin_tx.lock() else {
+            return Err(InputRefusal::Closed);
+        };
+        let sender = guard.as_ref().ok_or(InputRefusal::Closed)?;
+        let received = self.input_received.load(Ordering::SeqCst);
+        let total = received
+            .checked_add(data.len())
+            .filter(|total| *total <= MAX_PROGRAM_INPUT_BYTES)
+            .ok_or(InputRefusal::OverBudget)?;
         sender
             .try_send(Bytes::copy_from_slice(data))
-            .map_err(|error| io::Error::new(io::ErrorKind::WouldBlock, error))
+            .map_err(|_| InputRefusal::Full)?;
+        self.input_received.store(total, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Refuse all further input, stop the running Call, and refuse every later Call. Stdin stays
+    /// open, so the running Call never reads end-of-file on part of its input.
+    pub(crate) fn refuse_input(&self) {
+        self.input_refused.store(true, Ordering::SeqCst);
+        self.signal();
+    }
+
+    /// Whether input to this Program was refused.
+    pub(crate) fn input_refused(&self) -> bool {
+        self.input_refused.load(Ordering::SeqCst)
     }
 
     /// Close the Program's standard input, so a reader sees end-of-file.

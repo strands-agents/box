@@ -15,6 +15,13 @@ use crate::io as sio;
 use crate::mediate::Mediated;
 use crate::os::{self, OpenFlags, Process};
 
+/// Whether `code` can reach `io.read`, `io.lines`, or `io.stdin`, so the builtin must read stdin.
+fn names_stdin(code: &str) -> bool {
+    ["io.read", "io.lines", "io.stdin", "io[", "io ["]
+        .iter()
+        .any(|name| code.contains(name))
+}
+
 pub fn builtin_lua<'a>(
     os: &'a Mediated,
     proc: &'a mut Process,
@@ -92,8 +99,8 @@ pub fn builtin_lua<'a>(
                 })?
         };
 
-        // Pre-read stdin for io.read() when script comes from file or -e
-        let stdin_data = if script_file.is_some() || eval_code.is_some() {
+        // Pre-read stdin for io.read() when script comes from file or -e and can name stdin
+        let stdin_data = if (script_file.is_some() || eval_code.is_some()) && names_stdin(&code) {
             if let Ok(mut r) = sio::stdin() {
                 os::read_to_string_limited(&mut r, proc.max_output)
                     .await

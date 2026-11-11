@@ -2108,7 +2108,9 @@ async fn capture_admitted(os: Arc<Mediated>, proc: &mut Process, cmd: &str) -> (
         proc.last_exit = 1;
         return (String::new(), 1);
     }
+    proc.transfer_fd(STDIN, &mut sub);
     let (result, status) = run_capturing_status(os, &mut sub, &command_line).await;
+    sub.transfer_fd(STDIN, proc);
     if !sub.captured_stderr.is_empty() && !proc.append_captured_stderr(&sub.captured_stderr) {
         proc.last_exit = 1;
     }
@@ -2160,6 +2162,12 @@ async fn run_capturing_status(
                     let (s, exit) = Box::pin(run_capturing_status(os.clone(), proc, cl)).await;
                     (exit, s)
                 }
+                Item::Negated(inner) => {
+                    let inner_cl = vec![(*inner.clone(), None)];
+                    let (s, exit) =
+                        Box::pin(run_capturing_status(os.clone(), proc, &inner_cl)).await;
+                    (if exit == 0 { 1 } else { 0 }, s)
+                }
                 Item::Subshell(cl) => {
                     let mut sub = proc.fork();
                     sub.depth += 1;
@@ -2167,8 +2175,10 @@ async fn run_capturing_status(
                         sub.err_msg(msg);
                         (1, String::new())
                     } else {
+                        proc.transfer_fd(STDIN, &mut sub);
                         let (s, exit) =
                             Box::pin(run_capturing_status(os.clone(), &mut sub, cl)).await;
+                        sub.transfer_fd(STDIN, proc);
                         (exit, s)
                     }
                 }
@@ -2466,8 +2476,15 @@ async fn execute_command_line_inner(
             }
 
             // Determine if this item is in a "tested" context (suppresses errexit).
-            // Tested = followed by && or ||.
-            let tested = matches!(connector, Some(Connector::And) | Some(Connector::Or));
+            // Tested = followed by && or ||, or inverted by `!`.
+            let tested = matches!(connector, Some(Connector::And) | Some(Connector::Or))
+                || matches!(
+                    item,
+                    Item::Pipeline(_, true)
+                        | Item::Negated(_)
+                        | Item::CompoundPipeline { negated: true, .. }
+                        | Item::PipelineIntoCompound { negated: true, .. }
+                );
 
             last_exit = execute_item(os.clone(), proc, item).await?;
             proc.last_exit = last_exit;
@@ -2544,6 +2561,10 @@ async fn execute_item_unsettled(
             }
             Ok(exit)
         }
+        Item::Negated(inner) => {
+            let exit = Box::pin(execute_item(os, proc, inner)).await?;
+            Ok(if exit == 0 { 1 } else { 0 })
+        }
         Item::Group(cl) => Box::pin(execute_command_line_inner(os, proc, cl)).await,
         Item::Subshell(cl) => {
             let mut sub = proc.fork();
@@ -2552,7 +2573,9 @@ async fn execute_item_unsettled(
                 sub.err_msg(msg);
                 return Ok(1);
             }
+            proc.transfer_fd(STDIN, &mut sub);
             let r = Box::pin(execute_command_line_inner(os, &mut sub, cl)).await;
+            sub.transfer_fd(STDIN, proc);
             if proc.capture {
                 let complete = proc.append_captured_output(&sub.captured_output)
                     && proc.append_captured_stderr(&sub.captured_stderr);
@@ -2687,13 +2710,15 @@ async fn execute_item_unsettled(
                 let diverted = redirects_stderr.then(|| DivertedStderr::begin(proc));
                 let outer_stderr = std::mem::take(&mut proc.captured_stderr);
                 let inner_cl = vec![(*item.clone(), None)];
-                let captured = Box::pin(run_capturing(os.clone(), proc, &inner_cl)).await;
+                let (captured, mut status) =
+                    Box::pin(run_capturing_status(os.clone(), proc, &inner_cl)).await;
                 let mut stderr_text = match diverted {
                     Some(diverted) => {
                         let (text, complete) = diverted.end(proc).await;
                         if !complete {
                             proc.err_msg("strands-shell: output size limit exceeded");
                             proc.last_exit = 1;
+                            status = 1;
                         }
                         text
                     }
@@ -2760,9 +2785,10 @@ async fn execute_item_unsettled(
                     if let Err(e) = written {
                         proc.err_msg(&format!("strands-shell: {path}: {e}"));
                         proc.last_exit = 1;
+                        status = 1;
                     }
                 }
-                Ok(proc.last_exit)
+                Ok(status)
             } else {
                 let result = Box::pin(execute_item(os, proc, item)).await;
                 if !stdin_expanded.is_empty() {

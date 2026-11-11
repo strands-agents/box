@@ -16,8 +16,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use shell_protocol::{
-    BOUNDARY_FAILURE_STATUS, Body, Frame, Interpreter, MAX_FRAME_BYTES, PROTOCOL_VERSION, Stream,
-    decode_payload, encode_payload, read_frame, write_frame,
+    BOUNDARY_FAILURE_STATUS, Body, Frame, Interpreter, MAX_CHUNK_BYTES, MAX_FRAME_BYTES,
+    MAX_PROGRAM_INPUT_BYTES, PROTOCOL_VERSION, SignalKind, Stream, decode_payload, encode_payload,
+    read_frame, write_frame,
 };
 use tokio::net::UnixStream;
 
@@ -41,6 +42,9 @@ const SERVE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 const PYTHON_RESPONSE_TIMEOUT: Duration = Duration::from_secs(35);
 
 const MCP_OPEN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a Shell alias waits after a read of stdin for more before it sends a frame.
+const INPUT_COALESCE_WAIT: Duration = Duration::from_millis(10);
 
 enum Outcome {
     Status(i32),
@@ -129,7 +133,191 @@ async fn run() -> io::Result<Outcome> {
         std::env::current_exe()?,
         std::env::args_os().skip(1).collect(),
     )?;
-    forward(&socket, interpreter, source).await
+    let input = match interpreter {
+        Interpreter::Shell => match classify_stdin(0)? {
+            StdinKind::Finite => Some(spawn_input_reader(
+                std::io::stdin(),
+                MAX_PROGRAM_INPUT_BYTES,
+            )?),
+            StdinKind::Absent => None,
+        },
+        Interpreter::Python | Interpreter::Mcp { .. } => None,
+    };
+    forward(&socket, interpreter, source, input).await
+}
+
+/// Whether a stdin descriptor holds finite input this alias forwards.
+#[derive(Debug, PartialEq, Eq)]
+enum StdinKind {
+    /// A pipe, a regular file, or a socket.
+    Finite,
+    /// A terminal, another device, or no descriptor.
+    Absent,
+}
+
+/// Classify a descriptor by its own `fstat`, never by a path.
+#[cfg(unix)]
+fn classify_stdin(descriptor: libc::c_int) -> io::Result<StdinKind> {
+    let mut status = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: fstat writes one `stat` into the buffer it receives, and the buffer is read only
+    // after fstat reports success.
+    if unsafe { libc::fstat(descriptor, status.as_mut_ptr()) } == -1 {
+        let error = io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::EBADF) => Ok(StdinKind::Absent),
+            _ => Err(io::Error::new(
+                error.kind(),
+                format!("inspect stdin: {error}"),
+            )),
+        };
+    }
+    // SAFETY: fstat succeeded, so it initialized the buffer.
+    let mode = unsafe { status.assume_init() }.st_mode & libc::S_IFMT;
+    Ok(match mode {
+        libc::S_IFIFO | libc::S_IFREG | libc::S_IFSOCK => StdinKind::Finite,
+        _ => StdinKind::Absent,
+    })
+}
+
+#[cfg(not(unix))]
+fn classify_stdin(_descriptor: i32) -> io::Result<StdinKind> {
+    Ok(StdinKind::Absent)
+}
+
+/// One event from the thread that reads a Shell alias's stdin.
+#[derive(Debug, PartialEq, Eq)]
+enum InputEvent {
+    Data(Vec<u8>),
+    End,
+    Failed(String),
+}
+
+/// Read `reader` on its own thread, refusing more than `limit` bytes. The thread blocks in `read`
+/// for as long as its writer keeps the input open; the process exit ends it.
+fn spawn_input_reader(
+    reader: impl io::Read + Send + 'static,
+    limit: usize,
+) -> io::Result<tokio::sync::mpsc::Receiver<InputEvent>> {
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    std::thread::Builder::new()
+        .name("stdin".to_string())
+        .spawn(move || read_input(reader, limit, &sender))
+        .map_err(|error| io::Error::new(error.kind(), format!("read stdin: {error}")))?;
+    Ok(receiver)
+}
+
+/// Send each read of `reader` as an event, then one `End` or one `Failed`.
+fn read_input(
+    mut reader: impl io::Read,
+    limit: usize,
+    sender: &tokio::sync::mpsc::Sender<InputEvent>,
+) {
+    let mut buffer = vec![0_u8; MAX_CHUNK_BYTES];
+    let mut total: usize = 0;
+    let last = loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break InputEvent::End,
+            Ok(read) => {
+                total = total.saturating_add(read);
+                if total > limit {
+                    break InputEvent::Failed(format!(
+                        "stdin is more than {limit} bytes; maximum is {limit}"
+                    ));
+                }
+                if sender
+                    .blocking_send(InputEvent::Data(buffer[..read].to_vec()))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => break InputEvent::Failed(format!("read stdin: {error}")),
+        }
+    };
+    let _ = sender.blocking_send(last);
+}
+
+/// Forward a Shell alias's stdin as `Input` frames, coalesced up to [`MAX_CHUNK_BYTES`], then
+/// `InputEof`. On a refusal, record the reason in `refused` and interrupt the call.
+async fn pump_input(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    mut events: tokio::sync::mpsc::Receiver<InputEvent>,
+    refused: &std::sync::Mutex<Option<String>>,
+) -> io::Result<()> {
+    loop {
+        let Some(first) = events.recv().await else {
+            return Ok(());
+        };
+        let mut pending = Vec::new();
+        let mut last = None;
+        match first {
+            InputEvent::Data(bytes) => {
+                pending.extend(bytes);
+                // A short wait merges a writer's small writes into one frame.
+                tokio::time::sleep(INPUT_COALESCE_WAIT).await;
+            }
+            other => last = Some(other),
+        }
+        while last.is_none() && pending.len() < MAX_CHUNK_BYTES {
+            match events.try_recv() {
+                Ok(InputEvent::Data(bytes)) => pending.extend(bytes),
+                Ok(other) => last = Some(other),
+                Err(_) => break,
+            }
+        }
+        for chunk in pending.chunks(MAX_CHUNK_BYTES) {
+            write_alias_frame(
+                writer,
+                Body::Input {
+                    data: encode_payload(chunk),
+                },
+            )
+            .await?;
+        }
+        match last {
+            None | Some(InputEvent::Data(_)) => {}
+            Some(InputEvent::End) => {
+                return write_alias_frame(writer, Body::InputEof).await;
+            }
+            Some(InputEvent::Failed(reason)) => {
+                if let Ok(mut slot) = refused.lock() {
+                    *slot = Some(reason);
+                }
+                write_alias_frame(
+                    writer,
+                    Body::Signal {
+                        kind: SignalKind::Interrupt,
+                    },
+                )
+                .await?;
+                return write_alias_frame(writer, Body::InputEof).await;
+            }
+        }
+    }
+}
+
+/// Write one frame of this alias's Program, within [`SERVE_IO_TIMEOUT`].
+async fn write_alias_frame(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    body: Body,
+) -> io::Result<()> {
+    tokio::time::timeout(
+        SERVE_IO_TIMEOUT,
+        write_frame(
+            writer,
+            &Frame {
+                version: PROTOCOL_VERSION,
+                program: ALIAS_PROGRAM,
+                body,
+            },
+        ),
+    )
+    .await
+    .map_err(|_| timed_out("write a transport frame"))?
 }
 
 /// Parse the alias invocation, refusing this image's own name.
@@ -430,8 +618,14 @@ fn read_script(script: &Path) -> io::Result<String> {
 /// The one Program an alias opens.
 const ALIAS_PROGRAM: u32 = 1;
 
-/// Submit one Call to one Program and reproduce its result locally.
-async fn forward(socket: &Path, interpreter: Interpreter, source: String) -> io::Result<Outcome> {
+/// Submit one Call to one Program, stream `input` to it while it runs, and reproduce its result
+/// locally.
+async fn forward(
+    socket: &Path,
+    interpreter: Interpreter,
+    source: String,
+    input: Option<tokio::sync::mpsc::Receiver<InputEvent>>,
+) -> io::Result<Outcome> {
     let mut stream = tokio::time::timeout(SERVE_IO_TIMEOUT, UnixStream::connect(socket))
         .await
         .map_err(|_| timed_out("connect to the box broker"))?
@@ -448,31 +642,31 @@ async fn forward(socket: &Path, interpreter: Interpreter, source: String) -> io:
         return stream_mcp(stream, interpreter).await;
     }
     let python = matches!(interpreter, Interpreter::Python);
-
-    // `InputEof` immediately after the Call, because this alias forwards no input: a harness
-    // invoking `zsh -c` gives the command nothing on stdin, and without the EOF the Program's stdin
-    for body in [
-        Body::Open { mode: interpreter },
+    write_alias_frame(&mut stream, Body::Open { mode: interpreter }).await?;
+    write_alias_frame(
+        &mut stream,
         Body::Call {
             source,
             correlation: Box::new(call_correlation()),
         },
-        Body::InputEof,
-    ] {
-        tokio::time::timeout(
-            SERVE_IO_TIMEOUT,
-            write_frame(
-                &mut stream,
-                &Frame {
-                    version: PROTOCOL_VERSION,
-                    program: ALIAS_PROGRAM,
-                    body,
-                },
-            ),
-        )
-        .await
-        .map_err(|_| timed_out("write a transport frame"))??;
+    )
+    .await?;
+    let (mut stream, mut writer) = stream.into_split();
+    let refused: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    match input {
+        // Without the EOF, a command that reads stdin waits for its deadline.
+        None => write_alias_frame(&mut writer, Body::InputEof).await?,
+        Some(events) => {
+            let refused = std::sync::Arc::clone(&refused);
+            tokio::spawn(async move {
+                let _ = pump_input(&mut writer, events, &refused).await;
+                // Dropping the write half shuts the socket down, and the broker then reaps the
+                // running Program, so it lives until the process exits.
+                std::future::pending::<()>().await;
+            });
+        }
     }
+    let refusal = || refused.lock().ok().and_then(|reason| reason.clone());
 
     // Relayed as it arrives rather than accumulated, so a long-running command is observable
     // while it runs.
@@ -508,10 +702,18 @@ async fn forward(socket: &Path, interpreter: Interpreter, source: String) -> io:
                     }
                 }
             }
-            Body::Exit { status } => return Ok(Outcome::Status(status)),
+            Body::Exit { status } => {
+                return match refusal() {
+                    Some(reason) => Err(invalid_input(reason)),
+                    None => Ok(Outcome::Status(status)),
+                };
+            }
             // A transport refusal, including a version mismatch. Terminal, and reported as the
             // boundary's own failure rather than as something the program did.
             Body::Denied { reason, .. } => {
+                if let Some(reason) = refusal() {
+                    eprintln!("strands-box-sock-alias: {reason}");
+                }
                 eprintln!("strands-box: {reason}");
                 return Ok(Outcome::Status(i32::from(SHELL_FAILURE_EXIT)));
             }
@@ -939,6 +1141,295 @@ mod tests {
             }
             Err(_) => {}
         }
+    }
+
+    // ── Shell stdin ───────────────────────────────────────────────────────────
+
+    /// Every event `read_input` sends for `reader`.
+    fn events_of(reader: impl io::Read + Send + 'static, limit: usize) -> Vec<InputEvent> {
+        let mut events = spawn_input_reader(reader, limit).unwrap();
+        let mut seen = Vec::new();
+        while let Some(event) = events.blocking_recv() {
+            seen.push(event);
+        }
+        seen
+    }
+
+    fn data_of(events: &[InputEvent]) -> Vec<u8> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                InputEvent::Data(bytes) => Some(bytes.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Every byte of a finite input arrives unchanged, including NUL and non-UTF-8 bytes.
+    #[test]
+    fn a_finite_pipe_is_read_byte_for_byte() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        let input: Vec<u8> = b"{\"tool\":\"Edit\"}\n\0\xff\xfe tail".to_vec();
+        use std::io::Write as _;
+        writer.write_all(&input).unwrap();
+        drop(writer);
+        let events = events_of(reader, MAX_PROGRAM_INPUT_BYTES);
+        assert_eq!(data_of(&events), input);
+        assert_eq!(events.last(), Some(&InputEvent::End));
+    }
+
+    /// Input over the limit ends in a refusal, and input at the limit does not.
+    #[test]
+    fn oversized_stdin_is_refused_and_stdin_at_the_limit_is_not() {
+        let limit = 1024;
+        for (size, accepted) in [(limit, true), (limit + 1, false), (limit * 4, false)] {
+            let events = events_of(std::io::Cursor::new(vec![b'x'; size]), limit);
+            match (events.last(), accepted) {
+                (Some(InputEvent::End), true) => assert_eq!(data_of(&events).len(), size),
+                (Some(InputEvent::Failed(reason)), false) => {
+                    assert!(reason.contains("maximum"), "{reason}");
+                    assert!(data_of(&events).len() <= limit);
+                }
+                (last, _) => panic!("{size} bytes against {limit}: {last:?}"),
+            }
+        }
+    }
+
+    /// A socket, which a runtime may give a child as its stdio, is read like a pipe.
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_backed_stdin_is_read() {
+        use std::io::Write as _;
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.write_all(b"from a socket").unwrap();
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
+        let events = events_of(reader, MAX_PROGRAM_INPUT_BYTES);
+        assert_eq!(data_of(&events), b"from a socket");
+        assert_eq!(events.last(), Some(&InputEvent::End));
+    }
+
+    /// A read error is a refusal, never an empty input.
+    #[test]
+    fn a_read_error_is_refused_rather_than_sent_as_empty_input() {
+        struct Broken;
+        impl io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("device failed"))
+            }
+        }
+        let events = events_of(Broken, MAX_PROGRAM_INPUT_BYTES);
+        let [InputEvent::Failed(reason)] = events.as_slice() else {
+            panic!("one refusal, got {events:?}");
+        };
+        assert!(reason.contains("device failed"), "{reason}");
+    }
+
+    /// Pipes, regular files, and sockets are finite input; a device or a closed descriptor is not.
+    #[cfg(unix)]
+    #[test]
+    fn stdin_is_classified_by_its_descriptor() {
+        use std::os::fd::AsRawFd as _;
+        let (pipe, _writer) = std::io::pipe().unwrap();
+        let file = tempfile::tempfile().unwrap();
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let null = std::fs::File::open("/dev/null").unwrap();
+        for (descriptor, expected) in [
+            (pipe.as_raw_fd(), StdinKind::Finite),
+            (file.as_raw_fd(), StdinKind::Finite),
+            (socket.as_raw_fd(), StdinKind::Finite),
+            (null.as_raw_fd(), StdinKind::Absent),
+        ] {
+            assert_eq!(classify_stdin(descriptor).unwrap(), expected);
+        }
+        // A descriptor number far above any open one, so a parallel test cannot reuse it.
+        let closed = 1 << 20;
+        assert_eq!(classify_stdin(closed).unwrap(), StdinKind::Absent);
+    }
+
+    /// What a fake broker saw of one forwarded call, and the status it answered with.
+    struct Seen {
+        kinds: Vec<&'static str>,
+        input: Vec<u8>,
+    }
+
+    /// Serve one alias connection: record each frame, and answer `Exit { status }` once `answer`
+    /// says the frames so far are enough.
+    async fn fake_broker(
+        listener: tokio::net::UnixListener,
+        status: i32,
+        answer: fn(&[&'static str]) -> bool,
+    ) -> Seen {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut seen = Seen {
+            kinds: Vec::new(),
+            input: Vec::new(),
+        };
+        loop {
+            let Some(frame) = read_frame::<Frame, _>(&mut stream).await.unwrap() else {
+                return seen;
+            };
+            seen.kinds.push(match frame.body {
+                Body::Open { .. } => "open",
+                Body::Call { .. } => "call",
+                Body::Input { data } => {
+                    seen.input.extend(decode_payload(&data).unwrap());
+                    "input"
+                }
+                Body::InputEof => "eof",
+                Body::Signal { .. } => "signal",
+                other => panic!("unexpected frame {other:?}"),
+            });
+            if answer(&seen.kinds) {
+                let lingering = tokio::time::timeout(
+                    Duration::from_millis(200),
+                    read_frame::<Frame, _>(&mut stream),
+                )
+                .await;
+                if let Ok(Ok(None)) = lingering {
+                    seen.kinds.push("closed");
+                }
+                write_frame(
+                    &mut stream,
+                    &Frame {
+                        version: PROTOCOL_VERSION,
+                        program: ALIAS_PROGRAM,
+                        body: Body::Exit { status },
+                    },
+                )
+                .await
+                .unwrap();
+                return seen;
+            }
+        }
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// The alias sends the Call first, then all of its stdin, then end-of-file.
+    #[cfg(unix)]
+    #[test]
+    fn the_alias_streams_its_stdin_after_the_call() {
+        runtime().block_on(async {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                let directory = tempfile::tempdir().unwrap();
+                let socket = directory.path().join("box.sock");
+                let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+                let input: Vec<u8> = (0..MAX_CHUNK_BYTES + 100)
+                    .map(|index| (index % 251) as u8)
+                    .collect();
+                let broker = tokio::spawn(fake_broker(listener, 0, |kinds| {
+                    kinds.last() == Some(&"eof")
+                }));
+                let events = spawn_input_reader(
+                    std::io::Cursor::new(input.clone()),
+                    MAX_PROGRAM_INPUT_BYTES,
+                )
+                .unwrap();
+                let outcome = forward(&socket, Interpreter::Shell, "cat".to_string(), Some(events))
+                    .await
+                    .unwrap();
+                assert!(matches!(outcome, Outcome::Status(0)));
+                let seen = broker.await.unwrap();
+                assert_eq!(seen.kinds[..2], ["open", "call"]);
+                assert_eq!(seen.kinds.last(), Some(&"eof"));
+                assert!(
+                    seen.kinds[2..seen.kinds.len() - 1]
+                        .iter()
+                        .all(|kind| *kind == "input")
+                );
+                assert_eq!(seen.input, input);
+            })
+            .await
+            .expect("the test finishes within its limit");
+        });
+    }
+
+    /// A command that finishes is not held by a stdin that its writer keeps open.
+    #[cfg(unix)]
+    #[test]
+    fn a_stdin_held_open_does_not_hold_a_command_that_finishes() {
+        runtime().block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("box.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let (reader, mut writer) = std::io::pipe().unwrap();
+            use std::io::Write as _;
+            writer.write_all(b"partial").unwrap();
+            let broker = tokio::spawn(fake_broker(listener, 7, |kinds| kinds.contains(&"call")));
+            let events = spawn_input_reader(reader, MAX_PROGRAM_INPUT_BYTES).unwrap();
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(10),
+                forward(
+                    &socket,
+                    Interpreter::Shell,
+                    "true".to_string(),
+                    Some(events),
+                ),
+            )
+            .await
+            .expect("the alias returns when the command exits")
+            .unwrap();
+            assert!(matches!(outcome, Outcome::Status(7)));
+            drop(writer);
+            broker.await.unwrap();
+        });
+    }
+
+    /// Oversized stdin interrupts the call, and the alias fails loudly instead of reporting the
+    /// command's status.
+    #[cfg(unix)]
+    #[test]
+    fn oversized_stdin_interrupts_the_call_and_fails() {
+        runtime().block_on(async {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                let directory = tempfile::tempdir().unwrap();
+                let socket = directory.path().join("box.sock");
+                let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+                let broker =
+                    tokio::spawn(fake_broker(listener, 0, |kinds| kinds.contains(&"signal")));
+                let events = spawn_input_reader(
+                    std::io::Cursor::new(vec![b'x'; MAX_PROGRAM_INPUT_BYTES + 1]),
+                    MAX_PROGRAM_INPUT_BYTES,
+                )
+                .unwrap();
+                let Err(error) =
+                    forward(&socket, Interpreter::Shell, "cat".to_string(), Some(events)).await
+                else {
+                    panic!("oversized stdin must fail the alias");
+                };
+                assert!(error.to_string().contains("maximum"), "{error}");
+                let seen = broker.await.unwrap();
+                assert!(seen.input.len() <= MAX_PROGRAM_INPUT_BYTES);
+                assert_eq!(seen.kinds.last(), Some(&"signal"));
+            })
+            .await
+            .expect("the test finishes within its limit");
+        });
+    }
+
+    /// A Shell alias with no stdin sends end-of-file right after the Call.
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_alias_with_no_stdin_sends_end_of_file_after_the_call() {
+        runtime().block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("box.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let broker = tokio::spawn(fake_broker(listener, 3, |kinds| {
+                kinds.last() == Some(&"eof")
+            }));
+            let outcome = forward(&socket, Interpreter::Shell, "true".to_string(), None)
+                .await
+                .unwrap();
+            assert!(matches!(outcome, Outcome::Status(3)));
+            assert_eq!(broker.await.unwrap().kinds, ["open", "call", "eof"]);
+        });
     }
 
     // ── Fail-closed exit status ───────────────────────────────────────────────

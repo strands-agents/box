@@ -20,6 +20,23 @@ command to the Shell. Each accepts one of these forms:
 Any other form is refused with `Shell alias accepts only -c COMMAND, -lc COMMAND, -c -l COMMAND, or
 SCRIPT`.
 
+### Standard input
+
+When the alias's standard input is a pipe, a file, or a socket, the command reads it as its
+standard input while it runs. Bytes arrive unchanged. A terminal or `/dev/null` gives the command
+no input. A command that does not read its input is not held by it: the alias returns when the
+command exits, even when the writer keeps the pipe open. A command that does read such an input
+waits for it until the Shell's timeout.
+
+The alias stops the command and exits with status `125` when the input is more than 64 KiB, or when
+reading it fails, even if the command does not read its input. The command may have started by
+then. The alias reads the input whether or not the command reads it.
+
+Only commands that the Shell runs itself, such as `cat`, `read`, or `jq`, receive the input. A
+program that the Shell starts in its own sandbox gets no input. Text that a command reads from its
+input is still data: when a command runs it, as in `eval "$(cat)"`, or opens a file it names,
+policy decides that command or file.
+
 Each invocation is one command. A variable exported in one invocation is unset in the next. The
 Shell starts each command with `HOME` set to the agent's `HOME`, and with the workspace as its
 working directory.
