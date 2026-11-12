@@ -839,3 +839,29 @@ fn plain_mkdir_is_unchanged_by_the_parents_walk() {
         rendered(&above)
     );
 }
+
+/// A refused probe before a plain `mkdir` leaves that `mkdir` decided, and shows nothing about
+/// whether the path exists.
+#[test]
+fn a_plain_mkdir_after_a_refused_probe_is_still_decided() {
+    let (mut fixture, mut shell) = project_fixture_and_governed();
+    let (existing, absent) = run(async {
+        let made = fixture.run("mkdir -p /home/lash/other").await;
+        assert_eq!(made.status, 0, "setup: {}", rendered(&made));
+        let existing = shell
+            .run("test -d /home/lash/other; mkdir /home/lash/other")
+            .await;
+        let absent = shell
+            .run("test -d /home/lash/absent; mkdir /home/lash/absent")
+            .await;
+        (existing, absent)
+    });
+    for out in [&existing, &absent] {
+        assert_ne!(out.status, 0, "{}", rendered(out));
+        assert!(
+            out.stderr.contains("[default-deny]"),
+            "the mkdir is decided and refused: {}",
+            rendered(out)
+        );
+    }
+}

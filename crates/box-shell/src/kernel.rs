@@ -252,12 +252,25 @@ impl ShellKernel {
             .is_some_and(|refused| refused == abs)
     }
 
-    /// Whether `path` names a directory, asked with no decision.
-    async fn is_directory(&self, proc: &Process, path: &str) -> bool {
-        let resolved = self.resolve(proc, path, Follow::Yes).await;
-        self.stat_answer(proc, resolved, Follow::Yes)
-            .await
-            .is_ok_and(|stat| stat.is_dir)
+    /// Whether `path` is an ancestor that a running `mkdir -p` walks, and not one of its operands.
+    fn is_a_parents_ancestor(&self, proc: &Process, path: &str) -> bool {
+        let abs = resolve::absolute(&proc.cwd, path);
+        let running = self
+            .running
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        running.iter().any(|((program, args, cwd), _)| {
+            let parents = args
+                .iter()
+                .any(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg.contains('p'));
+            program == "mkdir"
+                && parents
+                && args
+                    .iter()
+                    .filter(|arg| !arg.starts_with('-'))
+                    .map(|operand| resolve::absolute(cwd, operand))
+                    .any(|operand| operand != abs && operand.starts_with(&format!("{abs}/")))
+        })
     }
 
     fn host_for(&self, resolved: &Resolved, follow: Follow) -> Option<(PathBuf, PathBuf)> {
@@ -756,10 +769,10 @@ impl Kernel for ShellKernel {
         permit.report(removed).await
     }
 
-    /// A symlink at the final component is the name that already exists. A `mkdir -p` ancestor
-    /// whose probe was refused is not created.
+    /// A symlink at the final component is the name that already exists. An ancestor that a
+    /// running `mkdir -p` walks, whose probe was refused, is not created.
     async fn create_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
-        if self.probe_was_refused(proc, path) && self.is_directory(proc, path).await {
+        if self.is_a_parents_ancestor(proc, path) && self.probe_was_refused(proc, path) {
             return Ok(());
         }
         let (resolved, permit) = self

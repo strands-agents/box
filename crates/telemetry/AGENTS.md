@@ -86,10 +86,12 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   **The deletion costs no audit data.** Measured on a real box: for
   `zsh -c 'cat $PWD/allowed.txt'`, `process.command_args` now holds `<redacted>` while the same
   command's own `fs:read` decision still carries the full path under `file.path`. The path was
-  recorded twice and is now recorded once, by the decision that authorized it. A LITERAL path is
-  unaffected and still reported whole, which is why
-  `box_telemetry.rs::a_shell_decision_states_its_arguments_and_its_directory` passes unchanged — the
-  outer bash expands `$BOX_HOME` there, so the Shell receives a literal word.
+  recorded twice and is now recorded once, by the decision that authorized it.
+- **The hosted Shell now marks no argument as literal**, because upstream Shell does not say which
+  words the script stated. So every Shell argument meets `reportable`, and a literal path is
+  `<redacted>` too; its `fs:read` decision still names it.
+  `box_telemetry.rs::a_shell_decision_states_its_arguments_and_its_directory` pins the redaction.
+  The mask and its pins stay, for a caller that can supply one.
 
   **`plain_flag` takes one letter after a single `-`, and a `--` name is lowercase and bounded.** The
   first version required only an alphanumeric first character and put no cap on the tail, so four
