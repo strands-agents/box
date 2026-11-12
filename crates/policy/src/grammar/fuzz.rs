@@ -142,11 +142,18 @@ impl Fixture {
                 values.insert(format!("+{toolchain}"));
             }
             for field in &action.fields {
-                let changes = match &field.source {
-                    FieldSource::Option(changes) | FieldSource::Operand(_, changes) => changes,
-                    FieldSource::Toolchain => continue,
-                };
-                values.extend(like_samples(changes));
+                match &field.source {
+                    FieldSource::Option(changes) | FieldSource::Operand(_, changes) => {
+                        values.extend(like_samples(changes));
+                    }
+                    FieldSource::Toolchain(changes) => {
+                        values.extend(
+                            like_samples(changes)
+                                .into_iter()
+                                .map(|sample| format!("+{sample}")),
+                        );
+                    }
+                }
             }
         }
         let short = SHORT_CANDIDATES

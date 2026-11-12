@@ -123,11 +123,8 @@ impl ActionGrammar {
                     Some(operands[*at].clone()).filter(|words| !words.is_empty()),
                     changes,
                 ),
-                FieldSource::Toolchain => {
-                    if let Some(selector) = &toolchain {
-                        fields.insert(field.name.clone(), FieldValue::String(selector.clone()));
-                    }
-                    continue;
+                FieldSource::Toolchain(changes) => {
+                    (toolchain.clone().map(|selector| vec![selector]), changes)
                 }
             };
             let value = match field.kind {
