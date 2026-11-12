@@ -120,10 +120,8 @@ fn non_test_source(source: &str) -> &str {
 
 /// The box's Shell kernel, which must replace the dependency's network path.
 fn box_kernel_source() -> String {
-    std::fs::read_to_string(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../shell/src/kernel.rs"),
-    )
-    .expect("read the box's Shell kernel")
+    std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../shell/src/kernel.rs"))
+        .expect("read the box's Shell kernel")
 }
 
 #[test]
