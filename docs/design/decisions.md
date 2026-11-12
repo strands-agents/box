@@ -950,17 +950,46 @@ Callers must retain each token until its effect ends, and existing unlabeled eve
 `durable_http_history_preserves_one_identifier_for_each_operation` pins request/result pairing.
 
 <a id="history-is-durable-per-box-and-has-no-rewind"></a>
-### History is durable per box, and it offers no rewind and no audit record
+### Default history is durable per box, and periodic persistence is experimental
 
 One box owns one engine, one policy source set, and one history file, and a restart reuses that
-file. `open` recovers a decision-equivalent history before returning an authority. If recovery
-fails, it returns an error. The box never falls back to empty or partial history. The engine
-timestamps each event from the trusted system wall clock. Callers cannot supply timestamps. If the
-clock steps backwards, each append advances one nanosecond until it catches up. This can keep a
-restriction active longer than the apparent interval. A policy edit applies prospectively. A
-temporal identity that still matches keeps its state, and an unmatched identity starts empty. The
-contract excludes checkpoint, rewind, branch, tamper evidence, an audit record, atomic commit across
-an external effect, and any history shared between boxes.
+file. Default builds retain per-event persistence. `open` recovers decision-equivalent state from
+persisted history before returning an authority. If recovery fails, it returns an error instead
+of substituting empty or partial history.
+
+The engine timestamps each event from the trusted system wall clock. Callers cannot supply
+timestamps. If the clock steps backwards, each append advances one nanosecond until it catches up.
+This can keep a restriction active longer than the apparent interval. A policy edit applies
+prospectively: a temporal identity that still matches keeps its state, and an unmatched identity
+starts empty. The contract excludes checkpoint, rewind, branch, tamper evidence, an audit record,
+atomic commit across an external effect, and any history shared between boxes.
+
+The `experimental-idle-flush` Cargo feature in `crates/box/Cargo.toml` permits a persistence
+experiment without changing default builds. In this mode, hosted `run` selects Dogwood's periodic
+durability interface and starts an independent timer on the existing policy engine, so pending
+history can be flushed even when events stop arriving. This experiment accepts the loss of recent
+requests and outcomes if the process crashes before a successful flush; after restart, a history
+rule can admit requests that those missing events would have denied. The timer's interval is a
+polling cadence, not a maximum persistence delay. Normal timer teardown joins its worker and
+attempts a final flush, but callers must stop event producers first, and hosted teardown does not
+establish that ordering. Errors during guard destruction reach stderr and do not change the
+selected exit result.
+
+The policy crate's matching feature exposes `PolicyEngine::set_periodic_history` to select
+persistence thresholds, `PolicyEngine::flush_history` to persist submitted history explicitly,
+and `PolicyEngine::start_history_flusher` to start one owned timer for that engine.
+`HistoryFlusher` owns the timer: `HistoryFlusher::snapshot` observes completed calls, and
+`HistoryFlusher::shutdown` joins the worker, attempts a final flush, and returns observed errors.
+`HistoryFlushSnapshot` carries call counts, elapsed time, and retained errors, not a count of
+persisted events. These interfaces are limited to the experiment; they keep Dogwood's engine-library
+types private and do not select periodic persistence for default releases. See the
+[experimental policy interface](../../crates/policy/README.md#experimental-idle-history-flushing)
+for the caller contract.
+
+`a_timer_calls_flush_without_event_submissions` pins idle timer calls, and
+`killing_before_the_first_timer_tick_still_loses_pending_history` pins the accepted crash-loss
+boundary. `idle_timer_preserves_history_after_sigkill` checks recovery after completed timer
+flushes.
 
 <a id="a-temporal-rule-names-one-action"></a>
 ### A temporal rule names one action, so a budget does not span a family

@@ -641,6 +641,35 @@ impl DogwoodEngine {
         }
     }
 
+    #[cfg(feature = "experimental-idle-flush")]
+    pub(crate) fn set_periodic_history(
+        &self,
+        max_events: u32,
+        max_interval: Duration,
+    ) -> Result<(), PolicyError> {
+        self.engine
+            .lock()
+            .map_err(|_| {
+                PolicyError::Evaluation("dogwood durable engine lock poisoned".to_string())
+            })?
+            .set_durability(dogwood_local_engine::Durability::Periodic {
+                max_events,
+                max_interval,
+            })
+            .map_err(|error| PolicyError::Evaluation(error.to_string()))
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    pub(crate) fn flush_history(&self) -> Result<(), PolicyError> {
+        self.engine
+            .lock()
+            .map_err(|_| {
+                PolicyError::Evaluation("dogwood durable engine lock poisoned".to_string())
+            })?
+            .flush()
+            .map_err(|error| PolicyError::Evaluation(error.to_string()))
+    }
+
     /// Feed one event through the durable engine under the scope lock.
     fn submit(
         &self,

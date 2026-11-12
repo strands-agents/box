@@ -1,0 +1,65 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="drawio" type="device">
+  <diagram id="dogwood-idle-history-flush" name="Idle policy history flushing">
+    <mxGraphModel dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1120" pageHeight="640" math="0" shadow="0" background="#ffffff">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="box-process" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;Box process&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;color:#5F6B7A;font-weight:normal&quot;&gt;Experimental idle flush&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=none;strokeWidth=2;verticalAlign=top;align=left;spacing=0;spacingLeft=16;spacingTop=6;fontSize=14;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="40" width="660" height="460" />
+        </mxCell>
+        <mxCell id="timer" value="&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:normal&quot;&gt;Box timer&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;color:#5F6B7A;font-weight:normal&quot;&gt;1-second interval&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;verticalAlign=middle;align=center;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="80" y="140" width="200" height="100" />
+        </mxCell>
+        <mxCell id="engine" value="&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:normal&quot;&gt;Policy engine&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;color:#5F6B7A;font-weight:normal&quot;&gt;Existing locks&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;verticalAlign=middle;align=center;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="440" y="140" width="220" height="100" />
+        </mxCell>
+        <mxCell id="history" value="&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:normal&quot;&gt;History on disk&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;verticalAlign=middle;align=center;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="840" y="140" width="200" height="100" />
+        </mxCell>
+        <mxCell id="shutdown" value="&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:normal&quot;&gt;Normal shutdown&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;verticalAlign=middle;align=center;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="80" y="380" width="240" height="80" />
+        </mxCell>
+        <mxCell id="timer-flush" value="Flush history" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;align=center;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="timer" target="engine">
+          <mxGeometry as="geometry" x="0" relative="1">
+            <Array as="points">
+              <mxPoint x="360" y="190" />
+            </Array>
+            <mxPoint as="offset" x="0" y="-15" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="persist" value="Persist history" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;align=center;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="engine" target="history">
+          <mxGeometry as="geometry" x="0" relative="1">
+            <Array as="points">
+              <mxPoint x="750" y="190" />
+            </Array>
+            <mxPoint as="offset" x="20" y="-15" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="stop-join" value="1. Stop and join" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.4166666666666667;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;align=left;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="shutdown" target="timer">
+          <mxGeometry as="geometry" x="0" relative="1">
+            <Array as="points">
+              <mxPoint x="180" y="310" />
+            </Array>
+            <mxPoint as="offset" x="12" y="0" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="final-flush" value="2. Final flush" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;align=center;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="shutdown" target="engine">
+          <mxGeometry as="geometry" x="-0.45" relative="1">
+            <Array as="points">
+              <mxPoint x="550" y="420" />
+              <mxPoint x="550" y="300" />
+            </Array>
+            <mxPoint as="offset" x="0" y="-15" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="cadence" value="The interval is a polling cadence, not a persistence deadline." style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=16;fontColor=#5F6B7A;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="540" width="1000" height="25" />
+        </mxCell>
+        <mxCell id="loss" value="Pending history can be lost before a successful flush." style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=16;fontColor=#5F6B7A;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="570" width="1000" height="25" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

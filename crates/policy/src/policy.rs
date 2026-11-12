@@ -58,6 +58,8 @@ pub enum SchemaStage {
 /// One durable policy authority.
 pub struct PolicyEngine {
     authority: Authority,
+    #[cfg(feature = "experimental-idle-flush")]
+    history_flusher_active: std::sync::atomic::AtomicBool,
     grammars: ToolGrammars,
     issuer: u64,
     bindings: GrammarBindings,
@@ -81,6 +83,57 @@ impl std::fmt::Debug for PolicyEngine {
 }
 
 impl PolicyEngine {
+    /// Select event-count and submission-time persistence thresholds for this experiment.
+    #[cfg(feature = "experimental-idle-flush")]
+    pub fn set_periodic_history(
+        &self,
+        max_events: u32,
+        max_interval: std::time::Duration,
+    ) -> Result<(), PolicyError> {
+        self.authority
+            .set_periodic_history(max_events, max_interval)
+    }
+
+    /// Persist all history submitted before this call obtains the authority lock.
+    #[cfg(feature = "experimental-idle-flush")]
+    pub fn flush_history(&self) -> Result<(), PolicyError> {
+        self.authority.flush_history()
+    }
+
+    /// Start one owned idle-flush worker; stop event producers before shutting down its guard.
+    #[cfg(feature = "experimental-idle-flush")]
+    pub fn start_history_flusher(
+        self: &Arc<Self>,
+        interval: std::time::Duration,
+    ) -> Result<crate::HistoryFlusher, PolicyError> {
+        use std::sync::atomic::Ordering;
+        if interval.is_zero() {
+            return Err(PolicyError::Evaluation(
+                "history flush interval must be positive".to_string(),
+            ));
+        }
+        self.history_flusher_active
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| {
+                PolicyError::Evaluation(
+                    "a history flush worker already owns this engine".to_string(),
+                )
+            })?;
+        match crate::history_flush::HistoryFlusher::start(Arc::clone(self), interval) {
+            Ok(worker) => Ok(worker),
+            Err(error) => {
+                self.release_history_flusher();
+                Err(error)
+            }
+        }
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    pub(crate) fn release_history_flusher(&self) {
+        self.history_flusher_active
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
     /// Open durable history, then parse and install owned policy sources for an unanchored operator.
     pub fn open(sources: Vec<Policy>, history: &Path) -> Result<Self, PolicyError> {
         Self::open_with_mcp_schemas(sources, &[], history)
@@ -165,6 +218,8 @@ impl PolicyEngine {
             issuer,
             effective,
             observer: None,
+            #[cfg(feature = "experimental-idle-flush")]
+            history_flusher_active: std::sync::atomic::AtomicBool::new(false),
         }
     }
 

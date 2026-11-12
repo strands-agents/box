@@ -82,6 +82,7 @@ tokio = { version = "1", features = [
 ] }
 
 [features]
+experimental-idle-flush = ["policy/experimental-idle-flush"]
 native-filesystem-policy = []
 # Builds `box-egress-probe` and the credential end-to-end tests. The probe is a real
 # binary, so its TLS deps are optional dependencies this feature enables rather than

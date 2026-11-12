@@ -675,6 +675,10 @@ pub(crate) struct HostedBox {
     /// The egress gateway. Dropped after the broker, which joins its accept thread.
     _proxy: MitmHandle,
 
+    /// Own the experimental history timer until gateway listener teardown completes.
+    #[cfg(feature = "experimental-idle-flush")]
+    _history_flusher: policy::HistoryFlusher,
+
     /// This box's collector. Dropped after the gateway, and the drain that precedes teardown is
     /// what exports; a verdict taken after it reaches no target.
     _collector: Arc<telemetry::Collector>,
@@ -788,6 +792,13 @@ impl HostedBox {
         workspace: &Path,
         home: &Path,
     ) -> Result<Self, BoxError> {
+        #[cfg(feature = "experimental-idle-flush")]
+        let history_flusher = {
+            let interval = std::time::Duration::from_secs(1);
+            policy.set_periodic_history(1_000, interval)?;
+            policy.start_history_flusher(interval)?
+        };
+
         // Whatever a previous owner left is stale, because the lock above just proved nothing of
         // this box is running.
         BoxLive::withdraw(root);
@@ -1044,6 +1055,8 @@ impl HostedBox {
             _file_monitor: file_monitor,
             coordinator_fatal,
             _proxy: proxy,
+            #[cfg(feature = "experimental-idle-flush")]
+            _history_flusher: history_flusher,
             _collector: collector,
             attachment,
             approved,

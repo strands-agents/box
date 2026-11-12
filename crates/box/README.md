@@ -286,6 +286,28 @@ so nothing is reachable.
 Egress is the enforced principal. The proxy asks the policy per request, and no
 destination allowlist exists beside it.
 
+### Experimental history timer
+
+The `experimental-idle-flush` Cargo feature in `crates/box/Cargo.toml` adds a timer
+that persists pending policy history while a hosted Box run is idle. It requires
+Dogwood engine interfaces that the pinned public dependency does not yet provide.
+The feature is for integration validation; default builds retain their existing
+history behavior.
+
+With this feature, hosted Box selects thresholds of 1,000 events or one second,
+checked when an event arrives, and owns a separate one-second idle timer. One second
+is a polling target. A process crash before a completed flush can lose pending history.
+These values are prototype settings, not runtime configuration keys.
+
+The timer joins and attempts a final flush when its guard is dropped. This does not
+establish a complete hosted shutdown guarantee: gateway connection threads can still
+submit events after listener teardown. Timer failures are retained and reported to
+stderr; the destructor cannot change the selected exit result. Production integration
+still needs producer draining and shutdown error handling.
+
+The [policy timer interface](../policy/README.md#experimental-idle-history-flushing)
+describes explicit shutdown and completed-call counters.
+
 ## Egress targets
 
 `.strands-box/box.toml` declares which host-side secret is attached at which

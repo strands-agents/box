@@ -18,8 +18,8 @@ enforcement point.
 
 ## Public Interface
 
-The façade exports **60 names with `--all-features`, and 54 by default.** The adapter features add
-the six names in the last row.
+The façade exports **62 names with `--all-features`, and 54 by default.** The adapter features add
+six names. The `experimental-idle-flush` feature adds two timer types.
 
 `PrincipalKind` left on 2026-08-18. The three enforcement-point principals collapsed into one
 `Agent`, so a kind enum named a distinction that no longer exists.
@@ -37,7 +37,7 @@ the six names in the last row.
 | `Outcome`, `Delivery`, `FsResult` | One completed effect, submitted as history. |
 | `PendingToolResponse`, `McpReply` | The per-tool `::response` an allowed `tools/call` owes, from `refine_tool_call` to `record_tool_response`, and how the call ended. |
 | `EffectivePolicy`, `ENGINE_ID` | Active engine and source identity. |
-| `PolicyError` | Startup and history-recording errors. |
+| `PolicyError` | Startup, history-recording, and experimental history-flush errors. |
 | `PolicyCheck`, `Finding`, `RuleRef`, `Location` | What `check` finds in a policy: each finding's message, rules, source location, and help. |
 | `SchemaStage`, `PolicyDiagnostic`, `PolicyStagingError` | Runtime MCP schema staging results and errors. |
 | `generate_mcp_schema`, `validate_mcp_schema_composition`, `compose_action_schema`, `McpSchemaError` | MCP schema generation, validation, composition, and errors. |
@@ -46,6 +46,7 @@ the six names in the last row.
 | `ToolGrammar`, `ToolGrammars`, `ToolGrammarError` | One checked tool grammar from its `box.toml` table, the set a box installs with no two that share a name or a program, the action schema with their actions, and why one is refused. |
 | `GrammarBindings`, `BindingRefusal` | The engine's tool grammars bound to each tool's opened program file and called name, which `PolicyEngine::bound_by` installs for the engine's life, and why declaring a tool or installing bindings from another engine is refused. |
 | `EgressPolicyInterceptor` (`egress-adapter`), `ShellPolicyInterceptor` (`shell-adapter`), `ScriptPolicyInterceptor`, `ScriptPermit`, `ScriptRefusal`, and `RenameDestination` (`script-adapter`) | One adapter per enforcement point, each behind its own feature. |
+| `HistoryFlusher`, `HistoryFlushSnapshot` (`experimental-idle-flush`) | Own one timer and observe its completed flush calls. |
 
 The lifecycle is:
 
@@ -476,6 +477,40 @@ Rules written against history:
   engine attempts a checkpoint. A successful checkpoint snapshots monitor state and removes
   the covered log records. A failed checkpoint increases the durable log replay depth.
 
+## Experimental idle-history flushing
+
+The `experimental-idle-flush` feature in `crates/policy/Cargo.toml` adds an owned timer
+for persistence experiments. It requires Dogwood's `Durability::Periodic`, `set_durability`,
+and `flush` interfaces, which the pinned `dogwood-local-engine = "=1.0.0"` package does
+not provide. The feature cannot build with the current public dependency selection.
+Default builds continue to use the pinned public packages.
+
+`PolicyEngine::open` still uses the engine's default durability mode. Select periodic
+persistence explicitly, then start one timer on the same `Arc<PolicyEngine>`:
+
+```text
+PolicyEngine::set_periodic_history(&self, max_events: u32, max_interval: Duration) -> Result<(), PolicyError>
+PolicyEngine::start_history_flusher(self: &Arc<Self>, interval: Duration) -> Result<HistoryFlusher, PolicyError>
+PolicyEngine::flush_history(&self) -> Result<(), PolicyError>
+HistoryFlusher::snapshot(&self) -> HistoryFlushSnapshot
+HistoryFlusher::shutdown(self) -> Result<HistoryFlushSnapshot, PolicyError>
+```
+
+Here, `Arc` and `Duration` are the standard library's shared pointer and time-span types.
+The engine's thresholds are checked when events arrive. The separate timer calls
+`flush_history` periodically, including while events arrive and while Box is idle.
+A successful call can do no work if no history is pending. The snapshot counts calls,
+not disk synchronizations.
+
+Keep the guard alive while producers can submit events. Stop and join those producers
+before calling `shutdown`; shutdown wakes and joins the timer, then flushes once.
+It returns any observed flush error, even if a later retry succeeds. Dropping the guard
+also joins it and normally flushes, but can only report errors to stderr.
+
+A one-second interval is a polling target. The worker waits another interval after each
+flush completes. Scheduling, lock waits, and storage latency can extend persistence delay. A process crash before a completed flush can lose pending
+history. The prototype does not change these events to operating-system-managed storage.
+
 ## Effective Policy
 
 `PolicyEngine::effective` returns:
@@ -495,7 +530,7 @@ Rules written against history:
 | `Schema` | A policy value, attribute, or entity type violates the schema. A deleted resource entity lands here. |
 | `UnknownAction` | A policy names an action outside the schema. |
 | `UnsupportedClause` | A temporal predicate names an action group. |
-| `Evaluation` | The durable engine could not open or recover the database, install sources, or submit an event. |
+| `Evaluation` | The durable engine could not open or recover the database, install sources, submit an event, or flush history. |
 
 `open` returns `Parse`, `Schema`, `UnknownAction`, or `Evaluation`. `record` returns
 `Evaluation` if durable submission fails after the effect.

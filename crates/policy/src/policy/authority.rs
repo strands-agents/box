@@ -493,6 +493,28 @@ impl Authority {
         }
     }
 
+    #[cfg(feature = "experimental-idle-flush")]
+    pub(super) fn set_periodic_history(
+        &self,
+        max_events: u32,
+        max_interval: std::time::Duration,
+    ) -> Result<(), PolicyError> {
+        self.live
+            .lock()
+            .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?
+            .engine
+            .set_periodic_history(max_events, max_interval)
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    pub(super) fn flush_history(&self) -> Result<(), PolicyError> {
+        self.live
+            .lock()
+            .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?
+            .engine
+            .flush_history()
+    }
+
     /// Records one outcome. The live authority always serves decisions (`Discovering` or `Ready`),
     /// so no readiness state refuses a record.
     pub(super) fn record(

@@ -266,6 +266,25 @@ History is not an audit record and has no tamper evidence. It cannot be rewound 
 The operation and its recorded outcome do not commit together. If the process stops between them,
 the history omits that outcome and a `::response` count is too low.
 
+### Experimental periodic persistence
+
+The preceding durability rules describe default builds. The `experimental-idle-flush`
+Cargo feature in `crates/box/Cargo.toml` selects periodic persistence and starts a
+separate timer for pending history. It requires Dogwood interfaces that the pinned
+public engine package does not provide.
+
+A process crash before a successful flush can lose recent requests and outcomes.
+After restart, a history rule can therefore see fewer events and admit additional
+requests under a count-based limit. The timer flushes while Box is idle, but its
+one-second interval is a polling cadence, not a maximum persistence delay.
+
+The timer guard joins its worker and attempts a final flush during normal teardown.
+This does not establish that all event producers have stopped. The
+[experimental policy interface](../../crates/policy/README.md#experimental-idle-history-flushing)
+describes explicit shutdown, counters, and errors; the
+[hosted integration](../../crates/box/README.md#experimental-history-timer) records
+its remaining shutdown limits.
+
 ## What refuses to load
 
 An invalid policy stops the box. A `forbid` that never matches can appear to protect a resource
