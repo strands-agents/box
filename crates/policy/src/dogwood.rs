@@ -469,8 +469,19 @@ impl DogwoodEngine {
         history: &Path,
         start_secs: i64,
     ) -> Result<Self, PolicyError> {
+        Self::open_with_test_clock_and_mcp(source, &[], history, start_secs)
+    }
+
+    /// [`Self::open_with_test_clock`] with MCP tool schemas composed in.
+    #[cfg(test)]
+    pub(crate) fn open_with_test_clock_and_mcp(
+        source: &str,
+        mcp_schemas: &[String],
+        history: &Path,
+        start_secs: i64,
+    ) -> Result<Self, PolicyError> {
         let (canonical_policies, effective_schema, _) =
-            validate_and_expand(source, &[], &Operator::unanchored())?;
+            validate_and_expand(source, mcp_schemas, &Operator::unanchored())?;
         let now = Arc::new(AtomicI64::new(start_secs.saturating_mul(NANOS_PER_SECOND)));
         let config = durable_config().with_clock(Box::new(FixedClock {
             now: Arc::clone(&now),
@@ -479,7 +490,7 @@ impl DogwoodEngine {
         reconcile_policy_set(
             &mut engine,
             &canonical_policies,
-            &[],
+            mcp_schemas,
             &effective_schema.source,
         )?;
 
@@ -676,7 +687,7 @@ impl DogwoodEngine {
             .map_err(|_| PolicyError::Evaluation("pending outcome lock poisoned".to_string()))?;
         pending.push(event);
         self.submit_pending(&mut pending)
-            .map_err(PolicyError::Evaluation)
+            .map_err(PolicyError::OutcomeKept)
     }
 
     /// Submit the refused outcome events in order, and stop at the first the history still refuses.
@@ -2936,6 +2947,90 @@ when temporal {
             decide(&reopened),
             budget_spent,
             "the recorded outcome still counts after a restart"
+        );
+    }
+
+    #[test]
+    fn a_tool_leg_queues_behind_a_kept_coarse_outcome_and_both_count() {
+        let history = tempfile::tempdir().expect("history directory");
+        let fragment = crate::mcp_schema::generate_mcp_schema(
+            "desk",
+            r#"{"result":{"tools":[{"name":"reset","inputSchema":{"type":"object",
+                "properties":{"user_name":{"type":"string"}},"required":["user_name"]}}]}}"#,
+        )
+        .expect("the desk schema generates");
+        let engine = DogwoodEngine::open_with_test_clock_and_mcp(
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource);
+permit(principal, action == desk::Action::"reset", resource);
+forbid(principal, action == desk::Action::"reset", resource)
+when temporal { formerly within 1h ( desk::Action::"reset"::response{ input.user_name: _ } ) };
+"#,
+            &[fragment],
+            &history.path().join("dogwood.redb"),
+            1_000_000,
+        )
+        .expect("policy loads");
+        let arguments = serde_json::json!({ "user_name": "u" });
+        fn call(arguments: Option<&serde_json::Value>) -> Request<'_> {
+            Request::McpCall {
+                server: "desk",
+                method: "tools/call",
+                tool: Some("reset"),
+                prompt: None,
+                uri: None,
+                arguments,
+            }
+        }
+        let refine = |engine: &DogwoodEngine| {
+            engine.decide_recording(
+                &governed(),
+                &Principal::agent(),
+                ActionRequest::Request(&call(Some(&arguments))),
+            )
+        };
+        let (decision, coarse) = engine.decide(
+            &governed(),
+            &Principal::agent(),
+            ActionRequest::Request(&call(None)),
+        );
+        assert!(decision.is_allow());
+        let (decision, request_id, input) = refine(&engine);
+        assert!(decision.is_allow(), "the first reset is in budget");
+        let pending = crate::PendingToolResponse {
+            request_id: request_id.expect("a tool request id"),
+            identity: crate::schema::ActionIdentity::mcp_tool("desk", "reset"),
+            input: input.expect("the recorded input"),
+        };
+
+        engine.advance_clock(-400);
+        let coarse = engine.observe_outcome(
+            &governed(),
+            &Principal::agent(),
+            &coarse.expect("a coarse request id"),
+            &Outcome::Mcp {
+                server: "desk",
+                method: "tools/call",
+                tool: Some("reset"),
+                prompt: None,
+                uri: None,
+            },
+        );
+        assert!(
+            matches!(coarse, Err(PolicyError::OutcomeKept(_))),
+            "a refused coarse outcome is kept, not lost: {coarse:?}"
+        );
+        let tool = engine.observe_tool_response(pending, crate::McpReply::Result, None);
+        assert!(
+            matches!(tool, Err(PolicyError::OutcomeKept(_))),
+            "the tool leg queues behind it: {tool:?}"
+        );
+
+        engine.advance_clock(410);
+        let (decision, ..) = refine(&engine);
+        assert!(
+            !decision.is_allow(),
+            "once the clock recovers, the kept tool leg counts toward the budget"
         );
     }
 

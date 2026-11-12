@@ -117,7 +117,9 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   on one also requires `output.reply: "result"`. The gateway hands a `tools/call`
   reply, copied after redaction, to the request permit's `ReplyObserver`; the permit and the
   observer share the pending response, and whichever ends second records it, so the tool's leg
-  records exactly when `mcp:call::response` does. An http reply over the 16 MiB response limit,
+  records exactly when `mcp:call::response` does. A coarse outcome the history keeps for later
+  (`PolicyError::OutcomeKept`) counts as recorded, so the tool's leg queues behind it, on the http
+  and stdio paths alike (`dogwood::tests::a_tool_leg_queues_behind_a_kept_coarse_outcome_and_both_count`). An http reply over the 16 MiB response limit,
   compressed, cut off, or without the reply matching the request's JSON-RPC id records
   `indeterminate`, and so does a reply that only accepts an MCP task or has a `resultType` other
   than `complete` (such as `input_required`): neither is the call's answer, and Box records no

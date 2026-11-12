@@ -18,7 +18,7 @@ use crate::{
 };
 use crate::{
     Decision, Delivery, DenyReason, McpReply, Outcome, PendingToolResponse, PolicyEngine,
-    Principal, Request, RequestId,
+    PolicyError, Principal, Request, RequestId,
 };
 
 /// Binds one policy and egress principal to outbound effect interception.
@@ -751,31 +751,32 @@ impl LocalPolicyEffectPermit {
                 // `::response`, like a delivered `Http` request with a 500); only a definite `Failed`
                 // — the effect provably did not occur — records nothing.
                 match mcp.as_ref().zip(self.mcp_request_id.as_ref()) {
-                    Some((mcp, mcp_request_id)) if !matches!(delivery, Delivery::Failed) => http
-                        .and(
-                            self.policy
-                                .record(
-                                    &self.governed,
-                                    &self.principal,
-                                    mcp_request_id,
-                                    &Outcome::Mcp {
-                                        server: &mcp.server,
-                                        method: &mcp.method,
-                                        tool: mcp.tool.as_deref(),
-                                        prompt: mcp.prompt.as_deref(),
-                                        uri: mcp.uri.as_deref(),
-                                    },
-                                )
-                                .and_then(|()| {
-                                    coarse_recorded = true;
-                                    tool_response.map_or(Ok(()), |response| {
-                                        // No reply observer took this call's response, so
-                                        // how it ended is not known.
-                                        self.policy
-                                            .record_tool_response(response, McpReply::Indeterminate)
-                                    })
-                                }),
-                        ),
+                    Some((mcp, mcp_request_id)) if !matches!(delivery, Delivery::Failed) => {
+                        let coarse = self.policy.record(
+                            &self.governed,
+                            &self.principal,
+                            mcp_request_id,
+                            &Outcome::Mcp {
+                                server: &mcp.server,
+                                method: &mcp.method,
+                                tool: mcp.tool.as_deref(),
+                                prompt: mcp.prompt.as_deref(),
+                                uri: mcp.uri.as_deref(),
+                            },
+                        );
+                        // A kept coarse event appends later, and the tool's leg queues behind it.
+                        coarse_recorded =
+                            matches!(coarse, Ok(()) | Err(PolicyError::OutcomeKept(_)));
+                        let tool = match tool_response {
+                            // No reply observer took this call's response, so how it ended is
+                            // not known.
+                            Some(response) if coarse_recorded => self
+                                .policy
+                                .record_tool_response(response, McpReply::Indeterminate),
+                            _ => Ok(()),
+                        };
+                        http.and(coarse).and(tool)
+                    }
                     _ => http,
                 }
             }

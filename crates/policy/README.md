@@ -66,6 +66,9 @@ An allowed decision returns `Some(RequestId)`. Retain that token until the effec
 A refusal before submission, or an unconfirmed append, returns no token.
 `RequestId::as_str()` exposes the identifier stored in the event; callers cannot construct tokens.
 A token remains valid across reload in the same engine. A separately opened engine rejects it.
+`record` returns `PolicyError::OutcomeKept` when the history refuses the outcome for now, for
+example after the clock steps back. The outcome is kept and recorded before the next decision, so
+treat it as recorded: record a tool call's own response after it too.
 `open` validates the sources, recovers the store, and installs the current source set.
 `validate` checks source text in memory. `effective` returns the engine and source identity.
 

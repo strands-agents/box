@@ -1153,37 +1153,32 @@ fn record_response_leg(
     call: RecordedCall,
     end: CallEnd<'_>,
 ) -> io::Result<()> {
-    exchange
-        .connection
-        .policy
-        .record(
-            &exchange.connection.governed,
-            &Principal::agent(),
-            &call.request_id,
-            &Outcome::Mcp {
-                server: exchange.running.server(),
-                method: &call.method,
-                tool: call.tool.as_deref(),
-                prompt: call.prompt.as_deref(),
-                uri: call.uri.as_deref(),
-            },
-        )
-        .and_then(|()| {
-            call.tool_response.map_or(Ok(()), |response| match end {
-                CallEnd::Reply(frame) => exchange
-                    .connection
-                    .policy
-                    .record_tool_reply(response, frame),
-                CallEnd::Ended(reply) => exchange
-                    .connection
-                    .policy
-                    .record_tool_response(response, reply),
-            })
-        })
-        .map_err(|error| {
-            eprintln!("[broker] failed to record mcp:call response leg: {error}");
-            io::Error::other(format!("failed to record MCP response: {error}"))
-        })
+    let policy = &exchange.connection.policy;
+    let coarse = policy.record(
+        &exchange.connection.governed,
+        &Principal::agent(),
+        &call.request_id,
+        &Outcome::Mcp {
+            server: exchange.running.server(),
+            method: &call.method,
+            tool: call.tool.as_deref(),
+            prompt: call.prompt.as_deref(),
+            uri: call.uri.as_deref(),
+        },
+    );
+    // A kept coarse event appends later, and the tool's leg queues behind it.
+    let coarse_recorded = matches!(coarse, Ok(()) | Err(policy::PolicyError::OutcomeKept(_)));
+    let tool = match call.tool_response {
+        Some(response) if coarse_recorded => match end {
+            CallEnd::Reply(frame) => policy.record_tool_reply(response, frame),
+            CallEnd::Ended(reply) => policy.record_tool_response(response, reply),
+        },
+        _ => Ok(()),
+    };
+    coarse.and(tool).map_err(|error| {
+        eprintln!("[broker] failed to record mcp:call response leg: {error}");
+        io::Error::other(format!("failed to record MCP response: {error}"))
+    })
 }
 
 /// Capture one `tools/list` reply, and hold the final page until its schema stages.
