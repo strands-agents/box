@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::model::{EffectChanges, EffectName, OptionValue};
+use super::model::{EffectChanges, EffectName, OptionValue, command_word};
 use super::shell_grammar::{
     ActionGrammar, FieldKind, FieldSource, FieldValue, OptionTable, Parsed, ShellGrammar,
 };
@@ -29,16 +29,24 @@ impl ShellGrammar {
         }
         let mut seen = Occurrences::default();
         let mut globals_given = false;
-        while is_option_word(argv.get(index)?) {
-            index = read_option(&self.globals, argv, index, &mut seen)?;
-            globals_given = true;
+        while argv.get(index).is_some_and(|word| is_option_word(word)) {
+            let mut read = seen.clone();
+            match read_option(&self.globals, argv, index, &mut read) {
+                Some(next) => {
+                    index = next;
+                    seen = read;
+                    globals_given = true;
+                }
+                None if self.bare => break,
+                None => return None,
+            }
         }
-        let (action, index, mut seen) = self.match_words(argv, index, seen)?;
+        let (action, start, mut seen) = self.match_words(argv, index, seen)?;
         if (globals_given && !action.globals) || (toolchain.is_some() && action.toolchain.is_none())
         {
             return None;
         }
-        let operands = action.read_after_words(argv, index, &mut seen)?;
+        let operands = action.read_after_words(argv, start, start == index, &mut seen)?;
         Some(action.outcome(&seen, &operands, toolchain))
     }
 
@@ -74,6 +82,7 @@ impl ActionGrammar {
         &self,
         argv: &[String],
         mut index: usize,
+        bare: bool,
         seen: &mut Occurrences,
     ) -> Option<Vec<Vec<String>>> {
         let rest = self.operands.first().is_some_and(|operand| operand.rest);
@@ -102,6 +111,14 @@ impl ActionGrammar {
                 before.push(word.clone());
                 index += 1;
             }
+        }
+        if bare
+            && before
+                .first()
+                .or(after.first())
+                .is_some_and(|word| command_word(word))
+        {
+            return None;
         }
         fill(self, before, after, separated)
     }

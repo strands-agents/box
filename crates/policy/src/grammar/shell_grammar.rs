@@ -41,6 +41,7 @@ pub(crate) const BASE_FIELDS: [&str; 6] = [
 pub(crate) struct ShellGrammar {
     pub(super) globals: OptionTable,
     pub(super) toolchain: bool,
+    pub(super) bare: bool,
     pub(super) actions: Vec<ActionGrammar>,
 }
 
@@ -139,6 +140,9 @@ impl ShellGrammar {
         Ok(Self {
             globals: OptionTable::of(global_options, |_| true),
             toolchain: compiled.iter().any(|action| action.toolchain.is_some()),
+            bare: compiled
+                .iter()
+                .any(|action| action.spellings.iter().any(Vec::is_empty)),
             actions: compiled,
         })
     }
@@ -175,7 +179,14 @@ impl ActionGrammar {
                 place: Place::ActionUsage(name.as_str().to_string()),
                 fault,
             })?;
+        let bare = usage.words.is_empty();
         if let Some(other) = spellings.insert(usage.words.clone(), name.as_str().to_string()) {
+            if bare {
+                return Err(GrammarRefusal::SecondBareAction {
+                    place,
+                    other: Box::new(Place::Action(other)),
+                });
+            }
             return Err(GrammarRefusal::SpellingTaken {
                 place,
                 spelling: usage.words.join(" "),
@@ -185,12 +196,14 @@ impl ActionGrammar {
         if !action.options.is_empty() && !usage.options {
             return Err(GrammarRefusal::OptionsNotInUsage { place });
         }
+        let every_global = OptionTable::of(global_options, |_| true);
+        let reachable = if bare { &every_global } else { anywhere };
         if usage.globals {
             for (option, shell_option) in &action.options {
                 if let Some((flag, global)) = shell_option
                     .flags
                     .iter()
-                    .find_map(|flag| anywhere.flags.get(flag).map(|slot| (flag, slot)))
+                    .find_map(|flag| reachable.flags.get(flag).map(|slot| (flag, slot)))
                 {
                     return Err(GrammarRefusal::FlagTaken {
                         place: Place::ActionOption {
@@ -281,7 +294,7 @@ impl ActionGrammar {
         let mut after = OptionTable::of(&action.options, |_| true);
         let mut between = OptionTable::default();
         if usage.globals {
-            after.flags.extend(anywhere.flags.clone());
+            after.flags.extend(reachable.flags.clone());
             between = anywhere.clone();
         }
         let mut action_spellings = vec![usage.words];

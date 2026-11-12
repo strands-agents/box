@@ -1,0 +1,14 @@
+# expect: `<grammar>.shell.deploy.options.deploy_token`: flag "--token" is also a flag of `<grammar>.global.options.token`
+# A bare action reads every global option among its own options, so no flag can be in both.
+
+name    = "vercel"
+program = "vercel"
+format  = 1
+version = 1
+
+[global]
+options.token = { flag = ["--token"], value = "required" }
+
+[shell.deploy]
+usage = "vercel [global options] [options] [<path>]"
+options.deploy_token = { flag = ["--token"], value = "required" }
