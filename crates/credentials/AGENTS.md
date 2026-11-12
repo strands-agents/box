@@ -215,7 +215,13 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   tool rewrites `~/.aws/credentials`. The `RefreshCache` is keyed by profile (`Option<String>`), so a
   bare route and a named profile never evict each other; it serves an expiring credential within its
   buffer and re-resolves a non-expiring one (`expiry == None`) on every call (per-request resolve, the
-  decided rotation behaviour), so a rotated file or environment credential is picked up.
+  decided rotation behaviour), so a rotated file or environment credential is picked up. Cache
+  validity is judged on the clock read *after* the resolve, not before it: a resolve can take real
+  time (a `credential_process` helper, an STS round trip), so a failed refresh serves the cached
+  credential only when it is still valid *now*, and a freshly resolved credential that is already
+  expired does not displace a still-valid cached one.
+  `cache_does_not_serve_a_cached_credential_that_expired_during_a_failed_refresh` and
+  `cache_keeps_a_valid_credential_over_an_expired_fresh_resolve` pin both.
 - **The region is resolved from the environment then a profile, never instance metadata**, and
   pinned on the provider so the rebuild never runs the SDK region chain (which would reach IMDS on a
   host with no configured region). The bare form resolves the region once from env then the *default*

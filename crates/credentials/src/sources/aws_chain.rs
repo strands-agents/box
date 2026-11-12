@@ -68,21 +68,33 @@ where
     /// a failed refresh serve still-valid cached, else return the hard error. Each `profile` key has
     /// its own slot.
     fn provide(&mut self, profile: Option<&str>) -> Result<AwsSessionCredentials> {
-        let now = (self.now)();
         let key: ProfileKey = profile.map(str::to_string);
         if let Some((credentials, expiry)) = self.cached.get(&key)
-            && !should_refresh(now, *expiry)
+            && !should_refresh((self.now)(), *expiry)
         {
             return Ok((**credentials).clone());
         }
         match (self.resolve)(profile) {
-            Ok((credentials, expiry)) => {
+            // A resolve can take real time (a `credential_process` helper, an STS round trip), so
+            // read the clock again rather than reusing the pre-resolve instant. A freshly resolved
+            // credential that is already expired must not displace a still-valid cached one.
+            Ok((credentials, expiry)) if still_valid((self.now)(), expiry) => {
                 self.cached
                     .insert(key, (Zeroizing::new(credentials.clone()), expiry));
                 Ok(credentials)
             }
+            Ok((credentials, _expired)) => match self.cached.get(&key) {
+                Some((cached, expiry)) if still_valid((self.now)(), *expiry) => {
+                    Ok((**cached).clone())
+                }
+                // No valid cache to prefer: serve the resolved credential and let the upstream
+                // reject it, rather than inventing a failure from a successful resolve.
+                _ => Ok(credentials),
+            },
+            // On a failed refresh, serve the cached credential only if it is still valid *now* — one
+            // that expired while the refresh ran is no longer a safe fallback.
             Err(error) => match self.cached.get(&key) {
-                Some((credentials, expiry)) if still_valid(now, *expiry) => {
+                Some((credentials, expiry)) if still_valid((self.now)(), *expiry) => {
                     Ok((**credentials).clone())
                 }
                 _ => Err(error),
@@ -568,6 +580,73 @@ mod tests {
         assert!(
             !error.is_soft(),
             "an expired cache with a failed refresh is hard"
+        );
+    }
+
+    /// A refresh that fails *after* the cached credential expired during the resolve is a hard
+    /// error, not a stale serve. The validity of the fallback is judged on the clock read after the
+    /// resolve, not before it, so a resolve that runs past the expiry cannot revive the old value.
+    #[test]
+    fn cache_does_not_serve_a_cached_credential_that_expired_during_a_failed_refresh() {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let calls = Cell::new(0u32);
+        let clock = Cell::new(base);
+        // The first resolve expires three seconds out; the second advances the clock four seconds
+        // (the resolve "took" that long) and then fails.
+        let mut cache = RefreshCache::new(
+            |_profile| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    Ok((creds("AKIA1"), Some(base + Duration::from_secs(3))))
+                } else {
+                    clock.set(clock.get() + Duration::from_secs(4));
+                    Err(CredentialError::KeystoreAccess(
+                        "refresh failed".to_string(),
+                    ))
+                }
+            },
+            || clock.get(),
+        );
+
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
+        // The cached credential is still valid now (base), so the refresh is attempted; it fails
+        // after moving the clock past the expiry, so the fallback must refuse rather than serve it.
+        let error = cache.provide(None).unwrap_err();
+        assert!(
+            !error.is_soft(),
+            "a credential that expired during the failed refresh is not a valid fallback: {error:?}"
+        );
+    }
+
+    /// A freshly resolved credential that is already expired does not displace a still-valid cached
+    /// one: the cache keeps serving the valid value rather than caching the expired resolve.
+    #[test]
+    fn cache_keeps_a_valid_credential_over_an_expired_fresh_resolve() {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let calls = Cell::new(0u32);
+        let clock = Cell::new(base);
+        let mut cache = RefreshCache::new(
+            |_profile| {
+                calls.set(calls.get() + 1);
+                if calls.get() == 1 {
+                    // Valid for a long time, so it stays a valid fallback.
+                    Ok((creds("AKIA1"), Some(base + Duration::from_secs(3600))))
+                } else {
+                    // A fresh resolve that is already expired.
+                    Ok((creds("STALE"), Some(base - Duration::from_secs(1))))
+                }
+            },
+            || clock.get(),
+        );
+
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
+        // Inside the buffer, so a refresh is attempted; it returns an already-expired credential,
+        // which must not replace the still-valid cached one.
+        clock.set(base + Duration::from_secs(3600) - Duration::from_secs(60));
+        assert_eq!(
+            cache.provide(None).unwrap().access_key_id,
+            "AKIA1",
+            "an expired fresh resolve does not displace the valid cached credential"
         );
     }
 
