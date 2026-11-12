@@ -15,7 +15,7 @@ operators inspecting egress decisions.
 
 ## Public Interface
 
-The crate root is the complete public API — 35 names, 30 unconditional and 5
+The crate root is the complete public API — 36 names, 31 unconditional and 5
 behind the `tls-intercept` feature:
 
 | Area | Items |
@@ -24,7 +24,7 @@ behind the `tls-intercept` feature:
 | Boundary values | `HeaderMap`, `InterceptedRequest`, `InterceptedResponse`, `Mutation`, `MutationTarget`, `Target` |
 | Credential mutators | `CapabilitySet`, `CredentialCapability` |
 | Host spelling | `is_bindable_host`, `normalize_host` |
-| Effect lifecycle | `EffectAttempt`, `EffectInterceptor`, `EffectOutcome`, `EffectPermit`, `McpFrame`, `McpListReply` |
+| Effect lifecycle | `EffectAttempt`, `EffectInterceptor`, `EffectOutcome`, `EffectPermit`, `McpFrame`, `McpListReply`, `ReplyObserver` |
 | Remote MCP | `McpTarget`, `McpTargetIdentity`, `canonicalize_mcp_frame`, `mcp_denial_response`, `refuse_duplicate_mcp_keys` |
 | Audit seam | `Emitter`, `StubEmitter` |
 | Errors | `PROXY_ORIGIN_HEADER`, `PROXY_ORIGIN_VALUE`, `ProxyError`, `Result` |
@@ -47,6 +47,15 @@ pub trait EffectInterceptor: Send + Sync {
 pub trait EffectPermit: Send {
     fn record_outcome(self: Box<Self>, outcome: EffectOutcome) -> io::Result<()>;
     fn mark_indeterminate(self: Box<Self>);
+    fn reply_observer(&mut self, request_id: Option<&str>) -> Option<Box<dyn ReplyObserver>> {
+        None
+    }
+}
+
+pub trait ReplyObserver: Send {
+    fn complete(&mut self, reply: &[u8]) -> bool { false }
+    fn finished(self: Box<Self>, reply: &[u8]);
+    fn abandoned(self: Box<Self>);
 }
 ```
 
@@ -68,6 +77,15 @@ Both `EffectPermit` methods consume `self: Box<Self>`, so one permit reaches
 exactly one terminal transition. The proxy reports `EffectOutcome::Connected`,
 `ConnectFailed`, `Replied`, `Completed`, `Failed`, `Partial`, or `Indeterminate`. A dropped
 permit becomes `mark_indeterminate`, so an early return or a panic still reports.
+
+For an MCP `tools/call`, a permit can return a `ReplyObserver` from `reply_observer`, and the
+proxy asks the server for an uncompressed reply. The proxy copies the reply as it passes to the
+workload, after credential redaction, up to the response body limit. It calls `finished` with the
+copy when the stream ends, or as soon as `complete` says the copy holds the answer, so the observer
+does not wait for a stream the server holds open. The permit's outcome still waits for that stream
+to end. It calls `abandoned` when the reply goes over the limit, the upstream fails, or the
+workload goes away. A dropped observer is abandoned too.
+
 Response delivery counts include accepted HTTP headers and framing. A source failure after a
 flushed prefix records incomplete delivery; an earlier flush does not make the response complete.
 

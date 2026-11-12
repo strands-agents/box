@@ -1833,3 +1833,116 @@ when temporal { formerly within 1h ( demo::Action::"echo"::response{ input.text:
         "the refused echo never reached origin"
     );
 }
+
+#[test]
+fn a_remote_tool_result_satisfies_a_result_precondition() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let upstream = TraceUpstream::start();
+    let box_ = Request::with_config(
+        "remote-tool-result",
+        r#"permit(principal, action == Box::Action::"net:connect", resource);
+permit(principal, action == Box::Action::"http:request", resource);
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "demo" };
+@id("guarded_after_result")
+forbid(principal, action == demo::Action::"echo", resource)
+when { context.input.text == "guarded" }
+unless temporal { formerly within 1h ( demo::Action::"echo"::response{ output.reply: "result" } ) };"#,
+        &format!(
+            "[mcp.demo]\ntype = \"http\"\ndestinations = [\"{}\"]\n",
+            upstream.authority
+        ),
+    )
+    .expect();
+    let frame = |id: &str, method: &str, text: Option<&str>| {
+        let params = match text {
+            Some(text) => json!({"name": "echo", "arguments": {"text": text}}),
+            None => json!({}),
+        };
+        json!({
+            "url": format!("http://{}/mcp", upstream.authority),
+            "headers": {},
+            "body": {"jsonrpc": "2.0", "id": id, "method": method, "params": params}
+        })
+    };
+    let statuses: Vec<u64> = trace_probe(
+        &box_,
+        &json!([
+            frame("list", "tools/list", None),
+            frame("early", "tools/call", Some("guarded")),
+            frame("first", "tools/call", Some("first")),
+            frame("after", "tools/call", Some("guarded")),
+        ]),
+    )
+    .iter()
+    .map(|reply| reply["status"].as_u64().expect("a status"))
+    .collect();
+    assert_eq!(
+        statuses,
+        [200, 403, 200, 200],
+        "the guarded call is refused until an earlier call's reply was a result"
+    );
+}
+
+/// Over http the gateway reads the `tools/call` reply, so a precondition on the
+/// tool's declared output (`output.structured.verified`) is met only by a verification that
+/// answered true — from a plain JSON reply or a streamed SSE reply.
+#[test]
+fn a_remote_precondition_on_structured_output_needs_the_answer_it_names() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let upstream = TraceUpstream::start();
+    let box_ = Request::with_config(
+        "remote-tool-output",
+        r#"permit(principal, action == Box::Action::"net:connect", resource);
+permit(principal, action == Box::Action::"http:request", resource);
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "demo" };
+@id("verified_first")
+forbid(principal, action == demo::Action::"echo", resource)
+unless temporal { formerly within 1h ( demo::Action::"verify"::response{
+  output.reply: "result", output.structured.verified: true } ) };"#,
+        &format!(
+            "[mcp.demo]\ntype = \"http\"\ndestinations = [\"{}\"]\n",
+            upstream.authority
+        ),
+    )
+    .expect();
+    let frame = |id: &str, method: &str, tool: &str, text: Option<&str>| {
+        let params = match text {
+            Some(text) => json!({"name": tool, "arguments": {"text": text}}),
+            None => json!({}),
+        };
+        json!({
+            "url": format!("http://{}/mcp", upstream.authority),
+            "headers": {},
+            "body": {"jsonrpc": "2.0", "id": id, "method": method, "params": params}
+        })
+    };
+    let statuses: Vec<u64> = trace_probe(
+        &box_,
+        &json!([
+            frame("list", "tools/list", "", None),
+            frame("v1", "tools/call", "verify", Some("no")),
+            frame("e1", "tools/call", "echo", Some("a")),
+            frame("v2", "tools/call", "verify", Some("sse-yes")),
+            frame("e2", "tools/call", "echo", Some("b")),
+        ]),
+    )
+    .iter()
+    .map(|reply| reply["status"].as_u64().expect("a status"))
+    .collect();
+    assert_eq!(
+        statuses,
+        [200, 200, 403, 200, 200],
+        "only a verification that answered verified=true admits the echo"
+    );
+    assert_eq!(
+        upstream.finish().len(),
+        4,
+        "the refused echo never reached origin"
+    );
+}

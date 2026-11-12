@@ -631,6 +631,61 @@ fn an_error_reply_does_not_satisfy_a_result_precondition() {
     }));
 }
 
+/// A stdio reply's `structuredContent` is recorded as `output.structured` on the
+/// tool's own `::response`, so a precondition can require what the tool answered.
+#[test]
+fn a_precondition_on_structured_output_needs_the_answer_it_names() {
+    let (runtime, local) = local_runtime();
+    runtime.block_on(local.run_until(async {
+        let fixture = fixture(&format!(
+            r#"{PERMIT_ALL_MCP}
+            forbid (principal, action == issues_mcp::Action::"Search", resource)
+            when {{ context.input has value && context.input.value == "continue" }}
+            unless temporal {{ formerly within 3600s (issues_mcp::Action::"Search"::response{{output.reply: "result", output.structured.verified: true}}) }};"#
+        ));
+        let log = tempfile::NamedTempFile::new().expect("frame log");
+        let mut command = modern_server(log.path());
+        command[2] = command[2].replace(
+            SEARCH_TOOLS,
+            r#"[{"name":"Search","inputSchema":{"type":"object","properties":{"value":{"type":"string"}}},"outputSchema":{"type":"object","properties":{"verified":{"type":"boolean"}},"required":["verified"]}}]"#,
+        );
+        command[2] = command[2].replace(
+            "case \"$frame\" in",
+            r#"case "$frame" in
+  *'"method":"tools/call"'*'"value":"no"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"resultType":"complete","content":[],"structuredContent":{"verified":false}}}\n' "$id"; continue ;;
+  *'"method":"tools/call"'*'"value":"yes"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"resultType":"complete","content":[],"structuredContent":{"verified":true,"extra":"x"}}}\n' "$id"; continue ;;"#,
+        );
+        let (mut program, mut output) = exchange(command, &fixture).await;
+        send(&program, modern_request(1, "tools/list", json!({}))).await;
+        let listed = next_output(&mut output).await;
+        assert!(listed["result"]["tools"][0]["outputSchema"].is_object(), "{listed}");
+        let search = |id: u64, value: &str| {
+            modern_request(
+                id,
+                "tools/call",
+                json!({"name": "Search", "arguments": {"value": value}}),
+            )
+        };
+        send(&program, search(2, "no")).await;
+        assert_eq!(next_output(&mut output).await["id"], 2);
+        send(&program, search(3, "continue")).await;
+        let refused = next_output(&mut output).await;
+        assert_eq!(
+            refused["error"]["code"], -32001,
+            "an answer of verified=false does not satisfy it: {refused}"
+        );
+        send(&program, search(4, "yes")).await;
+        assert_eq!(next_output(&mut output).await["id"], 4);
+        send(&program, search(5, "continue")).await;
+        let allowed = next_output(&mut output).await;
+        assert!(
+            allowed.get("error").is_none(),
+            "an answer of verified=true satisfies it: {allowed}"
+        );
+        program.stop_and_wait().await.expect("stop the exchange");
+    }));
+}
+
 #[test]
 fn modern_cancellation_releases_active_capacity() {
     let (runtime, local) = local_runtime();

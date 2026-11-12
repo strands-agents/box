@@ -303,6 +303,7 @@ impl DogwoodEngine {
         &self,
         response: crate::PendingToolResponse,
         reply: crate::McpReply,
+        structured: Option<&serde_json::Value>,
     ) -> Result<(), PolicyError> {
         let crate::PendingToolResponse {
             request_id,
@@ -310,11 +311,22 @@ impl DogwoodEngine {
             input,
         } = response;
         self.verify_request_id(&request_id)?;
+        let mut output = vec![(attr::REPLY, Value::String(reply.eid().to_string()))];
+        // Only a result carries the tool's declared output; an error result's content is not it.
+        if reply == crate::McpReply::Result
+            && let Some(structured) = structured
+            && let Some(projected) = identity
+                .cedar_uid()
+                .ok()
+                .and_then(|action| self.tool_inputs.project_output(&action, structured))
+        {
+            output.push((attr::STRUCTURED, json_value(&projected)));
+        }
         self.submit(|_| {
             with_request_id(
                 with_output_fields(
                     with_input(identity.event_builder(KIND_RESPONSE), input),
-                    vec![(attr::REPLY, Value::String(reply.eid().to_string()))],
+                    output.clone(),
                 ),
                 &request_id,
             )

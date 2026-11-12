@@ -9,6 +9,7 @@ use http_body_util::{BodyExt, Full, combinators::UnsyncBoxBody};
 use hyper::body::{Body, Bytes, Frame, SizeHint};
 
 use crate::client::http::UpstreamBody;
+use crate::effect::ReplyObserver;
 
 type Stream = UnsyncBoxBody<Bytes, io::Error>;
 
@@ -35,6 +36,105 @@ impl ResponseBody {
             .boxed_unsync();
         }
         Self::Streaming(body)
+    }
+
+    /// Hand a copy of every byte that reaches the workload, up to `limit`, to `observer`.
+    pub(crate) fn observed(self, observer: Box<dyn ReplyObserver>, limit: usize) -> Self {
+        let source = match self {
+            Self::Captured(body) => body.map_err(|never| match never {}).boxed_unsync(),
+            Self::Streaming(body) => body,
+        };
+        Self::Streaming(
+            ObservedBody {
+                source,
+                copy: Vec::new(),
+                limit,
+                observer: Some(observer),
+            }
+            .boxed_unsync(),
+        )
+    }
+}
+
+/// Copies a reply as it streams, and reports it when the stream ends or is dropped.
+struct ObservedBody {
+    source: Stream,
+    copy: Vec<u8>,
+    limit: usize,
+    observer: Option<Box<dyn ReplyObserver>>,
+}
+
+impl Body for ObservedBody {
+    type Data = Bytes;
+    type Error = io::Error;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<io::Result<Frame<Bytes>>>> {
+        let this = &mut *self;
+        let polled = Pin::new(&mut this.source).poll_frame(cx);
+        match &polled {
+            Poll::Ready(Some(Ok(frame))) => {
+                if let Some(data) = frame.data_ref()
+                    && this.observer.is_some()
+                {
+                    if this.copy.len() + data.len() > this.limit {
+                        this.abandon();
+                    } else {
+                        this.copy.extend_from_slice(data);
+                    }
+                }
+                // A server may hold the stream open after its answer, so finish as soon as the
+                // observer has it rather than waiting for an end that may never come. A server
+                // writing a sized body stops polling once the last byte is out, so the reply also
+                // finishes when the source says it has ended, not only on a final `None`.
+                let copy = &this.copy;
+                if this
+                    .observer
+                    .as_mut()
+                    .is_some_and(|observer| observer.complete(copy))
+                    || this.source.is_end_stream()
+                {
+                    this.finish();
+                }
+            }
+            Poll::Ready(None) => this.finish(),
+            Poll::Ready(Some(Err(_))) => this.abandon(),
+            Poll::Pending => {}
+        }
+        polled
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.source.is_end_stream()
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        self.source.size_hint()
+    }
+}
+
+impl ObservedBody {
+    /// Hand the copy to the observer and free it.
+    fn finish(&mut self) {
+        if let Some(observer) = self.observer.take() {
+            observer.finished(&std::mem::take(&mut self.copy));
+        }
+    }
+
+    /// Tell the observer the reply did not finish, and free the copy.
+    fn abandon(&mut self) {
+        self.copy = Vec::new();
+        if let Some(observer) = self.observer.take() {
+            observer.abandoned();
+        }
+    }
+}
+
+impl Drop for ObservedBody {
+    fn drop(&mut self) {
+        self.abandon();
     }
 }
 

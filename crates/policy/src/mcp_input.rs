@@ -16,6 +16,7 @@ const EXTENSION_TYPES: [&str; 4] = ["datetime", "decimal", "duration", "ipaddr"]
 #[derive(Debug, Default)]
 pub(crate) struct ToolInputs {
     source: Option<String>,
+    declares_union: bool,
     tool_actions: Vec<EntityUid>,
     resolved: OnceLock<Result<ResolvedInputs, String>>,
 }
@@ -27,9 +28,14 @@ impl ToolInputs {
         tool_actions: impl IntoIterator<Item = &'a EntityUid>,
     ) -> Self {
         let declares_union = source.contains(UNION_MEMBER_PREFIX);
+        // A tool output is projected through the same resolved types, so hold the source when any
+        // tool action declares `output.structured` too.
+        let declares_output = source.contains(STRUCTURED_OUTPUT);
+        let keep = declares_union || declares_output;
         Self {
-            source: declares_union.then(|| source.to_string()),
-            tool_actions: if declares_union {
+            source: keep.then(|| source.to_string()),
+            declares_union,
+            tool_actions: if keep {
                 tool_actions.into_iter().cloned().collect()
             } else {
                 Vec::new()
@@ -45,22 +51,50 @@ impl ToolInputs {
         action: &EntityUid,
         arguments: &Value,
     ) -> Result<Option<Value>, PolicyError> {
+        if !self.declares_union {
+            return Ok(None);
+        }
+        let Some(resolved) = self.resolved()? else {
+            return Ok(None);
+        };
+        resolved.conform(action, arguments)
+    }
+
+    /// A tool's `structuredContent` reduced to the fields its `outputSchema` declares, with union
+    /// members placed like inputs, or `None` when the tool declares no structured output, the value
+    /// is over [`MAX_STRUCTURED_OUTPUT_BYTES`], or it does not conform to the declared type.
+    pub(crate) fn project_output(&self, action: &EntityUid, structured: &Value) -> Option<Value> {
+        let resolved = self.resolved().ok()??;
+        let ty = resolved.outputs.get(action)?;
+        if structured.to_string().len() > MAX_STRUCTURED_OUTPUT_BYTES {
+            return None;
+        }
+        resolved.project(structured, ty)
+    }
+
+    fn resolved(&self) -> Result<Option<&ResolvedInputs>, PolicyError> {
         let Some(source) = &self.source else {
             return Ok(None);
         };
-        let resolved = self
-            .resolved
+        self.resolved
             .get_or_init(|| ResolvedInputs::from_schema(source, &self.tool_actions))
             .as_ref()
-            .map_err(|error| PolicyError::Schema(error.clone()))?;
-        resolved.conform(action, arguments)
+            .map(Some)
+            .map_err(|error| PolicyError::Schema(error.clone()))
     }
 }
+
+/// The schema attribute a tool action's context declares its structured output under.
+const STRUCTURED_OUTPUT: &str = "structured";
+
+/// The most serialized `structuredContent` Box records on a tool's `::response`.
+pub(crate) const MAX_STRUCTURED_OUTPUT_BYTES: usize = 16 * 1024;
 
 /// The resolved input types of the tool actions whose input declares a union.
 #[derive(Debug)]
 struct ResolvedInputs {
     inputs: HashMap<EntityUid, Value>,
+    outputs: HashMap<EntityUid, Value>,
     common_types: HashMap<String, Value>,
 }
 
@@ -86,8 +120,21 @@ impl ResolvedInputs {
         }
         let mut resolved = Self {
             inputs: HashMap::new(),
+            outputs: HashMap::new(),
             common_types,
         };
+        resolved.outputs = tool_actions
+            .iter()
+            .filter_map(|action| {
+                let (namespace, tool) = crate::schema::mcp_tool_action(action)?;
+                let output = schema
+                    .get(&namespace)?
+                    .get("actions")?
+                    .get(&tool)?
+                    .pointer("/appliesTo/context/attributes/output/attributes/structured")?;
+                Some((action.clone(), output.clone()))
+            })
+            .collect();
         resolved.inputs = tool_actions
             .iter()
             .filter_map(|action| {
@@ -220,6 +267,46 @@ impl ResolvedInputs {
                     .map(Value::Object)
             }
             _ => None,
+        }
+    }
+
+    /// `value` as `ty` with every undeclared record field dropped, or `None` when a declared field
+    /// is missing or a value does not have its declared type.
+    fn project(&self, value: &Value, ty: &Value) -> Option<Value> {
+        let ty = self.resolve(ty);
+        if let Some(members) = union_members(ty) {
+            return self.union_value(value, members);
+        }
+        match (ty.get("type").and_then(Value::as_str)?, value) {
+            ("Record", Value::Object(fields)) => {
+                let empty = Map::new();
+                let attributes = ty
+                    .get("attributes")
+                    .and_then(Value::as_object)
+                    .unwrap_or(&empty);
+                let mut projected = Map::new();
+                for (name, attribute) in attributes {
+                    let required =
+                        attribute.get("required").and_then(Value::as_bool) != Some(false);
+                    match fields.get(name) {
+                        Some(Value::Null) | None if required => return None,
+                        Some(Value::Null) | None => {}
+                        Some(field) => {
+                            projected.insert(name.clone(), self.project(field, attribute)?);
+                        }
+                    }
+                }
+                Some(Value::Object(projected))
+            }
+            ("Set", Value::Array(items)) => {
+                let element = ty.get("element")?;
+                items
+                    .iter()
+                    .map(|item| self.project(item, element))
+                    .collect::<Option<Vec<_>>>()
+                    .map(Value::Array)
+            }
+            _ => self.member_value(value, ty),
         }
     }
 

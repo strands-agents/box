@@ -35,7 +35,7 @@ the six names in the last row.
 | `ApprovedPath`, `PathResolver`, `PathRefusal` | The resolved path a `Request::Fs` demands, the only public minter of one, and why a mint fails. |
 | `Decision`, `DenyReason`, `RuleId` | Authorization verdict and determining rule. |
 | `Outcome`, `Delivery`, `FsResult` | One completed effect, submitted as history. |
-| `PendingToolResponse`, `McpReply` | The per-tool `::response` an allowed `tools/call` owes, from `refine_tool_call` to `record_tool_response`, and how the call ended. |
+| `PendingToolResponse`, `McpReply` | The per-tool `::response` an allowed `tools/call` owes, from `refine_tool_call` to `record_tool_response` (or `record_tool_reply`, which reads the reply frame and its `structuredContent`), and how the call ended. |
 | `EffectivePolicy`, `ENGINE_ID` | Active engine and source identity. |
 | `PolicyError` | Startup and history-recording errors. |
 | `PolicyCheck`, `Finding`, `RuleRef`, `Location` | What `check` finds in a policy: each finding's message, rules, source location, and help. |

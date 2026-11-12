@@ -247,6 +247,14 @@ async fn run_l7_legs(
         },
         None => None,
     };
+    // A tool call's reply is read into policy history, so ask for it uncompressed; otherwise the
+    // workload could hide its own reply from history by asking for a compressed one.
+    if mcp_target
+        .as_ref()
+        .is_some_and(|(_, target)| target.method() == "tools/call")
+    {
+        req.headers.set("Accept-Encoding", "identity");
+    }
 
     // The serialized request carries the credential the request leg just attached, so the buffer is
     // wiped on drop. This is the last copy on the byte path before the transport takes it (which is
@@ -327,7 +335,7 @@ async fn run_l7_legs(
             }
         }),
     };
-    let request_permit = match claim_effect(state, &request_attempt) {
+    let mut request_permit = match claim_effect(state, &request_attempt) {
         Ok(permit) => permit,
         Err(error) => {
             let mcp_request = state.mcp_server_for(&connect.host).map(|_| &req.body[..]);
@@ -346,6 +354,16 @@ async fn run_l7_legs(
         &allow_reason,
         correlation.clone(),
     );
+    // A tool call's reply goes to the request permit's observer once it has reached the workload.
+    let reply_observer = mcp_target
+        .as_ref()
+        .filter(|(_, target)| target.method() == "tools/call")
+        .and_then(|_| {
+            let request_id = serde_json::from_slice::<serde_json::Value>(&req.body)
+                .ok()
+                .and_then(|request| request.get("id").map(ToString::to_string));
+            request_permit.reply_observer(request_id.as_deref())
+        });
     // The request permit follows the upstream exchange through its terminal response.
     let cursor = mcp_target
         .as_ref()
@@ -403,6 +421,9 @@ async fn run_l7_legs(
     }
     let mut progress = Some(body.progress());
     let mut body = ResponseBody::streaming(body, controls.redactors);
+    if let Some(observer) = reply_observer {
+        body = body.observed(observer, state.config.response_limits.max_body_bytes);
+    }
 
     // Lazy remote MCP discovery: on the workload's `tools/list` to a configured MCP server, stage
     // the response catalog into the authority so the server's per-tool actions reach runtime
