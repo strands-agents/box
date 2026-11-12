@@ -25,7 +25,7 @@
 //! every other one for its full deadline (27.73s measured), because all Shells shared a thread.
 //!
 //! **MCP is deliberately not exercised.** Nothing in the box vends an MCP server today — the
-//! vendored Shell's client half needs `[[mcp]]` the box never writes, and its server half needs
+//! Shell's client half needs `[[mcp]]` the box never writes, and its server half needs
 //! `--mcp` the box never passes. What *is* asserted (`a_program_holds_a_session_across_many_calls`)
 //! is the capability MCP would need: one program, many calls, state surviving between them. If
 //! that holds, the abstraction can carry a session-oriented protocol later.
@@ -592,7 +592,7 @@ zsh -c 'cat {box_home}/shared/w1.txt {box_home}/shared/w2.txt {box_home}/shared/
 
 /// A program the box never saw behaves like a Unix program.
 ///
-/// Every other test here exercises builtins the vendored Shell implements. This one runs a script
+/// Every other test here exercises builtins Strands Shell implements. This one runs a script
 /// the *test* creates on the host, inside the box's mount, so the box has no knowledge of it — the
 /// closest reachable thing to "a fake command". It checks the parts an agent harness depends on: a
 /// shebang, an argument, stdout and stderr kept separate, and the tool's own exit code.

@@ -1665,7 +1665,7 @@ when { context.input.command == "printf AUTHORITY_CONTROL" };
 /// filesystem and environment read is serviced by the VFS instead of `std::env`/`std::fs`.
 ///
 /// Lua is probed deliberately and is the sharpest case. `mlua` is a **non-optional**
-/// dependency of the vendored Shell with `features = ["lua54", "async", "vendored"]`, so
+/// dependency of Strands Shell with `features = ["lua54", "async", "vendored"]`, so
 /// a Lua 5.4 **C** interpreter is compiled into whichever process hosts the Shell, and
 /// `builtins/mod.rs` exposes it as a reachable `lua` builtin that runs
 /// workload-supplied source. Measured 2026-08-07: `os.getenv` answers `nil`,

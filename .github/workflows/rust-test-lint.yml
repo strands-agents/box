@@ -230,37 +230,7 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: cargo fmt
-        # Owned-crate fmt is the gate. The vendored `strands-shell` and its
-        # `strands-shell-macros` sibling are skipped for the same reason as the
-        # clippy step below: upstream is the source of truth for that tree, and
-        # a fix belongs upstream.
-        run: |
-          cargo fmt --check \
-            -p strands-box \
-            -p strands-box-containment \
-            -p strands-box-credentials \
-            -p strands-box-egress-gateway \
-            -p strands-box-policy \
-            -p strands-box-shell \
-            -p strands-box-telemetry
+        run: cargo fmt --all --check
 
       - name: cargo clippy
-        # Follow the root AGENTS.md verification rules for owned and vendored warnings.
-        # `cargo clippy -p` / `--exclude` cannot skip a
-        # workspace crate that is a build dependency of an owned crate, so the
-        # lints are allowed at the driver level. The set was measured against
-        # the current pinned upstream — add a lint when it fires on a fresh
-        # sync, drop one when its `UPSTREAM.md` records an upstream fix. Every
-        # entry stays fatal on owned code because `#[warn(<lint>)]` at the
-        # owned crate root overrides `-A`, which is why this driver-level allow
-        # does not weaken the owned gate.
-        run: |
-          cargo clippy --workspace --all-targets --all-features -- \
-            -D warnings \
-            -A clippy::too_many_arguments \
-            -A clippy::only_used_in_recursion \
-            -A clippy::await_holding_refcell_ref \
-            -A clippy::explicit_auto_deref \
-            -A clippy::chunks_exact_to_as_chunks \
-            -A dead_code \
-            -A non_snake_case
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings

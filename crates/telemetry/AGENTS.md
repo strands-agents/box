@@ -27,7 +27,7 @@ Decisions live in the
 | the HTTP server for the agent's port | `axum`, behind a one-permit decode bound |
 | the OTLP mapping | `opentelemetry-proto`'s `group_logs_by_resource_and_scope` |
 | encoding a payload | this crate, one mapping for both file and endpoint |
-| the HTTP client | `reqwest`, at the same version the vendored shell declares |
+| the HTTP client | `reqwest`, at the same version Strands Shell declares |
 | the receiver | this crate; the OpenTelemetry SDK emits and does not receive |
 | the file format | this crate; `opentelemetry-stdout` writes a debug format, not the Collector's |
 
@@ -36,7 +36,7 @@ that filters by signal and wraps `BatchLogProcessor`, which carries the queue, t
 bounded flush. Do not rebuild any of those here.
 
 **`opentelemetry-otlp` is NOT adopted, and that is the one line to keep.** It requires
-`reqwest 0.13.1` and the vendored `shell` declares `0.12`, so taking it puts two TLS stacks in the
+`reqwest 0.13.1` and Strands Shell declares `0.12`, so taking it puts two TLS stacks in the
 process that holds the CA private key. The SDK itself needs no new package: `opentelemetry`,
 `opentelemetry_sdk` and `tokio-stream` were already in `Cargo.lock`.
 

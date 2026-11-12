@@ -546,13 +546,13 @@ Three facts about the hosted Shell are worth knowing.
   CA key and the resolved secrets. What holds is *mediation*, not a process boundary: the
   Shell asks policy before every operation, and the deny-only floors above protect the
   run process's own state whatever a rule permits.
-- **Every `Shell` is `!Send`** (one `Rc` field in the vendored crate), and a command future
+- **Every `Shell` is `!Send`** (one `Rc` field in Strands Shell), and a command future
   is not `Send` either. So each connection gets its **own thread** and its own
   current-thread runtime. `ShellSpec` is `Send`, which is what crosses that boundary; the
   Shell is built on the thread that serves it. A non-yielding command — the embedded Lua
   interpreter — pins its own thread and nothing else. The broker serves 64 connections at
   once and reaps one before it accepts the next.
-- **The vendored Shell embeds a Lua 5.4 C interpreter**, non-optionally. Its `io.popen` and
+- **Strands Shell embeds a Lua 5.4 C interpreter**, non-optionally. Its `io.popen` and
   `os.execute` bypassed `shell:exec` admission until 2026-08-08
   ([one admission point](../../docs/design/decisions.md#one-admission-point-after-resolution)). That is
   **closed**: admission moved into the one function every command-text route funnels

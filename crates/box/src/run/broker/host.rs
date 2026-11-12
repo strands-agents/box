@@ -2370,7 +2370,7 @@ done"#;
         runtime.block_on(local.run_until(async {
             let (_directory, socket) = serving_socket(spec);
 
-            // The vendored Shell's own `timeout` stops this and reports non-zero; the point
+            // The Shell's own `timeout` stops this and reports non-zero; the point
             // is that the client is answered at all rather than left waiting.
             let response = tokio::time::timeout(
                 SHORT_COMMAND_TIMEOUT + Duration::from_secs(10),

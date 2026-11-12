@@ -44,8 +44,8 @@ monty = "1.0.0"
 monty-types = "1.0.0"
 # The routed HTTP client for a Monty `fetch(url)`
 # (docs/design/decisions.md#a-monty-script-reaches-the-network-through-one-fetch-function). It
-# dials this box's egress gateway and trusts only its intercept CA, mirroring the vendored Shell's
-# proxy path. Same pin and features as `shell`, already in the lockfile via that crate, so
+# dials this box's egress gateway and trusts only its intercept CA, mirroring the Shell's
+# proxy path. Same pin and features as `strands-shell`, already in the lockfile via that crate, so
 # this adds no version the lockfile does not already hold.
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 clap = { version = "4", features = ["derive"] }
@@ -59,7 +59,7 @@ sha2 = "0.11"
 # base64. Already in the lockfile via `credentials` and `egress-gateway`, so this adds
 # nothing the lockfile does not already hold.
 base64 = { version = "0.23", default-features = false, features = ["std"] }
-# `Bytes` is the payload type the vendored Shell's channel descriptors carry
+# `Bytes` is the payload type the Shell's channel descriptors carry
 # (`FdKind::ChannelWriter { tx: mpsc::Sender<Bytes> }`), so a Program's streaming ends
 # speak it directly rather than copying through a second representation.
 bytes = "1"

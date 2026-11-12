@@ -1,9 +1,9 @@
 use strands_det_harness::det_case;
 
-// One scenario: the vendored parser and in-process built-ins run through the mediated seam and
+// One scenario: the Shell's parser and in-process built-ins run through the mediated seam and
 // return correct output. A representative each of a pipeline (sort/uniq/wc), a stream/field
 // tool (jq), and path arithmetic (basename) is enough here — the exhaustive coreutils
-// parity (every tr/sed/cut/grep/dirname spelling) is `crates/shell`'s job (`shell_integration.rs`),
+// parity (every tr/sed/cut/grep/dirname spelling) is upstream Strands Shell's job,
 // not the containment suite's. What this case adds is that they reach the hosted Shell (entered)
 // and compute correctly against an independent oracle.
 // Measured green on macOS 2026-09-22 (cargo test --test shell): `PIPE=3`, `JQ=V`, `BASE=c.txt`.

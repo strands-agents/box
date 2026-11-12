@@ -1,4 +1,4 @@
-# The Strands Box workspace and its vendored dependencies.
+# The Strands Box workspace.
 
 [workspace]
 resolver = "2"

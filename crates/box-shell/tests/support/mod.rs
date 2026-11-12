@@ -1,5 +1,4 @@
-//! A Shell over `box_shell`'s kernel, built the way these suites were written against the
-//! vendored Shell's builder.
+//! A Shell over `box_shell`'s kernel, with a builder for the suites.
 
 #![allow(dead_code)]
 

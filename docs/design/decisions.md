@@ -1686,28 +1686,29 @@ account lookup and preference-service denials against successful outside control
 
 ## Interpreters
 
-Box runs two interpreters for the workload: the vendored Strands Shell, and Monty, which is the
-Python interpreter.
+Box runs two interpreters for the workload: Strands Shell, and Monty, which is the Python
+interpreter.
 
 <a id="interpreters-are-vendored-not-the-host-shell"></a>
-### Box runs a vendored interpreter, never the host OS's shell
+### Box runs a pinned Strands Shell, never the host OS's shell
 
-Box runs every shell command the agent issues through Strands Shell, an open-source interpreter that
-Box vendors at a pinned revision. It never runs `bash` or `zsh` from the surrounding OS for the
-agent's sandbox. A tool's or MCP server's sandbox runs programs of the surrounding OS, a shell
-included, inside that sandbox. A harness runs a real shell for its command tool, so Box gives it
-something with the same exit codes, the same stdout and stderr shape, and the same argument
-conventions. Each filesystem operation is a Rust method call that Box intercepts before acting. The
-Shell does not make that operation as a syscall on its own authority. Box vendors the interpreter
-instead of writing one, because upstream already holds the parser, the pipelines, the control flow,
-and more than fifty builtins. Box must keep every builtin on the interception path. Updating the
-vendored interpreter requires a merge, and Box must fix upstream defects it encounters.
+Box runs every shell command the agent issues through Strands Shell, an open-source interpreter. Box
+builds against a pinned upstream revision, `5740518`, and holds no copy of its source. It never runs
+`bash` or `zsh` from the surrounding OS for the agent's sandbox. A tool's or MCP server's sandbox
+runs programs of the surrounding OS, a shell included, inside that sandbox. A harness runs a real
+shell for its command tool, so Box gives it something with the same exit codes, the same stdout and
+stderr shape, and the same argument conventions. Each filesystem operation is a call on Box's own
+kernel, which Box intercepts before acting. The Shell does not make that operation as a syscall on
+its own authority. Box uses the interpreter instead of writing one, because upstream already holds
+the parser, the pipelines, the control flow, and more than fifty builtins. Box must keep every
+builtin on the interception path. A Shell defect that Box needs fixed is fixed upstream, and Box
+moves its pin to the revision that holds the fix.
 
 <a id="the-interpreters-run-in-the-trusted-process"></a>
 ### Both interpreters run in the box's trusted process, and that is stated residual risk
 
 The Shell and Monty run in the `run` process. That process is outside the sandbox boundary, and it
-holds the policy engine, the interception CA key, and the resolved secrets. The vendored Shell
+holds the policy engine, the interception CA key, and the resolved secrets. Strands Shell
 always embeds a Lua 5.4 C interpreter, which the workload reaches through the `lua` builtin. The
 Shell is therefore not a small interpreter with no `unsafe` code. Monty has weaker memory-safety
 guarantees. The pinned version contains 46 `unsafe` blocks, including a custom raw-pointer heap. We
