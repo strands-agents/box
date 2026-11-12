@@ -76,8 +76,8 @@ impl StdinQueue {
     }
 }
 
-/// Move the queue's bytes into the Shell's stdin channel as one frame at a time, and close the
-/// channel once the queue is closed and empty.
+/// Move the queue's bytes into the Shell's stdin channel in frames of at most [`MAX_CHUNK_BYTES`],
+/// and close the channel once the queue is closed and empty.
 async fn pump_stdin(queue: Arc<StdinQueue>, sender: mpsc::Sender<Bytes>) {
     loop {
         tokio::select! {
@@ -90,7 +90,8 @@ async fn pump_stdin(queue: Arc<StdinQueue>, sender: mpsc::Sender<Bytes>) {
         loop {
             let (frame, closed) = {
                 let mut state = queue.lock();
-                (state.pending.split().freeze(), state.closed)
+                let size = state.pending.len().min(MAX_CHUNK_BYTES);
+                (state.pending.split_to(size).freeze(), state.closed)
             };
             if !frame.is_empty() {
                 if sender.send(frame).await.is_err() {
@@ -318,6 +319,34 @@ impl ProgramControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A large backlog reaches the Shell in frames no larger than one chunk.
+    #[test]
+    fn a_large_backlog_leaves_in_chunk_sized_frames() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let queue = Arc::new(StdinQueue::default());
+            let size = MAX_CHUNK_BYTES * 5 + 7;
+            {
+                let mut state = queue.lock();
+                state.pending.extend_from_slice(&vec![b'x'; size]);
+                state.closed = true;
+            }
+            let (sender, mut receiver) = mpsc::channel(INPUT_CHANNEL_DEPTH);
+            queue.ready.notify_one();
+            let pump = tokio::spawn(pump_stdin(Arc::clone(&queue), sender));
+            let mut bytes = 0;
+            while let Some(frame) = receiver.recv().await {
+                assert!(frame.len() <= MAX_CHUNK_BYTES, "{} bytes", frame.len());
+                bytes += frame.len();
+            }
+            pump.await.unwrap();
+            assert_eq!(bytes, size);
+        });
+    }
 
     /// Many small frames that nothing reads are held as one buffer of their bytes, not as frames.
     #[test]
