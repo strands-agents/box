@@ -691,7 +691,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
 - **A Shell alias streams finite stdin after the Call.** It classifies fd 0 with `fstat`: a pipe,
   a regular file, or a socket is read; a terminal, another device, or a closed fd is not. A thread
   reads it and `pump_input` sends `Input` frames, coalesced for `INPUT_COALESCE_WAIT` and up to
-  `MAX_CHUNK_BYTES`, then `InputEof`. The broker's stdin channel holds one slot per byte of `max_stdin`, so a writer's
+  `MAX_CHUNK_BYTES`, then `InputEof`. The broker merges a Program's unread stdin into one buffer, at most `max_stdin` bytes, behind a two-frame channel, so a writer's
   small writes do not trip flow control while the command is not reading. The alias reads stdin
   whether or not the command reads it, so it consumes bytes a POSIX shell would leave, such as the
   rest of an inherited file. The alias returns on `Exit`, so a writer that keeps the pipe open holds nothing:

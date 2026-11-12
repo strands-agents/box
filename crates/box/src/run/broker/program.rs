@@ -10,11 +10,15 @@ use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use strands_shell::os::{STDERR, STDIN, STDOUT};
 use tokio::sync::mpsc;
 
 use super::protocol::{MAX_CALL_OUTPUT_BYTES, MAX_CHUNK_BYTES, Stream};
+
+/// The stdin channel depth, in frames. Bytes wait in the Program's [`StdinQueue`], which merges
+/// them, so a frame count never limits a writer.
+const INPUT_CHANNEL_DEPTH: usize = 2;
 
 /// The output channel depth, per stream. Bounded, so a Program that outruns its client stalls
 /// itself rather than growing a queue inside the daemon.
@@ -29,7 +33,7 @@ pub(crate) struct Program {
 /// The half a concurrent task holds while a Call is in flight.
 #[derive(Clone)]
 pub(crate) struct ProgramControl {
-    stdin_tx: Arc<std::sync::Mutex<Option<mpsc::Sender<Bytes>>>>,
+    stdin: Arc<StdinQueue>,
     /// Set when a `Signal` arrives, and read by the Call loop, which stops by **dropping** the Call
     /// future.
     cancel: Arc<AtomicBool>,
@@ -48,8 +52,59 @@ pub(crate) struct ProgramControl {
 pub(crate) enum InputRefusal {
     /// Nothing reads the stdin any more, or it was already closed; the bytes are dropped.
     Closed,
-    /// The stdin queue is full.
-    Full,
+}
+
+/// A Program's accepted stdin that its Shell has not taken yet, merged into one buffer.
+#[derive(Default)]
+struct StdinQueue {
+    state: std::sync::Mutex<StdinState>,
+    ready: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct StdinState {
+    pending: BytesMut,
+    closed: bool,
+    reader_gone: bool,
+}
+
+impl StdinQueue {
+    fn lock(&self) -> std::sync::MutexGuard<'_, StdinState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+/// Move the queue's bytes into the Shell's stdin channel as one frame at a time, and close the
+/// channel once the queue is closed and empty.
+async fn pump_stdin(queue: Arc<StdinQueue>, sender: mpsc::Sender<Bytes>) {
+    loop {
+        tokio::select! {
+            () = queue.ready.notified() => {}
+            () = sender.closed() => {
+                queue.lock().reader_gone = true;
+                return;
+            }
+        }
+        loop {
+            let (frame, closed) = {
+                let mut state = queue.lock();
+                (state.pending.split().freeze(), state.closed)
+            };
+            if !frame.is_empty() {
+                if sender.send(frame).await.is_err() {
+                    queue.lock().reader_gone = true;
+                    return;
+                }
+                continue;
+            }
+            if closed {
+                return;
+            }
+            break;
+        }
+    }
 }
 
 /// One piece of a Program's output, tagged with the stream that produced it.
@@ -78,10 +133,9 @@ impl Program {
         mut shell: strands_shell::Shell,
         input_limit: usize,
     ) -> io::Result<(Self, ProgramOutput, ProgramControl)> {
-        // One slot per byte of the limit: every queued frame holds at least one byte, so the queue
-        // fills only past the limit, which `try_feed` never queues.
-        let depth = input_limit.clamp(1, tokio::sync::Semaphore::MAX_PERMITS);
-        let (stdin_tx, stdin_rx) = mpsc::channel(depth);
+        let (stdin_tx, stdin_rx) = mpsc::channel(INPUT_CHANNEL_DEPTH);
+        let stdin = Arc::new(StdinQueue::default());
+        tokio::spawn(pump_stdin(Arc::clone(&stdin), stdin_tx));
         let (stdout_tx, stdout_rx) = mpsc::channel(OUTPUT_CHANNEL_DEPTH);
         let (stderr_tx, stderr_rx) = mpsc::channel(OUTPUT_CHANNEL_DEPTH);
 
@@ -103,7 +157,7 @@ impl Program {
                 emitted: 0,
             },
             ProgramControl {
-                stdin_tx: Arc::new(std::sync::Mutex::new(Some(stdin_tx))),
+                stdin,
                 cancel,
                 input_received: Arc::new(AtomicUsize::new(0)),
                 input_limit,
@@ -191,21 +245,13 @@ pub(crate) enum DrainOutcome {
 
 impl ProgramControl {
     /// Feed bytes to the Program's standard input, up to its stdin limit; past the limit the rest
-    /// is discarded. A refusal stops the running Call and refuses every later one. Returns the
-    /// bytes accepted.
+    /// is discarded. Returns the bytes accepted. The bytes the Shell has not taken stay in one
+    /// buffer, so a Program holds at most its limit however many frames brought it.
     pub(crate) fn feed_stdin(&self, data: &[u8]) -> Result<usize, InputRefusal> {
-        let accepted = self.try_feed(data);
-        if matches!(accepted, Err(InputRefusal::Full)) {
-            self.refuse_input();
-        }
-        accepted
-    }
-
-    fn try_feed(&self, data: &[u8]) -> Result<usize, InputRefusal> {
-        let Ok(guard) = self.stdin_tx.lock() else {
+        let mut state = self.stdin.lock();
+        if state.closed || state.reader_gone {
             return Err(InputRefusal::Closed);
-        };
-        let sender = guard.as_ref().ok_or(InputRefusal::Closed)?;
+        }
         if self.input_refused.load(Ordering::SeqCst) || self.input_capped.load(Ordering::SeqCst) {
             return Ok(0);
         }
@@ -213,14 +259,10 @@ impl ProgramControl {
         let room = self.input_limit.saturating_sub(received);
         let taken = &data[..data.len().min(room)];
         if !taken.is_empty() {
-            sender
-                .try_send(Bytes::copy_from_slice(taken))
-                .map_err(|error| match error {
-                    mpsc::error::TrySendError::Full(_) => InputRefusal::Full,
-                    mpsc::error::TrySendError::Closed(_) => InputRefusal::Closed,
-                })?;
+            state.pending.extend_from_slice(taken);
             self.input_received
                 .store(received + taken.len(), Ordering::SeqCst);
+            self.stdin.ready.notify_one();
         }
         if taken.len() < data.len() {
             self.input_capped.store(true, Ordering::SeqCst);
@@ -246,7 +288,7 @@ impl ProgramControl {
     /// Refuse all further input, stop the running Call, and refuse every later Call. Later input is
     /// dropped and stdin stays open, so the running Call never reads more of its input or its end.
     pub(crate) fn refuse_input(&self) {
-        let _sender = self.stdin_tx.lock();
+        let _state = self.stdin.lock();
         self.input_refused.store(true, Ordering::SeqCst);
         self.signal();
     }
@@ -258,9 +300,8 @@ impl ProgramControl {
 
     /// Close the Program's standard input, so a reader sees end-of-file.
     pub(crate) fn close_stdin(&self) {
-        if let Ok(mut guard) = self.stdin_tx.lock() {
-            guard.take();
-        }
+        self.stdin.lock().closed = true;
+        self.stdin.ready.notify_one();
     }
 
     /// Ask the running Call to end, leaving the Program open.
@@ -271,5 +312,48 @@ impl ProgramControl {
     /// Whether a `Signal` has asked the running Call to stop.
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancel.load(Ordering::SeqCst)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Many small frames that nothing reads are held as one buffer of their bytes, not as frames.
+    #[test]
+    fn small_frames_merge_while_the_shell_does_not_read() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let queue = Arc::new(StdinQueue::default());
+            let (sender, mut receiver) = mpsc::channel(INPUT_CHANNEL_DEPTH);
+            let pump = tokio::spawn(pump_stdin(Arc::clone(&queue), sender));
+            for _ in 0..600 {
+                {
+                    let mut state = queue.lock();
+                    state.pending.extend_from_slice(b"x");
+                }
+                queue.ready.notify_one();
+                tokio::task::yield_now().await;
+            }
+            let held = queue.lock().pending.len();
+            assert!(
+                held >= 600 - (INPUT_CHANNEL_DEPTH + 1),
+                "the bytes wait in the buffer: {held}"
+            );
+            queue.lock().closed = true;
+            queue.ready.notify_one();
+            let mut frames = 0;
+            let mut bytes = 0;
+            while let Some(frame) = receiver.recv().await {
+                frames += 1;
+                bytes += frame.len();
+            }
+            pump.await.unwrap();
+            assert_eq!(bytes, 600);
+            assert!(frames <= INPUT_CHANNEL_DEPTH + 2, "{frames} frames");
+        });
     }
 }

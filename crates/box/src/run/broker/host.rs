@@ -1164,15 +1164,6 @@ async fn serve_transport(
                         Ok(accepted) => input_accepted += accepted,
                         // Nothing reads this stdin any more, so the bytes have no reader.
                         Err(InputRefusal::Closed) => {}
-                        Err(InputRefusal::Full) => {
-                            deny(
-                                &frames,
-                                id,
-                                DeniedKind::FlowControl,
-                                "the program is not reading input fast enough",
-                            )
-                            .await?;
-                        }
                     }
                 }
                 Body::InputEof => {
