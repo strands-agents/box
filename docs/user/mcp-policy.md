@@ -217,8 +217,9 @@ Key it on `::response`, and require `output.reply` to be `result`:
 - Every call that ends records `::response`, so a budget counts it. `output.reply` says how it
   ended: `result`, `tool_error` when the result sets `isError`, `protocol_error` for a JSON-RPC
   error, `cancelled`, or `indeterminate` when its connection ended or Box didn't read the reply.
-  A reply that only accepts a background task (an MCP task) is also `indeterminate`, because Box
-  doesn't record the task's own result. Requiring `result` means this rule isn't met by a call
+  A reply that only accepts a background task (an MCP task), or that asks the client for input
+  first (`resultType: "input_required"`), is also `indeterminate`, because it isn't the call's
+  answer and Box doesn't record the later one. Requiring `result` means this rule isn't met by a call
   that failed, that the agent started and abandoned, or that is still running as a task.
 - A `result` shows that the server answered without an error, not that the verification passed.
   `output.structured` is what the tool answered. It holds the reply's `structuredContent`, keeping
@@ -228,12 +229,14 @@ Key it on `::response`, and require `output.reply` to be `result`:
   The server's other tools keep their outputs, unless the problem only appears when the outputs
   are read together; then no tool on that server declares one.
 - Box records no `output.structured` when the tool declares no `outputSchema`, when the reply isn't
-  a `result`, when the value is over 16 KiB, or when it doesn't match the declared types. A JSON
+  a `result`, when a required field doesn't match its declared type, or when the kept fields are
+  over 16 KiB. An optional field that doesn't match is left out, like an undeclared one. A JSON
   `number` field is read as a whole number, so a fractional value such as `22.5` doesn't match. A
-  rule that reads it then isn't met.
+  rule that reads a field Box left out isn't met; a rule on another field still is.
 - Box reads the reply on stdio and http servers alike, including a streamed (Server-Sent Events)
   http reply. Box asks an http server for an uncompressed reply. An http reply over the gateway's
-  16 MiB response limit, compressed anyway, or cut off records `indeterminate`. A server that
+  16 MiB response limit, compressed anyway, or cut off records `indeterminate`, and so does a reply
+  Box can't copy because many tool calls' replies are being read at once. A server that
   always compresses its replies therefore never meets a precondition, so every call that needs one
   is refused.
 - The agent can make its own reply unreadable, for example by asking for an output over 16 MiB.

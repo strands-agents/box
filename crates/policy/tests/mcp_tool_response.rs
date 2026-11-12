@@ -498,6 +498,16 @@ fn a_reply_frame_classifies_as_result_tool_error_or_protocol_error() {
                 "lastUpdatedAt": "2026-11-11T00:00:00Z", "ttl": 60000}}}),
             McpReply::Indeterminate,
         ),
+        (
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"resultType": "input_required",
+                "inputRequests": {"r": {"method": "elicitation/create", "params": {}}},
+                "requestState": "s"}}),
+            McpReply::Indeterminate,
+        ),
+        (
+            json!({"jsonrpc": "2.0", "id": 1, "result": {"resultType": "complete", "content": []}}),
+            McpReply::Result,
+        ),
     ] {
         assert_eq!(McpReply::of_reply(&frame), reply, "{frame}");
     }

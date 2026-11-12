@@ -140,13 +140,15 @@ the server replied, and so is a cancelled or uncertain one, so a budget over res
 escaped by making calls fail. The tool's response carries `output.reply`, a string that says how the
 call ended, so a precondition can require `result` and exclude a failed or abandoned call. For a tool
 that declares an `outputSchema`, a `result` also carries `output.structured`: the reply's
-`structuredContent` reduced to the declared fields, converted like `input`, capped at 16 KiB, and
-absent when it doesn't conform. The stdio broker reads each reply frame. The gateway copies a
+`structuredContent` reduced to the declared fields, converted like `input`, capped at 16 KiB after
+the reduction, and absent when a required field doesn't conform; an optional field that doesn't
+conform is left out. The stdio broker reads each reply frame. The gateway copies a
 `tools/call` reply as it streams to the workload, after credential redaction, so history sees the
 bytes the workload saw, and hands the copy to the request's `ReplyObserver` once the reply matching
 the request's JSON-RPC id has passed. A reply over the gateway's response body limit (16 MiB),
 compressed, cut off, or without that reply records `indeterminate`, and so does a reply that only
-accepts an MCP task, because Box doesn't record the task's own result. The load refuses a rule that
+accepts an MCP task or has a `resultType` other than `complete`, such as `input_required`, because
+it isn't the call's answer and Box doesn't record the later one. The load refuses a rule that
 reads an MCP `::error`, or an `output.reply` value Box never records. `output.reply` is a string
 rather than a Box enum type because each MCP server's generated schema is stored in the history, and
 the previous release validates it against its own Box schema at startup; a new Box type there would

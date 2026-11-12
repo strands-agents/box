@@ -653,8 +653,21 @@ fn matching_reply(data: &str, request_id: Option<&str>) -> Option<serde_json::Va
 
 /// Whether a reply's JSON-RPC `id` names the request's, so `1` and `1.0` are one id.
 fn same_id(reply: &serde_json::Value, request: &serde_json::Value) -> bool {
+    if let (Some(reply), Some(request)) = (reply.as_i64(), request.as_i64()) {
+        return reply == request;
+    }
+    if let (Some(reply), Some(request)) = (reply.as_u64(), request.as_u64()) {
+        return reply == request;
+    }
+    // An integer outside f64's exact range only matches itself, which the integer arms covered.
+    let exact = |id: &serde_json::Value| {
+        id.is_f64()
+            || id
+                .as_f64()
+                .is_some_and(|n| n.abs() <= 9_007_199_254_740_992.0)
+    };
     match (reply.as_f64(), request.as_f64()) {
-        (Some(reply), Some(request)) => reply == request,
+        (Some(left), Some(right)) if exact(reply) && exact(request) => left == right,
         _ => reply == request,
     }
 }
@@ -1749,6 +1762,11 @@ mod tests {
                 b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n",
                 false,
             ),
+            // A server asking the client for input has not answered the call.
+            (
+                br#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"input_required","inputRequests":{"r":{"method":"elicitation/create","params":{}}},"requestState":"s"}}"#,
+                false,
+            ),
             // A server that compresses its reply anyway: the bytes are not JSON.
             (b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03not json", false),
         ] {
@@ -1941,6 +1959,20 @@ mod tests {
         permit.record_outcome(REPLIED).expect("the outcome records");
         observer.finished(br#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#);
         assert!(the_guarded_add_is_admitted(&fixture));
+    }
+
+    #[test]
+    fn distinct_large_integer_ids_stay_distinct() {
+        let id = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+        assert!(!same_id(&id("9007199254740993"), &id("9007199254740992")));
+        assert!(!same_id(
+            &id("18446744073709551615"),
+            &id("18446744073709551614")
+        ));
+        assert!(same_id(&id("9007199254740993"), &id("9007199254740993")));
+        assert!(same_id(&id("1"), &id("1.0")));
+        assert!(same_id(&id("\"a\""), &id("\"a\"")));
+        assert!(!same_id(&id("1"), &id("\"1\"")));
     }
 
     #[test]

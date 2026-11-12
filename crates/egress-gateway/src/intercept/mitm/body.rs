@@ -2,6 +2,8 @@
 
 use std::io;
 use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, ready};
 
 use credentials::ResponseRedactor;
@@ -38,8 +40,14 @@ impl ResponseBody {
         Self::Streaming(body)
     }
 
-    /// Hand a copy of every byte that reaches the workload, up to `limit`, to `observer`.
-    pub(crate) fn observed(self, observer: Box<dyn ReplyObserver>, limit: usize) -> Self {
+    /// Hand a copy of every byte that reaches the workload, up to `limit` and within `budget`, to
+    /// `observer`.
+    pub(crate) fn observed(
+        self,
+        observer: Box<dyn ReplyObserver>,
+        limit: usize,
+        budget: Arc<CopyBudget>,
+    ) -> Self {
         let source = match self {
             Self::Captured(body) => body.map_err(|never| match never {}).boxed_unsync(),
             Self::Streaming(body) => body,
@@ -49,10 +57,39 @@ impl ResponseBody {
                 source,
                 copy: Vec::new(),
                 limit,
+                budget,
                 observer: Some(observer),
             }
             .boxed_unsync(),
         )
+    }
+}
+
+/// The bytes all reply copies may hold at once, so concurrent tool calls cannot make the trusted
+/// process hold one full-size copy per connection.
+pub(crate) struct CopyBudget {
+    available: AtomicUsize,
+}
+
+impl CopyBudget {
+    /// Four replies at `limit` each.
+    pub(crate) fn for_limit(limit: usize) -> Self {
+        Self {
+            available: AtomicUsize::new(limit.saturating_mul(4)),
+        }
+    }
+
+    /// Take `bytes` from the budget, or nothing when it has fewer.
+    fn reserve(&self, bytes: usize) -> bool {
+        self.available
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |available| {
+                available.checked_sub(bytes)
+            })
+            .is_ok()
+    }
+
+    fn release(&self, bytes: usize) {
+        self.available.fetch_add(bytes, Ordering::AcqRel);
     }
 }
 
@@ -61,6 +98,7 @@ struct ObservedBody {
     source: Stream,
     copy: Vec<u8>,
     limit: usize,
+    budget: Arc<CopyBudget>,
     observer: Option<Box<dyn ReplyObserver>>,
 }
 
@@ -79,7 +117,8 @@ impl Body for ObservedBody {
                 if let Some(data) = frame.data_ref()
                     && this.observer.is_some()
                 {
-                    if this.copy.len() + data.len() > this.limit {
+                    if this.copy.len() + data.len() > this.limit || !this.budget.reserve(data.len())
+                    {
                         this.abandon();
                     } else {
                         this.copy.extend_from_slice(data);
@@ -118,14 +157,16 @@ impl Body for ObservedBody {
 impl ObservedBody {
     /// Hand the copy to the observer and free it.
     fn finish(&mut self) {
+        let copy = std::mem::take(&mut self.copy);
         if let Some(observer) = self.observer.take() {
-            observer.finished(&std::mem::take(&mut self.copy));
+            observer.finished(&copy);
         }
+        self.budget.release(copy.len());
     }
 
     /// Tell the observer the reply did not finish, and free the copy.
     fn abandon(&mut self) {
-        self.copy = Vec::new();
+        self.budget.release(std::mem::take(&mut self.copy).len());
         if let Some(observer) = self.observer.take() {
             observer.abandoned();
         }
@@ -239,5 +280,66 @@ impl Body for RedactedBody {
         } else {
             SizeHint::default()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use http_body_util::BodyExt;
+
+    use super::{CopyBudget, ResponseBody};
+    use crate::effect::ReplyObserver;
+
+    /// Records how an observer ended: the copy it was given, or `None` when abandoned.
+    struct Ending(Arc<Mutex<Vec<Option<usize>>>>);
+
+    impl ReplyObserver for Ending {
+        fn finished(self: Box<Self>, reply: &[u8]) {
+            self.0.lock().unwrap().push(Some(reply.len()));
+        }
+
+        fn abandoned(self: Box<Self>) {
+            self.0.lock().unwrap().push(None);
+        }
+    }
+
+    fn drain(reply: &[u8], budget: &Arc<CopyBudget>) -> Vec<Option<usize>> {
+        let ended = Arc::new(Mutex::new(Vec::new()));
+        let body = ResponseBody::from(reply.to_vec()).observed(
+            Box::new(Ending(Arc::clone(&ended))),
+            1024,
+            Arc::clone(budget),
+        );
+        let ResponseBody::Streaming(body) = body else {
+            panic!("an observed body streams");
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let delivered = runtime.block_on(body.collect()).unwrap().to_bytes();
+        assert_eq!(
+            delivered.as_ref(),
+            reply,
+            "the workload gets the whole reply"
+        );
+        std::mem::take(&mut *ended.lock().unwrap())
+    }
+
+    #[test]
+    fn a_reply_over_the_shared_copy_budget_is_abandoned_and_still_delivered() {
+        let budget = Arc::new(CopyBudget::for_limit(10));
+        assert!(
+            budget.reserve(35),
+            "another observer holds most of the budget"
+        );
+        assert_eq!(drain(&[b'x'; 8], &budget), [None]);
+        budget.release(35);
+        assert_eq!(drain(&[b'x'; 8], &budget), [Some(8)]);
+        assert!(
+            budget.reserve(40),
+            "a finished or abandoned copy returns its bytes"
+        );
     }
 }

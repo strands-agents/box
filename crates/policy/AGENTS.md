@@ -119,9 +119,11 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   observer share the pending response, and whichever ends second records it, so the tool's leg
   records exactly when `mcp:call::response` does. An http reply over the 16 MiB response limit,
   compressed, cut off, or without the reply matching the request's JSON-RPC id records
-  `indeterminate`, and so does a reply that only accepts an MCP task: its result arrives through
-  `tasks/result`, which Box does not record. `output.structured` is recorded only for a `result`
-  that conforms to the tool's `outputSchema`, within 16 KiB. `generate_mcp_schema` drops an
+  `indeterminate`, and so does a reply that only accepts an MCP task or has a `resultType` other
+  than `complete` (such as `input_required`): neither is the call's answer, and Box records no
+  later one. The stdio broker never records an `input_required` frame as an answer either. `output.structured` is recorded only for a `result`
+  whose required fields conform to the tool's `outputSchema`; an optional field that does not
+  conform is dropped, and the 16 KiB cap applies to what is kept. `generate_mcp_schema` drops an
   `outputSchema` that does not generate, so one tool's unreadable output never costs the server its
   catalog (`mcp_schema::tests::an_output_schema_cedar_cannot_read_drops_only_that_tools_output`).
   The workload can still make its own http reply unreadable (an output over 16 MiB, or a server

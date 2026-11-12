@@ -60,16 +60,15 @@ impl ToolInputs {
         resolved.conform(action, arguments)
     }
 
-    /// A tool's `structuredContent` reduced to the fields its `outputSchema` declares, with union
-    /// members placed like inputs, or `None` when the tool declares no structured output, the value
-    /// is over [`MAX_STRUCTURED_OUTPUT_BYTES`], or it does not conform to the declared type.
+    /// A tool's `structuredContent` reduced to the fields its `outputSchema` declares, or `None`
+    /// when the tool declares none, a required field does not conform, or the reduced value is over
+    /// [`MAX_STRUCTURED_OUTPUT_BYTES`].
     pub(crate) fn project_output(&self, action: &EntityUid, structured: &Value) -> Option<Value> {
         let resolved = self.resolved().ok()??;
         let ty = resolved.outputs.get(action)?;
-        if structured.to_string().len() > MAX_STRUCTURED_OUTPUT_BYTES {
-            return None;
-        }
-        resolved.project(structured, ty)
+        resolved
+            .project(structured, ty)
+            .filter(|projected| projected.to_string().len() <= MAX_STRUCTURED_OUTPUT_BYTES)
     }
 
     fn resolved(&self) -> Result<Option<&ResolvedInputs>, PolicyError> {
@@ -87,7 +86,7 @@ impl ToolInputs {
 /// The schema attribute a tool action's context declares its structured output under.
 const STRUCTURED_OUTPUT: &str = "structured";
 
-/// The most serialized `structuredContent` Box records on a tool's `::response`.
+/// The most serialized `output.structured` Box records on a tool's `::response`.
 pub(crate) const MAX_STRUCTURED_OUTPUT_BYTES: usize = 16 * 1024;
 
 /// The resolved input types of the tool actions whose input declares a union.
@@ -288,12 +287,18 @@ impl ResolvedInputs {
                 for (name, attribute) in attributes {
                     let required =
                         attribute.get("required").and_then(Value::as_bool) != Some(false);
-                    match fields.get(name) {
-                        Some(Value::Null) | None if required => return None,
-                        Some(Value::Null) | None => {}
-                        Some(field) => {
-                            projected.insert(name.clone(), self.project(field, attribute)?);
-                        }
+                    // An optional field that does not conform is dropped like an undeclared
+                    // one, so it costs a rule on another field nothing.
+                    match fields.get(name).filter(|field| !field.is_null()) {
+                        None if required => return None,
+                        None => {}
+                        Some(field) => match self.project(field, attribute) {
+                            Some(field) => {
+                                projected.insert(name.clone(), field);
+                            }
+                            None if required => return None,
+                            None => {}
+                        },
                     }
                 }
                 Some(Value::Object(projected))

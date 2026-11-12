@@ -179,8 +179,10 @@ The default 16 MiB cap still applies to requests and these catalog responses.
 For an HTTP MCP `tools/call`, the gateway asks the server for an uncompressed reply, and copies the
 reply as it streams, after redaction, so policy history sees the bytes the workload saw. It hands the copy to the request's reply observer
 once the reply matching the request's JSON-RPC id has passed, or when the stream ends. The copy is
-capped at the same 16 MiB; a longer reply, a cut-off stream, or a compressed body is recorded as
-`indeterminate` ([how a tool call ended](./policy.md)).
+capped at the same 16 MiB, and all copies held at once share 64 MiB, so concurrent tool calls can't
+make the gateway hold a full copy for each connection. A longer reply, a reply over the shared
+budget, a cut-off stream, or a compressed body is recorded as `indeterminate`
+([how a tool call ended](./policy.md)).
 
 One absolute upstream deadline covers request transmission and response receipt, with a default of
 300 seconds. Chunks do not reset it. A later timeout or framing error closes the unfinished response,

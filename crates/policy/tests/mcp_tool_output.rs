@@ -291,6 +291,48 @@ unless temporal {
     assert!(recorded[0].contains("typeChoice"), "{}", recorded[0]);
 }
 
+#[test]
+fn a_field_that_does_not_conform_costs_a_rule_on_another_field_nothing() {
+    let user = json!({"user_name": "u"});
+    let ok = json!({"jsonrpc": "2.0", "id": 9, "result": {}});
+    for (answer, reset_allowed) in [
+        // `score` lowers to a whole number, so `0.95` is dropped and `verified` is kept.
+        (json!({"verified": true, "score": 0.95}), true),
+        // A large undeclared field is dropped before the size cap, so it doesn't count.
+        (
+            json!({"verified": true, "notes": "x".repeat(32 * 1024)}),
+            true,
+        ),
+        // A required field that does not conform still drops the whole output.
+        (json!({"verified": "yes", "score": 7}), false),
+        // So does a declared value over the cap.
+        (
+            json!({"verified": true, "method": "x".repeat(32 * 1024)}),
+            false,
+        ),
+    ] {
+        let directory = tempfile::tempdir().expect("history directory");
+        let authority = desk(
+            VERIFIED_BEFORE_RESET,
+            &directory.path().join("dogwood.redb"),
+        );
+        assert!(
+            call(
+                &authority,
+                "verify_identity",
+                user.clone(),
+                &result(answer.clone())
+            )
+            .is_allow()
+        );
+        assert_eq!(
+            call(&authority, "reset_password", user.clone(), &ok).is_allow(),
+            reset_allowed,
+            "{answer}"
+        );
+    }
+}
+
 /// Probe: a nested object, an array of objects, and a `$defs` reference in an `outputSchema`
 /// generate, stage, and a rule can read the nested field.
 #[test]

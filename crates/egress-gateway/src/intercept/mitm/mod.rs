@@ -154,6 +154,8 @@ pub(crate) struct SharedState {
     emitter: Box<dyn Emitter>,
     /// The authorization authority for every outbound effect.
     effect_interceptor: Arc<dyn EffectInterceptor>,
+    /// The bytes every reply observer's copy may hold at once.
+    pub(crate) reply_copies: Arc<body::CopyBudget>,
 }
 
 impl SharedState {
@@ -257,6 +259,9 @@ impl MitmInterceptor {
             upstream_config,
             emitter,
             effect_interceptor,
+            reply_copies: Arc::new(body::CopyBudget::for_limit(
+                config.response_limits.max_body_bytes,
+            )),
         });
 
         let stop = Arc::new(AtomicBool::new(false));

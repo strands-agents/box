@@ -84,7 +84,9 @@ workload, after credential redaction, up to the response body limit. It calls `f
 copy when the stream ends, or as soon as `complete` says the copy holds the answer, so the observer
 does not wait for a stream the server holds open. The permit's outcome still waits for that stream
 to end. It calls `abandoned` when the reply goes over the limit, the upstream fails, or the
-workload goes away. A dropped observer is abandoned too.
+workload goes away. All copies held at once share a budget of four times the limit, so concurrent
+tool calls cannot make the gateway hold a full copy per connection; a reply that would go over it
+is abandoned, and still reaches the workload whole. A dropped observer is abandoned too.
 
 Response delivery counts include accepted HTTP headers and framing. A source failure after a
 flushed prefix records incomplete delivery; an earlier flush does not make the response complete.

@@ -422,7 +422,11 @@ async fn run_l7_legs(
     let mut progress = Some(body.progress());
     let mut body = ResponseBody::streaming(body, controls.redactors);
     if let Some(observer) = reply_observer {
-        body = body.observed(observer, state.config.response_limits.max_body_bytes);
+        body = body.observed(
+            observer,
+            state.config.response_limits.max_body_bytes,
+            std::sync::Arc::clone(&state.reply_copies),
+        );
     }
 
     // Lazy remote MCP discovery: on the workload's `tools/list` to a configured MCP server, stage
