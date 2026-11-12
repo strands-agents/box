@@ -331,6 +331,18 @@ pub(crate) enum ConfigError {
     RecordIdentity { found: String },
 
     #[error(
+        "box ID {found:?} is invalid; a box ID is a prefix of 1 to 16 letters, digits, `.`, `_`, \
+         or `-` that does not start with `.` or `-`, then `-` and 16 lowercase hexadecimal digits"
+    )]
+    SuppliedIdentity { found: String },
+
+    #[error(
+        "box ID {supplied:?} does not match this box, whose ID is {stored:?}; pass {stored:?}, or \
+         select an empty `box_dir` for a new box"
+    )]
+    IdentityMismatch { stored: String, supplied: String },
+
+    #[error(
         "{path} carries `{key}`, which this build does not read; write {replacement} instead. Edit \
          the configuration, or select an empty `box_dir` to rebuild a stored record"
     )]

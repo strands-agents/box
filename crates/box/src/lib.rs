@@ -34,6 +34,8 @@ pub struct RunOptions<'a> {
     pub terminal: Option<std::fs::File>,
     /// Called after hardening and signal registration, before workload setup; an error aborts the run.
     pub on_ready: Option<Box<dyn FnOnce() -> std::io::Result<()> + 'a>>,
+    /// The box ID a new box takes; `None` generates one, and a configured box refuses any other ID.
+    pub box_id: Option<String>,
 }
 
 /// Run the existing Box command with a configuration.

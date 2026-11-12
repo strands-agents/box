@@ -17,7 +17,7 @@ state, and one selects the workload:
 |---|---|---|---|
 | Policy | authority | `policy` in the config file | Which effects this box may cause, decided per request. Scoped to this box |
 | Credentials | authority | `[egress.<name>]` in the config file | Which secret is attached once a request is permitted |
-| Identity and state | state | `name` in the config file | Which box this is, and where it keeps its persistent state |
+| Identity and state | state | `name` in the config file, and `RunOptions::box_id` for a library caller | Which box this is, and where it keeps its persistent state |
 | Workload | selection | `[agent] command` in the config file, and `run`'s trailing argv | Which process runs |
 
 The caller always passes one configuration path. `[agent] command` is the complete command the box
@@ -436,8 +436,9 @@ destination reachable.
 creates that one directory with mode `0700`, owned by the current operating-system user, when its
 parent exists, and creates no directory above it. An existing symbolic link at that path, or at any
 child the box creates, is refused rather than followed. Box validates and opens the root, then uses
-the opened directory identity for persistent and generated state. It generates an immutable `box_id`
-and creates the children. The root persists across runs, so an agent's logins, caches, and history
+the opened directory identity for persistent and generated state. It stores an immutable `box_id`,
+the one a library caller supplies through `RunOptions::box_id` or one it generates, and creates the
+children. The root persists across runs, so an agent's logins, caches, and history
 persist with it. Everything below is relative to `box_dir`:
 
 ```text
@@ -473,8 +474,10 @@ default.
 `private/` is the tree no profile placeholder names, which is what puts the record,
 the policy copy, and the containment configs out of the workload's reach.
 
-Distinct directories are distinct boxes and share no state. The generated `box_id` labels a box
-but does not locate it.
+Distinct directories are distinct boxes and share no state. The `box_id` labels a box but does not
+locate it. A generated one is `box-` and 16 lowercase hexadecimal digits. A supplied one is a prefix
+of 1 to 16 letters, digits, `.`, `_`, or `-`, then `-` and 16 lowercase hexadecimal digits. A box
+that already has an ID refuses a different supplied one.
 
 ## Workload
 
