@@ -86,7 +86,7 @@ The keys:
 | `effects` | Each effect a command can have, with a one-line description. |
 | `global.options` | Options that come before the action's words. Only an action whose `usage` has `[global options]` accepts them. |
 | `shell.<action>` | One action, such as `shell.push`. |
-| `shell.<action>.usage` | The action's command line. Each `<name>` is an operand, and `<name>...` takes more than one word. |
+| `shell.<action>.usage` | The action's command line. Each `<name>` is an operand, and `<name>...` takes more than one word. A command word, such as `push`, `payment_intents`, `emptyTrash`, or `+send`, holds ASCII letters, digits, `-`, and `_`, starts with a letter or a digit, and can have one `+` in front. It matches only that exact spelling, so `emptytrash` doesn't match `emptyTrash`. A `usage` or an alias whose first command word starts with `+` is refused when another `usage` has `[+<toolchain>]`, a selector such as cargo's `+stable`, because the parser reads that word as the selector. |
 | `shell.<action>.adds` | The effects that every spelling of the action has. |
 | `shell.<action>.options` | The options the action accepts, each with its `flag` spellings. An option with no `value` is a flag. |
 | `shell.<action>.operands` | Effects for an operand that `usage` names. `like` is a pattern: `like = "+*"` matches a refspec that starts with `+`. |

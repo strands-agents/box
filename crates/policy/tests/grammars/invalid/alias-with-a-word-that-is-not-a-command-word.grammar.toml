@@ -1,4 +1,4 @@
-# expect: `<grammar>.shell.commit.aliases`: "Commit" must be command words (lowercase ASCII letters, digits, and `-`)
+# expect: `<grammar>.shell.commit.aliases`: "c.i" must be command words (an optional `+`, then ASCII letters, digits, `-`, and `_`, not first a `-` or a `_`)
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"
@@ -27,7 +27,7 @@ operands.refspec         = { like = "+*", adds = ["force_push"], when = [{ like 
 
 [shell.commit]
 usage   = "git [global options] commit [options] [--] [<pathspec>...]"
-aliases = ["ci", "Commit"]
+aliases = ["ci", "c.i"]
 options.message   = { flag = ["-m", "--message"], value = "required", repeated = true }
 options.no_verify = { flag = ["-n", "--no-verify"], adds = ["skip_hooks"] }
 

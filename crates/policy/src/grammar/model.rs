@@ -358,14 +358,14 @@ impl EffectChanges {
     }
 }
 
-/// Whether `word` is a command word: lowercase ASCII letters, digits, and `-`, not first a `-`.
+/// Whether `word` is a command word: one optional `+`, then `[A-Za-z0-9][A-Za-z0-9_-]*`.
 pub(super) fn command_word(word: &str) -> bool {
-    let mut characters = word.chars();
+    let mut characters = word.strip_prefix('+').unwrap_or(word).chars();
     characters
         .next()
-        .is_some_and(|first| first.is_ascii_lowercase() || first.is_ascii_digit())
+        .is_some_and(|first| first.is_ascii_alphanumeric())
         && characters.all(|character| {
-            character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
         })
 }
 
@@ -453,6 +453,29 @@ mod tests {
             adds: effects(adds),
             removes: effects(removes),
             when: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_command_word_is_literal_and_may_start_with_one_plus() {
+        for word in [
+            "push",
+            "payment_intents",
+            "test_helpers",
+            "emptyTrash",
+            "batchUpdate",
+            "X",
+            "3d",
+            "+send",
+            "+Send_2-x",
+        ] {
+            assert!(command_word(word), "{word:?} is a command word");
+        }
+        for word in [
+            "", "+", "++send", "+-send", "+_send", "-send", "_send", "send+", "a.b", "a/b", "é",
+            "<send>", "+<send>",
+        ] {
+            assert!(!command_word(word), "{word:?} is not a command word");
         }
     }
 
