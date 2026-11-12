@@ -894,9 +894,10 @@ If the clock moves back more than five minutes during a run, the box denies each
 is within five minutes of the newest history timestamp. If an action finished while the clock was
 that far back, the box keeps its record and prints
 `policy: warn: an earlier outcome is not recorded yet: ...; denying` for each request until the
-record is saved. That happens once the clock is within five minutes again, and then requests are
-decided normally. If the run exits before then, that action doesn't count toward any limit after a
-restart. A time-zone change does not move this clock.
+record is saved. Once the clock is within five minutes again, the box saves it at the next request,
+or when the run shuts down, and then requests are decided normally. If the run ends while the clock
+is still more than five minutes behind, or the process is killed, that action doesn't count toward
+any limit after a restart. A time-zone change does not move this clock.
 Correct the system clock, or remove the box directory to start again, as
 [getting started](getting-started.md#clean-up) describes.
 

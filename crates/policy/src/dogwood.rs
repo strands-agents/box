@@ -99,6 +99,25 @@ impl DurableClock for FixedClock {
     }
 }
 
+/// Records every kept outcome event before the history closes.
+impl Drop for DogwoodEngine {
+    fn drop(&mut self) {
+        let mut pending = match self.pending_outcomes.get_mut() {
+            Ok(pending) => std::mem::take(pending),
+            Err(_) => {
+                eprintln!("policy: warn: pending outcome lock poisoned; kept outcomes are lost");
+                return;
+            }
+        };
+        if let Err(error) = self.submit_pending(&mut pending) {
+            eprintln!(
+                "policy: warn: {} kept outcome(s) not recorded at shutdown: {error}",
+                pending.len()
+            );
+        }
+    }
+}
+
 /// The box's own event-kind contract (`schema/events.dwschema`): the
 /// `request`/`response`/`error` convention shared with upstream `dogwood-language`
 /// and AgentCore, the default macro library, and no providers.
@@ -2905,6 +2924,48 @@ when temporal {
             decide(&reopened),
             budget_spent,
             "the recorded outcome still counts after a restart"
+        );
+    }
+
+    #[test]
+    fn a_kept_outcome_is_recorded_when_the_engine_shuts_down() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        let engine =
+            DogwoodEngine::open_with_test_clock(BUDGET, &path, 1_000_000).expect("policy loads");
+        let request_id = permitted_http_request(&engine);
+        engine.advance_clock(-400);
+        assert!(
+            engine
+                .observe_outcome(
+                    &governed(),
+                    &Principal::agent(),
+                    &request_id,
+                    &delivered(101),
+                )
+                .is_err(),
+            "an outcome 400 s behind history is refused"
+        );
+
+        engine.advance_clock(410);
+        drop(engine);
+        let reopened =
+            DogwoodEngine::open_with_test_clock(BUDGET, &path, 1_000_020).expect("history reopens");
+        assert_eq!(
+            reopened
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http()),
+                )
+                .0,
+            Decision::Deny {
+                reason: DenyReason::NoMatch,
+                rule: RuleId::default_deny(),
+                attribution: Vec::new(),
+                resource: String::new(),
+            },
+            "the outcome kept at shutdown counts after a restart with no request in between"
         );
     }
 
