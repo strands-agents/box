@@ -1387,13 +1387,14 @@ dependencies = [
 
 [[package]]
 name = "dogwood-language"
-version = "1.0.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6996ef17ca5d06cea0e53bbffb177690e8e4a7f3bbcdb5bf67ad59603f2bf079"
+checksum = "95d80fd9a1d004f830f780164e07ce96083b4480315543bed3e810b0b240a7b7"
 dependencies = [
  "cedar-policy",
  "cedar-policy-core",
  "cedar-policy-mcp-schema-generator",
+ "dogwood-syntax",
  "mcp-tools-sdk",
  "miette",
  "nonempty",
@@ -1411,9 +1412,9 @@ dependencies = [
 
 [[package]]
 name = "dogwood-local-engine"
-version = "1.0.0"
+version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "02d82f08653e0090010cfa076bcec582d3aa31e1dc3f0574e4e929c63253878b"
+checksum = "6e5c680b5832d7a5e032777d480c1d871f05de527337fd1e52b481646171ee9a"
 dependencies = [
  "dogwood-language",
  "getrandom 0.3.4",
@@ -1421,6 +1422,16 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "dogwood-syntax"
+version = "1.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2f7c029a053c7f23a15f1d887809230fccde4031fba0d01d21e07ca910b215b"
+dependencies = [
+ "pest",
+ "pest_derive",
 ]
 
 [[package]]
