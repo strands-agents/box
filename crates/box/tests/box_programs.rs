@@ -1209,7 +1209,8 @@ when temporal {{
 /// The text the hosted Shell reports when no rule permits a command.
 const NO_PERMIT_MATCHED: &str = "No permit policy matched";
 
-/// The marker write's journaled decision, and the commit's.
+/// The marker write's journaled decision, and the commit's: the box's only `printf`, whose
+/// argument a record redacts.
 fn marker_and_commit(journaled: &[Journaled]) -> (Option<usize>, Vec<usize>) {
     let marker = journaled.iter().position(|entry| {
         entry.action == "fs:write"
@@ -1220,7 +1221,9 @@ fn marker_and_commit(journaled: &[Journaled]) -> (Option<usize>, Vec<usize>) {
         .iter()
         .enumerate()
         .filter(|(_, entry)| {
-            entry.action == "shell:exec" && entry.command_args == ["printf", "COMMIT"]
+            entry.action == "shell:exec"
+                && entry.resource == "printf"
+                && entry.command_args == ["printf", "<redacted>"]
         })
         .map(|(index, _)| index)
         .collect();
@@ -1260,7 +1263,7 @@ fn two_racing_requests_under_a_response_keyed_rule_get_the_verdicts_the_journal_
         // hold both racers at the same gate and erase the stagger; one exec pays it before the race.
         let script = format!(
             r#"zsh -c true > /dev/null 2>&1
-( : > "{home}/ready-test"; {wait}; out=$(zsh -c "printf ok > {home}/tests-passed" 2>&1); echo "|test_status=$?|${{out//$'\n'/ }}" ) &
+( : > "{home}/ready-test"; {wait}; out=$(zsh -c "echo ok > {home}/tests-passed" 2>&1); echo "|test_status=$?|${{out//$'\n'/ }}" ) &
 ( : > "{home}/ready-commit"; {wait}; for (( i = 0; i < {stagger}; i++ )); do :; done; out=$(zsh -c "printf COMMIT" 2>&1); echo "|commit_status=$?|${{out//$'\n'/ }}" ) &
 {wait_test}
 {wait_commit}
@@ -1359,7 +1362,7 @@ fn a_commit_sequenced_after_the_test_response_is_permitted() {
     }
     let box_ = Request::with_policy("order-after", &response_keyed_policy()).expect();
     let output = box_.bash(
-        r#"zsh -c "printf ok > $BOX_HOME/tests-passed"; echo "|test_status=$?"
+        r#"zsh -c "echo ok > $BOX_HOME/tests-passed"; echo "|test_status=$?"
 out=$(zsh -c "printf COMMIT" 2>&1); echo "|commit_status=$?|$out""#,
     );
     let text = stdout(&output);
@@ -1392,7 +1395,7 @@ fn a_commit_sequenced_before_the_test_response_is_denied_until_it_lands() {
     let box_ = Request::with_policy("order-before", &response_keyed_policy()).expect();
     let output = box_.bash(
         r#"out=$(zsh -c "printf COMMIT" 2>&1); echo "|first_status=$?|${out//$'\n'/ }"
-zsh -c "printf ok > $BOX_HOME/tests-passed"; echo "|test_status=$?"
+zsh -c "echo ok > $BOX_HOME/tests-passed"; echo "|test_status=$?"
 out=$(zsh -c "printf COMMIT" 2>&1); echo "|second_status=$?|$out""#,
     );
     let text = stdout(&output);

@@ -8,10 +8,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
-use policy::{GovernedBox, PolicyEngine, Principal, ShellPolicyInterceptor};
-use strands_shell::{
-    EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, EffectResult, FsOperation, Shell,
+use box_shell::{
+    EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, EffectResult, FsOperation,
 };
+use policy::{GovernedBox, PolicyEngine, Principal, ShellPolicyInterceptor};
+use strands_shell::Shell;
 
 use crate::run::broker::invalid_input;
 use crate::run::broker::mcp::DiscoveryRegistry;
@@ -19,11 +20,16 @@ use crate::run::broker::protocol::MAX_CAPTURE_STREAM_BYTES;
 use crate::run::broker::reach::{Reach, Refused};
 use crate::run::contain::boundary::environment::WORKLOAD_USER;
 use crate::run::telemetry::{DecisionRecorder, EffectiveDecision, ObservationCapture};
+use box_shell::{Filesystem, ScriptOutcome, ScriptRunner, ShellKernel};
 
 /// The most command text the broker will accept into the Shell.
-const SHELL_MAX_INPUT: usize = 256 * 1024;
-const SHELL_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
-const SHELL_MAX_INODES: usize = 10_000;
+pub(super) const SHELL_MAX_INPUT: usize = 256 * 1024;
+pub(super) const SHELL_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
+pub(super) const SHELL_MAX_INODES: usize = 10_000;
+const SHELL_MAX_DEPTH: u32 = 64;
+const SHELL_MAX_FDS: usize = 128;
+const SHELL_MAX_BACKGROUND_JOBS: usize = 8;
+const SHELL_MAX_PIPELINE: usize = 16;
 
 /// How the hosted Shell reaches the network: through this box's own egress gateway.
 ///
@@ -82,12 +88,11 @@ pub(super) struct ShellSpec {
     /// Where final policy enforcement point decisions are submitted.
     pub(super) recorder: Arc<crate::run::telemetry::DecisionRecorder>,
 
-    /// The hook that runs a host binary in a contained leaf box. `None` leaves the
-    /// vendored crate's built-in spawn, which the box never wants; the box always installs it.
+    /// The hook that runs a host binary in a contained leaf box. `None` refuses every host binary.
     pub(super) host_spawner: Option<crate::run::hosted::ToolSpawner>,
 
     /// The `[tool]` file each declared bare name runs, in place of a host `PATH` lookup.
-    pub(super) host_programs: strands_shell::os::HostPrograms,
+    pub(super) host_programs: box_shell::HostPrograms,
 }
 
 impl ShellSpec {
@@ -96,42 +101,17 @@ impl ShellSpec {
         self.build_on(self.backend()?, &self.recorder)
     }
 
-    pub(super) fn backend(&self) -> io::Result<Arc<dyn strands_shell::os::Kernel>> {
-        use strands_shell::vfs_config::{BindEntry, BindMode, VfsConfig, build_vfs};
-        use strands_shell::vfs_kernel::VfsKernel;
-
-        let config = VfsConfig {
-            bind: self
-                .reach
-                .shell_binds()
-                .into_iter()
-                .map(|(source, destination)| BindEntry {
-                    mode: BindMode::Direct,
-                    source: source.to_string(),
-                    destination: destination.to_string(),
-                    readonly: false,
-                })
-                .collect(),
-            ..VfsConfig::default()
-        };
-        let mut vfs = build_vfs(&config)?;
-        vfs.max_file_size = SHELL_MAX_FILE_SIZE;
-        vfs.max_inodes = SHELL_MAX_INODES;
-        let mut backend = VfsKernel::new(vfs);
-        // `CallKernel` sends HTTP through the gateway, so the vendored client never dials.
-        backend.network_enabled = false;
-        backend.script_interpreter = Some(self.script_interpreter());
-        backend.host_spawner = self
-            .host_spawner
-            .as_ref()
-            .map(crate::run::hosted::ToolSpawner::spawn);
-        backend.host_programs = Arc::clone(&self.host_programs);
-        Ok(Arc::new(backend))
+    /// One Program's filesystem: the Shell's own, with each reachable root served from the host.
+    pub(super) fn backend(&self) -> io::Result<Arc<Filesystem>> {
+        Ok(Arc::new(Filesystem::serving(
+            shell_filesystem()?,
+            &self.reach.shell_binds(),
+        )?))
     }
 
     pub(super) fn build_on(
         &self,
-        backend: Arc<dyn strands_shell::os::Kernel>,
+        backend: Arc<Filesystem>,
         recorder: &Arc<DecisionRecorder>,
     ) -> io::Result<Shell> {
         // Two interceptors, one above the other. PolicyEngine decides first; the reachable set is a
@@ -160,42 +140,28 @@ impl ShellSpec {
                 ),
             },
         );
-        // One bind per reachable root, each writable and passed through, so **policy decides a
-        // write rather than the mount deciding first**.
-        let binds = self.reach.shell_binds();
-        let mut builder = Shell::builder();
-        for (source, destination) in &binds {
-            builder = builder.bind_direct(*source, *destination);
+        verify_direct_binds(&backend, &self.reach.shell_binds())?;
+        let correlation = recorder.request_context();
+        let mut kernel = ShellKernel::over(backend, interceptor)
+            .programs(Arc::clone(&self.host_programs))
+            .python(
+                MAX_CAPTURE_STREAM_BYTES,
+                self.script_interpreter(correlation.clone()),
+            );
+        // With no gateway the network stays off: a fail-closed refusal, never a direct dial.
+        if let Some(egress) = &self.egress {
+            super::kernel::verify_gateway_ca(egress)?;
+            kernel = kernel.network(Arc::new(super::kernel::GatewayNetwork::new(
+                egress.clone(),
+                correlation.clone(),
+            )));
         }
-        let builder = builder
-            .effect_interceptor(interceptor)
-            .max_input(SHELL_MAX_INPUT)
-            .max_output(MAX_CAPTURE_STREAM_BYTES)
-            .max_file_size(SHELL_MAX_FILE_SIZE)
-            .max_inodes(SHELL_MAX_INODES);
-        let builder = match self.command_timeout {
-            Some(timeout) => builder.timeout(timeout),
-            None => builder.disable_timeout(),
-        };
-        // Route outbound HTTP through this box's egress gateway, so a Shell `curl` meets the
-        // same `net:connect`/`http:request` policy the workload's own traffic does.
-        // With no gateway the network stays off — a fail-closed refusal, never a direct dial
-        // around the only governed route the box has.
-        let builder = match &self.egress {
-            Some(egress) => {
-                super::kernel::verify_gateway_ca(egress)?;
-                builder
-            }
-            None => builder.disable_network(),
-        };
-        let mut shell = builder
-            .kernel(Arc::new(super::kernel::CallKernel::new(
-                backend,
-                recorder.request_context(),
-                self.egress.clone(),
-            )))
-            .build()?;
-        verify_direct_binds(&shell, &binds)?;
+        if let Some(spawner) = &self.host_spawner {
+            kernel = kernel.spawner(within(correlation, spawner.spawn()));
+        }
+        let mut shell = kernel.shell();
+        apply_limits(&mut shell.proc);
+        shell.proc.deadline = deadline(self.command_timeout)?;
         shell.proc.cwd = PathBuf::from(self.reach.working_directory());
         shell.set_env("PWD", self.reach.working_directory());
         shell.set_env("HOME", self.reach.home_variable());
@@ -203,20 +169,21 @@ impl ShellSpec {
         Ok(shell)
     }
 
-    fn script_interpreter(&self) -> strands_shell::os::ScriptInterpreter {
+    fn script_interpreter(&self, correlation: telemetry::Correlation) -> ScriptRunner {
         let reach = Arc::clone(&self.reach);
         let policy = Arc::clone(&self.policy);
         let governed = self.governed.clone();
         let recorder = Arc::clone(&self.recorder);
         let egress = self.egress.clone();
-        std::sync::Arc::new(move |source: String| {
+        Arc::new(move |source: String| {
             let reach = Arc::clone(&reach);
             let policy = Arc::clone(&policy);
             let governed = governed.clone();
             let egress = egress.clone();
             let recorder = Arc::clone(&recorder);
+            let correlation = correlation.clone();
             Box::pin(async move {
-                let outcome = crate::run::broker::python::drive_monty(
+                let monty = crate::run::broker::python::drive_monty(
                     source,
                     crate::run::broker::python::PYTHON_ORIGIN.to_string(),
                     &reach,
@@ -224,42 +191,78 @@ impl ShellSpec {
                     &governed,
                     egress.as_ref(),
                     &recorder,
-                )
-                .await;
-                Ok::<_, std::io::Error>(strands_shell::os::ScriptOutcome {
+                );
+                let outcome = correlation.scope(monty).await;
+                ScriptOutcome {
                     status: outcome.status,
                     stdout: outcome.stdout,
                     stderr: outcome.stderr,
-                })
+                }
             })
         })
     }
 }
 
-/// The bind mode the box requires, as the vendored crate spells it in a `BindInfo`.
-const REQUIRED_BIND_MODE: &str = "direct";
+/// `spawner`, run inside one Call's trace context.
+fn within(
+    correlation: telemetry::Correlation,
+    spawner: box_shell::HostSpawner,
+) -> box_shell::HostSpawner {
+    Arc::new(move |spawn| {
+        let correlation = correlation.clone();
+        let spawned = spawner(spawn);
+        Box::pin(async move { correlation.scope(spawned).await })
+    })
+}
 
-/// Refuse a Shell whose binds are not exactly the declared set, all host pass-throughs.
-fn verify_direct_binds(shell: &Shell, declared: &[(&str, &str)]) -> io::Result<()> {
-    let binds = &shell.config().binds;
-    if binds.len() != declared.len() {
+/// The Shell's own filesystem, under its file size and inode caps.
+pub(super) fn shell_filesystem() -> io::Result<strands_shell::vfs::Vfs> {
+    let mut vfs =
+        strands_shell::vfs_config::build_vfs(&strands_shell::vfs_config::VfsConfig::default())?;
+    vfs.max_file_size = SHELL_MAX_FILE_SIZE;
+    vfs.max_inodes = SHELL_MAX_INODES;
+    Ok(vfs)
+}
+
+/// The limits one Shell process runs under.
+pub(super) fn apply_limits(proc: &mut strands_shell::os::Process) {
+    proc.max_depth = SHELL_MAX_DEPTH;
+    proc.max_output = MAX_CAPTURE_STREAM_BYTES;
+    proc.max_fds = SHELL_MAX_FDS;
+    proc.max_bg_jobs = SHELL_MAX_BACKGROUND_JOBS;
+    proc.max_pipeline = SHELL_MAX_PIPELINE;
+    proc.max_input = SHELL_MAX_INPUT;
+}
+
+/// The deadline of a Call starting now, or none when the Shell timeout is unlimited.
+pub(super) fn deadline(timeout: Option<Duration>) -> io::Result<Option<tokio::time::Instant>> {
+    timeout
+        .map(|timeout| {
+            tokio::time::Instant::now()
+                .checked_add(timeout)
+                .ok_or_else(|| invalid_input("the Shell timeout overflows the clock"))
+        })
+        .transpose()
+}
+
+/// Refuse a mount table that is not exactly the declared set.
+fn verify_direct_binds(filesystem: &Filesystem, declared: &[(&str, &str)]) -> io::Result<()> {
+    let served: Vec<(&Path, &str)> = filesystem.binds().collect();
+    if served.len() != declared.len() {
         return Err(invalid_input(format!(
-            "the hosted Shell must have {} direct binds; found {}",
+            "the hosted Shell must serve {} host folders; found {}",
             declared.len(),
-            binds.len(),
+            served.len(),
         )));
     }
-    for (built, (source, destination)) in binds.iter().zip(declared) {
-        if built.source != *source || built.destination != *destination {
+    for ((source, visible), (declared_source, declared_visible)) in served.iter().zip(declared) {
+        if *source != Path::new(declared_source)
+            || *visible != strands_shell::vfs::normalize(declared_visible)
+        {
             return Err(invalid_input(format!(
-                "the hosted Shell binds {} at {}; the box declared {source} at {destination}",
-                built.source, built.destination
-            )));
-        }
-        if built.mode != REQUIRED_BIND_MODE {
-            return Err(invalid_input(format!(
-                "the hosted Shell's bind of {} at {} is mode {:?}; the box requires {:?}",
-                built.source, built.destination, built.mode, REQUIRED_BIND_MODE
+                "the hosted Shell serves {} at {visible}; the box declared {declared_source} at \
+                 {declared_visible}",
+                source.display(),
             )));
         }
     }
@@ -303,10 +306,10 @@ impl ReachFloor {
                 to,
                 operation,
             } => match operation {
-                strands_shell::FsPairOperation::Rename { .. } => self
+                box_shell::FsPairOperation::Rename { .. } => self
                     .approve_one(from, true)
                     .and_then(|()| self.approve_one(to, true)),
-                strands_shell::FsPairOperation::Symlink => self
+                box_shell::FsPairOperation::Symlink => self
                     .approve_one(from, false)
                     .and_then(|()| self.approve_one(to, true)),
                 _ => self
@@ -410,8 +413,8 @@ fn decision_subject(effect: &EffectAttempt<'_>, home: Option<&Path>) -> Option<D
         }),
         EffectAttempt::FilesystemPair { to, operation, .. } => Some(DecisionSubject {
             action: match operation {
-                strands_shell::FsPairOperation::Rename { .. } => r#"Box::Action::"fs:move""#,
-                strands_shell::FsPairOperation::Symlink => r#"Box::Action::"fs:write""#,
+                box_shell::FsPairOperation::Rename { .. } => r#"Box::Action::"fs:move""#,
+                box_shell::FsPairOperation::Symlink => r#"Box::Action::"fs:write""#,
                 _ => r#"Box::Action::"fs:other""#,
             }
             .into(),
@@ -784,7 +787,7 @@ mod tests {
 
     /// **The box's label table agrees with the policy adapter on every kernel verb listed here,
     /// no listed verb reaches `fs:other`, and `Locate` is no decision on either side.** The policy
-    /// crate's `tests/shell_fs_vocabulary.rs` pins the same lists against the vendored source.
+    /// crate's `tests/shell_fs_vocabulary.rs` pins the same lists against `box-shell`.
     #[tokio::test]
     async fn every_kernel_verb_labels_the_action_the_policy_adapter_decides() {
         const FS_OTHER: &str = r#"Box::Action::"fs:other""#;
@@ -874,19 +877,19 @@ mod tests {
         assert!(!mutates(FsOperation::Locate), "a Locate mutates nothing");
 
         for operation in [
-            strands_shell::FsPairOperation::Rename {
+            box_shell::FsPairOperation::Rename {
                 destination_exists: false,
                 destination_is_dir: false,
             },
-            strands_shell::FsPairOperation::Rename {
+            box_shell::FsPairOperation::Rename {
                 destination_exists: true,
                 destination_is_dir: false,
             },
-            strands_shell::FsPairOperation::Rename {
+            box_shell::FsPairOperation::Rename {
                 destination_exists: true,
                 destination_is_dir: true,
             },
-            strands_shell::FsPairOperation::Symlink,
+            box_shell::FsPairOperation::Symlink,
         ] {
             let effect = EffectAttempt::FilesystemPair {
                 from: "/home/strands-box/a.txt",
@@ -989,7 +992,7 @@ mod tests {
             floor
                 .intercept(&EffectAttempt::Filesystem {
                     path: &permitted,
-                    operation: strands_shell::FsOperation::ReadContent,
+                    operation: box_shell::FsOperation::ReadContent,
                 })
                 .await
                 .expect("the authored permit admits the read"),
@@ -998,7 +1001,7 @@ mod tests {
         floor
             .intercept(&EffectAttempt::Filesystem {
                 path: &refused,
-                operation: strands_shell::FsOperation::ReadContent,
+                operation: box_shell::FsOperation::ReadContent,
             })
             .await
             .err()
@@ -1056,7 +1059,7 @@ mod tests {
             let path = resolved.join(name).display().to_string();
             let attempt = EffectAttempt::Filesystem {
                 path: &path,
-                operation: strands_shell::FsOperation::ReadContent,
+                operation: box_shell::FsOperation::ReadContent,
             };
             let mut deciding = std::pin::pin!(floor.inner.intercept(&attempt));
             let mut context = std::task::Context::from_waker(std::task::Waker::noop());
@@ -1087,7 +1090,7 @@ mod tests {
         let refusal = floor
             .approve(&EffectAttempt::Filesystem {
                 path: &link,
-                operation: strands_shell::FsOperation::ReadContent,
+                operation: box_shell::FsOperation::ReadContent,
             })
             .expect_err("a link out of the set is not the identity policy judged");
         assert!(
@@ -1099,7 +1102,7 @@ mod tests {
         floor
             .approve(&EffectAttempt::Filesystem {
                 path: &real,
-                operation: strands_shell::FsOperation::ReadContent,
+                operation: box_shell::FsOperation::ReadContent,
             })
             .expect("an ordinary file inside the home is reachable");
     }
@@ -1115,7 +1118,7 @@ mod tests {
             floor
                 .approve(&EffectAttempt::Filesystem {
                     path: virtual_only,
-                    operation: strands_shell::FsOperation::ReadContent,
+                    operation: box_shell::FsOperation::ReadContent,
                 })
                 .expect("a virtual-only inode is the virtual filesystem's own floor");
         }
@@ -1182,7 +1185,7 @@ mod tests {
         let error = match floor
             .intercept(&EffectAttempt::Filesystem {
                 path: &refused_text,
-                operation: strands_shell::FsOperation::ReadContent,
+                operation: box_shell::FsOperation::ReadContent,
             })
             .await
         {
@@ -1250,7 +1253,7 @@ mod tests {
             ),
             recorder: DecisionRecorder::discarding(),
         };
-        let metadata = strands_shell::FsOperation::ReadMetadata {
+        let metadata = box_shell::FsOperation::ReadMetadata {
             follow_symlinks: true,
         };
         let refused_text = refused.to_string_lossy();
@@ -1258,7 +1261,7 @@ mod tests {
         let checked_text = checked.to_string_lossy();
         let read_gated = EffectAttempt::Filesystem {
             path: &gated_text,
-            operation: strands_shell::FsOperation::ReadContent,
+            operation: box_shell::FsOperation::ReadContent,
         };
 
         assert!(
@@ -1341,9 +1344,9 @@ mod tests {
         let gated_text = shared.join("gated.txt").to_string_lossy().into_owned();
         let read_gated = EffectAttempt::Filesystem {
             path: &gated_text,
-            operation: strands_shell::FsOperation::ReadContent,
+            operation: box_shell::FsOperation::ReadContent,
         };
-        let metadata = strands_shell::FsOperation::ReadMetadata {
+        let metadata = box_shell::FsOperation::ReadMetadata {
             follow_symlinks: true,
         };
         let probe = |relative: &str| shared.join(relative).to_string_lossy().into_owned();
@@ -1394,7 +1397,7 @@ mod tests {
             floor
                 .intercept(&EffectAttempt::Filesystem {
                     path: &absent,
-                    operation: strands_shell::FsOperation::ReadContent,
+                    operation: box_shell::FsOperation::ReadContent,
                 })
                 .await
                 .is_err(),
@@ -1433,7 +1436,7 @@ mod tests {
         let error = floor
             .intercept(&EffectAttempt::Filesystem {
                 path: &planted,
-                operation: strands_shell::FsOperation::Locate,
+                operation: box_shell::FsOperation::Locate,
             })
             .await
             .err()
@@ -1445,7 +1448,7 @@ mod tests {
         floor
             .intercept(&EffectAttempt::Filesystem {
                 path: &beside,
-                operation: strands_shell::FsOperation::Locate,
+                operation: box_shell::FsOperation::Locate,
             })
             .await
             .expect("a candidate in the project passes the floor");
@@ -1503,18 +1506,18 @@ mod tests {
         let config = authority.join("box.toml").to_string_lossy().into_owned();
         let directory = authority.to_string_lossy().into_owned();
         let routes = [
-            (policy.as_str(), strands_shell::FsOperation::ReadContent),
-            (config.as_str(), strands_shell::FsOperation::ReadContent),
+            (policy.as_str(), box_shell::FsOperation::ReadContent),
+            (config.as_str(), box_shell::FsOperation::ReadContent),
             (
                 policy.as_str(),
-                strands_shell::FsOperation::ReadMetadata {
+                box_shell::FsOperation::ReadMetadata {
                     follow_symlinks: true,
                 },
             ),
-            (directory.as_str(), strands_shell::FsOperation::RemoveDir),
+            (directory.as_str(), box_shell::FsOperation::RemoveDir),
             (
                 policy.as_str(),
-                strands_shell::FsOperation::WriteContent {
+                box_shell::FsOperation::WriteContent {
                     create: true,
                     truncate: true,
                 },
@@ -1552,9 +1555,9 @@ mod tests {
         for (path, operation) in [
             (
                 workspace.join("README.md").to_string_lossy().into_owned(),
-                strands_shell::FsOperation::ReadContent,
+                box_shell::FsOperation::ReadContent,
             ),
-            (directory.clone(), strands_shell::FsOperation::Enumerate),
+            (directory.clone(), box_shell::FsOperation::Enumerate),
         ] {
             floor
                 .intercept(&EffectAttempt::Filesystem {
@@ -1566,22 +1569,29 @@ mod tests {
         }
     }
 
-    /// The mode half of the same guard, also proven by introducing the defect.
+    /// A mount table that is not the declared set refuses to serve.
     #[test]
-    fn a_snapshotted_bind_refuses_to_serve() {
+    fn a_mount_table_that_is_not_the_declared_set_refuses_to_serve() {
         let (_root, reach) = fixture();
         let binds = reach.shell_binds();
-        let (source, destination) = binds[0];
-        // `bind`, not `bind_direct`: the vendored crate's default, which snapshots.
-        let builder = Shell::builder().bind(source, destination);
-        let snapshotted = builder.build().expect("a snapshotting Shell still builds");
+        let serving = |binds: &[(&str, &str)]| {
+            Filesystem::serving(shell_filesystem().expect("a filesystem"), binds).expect("serves")
+        };
+        verify_direct_binds(&serving(&binds), &binds).expect("the declared set serves");
 
-        let refusal = verify_direct_binds(&snapshotted, &binds)
-            .expect_err("a snapshot diverges from every other view of the directory")
+        let (source, destination) = binds[0];
+        let elsewhere = serving(&[(source, "/elsewhere")]);
+        let refusal = verify_direct_binds(&elsewhere, &binds)
+            .expect_err("a folder served at another name is refused")
             .to_string();
         assert!(
-            refusal.contains("copy") && refusal.contains("direct"),
-            "the refusal must name the mode built and the mode required: {refusal}"
+            refusal.contains("/elsewhere") && refusal.contains(destination),
+            "the refusal names the folder served and the folder declared: {refusal}"
         );
+
+        let missing = verify_direct_binds(&serving(&[]), &binds)
+            .expect_err("a table that serves nothing is refused")
+            .to_string();
+        assert!(missing.contains("must serve"), "{missing}");
     }
 }

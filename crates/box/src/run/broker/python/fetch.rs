@@ -163,7 +163,7 @@ pub(super) async fn fetch_through_gateway(
     // a scheme allowlist plus a literal private/loopback/link-local/IMDS refusal, before any client
     // is built. Parity with the Shell; the gateway floor remains the authority for
     // DNS-resolved destinations.
-    if let Err(error) = strands_shell::vfs_kernel::check_url_safe(&request.url) {
+    if let Err(error) = box_shell::check_url_safe(&request.url) {
         // This floor fires before the gateway is contacted, so the gateway journals nothing for it;
         // record the deny to the operator's stderr so it stays reconstructable (Tenet 4). A gateway
         // net:connect/http:request denial is journaled by the gateway itself.

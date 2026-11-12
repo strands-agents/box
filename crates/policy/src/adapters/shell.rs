@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use strands_shell::{
+use box_shell::{
     EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, EffectResult,
     FsOperation as KernelFsOperation, FsPairOperation,
 };

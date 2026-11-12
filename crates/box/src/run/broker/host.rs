@@ -318,7 +318,7 @@ async fn authorize_mcp_start(
     );
     let capture = crate::run::telemetry::ObservationCapture::begin();
     let admitted = interceptor
-        .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+        .intercept(&box_shell::EffectAttempt::ShellSpawn {
             command: &command,
             program: server.program(),
             program_path: &host_program_path,
@@ -493,7 +493,7 @@ fn host(
     egress: Option<EgressRouting>,
     recorder: Arc<crate::run::telemetry::DecisionRecorder>,
     host_spawner: Option<crate::run::hosted::ToolSpawner>,
-    host_programs: strands_shell::os::HostPrograms,
+    host_programs: box_shell::HostPrograms,
     command_timeout: Option<Duration>,
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
     shutdown: oneshot::Receiver<()>,
@@ -903,7 +903,8 @@ async fn serve_transport(
                     }
                     let opened = spec.backend().and_then(|backend| {
                         let shell = spec.build_on(Arc::clone(&backend), &spec.recorder)?;
-                        Program::adopt(shell).map(|program| (backend, program))
+                        Program::adopt(shell, spec.command_timeout)
+                            .map(|program| (backend, program))
                     });
                     match opened {
                         Ok((backend, (program, output, control))) => {
@@ -1222,7 +1223,7 @@ fn open_program_count(
 }
 
 struct ProgramSlot {
-    backend: Arc<dyn strands_shell::os::Kernel>,
+    backend: Arc<box_shell::Filesystem>,
     program: Program,
     output: ProgramOutput,
     control: ProgramControl,
@@ -2447,7 +2448,8 @@ done"#;
             let shell = spec
                 .build_on(Arc::clone(&backend), &spec.recorder)
                 .expect("Shell");
-            let (program, output, control) = Program::adopt(shell).expect("program");
+            let (program, output, control) =
+                Program::adopt(shell, spec.command_timeout).expect("program");
             let mut slot = ProgramSlot {
                 backend,
                 program,
@@ -2519,7 +2521,8 @@ done"#;
             let shell = spec
                 .build_on(Arc::clone(&backend), &spec.recorder)
                 .expect("unlimited Shell");
-            let (program, output, control) = Program::adopt(shell).expect("program");
+            let (program, output, control) =
+                Program::adopt(shell, spec.command_timeout).expect("program");
             let mut slot = ProgramSlot {
                 backend,
                 program,

@@ -27,6 +27,11 @@ const OUTPUT_CHANNEL_DEPTH: usize = 64;
 pub(crate) struct Program {
     shell: strands_shell::Shell,
     cancel: Arc<AtomicBool>,
+    /// The Shell's own bound on one Call, re-armed when each Call starts.
+    timeout: Option<std::time::Duration>,
+    /// The streams a Call's diagnostics that the Shell captured rather than wrote are sent to.
+    stdout: mpsc::WeakSender<Bytes>,
+    stderr: mpsc::WeakSender<Bytes>,
 }
 
 /// The half a concurrent task holds while a Call is in flight.
@@ -62,14 +67,14 @@ impl Program {
     /// Wrap a freshly built Shell, installing the three standard channel descriptors.
     pub(crate) fn adopt(
         mut shell: strands_shell::Shell,
+        timeout: Option<std::time::Duration>,
     ) -> io::Result<(Self, ProgramOutput, ProgramControl)> {
         let (stdin_tx, stdin_rx) = mpsc::channel(INPUT_CHANNEL_DEPTH);
         let (stdout_tx, stdout_rx) = mpsc::channel(OUTPUT_CHANNEL_DEPTH);
         let (stderr_tx, stderr_rx) = mpsc::channel(OUTPUT_CHANNEL_DEPTH);
 
-        // The writers reach a builtin only because the vendored fork inherits them — see
-        // `shell/UPSTREAM.md`.
         shell.proc.set_channel_reader(STDIN, stdin_rx);
+        let (stdout, stderr) = (stdout_tx.downgrade(), stderr_tx.downgrade());
         shell.proc.set_channel_writer(STDOUT, stdout_tx);
         shell.proc.set_channel_writer(STDERR, stderr_tx);
 
@@ -78,6 +83,9 @@ impl Program {
             Self {
                 shell,
                 cancel: Arc::clone(&cancel),
+                timeout,
+                stdout,
+                stderr,
             },
             ProgramOutput {
                 stdout_rx,
@@ -98,9 +106,28 @@ impl Program {
     /// Run one Call and return its status. Its bytes reach [`ProgramOutput`] while this future is
     /// pending, so a caller must poll both concurrently.
     pub(crate) async fn call(&mut self, command: &str) -> CallOutcome {
+        match super::shell::deadline(self.timeout) {
+            Ok(deadline) => self.shell.proc.deadline = deadline,
+            Err(error) => {
+                Self::forward(&self.stderr, format!("strands-box: {error}\n")).await;
+                return CallOutcome { status: 1 };
+            }
+        }
         let output = self.shell.run(command).await;
+        Self::forward(&self.stdout, output.stdout).await;
+        Self::forward(&self.stderr, output.stderr).await;
         CallOutcome {
             status: output.status,
+        }
+    }
+
+    /// Send text the Shell captured to the stream it belongs to.
+    async fn forward(stream: &mpsc::WeakSender<Bytes>, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(sender) = stream.upgrade() {
+            let _ = sender.send(Bytes::from(text)).await;
         }
     }
 

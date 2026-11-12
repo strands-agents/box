@@ -1,0 +1,26 @@
+[package]
+name = "strands-box-shell"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "The hosted Shell's kernel: host folders on a pinned identity, and each effect presented at one checkpoint (docs/design/decisions.md#interpreters-are-vendored-not-the-host-shell)."
+
+[lib]
+name = "box_shell"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait = "0.1"
+bytes = "1"
+libc = "0.2"
+strands-shell = { git = "https://github.com/strands-agents/shell", rev = "286ac414ec083501f421ba7ba17b60d82f52902c", default-features = false }
+tokio = { version = "1", features = ["io-util", "rt", "sync"] }
+# The parsed host the SSRF floor reads, as an HTTP client parses it.
+url = "2"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+
+[lints.rust]
+unused_must_use = "deny"

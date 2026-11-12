@@ -162,8 +162,8 @@ action `push` in the category `Tool::git`.
 
 Two keys are excluded: `url.full` and `process.command_line`.
 
-`process.command_args` reports an argument the script stated literally. For an argument that arrived
-from an expansion, the record reports:
+`process.command_args` reports each argument after expansion, because the Shell does not say which
+words the script stated literally. For each argument, the record reports:
 
 | The expanded argument | What the record carries |
 |---|---|

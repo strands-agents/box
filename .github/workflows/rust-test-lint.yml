@@ -241,6 +241,7 @@ jobs:
             -p strands-box-credentials \
             -p strands-box-egress-gateway \
             -p strands-box-policy \
+            -p strands-box-shell \
             -p strands-box-telemetry
 
       - name: cargo clippy
