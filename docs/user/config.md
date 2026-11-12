@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries eleven keys. `name` and `box_dir` are required.
+The file carries twelve keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -83,8 +83,9 @@ The file carries eleven keys. `name` and `box_dir` are required.
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
 | `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, and ingress. Each is disabled by default. |
 | `[limits]` | table | Execution limits for Strands Shell. |
+| `[gateway]` | table | Settings for every request through the egress gateway: `upgrade_http`, the hosts whose plain `http://` on port 80 the gateway sends as `https://` on port 443. See [`[gateway]`](#gateway). |
 
-The example uses five of the eleven: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the twelve: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -217,6 +218,23 @@ inside the Shell. Python's [own limits](monty.md#limits-and-exit-statuses) also 
 with `shell.timeout = false`. Synchronous Python execution can delay timeout reporting.
 See [Shell timeouts](shell.md#limitsshelltimeout) for the call scope and
 [stored configuration](native-filesystem-policy.md#stored-configuration-and-rollback) for rollback.
+
+## `[gateway]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `upgrade_http` | string array | empty | Host names whose plain `http://` request to port 80 the gateway decides and sends as `https://` on port 443. A host name alone: no scheme, port, path, `*` wildcard, or IP address. |
+
+```toml
+[gateway]
+upgrade_http = ["static.rust-lang.org"]
+```
+
+The list is for a tool that can't trust the box's CA, such as rustup on macOS. Policy decides an
+upgraded request on port 443, as it decides HTTPS to that host, and a credential is never added to
+it. A box that sets the list stores its record at version 32, and an older build refuses it.
+[Upgrade plain HTTP to HTTPS](egress.md#upgrade-plain-http-to-https) describes the behaviour and
+its limits.
 
 ## `[experimental-features]`
 
@@ -778,8 +796,9 @@ An older build refuses a box that uses a grammar, so before you go back to one, 
 
 Each table binds one secret to a set of destinations, and its name is the operator's own label.
 The example's `[egress.model]` binds `AWS_BEARER_TOKEN_BEDROCK` to the Bedrock endpoint, and `run`
-reads the key from its own environment. The agent, and every tool or MCP server in the box, gets a
-placeholder in that variable, and the gateway swaps the key in on each request to the destination.
+reads the key from its own environment. The agent, every tool or MCP server in the box, and the
+Shell get a placeholder in that variable, and the gateway swaps the key in on each request to the
+destination.
 A binding attaches a credential to a request the policy already permitted, and grants no network
 reach of its own: the example policy's `net:connect` and `http:request` rules are what let the
 requests out. The current reference for this table is

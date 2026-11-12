@@ -93,6 +93,12 @@ pub struct MitmConfig {
     /// destination, and the address decision on the backend address. Empty means no re-route, and
     /// every existing caller keeps today's behavior unchanged.
     pub backends: Vec<(credentials::DestinationPattern, BackendDial)>,
+    /// Hosts whose plain `http://` request to port 80 the gateway decides and sends as `https://` on
+    /// port 443. The gateway speaks TLS upstream against the same roots as a CONNECT, with the host as
+    /// SNI, and the workload's leg stays plain, so a credential on such a request is still refused.
+    /// Matched as a whole host, without regard to case or a trailing dot. Empty means no upgrade, and
+    /// every existing caller keeps today's behavior unchanged.
+    pub upgrade_http: Vec<String>,
 }
 
 /// Where a re-routed destination dials, and how the upstream leg speaks to it.
@@ -136,6 +142,7 @@ impl Default for MitmConfig {
             max_connections: 256,
             mcp_servers: Vec::new(),
             backends: Vec::new(),
+            upgrade_http: Vec::new(),
         }
     }
 }
@@ -154,6 +161,8 @@ pub(crate) struct SharedState {
     emitter: Box<dyn Emitter>,
     /// The authorization authority for every outbound effect.
     effect_interceptor: Arc<dyn EffectInterceptor>,
+    /// The bytes every reply observer's copy may hold at once.
+    pub(crate) reply_copies: Arc<body::CopyBudget>,
 }
 
 impl SharedState {
@@ -257,6 +266,9 @@ impl MitmInterceptor {
             upstream_config,
             emitter,
             effect_interceptor,
+            reply_copies: Arc::new(body::CopyBudget::for_limit(
+                config.response_limits.max_body_bytes,
+            )),
         });
 
         let stop = Arc::new(AtomicBool::new(false));

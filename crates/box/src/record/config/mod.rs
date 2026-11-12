@@ -14,6 +14,7 @@
 //! | [`process`] | `[agent]` and `[tool.<name>]`: one `ProcessSpec` each |
 //! | [`egress`] | `[egress.a]`: which secret attaches to which request |
 //! | [`filesystem`] | the translation of a `ProcessSpec`'s eight lists into containment cells |
+//! | [`gateway`] | `[gateway]`: the hosts whose plain HTTP the egress gateway upgrades to HTTPS |
 //! | [`grammar`] | `[tool.<name>.grammar]`: the tool grammars a box installs |
 //! | [`ingress`] | `[[agent.ingress]]`: where callers reach the agent |
 //! | [`limits`] | `[limits.shell]`: the execution timeout of one Shell submission |
@@ -27,6 +28,7 @@
 pub(crate) mod egress;
 pub(crate) mod env;
 pub(crate) mod filesystem;
+pub(crate) mod gateway;
 pub(crate) mod grammar;
 pub(crate) mod ingress;
 pub(crate) mod limits;
@@ -55,6 +57,7 @@ use self::egress::{
 use self::env::{LOADER_HOOK_PREFIXES, LOADER_HOOKS};
 #[cfg(test)]
 use self::env::{reserved_workload_environment, valid_environment_name};
+use self::gateway::Gateway;
 use self::limits::Limits;
 use self::process::{ContainedMcp, ProcessSpec};
 use credentials::DestinationPattern;
@@ -504,9 +507,11 @@ impl RunContract {
                         .as_ref()
                         .is_some_and(|agent| !agent.ingress.is_empty()),
                     has_backend(&egress, &remote_mcp),
+                    &self.file.gateway,
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 file_attributes: self.file.file_attributes,
+                gateway: self.file.gateway.clone(),
                 limits: self.file.limits.clone(),
                 box_id: root.box_id().to_string(),
                 box_dir: root.root().to_path_buf(),
@@ -573,6 +578,9 @@ pub(crate) struct Record {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub(crate) file_attributes: bool,
+    /// The box-wide egress gateway settings.
+    #[serde(default, skip_serializing_if = "Gateway::is_default")]
+    pub(crate) gateway: Gateway,
     /// The operator-selected execution limits.
     #[serde(default, skip_serializing_if = "Limits::is_default")]
     pub(crate) limits: Limits,
@@ -662,6 +670,9 @@ const INGRESS_RECORD_VERSION: u32 = 29;
 /// The record version of a record whose egress re-routes a destination to a backend.
 const BACKEND_RECORD_VERSION: u32 = 30;
 const SHELL_SIZE_LIMITS_RECORD_VERSION: u32 = 31;
+/// The record version of a record whose `[gateway]` upgrades a host's plain HTTP, so an older build
+/// refuses the box rather than resuming it with those requests refused on port 80.
+const UPGRADE_HTTP_RECORD_VERSION: u32 = 32;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -709,6 +720,7 @@ impl ExperimentalFeatures {
 }
 
 /// The highest record version required by the features a record holds.
+#[allow(clippy::too_many_arguments)]
 fn record_version<'a>(
     file_attributes: bool,
     features: &ExperimentalFeatures,
@@ -717,8 +729,11 @@ fn record_version<'a>(
     mcp: &[crate::record::config::mcp::McpServer],
     ingress: bool,
     has_backend: bool,
+    gateway: &Gateway,
 ) -> u32 {
-    if limits.shell.has_size_limits() {
+    if !gateway.is_default() {
+        UPGRADE_HTTP_RECORD_VERSION
+    } else if limits.shell.has_size_limits() {
         SHELL_SIZE_LIMITS_RECORD_VERSION
     } else if has_backend {
         BACKEND_RECORD_VERSION
@@ -1001,6 +1016,7 @@ impl Record {
             INGRESS_RECORD_VERSION,
             BACKEND_RECORD_VERSION,
             SHELL_SIZE_LIMITS_RECORD_VERSION,
+            UPGRADE_HTTP_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1029,6 +1045,7 @@ impl Record {
                 .as_ref()
                 .is_some_and(|agent| !agent.ingress.is_empty()),
             has_backend(&record.egress, &record.remote_mcp),
+            &record.gateway,
         );
         if record.version != expected {
             return Err(ConfigError::RecordVersion {
@@ -1042,6 +1059,7 @@ impl Record {
             });
         }
         BoxName::parse(&record.name)?;
+        record.gateway.validate()?;
         record.validate_processes()?;
         Ok(record)
     }
@@ -1307,6 +1325,9 @@ struct ConfigFile {
     /// and ACLs. Linux accepts the key and renders nothing for it.
     #[serde(default, rename = "file-attributes")]
     file_attributes: bool,
+    /// The box-wide egress gateway settings.
+    #[serde(default)]
+    gateway: Gateway,
     /// The execution limits for hosted interpreters.
     #[serde(default)]
     limits: Limits,
@@ -1401,6 +1422,7 @@ impl ConfigFile {
     fn validate(&self) -> Result<(), ConfigError> {
         self.experimental_features.validate()?;
         BoxName::parse(&self.name)?;
+        self.gateway.validate()?;
         if let Some(agent) = &self.agent {
             agent.validate("[agent]")?;
             agent.validate_native_policy(
@@ -1510,6 +1532,7 @@ mod tests {
                             &stored.mcp,
                             false,
                             false,
+                            &Gateway::default(),
                         ),
                         expected_version
                     );
@@ -1561,6 +1584,7 @@ mod tests {
                 &stored.mcp,
                 false,
                 has_backend(&stored.egress, &stored.remote_mcp),
+                &Gateway::default(),
             ),
             MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
         );
@@ -1683,6 +1707,7 @@ mod tests {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            gateway: Default::default(),
             limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/codex"),
@@ -1892,6 +1917,7 @@ native-filesystem-policy = false
                                     servers,
                                     false,
                                     false,
+                                    &Gateway::default(),
                                 ),
                                 27
                             );
@@ -2089,6 +2115,89 @@ native-filesystem-policy = false
         );
         let ordinary = toml::to_string(&record(None, BTreeMap::new())).unwrap();
         assert!(!ordinary.contains("file-attributes"), "{ordinary}");
+    }
+
+    #[test]
+    fn the_gateway_upgrade_list_parses_and_is_empty_by_default() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        let absent = ConfigFile::parse(required, Path::new("box.toml")).unwrap();
+        assert!(absent.gateway.is_default());
+        let listed = ConfigFile::parse(
+            &format!("{required}[gateway]\nupgrade_http = [\"static.rust-lang.org\"]\n"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        assert_eq!(listed.gateway.upgrade_http, ["static.rust-lang.org"]);
+        let stored = record_from_config("[gateway]\nupgrade_http = [\"static.rust-lang.org\"]\n")
+            .expect("the configuration loads");
+        assert_eq!(stored.version, UPGRADE_HTTP_RECORD_VERSION);
+        assert_eq!(stored.gateway.upgrade_http, ["static.rust-lang.org"]);
+    }
+
+    #[test]
+    fn a_gateway_upgrade_entry_that_is_not_a_host_name_is_refused_at_load() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        for (entry, reason) in [
+            ("http://static.rust-lang.org", "it names a scheme"),
+            ("static.rust-lang.org:80", "it names a port"),
+            ("*.rust-lang.org", "it is a wildcard"),
+            ("151.101.2.137", "it is an IP address"),
+        ] {
+            let text = format!("{required}[gateway]\nupgrade_http = [\"{entry}\"]\n");
+            let error = ConfigFile::parse(&text, Path::new("box.toml"))
+                .expect_err(entry)
+                .to_string();
+            assert!(error.contains(reason), "{entry}: {error}");
+        }
+        for text in [
+            format!("{required}[gateway]\nupgrade-http = [\"static.rust-lang.org\"]\n"),
+            format!("{required}[gateway]\nupgrade_http = \"static.rust-lang.org\"\n"),
+            format!("{required}[gateway]\nupgrade_https = [\"static.rust-lang.org\"]\n"),
+            format!("upgrade_http = [\"static.rust-lang.org\"]\n{required}"),
+        ] {
+            assert!(
+                ConfigFile::parse(&text, Path::new("box.toml")).is_err(),
+                "{text} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_gateway_upgrade_list_cannot_hide_in_a_legacy_record() {
+        let mut stored = record(None, BTreeMap::new());
+        stored.gateway.upgrade_http = vec!["static.rust-lang.org".to_string()];
+        let forged = toml::to_string(&stored).unwrap();
+        assert!(forged.contains("[gateway]"), "{forged}");
+        for found in [
+            RECORD_VERSION,
+            FILE_ATTRIBUTES_RECORD_VERSION,
+            BACKEND_RECORD_VERSION,
+        ] {
+            stored.version = found;
+            assert!(
+                matches!(
+                    Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion {
+                        found: refused,
+                        expected: UPGRADE_HTTP_RECORD_VERSION
+                    }) if refused == found
+                ),
+                "version {found}"
+            );
+        }
+        stored.version = UPGRADE_HTTP_RECORD_VERSION;
+        let encoded = toml::to_string(&stored).unwrap();
+        assert_eq!(
+            Record::parse(&encoded, Path::new("record.toml")).unwrap(),
+            stored
+        );
+        stored.gateway.upgrade_http = vec!["static.rust-lang.org:80".to_string()];
+        assert!(
+            Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")).is_err(),
+            "a stored entry is checked again when the record is read"
+        );
+        let ordinary = toml::to_string(&record(None, BTreeMap::new())).unwrap();
+        assert!(!ordinary.contains("gateway"), "{ordinary}");
     }
 
     #[test]
@@ -2867,7 +2976,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, SHELL_SIZE_LIMITS_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, UPGRADE_HTTP_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
