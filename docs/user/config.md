@@ -796,8 +796,9 @@ An older build refuses a box that uses a grammar, so before you go back to one, 
 
 Each table binds one secret to a set of destinations, and its name is the operator's own label.
 The example's `[egress.model]` binds `AWS_BEARER_TOKEN_BEDROCK` to the Bedrock endpoint, and `run`
-reads the key from its own environment. The agent, and every tool or MCP server in the box, gets a
-placeholder in that variable, and the gateway swaps the key in on each request to the destination.
+reads the key from its own environment. The agent, every tool or MCP server in the box, and the
+Shell get a placeholder in that variable, and the gateway swaps the key in on each request to the
+destination.
 A binding attaches a credential to a request the policy already permitted, and grants no network
 reach of its own: the example policy's `net:connect` and `http:request` rules are what let the
 requests out. The current reference for this table is

@@ -91,7 +91,8 @@ names the route.
 3. Box opens one vault for each `env://` variable and one for each signed route. An `env://` vault
    reads the variable and creates one placeholder, shared by every destination that names the
    variable. A signed vault reads nothing yet.
-4. The agent, each tool, and each stdio MCP server get every placeholder in their environments.
+4. The agent, each tool, each stdio MCP server, and the hosted Shell get every placeholder in their
+   environments.
 
 A placeholder starts with the route's `phantom_prefix`, or `strands_box_`, followed by 64 random hex
 characters. `box.toml` calls it a phantom. The workload can read it and learn that a credential

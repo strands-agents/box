@@ -22,7 +22,10 @@ SCRIPT`.
 
 Each invocation is one command. A variable exported in one invocation is unset in the next. The
 Shell starts each command with `HOME` set to the agent's `HOME`, and with the workspace as its
-working directory.
+working directory. It also gets the placeholder of each [credential route](./egress.md), in the
+same variable as the agent. So `curl -H "Authorization: Bearer $GITHUB_TOKEN" ...` sends the
+placeholder. On a request to the route's destination that policy permits, the gateway puts the real
+token in its place.
 
 ## What runs where
 
