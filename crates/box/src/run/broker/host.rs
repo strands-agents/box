@@ -1444,7 +1444,24 @@ async fn run_call_in(
         flush(frames, id, &mut pending).await?;
         return Ok(DIRECTORY_REFUSED_STATUS);
     }
-    let remaining = request_timeout.map(|timeout| timeout.saturating_sub(started.elapsed()));
+    // `timeout` polls `enter` before its timer, so a synchronous lookup that overran still returns
+    // `Ok`. The command must not start once the deadline has passed.
+    let remaining = match request_timeout {
+        Some(timeout) => match timeout.checked_sub(started.elapsed()) {
+            Some(remaining) if !remaining.is_zero() => Some(remaining),
+            _ => {
+                deny(
+                    frames,
+                    id,
+                    DeniedKind::Timeout,
+                    "the call exceeded its deadline",
+                )
+                .await?;
+                return Ok(BOUNDARY_FAILURE_STATUS);
+            }
+        },
+        None => None,
+    };
     run_call(slot, command, id, remaining, frames).await
 }
 
@@ -4648,6 +4665,9 @@ done"#;
         }));
     }
 
+    /// How long a test waits for a refusal the daemon sends at once.
+    const REFUSAL_WAIT: Duration = Duration::from_secs(5);
+
     /// **An `open` in Python mode is refused, so the Shell is the only way to Monty.**
     ///
     /// A Python Program ran Monty with no `shell:exec` decision, so a policy that forbids
@@ -4671,8 +4691,10 @@ done"#;
                 },
             )
             .await;
-            let frame = read_frame::<Frame, _>(&mut reader)
+            // Bounded, so a regression fails here rather than at the 300-second idle timeout.
+            let frame = tokio::time::timeout(REFUSAL_WAIT, read_frame::<Frame, _>(&mut reader))
                 .await
+                .expect("the refusal must arrive promptly")
                 .expect("read a frame")
                 .expect("an answer");
             assert_eq!(frame.program, 3);
@@ -4694,8 +4716,10 @@ done"#;
                 },
             )
             .await;
-            let frame = read_frame::<Frame, _>(&mut reader)
+            // Bounded, so a regression fails here rather than at the 300-second idle timeout.
+            let frame = tokio::time::timeout(REFUSAL_WAIT, read_frame::<Frame, _>(&mut reader))
                 .await
+                .expect("the refusal must arrive promptly")
                 .expect("read a frame")
                 .expect("an answer");
             assert!(
@@ -5445,6 +5469,75 @@ done"#;
                 assert!(
                     output.starts_with("strands-box: cannot start in ") && !output.contains("RAN"),
                     "{directory:?} must be refused before the command runs: {output}"
+                );
+            }
+        }));
+    }
+
+    /// **A folder entered after the deadline runs nothing.** `timeout` polls the entry before its
+    /// timer, so a lookup that overran still finishes; the command must then not start. A zero
+    /// deadline has always passed once the entry returns, so this needs no real slowness. Repeated,
+    /// because without the check the command runs only when the Call happens to be polled first.
+    #[test]
+    fn a_run_whose_folder_entry_passes_the_deadline_runs_nothing() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            let sub = workspace.join("sub");
+            std::fs::create_dir(&sub).expect("a sub folder");
+            let (_dir, socket) = serving_socket(spec_with(
+                marker.path(),
+                DEFAULT_SHELL_TIMEOUT,
+                Duration::ZERO,
+            ));
+
+            for attempt in 0..20 {
+                let (mut reader, mut writer) = transport(&socket).await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Open {
+                        mode: Interpreter::Shell,
+                    },
+                )
+                .await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Run {
+                        command: Command::Text("printf RAN > ran.txt".to_string()),
+                        directory: sub.display().to_string(),
+                        correlation: Default::default(),
+                    },
+                )
+                .await;
+                let mut timed_out = false;
+                let status = loop {
+                    let frame =
+                        tokio::time::timeout(REFUSAL_WAIT, read_frame::<Frame, _>(&mut reader))
+                            .await
+                            .expect("the daemon must answer promptly")
+                            .expect("read a frame")
+                            .expect("an answer");
+                    match frame.body {
+                        Body::Denied {
+                            kind: DeniedKind::Timeout,
+                            ..
+                        } => timed_out = true,
+                        Body::Exit { status } => break status,
+                        Body::Output { .. } => {}
+                        other => panic!("attempt {attempt}: unexpected {other:?}"),
+                    }
+                };
+                assert!(
+                    timed_out,
+                    "attempt {attempt}: the deadline must be reported"
+                );
+                assert_eq!(status, BOUNDARY_FAILURE_STATUS, "attempt {attempt}");
+                assert!(
+                    !sub.join("ran.txt").exists(),
+                    "attempt {attempt}: a command past its deadline must not start"
                 );
             }
         }));

@@ -49,9 +49,9 @@ the engine decides a request and what a history rule can see.
 ### The broker
 
 The broker accepts connections from the alias on `run/box.sock` in the box directory. It checks
-the protocol version and routes each request by type. Strands Shell handles shell commands, Monty
-handles Python scripts, and the MCP broker handles requests to local MCP servers. The broker does
-not authorize requests itself.
+the protocol version and routes each request by type. Strands Shell handles shell commands and the
+`python3` and `python` aliases, and runs Python scripts in Monty. The MCP broker handles requests to
+local MCP servers. The broker does not authorize requests itself.
 
 The alias is part of the untrusted workload. The broker therefore treats its input as hostile, as
 described in [why interpreters run outside the workload](decisions.md#interpreters-are-brokered-aliases).
