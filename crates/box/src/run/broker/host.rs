@@ -3444,7 +3444,11 @@ done"#;
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
             let (_dir, socket) = serving_socket(connection_spec(marker.path()));
-            let out = marker.path().join("out");
+            let out = marker
+                .path()
+                .canonicalize()
+                .expect("marker resolves")
+                .join("out");
             let (_reader, mut writer) = transport(&socket).await;
             for id in 1..=5_u32 {
                 put(
@@ -3554,7 +3558,11 @@ done"#;
     async fn read_after_part(sent: &[String]) -> (i32, bool, Option<String>) {
         let marker = tempfile::tempdir().expect("marker");
         let (_dir, socket) = serving_socket(connection_spec(marker.path()));
-        let acted = marker.path().join("acted");
+        let acted = marker
+            .path()
+            .canonicalize()
+            .expect("marker resolves")
+            .join("acted");
         let (mut reader, mut writer) = transport(&socket).await;
         put(
             &mut writer,
@@ -4019,7 +4027,11 @@ done"#;
             );
             assert!(stderr.is_empty(), "{stderr}");
 
-            let ran = marker.path().join("ran");
+            let ran = marker
+                .path()
+                .canonicalize()
+                .expect("marker resolves")
+                .join("ran");
             let (mut reader, mut writer) = call_with_input(
                 &socket,
                 &oversized,
@@ -4060,7 +4072,11 @@ done"#;
             let mut spec = connection_spec(marker.path());
             Arc::get_mut(&mut spec).expect("one owner").max_stdin = 1000;
             let (_dir, socket) = serving_socket(spec);
-            let out = marker.path().join("out");
+            let out = marker
+                .path()
+                .canonicalize()
+                .expect("marker resolves")
+                .join("out");
             let source = format!(r#"x=$(cat); printf %s "${{#x}}" > {}"#, out.display());
             let (mut reader, _writer) = call_with_input(&socket, &[b'x'; 1000], &source).await;
             let (stderr, status) = stderr_and_status(&mut reader).await;
