@@ -798,7 +798,7 @@ mod tests {
 
     /// **The box's label table agrees with the policy adapter on every kernel verb listed here,
     /// no listed verb reaches `fs:other`, and `Locate` is no decision on either side.** The policy
-    /// crate's `tests/shell_fs_vocabulary.rs` pins the same lists against `box-shell`.
+    /// crate's `tests/shell_fs_vocabulary.rs` pins the same lists against `crates/shell`.
     #[tokio::test]
     async fn every_kernel_verb_labels_the_action_the_policy_adapter_decides() {
         const FS_OTHER: &str = r#"Box::Action::"fs:other""#;

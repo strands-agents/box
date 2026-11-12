@@ -9,7 +9,7 @@ resolver = "2"
 #
 members = [
     "crates/box",
-    "crates/box-shell",
+    "crates/shell",
     "crates/credentials",
     "crates/policy",
     "crates/containment",

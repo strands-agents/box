@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use box_shell::{EffectAttempt, EffectInterceptor, FsOperation, FsPairOperation};
 use policy::{Decision, DecisionObserver, GovernedBox, Policy, Principal, ShellPolicyInterceptor};
 
-const EFFECT_SOURCE: &str = include_str!("../../box-shell/src/effect.rs");
+const EFFECT_SOURCE: &str = include_str!("../../shell/src/effect.rs");
 
 const FS_OTHER: &str = r#"Box::Action::"fs:other""#;
 
@@ -216,12 +216,12 @@ fn variant_name(debug: &str) -> String {
         .collect()
 }
 
-/// The variant names of `pub enum <enum_name>` in `box-shell/src/effect.rs`.
+/// The variant names of `pub enum <enum_name>` in `crates/shell/src/effect.rs`.
 fn declared_variants(source: &str, enum_name: &str) -> BTreeSet<String> {
     let header = format!("pub enum {enum_name} {{\n");
     let start = source
         .find(&header)
-        .unwrap_or_else(|| panic!("`{header}` is declared in box-shell's effect.rs"))
+        .unwrap_or_else(|| panic!("`{header}` is declared in crates/shell/src/effect.rs"))
         + header.len();
     let body = &source[start..];
     let end = body.find("\n}").expect("the enum closes");

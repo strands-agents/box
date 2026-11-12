@@ -50,7 +50,7 @@ toml = "1"
 # `egress-adapter` target. `default-features = false` drops egress-gateway's TLS
 # stack; neither the rule nor the adapter contract needs a socket.
 strands-box-egress-gateway = { path = "../egress-gateway", default-features = false }
-box-shell = { package = "strands-box-shell", path = "../box-shell", optional = true }
+box-shell = { package = "strands-box-shell", path = "../shell", optional = true }
 # The Monty adapter targets, behind the default-off `script-adapter` feature. Published
 # crates, not vendored: the integration needs no interpreter change, so there is nothing
 # to carry a fork for. `monty` drives the run loop; `monty-types` carries the OS-call
