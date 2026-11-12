@@ -99,7 +99,7 @@ pub(crate) enum SignalKind {
 pub(crate) enum Interpreter {
     /// The Strands Shell — what every `zsh`, `bash`, `sh`, `python3`, and `python` alias reaches.
     Shell,
-    /// Monty directly, with no Shell decision. No alias opens it.
+    /// Monty without the Shell. Refused since version 9, so Python runs only through the Shell.
     Python,
     /// One MCP server, selected by the command the agent executed through its alias.
     Mcp {

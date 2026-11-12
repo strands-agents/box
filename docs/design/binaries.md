@@ -134,7 +134,8 @@ local MCP servers get neither the alias nor `bin/` on their `PATH`. The alias us
 name to select where its request goes. A shell name sends one command to Strands Shell. A Python
 name sends its name and its arguments, unchanged, to Strands Shell, whose own `python3` runs Monty.
 Both send the directory the alias was run from, and the broker starts the command there only after
-the decision a `cd` gets. For an MCP program name, the alias sends the arguments. `strands-box`
+the decision a `cd` gets. No alias asks for Monty directly, and the broker refuses a request that
+does. For an MCP program name, the alias sends the arguments. `strands-box`
 starts the server whose alias name and declared arguments match after policy permits it.
 The server's configured executable path remains separate from its alias name. See
 [MCP executable filenames name their aliases](decisions.md#mcp-executable-filenames-name-their-aliases).

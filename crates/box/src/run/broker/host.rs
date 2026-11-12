@@ -83,6 +83,10 @@ const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(10);
 /// The status of a `run` whose directory the box refused, the Shell's status for a refused effect.
 const DIRECTORY_REFUSED_STATUS: i32 = 126;
 
+/// Why an `open` in Python mode is refused.
+const PYTHON_MODE_REMOVED: &str = "the python mode was removed in protocol 9; the python3 alias \
+     sends a run to a Shell program, so Python runs only through the Shell";
+
 struct ConnectionTask<T> {
     task: Option<tokio::task::JoinHandle<T>>,
 }
@@ -842,8 +846,13 @@ async fn serve_transport(
                     }
                     // `Interpreter` is closed, so this match is exhaustive by construction and a new
                     // kind cannot be added without an exec-authority decision.
+                    //
+                    // **Python is refused: the Shell is the only way to Monty.** Version 9 aliases
+                    // send `run` to a Shell Program, so a `shell:exec` decision covers every route.
+                    // A Python Program ran Monty with no command decision, and only a client the
+                    // workload wrote itself could still open one.
                     if let Interpreter::Python = interpreter {
-                        python.insert(id);
+                        deny(&frames, id, DeniedKind::TransportError, PYTHON_MODE_REMOVED).await?;
                         continue;
                     }
                     // One MCP server, started outside the cage.
@@ -963,16 +972,6 @@ async fn serve_transport(
                     .await?;
                         continue;
                     }
-                    if python.contains(&id) && directory.is_some() {
-                        deny(
-                            &frames,
-                            id,
-                            DeniedKind::TransportError,
-                            "a Python program takes a call, not a run; a run goes to a Shell program",
-                        )
-                        .await?;
-                        continue;
-                    }
                     if python.contains(&id) {
                         let recorder = spec.recorder.for_request(correlation);
                         // Stateless, so it runs inline: there is no Program state a concurrent reader
@@ -1057,11 +1056,12 @@ async fn serve_transport(
                     let frames = frames.clone();
                     let finished = finished.clone();
                     let request_timeout = spec.request_timeout;
+                    let reach = Arc::clone(&spec.reach);
                     tokio::task::spawn_local(async move {
                         let status = correlation
                             .scope(run_call_in(
                                 &mut slot,
-                                directory.as_deref(),
+                                directory.as_deref().map(|directory| (directory, &*reach)),
                                 &source,
                                 id,
                                 request_timeout,
@@ -1398,18 +1398,38 @@ fn command_text(command: Command) -> String {
 /// Enter `directory`, when one is given, and only then drive the Call.
 ///
 /// A directory the Program can't enter runs nothing: the refusal goes to stderr, and the status is
-/// [`DIRECTORY_REFUSED_STATUS`].
+/// [`DIRECTORY_REFUSED_STATUS`]. Entering counts against the Call's deadline.
 async fn run_call_in(
     slot: &mut ProgramSlot,
-    directory: Option<&str>,
+    directory: Option<(&str, &Reach)>,
     command: &str,
     id: ProgramId,
     request_timeout: Option<Duration>,
     frames: &tokio::sync::mpsc::Sender<OutboundFrame>,
 ) -> io::Result<i32> {
-    if let Some(directory) = directory
-        && let Err(error) = slot.program.enter(directory).await
-    {
+    let Some((directory, reach)) = directory else {
+        return run_call(slot, command, id, request_timeout, frames).await;
+    };
+    let started = tokio::time::Instant::now();
+    let entered = match request_timeout {
+        Some(timeout) => {
+            match tokio::time::timeout(timeout, slot.program.enter(directory, reach)).await {
+                Ok(entered) => entered,
+                Err(_) => {
+                    deny(
+                        frames,
+                        id,
+                        DeniedKind::Timeout,
+                        "the call exceeded its deadline",
+                    )
+                    .await?;
+                    return Ok(BOUNDARY_FAILURE_STATUS);
+                }
+            }
+        }
+        None => slot.program.enter(directory, reach).await,
+    };
+    if let Err(error) = entered {
         // Through the Program's output budget and chunking, because the directory is the
         // caller's own text and can be as long as a frame.
         let refusal = format!("strands-box: cannot start in {directory}: {error}\n");
@@ -1424,7 +1444,8 @@ async fn run_call_in(
         flush(frames, id, &mut pending).await?;
         return Ok(DIRECTORY_REFUSED_STATUS);
     }
-    run_call(slot, command, id, request_timeout, frames).await
+    let remaining = request_timeout.map(|timeout| timeout.saturating_sub(started.elapsed()));
+    run_call(slot, command, id, remaining, frames).await
 }
 
 /// Drive one Call, forwarding output as it is produced.
@@ -4627,17 +4648,18 @@ done"#;
         }));
     }
 
-    /// **A Python Program refuses `Input`, `InputEof` and `Signal` by name.**
+    /// **An `open` in Python mode is refused, so the Shell is the only way to Monty.**
     ///
-    /// A Python Program lives in its own set and `control_for` consults only `programs` and
-    /// `running`, so `Input` answered "transport program 3 is not open" for a Program that was open,
-    /// and `InputEof` and `Signal` were dropped in silence — no way to interrupt a running script and
-    /// no frame saying so. Nothing covered any of the three.
+    /// A Python Program ran Monty with no `shell:exec` decision, so a policy that forbids
+    /// `shell:exec` on `python3` did not stop a client the workload wrote itself. Nothing is opened:
+    /// a `call` for the same id is refused as not open and runs nothing, and the connection keeps
+    /// serving a Shell Program.
     #[test]
-    fn a_python_program_refuses_input_and_signal_by_name() {
+    fn an_open_in_python_mode_is_refused_and_runs_nothing() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
             let (_dir, socket) = serving_socket(connection_spec(marker.path()));
             let (mut reader, mut writer) = transport(&socket).await;
 
@@ -4649,38 +4671,65 @@ done"#;
                 },
             )
             .await;
+            let frame = read_frame::<Frame, _>(&mut reader)
+                .await
+                .expect("read a frame")
+                .expect("an answer");
+            assert_eq!(frame.program, 3);
+            assert!(
+                matches!(
+                    frame.body,
+                    Body::Denied { kind: DeniedKind::TransportError, ref reason }
+                        if reason.contains("python mode was removed")
+                ),
+                "an open in Python mode must be refused by name: {frame:?}"
+            );
 
-            for body in [
-                Body::Input {
-                    data: encode_payload(b"ignored"),
+            put(
+                &mut writer,
+                3,
+                Body::Call {
+                    source: "open('ran.txt', 'w').write('RAN')".to_string(),
+                    correlation: Default::default(),
                 },
-                Body::InputEof,
-                Body::Signal {
-                    kind: SignalKind::Interrupt,
+            )
+            .await;
+            let frame = read_frame::<Frame, _>(&mut reader)
+                .await
+                .expect("read a frame")
+                .expect("an answer");
+            assert!(
+                matches!(
+                    frame.body,
+                    Body::Denied { kind: DeniedKind::TransportError, ref reason }
+                        if reason.contains("not open")
+                ),
+                "a call for the refused id must find nothing open: {frame:?}"
+            );
+            assert!(
+                !workspace.join("ran.txt").exists(),
+                "the refused Program must run nothing"
+            );
+
+            put(
+                &mut writer,
+                4,
+                Body::Open {
+                    mode: Interpreter::Shell,
                 },
-            ] {
-                let named = format!("{body:?}");
-                put(&mut writer, 3, body).await;
-                let outcome = read_frame::<Frame, _>(&mut reader).await;
-                let Ok(Some(frame)) = outcome else {
-                    panic!("{named} must be answered, not dropped: {outcome:?}");
-                };
-                match frame.body {
-                    Body::Denied { kind, reason } => {
-                        assert_eq!(kind, DeniedKind::TransportError, "{named}");
-                        assert!(
-                            !reason.contains("not open"),
-                            "{named}: the Program IS open; that message was the defect: {reason}"
-                        );
-                        assert!(
-                            reason.contains("no input") || reason.contains("no signal"),
-                            "{named}: the refusal must say what a Python program does not take: \
-                             {reason}"
-                        );
-                    }
-                    other => panic!("{named} must be refused by name, got {other:?}"),
-                }
-            }
+            )
+            .await;
+            put(
+                &mut writer,
+                4,
+                Body::Call {
+                    source: "printf still_serving".to_string(),
+                    correlation: Default::default(),
+                },
+            )
+            .await;
+            let (output, status) = collect(&mut reader, 4).await;
+            assert_eq!((output.as_str(), status), ("still_serving", 0));
         }));
     }
 
@@ -5355,6 +5404,10 @@ done"#;
 
     /// A folder outside the reachable paths, a missing one, a file, a relative one, and one longer
     /// than an output chunk are each refused, and the command never runs.
+    ///
+    /// So are `/`, `/tmp`, and a `..` spelling that leaves the reachable paths: the Shell's
+    /// in-memory tree holds `/` and `/tmp`, and a policy permits `change_dir` on them, but a
+    /// command run there would read and write nothing on the host.
     #[test]
     fn a_folder_the_box_cannot_enter_is_refused_and_runs_nothing() {
         let (runtime, local) = runtime();
@@ -5376,6 +5429,15 @@ done"#;
                 PathBuf::from("relative"),
                 // Longer than one output chunk, so the refusal that names it is split.
                 PathBuf::from(format!("/{}", "d".repeat(200 * 1024))),
+                PathBuf::from("/"),
+                PathBuf::from("/tmp"),
+                PathBuf::from("/made/up/absolute"),
+                // Inside the reachable paths as spelled, and the in-memory `/tmp` once resolved.
+                PathBuf::from(format!(
+                    "{}{}/tmp",
+                    workspace.display(),
+                    "/..".repeat(workspace.components().count())
+                )),
             ] {
                 let (output, status) =
                     run_in(&socket, &directory, Command::Text("printf RAN".to_string())).await;
@@ -5385,48 +5447,6 @@ done"#;
                     "{directory:?} must be refused before the command runs: {output}"
                 );
             }
-        }));
-    }
-
-    /// A `run` goes to a Shell Program; a Python Program refuses it by name.
-    #[test]
-    fn a_python_program_refuses_a_run() {
-        let (runtime, local) = runtime();
-        runtime.block_on(local.run_until(async {
-            let marker = tempfile::tempdir().expect("marker");
-            let workspace = working_directory_of(&marker);
-            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
-            let (mut reader, mut writer) = transport(&socket).await;
-            put(
-                &mut writer,
-                1,
-                Body::Open {
-                    mode: Interpreter::Python,
-                },
-            )
-            .await;
-            put(
-                &mut writer,
-                1,
-                Body::Run {
-                    command: Command::Text("print(1)".to_string()),
-                    directory: workspace.display().to_string(),
-                    correlation: Default::default(),
-                },
-            )
-            .await;
-            let frame = read_frame::<Frame, _>(&mut reader)
-                .await
-                .expect("read a frame")
-                .expect("an answer");
-            assert!(
-                matches!(
-                    frame.body,
-                    Body::Denied { kind: DeniedKind::TransportError, ref reason }
-                        if reason.contains("not a run")
-                ),
-                "{frame:?}"
-            );
         }));
     }
 

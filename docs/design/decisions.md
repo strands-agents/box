@@ -1828,6 +1828,8 @@ the Shell exited 127, so an agent that reaches interpreters only through its she
 Monty.
 
 The Shell's deadline bounds both ways, and the Shell reads a script file argument under policy.
+The broker refuses a request that opens Monty without the Shell, so a `shell:exec` decision covers
+every route.
 
 <a id="a-bare-python-name-always-means-monty"></a>
 ### A bare `python` name always means Monty, so a host interpreter needs its absolute path

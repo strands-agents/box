@@ -47,6 +47,8 @@ The agent reaches Monty two ways: the harness runs the `python3` or `python` ali
 parses no option. It sends its name, its arguments, and the directory it was run from to the broker.
 The broker quotes each argument as one literal word and runs the command in Strands Shell, in that
 directory. See [a workload reaches Monty two ways](decisions.md#python-in-the-shell-is-monty).
+The broker refuses a request that asks for Monty without the Shell, so no route skips these
+decisions:
 
 - The command takes a `shell:exec` decision, with `program` set to the name the agent ran.
 - Strands Shell reads a script file from the command's directory, and policy decides an `fs:read`

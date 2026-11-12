@@ -15,6 +15,7 @@ use strands_shell::os::{STDERR, STDIN, STDOUT};
 use tokio::sync::mpsc;
 
 use super::protocol::{MAX_CALL_OUTPUT_BYTES, MAX_CHUNK_BYTES, Stream};
+use super::reach::Reach;
 
 /// The stdin channel depth. One frame in flight is enough; the client waits for progress.
 const INPUT_CHANNEL_DEPTH: usize = 16;
@@ -112,19 +113,30 @@ impl Program {
     /// Move into `directory` through the decision a `cd` gets, unless the Program is already there.
     ///
     /// Like `cd`, a move sets `OLDPWD` and `PWD`. A refusal leaves the working directory unchanged.
-    pub(crate) async fn enter(&mut self, directory: &str) -> io::Result<()> {
-        if self.shell.proc.cwd == std::path::Path::new(directory) {
+    /// A folder that only the Shell's in-memory tree holds, such as its own `/tmp`, is refused both
+    /// as spelled and as resolved, because a command run there reads and writes nothing on the host.
+    pub(super) async fn enter(&mut self, directory: &str, reach: &Reach) -> io::Result<()> {
+        let spelled = std::path::Path::new(directory);
+        if self.shell.proc.cwd == spelled {
             return Ok(());
         }
-        if !std::path::Path::new(directory).is_absolute() {
+        if !spelled.is_absolute() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "the directory is not an absolute path",
             ));
         }
-        let previous = self.shell.proc.cwd.to_string_lossy().into_owned();
+        if !reach.names_a_host_path(spelled) {
+            return Err(no_host_folder());
+        }
+        let before = self.shell.proc.cwd.clone();
         let kernel = Arc::clone(self.shell.kernel());
         kernel.change_dir(&mut self.shell.proc, directory).await?;
+        if !reach.names_a_host_path(&self.shell.proc.cwd) {
+            self.shell.proc.cwd = before;
+            return Err(no_host_folder());
+        }
+        let previous = before.to_string_lossy().into_owned();
         let current = self.shell.proc.cwd.to_string_lossy().into_owned();
         self.shell.proc.set_env("OLDPWD", previous);
         self.shell.proc.set_env("PWD", current);
@@ -180,6 +192,14 @@ impl ProgramOutput {
         }
         DrainOutcome::Within
     }
+}
+
+/// A folder outside the operator's home, the agent's home, and the workspace.
+fn no_host_folder() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "outside this box's home and every declared bind",
+    )
 }
 
 /// A `ProgramControl` lock poisoned by a panic in another holder.

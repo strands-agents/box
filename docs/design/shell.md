@@ -38,10 +38,13 @@ quotes each argument as one literal word before the Shell parses the command. In
 not persist between requests, so a variable exported in one `zsh -c` is unset in the next.
 
 The Shell starts each command in the workspace. When the alias sends another directory, the broker
-moves the Shell there through the same `fs:read` decision, with operation `change_dir`, and the same
-reachable paths check that a `cd` gets. If either refuses, or the path isn't a directory, the
-command doesn't run. The alias doesn't fall back to the workspace: when it can't tell which
-directory it was run from, it refuses to send the command.
+moves the Shell there through the same `fs:read` decision, with operation `change_dir`, that a `cd`
+gets. The broker also refuses a directory outside the operator's home, the agent's home, and the
+workspace, both as the alias spelled it and as the Shell resolved it. The Shell holds `/`, `/tmp`,
+and a few other directories only in memory, so a command run in one of them would read and write
+nothing on the host. If policy refuses, the directory is outside those three, or the path isn't a
+directory, the command doesn't run. The alias doesn't fall back to the workspace: when it can't
+tell which directory it was run from, it refuses to send the command.
 
 ## How the Shell decides a command
 

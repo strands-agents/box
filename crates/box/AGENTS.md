@@ -534,7 +534,11 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   the box's one Policy.** The workload reaches Monty two ways — the `python3` alias, which sends its
   name and arguments to the Shell, and a `python`/`python3` command inside the Shell
   ([Monty two ways](../../docs/design/decisions.md#python-in-the-shell-is-monty)) — and both reach
-  the Shell's own `python3`, judged on the same `Arc<PolicyEngine>`. There is **one `Policy` per box** ([one policy
+  the Shell's own `python3`, judged on the same `Arc<PolicyEngine>`. **`Open { mode: Python }` is
+  refused at protocol 9**: it ran Monty with no `shell:exec` decision, so a forbid on `python3`
+  didn't stop a socket client the workload wrote. `an_open_in_python_mode_is_refused_and_runs_nothing`
+  pins it. Its serving code in `host.rs` and `python::run_python` is unreachable and kept, because
+  deleting it also retires `REQUEST_TIMEOUT` and the `fetch.rs` ordering check. There is **one `Policy` per box** ([one policy
   engine](../../docs/design/decisions.md#one-policy-engine-per-box)): `broker/host` owns the one
   socket and its listener, and `broker/shell` builds the Shell on the same `Arc<PolicyEngine>` the
   egress gateway holds. The Shell is built **per connection** ([no state crosses a
@@ -553,13 +557,16 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     requests at a socket it controls.
   - **Every alias sends its working directory, and the broker decides it.** The `run` frame
     carries the directory the alias was run from. `Program::enter` moves the Shell there through
-    `Mediated::change_dir`, the same `fs:read` `change_dir` decision and reachable paths check a
-    typed `cd` gets, and takes no decision when the Program is already there, so a file-scoped
-    policy still runs a `zsh -c` from the workspace. A refused directory runs nothing and exits
-    126. The directory never selects the socket. An alias that can't tell its directory exits 125
+    `Mediated::change_dir`, the same `fs:read` `change_dir` decision a typed `cd` gets, and takes
+    no decision when the Program is already there, so a file-scoped policy still runs a `zsh -c`
+    from the workspace. It also refuses a directory `Reach::names_a_host_path` doesn't back, both
+    as spelled and as resolved: the reachable paths check passes a name no host path backs, and the
+    Shell's in-memory tree holds `/` and `/tmp`, so a command would run there and touch nothing on
+    the host. A refused directory runs nothing and exits 126. The directory never selects the socket. An alias that can't tell its directory exits 125
     rather than letting the command run in the workspace.
     `only_a_folder_other_than_the_programs_own_meets_the_change_dir_decision` and
-    `a_folder_the_box_cannot_enter_is_refused_and_runs_nothing` pin it.
+    `a_folder_the_box_cannot_enter_is_refused_and_runs_nothing` pin it, including `/`, `/tmp`,
+    and a `..` spelling that resolves into the in-memory tree.
   - **A Python alias sends words, and only the trusted process quotes them.** `python3` and
     `python` send their name and arguments as a list; `command_text` single-quotes every word
     before the Shell parses it, so `$(…)`, backticks, and a newline in an argument stay literal.
