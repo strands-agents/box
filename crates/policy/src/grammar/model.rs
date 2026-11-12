@@ -94,7 +94,16 @@ pub(crate) enum OptionValue {
     None,
     Required,
     Optional,
+    OptionalNext,
+    Boolean,
     Many,
+}
+
+impl OptionValue {
+    /// Whether the option records a Bool and not the words it takes.
+    pub(crate) fn is_flag(self) -> bool {
+        matches!(self, Self::None | Self::Boolean)
+    }
 }
 
 /// The patterns an option or operand value is like, and the declared effects it adds or removes.
@@ -280,12 +289,14 @@ impl ShellOption {
             ValueSpec::None => OptionValue::None,
             ValueSpec::Required => OptionValue::Required,
             ValueSpec::Optional => OptionValue::Optional,
+            ValueSpec::OptionalNext => OptionValue::OptionalNext,
+            ValueSpec::Boolean => OptionValue::Boolean,
             ValueSpec::Many => OptionValue::Many,
         };
-        if value == OptionValue::None && (!spec.like.is_empty() || !spec.when.is_empty()) {
+        if value.is_flag() && (!spec.like.is_empty() || !spec.when.is_empty()) {
             return refuse(OptionFault::PatternWithoutValue);
         }
-        if value == OptionValue::None && spec.repeated {
+        if value.is_flag() && spec.repeated {
             return refuse(OptionFault::RepeatedWithoutValue);
         }
         if spec.anywhere && !global {

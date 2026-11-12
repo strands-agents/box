@@ -327,7 +327,7 @@ fn option_field((name, option): (&String, &ShellOption)) -> Field {
     Field {
         name: name.clone(),
         kind: match option.value {
-            OptionValue::None => FieldKind::Bool,
+            OptionValue::None | OptionValue::Boolean => FieldKind::Bool,
             OptionValue::Many => FieldKind::Set,
             _ if option.repeated => FieldKind::Set,
             _ => FieldKind::String,

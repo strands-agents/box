@@ -1,6 +1,6 @@
 //! Fuzz tests: argvs built from each valid grammar's vocabulary, held to the parser's invariants.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -35,6 +35,12 @@ const SAMPLE_VALUES: &[&str] = &[
     "\\*",
     "é",
     "\u{0}",
+    "true",
+    "false",
+    "no",
+    "FALSE",
+    "f",
+    "1",
 ];
 
 /// One valid grammar, and the words a generated argv for it draws from.
@@ -45,6 +51,9 @@ struct Fixture {
     flags: Vec<String>,
     values: Vec<String>,
     switches: Vec<char>,
+    booleans: Vec<String>,
+    optional_next: Vec<String>,
+    fields: BTreeMap<String, BTreeSet<String>>,
     short: char,
     undeclared: Vec<String>,
     seeds: Vec<Vec<String>>,
@@ -121,16 +130,36 @@ impl Fixture {
                 .flat_map(|action| [&action.between, &action.after]),
         );
         let mut takes_value = BTreeSet::new();
+        let mut modes: BTreeMap<String, Vec<OptionValue>> = BTreeMap::new();
+        let mut fields: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for table in tables {
             flags.extend(table.flags.keys().cloned());
             takes_value.extend(
                 table
                     .flags
                     .iter()
-                    .filter(|(_, slot)| slot.value != OptionValue::None)
+                    .filter(|(_, slot)| !slot.value.is_flag())
                     .map(|(flag, _)| flag.clone()),
             );
+            for (flag, slot) in &table.flags {
+                modes.entry(flag.clone()).or_default().push(slot.value);
+                fields
+                    .entry(flag.clone())
+                    .or_default()
+                    .insert(slot.field.clone());
+            }
         }
+        let only = |mode: OptionValue| -> Vec<String> {
+            modes
+                .iter()
+                .filter(|(flag, values)| {
+                    flag.starts_with("--") && values.iter().all(|value| *value == mode)
+                })
+                .map(|(flag, _)| flag.clone())
+                .collect()
+        };
+        let booleans = only(OptionValue::Boolean);
+        let optional_next = only(OptionValue::OptionalNext);
         let switches: Vec<char> = flags
             .iter()
             .filter(|flag| !takes_value.contains(*flag))
@@ -176,6 +205,9 @@ impl Fixture {
             flags: flags.into_iter().collect(),
             values: values.into_iter().collect(),
             switches,
+            booleans,
+            optional_next,
+            fields,
             short: *short,
             undeclared,
             seeds,
@@ -378,6 +410,7 @@ fn check(fixture: &Fixture, argv: &[String]) {
             );
         }
     }
+    value_modes(fixture, argv, &parsed, &at);
     for (position, word) in argv.iter().enumerate() {
         for cluster in in_cluster(fixture, word) {
             if argv.iter().any(|other| other.contains(cluster.as_str())) {
@@ -392,6 +425,80 @@ fn check(fixture: &Fixture, argv: &[String]) {
                 "{at}: {cluster} at {position} is read as options and gives {read:?}"
             );
         }
+    }
+}
+
+/// Assert that each spelling of a `boolean` or `optional-next` value reads as the attached one.
+fn value_modes(fixture: &Fixture, argv: &[String], parsed: &Parsed, at: &str) {
+    if *parsed == Parsed::Unmodeled {
+        return;
+    }
+    let shell = fixture.grammar.shell();
+    let once = |flag: &String| argv.iter().filter(|word| *word == flag).count() == 1;
+    let spliced = |position: usize, length: usize, words: &[String]| {
+        let mut changed = argv.to_vec();
+        changed.splice(position..position + length, words.iter().cloned());
+        changed
+    };
+    let shares_field = |position: usize, word: &String| {
+        let Some(mine) = fixture.fields.get(word) else {
+            return false;
+        };
+        argv.iter().enumerate().any(|(other, spelled)| {
+            other != position
+                && spellings(spelled)
+                    .iter()
+                    .filter_map(|flag| fixture.fields.get(flag))
+                    .any(|theirs| !theirs.is_disjoint(mine))
+        })
+    };
+    for (position, word) in argv.iter().enumerate() {
+        if held(parsed, word) || !once(word) || shares_field(position, word) {
+            continue;
+        }
+        let next = argv.get(position + 1);
+        if fixture.booleans.contains(word)
+            && !next.is_some_and(|next| super::parse::boolean_word(next))
+        {
+            let attached = |value: &str| spliced(position, 1, &[format!("{word}={value}")]);
+            let truth = [
+                attached("true"),
+                spliced(position, 1, &[word.clone(), "true".to_string()]),
+            ];
+            for changed in truth {
+                assert_eq!(shell.parse(&changed), *parsed, "{at}: {changed:?}");
+            }
+            let attached_false = shell.parse(&attached("false"));
+            let changed = spliced(position, 1, &[word.clone(), "false".to_string()]);
+            let next_false = shell.parse(&changed);
+            assert_eq!(next_false, attached_false, "{at}: {changed:?}");
+            if let Parsed::Action { fields, .. } = &next_false {
+                for name in &fixture.fields[word] {
+                    if let Some(value) = fields.get(name) {
+                        assert_eq!(*value, FieldValue::Bool(false), "{at}: {changed:?}");
+                    }
+                }
+            }
+        }
+        if fixture.optional_next.contains(word)
+            && let Some(next) = next
+            && !next.starts_with('-')
+        {
+            let changed = spliced(position, 2, &[format!("{word}={next}")]);
+            assert_eq!(shell.parse(&changed), *parsed, "{at}: {changed:?}");
+        }
+    }
+}
+
+/// Each flag that `word` can spell: a long flag before any `=`, or each letter of a cluster.
+fn spellings(word: &str) -> Vec<String> {
+    if let Some(long) = word.strip_prefix("--") {
+        let name = long.split_once('=').map_or(long, |(name, _)| name);
+        vec![format!("--{name}")]
+    } else if let Some(letters) = word.strip_prefix('-') {
+        letters.chars().map(|letter| format!("-{letter}")).collect()
+    } else {
+        Vec::new()
     }
 }
 

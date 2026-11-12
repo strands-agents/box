@@ -578,4 +578,19 @@ mod tests {
         assert_eq!(at_version("git", 2).namespace(), "Tool::git::v2");
         assert_eq!(at_version("git", 13).namespace(), "Tool::git::v13");
     }
+
+    #[test]
+    fn a_boolean_option_types_as_bool_and_an_optional_next_option_as_string() {
+        let path = Path::new(GRAMMARS)
+            .join("corpus")
+            .join("value-modes.grammar.toml");
+        let schema = Grammar::load(&path)
+            .expect("the fixture grammar loads")
+            .schema();
+
+        assert!(schema.contains(r#""dry_run": Bool"#), "{schema}");
+        assert!(schema.contains(r#""debug": Bool"#), "{schema}");
+        assert!(schema.contains(r#""tag"?: String"#), "{schema}");
+        assert!(schema.contains(r#""bin"?: String"#), "{schema}");
+    }
 }
