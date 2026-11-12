@@ -47,11 +47,10 @@ pub(crate) enum UsageFault {
     CommandWordOutOfPlace(String),
     #[error("has {0:?}, which is not a command word, an operand `<name>`, or `--`")]
     UnknownWord(String),
-    #[error(
-        "has {0:?}, which has no lowercase letter, so it is not a command word; write an operand as `<{lower}>`",
-        lower = .0.to_ascii_lowercase()
-    )]
+    #[error("{}", uppercase_word(.0))]
     UppercaseWord(String),
+    #[error("has `[{written}]`; write `[{lowercase}]`")]
+    UppercaseOptions { written: String, lowercase: String },
     #[error("has option {0:?}; declare it in `options`, and write `[options]` in the usage")]
     InlineOption(String),
     #[error("puts `[global options]` after the command words")]
@@ -142,6 +141,16 @@ fn tokenize(usage: &str) -> Result<Vec<Node>, UsageFault> {
     }
 }
 
+fn uppercase_word(word: &str) -> String {
+    let lowercase = word.to_ascii_lowercase();
+    let advice = if is_identifier(&lowercase) {
+        format!("write an operand as `<{lowercase}>`")
+    } else {
+        "write an operand as `<name>`".to_string()
+    };
+    format!("has {word:?}, which has no lowercase letter, so it is not a command word; {advice}")
+}
+
 fn placeholder(word: &str) -> Option<(&str, bool)> {
     let (inner, variadic) = match word.strip_suffix("...") {
         Some(inner) => (inner, true),
@@ -212,6 +221,14 @@ impl Walker {
                 Node::Group(_) => None,
             })
             .collect();
+        let written = words.join(" ");
+        let lowercase = written.to_ascii_lowercase();
+        if group.len() == words.len()
+            && written != lowercase
+            && (lowercase == "options" || lowercase == "global options")
+        {
+            return Err(UsageFault::UppercaseOptions { written, lowercase });
+        }
         match (words.as_slice(), group.len()) {
             (["global", "options"], 2) => {
                 if self.phase != Phase::Before {
