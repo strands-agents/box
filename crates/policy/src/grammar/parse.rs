@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::model::{EffectChanges, EffectName, OptionValue, command_word};
+use super::model::{EffectChanges, EffectName, OptionValue};
 use super::shell_grammar::{
     ActionGrammar, FieldKind, FieldSource, FieldValue, OptionTable, Parsed, ShellGrammar,
 };
@@ -116,7 +116,7 @@ impl ActionGrammar {
             && before
                 .first()
                 .or(after.first())
-                .is_some_and(|word| command_word(word))
+                .is_some_and(|word| like_a_command(word))
         {
             return None;
         }
@@ -196,6 +196,15 @@ fn spelled(
         index += 1;
     }
     Some(index)
+}
+
+/// Whether `word` could name a subcommand: ASCII letters, digits, `-`, and `_`, and not first a `-`.
+fn like_a_command(word: &str) -> bool {
+    !word.starts_with('-')
+        && !word.is_empty()
+        && word
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
 }
 
 fn is_option_word(word: &str) -> bool {
