@@ -97,6 +97,10 @@ pub(crate) enum GrammarRefusal {
         "{place}: `rest` needs this operand alone in the usage, written as `<name>...` and not after a required `--`"
     )]
     BadRest { place: Place },
+    #[error(
+        "{place}: pattern {pattern:?} starts with `+`, but a `[+<name>]` word is matched without its `+`"
+    )]
+    ToolchainPattern { place: Place, pattern: String },
     #[error("{place}: two fields have the name {field:?}")]
     FieldTaken { place: Place, field: String },
     #[error("{place}: the name is reserved for a command that no action matches")]
@@ -228,6 +232,7 @@ impl GrammarRefusal {
             | Self::OptionsNotInUsage { place }
             | Self::OperandNotInUsage { place }
             | Self::BadRest { place }
+            | Self::ToolchainPattern { place, .. }
             | Self::FieldTaken { place, .. }
             | Self::ReservedAction { place }
             | Self::ReservedField { place, .. }

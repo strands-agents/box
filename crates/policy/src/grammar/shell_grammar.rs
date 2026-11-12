@@ -254,6 +254,19 @@ impl ActionGrammar {
                     place: operand_place(toolchain),
                 });
             }
+            if let Some(pattern) = declared.and_then(|operand| {
+                let changes = &operand.effects;
+                changes
+                    .like
+                    .iter()
+                    .chain(changes.when.iter().flat_map(|when| &when.like))
+                    .find(|pattern| pattern.starts_with('+'))
+            }) {
+                return Err(GrammarRefusal::ToolchainPattern {
+                    place: operand_place(toolchain),
+                    pattern: pattern.clone(),
+                });
+            }
             fields.push(Field {
                 name: toolchain.clone(),
                 kind: FieldKind::String,

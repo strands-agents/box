@@ -89,7 +89,7 @@ The keys:
 | `shell.<action>.usage` | The action's command line. Each `<name>` is an operand, and `<name>...` takes more than one word. `[+<name>]` directly after the program reads a word such as `+beta`, as in `cargo +beta build`, into the field `name` without its `+`. |
 | `shell.<action>.adds` | The effects that every spelling of the action has. |
 | `shell.<action>.options` | The options the action accepts, each with its `flag` spellings. An option with no `value` is a flag. |
-| `shell.<action>.operands` | Effects for an operand that `usage` names, and for its `[+<name>]` word. `like` is a pattern: `like = "+*"` matches a refspec that starts with `+`. A pattern for a `[+<name>]` word leaves out the `+`, so `like = "nightly*"` matches `+nightly-2026-01-01`. |
+| `shell.<action>.operands` | Effects for an operand that `usage` names, and for its `[+<name>]` word. `like` is a pattern: `like = "+*"` matches a refspec that starts with `+`. A pattern for a `[+<name>]` word leaves out the `+`, so `like = "nightly*"` matches `+nightly-2026-01-01`, and a pattern that starts with `+` is refused. |
 
 An option or an operand adds effects with `adds`, and takes them away with `removes`.
 
