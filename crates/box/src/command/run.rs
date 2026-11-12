@@ -16,6 +16,7 @@ use crate::record::layout::BoxRoot;
 use crate::run::commands::ConfiguredCommands;
 use crate::run::contain::boundary::{
     Boundary, EgressMode, Launch, RuntimeReach, ShebangInterpreters, Site,
+    native_file_watching_disclosure,
 };
 use crate::run::contain::supervise::Contained;
 use crate::run::hosted::HostedBox;
@@ -284,7 +285,7 @@ async fn hosted(
         )?;
         eprintln!("{}", boundary.disclosure());
     }
-    for label in locked.record.contained_mcp.keys() {
+    for (label, contained) in &locked.record.contained_mcp {
         let table = format!("[mcp.{label}]");
         let reach = hosted
             .approved()
@@ -295,6 +296,9 @@ async fn hosted(
         eprintln!("strands-box: {table} starts on demand; approved direct filesystem grants:");
         for grant in &reach.grants {
             eprintln!("{}", grant.disclosure());
+        }
+        if cfg!(target_os = "macos") && contained.spec.native_file_watching {
+            eprintln!("{}", native_file_watching_disclosure(&table));
         }
     }
     let boundary = Boundary::translate(

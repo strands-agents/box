@@ -289,6 +289,8 @@ interpreters are part of the code the operator must trust.
    sandbox that states which attributes its write grants can set.
    A process that selects `native-file-watching` also gets a disclosure that FSEvents can expose
    denied names and event metadata, including outside the workspace and from past events.
+   Box prints this warning for selected stdio MCP servers before the agent starts, even when those
+   servers are never requested, and repeats it when a server starts.
    The setting belongs to each process table; the agent's selection does not enable its tools or servers.
 
    On Linux, `interpreter aliases for configured access` lists preserved interpreter spellings

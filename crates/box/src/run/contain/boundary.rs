@@ -917,6 +917,14 @@ struct DisclosureInputs<'a> {
     native_filesystem_policy: bool,
 }
 
+pub(crate) fn native_file_watching_disclosure(table: &str) -> String {
+    format!(
+        "strands-box: {table} native file watching: macOS FSEvents may disclose denied names \
+         and event metadata, including outside the workspace and from past events; \
+         file-content and write restrictions still apply"
+    )
+}
+
 /// The text a box prints for one spec: its grants, selected policy checks, Core's own additions,
 /// and the effective `HOME` and `PATH`.
 fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
@@ -981,11 +989,7 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
         ));
     }
     if inputs.native_file_watching {
-        lines.push(format!(
-            "strands-box: {table} native file watching: macOS FSEvents may disclose denied names \
-             and event metadata, including outside the workspace and from past events; \
-             file-content and write restrictions still apply"
-        ));
+        lines.push(native_file_watching_disclosure(table));
     }
     if inputs.native_egress {
         let arguments = if table.starts_with("[tool.") {

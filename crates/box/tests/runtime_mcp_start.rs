@@ -135,6 +135,66 @@ fn unmatched_diagnostic(text: &str, program: &str) -> serde_json::Value {
 }
 
 #[test]
+fn native_file_watching_is_disclosed_before_an_unstarted_server_is_needed() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    for selection in [None, Some(false), Some(true)] {
+        let box_ = RuntimeMcpBox::new("mcp-watch-disclosure");
+        let watcher = Server::new("watcher", "watcher-mcp", "read", DiscoveryBehavior::Ready);
+        let other = Server::new("other", "other-mcp", "read", DiscoveryBehavior::Ready);
+        box_.install_server(&watcher);
+        box_.install_server(&other);
+        box_.write_workspace_as_authored(
+            &format!(
+                "{}\n{}",
+                start_permit_for("watcher-mcp"),
+                start_permit_for("other-mcp")
+            ),
+            &[watcher, other],
+            "printf 'AGENT_STARTED\\n' >&2",
+        );
+        if let Some(selected) = selection {
+            let path = box_.operator_home().join("workspace/.strands-box/box.toml");
+            let mut config: toml::Value =
+                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            config["mcp"]["watcher"].as_table_mut().unwrap().insert(
+                "native-file-watching".into(),
+                toml::Value::Boolean(selected),
+            );
+            std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
+        }
+        let output = box_.spawn().wait(BOX_STARTUP);
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(box_.invocation_count("watcher-mcp"), 0);
+        assert_eq!(box_.invocation_count("other-mcp"), 0);
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let agent = stderr.find("AGENT_STARTED").expect("the agent ran");
+        let warning = stderr.find("[mcp.watcher] native file watching:");
+        assert_eq!(
+            warning.is_some(),
+            selection == Some(true) && cfg!(target_os = "macos"),
+            "{stderr}"
+        );
+        if let Some(warning) = warning {
+            assert!(warning < agent, "{stderr}");
+            assert!(
+                stderr.contains("outside the workspace and from past events"),
+                "{stderr}"
+            );
+        }
+        assert!(
+            !stderr.contains("[agent] native file watching:"),
+            "{stderr}"
+        );
+        assert!(
+            !stderr.contains("[mcp.other] native file watching:"),
+            "{stderr}"
+        );
+    }
+}
+
+#[test]
 fn absent_start_permit_refuses_the_server_and_it_never_runs() {
     if !fixture::namespace_launcher_is_usable() {
         return;

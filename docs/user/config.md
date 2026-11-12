@@ -307,7 +307,8 @@ Use this option only when that metadata disclosure is acceptable.
 Keep it disabled when denied filenames or activity must remain confidential, and use the application's polling mode if available.
 Node directory watchers can report `EMFILE` when FSEvents is unavailable; this error does not necessarily mean that file descriptors are exhausted.
 
-On macOS, the startup disclosure names each selected process:
+On macOS, the startup disclosure names each selected process before the agent starts.
+This includes stdio MCP servers that remain unstarted; Box repeats their disclosure when they start.
 
 ```text
 strands-box: [tool.dev] native file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events; file-content and write restrictions still apply

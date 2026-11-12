@@ -1687,11 +1687,11 @@ account lookup and preference-service denials against successful outside control
 <a id="native-file-watching-requires-explicit-acceptance-of-metadata-disclosure"></a>
 ### Native file watching requires explicit acceptance of metadata disclosure
 
-Box permits macOS FSEvents only for a process whose table selects `native-file-watching = true`.
-The default remains off, and the agent's selection does not enable its tools or local MCP servers.
-Automatically permitting FSEvents for tools would restore directory watching without the operator accepting its metadata cost.
-Seatbelt direct-access denials do not fully filter FSEvents: a stream can disclose denied names and event metadata, including outside the workspace and from past events.
-On macOS, Box prints this limitation at startup for each selected process, while direct file-content and write restrictions remain in force.
+The approved `native-file-watching = true` option is an explicit exception to the four-inputs authority test because it grants access to event metadata that policy does not judge and that can extend beyond the process's filesystem grants.
+This exception accepts possible disclosure of denied names and event metadata, including outside the workspace and from past events; direct file-content and write restrictions remain in force.
+Box permits FSEvents only for each process table that opts in, so the default remains off and the agent's selection does not enable its tools or local MCP servers.
+Automatically permitting FSEvents for tools would restore directory watching without the operator accepting this additional authority.
+On macOS, Box discloses the limitation for every selected table before the agent starts, including stdio MCP servers that remain unstarted, and repeats the disclosure when a server starts.
 Linux retains its existing watcher behavior.
 
 ## Interpreters
