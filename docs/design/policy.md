@@ -46,11 +46,12 @@ its own lists name](decisions.md#a-tool-reaches-only-the-paths-its-own-lists-nam
 server runs contained](decisions.md#a-stdio-mcp-server-runs-contained). In the other direction, a
 `permit` never changes what the workload's own system calls reach.
 
-Strands Shell and Monty can access anything under the operator's home when policy permits it. An
-`fs:read` permit without a path condition therefore exposes `~/.ssh` and `~/.aws` through either
-interpreter. This is the product's widest exposure. The reachable paths check described below does
-not protect those paths. See [credential paths have no additional protection from the
-interpreters](decisions.md#no-credential-floor-sits-beneath-the-interpreters).
+Strands Shell and Monty can access anything under the operator's home when policy permits it,
+except a credential store. An `fs:read` permit without a path condition therefore exposes the
+operator's source and documents through either interpreter. This is the product's widest exposure.
+The reachable paths check described below refuses `~/.ssh`, `~/.aws`, and every other store the
+sandbox refuses. See [the interpreters meet the sandbox's credential
+floor](decisions.md#no-credential-floor-sits-beneath-the-interpreters).
 
 ## One engine, and it's the only authorizer
 
@@ -76,7 +77,9 @@ authority](decisions.md#the-authored-policy-is-the-only-decision-authority).
 
 - The reachable paths check runs in the Shell and Monty after the engine. It refuses the box
   directory, the `box.toml` and policy this run loaded, and anything outside the operator's home and
-  the workspace. It also refuses writes, deletion, replacement, and enclosing-path changes for
+  the workspace. It refuses every credential store the sandbox refuses, unless an
+  `[agent.filesystem]` `read` or `write` entry names that store, and it refuses a change to a
+  directory that holds a store. It also refuses writes, deletion, replacement, and enclosing-path changes for
   configured tool programs and the [installed trusted
   binaries](binaries.md#trampoline---strands-box-contain-trampoline). Reads of these files remain
   subject to policy. Policy decides first, so a counting rule still sees the attempt, and the

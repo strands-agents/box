@@ -92,10 +92,12 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   never judged. A case that needs more than a cell is a third `Match` variant.
 
   **`box` holds no list of its own.** Every grant it renders, from its floor or from
-  `[agent.filesystem]`, reaches `require_bounded_grant`. Two entry points serve it:
-  `home_relative_path_refusal` judges an authored `~/`-relative spelling before a home is known, and
+  `[agent.filesystem]`, reaches `require_bounded_grant`. Three entry points serve it:
+  `home_relative_path_refusal` judges an authored `~/`-relative spelling before a home is known,
   `validate_grant(path, operator_home, operation, scope)` judges one composed grant and reports a
-  named-exactly credential store in its `bool`. A refusal by a row carries the row's
+  named-exactly credential store in its `bool`, and `credential_store_anchors(home)` returns every
+  spelling of each store so the box's interpreter floor refuses the same set. `credential_store_path`
+  reads that function too, so the grant check and the interpreter floor read one store list. A refusal by a row carries the row's
   `ForbiddenClass`, which `ContainmentError::forbidden_class` returns. Two lists in two crates was the divergence this merge removed,
   and `the_floor_covers_every_credential_path_the_pack_loader_held` is the guard. One case table,
   `the_list_refuses_what_it_claims_and_renders_what_it_must`, pins every classification; a per-entry
