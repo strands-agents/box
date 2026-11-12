@@ -128,8 +128,8 @@ Box works out a box's reach in four steps:
 
 ### The process specification
 
-`[agent]` and each `[tool.<name>]` hold the same four fields, and a stdio `[mcp.<name>]` entry holds
-the same four plus `network`. One translator turns each of them into a set of sandbox grants. See
+`[agent]`, each `[tool.<name>]`, and each stdio `[mcp.<name>]` share the process fields below.
+One translator turns each of them into a set of sandbox grants. See
 [one process specification and one translator](decisions.md#one-process-spec-and-one-translator).
 
 - `command` names the program and its fixed leading arguments.
@@ -264,6 +264,23 @@ decision](decisions.md#a-write-root-sets-file-attributes-only-when-selected) rec
 the switch.
 
 Linux renders nothing for this switch.
+
+### Native file watching on macOS
+
+FSEvents is unavailable unless the operator selects `native-file-watching` for that process.
+The selection adds one Mach lookup grant for `com.apple.FSEvents`.
+It changes no direct filesystem grant and adds no other service lookup.
+The agent, each tool, and each local MCP server select it independently.
+Descendants running within that sandbox receive the same service access.
+Linux ignores this selection.
+
+We make this access [an explicit process choice](decisions.md#native-file-watching-requires-explicit-acceptance-of-metadata-disclosure)
+because permitting the service does not constrain its subscriptions to declared filesystem grants.
+FSEvents can disclose denied names and event metadata for removed or renamed paths and some historical paths.
+An ancestor subscription can extend that disclosure outside the workspace.
+The event stream bypasses `fs:*` policy decisions, including experimental native filesystem mediation.
+Direct content and write checks still apply, but they do not provide filename or activity confidentiality through this service.
+The [configuration reference](../user/config.md#native-file-watching) gives the option and its startup disclosure.
 
 ### Linux root sandbox launches
 

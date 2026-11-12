@@ -1197,6 +1197,7 @@ mod linked_command_mutation_tests {
             tool: BTreeMap::from([(
                 "reader".to_string(),
                 ProcessSpec {
+                    native_file_watching: false,
                     native_filesystem_policy: None,
                     command: vec![command.display().to_string()],
                     workspace: None,

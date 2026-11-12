@@ -14,6 +14,32 @@ const CROSS_CWD_CONFIG_ENV: &str = "STRANDS_BOX_CONTAINMENT_CROSS_CWD_CONFIG_48A
 const CROSS_CWD_TARGET_ENV: &str = "STRANDS_BOX_CONTAINMENT_CROSS_CWD_TARGET_48A46E9E6D4F4C3A";
 
 #[test]
+fn native_file_watching_is_off_in_old_wire_and_preserved_when_selected() {
+    let old = ContainmentConfig::new().to_json().unwrap();
+    assert!(!old.contains("native_file_watching"));
+    assert_eq!(
+        ContainmentConfig::from_json(&old)
+            .unwrap()
+            .to_json()
+            .unwrap(),
+        old
+    );
+    let selected = ContainmentConfig::new()
+        .allow_native_file_watching()
+        .to_json()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&selected).unwrap();
+    assert_eq!(value["native_file_watching"], true);
+    assert_eq!(
+        ContainmentConfig::from_json(&selected)
+            .unwrap()
+            .to_json()
+            .unwrap(),
+        selected
+    );
+}
+
+#[test]
 fn defaults_are_deny_first_and_isolated() {
     let config = ContainmentConfig::new();
     let config_json: serde_json::Value =

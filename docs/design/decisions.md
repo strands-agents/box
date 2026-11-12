@@ -1684,6 +1684,16 @@ gains neither `net.*` reads nor a routing socket, while tool and MCP server sand
 in gain no lookup. `account_lookup_is_allowed_but_preferences_services_remain_denied` checks live
 account lookup and preference-service denials against successful outside controls.
 
+<a id="native-file-watching-requires-explicit-acceptance-of-metadata-disclosure"></a>
+### Native file watching requires explicit acceptance of metadata disclosure
+
+Box permits macOS FSEvents only for a process whose table selects `native-file-watching = true`.
+The default remains off, and the agent's selection does not enable its tools or local MCP servers.
+Automatically permitting FSEvents for tools would restore directory watching without the operator accepting its metadata cost.
+Seatbelt direct-access denials do not fully filter FSEvents: a stream can disclose denied names and event metadata, including outside the workspace and from past events.
+On macOS, Box prints this limitation at startup for each selected process, while direct file-content and write restrictions remain in force.
+Linux retains its existing watcher behavior.
+
 ## Interpreters
 
 Box runs two interpreters for the workload: the vendored Strands Shell, and Monty, which is the

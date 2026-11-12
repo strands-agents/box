@@ -828,6 +828,12 @@ pub(crate) fn render_profile_with_streams(
         ));
     }
 
+    if config.native_file_watching() {
+        cells
+            .entry(RUNTIME_SERVICES)
+            .or_default()
+            .push_str("(allow mach-lookup (global-name \"com.apple.FSEvents\"))\n");
+    }
     // Leaf-only: a bundled JS/Node runtime calls `getifaddrs` at startup. It reads the `net.*`
     // sysctls and opens a routing socket. This is host information, never egress: the `(deny
     // network*)` that follows still stands, and AF_INET/AF_UNIX are unaffected. Scope the socket

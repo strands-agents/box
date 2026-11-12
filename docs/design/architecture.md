@@ -287,6 +287,9 @@ interpreters are part of the code the operator must trust.
    because those accesses do not produce `fs:*` decisions. If Box cannot build a tool's sandbox
    grants, startup fails before the agent starts. On macOS, `file-attributes` adds a line for each
    sandbox that states which attributes its write grants can set.
+   A process that selects `native-file-watching` also gets a disclosure that FSEvents can expose
+   denied names and event metadata, including outside the workspace and from past events.
+   The setting belongs to each process table; the agent's selection does not enable its tools or servers.
 
    On Linux, `interpreter aliases for configured access` lists preserved interpreter spellings
    before the runtime-minimum section. Each line maps a spelling to a file the process's existing

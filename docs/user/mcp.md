@@ -264,6 +264,13 @@ The table takes no `metadata` or `exec` list, and `box run` refuses either one b
 On macOS, a server can test whether a path exists and read its metadata across the operator's home.
 Linux does not provide that same discovery access.
 
+For a local server that needs macOS FSEvents, set `native-file-watching = true` in its
+`[mcp.<name>]` table. It defaults to `false` independently of the agent and other servers.
+The stream can disclose denied names and event metadata, including outside the workspace and
+from past events. Read the [native file watching limitation](config.md#native-file-watching) before enabling it.
+Direct file-content and write restrictions still apply.
+Linux ignores the setting; remote HTTP servers do not accept it.
+
 On Linux and macOS, a server can execute helpers and load native code from its readable and
 writable grants. For a Python extension outside the runtime minimum, grant `read` to its directory
 or `read_file` to the extension file. Grant access to any additional libraries and helpers it needs.

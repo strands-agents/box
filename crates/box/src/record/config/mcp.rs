@@ -22,6 +22,13 @@ pub(crate) enum McpEntry {
     /// own load closure plus the OS paths). Only the network posture is a knob: `[mcp.<name>.network]`
     /// `contain_egress = false` lets a client that cannot honor `HTTPS_PROXY` egress directly.
     Stdio {
+        /// Permit macOS FSEvents for this server and its descendants.
+        #[serde(
+            default,
+            rename = "native-file-watching",
+            skip_serializing_if = "std::ops::Not::not"
+        )]
+        native_file_watching: bool,
         /// Override native filesystem policy for this local server and its descendants.
         #[serde(
             default,
@@ -127,6 +134,7 @@ pub(crate) fn contained_specs(
         .iter()
         .filter_map(|(name, entry)| match entry {
             McpEntry::Stdio {
+                native_file_watching,
                 native_filesystem_policy,
                 command,
                 workspace,
@@ -138,6 +146,7 @@ pub(crate) fn contained_specs(
                 name.clone(),
                 ContainedMcp {
                     spec: ProcessSpec {
+                        native_file_watching: *native_file_watching,
                         native_filesystem_policy: *native_filesystem_policy,
                         command: command.clone(),
                         workspace: workspace.clone(),
@@ -955,6 +964,7 @@ mod tests {
             parsed,
             McpEntry::Stdio {
                 argument_wildcards: false,
+                native_file_watching: false,
                 native_filesystem_policy: None,
                 command: vec!["issues-mcp".to_string()],
                 workspace: None,

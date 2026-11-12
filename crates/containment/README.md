@@ -109,6 +109,12 @@ is what closes the window between authorization and apply.
 
 ## macOS Profile
 
+`ContainmentConfig::allow_native_file_watching` permits lookup of `com.apple.FSEvents`.
+It defaults to off and is independent of `allow_runtime_services`.
+FSEvents can disclose denied names and event metadata, including outside the granted paths and
+from past events. The caller must disclose that cost when selecting it.
+Direct filesystem and other service rules do not change. Linux ignores this setting.
+
 The macOS backend always applies
 [`src/backend/macos/seatbelt-agent.sb`](src/backend/macos/seatbelt-agent.sb). The file is
 the complete readable policy; Rust replaces one placeholder per cell, plus the
