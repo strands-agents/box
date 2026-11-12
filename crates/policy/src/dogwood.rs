@@ -5,8 +5,7 @@ use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
-use std::sync::atomic::AtomicI64;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dogwood_language::{
@@ -78,8 +77,8 @@ pub(crate) struct DogwoodEngine {
     request_schema: cedar_policy::Schema,
     tool_actions: std::collections::HashSet<cedar_policy::EntityUid>,
     tool_inputs: crate::mcp_input::ToolInputs,
-    /// Set when an outcome could not be recorded, so every later decision in this run denies.
-    outcome_lost: AtomicBool,
+    /// Outcome events the history refused, recorded before the next decision.
+    pending_outcomes: Mutex<Vec<EventBuilder>>,
     #[cfg(test)]
     fixed_clock: Option<Arc<AtomicI64>>,
 }
@@ -217,7 +216,7 @@ impl DogwoodEngine {
                 request_schema: effective_schema.cedar,
                 tool_actions: effective_schema.tool_actions,
                 tool_inputs: effective_schema.tool_inputs,
-                outcome_lost: AtomicBool::new(false),
+                pending_outcomes: Mutex::new(Vec::new()),
                 #[cfg(test)]
                 fixed_clock: None,
             },
@@ -292,7 +291,7 @@ impl DogwoodEngine {
             request_schema,
             tool_actions,
             tool_inputs,
-            outcome_lost: AtomicBool::new(false),
+            pending_outcomes: Mutex::new(Vec::new()),
             #[cfg(test)]
             fixed_clock: None,
         })
@@ -314,15 +313,13 @@ impl DogwoodEngine {
             input,
         } = response;
         self.verify_request_id(&request_id)?;
-        self.record_outcome(|_| {
-            with_request_id(
-                with_output_fields(
-                    with_input(identity.event_builder(KIND_RESPONSE), input),
-                    vec![(attr::REPLY, Value::String(reply.eid().to_string()))],
-                ),
-                &request_id,
-            )
-        })
+        self.record_outcome(with_request_id(
+            with_output_fields(
+                with_input(identity.event_builder(KIND_RESPONSE), input),
+                vec![(attr::REPLY, Value::String(reply.eid().to_string()))],
+            ),
+            &request_id,
+        ))
     }
 
     /// A tool call's arguments with each union member placed in its declared `typeChoice` record.
@@ -429,7 +426,7 @@ impl DogwoodEngine {
             request_schema: effective_schema.cedar,
             tool_actions: effective_schema.tool_actions,
             tool_inputs: effective_schema.tool_inputs,
-            outcome_lost: AtomicBool::new(false),
+            pending_outcomes: Mutex::new(Vec::new()),
             fixed_clock: None,
         })
     }
@@ -462,7 +459,7 @@ impl DogwoodEngine {
             request_schema: effective_schema.cedar,
             tool_actions: effective_schema.tool_actions,
             tool_inputs: effective_schema.tool_inputs,
-            outcome_lost: AtomicBool::new(false),
+            pending_outcomes: Mutex::new(Vec::new()),
             fixed_clock: Some(now),
         })
     }
@@ -502,8 +499,12 @@ impl DogwoodEngine {
         principal: &Principal,
         request: ActionRequest<'_>,
     ) -> (Decision, Option<RequestId>, Option<Value>) {
-        if self.outcome_lost.load(Ordering::SeqCst) {
-            eprintln!("policy: warn: an earlier outcome was not recorded; denying");
+        let recorded = match self.pending_outcomes.lock() {
+            Ok(mut pending) => self.submit_pending(&mut pending),
+            Err(_) => Err("pending outcome lock poisoned".to_string()),
+        };
+        if let Err(error) = recorded {
+            eprintln!("policy: warn: an earlier outcome is not recorded yet: {error}; denying");
             return (Decision::internal_fault(), None, None);
         }
         let identity = request.identity();
@@ -604,9 +605,10 @@ impl DogwoodEngine {
         outcome: &Outcome<'_>,
     ) -> Result<(), PolicyError> {
         self.verify_request_id(request_id)?;
-        self.record_outcome(|_| {
-            with_request_id(outcome_event(governed, principal, outcome), request_id)
-        })
+        self.record_outcome(with_request_id(
+            outcome_event(governed, principal, outcome),
+            request_id,
+        ))
     }
 
     /// Submit the `::response` of one completed action whose `input` is the JSON record `input`.
@@ -625,24 +627,35 @@ impl DogwoodEngine {
         status: i32,
     ) -> Result<(), PolicyError> {
         self.verify_request_id(request_id)?;
-        self.record_outcome(|_| {
-            let builder = with_input(
-                identity.event_builder(KIND_RESPONSE),
-                entity_json_value(input),
-            );
-            with_request_id(
-                with_output_fields(builder, vec![(attr::STATUS, Value::Int(i64::from(status)))]),
-                request_id,
-            )
-        })
+        let builder = with_input(
+            identity.event_builder(KIND_RESPONSE),
+            entity_json_value(input),
+        );
+        self.record_outcome(with_request_id(
+            with_output_fields(builder, vec![(attr::STATUS, Value::Int(i64::from(status)))]),
+            request_id,
+        ))
     }
 
-    /// Submit one outcome event, and deny every later decision when the history refuses it.
-    fn record_outcome(&self, build: impl FnOnce(u64) -> EventBuilder) -> Result<(), PolicyError> {
-        self.submit(build).map(|_| ()).map_err(|error| {
-            self.outcome_lost.store(true, Ordering::SeqCst);
-            PolicyError::Evaluation(error)
-        })
+    /// Submit one outcome event after every kept one, and keep it when the history refuses it.
+    fn record_outcome(&self, event: EventBuilder) -> Result<(), PolicyError> {
+        let mut pending = self
+            .pending_outcomes
+            .lock()
+            .map_err(|_| PolicyError::Evaluation("pending outcome lock poisoned".to_string()))?;
+        pending.push(event);
+        self.submit_pending(&mut pending)
+            .map_err(PolicyError::Evaluation)
+    }
+
+    /// Submit the refused outcome events in order, and stop at the first the history still refuses.
+    fn submit_pending(&self, pending: &mut Vec<EventBuilder>) -> Result<(), String> {
+        while let Some(event) = pending.first() {
+            let event = event.clone();
+            self.submit(|_| event)?;
+            pending.remove(0);
+        }
+        Ok(())
     }
 
     fn verify_request_id(&self, request_id: &RequestId) -> Result<(), PolicyError> {
@@ -2839,14 +2852,26 @@ when temporal {
     }
 
     #[test]
-    fn an_outcome_refused_for_clock_skew_denies_every_later_request_in_the_run() {
+    fn a_skew_refused_outcome_is_recorded_before_the_next_decision_and_survives_a_restart() {
         let history = tempfile::tempdir().expect("history directory");
-        let engine = DogwoodEngine::open_with_test_clock(
-            BUDGET,
-            &history.path().join("dogwood.redb"),
-            1_000_000,
-        )
-        .expect("policy loads");
+        let path = history.path().join("dogwood.redb");
+        let engine =
+            DogwoodEngine::open_with_test_clock(BUDGET, &path, 1_000_000).expect("policy loads");
+        let decide = |engine: &DogwoodEngine| {
+            engine
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http()),
+                )
+                .0
+        };
+        let budget_spent = Decision::Deny {
+            reason: DenyReason::NoMatch,
+            rule: RuleId::default_deny(),
+            attribution: Vec::new(),
+            resource: String::new(),
+        };
         let request_id = permitted_http_request(&engine);
 
         engine.advance_clock(-400);
@@ -2860,18 +2885,26 @@ when temporal {
             recorded.is_err(),
             "an outcome 400 s behind history is refused: {recorded:?}"
         );
+        assert_eq!(
+            decide(&engine),
+            Decision::internal_fault(),
+            "every decision denies while the outcome is still refused"
+        );
 
         engine.advance_clock(410);
         assert_eq!(
-            engine
-                .decide(
-                    &governed(),
-                    &Principal::agent(),
-                    ActionRequest::Request(&http())
-                )
-                .0,
-            Decision::internal_fault(),
-            "a lost outcome must not let the budget permit the next request"
+            decide(&engine),
+            budget_spent,
+            "the kept outcome is recorded first, so the spent budget denies"
+        );
+
+        drop(engine);
+        let reopened =
+            DogwoodEngine::open_with_test_clock(BUDGET, &path, 1_000_020).expect("history reopens");
+        assert_eq!(
+            decide(&reopened),
+            budget_spent,
+            "the recorded outcome still counts after a restart"
         );
     }
 

@@ -945,8 +945,8 @@ clock steps backwards, each append advances one nanosecond until it catches up. 
 restriction active longer than the apparent interval. The engine allows the newest timestamp to run
 at most five minutes ahead of the clock. Beyond that, `open` refuses the history, and during a run
 each append fails, until the clock comes within five minutes of the newest timestamp or the operator
-removes the box directory. An outcome that fails to record this way denies the rest of the run,
-because history no longer holds an effect that ran. Without that bound, one forged future-stamped
+removes the box directory. An outcome refused this way is kept and recorded before the next
+decision, and every request is denied until it is. Without that bound, one forged future-stamped
 event would pin every later timestamp one nanosecond past it, so every earlier real event would
 leave its window and no later event would expire. A forged event within the bound can still hold
 timestamps ahead for up to five minutes. A policy edit applies prospectively. A temporal identity

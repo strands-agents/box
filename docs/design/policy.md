@@ -258,8 +258,9 @@ stops a restart from resetting a budget. The history follows these rules:
   without appending it. A refused request doesn't persist: the next request within the bound is
   decided.
 - If a request's append fails, the engine denies that request. If recording an outcome fails, the
-  caller warns on stderr and nothing retries it. The effect already ran and history doesn't hold it,
-  so the engine denies every later request in that run.
+  caller warns on stderr, and the engine keeps the event. Before each later decision it records the
+  kept events first, and it denies every request until they append. An event still kept when the
+  run exits is lost, so that effect doesn't count after a restart.
 - The engine checkpoints as events accumulate and removes events outside the longest window. This
   bounds the file size by the window rather than the box's lifetime.
 
