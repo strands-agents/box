@@ -114,9 +114,9 @@ pub(crate) enum OptionFault {
     NoFlag,
     #[error("flag {0:?} must be `--` and a name with no `=`, or `-` and one character")]
     MalformedFlag(String),
-    #[error("takes no value, so it cannot carry `like` or `when`")]
+    #[error("records a Bool, so it cannot carry `like` or `when`")]
     PatternWithoutValue,
-    #[error("takes no value, so it cannot be `repeated`")]
+    #[error("records a Bool, so it cannot be `repeated`")]
     RepeatedWithoutValue,
     #[error("only a `global` option can set `anywhere`")]
     AnywhereOnAction,

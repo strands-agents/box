@@ -130,8 +130,11 @@ impl ActionGrammar {
                     continue;
                 }
             };
+            let set = values
+                .as_ref()
+                .is_some_and(|values| values.first().is_none_or(|value| value != FALSE));
             let value = match field.kind {
-                FieldKind::Bool => Some(FieldValue::Bool(values.is_some())),
+                FieldKind::Bool => Some(FieldValue::Bool(set)),
                 FieldKind::Set => {
                     let mut set = values.clone().unwrap_or_default();
                     set.sort();
@@ -146,7 +149,9 @@ impl ActionGrammar {
             if let Some(value) = value {
                 fields.insert(field.name.clone(), value);
             }
-            if let Some(values) = &values {
+            if let Some(values) = &values
+                && (field.kind != FieldKind::Bool || set)
+            {
                 apply(changes, values, &mut adds, &mut removes);
             }
         }
@@ -200,6 +205,11 @@ impl Occurrences {
         values: Vec<String>,
     ) -> Option<()> {
         match self.values.get_mut(field) {
+            Some(existing) if value == OptionValue::Boolean => {
+                if *existing != values {
+                    return None;
+                }
+            }
             Some(_) if value != OptionValue::None && !repeated => return None,
             Some(existing) => existing.extend(values),
             None => {
@@ -222,6 +232,43 @@ fn many(argv: &[String], from: usize) -> Option<(Vec<String>, usize)> {
     (!values.is_empty()).then_some((values, next))
 }
 
+const TRUE: &str = "true";
+const FALSE: &str = "false";
+
+/// The words that some command line parser reads as a boolean value, compared without case.
+const BOOLEAN_WORDS: [&str; 12] = [
+    "true", "false", "yes", "no", "on", "off", "y", "n", "t", "f", "1", "0",
+];
+
+/// Whether a parser can read `word` as a boolean value.
+pub(super) fn boolean_word(word: &str) -> bool {
+    BOOLEAN_WORDS
+        .iter()
+        .any(|boolean| boolean.eq_ignore_ascii_case(word))
+}
+
+/// The value of a boolean option given as `value`, or `None` when it is not `true` or `false`.
+fn boolean(value: &str) -> Option<String> {
+    matches!(value, TRUE | FALSE).then(|| value.to_string())
+}
+
+/// The value of a boolean option with no attached value: `argv[from]` when that is `true` or
+/// `false`, `None` when a parser can read it as another boolean value, and otherwise `true`.
+fn boolean_next(argv: &[String], from: usize) -> Option<(Vec<String>, usize)> {
+    match argv.get(from) {
+        Some(word) if boolean_word(word) => Some((vec![boolean(word)?], from + 1)),
+        _ => Some((vec![TRUE.to_string()], from)),
+    }
+}
+
+/// The value an `optional-next` option takes from `argv[from]`: that word unless it is an option.
+fn optional_next(argv: &[String], from: usize) -> (Vec<String>, usize) {
+    match argv.get(from) {
+        Some(word) if !is_option_word(word) && word != "--" => (vec![word.clone()], from + 1),
+        _ => (vec![String::new()], from),
+    }
+}
+
 /// Read the option word at `argv[index]`, and return the position after it and its value.
 fn read_option(
     table: &OptionTable,
@@ -239,9 +286,12 @@ fn read_option(
         let (values, next) = match (option.value, attached) {
             (OptionValue::None, Some(_)) => return None,
             (OptionValue::None, None) => (Vec::new(), index + 1),
+            (OptionValue::Boolean, Some(value)) => (vec![boolean(value)?], index + 1),
             (_, Some(value)) => (vec![value.to_string()], index + 1),
             (OptionValue::Required, None) => (vec![argv.get(index + 1)?.clone()], index + 2),
             (OptionValue::Optional, None) => (vec![String::new()], index + 1),
+            (OptionValue::OptionalNext, None) => optional_next(argv, index + 1),
+            (OptionValue::Boolean, None) => boolean_next(argv, index + 1)?,
             (OptionValue::Many, None) => many(argv, index + 1)?,
         };
         seen.record(&option.field, option.value, option.repeated, values)?;
@@ -250,8 +300,18 @@ fn read_option(
     let cluster: Vec<char> = word.chars().skip(1).collect();
     for (position, character) in cluster.iter().enumerate() {
         let option = table.flags.get(&format!("-{character}"))?;
-        if option.value == OptionValue::None {
-            seen.record(&option.field, option.value, option.repeated, Vec::new())?;
+        let last = position + 1 == cluster.len();
+        if option.value == OptionValue::Boolean && last {
+            let (values, next) = boolean_next(argv, index + 1)?;
+            seen.record(&option.field, option.value, option.repeated, values)?;
+            return Some(next);
+        }
+        if option.value.is_flag() {
+            let values = match option.value {
+                OptionValue::Boolean => vec![TRUE.to_string()],
+                _ => Vec::new(),
+            };
+            seen.record(&option.field, option.value, option.repeated, values)?;
             continue;
         }
         let attached: String = cluster[position + 1..].iter().collect();
@@ -263,6 +323,7 @@ fn read_option(
         } else {
             match option.value {
                 OptionValue::Optional => (vec![String::new()], index + 1),
+                OptionValue::OptionalNext => optional_next(argv, index + 1),
                 OptionValue::Many => many(argv, index + 1)?,
                 _ => (vec![argv.get(index + 1)?.clone()], index + 2),
             }

@@ -269,7 +269,7 @@ Each other action also carries one field for each of its options and operands, n
 
 | The option or operand | Type |
 |---|---|
-| An option with no `value` | Bool |
+| An option with no `value`, or with `value = "boolean"` | Bool |
 | An option with one value, or an operand `<name>` | String, and optional |
 | A `repeated` option, an option with `value = "many"`, or an operand `<name>...` | Set of String |
 
