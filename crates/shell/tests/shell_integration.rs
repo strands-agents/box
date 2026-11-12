@@ -8302,3 +8302,38 @@ fn a_compound_pipeline_hands_the_callers_stdin_back() {
         }
     }));
 }
+
+/// A cancelled run stops the compound that starts a pipeline, so the end of input that arrives
+/// later never lets it act on part of its input.
+#[test]
+fn a_cancelled_compound_pipeline_never_acts_after_its_run_is_dropped() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().build().unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::channel(4);
+        shell.proc.set_channel_reader(0, receiver);
+        sender
+            .send(bytes::Bytes::from_static(b"line\npart"))
+            .await
+            .unwrap();
+        {
+            let run =
+                shell.run("{ read first; printf R > ready; x=$(cat); printf A > acted; } | cat");
+            tokio::pin!(run);
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(300), &mut run).await;
+        }
+        drop(sender);
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        let out = shell
+            .run("cat ready; if [ -e acted ]; then printf ACTED; fi")
+            .await;
+        assert_eq!(
+            out.stdout, "R",
+            "a dropped run must not act on part of its input: {}",
+            out.stderr
+        );
+    }));
+}
