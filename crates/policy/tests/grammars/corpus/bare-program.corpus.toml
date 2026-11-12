@@ -56,7 +56,8 @@ action = "unmodeled"
 argv = ["vercel", "lss"]
 action = "unmodeled"
 
-# A word that no command word can spell is still refused, because a real subcommand can have one
+# Any first operand that does not read as a path is refused, because a real subcommand can be
+# spelled with uppercase letters, `_`, `:`, or `.`
 [[case]]
 argv = ["vercel", "LIST"]
 action = "unmodeled"
@@ -65,11 +66,29 @@ action = "unmodeled"
 argv = ["vercel", "my_site"]
 action = "unmodeled"
 
-# A word with `.` or `/` is a path
+[[case]]
+argv = ["vercel", "apps:create"]
+action = "unmodeled"
+
 [[case]]
 argv = ["vercel", "site.v2"]
+action = "unmodeled"
+
+[[case]]
+argv = ["vercel", ""]
+action = "unmodeled"
+
+# A word that starts with `.` or holds a `/` is a path
+[[case]]
+argv = ["vercel", "./site.v2"]
 action = "deploy"
-fields = { path = "site.v2" }
+fields = { path = "./site.v2" }
+effects = ["deploy"]
+
+[[case]]
+argv = ["vercel", "apps/web"]
+action = "deploy"
+fields = { path = "apps/web" }
 effects = ["deploy"]
 
 [[case]]
