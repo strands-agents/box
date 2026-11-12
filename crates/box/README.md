@@ -80,9 +80,9 @@ every harness's stored credentials, through an interpreter that runs outside con
 refusal tells the operator to make a directory for the workspace and to work there, and
 `the_operator_home_is_not_a_project` pins it.
 
-The config file's complete key set is **eleven**: `name`, `box_dir`, `policy`, `[agent]`,
+The config file's complete key set is **twelve**: `name`, `box_dir`, `policy`, `[agent]`,
 `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
-`[experimental-features]`, `file-attributes`, and `[limits]`. `name` and `box_dir`
+`[experimental-features]`, `file-attributes`, `[limits]`, and `[gateway]`. `name` and `box_dir`
 are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
 every removed spelling is refused by its own name with its replacement.
 `four_inputs.rs::the_config_record_carries_only_the_four_inputs` pins the set, and
@@ -100,6 +100,12 @@ of 262144 and 65536. Shell applies the output limit to both output buffers and s
 Set either size to `0` to disable that Shell limit, or omit it to keep its default.
 Invalid or unrepresentable durations and sizes are load errors. Python retains its existing limits.
 See [execution limits](../../docs/user/config.md#limits).
+
+`[gateway]` accepts `upgrade_http`, a list of host names whose plain `http://` request to port 80
+the egress gateway decides and sends as `https://` on port 443. Policy still decides each such
+request, on port 443, so the key grants no reach a permit does not. An entry with a scheme, a port, a
+path, a wildcard, or an IP address is a load error. See
+[upgrade plain HTTP to HTTPS](../../docs/user/egress.md#upgrade-plain-http-to-https).
 
 **`[agent]` and each `[tool.<label>]` hold the same four fields.** `[agent]` is the process the
 operator starts. A `[tool.<label>]` is a process the Shell runs for a request the policy already

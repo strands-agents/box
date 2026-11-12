@@ -957,10 +957,17 @@ file. `open` recovers a decision-equivalent history before returning an authorit
 fails, it returns an error. The box never falls back to empty or partial history. The engine
 timestamps each event from the trusted system wall clock. Callers cannot supply timestamps. If the
 clock steps backwards, each append advances one nanosecond until it catches up. This can keep a
-restriction active longer than the apparent interval. A policy edit applies prospectively. A
-temporal identity that still matches keeps its state, and an unmatched identity starts empty. The
-contract excludes checkpoint, rewind, branch, tamper evidence, an audit record, atomic commit across
-an external effect, and any history shared between boxes.
+restriction active longer than the apparent interval. The engine allows the newest timestamp to run
+at most five minutes ahead of the clock. Beyond that, `open` refuses the history, and during a run
+each append fails, until the clock comes within five minutes of the newest timestamp or the operator
+removes the box directory. An outcome refused this way is kept and recorded before the next decision
+or at shutdown, and every request is denied until it is. Without that bound, one forged
+future-stamped event would pin every later timestamp one nanosecond past it, so every earlier real
+event would leave its window and no later event would expire. A forged event within the bound can
+still hold timestamps ahead for up to five minutes. A policy edit applies prospectively. A temporal
+identity that still matches keeps its state, and an unmatched identity starts empty. The contract
+excludes checkpoint, rewind, branch, tamper evidence, an audit record, atomic commit across an
+external effect, and any history shared between boxes.
 
 <a id="a-temporal-rule-names-one-action"></a>
 ### A temporal rule names one action, so a budget does not span a family
@@ -2037,6 +2044,28 @@ the upstream routes on, so a virtual-host name cannot bypass the decision. The r
 TLS-terminated traffic therefore continues to refuse cleartext. The parser drops a URL fragment,
 because a fragment is client-only and must never reach an origin server.
 
+<a id="a-listed-host-is-upgraded-from-plain-http-to-https-in-the-gateway"></a>
+### A listed host's plain HTTP is upgraded to HTTPS in the gateway
+
+`[gateway] upgrade_http` lists hosts whose plain `http://` request to port 80 the gateway decides
+and sends as `https://` on port 443. The gateway, not the workload, then does the TLS handshake,
+against its own upstream roots and with the host as SNI. The reason is macOS. A runtime that checks
+certificates with the macOS platform verifier, such as rustup, cannot trust the per-run CA,
+because the box CA is [an environment value and not in the keychain](#ca-trust-is-a-per-process-environment-value),
+so its HTTPS through the gateway fails with `OSStatus -26276`. Sent as plain `http://`, the same
+request needs no workload trust at all. Policy decides the upgraded request on port 443, as it decides
+a `CONNECT` to that host, so the list grants no reach that a permit does not. The obvious
+alternative was to let such a tool skip the gateway, which loses the per-request decision and the
+credential swap for that tool and everything it starts, such as cargo behind rustup's proxy. The
+list is box-wide and not per route, because the hop it changes is the workload's own, before any
+route matches. The cost is that the hop from the workload to the gateway is cleartext. It stays on
+the machine, and the gateway's TLS leg protects the rest. The workload's leg is still plain, so the
+request reports `intercepted` false and [a secret still rides only TLS](#a-secret-rides-only-tls).
+rustup still checks each package against the SHA-256 hash in its channel manifest, and the
+manifest itself reaches the workload through the gateway's TLS leg.
+`a_listed_plain_request_reaches_a_tls_upstream_judged_on_443` and
+`a_credential_on_an_upgraded_plain_request_is_refused` pin it.
+
 <a id="a-remote-mcp-tool-call-passes-a-second-gate"></a>
 ### A remote MCP tool call passes a second gate after the transport gate
 
@@ -2227,7 +2256,10 @@ credential exists.
 The box here is the whole of what one `box.toml` declares: the agent's sandbox, the box's trusted
 process, and every sandbox it starts for a tool or an MCP server. Every request and response flows
 inside it. Every process in the box gets every egress route that `box.toml` declares: the agent,
-each tool, and each MCP server hold every route's phantom or placeholder. Every process in the box
+each tool, and each MCP server hold every route's phantom or placeholder. The hosted Shell runs in
+the trusted process and holds them too. A command that the agent sends through its shell alias
+expands a route's variable to that route's phantom or placeholder.
+`the_shell_holds_the_workloads_phantom_and_never_the_secret` checks this. Every process in the box
 shares one gateway, and the gateway cannot tell which process made a call. An `aws://` route
 generates no phantom. Every process gets the same public placeholder keys, and the gateway signs
 matching requests with the real credentials. An `env://` route with `secret.inject = "always"`

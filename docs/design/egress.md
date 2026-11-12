@@ -42,7 +42,7 @@ gateway. See [local MCP servers](./containment.md#local-mcp-servers).
 Strands Shell's `curl` and Monty's `fetch()` run in the box's trusted process, and both send their
 requests through the same gateway, trusting only its certificate authority. Before they do, each
 refuses a URL that isn't `http` or `https`, or that names `localhost` or a literal loopback,
-private, or link-local address.
+private, link-local, or `0.0.0.0/8` address, or one of two cloud metadata addresses outside `169.254.0.0/16`, or an IPv4-mapped, IPv4-compatible, IPv4-translated, 6to4, Teredo, or `64:ff9b::/96` NAT64 address that carries one of these, or any `64:ff9b:1::/48` address. A NAT64 address under a network's own prefix is not covered.
 
 ```mermaid
 flowchart LR
@@ -69,6 +69,10 @@ flowchart LR
 A client sends either `CONNECT host:port` for HTTPS, or a plain HTTP request with an absolute
 `http://` URL. See [plain HTTP takes the same governed
 path](decisions.md#plain-http-takes-the-same-governed-path-as-https). Both pass the same decisions.
+A plain request to port 80 of a host in `[gateway] upgrade_http` is decided as that host on port
+443, and the gateway speaks TLS to the server itself. The workload's own leg stays plain, so it
+carries no credential. See [a listed host's plain HTTP is upgraded to
+HTTPS](decisions.md#a-listed-host-is-upgraded-from-plain-http-to-https-in-the-gateway).
 
 ```mermaid
 flowchart TD
@@ -159,10 +163,12 @@ starts TLS. A policy refusal of a request to an HTTP MCP server gets a JSON-RPC 
 
 ### Cloud instance metadata
 
-Policy provides the only check on metadata endpoints. The gateway has no built-in block. A policy
+For gateway traffic, policy provides the only check on metadata endpoints. The gateway has no
+built-in block. Strands Shell `curl` and Monty `fetch()` also refuse a literal metadata address
+before the request leaves, but a name that resolves to one reaches policy. A policy
 needs two `forbid` rules on `net:connect`: one for the metadata hostnames `metadata.google.internal`
-and `metadata.azure.internal`, and one for the metadata addresses `169.254.*`, `fd00:ec2::254`, and
-the IPv6 link-local range.
+and `metadata.azure.internal`, and one for the metadata addresses `169.254.*`, `fd00:ec2::254`,
+Azure WireServer `168.63.129.16`, Alibaba Cloud `100.100.100.200`, and the IPv6 link-local range.
 
 ## How responses reach the workload
 
@@ -175,6 +181,14 @@ Matches across chunk boundaries are redacted before delivery.
 HTTP MCP `tools/list` keeps bounded capture for each page and the existing schema-staging order
 ([runtime tool discovery](decisions.md#remote-tool-schemas-are-discovered-at-runtime-in-memory)).
 The default 16 MiB cap still applies to requests and these catalog responses.
+
+For an HTTP MCP `tools/call`, the gateway asks the server for an uncompressed reply, and copies the
+reply as it streams, after redaction, so policy history sees the bytes the workload saw. It hands the copy to the request's reply observer
+once the reply matching the request's JSON-RPC id has passed, or when the stream ends. The copy is
+capped at the same 16 MiB, and all copies held at once share 64 MiB, so concurrent tool calls can't
+make the gateway hold a full copy for each connection. A longer reply, a reply over the shared
+budget, a cut-off stream, or a compressed body is recorded as `indeterminate`
+([how a tool call ended](./policy.md)).
 
 One absolute upstream deadline covers request transmission and response receipt, with a default of
 300 seconds. Chunks do not reset it. A later timeout or framing error closes the unfinished response,
@@ -230,11 +244,12 @@ and credential handling for tools and local MCP servers.
 An `[egress.<name>]` route binds a secret to a set of destinations. Policy decides whether to
 forward each request. The route specifies which credential to add and grants no access itself.
 
-> Every process in a box can use every route. The agent, each tool, and each stdio MCP server get
-> every placeholder, and the gateway adds credentials based on the destination. It cannot identify
-> which process opened a connection, so it cannot enforce a per-process credential list. A process
-> that must not use a credential belongs in a separate box. [The box is the credential
-> boundary](./decisions.md#the-box-is-the-credential-boundary) records the decision and its cost.
+> Every process in a box can use every route. The agent, each tool, each stdio MCP server, and the
+> hosted Shell get every placeholder, and the gateway adds credentials based on the destination. It
+> cannot identify which process opened a connection, so it cannot enforce a per-process credential
+> list. A process that must not use a credential belongs in a separate box. [The box is the
+> credential boundary](./decisions.md#the-box-is-the-credential-boundary) records the decision and
+> its cost.
 
 | Source | `secret.ref` | What the gateway does |
 |---|---|---|
@@ -245,8 +260,8 @@ forward each request. The route specifies which credential to add and grants no 
 ### The placeholder swap
 
 An `env://` route keeps the real secret in the box's trusted process and gives every contained
-process a placeholder instead, which `box.toml` calls a phantom. See [the workload holds a phantom,
-and the gateway holds the
+process, and the hosted Shell, a placeholder instead, which `box.toml` calls a phantom. See [the
+workload holds a phantom, and the gateway holds the
 secret](decisions.md#the-workload-holds-a-phantom-and-the-gateway-holds-the-secret).
 
 ```mermaid

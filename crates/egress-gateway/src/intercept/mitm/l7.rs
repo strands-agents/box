@@ -247,6 +247,14 @@ async fn run_l7_legs(
         },
         None => None,
     };
+    // A tool call's reply is read into policy history, so ask for it uncompressed; otherwise the
+    // workload could hide its own reply from history by asking for a compressed one.
+    if mcp_target
+        .as_ref()
+        .is_some_and(|(_, target)| target.method() == "tools/call")
+    {
+        req.headers.set("Accept-Encoding", "identity");
+    }
 
     // The serialized request carries the credential the request leg just attached, so the buffer is
     // wiped on drop. This is the last copy on the byte path before the transport takes it (which is
@@ -327,7 +335,7 @@ async fn run_l7_legs(
             }
         }),
     };
-    let request_permit = match claim_effect(state, &request_attempt) {
+    let mut request_permit = match claim_effect(state, &request_attempt) {
         Ok(permit) => permit,
         Err(error) => {
             let mcp_request = state.mcp_server_for(&connect.host).map(|_| &req.body[..]);
@@ -346,6 +354,16 @@ async fn run_l7_legs(
         &allow_reason,
         correlation.clone(),
     );
+    // A tool call's reply goes to the request permit's observer once it has reached the workload.
+    let reply_observer = mcp_target
+        .as_ref()
+        .filter(|(_, target)| target.method() == "tools/call")
+        .and_then(|_| {
+            let request_id = serde_json::from_slice::<serde_json::Value>(&req.body)
+                .ok()
+                .and_then(|request| request.get("id").map(ToString::to_string));
+            request_permit.reply_observer(request_id.as_deref())
+        });
     // The request permit follows the upstream exchange through its terminal response.
     let cursor = mcp_target
         .as_ref()
@@ -403,6 +421,13 @@ async fn run_l7_legs(
     }
     let mut progress = Some(body.progress());
     let mut body = ResponseBody::streaming(body, controls.redactors);
+    if let Some(observer) = reply_observer {
+        body = body.observed(
+            observer,
+            state.config.response_limits.max_body_bytes,
+            std::sync::Arc::clone(&state.reply_copies),
+        );
+    }
 
     // Lazy remote MCP discovery: on the workload's `tools/list` to a configured MCP server, stage
     // the response catalog into the authority so the server's per-tool actions reach runtime
@@ -454,7 +479,8 @@ async fn run_l7_legs(
 
 /// Run [`run_l7_legs`] for a plain-HTTP request; `origin_target` is its `/path?query`. When `backend`
 /// re-routes the destination, the upstream leg dials the backend (with TLS when the backend scheme is
-/// `https`), and `run_l7_legs` rewrites `Host` to the backend.
+/// `https`), and `run_l7_legs` rewrites `Host` to the backend. `upgraded` marks a request to a host in
+/// [`MitmConfig::upgrade_http`](super::MitmConfig::upgrade_http), whose upstream leg speaks TLS.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_plain(
     upstream: TcpStream,
@@ -462,16 +488,12 @@ pub(crate) async fn forward_plain(
     connect: &ConnectRequest,
     parsed: http1::ParsedRequest,
     origin_target: String,
+    upgraded: bool,
     state: &SharedState,
     correlation: RequestId,
     completion: &ResponseCompletion,
 ) -> Result<WorkloadResponse> {
-    // With no backend the plain request forwards over plaintext, as today. A backend may raise the
-    // upstream leg to TLS (`https` backend) against the backend's own certificate.
-    let (upstream_host, upstream_tls) = match backend {
-        Some(dial) => (dial.host.as_str(), dial.tls),
-        None => (connect.host.as_str(), false),
-    };
+    let (upstream_host, upstream_tls) = plain_upstream_leg(backend, &connect.host, upgraded);
     let upstream = make_upstream(upstream, upstream_host, upstream_tls, state, completion)?;
     let originally_empty_query = has_empty_query(&origin_target);
     let mut req = intercepted_request(connect, &origin_target, parsed);
@@ -482,15 +504,8 @@ pub(crate) async fn forward_plain(
     // CONNECT authority to bind against, so it normalizes instead: rewrite `Host` to the URL host, so
     // the destination the box authorized is the one the upstream routes on (no vhost smuggling).
     //
-    // The port is omitted only for 80 — plain HTTP's sole default. `http://host:443/` keeps `:443`,
-    // because 443 is not the default under the `http` scheme, and a dropped port would make `Host`
-    // name a different authority than the one authorized.
-    let host_value = if connect.port == 80 {
-        connect.host.clone()
-    } else {
-        format!("{}:{}", connect.host, connect.port)
-    };
-    req.headers.set("Host", host_value);
+    req.headers
+        .set("Host", plain_host_header(connect, upgraded));
 
     run_l7_legs(
         connect,
@@ -505,6 +520,39 @@ pub(crate) async fn forward_plain(
         |_method, _target, _headers| Ok(()),
     )
     .await
+}
+
+/// The host a plain-HTTP request's upstream leg presents, and whether that leg speaks TLS. A backend
+/// decides both. Without one, an upgraded request speaks TLS to its own host, checked against the
+/// gateway's upstream roots, and any other request forwards over plaintext.
+fn plain_upstream_leg<'a>(
+    backend: Option<&'a BackendDial>,
+    host: &'a str,
+    upgraded: bool,
+) -> (&'a str, bool) {
+    match backend {
+        Some(dial) => (dial.host.as_str(), dial.tls),
+        None => (host, upgraded),
+    }
+}
+
+/// The `Host` a plain-HTTP request carries upstream: the authority the gateway judged, without the
+/// port when it is the default of the upstream scheme.
+///
+/// Plain HTTP's only default is 80, so `http://host:443/` keeps `:443`: 443 is not the default
+/// under the `http` scheme, and a dropped port would name a different authority than the one
+/// authorized. An upgraded request goes upstream as `https` on 443, so its `Host` is the bare host.
+fn plain_host_header(connect: &ConnectRequest, upgraded: bool) -> String {
+    let default_port = if upgraded {
+        super::connect::HTTPS_PORT
+    } else {
+        super::connect::HTTP_PORT
+    };
+    if connect.port == default_port {
+        connect.host.clone()
+    } else {
+        format!("{}:{}", connect.host, connect.port)
+    }
 }
 
 /// The boundary request for `parsed`, sent to `connect` with the origin-form `target`.
@@ -770,6 +818,55 @@ fn validate_request_binding(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An upgraded request speaks TLS to its own host; a backend still decides the leg.
+    #[test]
+    fn an_upgraded_plain_request_speaks_tls_to_its_own_host() {
+        assert_eq!(
+            plain_upstream_leg(None, "static.rust-lang.org", true),
+            ("static.rust-lang.org", true)
+        );
+        assert_eq!(
+            plain_upstream_leg(None, "example.com", false),
+            ("example.com", false),
+            "a request that is not upgraded forwards over plaintext, as before"
+        );
+        let dial = BackendDial {
+            host: "gw.example.com".to_string(),
+            port: 8080,
+            tls: false,
+            path_prefix: String::new(),
+        };
+        assert_eq!(
+            plain_upstream_leg(Some(&dial), "static.rust-lang.org", true),
+            ("gw.example.com", false),
+            "a backend of the upgraded destination decides the leg, as for a CONNECT to it"
+        );
+    }
+
+    /// The plain-HTTP `Host` omits only the upstream scheme's default port.
+    #[test]
+    fn a_plain_host_header_omits_the_upstream_schemes_default_port() {
+        let to = |port| ConnectRequest {
+            host: "static.rust-lang.org".to_string(),
+            port,
+        };
+        assert_eq!(plain_host_header(&to(80), false), "static.rust-lang.org");
+        assert_eq!(
+            plain_host_header(&to(443), false),
+            "static.rust-lang.org:443",
+            "`http://host:443/` keeps its port, because 443 is not plain HTTP's default"
+        );
+        assert_eq!(
+            plain_host_header(&to(8080), false),
+            "static.rust-lang.org:8080"
+        );
+        assert_eq!(
+            plain_host_header(&to(443), true),
+            "static.rust-lang.org",
+            "an upgraded request goes upstream as https on 443, so its Host is the bare host"
+        );
+    }
 
     /// A backend path prefix is prepended to the agent's path; an empty prefix forwards unchanged.
     #[test]

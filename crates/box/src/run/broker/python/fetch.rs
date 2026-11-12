@@ -160,9 +160,9 @@ pub(super) async fn fetch_through_gateway(
         Err(type_error) => return type_error,
     };
     // The Shell's own pre-transport SSRF check, reused (not copied) so the floor list cannot drift:
-    // a scheme allowlist plus a literal private/loopback/link-local/IMDS refusal, before any client
-    // is built. Parity with the Shell; the gateway floor remains the authority for
-    // DNS-resolved destinations.
+    // a scheme allowlist plus a literal private/loopback/link-local/metadata refusal, before any
+    // client is built. Parity with the Shell. The gateway has no compiled floor: authored
+    // `net:connect` policy decides every DNS-resolved destination.
     if let Err(error) = strands_shell::vfs_kernel::check_url_safe(&request.url) {
         // This floor fires before the gateway is contacted, so the gateway journals nothing for it;
         // record the deny to the operator's stderr so it stays reconstructable (Tenet 4). A gateway
@@ -762,6 +762,35 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
             rx.recv_timeout(Duration::from_millis(300)).is_err(),
             "no request should reach the proxy — the refusal is pre-transport"
         );
+    }
+
+    /// The floor unwraps the IPv4 address a NAT64 or IPv4-translated literal carries and refuses
+    /// the platform metadata addresses outside `169.254.0.0/16`, all before transport.
+    #[tokio::test]
+    async fn a_fetch_to_a_translated_or_platform_metadata_literal_is_refused_before_transport() {
+        for url in [
+            "http://[64:ff9b::a9fe:a9fe]/latest/meta-data/",
+            "http://[::ffff:0:a9fe:a9fe]/latest/meta-data/",
+            "http://168.63.129.16/",
+            "http://100.100.100.200/latest/meta-data/",
+        ] {
+            let (proxy_url, rx) = proxy_returning(200, "OK", "OK");
+            let (_dir, routing) = routing_with_proxy(proxy_url);
+
+            let result =
+                fetch_through_gateway(&routing, &[MontyObject::string(url.to_string())], &[]).await;
+
+            match result {
+                ExtFunctionResult::Error(exception) => {
+                    assert_eq!(exception.exc_type(), ExcType::OSError, "{url}");
+                }
+                _ => panic!("{url} must be refused before transport"),
+            }
+            assert!(
+                rx.recv_timeout(Duration::from_millis(300)).is_err(),
+                "{url}: no request should reach the proxy"
+            );
+        }
     }
 
     /// A response body over `MAX_RESPONSE_BYTES` is a catchable error, not a truncated value — the

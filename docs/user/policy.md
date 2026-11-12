@@ -612,7 +612,10 @@ own `has` guard, so a rule that covers both families gives each one its own clau
 @id("metadata_addresses")
 forbid (principal, action == Box::Action::"net:connect", resource)
 when {
-  (context.input has ip4 && context.input.ip4 like "169.254.*") ||
+  (context.input has ip4 && (
+    context.input.ip4 like "169.254.*" ||
+    context.input.ip4 == "168.63.129.16" ||
+    context.input.ip4 == "100.100.100.200")) ||
   (context.input has ip6 && (
     context.input.ip6 == "fd00:ec2::254" ||
     context.input.ip6 like "fe8*" || context.input.ip6 like "fe9*" ||
@@ -881,6 +884,25 @@ The text varies: the record `is committed` or `is not committed`, and the histor
 file, with `policy staging failed: ` and the engine's own reason, and the file is left as found.
 Remove the box directory to start again, as [getting started](getting-started.md#clean-up)
 describes.
+
+The run also refuses history stamped more than five minutes ahead of the system clock. This
+happens when the clock moved back after the box last ran, or when someone edited the history file:
+
+```text
+strands-box: error: policy staging failed: policy staging history failure: durable timestamp <t> is <n> ns ahead of the current clock <now>, exceeding the maximum allowed future skew of 300000000000 ns; refusing the operation rather than issuing future-dated timestamps
+```
+
+If the clock moves back more than five minutes during a run, the box denies each request and prints
+`policy: warn: durable timestamp ...; denying` on stderr. Requests are decided again once the clock
+is within five minutes of the newest history timestamp. If an action finished while the clock was
+that far back, the box keeps its record and prints
+`policy: warn: an earlier outcome is not recorded yet: ...; denying` for each request until the
+record is saved. Once the clock is within five minutes again, the box saves it at the next request,
+or when the run shuts down, and then requests are decided normally. If the run ends while the clock
+is still more than five minutes behind, or the process is killed, that action doesn't count toward
+any limit after a restart. A time-zone change does not move this clock.
+Correct the system clock, or remove the box directory to start again, as
+[getting started](getting-started.md#clean-up) describes.
 
 ## See also
 
