@@ -90,6 +90,7 @@ The keys:
 | `shell.<action>.adds` | The effects that every spelling of the action has. |
 | `shell.<action>.options` | The options the action accepts, each with its `flag` spellings. An option with no `value` is a flag. |
 | `shell.<action>.operands` | Effects for an operand that `usage` names. `like` is a pattern: `like = "+*"` matches a refspec that starts with `+`. |
+| `shell.<action>.options_first` | When `true`, options stop at the first operand, so every word after it is an operand, even one that starts with `-`. Use it for a command such as `git config <name> <value>`, where `git config user.name --global` sets the value `--global`. The usage can't have a `--`, and the action can't take `[global options]` that hold an `anywhere` option. |
 
 An option or an operand adds effects with `adds`, and takes them away with `removes`.
 
