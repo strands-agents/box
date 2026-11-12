@@ -92,6 +92,8 @@ The keys:
 | `shell.<action>.operands` | Effects for an operand that `usage` names. `like` is a pattern: `like = "+*"` matches a refspec that starts with `+`. |
 
 An option or an operand adds effects with `adds`, and takes them away with `removes`.
+[A pattern decides when an effect applies](#a-pattern-decides-when-an-effect-applies) lists the
+pattern keys.
 
 A command line that matches no `usage` is the action `unmodeled`. So is one with an option that its
 action doesn't declare. [A command the grammar can't read](#a-command-the-grammar-cant-read-is-unmodeled)
@@ -249,6 +251,53 @@ denies all of `git` must name both:
 ```cedar
 forbid (principal, action in [Tool::git::Action::"*", Tool::git::Action::"unmodeled"], resource);
 ```
+
+### A pattern decides when an effect applies
+
+An operand, or an option that takes a value, can carry patterns. Its `adds` and `removes` then
+apply only when a value matches:
+
+| Key | What it holds |
+|---|---|
+| `like` | Patterns the value must match. `*` matches any run of characters, and `\*` matches a `*`. Without `like`, every value matches. |
+| `not_like` | Exact values the value must not be. `not_like = ["localhost", "127.0.0.1", "::1"]` matches every address except those three. A `not_like` pattern can't hold `*`, though `\*` matches a `*`. |
+| `case` | `"sensitive"`, the default, or `"insensitive"`. With `"insensitive"`, every pattern of the option or operand, including the patterns in its `when` entries, matches in any letter case. Box folds only the ASCII letters `A` to `Z`. |
+| `when` | A list of entries, each with its own `like`, `not_like`, `adds`, and `removes`, for values that need other effects. Each entry needs `like` or `not_like`. |
+
+A value matches an entry when it matches one of the `like` patterns and none of the `not_like`
+patterns. When an option or an operand has more than one value, such as a repeated option, the
+entry applies when any one value matches.
+
+kubectl reads a resource type in any letter case, and `--address` exposes a port unless it names a
+loopback address:
+
+```toml
+[tool.kubectl.grammar.shell.get]
+usage = "kubectl get [<type>] [<name>...]"
+operands.type = { like = "*secret*", case = "insensitive", adds = ["read_secrets"] }
+
+[tool.kubectl.grammar.shell.port_forward]
+usage = "kubectl port-forward [options] <target> <ports>..."
+options.address = { flag = "--address", value = "required", repeated = true, not_like = ["localhost", "127.0.0.1", "::1"], adds = ["listen_address"] }
+```
+
+`kubectl get SECRETS` has `read_secrets`, and `kubectl port-forward --address 0.0.0.0 pod/web 8080`
+has `listen_address`.
+
+Set `case = "insensitive"` only when the program ignores letter case for that value. Otherwise a
+`removes` takes an effect away, and a `not_like` keeps an effect off, for a spelling that the program
+reads as another value. Box folds only ASCII letters, so a program that also folds other letters,
+such as Go's `strings.ToLower` turning the Kelvin sign `K` into `k`, can read a spelling that a
+`like` pattern doesn't match.
+
+An entry with `not_like` can't have `removes`, and `run` refuses the grammar at startup. That
+entry matches every value except the few it names, so the agent could take an effect away with any
+word it chooses. To remove an effect, list the values that remove it in `like`.
+
+A `not_like` pattern with `*` is refused at startup for the same reason. With
+`like = ["*namespace*"]` and `not_like = ["*gadget*"]`, the agent could type
+`namespaces,gadgets` and the `adds` would no longer apply, though the program still reads
+`namespaces`.
 
 ### A rule covers one grammar
 

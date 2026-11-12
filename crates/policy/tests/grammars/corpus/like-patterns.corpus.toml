@@ -1,0 +1,143 @@
+# like-patterns grammar corpus
+#
+# Each case is one argv, and what the shell grammar of `like-patterns.grammar.toml` reads
+# it as. `fields` lists each field that does not hold its default: a Bool `false`, an
+# empty set, or an absent string. An `unmodeled` case has no fields and no effects.
+
+# `case = "insensitive"` matches each casing of the pattern
+[[case]]
+argv = ["kube", "get", "secret"]
+action = "get"
+fields = { type = "secret" }
+effects = ["read_secrets"]
+
+[[case]]
+argv = ["kube", "get", "Secret", "db"]
+action = "get"
+fields = { type = "Secret", name = ["db"] }
+effects = ["read_secrets"]
+
+[[case]]
+argv = ["kube", "get", "SECRETS"]
+action = "get"
+fields = { type = "SECRETS" }
+effects = ["read_secrets"]
+
+[[case]]
+argv = ["kube", "get", "pods,sEcReT"]
+action = "get"
+fields = { type = "pods,sEcReT" }
+effects = ["read_secrets"]
+
+[[case]]
+argv = ["kube", "get", "pods", "Secrets/db"]
+action = "get"
+fields = { type = "pods", name = ["Secrets/db"] }
+effects = ["read_secrets"]
+
+# A pattern with capital letters also matches in any casing
+[[case]]
+argv = ["kube", "get", "ServiceAccountTOKENS"]
+action = "get"
+fields = { type = "ServiceAccountTOKENS" }
+effects = ["read_secrets"]
+
+# The fold is ASCII only: KELVIN SIGN is not `k`, and LONG S is not `s`
+[[case]]
+argv = ["kube", "get", "TOKEN"]
+action = "get"
+fields = { type = "TOKEN" }
+
+[[case]]
+argv = ["kube", "get", "ſecret"]
+action = "get"
+fields = { type = "ſecret" }
+
+# A word that holds no casing of the pattern
+[[case]]
+argv = ["kube", "get", "pods", "secret-store"]
+action = "get"
+fields = { type = "pods", name = ["secret-store"] }
+
+# A `when` entry inherits the field's `case`
+[[case]]
+argv = ["kube", "delete", "customResourceDefinitions", "x"]
+action = "delete"
+fields = { type = "customResourceDefinitions", name = ["x"] }
+effects = ["broad_delete", "cluster_write"]
+
+[[case]]
+argv = ["kube", "delete", "CRD", "x"]
+action = "delete"
+fields = { type = "CRD", name = ["x"] }
+effects = ["broad_delete", "cluster_write"]
+
+[[case]]
+argv = ["kube", "delete", "NS", "x"]
+action = "delete"
+fields = { type = "NS", name = ["x"] }
+effects = ["broad_delete", "cluster_write"]
+
+# A type that matches no listed pattern adds only `cluster_write`
+[[case]]
+argv = ["kube", "delete", "widgetdefinitions", "x"]
+action = "delete"
+fields = { type = "widgetdefinitions", name = ["x"] }
+effects = ["cluster_write"]
+
+# `not_like` beside `like` excludes a value that both match, in any casing
+[[case]]
+argv = ["kube", "delete", "NamespacedGadgets", "x"]
+action = "delete"
+fields = { type = "NamespacedGadgets", name = ["x"] }
+effects = ["cluster_write"]
+
+# An exact `not_like` excludes only the whole value, so text that it names inside a list keeps the effect
+[[case]]
+argv = ["kube", "delete", "namespaces,namespacedgadgets", "x"]
+action = "delete"
+fields = { type = "namespaces,namespacedgadgets", name = ["x"] }
+effects = ["broad_delete", "cluster_write"]
+
+# A `case`-sensitive field keeps exact matching: `Client` is not `client`
+[[case]]
+argv = ["kube", "delete", "--dry-run=Client", "pods", "x"]
+action = "delete"
+fields = { dry_run = "Client", type = "pods", name = ["x"] }
+effects = ["cluster_write"]
+
+[[case]]
+argv = ["kube", "delete", "--dry-run=client", "ns", "x"]
+action = "delete"
+fields = { dry_run = "client", type = "ns", name = ["x"] }
+
+# `not_like` alone adds the effect for every value outside its patterns
+[[case]]
+argv = ["kube", "port-forward", "pod/web", "8080:80"]
+action = "port_forward"
+fields = { target = "pod/web", ports = ["8080:80"] }
+
+[[case]]
+argv = ["kube", "port-forward", "--address", "localhost", "pod/web", "8080:80"]
+action = "port_forward"
+fields = { address = ["localhost"], target = "pod/web", ports = ["8080:80"] }
+
+[[case]]
+argv = ["kube", "port-forward", "--address", "0.0.0.0", "pod/web", "8080:80"]
+action = "port_forward"
+fields = { address = ["0.0.0.0"], target = "pod/web", ports = ["8080:80"] }
+effects = ["listen_address"]
+
+# One value outside the patterns is enough, whatever the other values are
+[[case]]
+argv = ["kube", "port-forward", "--address", "localhost", "--address", "10.0.0.5", "pod/web", "8080:80"]
+action = "port_forward"
+fields = { address = ["10.0.0.5", "localhost"], target = "pod/web", ports = ["8080:80"] }
+effects = ["listen_address"]
+
+# A case-sensitive `not_like` does not exclude another casing
+[[case]]
+argv = ["kube", "port-forward", "--address", "LOCALHOST", "pod/web", "8080:80"]
+action = "port_forward"
+fields = { address = ["LOCALHOST"], target = "pod/web", ports = ["8080:80"] }
+effects = ["listen_address"]

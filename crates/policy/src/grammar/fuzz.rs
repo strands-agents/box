@@ -34,6 +34,8 @@ const SAMPLE_VALUES: &[&str] = &[
     "@file",
     "\\*",
     "é",
+    "\u{212A}",
+    "\u{17F}",
     "\u{0}",
 ];
 
@@ -190,7 +192,7 @@ fn short_letter(flag: &str) -> Option<char> {
     letters.next().is_none().then_some(letter)
 }
 
-/// Values that match, and nearly match, each `like` pattern of `changes`.
+/// Values that match, and nearly match, each `like` and `not_like` pattern of `changes`.
 fn like_samples(changes: &EffectChanges) -> Vec<String> {
     let fill = |pattern: &str, with: &str| {
         pattern
@@ -198,10 +200,9 @@ fn like_samples(changes: &EffectChanges) -> Vec<String> {
             .replace('*', with)
             .replace('\u{1}', "*")
     };
-    changes
-        .like
-        .iter()
-        .chain(changes.when.iter().flat_map(|when| &when.like))
+    std::iter::once(&changes.patterns)
+        .chain(changes.when.iter().map(|when| &when.patterns))
+        .flat_map(|patterns| patterns.like.iter().chain(&patterns.not_like))
         .flat_map(|pattern| {
             let filled = fill(pattern, "v");
             [
@@ -209,6 +210,7 @@ fn like_samples(changes: &EffectChanges) -> Vec<String> {
                 fill(pattern, ""),
                 format!("{filled}x"),
                 format!("x{filled}"),
+                filled.to_uppercase(),
                 filled,
             ]
         })
