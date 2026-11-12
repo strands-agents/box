@@ -158,9 +158,10 @@ the same four plus `network`. One translator turns each of them into a set of sa
   is `PWD`, `USER`, or an OTLP exporter name, which Box sets in every process. `LoadsCode` is a name
   that loads code before a program's first line, which a credential cannot take.
 
-- `filesystem` lists name paths and their access modes. The agent takes eight: `read`, `write`,
-  `read_file`, `write_file`, `list`, `metadata`, `exec`, and `deny`. A tool and a local MCP server
-  take the same lists without `metadata` and `exec`. A directory entry covers its tree, and a file
+- `filesystem` lists name paths and their access modes. The agent takes nine: `read`, `write`,
+  `read_file`, `write_file`, `list`, `metadata`, `exec`, `deny`, and `deny_write`. A tool and a
+  local MCP server take the same
+  lists without `metadata` and `exec`. A directory entry covers its tree, and a file
   entry is exact. `write` doesn't imply `read`.
 
 On Linux, the trusted process prepares filesystem grants for each new sandbox launch.

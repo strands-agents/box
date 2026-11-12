@@ -62,6 +62,11 @@ impl Fixture {
     }
 
     fn run(&self, role: &str, shape: &str, mode: &str) -> Output {
+        let grants = self.grants(shape, mode != "write-only", mode != "read-only");
+        self.run_with(role, shape, mode, &grants, "")
+    }
+
+    fn run_with(&self, role: &str, shape: &str, mode: &str, grants: &str, top: &str) -> Output {
         let agent = self.root.join("bin/mode-agent").display().to_string();
         let target = self.data.join("nested/value").display().to_string();
         let sibling = self.sibling(shape).display().to_string();
@@ -83,7 +88,6 @@ impl Fixture {
             ],
             _ => unreachable!(),
         };
-        let grants = self.grants(shape, mode != "write-only", mode != "read-only");
         let process = match role {
             "agent" => format!("[agent.filesystem]\n{grants}"),
             "tool" => {
@@ -95,7 +99,7 @@ impl Fixture {
             _ => unreachable!(),
         };
         let config = format!(
-            "name = 'filesystem-modes'\nbox_dir = {:?}\npolicy = 'policy.dw'\n\
+            "name = 'filesystem-modes'\nbox_dir = {:?}\npolicy = 'policy.dw'\n{top}\
              [agent]\ncommand = {command:?}\nworkspace = {:?}\n{process}",
             self.root.join("state").display().to_string(),
             self.data.display().to_string(),
@@ -216,6 +220,46 @@ fn explicit_read_write_succeeds_for_every_process_and_scope() {
                 );
             }
         }
+    }
+}
+
+/// **A `deny_write` directory reads and refuses writes in every process**: the agent, a tool, and a
+/// local MCP server, each with a write grant over its parent.
+#[test]
+fn a_deny_write_directory_refuses_writes_for_every_process() {
+    if !fixture::namespace_launcher_is_usable() {
+        println!("skipping: this platform has no usable containment backend");
+        return;
+    }
+    for role in ["agent", "tool", "server"] {
+        let fixture = Fixture::new();
+        let grants = format!(
+            "{}deny_write = [{:?}]\n",
+            fixture.grants("directory", true, true),
+            fixture.data.join("nested").display().to_string()
+        );
+        let output = fixture.run_with(role, "directory", "read-only", &grants, "");
+        assert!(output.status.success(), "{role}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("FILESYSTEM_PROBE_OK"),
+            "{role}: {output:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("deny_write"),
+            "{role}: the disclosure names the directory: {output:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(fixture.data.join("nested/value")).unwrap(),
+            "seed",
+            "{role}"
+        );
+
+        let fixture = Fixture::new();
+        let output = fixture.run(role, "directory", "read-write");
+        assert!(
+            output.status.success(),
+            "{role}: without it the directory is writable: {output:?}"
+        );
     }
 }
 

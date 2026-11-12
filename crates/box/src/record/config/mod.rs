@@ -519,10 +519,7 @@ impl RunContract {
                         .chain(self.file.tool.values())
                         .chain(contained_mcp.values().map(|m| &m.spec)),
                     &mcp_servers,
-                    self.file
-                        .agent
-                        .as_ref()
-                        .is_some_and(|agent| !agent.ingress.is_empty()),
+                    self.file.agent.as_ref(),
                     has_backend(&egress, &remote_mcp),
                     &self.file.gateway,
                     &telemetry,
@@ -713,6 +710,8 @@ const TELEMETRY_EXPORT_RECORD_VERSION: u32 = 36;
 /// The record version of a record with `monty = false`, so an older build refuses the box rather
 /// than resuming it with a bare `python3` running Monty again.
 const MONTY_OFF_RECORD_VERSION: u32 = 37;
+/// The record version of a record whose process declares a `filesystem.deny_write` list.
+const DENY_WRITE_RECORD_VERSION: u32 = 38;
 
 /// Monty is on unless the operator turns it off.
 fn monty_default() -> bool {
@@ -778,12 +777,18 @@ fn record_version<'a>(
     limits: &Limits,
     specs: impl Iterator<Item = &'a ProcessSpec> + Clone,
     mcp: &[crate::record::config::mcp::McpServer],
-    ingress: bool,
+    agent: Option<&ProcessSpec>,
     has_backend: bool,
     gateway: &Gateway,
     targets: &BTreeMap<String, telemetry::TelemetryEntry>,
 ) -> u32 {
-    if !monty {
+    let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
+    if specs
+        .clone()
+        .any(|spec| !spec.filesystem.deny_write.is_empty())
+    {
+        DENY_WRITE_RECORD_VERSION
+    } else if !monty {
         MONTY_OFF_RECORD_VERSION
     } else if telemetry::needs_export_record(targets) {
         TELEMETRY_EXPORT_RECORD_VERSION
@@ -1084,6 +1089,7 @@ impl Record {
             FILE_WATCHING_RECORD_VERSION,
             TELEMETRY_EXPORT_RECORD_VERSION,
             MONTY_OFF_RECORD_VERSION,
+            DENY_WRITE_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1114,10 +1120,7 @@ impl Record {
                 .chain(record.tool.values())
                 .chain(record.contained_mcp.values().map(|m| &m.spec)),
             &record.mcp,
-            record
-                .agent
-                .as_ref()
-                .is_some_and(|agent| !agent.ingress.is_empty()),
+            record.agent.as_ref(),
             has_backend(&record.egress, &record.remote_mcp),
             &record.gateway,
             &record.telemetry,
@@ -1626,7 +1629,7 @@ mod tests {
                             &stored.limits,
                             std::iter::empty(),
                             &stored.mcp,
-                            false,
+                            None,
                             false,
                             &Gateway::default(),
                             &stored.telemetry,
@@ -1681,7 +1684,7 @@ mod tests {
                 &stored.limits,
                 std::iter::empty(),
                 &stored.mcp,
-                false,
+                None,
                 has_backend(&stored.egress, &stored.remote_mcp),
                 &Gateway::default(),
                 &stored.telemetry,
@@ -2096,7 +2099,7 @@ native-filesystem-policy = false
                                     &limits,
                                     std::iter::once(&spec),
                                     servers,
-                                    false,
+                                    None,
                                     false,
                                     &Gateway::default(),
                                     &BTreeMap::new(),
@@ -2682,6 +2685,61 @@ native-filesystem-policy = false
         );
     }
 
+    /// **`filesystem.deny_write` loads on the agent, a tool, and a local MCP server**, with no
+    /// switch, and a `deny-write` key in `[experimental-features]` is refused as unknown.
+    #[test]
+    fn a_deny_write_list_loads_on_every_process() {
+        let agent = "[agent]\ncommand = [\"x\"]\n[agent.filesystem]\n\
+             write = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n";
+        let file = load(agent).expect("the agent takes the list");
+        assert_eq!(
+            file.agent.expect("the agent").filesystem.deny_write,
+            [PathBuf::from("/work/.venv")]
+        );
+        let tool = "[agent]\ncommand = [\"x\"]\n[tool.git]\ncommand = [\"/usr/bin/git\"]\n\
+             [tool.git.filesystem]\nwrite = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n";
+        let file = load(tool).expect("a tool takes the list");
+        assert_eq!(
+            file.tool["git"].filesystem.deny_write,
+            [PathBuf::from("/work/.venv")]
+        );
+        let server = "[mcp.local]\ntype = \"stdio\"\ncommand = [\"/bin/sh\"]\n\
+             [mcp.local.filesystem]\nwrite = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n";
+        load(server).expect("a local MCP server takes the list");
+        let error = toml::from_str::<ConfigFile>(&format!(
+            "name = \"codex\"\nbox_dir = {LOAD_BOX_DIR:?}\n{agent}[experimental-features]\n\
+             deny-write = true\n"
+        ))
+        .expect_err("the old switch is gone");
+        assert!(error.to_string().contains("deny-write"), "{error}");
+    }
+
+    /// A stored `deny_write` list, on the agent or a tool, takes its record version, so an older
+    /// build refuses the box.
+    #[test]
+    fn a_stored_deny_write_takes_its_record_version() {
+        let tool = record_from_config(
+            "[agent]\ncommand = [\"/bin/sh\"]\n[tool.git]\ncommand = [\"/usr/bin/git\"]\n\
+             [tool.git.filesystem]\nwrite = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n",
+        )
+        .expect("a tool deny_write loads");
+        assert_eq!(tool.version, DENY_WRITE_RECORD_VERSION);
+        let stored = record_from_config(
+            "[agent]\ncommand = [\"/bin/sh\"]\n[agent.filesystem]\n\
+             write = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n",
+        )
+        .expect("an agent deny_write loads");
+        assert_eq!(stored.version, DENY_WRITE_RECORD_VERSION);
+        assert!(
+            Record::parse(
+                &toml::to_string(&stored).expect("the record serializes"),
+                Path::new("record.toml")
+            )
+            .is_ok(),
+            "the record round-trips"
+        );
+    }
+
     /// A stored ingress needs the stored switch, so a record cannot carry a listener the operator
     /// did not turn on.
     #[test]
@@ -3157,7 +3215,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, MONTY_OFF_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, DENY_WRITE_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
