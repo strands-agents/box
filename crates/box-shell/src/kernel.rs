@@ -1,7 +1,6 @@
 //! The kernel the hosted Shell runs on: each filesystem effect is resolved, presented at the
 //! checkpoint, and performed on the identity the checkpoint judged.
 
-use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex};
@@ -37,8 +36,6 @@ pub struct Filesystem {
     mounts: Mounts,
     /// Advanced by each effect that changes what a path names.
     generation: tokio::sync::Mutex<u64>,
-    /// The last refused metadata probe of each process, by its virtual pid.
-    refused_probes: StdMutex<HashMap<u32, String>>,
 }
 
 impl Filesystem {
@@ -59,7 +56,6 @@ impl Filesystem {
             memory: VfsKernel::new(vfs, Vec::new()),
             mounts,
             generation: tokio::sync::Mutex::new(0),
-            refused_probes: StdMutex::new(HashMap::new()),
         })
     }
 
@@ -218,7 +214,7 @@ impl ShellKernel {
         Ok((resolved, permit))
     }
 
-    /// Admit a probe whose caller cannot report an error, remembering a refusal for `mkdir -p`.
+    /// Admit a probe whose caller cannot report an error.
     async fn admit_probe(
         &self,
         proc: &Process,
@@ -226,54 +222,7 @@ impl ShellKernel {
         follow: Follow,
         operation: FsOperation,
     ) -> Option<(Resolved, Permit)> {
-        let admitted = self.admit_path(proc, path, follow, operation).await;
-        let mut refused = self
-            .backend
-            .refused_probes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        match (&admitted, operation) {
-            (Err(_), FsOperation::ReadMetadata { .. }) => {
-                refused.insert(proc.pid, resolve::absolute(&proc.cwd, path));
-            }
-            _ => {
-                refused.remove(&proc.pid);
-            }
-        }
-        admitted.ok()
-    }
-
-    /// Whether the last probe of `proc` was a refused metadata read of `path`, which a `mkdir -p`
-    /// walk does not create (docs/design/decisions.md#the-shell-checks-policy-at-two-levels).
-    fn probe_was_refused(&self, proc: &Process, path: &str) -> bool {
-        let abs = resolve::absolute(&proc.cwd, path);
-        self.backend
-            .refused_probes
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&proc.pid)
-            .is_some_and(|refused| refused == abs)
-    }
-
-    /// Whether `path` is an ancestor that a running `mkdir -p` walks, and not one of its operands.
-    fn is_a_parents_ancestor(&self, proc: &Process, path: &str) -> bool {
-        let abs = resolve::absolute(&proc.cwd, path);
-        let running = self
-            .running
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        running.iter().any(|((program, args, cwd), _)| {
-            let parents = args
-                .iter()
-                .any(|arg| arg.starts_with('-') && !arg.starts_with("--") && arg.contains('p'));
-            program == "mkdir"
-                && parents
-                && args
-                    .iter()
-                    .filter(|arg| !arg.starts_with('-'))
-                    .map(|operand| resolve::absolute(cwd, operand))
-                    .any(|operand| operand != abs && operand.starts_with(&format!("{abs}/")))
-        })
+        self.admit_path(proc, path, follow, operation).await.ok()
     }
 
     fn host_for(&self, resolved: &Resolved, follow: Follow) -> Option<(PathBuf, PathBuf)> {
@@ -772,12 +721,8 @@ impl Kernel for ShellKernel {
         permit.report(removed).await
     }
 
-    /// A symlink at the final component is the name that already exists. An ancestor that a
-    /// running `mkdir -p` walks, whose probe was refused, is not created.
+    /// A symlink at the final component is the name that already exists.
     async fn create_dir(&self, proc: &Process, path: &str) -> io::Result<()> {
-        if self.is_a_parents_ancestor(proc, path) && self.probe_was_refused(proc, path) {
-            return Ok(());
-        }
         let (resolved, permit) = self
             .admit_path(proc, path, Follow::No, FsOperation::CreateDir)
             .await?;
