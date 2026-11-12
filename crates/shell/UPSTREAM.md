@@ -17,6 +17,47 @@ constraint is held at 15, which shares the workspace's `unicode-width` version.
 
 ## Local divergence from the pinned revision
 
+### Continued source lines and empty lexer words
+
+Two upstream parsing defects caused backslash-newline continuations to execute commands
+prematurely or introduce empty words. This could alter arguments or reject valid grouped
+commands. For example, this is one command written across two physical lines:
+
+```sh
+printf '<%s>\n' first \
+  second
+```
+
+Before the fix, the first line ran too early with `first` and an unintended empty argument:
+
+```text
+<first>
+<>
+```
+
+The shell then treated `second` as a separate command, reported
+`strands-shell: second: command not found`, and returned exit status 127.
+
+After the fix, it runs as `printf '<%s>\n' first second` and returns exit status 0:
+
+```text
+<first>
+<second>
+```
+
+The source executor now collects continued lines before executing commands or reading heredocs.
+The lexer omits words emptied by continuation removal and retains quoted empty words as tokens.
+End-of-input escape handling is unchanged. Alias expansion handles empty replacements without
+cursor underflow.
+
+`line_continuations_join_source_lines`, `line_continuations_do_not_create_words`, and
+`line_continuations_preserve_quoting_and_input_boundaries` cover execution, argument boundaries,
+quoting, heredocs, aliases, and end of input.
+
+Existing limitations remain: some quoted empty arguments are lost during execution, large source
+statements incur repeated parsing, and continuations within operators or variable names are
+unsupported.
+
 ### Backport: enforce the submitted input limit for multiline commands
 
 The guard matches [strands-agents/shell#178](https://github.com/strands-agents/shell/pull/178),
