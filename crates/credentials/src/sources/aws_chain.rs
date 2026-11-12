@@ -737,9 +737,10 @@ mod tests {
 
     // --- real SDK resolver against a temp profile file (no network) -----------
     //
-    // These tests mutate the process environment, which is global, so a lock serializes them.
+    // These tests mutate the process environment, which is global, so `test_env` serializes them
+    // and restores the snapshot even on a panic.
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    use crate::sources::test_env::{EnvRestore, lock_env};
 
     /// A named `aws://PROFILE` resolves only that profile, through the real SDK resolver: the
     /// profile's static key wins over an exported `AWS_ACCESS_KEY_ID`, and a missing profile is a
@@ -749,7 +750,18 @@ mod tests {
     /// `ProfileFileCredentialsProvider` path. Static keys need no network, so the test is hermetic.
     #[test]
     fn named_profile_ignores_ambient_env_and_refuses_a_missing_profile() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+        let _guard = lock_env();
+        // Restore the captured environment on every exit, including a panicking assertion.
+        let _restore = EnvRestore::capture(&[
+            "AWS_SHARED_CREDENTIALS_FILE",
+            "AWS_CONFIG_FILE",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_PROFILE",
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION",
+        ]);
 
         let dir = std::env::temp_dir().join(format!("box-aws-profile-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("temp dir");
@@ -760,21 +772,9 @@ mod tests {
         )
         .expect("write the profile file");
 
-        // Capture the AWS environment, then set an ambient key that must NOT win for a named profile.
-        let names = [
-            "AWS_SHARED_CREDENTIALS_FILE",
-            "AWS_CONFIG_FILE",
-            "AWS_ACCESS_KEY_ID",
-            "AWS_SECRET_ACCESS_KEY",
-            "AWS_SESSION_TOKEN",
-            "AWS_PROFILE",
-            "AWS_REGION",
-            "AWS_DEFAULT_REGION",
-        ];
-        let saved: Vec<(&str, Option<String>)> =
-            names.iter().map(|n| (*n, std::env::var(n).ok())).collect();
-        // SAFETY: the `ENV_LOCK` guard serializes every env-mutating test in this module, and the
-        // snapshot above is restored below, so no other thread observes a torn environment.
+        // Set an ambient key that must NOT win for a named profile.
+        // SAFETY: `_guard` holds `ENV_LOCK` and `_restore` restores the snapshot on drop, so no
+        // other thread observes a torn environment.
         unsafe {
             std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &creds_path);
             std::env::set_var("AWS_CONFIG_FILE", dir.join("config-does-not-exist"));
@@ -806,15 +806,6 @@ mod tests {
             "a missing profile refuses rather than signing as the ambient identity: {missing:?}"
         );
 
-        // SAFETY: same guard; restore the captured environment exactly.
-        unsafe {
-            for (name, value) in saved {
-                match value {
-                    Some(value) => std::env::set_var(name, value),
-                    None => std::env::remove_var(name),
-                }
-            }
-        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

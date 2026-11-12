@@ -13,6 +13,48 @@ mod env;
 mod file;
 mod op;
 
+/// Shared test support for the few source tests that mutate the process environment, which is
+/// global to the test binary.
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::Mutex;
+
+    /// Serializes every test that reads or writes the process environment, so no two observe each
+    /// other's torn state. Hold this for the whole body of such a test.
+    pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Takes the environment lock, recovering it from a prior test's panic.
+    pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Captures named variables on construction and restores them on drop, so a panicking test
+    /// under [`ENV_LOCK`] still leaves the environment as it found it.
+    pub(crate) struct EnvRestore(Vec<(&'static str, Option<String>)>);
+
+    impl EnvRestore {
+        /// Snapshots the current values of `names`.
+        pub(crate) fn capture(names: &[&'static str]) -> Self {
+            Self(names.iter().map(|n| (*n, std::env::var(n).ok())).collect())
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            // SAFETY: the caller holds `ENV_LOCK` for the lifetime of this guard, so no other thread
+            // reads the environment while it is restored here.
+            unsafe {
+                for (name, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(crate) use aws::{
     AWS_SCHEME, AmbientFallbackPolicy, AwsAcquisition, AwsCredentialProvider, AwsResolution,
     AwsSource, credsd_session_credentials, default_aws_provider, is_bare_aws_default_chain,
