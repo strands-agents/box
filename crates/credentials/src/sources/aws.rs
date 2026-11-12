@@ -516,9 +516,9 @@ pub(crate) trait AwsCredentialProvider: Send + Sync + std::fmt::Debug {
 /// With no profile it resolves the SDK default credential provider chain
 /// ([`SdkChainProvider`](super::aws_chain::SdkChainProvider)) — environment, profile files
 /// (including `credential_process`), web identity, the container endpoint, then instance metadata.
-/// With a profile it pins that same chain to the named profile, so a named profile resolves its
-/// `credential_process`, assume-role, or web identity through the SDK just like the AWS CLI. Both
-/// forms share one worker, one cache, and one risk
+/// With a profile it resolves only that profile through a profile-only provider (static keys,
+/// `credential_process`, assume-role, or web identity), never the ambient `AWS_*` keys or instance
+/// metadata; a missing profile is a hard error. Both forms share one worker, one cache, and one risk
 /// (docs/design/decisions.md#a-provider-refuses-an-identity-it-cannot-honour).
 #[derive(Debug)]
 struct DefaultAwsProvider;
