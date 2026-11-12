@@ -17,6 +17,24 @@ constraint is held at 15, which shares the workspace's `unicode-width` version.
 
 ## Local divergence from the pinned revision
 
+### Backport: enforce the submitted input limit for multiline commands
+
+The guard matches [strands-agents/shell#178](https://github.com/strands-agents/shell/pull/178),
+merged on 2026-10-27 as `cff867ba10310b42fb4af135b999defc4ed78c6a`.
+The pinned revision predates that fix.
+
+`exec::execute` selected `execute_sourced` for input containing a newline, which skipped the
+`max_input` check in `execute_admitted_line`. Thus an oversized submission ran when it ended in
+a newline, while the same text without that newline was refused. This is an upstream limit
+enforcement bug.
+
+`execute` now checks the full input before choosing the evaluator. Its EXIT-trap handling remains
+after the result, and direct calls to `execute_with_reader` retain their check. Files loaded by
+`source` still use `max_output`; this change adds no `max_input` check to `execute_sourced`.
+`builder_max_input` covers single-line, trailing-newline, and multiline submissions at the limit,
+one byte over it, and with the existing `0` unlimited value. The trailing-newline assertion fails
+without the fix.
+
 ### Local addition: bind a host spawn to its checked directory (2026-11-04)
 
 An embedding can select a program's launch directory independently of the caller's Shell directory.

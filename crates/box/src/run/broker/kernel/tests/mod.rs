@@ -55,7 +55,11 @@ pub(super) fn adapter(policy: Arc<PolicyEngine>) -> Arc<dyn EffectInterceptor> {
 /// The box's limits on a Shell over `kernel`.
 pub(super) fn limited(kernel: ShellKernel) -> Shell {
     let mut shell = kernel.shell();
-    crate::run::broker::shell::apply_limits(&mut shell.proc);
+    crate::run::broker::shell::apply_limits(
+        &mut shell.proc,
+        crate::record::config::limits::DEFAULT_SHELL_MAX_INPUT,
+        crate::record::config::limits::DEFAULT_SHELL_MAX_OUTPUT,
+    );
     shell
 }
 

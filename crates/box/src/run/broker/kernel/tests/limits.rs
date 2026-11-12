@@ -3,9 +3,12 @@
 
 use std::time::Duration;
 
+use crate::record::config::limits::{
+    DEFAULT_SHELL_MAX_INPUT as SHELL_MAX_INPUT,
+    DEFAULT_SHELL_MAX_OUTPUT as MAX_CAPTURE_STREAM_BYTES,
+};
 use crate::run::broker::program::Program;
-use crate::run::broker::protocol::MAX_CAPTURE_STREAM_BYTES;
-use crate::run::broker::shell::{SHELL_MAX_FILE_SIZE, SHELL_MAX_INODES, SHELL_MAX_INPUT};
+use crate::run::broker::shell::{SHELL_MAX_FILE_SIZE, SHELL_MAX_INODES};
 
 use super::{backend, fixture_on, run};
 

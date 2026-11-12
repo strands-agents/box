@@ -166,6 +166,11 @@ a `shell:spawn` permit, the program runs under the first of these that covers it
 2. An [`[agent.filesystem] exec`](#agentfilesystem-exec) entry.
 3. Neither: the program is refused with status `126`.
 
+`limits.shell.max_input` bounds submitted command text, and `limits.shell.max_output` bounds
+output buffers and script files loaded with `source`. Set either size to `0` to disable that Shell
+limit. The [limits reference](config.md#limits)
+gives their defaults, byte units, and the separate limits on transport and positional script invocation.
+
 ### `limits.shell.timeout`
 
 Each submitted Shell call has a 30-second timeout by default. Set `shell.timeout = 600` under
@@ -293,6 +298,7 @@ refuses makes `curl` exit non-zero.
 
 | Status | Meaning | stderr |
 |---|---|---|
+| `1` | Submitted command text exceeds 256 KiB, including text with line breaks. Split the text across several calls, for example by appending to a file. | `strands-shell: input too large` |
 | `1` | The Shell call exceeded its execution allowance. | `strands-shell: execution timeout exceeded` |
 | `125` | Box failed to serve the command. | The failure |
 | `125` | The call exceeded the broker's backup deadline, five seconds after its finite Shell allowance. | `strands-box: the call exceeded its deadline` |

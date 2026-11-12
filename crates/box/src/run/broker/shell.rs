@@ -16,14 +16,11 @@ use strands_shell::Shell;
 
 use crate::run::broker::invalid_input;
 use crate::run::broker::mcp::DiscoveryRegistry;
-use crate::run::broker::protocol::MAX_CAPTURE_STREAM_BYTES;
 use crate::run::broker::reach::{Reach, Refused};
 use crate::run::contain::boundary::environment::WORKLOAD_USER;
 use crate::run::telemetry::{DecisionRecorder, EffectiveDecision, ObservationCapture};
 use box_shell::{Filesystem, ScriptOutcome, ScriptRunner, ShellKernel};
 
-/// The most command text the broker will accept into the Shell.
-pub(super) const SHELL_MAX_INPUT: usize = 256 * 1024;
 pub(super) const SHELL_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
 pub(super) const SHELL_MAX_INODES: usize = 10_000;
 const SHELL_MAX_DEPTH: u32 = 64;
@@ -49,6 +46,8 @@ pub(crate) struct EgressRouting {
 
 /// Everything needed to build the hosted Shell, kept so one can be rebuilt.
 pub(super) struct ShellSpec {
+    pub(super) max_input: usize,
+    pub(super) max_output: usize,
     /// The Shell's own bound on one submitted Shell call.
     pub(super) command_timeout: Option<Duration>,
     /// The broker's backstop deadline on one Call, distinct from `command_timeout`. The Shell's own
@@ -145,7 +144,7 @@ impl ShellSpec {
         let mut kernel = ShellKernel::over(backend, interceptor)
             .programs(Arc::clone(&self.host_programs))
             .python(
-                MAX_CAPTURE_STREAM_BYTES,
+                self.max_output,
                 self.script_interpreter(correlation.clone()),
             );
         // With no gateway the network stays off: a fail-closed refusal, never a direct dial.
@@ -160,7 +159,7 @@ impl ShellSpec {
             kernel = kernel.spawner(within(correlation, spawner.spawn()));
         }
         let mut shell = kernel.shell();
-        apply_limits(&mut shell.proc);
+        apply_limits(&mut shell.proc, self.max_input, self.max_output);
         shell.proc.deadline = deadline(self.command_timeout)?;
         shell.proc.cwd = PathBuf::from(self.reach.working_directory());
         shell.set_env("PWD", self.reach.working_directory());
@@ -225,13 +224,17 @@ pub(super) fn shell_filesystem() -> io::Result<strands_shell::vfs::Vfs> {
 }
 
 /// The limits one Shell process runs under.
-pub(super) fn apply_limits(proc: &mut strands_shell::os::Process) {
+pub(super) fn apply_limits(
+    proc: &mut strands_shell::os::Process,
+    max_input: usize,
+    max_output: usize,
+) {
     proc.max_depth = SHELL_MAX_DEPTH;
-    proc.max_output = MAX_CAPTURE_STREAM_BYTES;
+    proc.max_output = max_output;
     proc.max_fds = SHELL_MAX_FDS;
     proc.max_bg_jobs = SHELL_MAX_BACKGROUND_JOBS;
     proc.max_pipeline = SHELL_MAX_PIPELINE;
-    proc.max_input = SHELL_MAX_INPUT;
+    proc.max_input = max_input;
 }
 
 /// The deadline of a Call starting now, or none when the Shell timeout is unlimited.

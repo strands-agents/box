@@ -47,6 +47,9 @@ actions and elapsed time to decide what is allowed next. For example, a file rea
 through Shell or Python can cause the gateway to deny a later outbound HTTP request.
 
 **Preview:** Box supports local execution on Linux ARM64 and macOS with Apple silicon.
+Linux x86-64 is experimental and requires `EXPERIMENTAL_X86_SUPPORT=TRUE` in the
+environment of the Box process. See [building from source](docs/user/getting-started.md#build-from-source)
+for the x86-64 opt-in; release downloads remain ARM64-only on Linux.
 We welcome feedback through [GitHub issues](https://github.com/strands-agents/box/issues).
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 

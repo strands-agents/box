@@ -38,6 +38,13 @@ strands-box run    --config <file> [-- <args>...]
 strands-box policy generate-schema --config <file> --output-dir <dir>
 ```
 
+On Linux x86-64, both verbs require the operator environment variable
+`EXPERIMENTAL_X86_SUPPORT=TRUE`. If the variable is unset or has any other value,
+Box refuses execution before reading the configuration or starting a workload. `--help` and `--version`
+remain available. The same check applies to the Rust library functions `run` and
+`generate_policy_schema`; set the variable before starting the host application.
+ARM64 does not require the flag. This startup opt-in does not change sandbox permissions.
+
 There are two verbs. The caller that created `box_dir` owns its lifecycle: it holds the path, so it
 stops a box by ending the `run` process and deletes one by removing the directory.
 
@@ -88,7 +95,10 @@ which requests are governed.
 the execution timeout for each submitted Strands Shell call. The default is 30 seconds.
 For ten minutes, set `shell.timeout = 600`; for unlimited execution, set `shell.timeout = false`.
 The nested table `[limits.shell]` accepts the same values under `timeout`.
-Invalid or unrepresentable durations are load errors. Python retains its existing limits.
+`shell.max_input` and `shell.max_output` accept nonnegative integer byte counts, with defaults
+of 262144 and 65536. Shell applies the output limit to both output buffers and source-file reads.
+Set either size to `0` to disable that Shell limit, or omit it to keep its default.
+Invalid or unrepresentable durations and sizes are load errors. Python retains its existing limits.
 See [execution limits](../../docs/user/config.md#limits).
 
 **`[agent]` and each `[tool.<label>]` hold the same four fields.** `[agent]` is the process the
