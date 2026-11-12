@@ -94,6 +94,8 @@ pub(crate) struct WhenSpec {
     pub(crate) adds: Vec<String>,
     #[serde(default)]
     pub(crate) removes: Vec<String>,
+    #[serde(default)]
+    pub(crate) unmodeled: bool,
 }
 
 /// Read one string or a list of strings as a list.

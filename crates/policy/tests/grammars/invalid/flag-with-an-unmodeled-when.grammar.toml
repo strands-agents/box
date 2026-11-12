@@ -1,0 +1,11 @@
+# expect: `<grammar>.shell.publish.options.dry_run`: takes no value, so it cannot carry `like` or `when`
+# A flag that takes no value, with a `when` entry that makes the line unmodeled.
+
+name    = "pkg"
+program = "pkg"
+format  = 1
+version = 1
+
+[shell.publish]
+usage = "pkg publish [options]"
+options.dry_run = { flag = "--dry-run", when = [{ like = "false", unmodeled = true }] }

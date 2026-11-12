@@ -1,0 +1,28 @@
+# A tool grammar where a value that the program reads another way makes the line `unmodeled`.
+
+name    = "unmodeled_when"
+program = "pkg"
+format  = 1
+version = 1
+
+[effects]
+network     = "Contacts the registry"
+publish     = "Publishes the package"
+make_public = "Makes the package public"
+
+[global]
+options.registry = { flag = "--registry", value = "required", when = [{ like = "-*", unmodeled = true }] }
+
+[shell.publish]
+usage = "pkg [global options] publish [options] [<package_spec>]"
+adds  = ["network", "publish"]
+options.tag     = { flag = "--tag", value = "required", when = [{ like = "-*", unmodeled = true }] }
+options.access  = { flag = "--access", value = "required", when = [{ like = "public", adds = ["make_public"] }, { like = "-*", unmodeled = true }] }
+options.dry_run = { flag = "--dry-run", removes = ["publish", "make_public"] }
+operands.package_spec = { when = [{ like = ["true", "false"], unmodeled = true }] }
+
+[shell.deploy]
+usage = "pkg deploy [options] [<function>...]"
+adds  = ["network"]
+options.debug = { flag = "--debug" }
+operands.function = { when = [{ like = ["true", "false"], unmodeled = true }] }

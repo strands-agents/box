@@ -103,6 +103,10 @@ pub(crate) enum GrammarRefusal {
     ReservedAction { place: Place },
     #[error("{place}: field {field:?} has a name that the schema gives every action")]
     ReservedField { place: Place, field: String },
+    #[error(
+        "{place}: a `when` entry with `unmodeled = true` cannot also carry `adds` or `removes`"
+    )]
+    UnmodeledWithEffects { place: Place },
     #[error("{place}: field {field:?} starts with `__`, which Box reserves for Cedar record keys")]
     CedarReservedField { place: Place, field: String },
 }
@@ -230,6 +234,7 @@ impl GrammarRefusal {
             | Self::BadRest { place }
             | Self::FieldTaken { place, .. }
             | Self::ReservedAction { place }
+            | Self::UnmodeledWithEffects { place }
             | Self::ReservedField { place, .. }
             | Self::CedarReservedField { place, .. } => place.under(table),
         }

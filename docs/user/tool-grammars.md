@@ -91,10 +91,25 @@ The keys:
 | `shell.<action>.options` | The options the action accepts, each with its `flag` spellings. An option with no `value` is a flag. |
 | `shell.<action>.operands` | Effects for an operand that `usage` names. `like` is a pattern: `like = "+*"` matches a refspec that starts with `+`. |
 
-An option or an operand adds effects with `adds`, and takes them away with `removes`.
+An option or an operand adds effects with `adds`, and takes them away with `removes`. Its `when`
+list does the same for one value pattern at a time: `when = [{ like = "public", adds =
+["make_public"] }]` adds `make_public` only when the value is `public`.
+
+A `when` entry with `unmodeled = true` makes the whole command line `unmodeled` when a value is
+like its patterns. Use it where the program reads a word another way than the grammar does. npm
+reads `npm publish --dry-run false` as a real publish, because `false` is the value of
+`--dry-run`, and the grammar reads `false` as the package. This entry makes that line `unmodeled`,
+so the default-deny decides it and no rule has to forbid it:
+
+```toml
+operands.package_spec = { when = [{ like = ["true", "false"], unmodeled = true }] }
+```
+
+The entry applies before any `removes`, so a dry-run flag elsewhere on the line doesn't keep it
+modeled. An entry with `unmodeled = true` can't also have `adds` or `removes`.
 
 A command line that matches no `usage` is the action `unmodeled`. So is one with an option that its
-action doesn't declare. [A command the grammar can't read](#a-command-the-grammar-cant-read-is-unmodeled)
+action doesn't declare, and one with a value that an `unmodeled` `when` entry matches. [A command the grammar can't read](#a-command-the-grammar-cant-read-is-unmodeled)
 says how policy decides it.
 
 `name` and `program` are separate. `program` is what the agent types, and it decides which
@@ -232,7 +247,8 @@ it enters history as its grammar action.
 ### A command the grammar can't read is `unmodeled`
 
 When no `usage` matches a command, such as `git frobnicate`, or a command has an option the grammar
-doesn't declare, such as `--delete` in `git push --delete origin main`, Box decides it as
+doesn't declare, such as `--delete` in `git push --delete origin main`, or a value matches an
+[`unmodeled` `when` entry](#step-2-add-a-grammar-to-the-tool), Box decides it as
 `Tool::git::Action::"unmodeled"`. `unmodeled` isn't in the `"*"` group, so the permit over `"*"`
 doesn't allow it. With no rule that names it, it's denied:
 
