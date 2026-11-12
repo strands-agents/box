@@ -80,7 +80,7 @@ pub(crate) enum GrammarRefusal {
         other: Box<Place>,
     },
     #[error(
-        "{place}: {alias:?} must be command words (an optional `+`, then ASCII letters, digits, `-`, and `_`, not first a `-` or a `_`)"
+        "{place}: {alias:?} must be command words (an optional `+`, then ASCII letters, digits, `-`, and `_`, not first a `-` or a `_`, and not all uppercase)"
     )]
     BadAlias { place: Place, alias: String },
     #[error("{place}: spells `{spelling}`, and {other} spells it too")]

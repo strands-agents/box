@@ -1,4 +1,4 @@
-# expect: `<grammar>.shell.commit.aliases`: "c.i" must be command words (an optional `+`, then ASCII letters, digits, `-`, and `_`, not first a `-` or a `_`)
+# expect: `<grammar>.shell.commit.aliases`: "c.i" must be command words (an optional `+`, then ASCII letters, digits, `-`, and `_`, not first a `-` or a `_`, and not all uppercase)
 # A tool grammar for git: push, commit, and status.
 
 name    = "git"

@@ -1,6 +1,6 @@
 //! One `usage` line, read into the shape that the command lines of its action take.
 
-use super::model::{command_word, is_identifier};
+use super::model::{all_uppercase, command_word, is_identifier, spelled_like_a_command_word};
 
 /// What one `usage` line says about the command lines of its action.
 #[derive(Debug, Default)]
@@ -47,6 +47,11 @@ pub(crate) enum UsageFault {
     CommandWordOutOfPlace(String),
     #[error("has {0:?}, which is not a command word, an operand `<name>`, or `--`")]
     UnknownWord(String),
+    #[error(
+        "has {0:?}, which has no lowercase letter, so it is not a command word; write an operand as `<{lower}>`",
+        lower = .0.to_ascii_lowercase()
+    )]
+    UppercaseWord(String),
     #[error("has option {0:?}; declare it in `options`, and write `[options]` in the usage")]
     InlineOption(String),
     #[error("puts `[global options]` after the command words")]
@@ -181,6 +186,9 @@ impl Walker {
                 variadic,
             });
             return Ok(());
+        }
+        if spelled_like_a_command_word(word) && all_uppercase(word) {
+            return Err(UsageFault::UppercaseWord(word.to_string()));
         }
         if command_word(word) {
             if optional || self.phase == Phase::After {
