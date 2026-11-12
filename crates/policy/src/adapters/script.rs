@@ -248,6 +248,32 @@ impl<'p> ScriptPolicyInterceptor<'p> {
             // Pinned by `an_environment_read_is_refused_while_the_schema_cannot_name_it`.
             OsFunctionCall::Getenv(_) | OsFunctionCall::GetEnviron => None,
 
+            // --- subtree scans and host modules ---
+            //
+            // `Scan` reads a whole subtree in one call, for `os.scandir`, `os.walk`,
+            // `Path.walk`, `Path.glob` and `Path.rglob`. One decision on the root cannot
+            // stand for every entry below it, and the vocabulary has no subtree verb, so it
+            // is refused until someone states what it is.
+            //
+            // `Import` and `ImportStubs` ask the host for a module the sandbox does not
+            // bundle. The box gives the script no host modules, so they are refused, and
+            // `on_no_handler` raises the `ModuleNotFoundError` that Monty raised itself
+            // before it asked the host. Pinned by
+            // `an_unknown_import_raises_module_not_found_error`.
+            OsFunctionCall::Scan(_)
+            | OsFunctionCall::Import(_)
+            | OsFunctionCall::ImportStubs(_) => None,
+
+            // `CreateExclusive` creates a file that must not exist yet. Monty declares it but no
+            // script call produces it, since `open(path, "x")` is still rejected, so it is
+            // refused until someone states which effect it is.
+            //
+            // `GetTypeHints` asks the host to evaluate a function's or class's annotations for
+            // `typing.get_type_hints`. The box evaluates nothing for the script, so it is refused
+            // and the script sees `RuntimeError`. Pinned by
+            // `a_type_hints_request_is_refused_with_runtime_error`.
+            OsFunctionCall::CreateExclusive(_) | OsFunctionCall::GetTypeHints(_) => None,
+
             // --- not governed ---
             OsFunctionCall::DateToday
             | OsFunctionCall::DateTimeNow(_)
@@ -738,6 +764,35 @@ mod tests {
         assert!(
             !stderr.contains("api-key") && !stderr.contains("hunter2"),
             "{stderr}"
+        );
+    }
+
+    /// `typing.get_type_hints` on a host function asks the host to evaluate its annotations.
+    /// The box evaluates nothing for the script, so the request is refused with `RuntimeError`,
+    /// even under a policy that permits everything.
+    #[test]
+    fn a_type_hints_request_is_refused_with_runtime_error() {
+        let history = tempfile::tempdir().expect("history directory");
+        let policy = PolicyEngine::open(
+            vec![Policy {
+                origin: PathBuf::from("permit-all.dw"),
+                text: "permit(principal, action, resource);".to_string(),
+            }],
+            &history.path().join("dogwood.redb"),
+        )
+        .expect("policy opens");
+        let call = OsFunctionCall::GetTypeHints(monty_types::TypeHintsTarget::Function(
+            "fetch".to_string(),
+        ));
+
+        let Err(refusal) = interceptor(&policy).admit(&call) else {
+            panic!("a type-hints request must be refused");
+        };
+        let exception = refusal.into_exception();
+        assert_eq!(exception.exc_type(), ExcType::RuntimeError);
+        assert_eq!(
+            exception.message(),
+            Some("'typing.get_type_hints' is not supported in this environment")
         );
     }
 }

@@ -1136,6 +1136,59 @@ fn an_environment_read_is_refused_while_the_schema_cannot_name_it() {
     );
 }
 
+/// A subtree scan is refused even when every filesystem effect is permitted.
+///
+/// `os.scandir`, `os.walk` and `Path.glob` read a whole subtree in one call. One decision on
+/// the root cannot stand for every entry below it, so the adapter must not admit the scan as
+/// an enumeration of the root alone. `os.scandir` raises the refusal. `os.walk` and
+/// `Path.glob` swallow it as CPython does, so they list nothing even though a file exists.
+#[test]
+fn a_subtree_scan_is_refused_even_when_every_filesystem_effect_is_permitted() {
+    let directory = tempfile::tempdir().expect("temp dir");
+    fs::write(directory.path().join("listed.txt"), "x").expect("fixture writes");
+    let root = directory.path().to_str().expect("utf-8 path");
+
+    let ran = run_governed(
+        PERMIT_ALL,
+        &format!("import os\nlist(os.scandir({root:?}))\n"),
+    );
+    assert_eq!(
+        ran.raised(),
+        Some(ExcType::PermissionError),
+        "a subtree scan must be refused, not admitted by a broad filesystem rule: {ran:?}"
+    );
+
+    for source in [
+        format!("import os\nlist(os.walk({root:?}))\n"),
+        format!("from pathlib import Path\nlist(Path({root:?}).glob(\"*\"))\n"),
+    ] {
+        match run_governed(PERMIT_ALL, &source) {
+            Ran::Completed(MontyNode::List(entries)) => assert!(
+                entries.is_empty(),
+                "a refused scan must list nothing, got {entries:?} for {source:?}"
+            ),
+            other => panic!("expected an empty listing for {source:?}, got {other:?}"),
+        }
+    }
+}
+
+/// An import of a module the sandbox does not bundle raises `ModuleNotFoundError`.
+///
+/// Monty asks the host for such a module. The box gives the script no host modules, so the
+/// adapter refuses the request, and the script sees the same error that Monty raised itself
+/// before it asked the host.
+#[test]
+fn an_unknown_import_raises_module_not_found_error() {
+    let ran = run_governed(PERMIT_ALL, "import not_a_bundled_module\n");
+
+    assert_eq!(
+        ran.raised(),
+        Some(ExcType::ModuleNotFoundError),
+        "an unknown import must raise ModuleNotFoundError: {ran:?}"
+    );
+    assert_eq!(ran.message(), "No module named 'not_a_bundled_module'");
+}
+
 /// An empty policy denies everything: absence of a rule is not permission.
 #[test]
 fn an_empty_policy_denies_every_effect() {

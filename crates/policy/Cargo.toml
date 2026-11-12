@@ -36,7 +36,7 @@ mcp-tools-sdk = "=0.4.1"
 # NOTE: `cedar-policy` above stays a DIRECT exact pin even though the Cedar authorizer is
 # gone — the schema and the request gate are Cedar types, and Dogwood's own constraint on
 # cedar is a caret range, so removing our pin would silently widen it.
-dogwood-language = "=1.1.0"
+dogwood-language = "=1.1.1"
 # The single-machine temporal engine. Its durable assembly appends each event before
 # evaluation and recovers monitor state from the box's private history file.
 dogwood-local-engine = "=1.1.1"
@@ -55,8 +55,8 @@ strands-shell = { path = "../shell", optional = true }
 # crates, not vendored: the integration needs no interpreter change, so there is nothing
 # to carry a fork for. `monty` drives the run loop; `monty-types` carries the OS-call
 # vocabulary the loop hands over (upstream split the two at 0.0.19).
-monty = { version = "1.0.0", optional = true }
-monty-types = { version = "1.0.0", optional = true }
+monty = { version = "1.6.0", optional = true }
+monty-types = { version = "1.6.0", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
