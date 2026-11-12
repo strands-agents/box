@@ -98,7 +98,7 @@ impl ActionGrammar {
             } else if is_option_word(word) {
                 index = read_option(&self.after, argv, index, seen)?;
             } else {
-                verbatim = rest;
+                verbatim = rest || self.options_first;
                 before.push(word.clone());
                 index += 1;
             }

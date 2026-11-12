@@ -67,6 +67,7 @@ pub(crate) struct ShellAction {
     pub(super) adds: Vec<EffectName>,
     pub(super) options: BTreeMap<String, ShellOption>,
     pub(super) operands: BTreeMap<String, Operand>,
+    pub(super) options_first: bool,
 }
 
 /// One option of a shell action or of `[global]`.
@@ -253,6 +254,7 @@ impl ShellAction {
             adds,
             options,
             operands,
+            options_first: spec.options_first,
         })
     }
 }
@@ -561,6 +563,7 @@ operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], 
                         effects: refspec,
                     },
                 )]),
+                options_first: false,
             },
         )]);
         let grammar = ShellGrammar::compile("git", &global_options, &actions)

@@ -1,0 +1,55 @@
+# options-first grammar corpus
+#
+# Each case is one argv, and what the shell grammar of `options-first.grammar.toml` reads
+# it as. `fields` lists each field that does not hold its default: a Bool `false`, an
+# empty set, or an absent string. An `unmodeled` case has no fields and no effects.
+
+# An option before the first operand is an option
+[[case]]
+argv = ["git", "config", "--global", "user.name"]
+action = "config"
+fields = { global = true, name = "user.name" }
+
+# An option word after the first operand is an operand: git writes the value "--global"
+[[case]]
+argv = ["git", "config", "user.name", "--global"]
+action = "config"
+fields = { name = "user.name", value = "--global" }
+effects = ["write_config"]
+
+# An option that takes a value, then the operands
+[[case]]
+argv = ["git", "config", "-f", "x.cfg", "user.name", "Ada"]
+action = "config"
+fields = { file = "x.cfg", name = "user.name", value = "Ada" }
+effects = ["write_config"]
+
+# A `--` after the first operand is an operand
+[[case]]
+argv = ["git", "config", "user.name", "--"]
+action = "config"
+fields = { name = "user.name", value = "--" }
+effects = ["write_config"]
+
+# A `--` before the first operand ends the options
+[[case]]
+argv = ["git", "config", "--", "--global"]
+action = "config"
+fields = { name = "--global" }
+
+# An undeclared option before the first operand is unmodeled
+[[case]]
+argv = ["git", "config", "--add", "x.y", "z"]
+action = "unmodeled"
+
+# More operands than the usage names
+[[case]]
+argv = ["git", "config", "user.name", "--global", "x"]
+action = "unmodeled"
+
+# An action without `options_first` reads an option after an operand as an option
+[[case]]
+argv = ["git", "config", "set", "user.name", "--global", "Ada"]
+action = "config_set"
+fields = { global = true, name = "user.name", value = "Ada" }
+effects = ["write_config"]
