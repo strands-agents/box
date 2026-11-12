@@ -1,0 +1,33 @@
+# A tool grammar whose patterns ignore letter case or exclude values, after kubectl.
+
+name    = "like_patterns"
+program = "kube"
+format  = 1
+version = 1
+
+[effects]
+read_secrets   = "Reads Secret objects"
+broad_delete   = "Can delete many objects at once"
+listen_address = "Listens on an address other than localhost"
+cluster_write  = "Changes objects in the cluster"
+
+[shell.get]
+usage = "kube get [<type>] [<name>...]"
+operands.type = { like = ["*Secret*", "*token*"], case = "insensitive", adds = ["read_secrets"] }
+operands.name = { like = "*secret*/*", case = "insensitive", adds = ["read_secrets"] }
+
+[shell.delete]
+usage = "kube delete [options] [<type>] [<name>...]"
+adds  = ["cluster_write"]
+options.dry_run = { flag = ["--dry-run"], value = "optional", like = ["", "client", "server"], removes = ["cluster_write", "broad_delete"] }
+
+[shell.delete.operands.type]
+case = "insensitive"
+[[shell.delete.operands.type.when]]
+like     = ["ns", "*namespace*", "*customresourcedefinition*", "crd", "crds"]
+not_like = ["*namespacedgadget*"]
+adds     = ["broad_delete"]
+
+[shell.port_forward]
+usage = "kube port-forward [options] <target> <ports>..."
+options.address = { flag = ["--address"], value = "required", repeated = true, not_like = ["localhost", "127.0.0.1", "::1"], adds = ["listen_address"] }

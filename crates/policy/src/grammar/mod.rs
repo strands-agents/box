@@ -73,6 +73,14 @@ pub(crate) enum GrammarRefusal {
     UndeclaredEffect { place: Place, effect: String },
     #[error("{place}: {fault}")]
     BadOption { place: Place, fault: OptionFault },
+    #[error(
+        "{place}: an entry with `not_like` cannot carry `removes`, because every value outside its patterns would remove the effect"
+    )]
+    NegatedRemoval { place: Place },
+    #[error("{place}: a `when` entry needs `like` or `not_like`")]
+    WhenWithoutPattern { place: Place },
+    #[error("{place}: sets `case`, but has no `like` or `not_like` pattern")]
+    CaseWithoutPattern { place: Place },
     #[error("{place}: flag {flag:?} is also a flag of {other}")]
     FlagTaken {
         place: Place,
@@ -114,7 +122,7 @@ pub(crate) enum OptionFault {
     NoFlag,
     #[error("flag {0:?} must be `--` and a name with no `=`, or `-` and one character")]
     MalformedFlag(String),
-    #[error("takes no value, so it cannot carry `like` or `when`")]
+    #[error("takes no value, so it cannot carry `like`, `not_like`, `case`, or `when`")]
     PatternWithoutValue,
     #[error("takes no value, so it cannot be `repeated`")]
     RepeatedWithoutValue,
@@ -223,6 +231,9 @@ impl GrammarRefusal {
             | Self::UsageDisagrees { place, .. }
             | Self::UndeclaredEffect { place, .. }
             | Self::BadOption { place, .. }
+            | Self::NegatedRemoval { place }
+            | Self::WhenWithoutPattern { place }
+            | Self::CaseWithoutPattern { place }
             | Self::BadAlias { place, .. }
             | Self::BadUsage { place, .. }
             | Self::OptionsNotInUsage { place }

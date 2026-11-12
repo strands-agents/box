@@ -3,7 +3,9 @@
 use std::borrow::Borrow;
 use std::collections::BTreeMap;
 
-use super::format::{GrammarFile, OperandSpec, OptionSpec, ShellActionSpec, ValueSpec, WhenSpec};
+use super::format::{
+    CaseSpec, GrammarFile, OperandSpec, OptionSpec, ShellActionSpec, ValueSpec, WhenSpec,
+};
 use super::shell_grammar::ShellGrammar;
 use super::{GrammarRefusal, OptionFault, Place};
 use crate::schema::cedar_identifier;
@@ -101,19 +103,42 @@ pub(crate) enum OptionValue {
 #[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug, Clone, Default)]
 pub(crate) struct EffectChanges {
-    pub(super) like: Vec<String>,
+    pub(super) patterns: Patterns,
+    pub(super) case: LetterCase,
     pub(super) adds: Vec<EffectName>,
     pub(super) removes: Vec<EffectName>,
     pub(super) when: Vec<WhenChanges>,
 }
 
-/// The effects one `when` entry adds or removes when a value is like its patterns.
+/// The effects one `when` entry adds or removes when a value matches its patterns.
 #[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug, Clone)]
 pub(crate) struct WhenChanges {
-    pub(super) like: Vec<String>,
+    pub(super) patterns: Patterns,
     pub(super) adds: Vec<EffectName>,
     pub(super) removes: Vec<EffectName>,
+}
+
+/// A value matches when it is like a `like` pattern, or `like` is empty, and like no `not_like` pattern.
+#[cfg_attr(test, derive(PartialEq))]
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Patterns {
+    pub(super) like: Vec<String>,
+    pub(super) not_like: Vec<String>,
+}
+
+/// Whether patterns compare letters exactly, or after ASCII lowercasing of both sides.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum LetterCase {
+    #[default]
+    Sensitive,
+    Insensitive,
+}
+
+impl Patterns {
+    pub(super) fn is_empty(&self) -> bool {
+        self.like.is_empty() && self.not_like.is_empty()
+    }
 }
 
 impl Grammar {
@@ -282,7 +307,12 @@ impl ShellOption {
             ValueSpec::Optional => OptionValue::Optional,
             ValueSpec::Many => OptionValue::Many,
         };
-        if value == OptionValue::None && (!spec.like.is_empty() || !spec.when.is_empty()) {
+        if value == OptionValue::None
+            && (!spec.like.is_empty()
+                || !spec.not_like.is_empty()
+                || !spec.when.is_empty()
+                || spec.case.is_some())
+        {
             return refuse(OptionFault::PatternWithoutValue);
         }
         if value == OptionValue::None && spec.repeated {
@@ -298,9 +328,13 @@ impl ShellOption {
             anywhere: spec.anywhere,
             effects: EffectChanges::read(
                 place,
-                spec.like,
-                spec.adds,
-                spec.removes,
+                WhenSpec {
+                    like: spec.like,
+                    not_like: spec.not_like,
+                    adds: spec.adds,
+                    removes: spec.removes,
+                },
+                spec.case,
                 spec.when,
                 effects,
             )?,
@@ -318,9 +352,13 @@ impl Operand {
             rest: spec.rest,
             effects: EffectChanges::read(
                 place,
-                spec.like,
-                spec.adds,
-                spec.removes,
+                WhenSpec {
+                    like: spec.like,
+                    not_like: spec.not_like,
+                    adds: spec.adds,
+                    removes: spec.removes,
+                },
+                spec.case,
                 spec.when,
                 effects,
             )?,
@@ -331,29 +369,61 @@ impl Operand {
 impl EffectChanges {
     fn read(
         place: &Place,
-        like: Vec<String>,
-        adds: Vec<String>,
-        removes: Vec<String>,
+        entry: WhenSpec,
+        case: Option<CaseSpec>,
         when: Vec<WhenSpec>,
         effects: &BTreeMap<EffectName, String>,
     ) -> Result<Self, GrammarRefusal> {
-        let adds = declared(place, adds, effects)?;
-        let removes = declared(place, removes, effects)?;
+        let own = WhenChanges::read(place, entry, effects)?;
         let when = when
             .into_iter()
             .map(|entry| {
-                Ok(WhenChanges {
-                    like: entry.like,
-                    adds: declared(place, entry.adds, effects)?,
-                    removes: declared(place, entry.removes, effects)?,
-                })
+                let entry = WhenChanges::read(place, entry, effects)?;
+                if entry.patterns.is_empty() {
+                    return Err(GrammarRefusal::WhenWithoutPattern {
+                        place: place.clone(),
+                    });
+                }
+                Ok(entry)
             })
-            .collect::<Result<_, GrammarRefusal>>()?;
+            .collect::<Result<Vec<_>, GrammarRefusal>>()?;
+        if case.is_some() && own.patterns.is_empty() && when.is_empty() {
+            return Err(GrammarRefusal::CaseWithoutPattern {
+                place: place.clone(),
+            });
+        }
+        let case = match case {
+            None | Some(CaseSpec::Sensitive) => LetterCase::Sensitive,
+            Some(CaseSpec::Insensitive) => LetterCase::Insensitive,
+        };
         Ok(Self {
-            like,
-            adds,
-            removes,
+            patterns: own.patterns,
+            case,
+            adds: own.adds,
+            removes: own.removes,
             when,
+        })
+    }
+}
+
+impl WhenChanges {
+    fn read(
+        place: &Place,
+        entry: WhenSpec,
+        effects: &BTreeMap<EffectName, String>,
+    ) -> Result<Self, GrammarRefusal> {
+        if !entry.not_like.is_empty() && !entry.removes.is_empty() {
+            return Err(GrammarRefusal::NegatedRemoval {
+                place: place.clone(),
+            });
+        }
+        Ok(Self {
+            patterns: Patterns {
+                like: entry.like,
+                not_like: entry.not_like,
+            },
+            adds: declared(place, entry.adds, effects)?,
+            removes: declared(place, entry.removes, effects)?,
         })
     }
 }
@@ -447,9 +517,17 @@ mod tests {
             .collect()
     }
 
+    fn patterns(like: &[&str], not_like: &[&str]) -> Patterns {
+        Patterns {
+            like: strings(like),
+            not_like: strings(not_like),
+        }
+    }
+
     fn changes(like: &[&str], adds: &[&str], removes: &[&str]) -> EffectChanges {
         EffectChanges {
-            like: strings(like),
+            patterns: patterns(like, &[]),
+            case: LetterCase::Sensitive,
             adds: effects(adds),
             removes: effects(removes),
             when: Vec::new(),
@@ -479,7 +557,7 @@ aliases = ["send"]
 adds = ["network"]
 options.lease = { flag = ["--force-with-lease"], value = "optional", like = ["*:*", "*"], when = [{ like = "*", adds = ["force_push"], removes = ["network"] }] }
 options.dry_run = { flag = ["-n", "--dry-run"], removes = ["force_push"] }
-operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], when = [{ like = ["a", "b"] }], rest = true }
+operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], case = "insensitive", when = [{ like = ["a", "b"] }, { not_like = "c", adds = ["network"] }], rest = true }
 "#;
         let option = |flags: &[&str], value, repeated, anywhere, effects| ShellOption {
             flags: strings(flags),
@@ -490,18 +568,26 @@ operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], 
         };
         let lease = EffectChanges {
             when: vec![WhenChanges {
-                like: strings(&["*"]),
+                patterns: patterns(&["*"], &[]),
                 adds: effects(&["force_push"]),
                 removes: effects(&["network"]),
             }],
             ..changes(&["*:*", "*"], &[], &[])
         };
         let refspec = EffectChanges {
-            when: vec![WhenChanges {
-                like: strings(&["a", "b"]),
-                adds: Vec::new(),
-                removes: Vec::new(),
-            }],
+            case: LetterCase::Insensitive,
+            when: vec![
+                WhenChanges {
+                    patterns: patterns(&["a", "b"], &[]),
+                    adds: Vec::new(),
+                    removes: Vec::new(),
+                },
+                WhenChanges {
+                    patterns: patterns(&[], &["c"]),
+                    adds: effects(&["network"]),
+                    removes: Vec::new(),
+                },
+            ],
             ..changes(&["+*"], &["force_push"], &["network"])
         };
         let global_options = BTreeMap::from([

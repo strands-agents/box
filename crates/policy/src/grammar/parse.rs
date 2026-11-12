@@ -1,8 +1,9 @@
 //! One command line, read against a shell grammar.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::model::{EffectChanges, EffectName, OptionValue};
+use super::model::{EffectChanges, EffectName, LetterCase, OptionValue, Patterns};
 use super::shell_grammar::{
     ActionGrammar, FieldKind, FieldSource, FieldValue, OptionTable, Parsed, ShellGrammar,
 };
@@ -319,20 +320,46 @@ fn apply(
     adds: &mut BTreeSet<EffectName>,
     removes: &mut BTreeSet<EffectName>,
 ) {
-    let matches = |patterns: &[String]| {
+    let values: Vec<Cow<'_, str>> = values
+        .iter()
+        .map(|value| changes.case.fold(value))
+        .collect();
+    let matches = |patterns: &Patterns| {
         values
             .iter()
-            .any(|value| patterns.iter().any(|pattern| like(pattern, value)))
+            .any(|value| patterns.matches(value, changes.case))
     };
-    if changes.like.is_empty() || matches(&changes.like) {
+    if changes.patterns.is_empty() || matches(&changes.patterns) {
         adds.extend(changes.adds.iter().cloned());
         removes.extend(changes.removes.iter().cloned());
     }
     for when in &changes.when {
-        if matches(&when.like) {
+        if matches(&when.patterns) {
             adds.extend(when.adds.iter().cloned());
             removes.extend(when.removes.iter().cloned());
         }
+    }
+}
+
+impl LetterCase {
+    /// `text` as this case compares it.
+    fn fold(self, text: &str) -> Cow<'_, str> {
+        match self {
+            Self::Sensitive => Cow::Borrowed(text),
+            Self::Insensitive => Cow::Owned(text.to_ascii_lowercase()),
+        }
+    }
+}
+
+impl Patterns {
+    /// Whether `value`, already folded to `case`, matches these patterns.
+    fn matches(&self, value: &str, case: LetterCase) -> bool {
+        let like_any = |patterns: &[String]| {
+            patterns
+                .iter()
+                .any(|pattern| like(&case.fold(pattern), value))
+        };
+        (self.like.is_empty() || like_any(&self.like)) && !like_any(&self.not_like)
     }
 }
 
