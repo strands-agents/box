@@ -287,6 +287,8 @@ interpreters are part of the code the operator must trust.
    because those accesses do not produce `fs:*` decisions. If Box cannot build a tool's sandbox
    grants, startup fails before the agent starts. On macOS, `file-attributes` adds a line for each
    sandbox that states which attributes its write grants can set.
+   Each `metadata_entry` line states that it grants only exact existence and metadata, with no
+   contents or descendant access.
 
    On Linux, `interpreter aliases for configured access` lists preserved interpreter spellings
    before the runtime-minimum section. Each line maps a spelling to a file the process's existing

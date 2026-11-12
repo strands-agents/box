@@ -247,7 +247,7 @@ Both tables hold one process, in one shape:
 | `command` | string array | The first entry is the program; the rest are its fixed leading arguments. Arguments passed to `run` come after them. |
 | `workspace` | string | The process's initial working directory. The box enters it; a `filesystem` list grants reach to it. |
 | `env` | table | The literal environment. `HOME` and `PATH` default to the operator's own; every other variable is present only when `env` names it. |
-| `[<table>.filesystem]` | table | The path lists the process's own system calls reach. Eight for `[agent]`; six for a `[tool.<name>]`, which has no `metadata` or `exec` list. |
+| `[<table>.filesystem]` | table | The path lists the process's own system calls reach. Nine for `[agent]`; six for a `[tool.<name>]`, which has no `metadata`, `metadata_entry`, or `exec` list. |
 | `native-filesystem-policy` | boolean | Optional override of the global experimental setting for this process and its descendants. See [workload selection](native-filesystem-policy.md#select-workloads). |
 | `[tool.<name>.grammar]` | table | Experimental, and `[tool.<name>]` only. The tool grammar for the program this tool runs. See [`[tool.<name>.grammar]`](#toolnamegrammar). |
 | `[[agent.ingress]]` | list of tables | `[agent]` only. Where callers reach the agent's servers, one entry per port. See [`[[agent.ingress]]`](#agentingress). |
@@ -415,7 +415,7 @@ accepts on its port. On Linux the agent's sandbox creates no IPv6 socket, so an 
   when another process already listens on a `workload_port`.
 - On macOS, the agent may listen only on its `workload_port`s, on any address of the Mac. A local
   process can also connect to those ports directly, and the network can when the agent listens on
-  `0.0.0.0`.
+  `0.0.0.0`. The agent may connect to its own `workload_port`s through localhost.
 - No policy decision covers a caller. `listen` decides who can reach the agent.
 - `ingress` is refused on a `[tool.<name>]` and on an `[mcp.<name>]`.
 - Without `ingress = true`, `[[agent.ingress]]` is refused: ``invalid `[agent]` table: `ingress` is
@@ -439,8 +439,8 @@ one line until a caller is served again.
 
 ## `[agent.filesystem]` and `[tool.<name>.filesystem]`
 
-Each list, and what one entry in it grants. `[agent.filesystem]` takes all eight;
-`[tool.<name>.filesystem]` takes six, and a `metadata` or `exec` list there is refused by name at
+Each list, and what one entry in it grants. `[agent.filesystem]` takes all nine;
+`[tool.<name>.filesystem]` takes six, and a `metadata`, `metadata_entry`, or `exec` list there is refused by name at
 load. [A tool's sandbox](../design/containment.md#a-tools-leaf-box) states what a tool reaches in
 their place.
 
@@ -456,6 +456,7 @@ mounted aliases, and enclosing directories.
 | `write_file` | Write one exact file. Linux requires explicit read access to that file. The entry names an existing file. |
 | `list` | List the directory without content access on macOS. Linux refuses this list. |
 | `metadata` | Inspect file properties below a directory without content access on macOS. Linux omits this grant without an error. **`[agent.filesystem]` only.** |
+| `metadata_entry` | Check existence and file properties at one exact path on macOS, including a missing path. Grants no contents, directory listing, or access below that path. Linux refuses this list. **`[agent.filesystem]` only.** |
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
 
@@ -506,6 +507,7 @@ An `exec` entry for one file does not authorize the whole directory.
 Ordinary read-write data directories and the broader execution mode for tools remain unchanged.
 
 Startup output states `read-only`, `write-only`, or `read-write` for each content-access grant.
+Each `metadata_entry` line states `exact existence and metadata only; no contents or descendants`.
 For partial overlaps, the parent entry also identifies the overlapping grants that allow both.
 Denials and protected paths still restrict access. Duplicate or nested grants of the same
 operation still cause startup refusal.
@@ -561,7 +563,7 @@ happen after the box directory is created and before the workload starts.
 | A pattern or a control character | ``` `filesystem.read` path "<entry>" must be exact and contain no pattern or control character``` |
 | A `..` component | ``` `filesystem.read` path "<entry>" carries `..`; name the path it means``` |
 | The same path twice in one list | ``` `filesystem.read` path <path> is duplicated``` |
-| A path that does not exist | `<path> is not there: No such file or directory (os error 2). A grant on a path that does not exist grants nothing and says so nowhere` |
+| A path that does not exist, except in `metadata_entry` or in a macOS `deny` entry | `<path> is not there: No such file or directory (os error 2). A grant on a path that does not exist grants nothing and says so nowhere` |
 | A symbolic link | `<path> is a symbolic link to <target>. A grant carries the identity the kernel checks, so a link renders a rule that matches nothing; name <target> instead` |
 | A spelling the kernel resolves elsewhere | `<path> is not the path the kernel checks, which is <path>. A grant carries the identity it acts on, so name that path instead` |
 | A directory in `read_file` or `write_file` | ``<path> is a directory; `read_file` names one file, and a tree belongs in `read` `` |
@@ -575,7 +577,7 @@ happen after the box directory is created and before the workload starts.
 | A writable grant can change an installed Box program, a hard-link name, or an enclosing directory | `this write grant can change trusted Box executable <path> or its path. Keep the Box installation outside every process's write grants` |
 | A system directory or a credential store the box always refuses | `<path> is refused beneath every grant: <reason>` |
 
-Create the path first, or name the existing directory above it. The same rule holds for a
+Except for `metadata_entry` and macOS `deny` entries, create the path first, or name the existing directory above it. The same rule holds for a
 `[tool.<name>] command` that names a file the workload has not built yet, which is refused with
 `containment config failed: path does not exist: <path>`. In the example, the CLI install,
 `strands-home`, the preload file, and the project all exist before the first `run`, because the
@@ -861,7 +863,7 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | `command` | string array | For `stdio`: a bare program name or absolute executable path, followed by its arguments. The executable's filename names the alias in the box's `bin/`. The harness runs that alias with the arguments. Two tables can share an alias when their arguments distinguish them. See [executable paths](mcp.md#select-an-executable-by-path). |
 | `workspace` | string | For `stdio`: the server's initial working directory. It grants nothing. |
 | `env` | table | For `stdio`: the literal environment the server receives. `HOME` and `PATH` default to the operator's own, as for `[agent]`. |
-| `filesystem` | table | For `stdio`: the six lists the server's own syscalls reach, the same six a `[tool.<name>.filesystem]` takes; a `metadata` or `exec` list is refused by name. An absent table grants nothing, so the server's sandbox has the runtime minimum and the reach that [a local MCP server's sandbox](../design/containment.md#local-mcp-servers) states. |
+| `filesystem` | table | For `stdio`: the six lists the server's own syscalls reach, the same six a `[tool.<name>.filesystem]` takes; a `metadata`, `metadata_entry`, or `exec` list is refused by name. An absent table grants nothing, so the server's sandbox has the runtime minimum and the reach that [a local MCP server's sandbox](../design/containment.md#local-mcp-servers) states. |
 | `argument_wildcards` | bool | For `stdio`: `false` by default. `true` lets this server's whole-argument `*` entries match and forward caller-supplied values. See [argument wildcards](mcp.md#argument-wildcards). |
 | `network.contain_egress` | bool | For `stdio`: `true` by default. `false` gives this one server direct network access, with no gateway, no policy decision per request, and no credential injection. |
 | `native-filesystem-policy` | boolean | For `stdio`: override the global experimental filesystem policy setting. Remote `http` entries refuse this field. See [workload selection](native-filesystem-policy.md#select-workloads). |
@@ -985,7 +987,8 @@ A `box_dir` whose parent does not exist is refused before anything is created. E
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload
 starts: a `workspace` that does not exist, an `env.HOME` inside or enclosing `box_dir`, a telemetry
 file destination inside the box directory and outside `private/`, a `filesystem` entry whose path
-does not exist or is a symbolic link, a `[tool.<name>] command` that names a missing file, an
+is a symbolic link or is missing outside `metadata_entry` and macOS `deny` lists,
+a `[tool.<name>] command` that names a missing file, an
 `[[agent.ingress]] listen` address that cannot be bound, and on macOS a `workload_port` that another
 process already listens on. The
 box directory stays behind. It is empty when the refusal came before the record was written, and it

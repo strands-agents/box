@@ -428,7 +428,7 @@ pub fn validate_grant(
         )));
     }
     let credential_store = credential_store_path(path, operator_home)?;
-    if path.exists() {
+    if path.exists() || (operation == Operation::Metadata && scope == Scope::File) {
         let grant = PathGrant::new(path, operation, scope)?;
         if credential_store {
             if !credential_store_path(&grant.resolved, operator_home)? {

@@ -7,6 +7,14 @@ use crate::{ContainmentError, Operation, Scope};
 /// Check backend read/write coverage for already-resolved grants without probing the host.
 pub fn validate_grants(grants: &[(&Path, Operation, Scope)]) -> crate::Result<()> {
     if cfg!(target_os = "linux") {
+        if let Some((path, _, _)) = grants.iter().find(|(_, operation, scope)| {
+            *operation == Operation::Metadata && *scope == Scope::File
+        }) {
+            return Err(ContainmentError::UnsupportedCapability {
+                capability: format!("exact existence and metadata access to {}", path.display()),
+                backend: "namespace".into(),
+            });
+        }
         require_read_for_writes(grants)?;
     }
     Ok(())

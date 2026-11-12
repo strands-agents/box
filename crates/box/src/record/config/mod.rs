@@ -13,7 +13,7 @@
 //! |---|---|
 //! | [`process`] | `[agent]` and `[tool.<name>]`: one `ProcessSpec` each |
 //! | [`egress`] | `[egress.a]`: which secret attaches to which request |
-//! | [`filesystem`] | the translation of a `ProcessSpec`'s eight lists into containment cells |
+//! | [`filesystem`] | the translation of a `ProcessSpec`'s nine lists into containment cells |
 //! | [`grammar`] | `[tool.<name>.grammar]`: the tool grammars a box installs |
 //! | [`ingress`] | `[[agent.ingress]]`: where callers reach the agent |
 //! | [`limits`] | `[limits.shell]`: the execution timeout of one Shell submission |
@@ -653,6 +653,7 @@ const INGRESS_RECORD_VERSION: u32 = 29;
 /// The record version of a record whose egress re-routes a destination to a backend.
 const BACKEND_RECORD_VERSION: u32 = 30;
 const SHELL_SIZE_LIMITS_RECORD_VERSION: u32 = 31;
+const METADATA_ENTRY_RECORD_VERSION: u32 = 32;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -699,12 +700,17 @@ fn record_version<'a>(
     file_attributes: bool,
     features: &ExperimentalFeatures,
     limits: &Limits,
-    specs: impl Iterator<Item = &'a ProcessSpec>,
+    specs: impl Iterator<Item = &'a ProcessSpec> + Clone,
     mcp: &[crate::record::config::mcp::McpServer],
     ingress: bool,
     has_backend: bool,
 ) -> u32 {
-    if limits.shell.has_size_limits() {
+    if specs
+        .clone()
+        .any(|spec| !spec.filesystem.metadata_entry.is_empty())
+    {
+        METADATA_ENTRY_RECORD_VERSION
+    } else if limits.shell.has_size_limits() {
         SHELL_SIZE_LIMITS_RECORD_VERSION
     } else if has_backend {
         BACKEND_RECORD_VERSION
@@ -987,6 +993,7 @@ impl Record {
             INGRESS_RECORD_VERSION,
             BACKEND_RECORD_VERSION,
             SHELL_SIZE_LIMITS_RECORD_VERSION,
+            METADATA_ENTRY_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -2760,7 +2767,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, SHELL_SIZE_LIMITS_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, METADATA_ENTRY_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

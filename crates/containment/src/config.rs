@@ -865,7 +865,7 @@ mod tests {
     /// **Every illegal cell an authorizing verb can state is refused by the vocabulary**, so no
     /// backend sees a pair it cannot render.
     ///
-    /// Seven of the eight refusals are here. The `Deny` row is not reachable through `allow` at
+    /// Six of the seven refusals are here. The `Deny` row is not reachable through `allow` at
     /// all — it refuses that operation outright — and
     /// `profile_conformance.rs::a_refusal_at_dir_scope_is_refused_and_file_scope_names_one_file`
     /// pins it through the verb that does state one.
@@ -893,7 +893,6 @@ mod tests {
             (directory.as_path(), Operation::Write, Scope::Dir),
             (directory.as_path(), Operation::Connect, Scope::Dir),
             (directory.as_path(), Operation::Connect, Scope::Root),
-            (file.as_path(), Operation::Metadata, Scope::File),
         ] {
             let refusal = ContainmentConfig::new()
                 .allow(path, operation, scope)
@@ -909,6 +908,7 @@ mod tests {
             (Operation::Read, Scope::File),
             (Operation::Write, Scope::File),
             (Operation::Connect, Scope::File),
+            (Operation::Metadata, Scope::File),
         ] {
             ContainmentConfig::new()
                 .allow(&file, operation, scope)

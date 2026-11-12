@@ -1,4 +1,4 @@
-//! A `ProcessSpec`'s eight lists, translated into containment cells beneath Core's guards.
+//! A `ProcessSpec`'s filesystem lists, translated into containment cells beneath Core's guards.
 //!
 //! | List | Entry kind | Cell |
 //! |---|---|---|
@@ -8,6 +8,7 @@
 //! | `write_file` | existing file | `Write` at `File` |
 //! | `list` | directory | `List` at `Root` |
 //! | `metadata` | directory | `Metadata` at `Root` |
+//! | `metadata_entry` | file, directory, absent path | `Metadata` at `File` |
 //! | `exec` | directory, executable file | `Exec` at `Root`, `Exec` at `File` |
 //! | `deny` | file, directory, absent path | `Deny` at `File`, `Deny` at `Root` |
 
@@ -85,7 +86,7 @@ impl FileIdentity {
     }
 }
 
-/// Every grant the eight lists state, and the paths subtracted beneath them.
+/// Every grant the filesystem lists state, and the paths subtracted beneath them.
 ///
 /// One value, because a grant and the refusals that carve its interior are one decision: applying
 /// the grant without them is the configuration these keys must never produce.
@@ -228,6 +229,9 @@ fn require_supported_grants(
 }
 
 fn effective_access(grant: &DirectGrant, grants: &[DirectGrant]) -> &'static str {
+    if grant.kind == Grant::MetadataEntry {
+        return "exact existence and metadata only; no contents or descendants";
+    }
     let (opposite, only, mixed) = match grant.operation {
         Operation::Read => (
             Operation::Write,
@@ -271,6 +275,12 @@ pub(crate) fn require_judged_identities(
                 grant.resolved.display()
             ),
         };
+        if grant.kind == Grant::MetadataEntry {
+            containment::ContainmentConfig::new()
+                .allow(&grant.resolved, grant.operation, grant.scope)
+                .map_err(|error| changed(&error.to_string()))?;
+            continue;
+        }
         let metadata = std::fs::symlink_metadata(&grant.resolved)
             .map_err(|source| changed(&format!("cannot be read ({source})")))?;
         if metadata.is_symlink() {
@@ -376,20 +386,37 @@ fn entry_grant(
     let lexical = expand_home(entry, &authored, context)
         .map_err(|error| (GrantRefusal::NotAbsolute, error))?;
 
-    // **An authored grant on an absent path is refused, never skipped.** A grant that silently
-    // does nothing is the defect class this repository has recorded twice.
-    let metadata = std::fs::symlink_metadata(&lexical).map_err(|source| match source.kind() {
-        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory => refused(
-            GrantRefusal::Absent,
-            &format!(
-                "{} is not there: {source}. A grant on a path that does not exist grants nothing \
-                 and says so nowhere",
+    let metadata = match std::fs::symlink_metadata(&lexical) {
+        Ok(metadata) => Some(metadata),
+        Err(source)
+            if matches!(
+                source.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            if kind != Grant::MetadataEntry {
+                return Err(refused(
+                    GrantRefusal::Absent,
+                    &format!(
+                        "{} is not there: {source}. A grant on a path that does not exist grants nothing \
+                         and says so nowhere",
+                        lexical.display()
+                    ),
+                ));
+            }
+            None
+        }
+        Err(source) => {
+            return Err(other(&format!(
+                "cannot read {}: {source}",
                 lexical.display()
-            ),
-        ),
-        _ => other(&format!("cannot read {}: {source}", lexical.display())),
-    })?;
-    if metadata.is_symlink() {
+            )));
+        }
+    };
+    if metadata
+        .as_ref()
+        .is_some_and(|metadata| metadata.is_symlink())
+    {
         // Name the target so the operator can paste it into the grant. A missing target and a
         // resolve failure (permission, link loop) are different problems; say which one it is.
         let named = |reason: &str| refuse(context, &authored, reason);
@@ -413,9 +440,13 @@ fn entry_grant(
             },
         ));
     }
-    let resolved = lexical
-        .canonicalize()
-        .map_err(|source| other(&format!("cannot resolve {}: {source}", lexical.display())))?;
+    let resolved = if metadata.is_some() {
+        lexical
+            .canonicalize()
+            .map_err(|source| other(&format!("cannot resolve {}: {source}", lexical.display())))?
+    } else {
+        crate::record::layout::resolved_to_its_deepest_existing_ancestor(&lexical)
+    };
     if resolved != lexical {
         // Not necessarily a link: `canonicalize` also folds `.` and `..`, so the message names
         // what is actually wrong, which is that the authored spelling is not the identity the kernel
@@ -431,9 +462,10 @@ fn entry_grant(
         ));
     }
 
-    let is_directory = metadata.is_dir();
+    let is_directory = metadata.as_ref().is_some_and(|metadata| metadata.is_dir());
     let key = kind.key();
     let (operation, scope) = match (kind, is_directory) {
+        (Grant::MetadataEntry, _) => (Operation::Metadata, Scope::File),
         (Grant::Read, true) => (Operation::Read, Scope::Root),
         (Grant::Read, false) => (Operation::Read, Scope::File),
         (Grant::Write, true) => (Operation::Write, Scope::Root),

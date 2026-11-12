@@ -89,7 +89,8 @@ Production use still requires further review and tests for those failures.
 ## Stored configuration and rollback
 
 When `[limits]` has no explicit settings, `file-attributes` is `false`, MCP argument wildcards
-are disabled, MCP executable names are bare, the agent declares no `[[agent.ingress]]`,
+are disabled, MCP executable names are bare, the agent declares neither `[[agent.ingress]]`
+nor `filesystem.metadata_entry`,
 and no egress destination has a backend,
 configurations without process overrides retain version 21 when disabled and version 22 when enabled.
 An explicit process override requires record version 23.
@@ -102,6 +103,7 @@ A box whose agent declares `[[agent.ingress]]` requires record version 29.
 A box whose egress re-routes a destination to a [backend](egress.md) requires record version 30.
 An explicit `limits.shell.max_input` or `limits.shell.max_output` requires record version 31,
 including values equal to the defaults.
+A box whose agent declares `filesystem.metadata_entry` requires record version 32.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 
@@ -114,6 +116,7 @@ If MCP argument wildcards are enabled, replace the stars with concrete arguments
 Replace each absolute MCP executable path with a bare program name that the server's `PATH`
 resolves to the intended executable.
 Remove any egress backends before returning to a binary that supports only version 21.
+Remove `filesystem.metadata_entry` before returning to a binary that does not support it.
 Run once with the current build before switching binaries.
 This writes a version 21 record while retaining durable policy history.
 Changing TOML alone does not rewrite an existing record.

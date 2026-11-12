@@ -361,7 +361,9 @@ fn ancestor_existence_rule(path: &str) -> String {
 }
 
 fn grant_existence_rules(granted: &PathGrant, homes: &[std::path::PathBuf]) -> Result<Vec<String>> {
-    let filter = if granted.scope == Scope::Root || inside_operator_home(&granted.resolved, homes) {
+    let filter = if (granted.operation, granted.scope) != (Operation::Metadata, Scope::File)
+        && (granted.scope == Scope::Root || inside_operator_home(&granted.resolved, homes))
+    {
         "subpath"
     } else {
         "literal"
@@ -571,7 +573,7 @@ pub(crate) fn render_profile_with_streams(
             // No data rule, so a directory is not enumerable and a file's bytes stay unreadable.
             // The caller's spelling gets its own metadata rule when it differs, because a lookup
             // traverses the link node itself, as for an exec grant; `/etc` needs it.
-            (Operation::Metadata, Scope::Dir) => cells.entry(METADATA_DIR).or_default().push_str(
+            (Operation::Metadata, Scope::File | Scope::Dir) => cells.entry(METADATA_DIR).or_default().push_str(
                 &format!("{}{}", ancestor_rule(&path), reachable_metadata(granted)?),
             ),
             (Operation::Metadata, Scope::Root) => {
@@ -695,8 +697,10 @@ pub(crate) fn render_profile_with_streams(
                 .iter()
                 .any(|deny| granted.resolved.starts_with(deny))
             {
-                let filter = if granted.scope == Scope::Root
-                    || inside_operator_home(&granted.resolved, &homes)
+                let filter = if (granted.operation, granted.scope)
+                    != (Operation::Metadata, Scope::File)
+                    && (granted.scope == Scope::Root
+                        || inside_operator_home(&granted.resolved, &homes))
                 {
                     "subpath"
                 } else {
@@ -758,8 +762,8 @@ pub(crate) fn render_profile_with_streams(
             // restores existence alone. An announced store the leaf may read needs its metadata
             // re-allowed after that deny too, or `stat` and `open` on the named credentials break.
             // Mirror the box-state re-allow, and render both spellings for the same reason.
-            let filter = if granted.scope == Scope::Root
-                || inside_operator_home(&granted.resolved, &homes)
+            let filter = if (granted.operation, granted.scope) != (Operation::Metadata, Scope::File)
+                && (granted.scope == Scope::Root || inside_operator_home(&granted.resolved, &homes))
             {
                 "subpath"
             } else {

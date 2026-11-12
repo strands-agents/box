@@ -33,8 +33,9 @@ Each `box run` creates a new certificate authority in memory and writes only its
 `GIT_SSL_CAINFO`. The private key never leaves the box's trusted process, and a run refuses to start
 if the certificate file holds private key material.
 
-The kernel restricts a contained process to two local ports, the gateway and the telemetry
-collector, so a client that ignores the proxy variables can't reach the network at all. See [macOS
+On macOS, a process using the gateway can connect to its gateway and telemetry ports.
+The agent may also connect through localhost to workload ports declared by its ingress entries.
+These local server connections do not pass through gateway policy. See [macOS
 network restrictions](./macos-enforcement.md#network-connections-and-local-services). A stdio MCP
 server or declared tool with `contain_egress = false` connects directly. Its traffic bypasses the
 gateway. See [local MCP servers](./containment.md#local-mcp-servers).

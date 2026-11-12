@@ -125,6 +125,7 @@ Existing boundaries between separate grants or filesystems still apply.
 Linux refuses `list`, because the mount view cannot expose directory names without file contents.
 An agent's metadata-only directory grant contributes no mount and causes no startup error.
 Other grants can still expose that directory.
+Linux refuses the agent's exact-path `metadata_entry` grant.
 
 <a id="programs-and-shared-libraries"></a>
 

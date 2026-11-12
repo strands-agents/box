@@ -380,8 +380,8 @@ access to it.
 one translator takes that type with a launch role. A spec holds four fields. `command` names the
 program and its fixed leading arguments. `workspace` sets the initial working directory and grants
 nothing. `env` supplies the literal environment with no inheritance from the surrounding OS.
-`filesystem` lists the paths the process's own syscalls can reach. It has eight lists for `[agent]`
-and six for `[tool.<name>]`. A tool refuses `metadata` and `exec` by name because its sandbox
+`filesystem` lists the paths the process's own syscalls can reach. It has nine lists for `[agent]`
+and six for `[tool.<name>]`. A tool refuses `metadata`, `metadata_entry`, and `exec` by name because its sandbox
 already discovers metadata and runs its toolchain through broad exec. Before this, the agent table
 and the tool table had grown apart, each with its own grant keys and its own translation. With one
 type, the configuration file states each process's reach in the same form. A fault in the shared
@@ -413,9 +413,10 @@ the operator's home, because it runs as the operator and looks for its session t
 <a id="direct-filesystem-reach-is-declared-and-disclosed"></a>
 ### Direct filesystem reach is declared in the configuration and disclosed at startup
 
-`[agent.filesystem]` carries eight lists: `read`, `write`, `read_file`, `write_file`, `list`,
-`metadata`, `exec`, and `deny`. Each entry names one path on the surrounding OS that the process's
-own syscalls can reach. Directory entries are recursive and file entries are exact. Paths are
+`[agent.filesystem]` carries nine lists: `read`, `write`, `read_file`, `write_file`, `list`,
+`metadata`, `metadata_entry`, `exec`, and `deny`. Each entry names one path on the surrounding OS that the process's
+own syscalls can reach. `metadata_entry` grants exact existence and metadata without contents or
+descendant access, including when the path is missing. Other directory entries are recursive and file entries are exact. Paths are
 absolute or `~`-relative, with no wildcard syntax. `write` does not imply `read`. These keys let an
 unmodified coding agent edit files in a box. Its native file tools issue direct syscalls. When the
 sandbox refused all of them, the agent had to use `cat` and shell heredocs. Routing everything
@@ -423,6 +424,10 @@ through the mediated Shell instead was rejected, because it prevents unmodified 
 their native file tools. These grants are kernel reach that no `fs:*` decision covers, so the
 startup disclosure on stderr naming every grant is the whole compensating control, pinned by
 `the_startup_disclosure_names_every_grant_and_the_home_and_path`.
+
+Exact metadata uses a separate list because recursive metadata exposes more than an exact check
+requires, and narrowing the existing list would change existing configurations.
+The exact list is supported on macOS and refused on Linux.
 
 Box subtracts the paths that hold its own authority from every grant. These are the box directory
 and the directories holding the `box.toml` selected by `--config` and its policy. Their names and
@@ -1392,11 +1397,12 @@ boundary. `config_load_returns_exact_bytes_and_keeps_the_caller_owned_file` and
 `inherited_config_read_uses_the_opened_file_after_a_path_swap` pin the two halves.
 
 <a id="a-grant-is-one-operation-at-one-scope"></a>
-### A grant is one operation at one scope, and eight combinations are unrepresentable
+### A grant is one operation at one scope, and seven combinations are refused
 
 A grant states one operation at one scope. The operations are exec, read, write, connect, list,
-metadata, and deny. The scopes are one file, one directory, and a whole tree. The model cannot
-represent eight combinations, so a backend never receives a pair it cannot render. A directory has
+metadata, and deny. The scopes are one file, one directory, and a whole tree; exact metadata can
+also name a directory or an absent entry at file scope. The model refuses seven combinations.
+A backend refuses a legal combination it cannot enforce, as Linux does for exact metadata. A directory has
 no bytes to execute, a file has no entries to enumerate, and a socket grant must name one existing
 file. Metadata is the cell for a path the workload stats and never reads, and exec at whole-tree
 scope authorizes every program in a named toolchain directory. Read plus write requires membership
@@ -1424,8 +1430,8 @@ render: Seatbelt port rules on macOS, and sockets from the namespace's PID 1 on 
 list because it would select loopback access without
 granting any. It also refuses repeated entries. No count bounds the lists, because a limit there
 would refuse a composition the caller authorized, at a layer that cannot see what was asked for.
-Every entry is loopback and policy still decides each request, so this list cannot become a
-destination allowlist.
+Policy decides requests through the gateway. On macOS, the agent can also connect directly
+through localhost to its declared ingress workload ports, without a gateway policy decision.
 
 <a id="a-denial-is-an-operation-not-a-second-list"></a>
 ### A denial is an operation, not a second list

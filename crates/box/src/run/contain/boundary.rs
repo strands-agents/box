@@ -358,6 +358,10 @@ impl Boundary {
             config.allow_prepared(prepared, operation, scope)
         };
         let allow_operator = |config: ContainmentConfig, path: &Path, operation, scope| {
+            if operation == Operation::Metadata && scope == Scope::File {
+                guard.judge(path, operation, scope)?;
+                return config.allow(path, operation, scope);
+            }
             let prepared = ContainmentConfig::prepare_filesystem_path(path)?;
             guard.judge(prepared.resolved_path(), operation, scope)?;
             config.allow_prepared(prepared, operation, scope)
@@ -430,7 +434,13 @@ impl Boundary {
             // (filesystem, PID, user, IPC, seccomp) is unchanged, so the grant is network-only.
             EgressMode::Native => Network::AllowAll,
             EgressMode::Gateway => Network::Localhost {
-                connect: served_ports.clone(),
+                connect: {
+                    let mut ports = served_ports.clone();
+                    if cfg!(target_os = "macos") {
+                        ports.extend(ingress.iter().map(|entry| entry.workload_port));
+                    }
+                    ports
+                },
                 listen: ingress
                     .iter()
                     .map(|ingress| ingress.workload_port)

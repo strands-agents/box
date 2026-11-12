@@ -84,6 +84,11 @@ impl MountView {
     pub(crate) fn plan(config: &ContainmentConfig) -> Result<Self, ContainmentError> {
         let mut grant_identities = BTreeMap::new();
         for granted in config.authorizations() {
+            if granted.operation == Operation::Metadata && granted.scope == Scope::File {
+                return Err(refusal(
+                    "exact existence and metadata access is not supported".into(),
+                ));
+            }
             if let Some(identity) = granted.identity
                 && let Some(previous) = grant_identities.insert(granted.resolved.clone(), identity)
                 && previous != identity
