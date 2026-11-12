@@ -170,10 +170,11 @@ from the host, which ends in `.amazonaws.com` or `.api.aws`.
 Both forms resolve through the AWS SDK, so they share one capability. A bare `aws://` resolves the
 default credential provider chain, in order: the `AWS_*` environment variables, the profile files
 (including `credential_process`), web identity, the ECS or EKS container endpoint, then EC2 instance
-metadata — the host's **ambient** identity. `aws://PROFILE` pins that chain to the named profile, so
-it resolves that profile's static keys, `credential_process`, assume-role, or web identity, the same
-way the AWS CLI does. Naming a profile pins *which* identity signs; it does not avoid
-`credential_process` (see the writable-`~/.aws` note below).
+metadata — the host's **ambient** identity. `aws://PROFILE` resolves **only** the named profile: its
+static keys, `credential_process`, assume-role, or web identity. It never reads the ambient `AWS_*`
+keys or instance metadata, and a missing profile is refused rather than signing as the ambient
+identity — like the AWS CLI's `--profile`. Naming a profile pins *which* identity signs; it does not
+avoid `credential_process` (see the writable-`~/.aws` note below).
 
 This build does **not** resolve **AWS SSO** or `aws login` profiles (the SDK's `sso` provider is
 compiled out to keep the dependency surface small). Such a profile, named or default, is refused,

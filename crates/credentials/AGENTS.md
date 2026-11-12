@@ -175,15 +175,24 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   `AmbientFallbackPolicy::Deny` unreachable, and emits a lying `AwsAcquisition::Profile(..)`. The
   `Structured` arm carries the mirror check on `source`. `AWS_SCHEME` is one `pub(crate)` constant in
   `sources/aws.rs`, re-exported through `sources/mod.rs`; do not reintroduce a second `"aws"` literal.
-- Both forms resolve through the SDK (`SdkChainProvider`): a bare `aws://` leaves the chain's profile
-  unset (the default chain), and `aws://PROFILE` pins it to the named profile with `.profile_name`, so
-  a named profile resolves its `credential_process`, assume-role, or web identity like the AWS CLI.
-  `DefaultAwsProvider::provide(profile)` forwards both to the one shared worker. `AwsAcquisition::
-  DefaultChain` carries the ambient warning and `Profile(_)` carries none, so the bare form is never
-  silent and a named profile is recorded as itself — the audit names what signed. There is no static-
-  key-only path and no hand-rolled INI parser; both were deleted with `sources/aws_profile.rs`. The
-  `credential_process` RCE residual now covers a named profile too, bounded by the writable-`~/.aws`
-  filesystem rule (docs/design/decisions.md#a-provider-refuses-an-identity-it-cannot-honour).
+- Both forms resolve through the SDK (`SdkChainProvider`), but through **different providers**, so
+  the audit never lies. A bare `aws://` resolves a `DefaultCredentialsChain` (env, then the default
+  profile, then web identity, ECS, and IMDS — the ambient identity). A named `aws://PROFILE` resolves
+  a profile-only `ProfileFileCredentialsProvider` pinned with `.profile_name`: it reads *only* that
+  profile's `credential_process`, assume-role, web identity, or static keys, and it never reads the
+  ambient `AWS_*` keys or instance metadata. A missing profile is a hard error, not a fall-through.
+  Do **not** build the named form from `DefaultCredentialsChain::builder().profile_name(..)`:
+  `.profile_name` there only redirects the profile-file and region sub-providers, so the env provider
+  still sits in front and a missing profile falls through to IMDS — the named route would then sign as
+  the ambient identity while `Profile(_)` claims otherwise. `named_profile_ignores_ambient_env_and_
+  refuses_a_missing_profile` pins the profile-only path against a temp credentials file with a
+  conflicting `AWS_ACCESS_KEY_ID`. `DefaultAwsProvider::provide(profile)` forwards both forms to the
+  one shared worker. `AwsAcquisition::DefaultChain` carries the ambient warning and `Profile(_)`
+  carries none, so the bare form is never silent and a named profile is recorded as itself — the audit
+  names what signed. There is no static-key-only path and no hand-rolled INI parser; both were deleted
+  with `sources/aws_profile.rs`. The `credential_process` RCE residual now covers a named profile too,
+  bounded by the writable-`~/.aws` filesystem rule
+  (docs/design/decisions.md#a-provider-refuses-an-identity-it-cannot-honour).
 
 ### The SDK provider (`sources/aws_chain.rs`)
 
@@ -207,12 +216,16 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   bare route and a named profile never evict each other; it serves an expiring credential within its
   buffer and re-resolves a non-expiring one (`expiry == None`) on every call (per-request resolve, the
   decided rotation behaviour), so a rotated file or environment credential is picked up.
-- **The region is resolved once, from the environment then the profile, never instance metadata**,
-  and pinned on each rebuild with `.region(..)`. Letting the rebuild run the SDK region chain would
-  reach IMDS on every request on a host with no configured region. The signing region still comes
-  from the route host, so the chain region only selects the STS endpoint for an assume-role or
-  web-identity profile; dropping the profile's `region =` breaks GovCloud, China, and VPC-endpoint
-  subnets.
+- **The region is resolved from the environment then a profile, never instance metadata**, and
+  pinned on the provider so the rebuild never runs the SDK region chain (which would reach IMDS on a
+  host with no configured region). The bare form resolves the region once from env then the *default*
+  profile and pins it with `.region(..)`. A named form resolves the region from env then *its own*
+  named profile (`ProfileFileRegionProvider::builder().profile_name(..)`), falling back to the shared
+  region, and passes it through `ProviderConfig::with_region(..)`. The signing region still comes from
+  the route host, so the chain region only selects the STS endpoint for an assume-role or web-identity
+  profile; a named profile must use its own `region =`, or an assume-role for a GovCloud, China, or
+  VPC-endpoint profile reaches the wrong STS endpoint. Both region providers read only env and files,
+  so resolving the named region per resolve never reaches IMDS.
 - **SSO and `aws login` are compiled out** (`default-features = false`, no `sso`), so neither form
   resolves an SSO default profile. `resolve_once` walks the error source chain so the refusal names
   the missing `sso` feature rather than a bare "not properly configured".

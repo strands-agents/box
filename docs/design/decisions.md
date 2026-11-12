@@ -2332,14 +2332,20 @@ broken config after the box starts. Do not delete one because the other exists.
 ### Both aws:// forms resolve through the AWS SDK and share one risk
 
 `aws://PROFILE` and a bare `aws://` both resolve through the AWS SDK credential providers, so they
-share one capability. `aws://PROFILE` resolves that named profile, and a bare `aws://` resolves the
-default credential provider chain: the environment, the profile files, web identity, the container
-endpoint, then instance metadata. Either form honours `credential_process`, assume-role, and web
-identity, the same way the AWS CLI does. A named profile records its own acquisition and a bare form
-records the default chain, so the audit names what actually signed. The earlier split, where
-`aws://PROFILE` read static keys only and refused those shapes as a boundary, is gone: it made the
-named form weaker than the unscoped one and drove operators to set `AWS_PROFILE` and use a bare
-`aws://`, which signed as the profile but mislabelled the audit as the default chain.
+share one capability, but through different providers so the audit never lies. `aws://PROFILE`
+resolves only the named profile, through a profile provider: it reads that profile's static keys,
+`credential_process`, assume-role, or web identity, never the ambient `AWS_*` keys or instance
+metadata, and a missing profile is refused rather than falling through to the ambient identity. A
+bare `aws://` resolves the default credential provider chain: the environment, the profile files,
+web identity, the container endpoint, then instance metadata. A named profile records its own
+acquisition and a bare form records the default chain, so the audit names what actually signed.
+Building the named form from the default chain with a pinned profile name was rejected, because that
+chain keeps the environment provider in front of the profile and falls through a missing profile to
+instance metadata, so a named route could sign as the ambient identity while the audit still claimed
+the profile. The earlier split, where `aws://PROFILE` read static keys only and refused
+`credential_process` as a boundary, is also gone: it made the named form weaker than the unscoped one
+and drove operators to set `AWS_PROFILE` and use a bare `aws://`, which signed as the profile but
+mislabelled the audit as the default chain.
 
 The credentials crate owns the SDK (`aws-config`, an HTTP/TLS stack, and a current-thread runtime on
 a dedicated worker thread), because the crate that already resolves AWS routes owns every AWS

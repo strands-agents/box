@@ -307,9 +307,10 @@ region from the host, for example `bedrock` and `us-west-2` from
 gets placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` values, so an AWS SDK builds its
 request, and the gateway replaces the signature.
 
-Both forms resolve through the AWS SDK: `aws://PROFILE` pins the chain to the named profile, and a
-bare `aws://` resolves the default chain, the host's ambient identity, which the box warns about on
-every request. The decision
+Both forms resolve through the AWS SDK: `aws://PROFILE` resolves only the named profile (never the
+ambient env keys or instance metadata, and a missing profile is refused), and a bare `aws://`
+resolves the default chain, the host's ambient identity, which the box warns about on every request.
+The decision
 [Both aws:// forms resolve through the AWS SDK and share one risk](decisions.md#a-bare-aws-resolves-the-default-credential-chain)
 states both forms and the writable-`~/.aws` cost.
 

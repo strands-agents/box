@@ -262,44 +262,76 @@ fn real_setup() -> Result<ResolveFn> {
         )
         .unwrap_or_else(|| aws_config::Region::from_static("us-east-1"));
     Ok(Box::new(move |profile: Option<&str>| {
-        // `without_region` carries the Tokio sleep implementation (rt-tokio). A fresh config
-        // re-reads the profile files; `.region` pins the region so the rebuild does not re-run the
-        // region chain (which reaches instance metadata). `.profile_name` pins the whole chain to
-        // the named profile, so `aws://PROFILE` resolves that profile's `credential_process`,
-        // assume-role, or web identity; a bare `aws://` leaves it unset for the default chain.
         let http_client = http_client.clone();
-        let region = region.clone();
-        resolve_once(&runtime, || {
-            let config = aws_config::provider_config::ProviderConfig::without_region()
-                .with_http_client(http_client.clone());
-            let mut builder =
-                aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
-                    .region(region.clone())
-                    .configure(config);
-            if let Some(profile) = profile {
-                builder = builder.profile_name(profile);
+        match profile {
+            // A bare `aws://` resolves the SDK default chain: env keys, then the default profile,
+            // then web identity, ECS, and IMDS. `without_region` carries the Tokio sleep
+            // implementation (rt-tokio); a fresh config re-reads the profile files each resolve; and
+            // `.region` pins the region so the rebuild never re-runs the region chain, which reaches
+            // instance metadata.
+            None => {
+                let region = region.clone();
+                resolve_once(&runtime, || {
+                    let config = aws_config::provider_config::ProviderConfig::without_region()
+                        .with_http_client(http_client.clone());
+                    aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
+                        .region(region.clone())
+                        .configure(config)
+                        .build()
+                })
             }
-            builder.build()
-        })
+            // `aws://PROFILE` resolves only that profile through a `ProfileFileCredentialsProvider`:
+            // static keys, `credential_process`, assume-role, or web identity. It never reads the
+            // ambient `AWS_*` keys or instance metadata, and a missing profile is a hard error, so a
+            // named route signs as the profile it names or refuses, and the audit's `Profile(_)` is
+            // true. The region is the profile's own (env first, then the named profile, then the
+            // shared fallback), so an assume-role or web-identity STS call for a GovCloud, China, or
+            // VPC-endpoint profile reaches the right endpoint. Both region providers read only env
+            // and files, so this never reaches IMDS.
+            Some(profile) => {
+                let named_region = runtime
+                    .block_on(
+                        aws_config::meta::region::RegionProviderChain::first_try(
+                            aws_config::environment::EnvironmentVariableRegionProvider::new(),
+                        )
+                        .or_else(
+                            aws_config::profile::ProfileFileRegionProvider::builder()
+                                .profile_name(profile)
+                                .build(),
+                        )
+                        .region(),
+                    )
+                    .unwrap_or_else(|| region.clone());
+                resolve_once(&runtime, || {
+                    let config = aws_config::provider_config::ProviderConfig::without_region()
+                        .with_region(Some(named_region))
+                        .with_http_client(http_client.clone());
+                    let provider = aws_config::profile::ProfileFileCredentialsProvider::builder()
+                        .configure(&config)
+                        .profile_name(profile)
+                        .build();
+                    async move { provider }
+                })
+            }
+        }
     }))
 }
 
-/// Build a chain with `build_chain` and resolve it once under [`RESOLVE_TIMEOUT`], mapping an
-/// unreachable, empty, or timed-out chain to [`CredentialError::KeystoreAccess`]. The timeout keeps
-/// a stuck `credential_process` helper (which the SDK does not time out) from wedging the worker
-/// past this bound; the worker thread is then free to serve the next request.
-fn resolve_once<F, C>(runtime: &tokio::runtime::Runtime, build_chain: F) -> Result<Resolved>
+/// Build a provider with `build_provider` and resolve it once under [`RESOLVE_TIMEOUT`], mapping an
+/// unreachable, empty, or timed-out provider to [`CredentialError::KeystoreAccess`]. The timeout
+/// keeps a stuck `credential_process` helper (which the SDK does not time out) from wedging the
+/// worker past this bound; the worker thread is then free to serve the next request. The provider is
+/// generic over `ProvideCredentials`, so a bare `aws://` resolves a `DefaultCredentialsChain` and a
+/// named `aws://PROFILE` resolves a profile-only `ProfileFileCredentialsProvider`.
+fn resolve_once<F, C, P>(runtime: &tokio::runtime::Runtime, build_provider: F) -> Result<Resolved>
 where
     F: FnOnce() -> C,
-    C: std::future::Future<
-            Output = aws_config::default_provider::credentials::DefaultCredentialsChain,
-        >,
+    C: std::future::Future<Output = P>,
+    P: aws_credential_types::provider::ProvideCredentials,
 {
-    use aws_credential_types::provider::ProvideCredentials;
-
     resolve_within(runtime, RESOLVE_TIMEOUT, async move {
-        let chain = build_chain().await;
-        chain.provide_credentials().await
+        let provider = build_provider().await;
+        provider.provide_credentials().await
     })
 }
 
@@ -701,5 +733,88 @@ mod tests {
             .expect("a current-thread runtime");
         let resolved = runtime.block_on(async { provider.provide(None) });
         assert_eq!(resolved.unwrap().access_key_id, "AKIA");
+    }
+
+    // --- real SDK resolver against a temp profile file (no network) -----------
+    //
+    // These tests mutate the process environment, which is global, so a lock serializes them.
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// A named `aws://PROFILE` resolves only that profile, through the real SDK resolver: the
+    /// profile's static key wins over an exported `AWS_ACCESS_KEY_ID`, and a missing profile is a
+    /// hard error rather than a fall-through to the ambient identity. A `DefaultCredentialsChain`
+    /// with `.profile_name` would fail both halves — env keys sit in front of the profile, and a
+    /// missing profile falls through to web identity, ECS, and IMDS — so this pins the profile-only
+    /// `ProfileFileCredentialsProvider` path. Static keys need no network, so the test is hermetic.
+    #[test]
+    fn named_profile_ignores_ambient_env_and_refuses_a_missing_profile() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner());
+
+        let dir = std::env::temp_dir().join(format!("box-aws-profile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let creds_path = dir.join("credentials");
+        std::fs::write(
+            &creds_path,
+            "[prod]\naws_access_key_id = PROFILEKEY\naws_secret_access_key = profilesecret\n",
+        )
+        .expect("write the profile file");
+
+        // Capture the AWS environment, then set an ambient key that must NOT win for a named profile.
+        let names = [
+            "AWS_SHARED_CREDENTIALS_FILE",
+            "AWS_CONFIG_FILE",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "AWS_PROFILE",
+            "AWS_REGION",
+            "AWS_DEFAULT_REGION",
+        ];
+        let saved: Vec<(&str, Option<String>)> =
+            names.iter().map(|n| (*n, std::env::var(n).ok())).collect();
+        // SAFETY: the `ENV_LOCK` guard serializes every env-mutating test in this module, and the
+        // snapshot above is restored below, so no other thread observes a torn environment.
+        unsafe {
+            std::env::set_var("AWS_SHARED_CREDENTIALS_FILE", &creds_path);
+            std::env::set_var("AWS_CONFIG_FILE", dir.join("config-does-not-exist"));
+            std::env::set_var("AWS_ACCESS_KEY_ID", "ENVKEY");
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "envsecret");
+            for n in [
+                "AWS_SESSION_TOKEN",
+                "AWS_PROFILE",
+                "AWS_REGION",
+                "AWS_DEFAULT_REGION",
+            ] {
+                std::env::remove_var(n);
+            }
+        }
+
+        let mut resolve = real_setup().expect("the resolver builds");
+
+        // The named profile's static key wins; the exported ENVKEY is never consulted.
+        let named = resolve(Some("prod")).expect("the named profile resolves");
+        assert_eq!(
+            named.0.access_key_id, "PROFILEKEY",
+            "aws://prod signs as the profile, not the ambient AWS_ACCESS_KEY_ID"
+        );
+
+        // A missing profile refuses, rather than falling through to env, web identity, or IMDS.
+        let missing = resolve(Some("nosuchprofile"));
+        assert!(
+            missing.is_err(),
+            "a missing profile refuses rather than signing as the ambient identity: {missing:?}"
+        );
+
+        // SAFETY: same guard; restore the captured environment exactly.
+        unsafe {
+            for (name, value) in saved {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

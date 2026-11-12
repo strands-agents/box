@@ -221,8 +221,11 @@ The process gets placeholder AWS keys so that an AWS SDK builds and signs its ow
 gateway replaces that signature, so the placeholder keys never reach AWS.
 
 **Both forms resolve through the AWS SDK on a dedicated worker thread**, because the chain is async
-and the signing path is synchronous. `aws://PROFILE` pins the chain to the named profile; a bare
-`aws://` leaves it at the default chain. The worker owns a current-thread runtime and a refresh
+and the signing path is synchronous. A bare `aws://` resolves the default chain (the host's ambient
+identity). `aws://PROFILE` resolves only the named profile, through a profile-only provider: it
+reads that profile's static keys, `credential_process`, assume-role, or web identity, never the
+ambient `AWS_*` keys or instance metadata, and a missing profile is refused rather than falling
+through to the ambient identity. The worker owns a current-thread runtime and a refresh
 cache keyed by profile: it serves a cached credential while valid, resolves again near expiry, and
 on a failed refresh serves a still-valid cached one rather than dropping it. Each resolve is bounded
 by a timeout, so a stuck `credential_process` helper cannot wedge the worker. The identity each form
