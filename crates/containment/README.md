@@ -88,13 +88,13 @@ widening it could not also write as a plain grant. This is also why there is one
 `apply` rather than one entry point per backend: a request that describes only
 access has nothing backend-specific left to dispatch on.
 
-**Nine cells are legal and six are refused by the vocabulary itself**, so no
-backend ever sees a pair it cannot render. `Exec` at `Dir` or `Root` is refused
-because a directory authorizes however many programs it holds; `Write` at `Dir`
+**Fourteen cells are legal and seven are refused by the vocabulary itself.**
+A backend can refuse a legal cell it cannot enforce. `Exec` at `Dir` is refused
+because a directory has no executable bytes; `Write` at `Dir`
 because writing a directory's entries is a grant on its children; `Connect`
-at either directory scope because a socket grant names one existing file; and
-`Metadata` at `File` because a file's metadata comes with the exec or read grant
-that names it.
+at either directory scope because a socket grant names one existing file.
+`Metadata` at `File` grants existence and metadata for one exact path that may name a file,
+a directory, or nothing yet. Linux refuses this cell.
 
 One operation per grant is what keeps exec-without-read expressible, and the
 macOS profile depends on it: it grants `process-exec` on the workload and no read
@@ -130,6 +130,7 @@ shape:
 | `Read` + `Dir` | `file-read-metadata` on the literal and its ancestors, plus its entries, and no descendant read |
 | `Read` + `Root` | ancestor metadata, and `file-read*` over the subtree |
 | `Metadata` + `Dir` | `file-read-metadata` on the literal and its ancestors, and no data rule at all |
+| `Metadata` + `File` | Existence and metadata on the literal, plus ancestor metadata; no contents or descendant access |
 | `Metadata` + `Root` | ancestor metadata, and `file-read-metadata` over the subtree |
 | `Write` + `File` | `file-write*` on that literal |
 | `Write` + `Root` | Six named write operations over the subtree (contents, create, unlink, extended attributes, mode, and times), and two denies pinning the root's own identity. With `allow_file_attributes`, also `file-write*` over the subtree, with the flags, owner, ACL, and Finder information operations denied again. Linux ignores the builder |
@@ -153,9 +154,9 @@ covers the literal and its ancestors, and no descendant is granted at all.
 `Metadata` is the cell for a path the workload stats and never reads. At `Dir`
 scope it renders the literal's own metadata plus its ancestors, and at `Root`
 scope the subtree's metadata plus its ancestors. Neither renders a data rule, so a
-file's bytes stay unreadable and a directory stays unlistable. `Metadata` at
-`File` scope is refused, because an exec or read grant on a file already carries
-that file's metadata.
+file's bytes stay unreadable and a directory stays unlistable. At `File` scope,
+metadata names one exact path regardless of its kind or existence, with no descendant grant.
+This scope remains exact inside the operator's home too.
 
 ### The minimum process authority the profile grants
 

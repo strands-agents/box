@@ -149,10 +149,12 @@ the same four plus `network`. One translator turns each of them into a set of sa
   Box-supplied names and reject names that load code without copying Box's lists. This check does
   not cover a credential's `env://` name, for which Box also refuses `HOME` and `PATH`.
 
-- `filesystem` lists name paths and their access modes. The agent takes eight: `read`, `write`,
-  `read_file`, `write_file`, `list`, `metadata`, `exec`, and `deny`. A tool and a local MCP server
-  take the same lists without `metadata` and `exec`. A directory entry covers its tree, and a file
-  entry is exact. `write` doesn't imply `read`.
+- `filesystem` lists name paths and their access modes. The agent takes nine: `read`, `write`,
+  `read_file`, `write_file`, `list`, `metadata`, `metadata_entry`, `exec`, and `deny`. A tool and a local MCP server
+  take the same lists without `metadata`, `metadata_entry`, and `exec`.
+  `metadata_entry` grants existence and file properties at one exact path, including a missing path,
+  without granting contents or descendant access. macOS supports it; Linux refuses it.
+  Other directory entries cover their trees, and file entries are exact. `write` doesn't imply `read`.
 
 ### Script interpreter grants on Linux
 
@@ -519,7 +521,7 @@ It's the narrowest sandbox. The agent can run its own `command` and each program
 names, and nothing else. It can't run or load a file it can write as code, unless the operator lists
 the same path under both `exec` and `write`, which Box warns about and allows. See [one exec rule
 per grant](decisions.md#the-agent-gets-one-exec-rule-per-grant). It can't learn that an ungranted
-path under the home exists unless its `metadata` list names it.
+path under the home exists unless its `metadata` or `metadata_entry` list names it.
 
 Only the agent's sandbox has aliases and a rule allowing connections to its broker socket.
 
@@ -654,13 +656,13 @@ tool's sandbox. Give a tool its own table when it should reach less than the age
 |---|---|---|---|
 | Starts | When the run starts | On a `shell:spawn` permit, one sandbox per launch | On a `shell:spawn` permit |
 | Configured by | `[agent]` | `[tool.<name>]`; see note | `[mcp.<name>]` |
-| `filesystem` lists | All eight: `read`, `write`, `read_file`, `write_file`, `list`, `metadata`, `exec`, `deny` | Six: the agent's eight minus `metadata` and `exec` | Six, like a tool |
+| `filesystem` lists | All nine: `read`, `write`, `read_file`, `write_file`, `list`, `metadata`, `metadata_entry`, `exec`, `deny` | Six: the agent's nine minus `metadata`, `metadata_entry`, and `exec` | Six, like a tool |
 | Program execution | Its `command` and each `exec` entry | Any helper, on macOS | Any helper, on macOS |
 | Run or load writable files as code | Only where `exec` and `write` overlap; Box warns | Its own writable grants, on macOS | Its own writable grants, on macOS |
 | Existence and metadata under the home | Only where a list names the path | Across the home on macOS, minus the box directory and credential stores | Same as a tool |
 | System paths | The agent set | Both sets | Both sets |
 | Route back to Box | Aliases and the broker socket | None | None |
-| Network | Through the egress gateway | The gateway, unless `contain_egress = false` | The gateway, unless `contain_egress = false` |
+| Network | Through the egress gateway; also directly to declared ingress workload ports through localhost on macOS | The gateway, unless `contain_egress = false` | The gateway, unless `contain_egress = false` |
 | In the startup report | Yes | Yes | No |
 
 A program with no tool table runs in a tool's sandbox with the agent's specification. Its file

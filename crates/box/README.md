@@ -119,10 +119,13 @@ Both tables hold the same four fields, and a `[tool.<label>]` also holds `gramma
 `tool_grammars.rs` pins the `tool-grammars` switch, the startup refusals, and the grammar action
 that decides a spawn of a bound program.
 
-`filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
-`exec`, and `deny`. They give this process's own filesystem calls direct reach, because an
+The agent's `filesystem` holds nine lists: `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
+`metadata_entry`, `exec`, and `deny`. They give this process's own filesystem calls direct reach, because an
 unmodified coding agent's `Read`, `Write` and `Edit` issue those calls and containment refuses every
-one. A directory entry is recursive, and a file entry is exact. `write` does not imply `read`. Linux
+one. `metadata_entry` grants existence and metadata at one exact path on macOS, including a
+missing path, without granting contents, listing, or descendant access. Linux refuses this list.
+It is agent-only, as are `metadata` and `exec`.
+Other directory entries are recursive, and file entries are exact. `write` does not imply `read`. Linux
 is the residual: a writable bind reads there, and the startup disclosure says so on that entry's
 line.
 

@@ -6,7 +6,7 @@ Read the **"`strands-box` is interface-frozen"** section of the
 [repository guidance](../../AGENTS.md) before changing anything here. A change to an
 observable surface — the CLI verbs and flags, `box.toml`'s keys, the four box inputs, the
 on-disk records (`Record` at `RECORD_VERSION` and each later record version through
-`SHELL_SIZE_LIMITS_RECORD_VERSION`, `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
+`METADATA_ENTRY_RECORD_VERSION`, `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
 `PROTOCOL_VERSION`, the alias names and their socket derivation, the
 policy action vocabulary, the composed workload environment — or to a foundational premise,
 needs the user's explicit approval **before** the code is written. Fixing a defect behind the
@@ -33,7 +33,7 @@ implemented — see "The lifecycle verbs are gone" below before adding one back.
 The three `record/` modules each answer one question. `config` is `box.toml` — the two wire records,
 plus one module per vocabulary: `process`, `filesystem`, `egress`, `env`, `mcp`, and `telemetry`.
 `process` holds `ProcessSpec`, the one shape `[agent]` and each `[tool.<name>]` take, and the
-`Filesystem` that spec carries. `filesystem` translates the eight lists into containment cells.
+`Filesystem` that spec carries. `filesystem` translates the nine lists into containment cells.
 `layout` sites the filesystem. `config/mcp` is `box.toml`'s MCP
 declarations — identity, never authority. `workspace` finds a workspace's `.strands-box/`, which is
 where the operator's authored `box.toml` and `policy.dw` live; only `policy generate-schema` reads it
@@ -43,7 +43,7 @@ now, because `run` takes one `--config` path and searches nowhere. **That direct
 - **Four phases, in order.** `record::config` decides the four inputs — `Cli`, the `box.toml`
   wire record, and every refusal. `record::layout` sites the filesystem: one root, `BoxRoot`, with
   every other path computed from it. `run::contain::boundary` translates one `ProcessSpec` into a
-  boundary: the one exec literal, the eight lists as cells, the runtime minimum, the mediation
+  boundary: the one exec literal, the nine lists as cells, the runtime minimum, the mediation
   plumbing, and the composed environment.
   `run::contain::supervise` runs the child: process group, wait, exit code.
   *Why separate:* the types enforce a strict dependency order — a `BoxRoot` cannot exist
@@ -260,8 +260,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   workload input, and each process discloses it. `[agent]` and each
   `[tool.<label>]` hold one `ProcessSpec`, which is six fields — `command`, `workspace`, `env`,
   `filesystem`, `native-filesystem-policy`, and `grammar`. Only a `[tool.<label>]` takes
-  `grammar`, behind `[experimental-features] tool-grammars`, and `[agent]` refuses it. `filesystem` holds the path lists: eight for `[agent]`, six
-  for a `[tool.<label>]`, which has no `metadata` or `exec` list: a leaf discovers metadata across the
+  `grammar`, behind `[experimental-features] tool-grammars`, and `[agent]` refuses it. `filesystem` holds the path lists: nine for `[agent]`, six
+  for a `[tool.<label>]`, which has no `metadata`, `metadata_entry`, or `exec` list: a leaf discovers metadata across the
   operator home ([a leaf discovers metadata](../../docs/design/decisions.md#a-leaf-discovers-existence-and-metadata-content-stays-gated))
   and runs its toolchain through broad exec on macOS
   ([a leaf runs its whole toolchain](../../docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds)).
@@ -329,7 +329,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   floors carry the boundary:
   - **A home is never a grant, and the agent's own syscalls reach almost nothing.** The profile
     grants its program, `bin/`, `run/box.sock`, `trust/`, the workspace at `Dir` scope, the cells
-    `run/contain/runtime_minimum.rs` states, and what the eight lists in `[agent.filesystem]` name.
+    `run/contain/runtime_minimum.rs` states, and what the nine lists in `[agent.filesystem]` name.
     Everything else is an interpreter request policy decides, and
     `box_filesystem.rs::reach_under_the_operator_home_is_only_what_is_listed` pins that naming the
     home as `HOME` reaches nothing under it.

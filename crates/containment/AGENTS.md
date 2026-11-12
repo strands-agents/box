@@ -100,9 +100,9 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   and `the_floor_covers_every_credential_path_the_pack_loader_held` is the guard. One case table,
   `the_list_refuses_what_it_claims_and_renders_what_it_must`, pins every classification; a per-entry
   witness cannot see that `/Users` renders a home only because no credential entry sits under it.
-- **Render `resolved`, and render every other node a lookup traverses.** Three cells emit a
+- **Render `resolved`, and render every other node a lookup traverses.** Four cells emit a
   `file-read-metadata` rule per node: `Exec`/`File` (because `claude` is a symlink and 873 of
-  874 Homebrew `bin` entries are) and both `Metadata` cells (because the box's floor authors `/etc`, the box
+  874 Homebrew `bin` entries are) and all three `Metadata` cells (because the box's floor authors `/etc`, the box
   canonicalizes to `/private/etc`, and Codex read `EPERM` on `/etc/codex/requirements.toml` when the
   link node had no rule). **`require_bounded_grant` judges the same set**, so the rendered set is
   never wider than the approved set. **Two rules reach a node other than `resolved`, and no third**:
@@ -509,9 +509,10 @@ by reading `src/` belongs in `src/` — the README describes the shape.
     `every_grant_renders_an_existence_allow_at_its_own_scope` pin the two halves. The credential
     denies are redundant for a spelling the home deny already covers — dropping them leaves the
     kernel test green — and they are kept because they are what a reader looks for.
-  - **The allow's scope is POSITION, not the grant's own scope, and reading it the other way is the
-    defect this fixed.** `subpath` at `Root` scope **or** for any path **strictly** inside the home,
-    `literal` elsewhere. Position only ever widens: a `Root` grant reaches its entries wherever it
+  - **Except for exact metadata, position can widen the allow beyond the grant's own scope.**
+    `subpath` at `Root` scope **or** for any path **strictly** inside the home,
+    `literal` elsewhere. `Metadata` at `File` scope is always literal, including inside the home.
+    Position only widens the other cells: a `Root` grant reaches its entries wherever it
     sits, and `/usr/share/icu` is one outside the home. What position adds is a non-`Root` grant
     inside the home reaching its entries. Two exclusions carry the safety, and each is load-bearing:
     a path **outside** the home stays `literal`, because this block renders after the home deny and

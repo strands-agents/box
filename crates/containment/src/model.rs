@@ -52,8 +52,7 @@ impl Scope {
 
 /// Whether an operation may be granted at a scope, and why not when it may not.
 ///
-/// Thirteen cells are legal. The eight refusals are the vocabulary's own, so a backend never sees
-/// a pair it cannot render.
+/// Fourteen cells are legal; a backend can refuse a legal cell it cannot enforce.
 pub(crate) const fn cell_refusal(operation: Operation, scope: Scope) -> Option<&'static str> {
     match (operation, scope) {
         (Operation::Exec, Scope::File | Scope::Root)
@@ -61,7 +60,7 @@ pub(crate) const fn cell_refusal(operation: Operation, scope: Scope) -> Option<&
         | (Operation::List, Scope::Root)
         | (Operation::Write, Scope::File | Scope::Root)
         | (Operation::Connect, Scope::File)
-        | (Operation::Metadata, Scope::Dir | Scope::Root)
+        | (Operation::Metadata, Scope::File | Scope::Dir | Scope::Root)
         | (Operation::Deny, Scope::File | Scope::Root) => None,
         (Operation::Exec, Scope::Dir) => Some("a directory has no bytes to execute"),
         (Operation::List, Scope::File) => Some("a file has no entries to enumerate"),
@@ -73,9 +72,6 @@ pub(crate) const fn cell_refusal(operation: Operation, scope: Scope) -> Option<&
         }
         (Operation::Connect, Scope::Dir | Scope::Root) => {
             Some("a socket grant names one existing file")
-        }
-        (Operation::Metadata, Scope::File) => {
-            Some("a file's metadata comes with the exec or read grant that names it")
         }
         (Operation::Deny, Scope::Dir) => Some(
             "a denial subtracts one file or a whole tree; a directory's own entry alone would \
@@ -541,7 +537,7 @@ impl PathGrant {
     /// Refuse one path, a whole tree at `Root` scope or one file at `File` scope, whether or not it
     /// exists yet.
     ///
-    /// **A denial is the one entry that need not exist.** Every authorization is canonicalized and
+    /// **A denial or exact metadata entry need not exist.** Other authorizations are canonicalized and
     /// refused when absent, because a grant on a path that is not there grants nothing and says so
     /// nowhere. A denial is the opposite: `~/.codex` is commonly absent on a machine that has never
     /// run Codex, and skipping the subtraction there would leave a grant enclosing its future
@@ -592,6 +588,52 @@ impl PathGrant {
 
     /// Authorize one operation at one scope, reconciling the authored scope with the filesystem.
     pub(crate) fn new(path: impl AsRef<Path>, operation: Operation, scope: Scope) -> Result<Self> {
+        if operation == Operation::Metadata && scope == Scope::File {
+            let original = absolute_path(path.as_ref())?;
+            let resolved = canonical_with_absent_tail(&original);
+            let mut is_symlink = false;
+            for ancestor in original.ancestors() {
+                match std::fs::symlink_metadata(ancestor) {
+                    Ok(metadata) => {
+                        is_symlink = metadata.is_symlink();
+                        break;
+                    }
+                    Err(source)
+                        if matches!(
+                            source.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                        ) => {}
+                    Err(source) => {
+                        return Err(ContainmentError::PathCanonicalization {
+                            path: ancestor.to_path_buf(),
+                            source,
+                        });
+                    }
+                }
+            }
+            if original != resolved
+                || original
+                    .components()
+                    .any(|component| component == std::path::Component::ParentDir)
+                || is_symlink
+            {
+                return Err(ContainmentError::ConfigValidation(format!(
+                    "metadata entry must name a canonical path without symbolic links: {}",
+                    original.display()
+                )));
+            }
+            return Ok(Self {
+                nodes: vec![resolved.clone()],
+                original,
+                resolved,
+                operation,
+                scope,
+                #[cfg(target_os = "linux")]
+                identity: None,
+                #[cfg(target_os = "linux")]
+                pin: None,
+            });
+        }
         Self::from_prepared(PreparedFilesystemPath::new(path)?, operation, scope)
     }
 
@@ -600,6 +642,13 @@ impl PathGrant {
         operation: Operation,
         scope: Scope,
     ) -> Result<Self> {
+        let exact_metadata = operation == Operation::Metadata && scope == Scope::File;
+        if exact_metadata && path.original != path.resolved {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "metadata entry must name a canonical path without symbolic links: {}",
+                path.original.display()
+            )));
+        }
         if let Some(reason) = cell_refusal(operation, scope) {
             return Err(ContainmentError::UnsupportedCapability {
                 capability: format!(
@@ -610,7 +659,7 @@ impl PathGrant {
             });
         }
         // The authored scope against what the filesystem says, both spelled the same way.
-        if scope.is_directory() != path.is_directory() {
+        if !exact_metadata && scope.is_directory() != path.is_directory() {
             return Err(if path.is_directory() {
                 ContainmentError::ExpectedFile(path.original)
             } else {
@@ -688,6 +737,16 @@ impl PathGrant {
 
     /// Re-resolve the caller spelling immediately before apply.
     pub(crate) fn validate_live_identity(&self) -> Result<()> {
+        if self.operation == Operation::Metadata && self.scope == Scope::File {
+            let live = Self::new(&self.original, self.operation, self.scope)?;
+            if live.resolved != self.resolved {
+                return Err(ContainmentError::ConfigValidation(format!(
+                    "metadata entry changed before apply: {}",
+                    self.original.display()
+                )));
+            }
+            return Ok(());
+        }
         // **A denial re-checks its identity without requiring the path to be there.** It may name a
         // path that does not exist, and it renders the same rule either way; what still matters is
         // that the identity has not moved under it, which the lexical resolve answers.

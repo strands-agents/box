@@ -75,12 +75,14 @@ pub(crate) struct Filesystem {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) metadata: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) metadata_entry: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) exec: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) deny: Vec<PathBuf>,
 }
 
-/// Which of the eight lists an entry came from.
+/// Which of the nine lists an entry came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Grant {
     Read,
@@ -89,19 +91,21 @@ pub(crate) enum Grant {
     WriteFile,
     List,
     Metadata,
+    MetadataEntry,
     Exec,
     Deny,
 }
 
 impl Grant {
     /// Every list, in the order the contract states them.
-    pub(crate) const ALL: [Grant; 8] = [
+    pub(crate) const ALL: [Grant; 9] = [
         Grant::Read,
         Grant::Write,
         Grant::ReadFile,
         Grant::WriteFile,
         Grant::List,
         Grant::Metadata,
+        Grant::MetadataEntry,
         Grant::Exec,
         Grant::Deny,
     ];
@@ -115,6 +119,7 @@ impl Grant {
             Grant::WriteFile => "write_file",
             Grant::List => "list",
             Grant::Metadata => "metadata",
+            Grant::MetadataEntry => "metadata_entry",
             Grant::Exec => "exec",
             Grant::Deny => "deny",
         }
@@ -140,6 +145,7 @@ impl Filesystem {
             Grant::WriteFile => &self.write_file,
             Grant::List => &self.list,
             Grant::Metadata => &self.metadata,
+            Grant::MetadataEntry => &self.metadata_entry,
             Grant::Exec => &self.exec,
             Grant::Deny => &self.deny,
         }
@@ -280,6 +286,11 @@ impl ProcessSpec {
                  the egress gateway, and only a `[tool.<name>]` or a stdio `[mcp.<name>]` takes \
                  `network.contain_egress`"
                     .into(),
+            ));
+        }
+        if table != "[agent]" && !self.filesystem.metadata_entry.is_empty() {
+            return Err(refuse(
+                "`filesystem.metadata_entry` is supported on `[agent]` only".into(),
             ));
         }
         if self.grammar.is_some() && !table.starts_with("[tool.") {

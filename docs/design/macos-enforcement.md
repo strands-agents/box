@@ -67,6 +67,7 @@ File access has several separate parts. Knowing that a file exists, listing its 
 | Read a directory tree | Read files beneath that directory. | `read` names the directory. |
 | Write files | Modify the named file or files beneath the named directory. On macOS, this does not also grant read access. | `write` names a directory or file. |
 | List directories | Enumerate directory entries without granting file-content reads. | `list` names a directory tree. |
+| Inspect one exact path | Check existence and file properties without contents, listing, or descendant access. | `metadata_entry` names a file, directory, or missing path. |
 | Inspect file information | Query metadata, such as existence and attributes, without reading file contents. | The agent's `metadata` list names a directory tree. |
 
 Setting `workspace` chooses the program's initial working directory. Setting `HOME` chooses its home directory. Neither setting grants access to the contents of that directory.
@@ -76,6 +77,7 @@ The process also needs system libraries and other runtime files. Box adds a [min
 ### Network connections and local services
 
 For a process that uses the gateway, Box permits connections to specified local ports, including the gateway and telemetry receiver. The telemetry receiver collects application logs, metrics, and traces.
+The agent may also connect through localhost to the workload ports declared by its ingress entries.
 
 For gateway traffic, Seatbelt controls whether the process can connect to Box's local gateway port. Dogwood decides whether the gateway may connect to the destination and forward the request.
 
