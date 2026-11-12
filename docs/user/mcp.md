@@ -87,6 +87,18 @@ when policy permits `shell:spawn` for it. When an experimental tool grammar bind
 program, the grammar's action decides the start in place of `shell:spawn`, as for a
 [spawn in the Shell](shell.md#shellspawn). By default, the box runs the `command` and arguments from `box.toml`.
 
+Servers start on demand, so an unused server program can be missing when Box starts. When a
+command matches a declared server and its executable's filename matches an installed tool grammar's
+program name, starting that server requires the file identity and called name that Box bound at
+startup. A later executable cannot receive general `shell:spawn` permission instead. If Box reports
+`its tool grammar requires an approved program file`, it refuses that server's start and keeps running.
+
+If the program was missing or unreadable when Box started, make it readable and executable by
+the user running Box, then start a new Box run. A link to an already-bound file under the same
+called name can pass this check on retry, provided the existing replacement checks pass. See
+[which program files a grammar binds](tool-grammars.md#which-program-files-a-grammar-binds) for retries
+and newly installed programs.
+
 Without argument wildcards, the harness must use the alias name and the same arguments, in the same order, as `command`.
 The harness runs the alias with its arguments, and the box starts the matching server.
 A harness entry that sets only the program reaches only a server whose `command` is the
@@ -145,11 +157,21 @@ server:
 |---|---|
 | `npx -y @playwright/mcp` | `playwright` |
 | `npx -y @modelcontextprotocol/server-github` | `github` |
-| `npx -y some-other-server` | Nothing. The launch is refused. |
+| `npx --version` | The ordinary `npx` program, inside the agent's sandbox. |
 
 The same rule applies when executable paths have the same filename. Two installations can share
 `bin/npx` when their arguments distinguish them. Different executable paths alone do not distinguish
 the commands the harness sends.
+
+If no declared command matches, the alias runs the next ordinary program on the agent's `PATH`.
+When `PATH` is absent or empty, the alias searches `/usr/bin:/bin` instead of the working directory.
+It skips Box's alias directory and retains the agent's existing sandbox grants and environment.
+It receives none of a server's extra sandbox grants or credentials. The program still needs the
+agent's execution and filesystem grants. A mistyped server command takes this same path.
+A policy denial, ambiguous match, or broker failure never falls back.
+Box records each non-match as a [`strands.box.mcp.unmatched` diagnostic](telemetry.md#an-unmatched-mcp-route),
+so you can find a harness command that drifted from its declaration. This records only that no
+declared command matched. A server started through fallback has no Box MCP tool checks.
 
 Words that mean the same thing to the server are still different words. `--port=3000` and
 `--port 3000` don't match, and neither do `~/data` and `/Users/me/data`. Write each argument the same
@@ -302,7 +324,7 @@ to the server in both modes.
 |---|---|---|---|
 | `type` | string | required | `"http"`. |
 | `destinations` | string array | required | The server's hosts. Each is a host, `host:port`, a host with a path prefix, or a `*.` wildcard host. |
-| `secret.ref` | string | none | The credential the gateway attaches to each request to the server: `env://NAME` or `aws://PROFILE`. |
+| `secret.ref` | string | none | The credential the gateway attaches to each request to the server: `env://NAME`, `aws://PROFILE`, or a bare `aws://` for the AWS default credential chain. |
 | `secret.header` | string | `Authorization` | The header the credential goes in. |
 | `secret.prefix` | string | `Bearer ` on `Authorization` | The text before the credential. |
 | `secret.placement` | string | `header` | `header`, `basic_auth`, or `query_param`. |
@@ -335,9 +357,21 @@ The harness gets these errors when it starts a server, and the box keeps running
 
 | Message | Cause |
 |---|---|
-| `no MCP server declares "<command>"; servers on <program>: <name>, ...` | The harness ran a command that matches no server on that alias. Use the executable's filename and the arguments of one of the listed servers in `box.toml`. |
+| `no MCP server declares "<command>"; servers on <program>: <name>, ...` | A command on that alias cannot expand, so Box cannot safely select ordinary fallback. Check the declaration named in the error. |
 | `` <name> (its `command` does not expand) `` in that list | The server's `command` holds a `${...}` name the box does not fill in. Use one of the three `OTEL_EXPORTER_OTLP_` names. |
 | ``no MCP server declares "<command>"; no `[mcp.<name>]` table in box.toml declares the program "<program>"`` | The harness ran a program that no `[mcp.<name>]` table names. |
+
+An ordinary fallback reports the program's own exit status. If no ordinary executable exists on
+the agent's visible `PATH`, the alias reports status 127. A missing grant can make a program
+invisible on Linux, so this status does not prove the program is absent from the surrounding OS.
+If a visible program is refused execution, the alias reports status 126.
+A script also needs its interpreter to be visible and executable; a missing interpreter can
+produce status 127 even when the script itself is visible. Scripts need a `#!` line: Box does not
+try an implicit shell for an unrecognized executable.
+
+Failures before the broker selects a route report status 125. After readiness, an incompatible
+protocol version or program identifier also reports 125. After readiness, a closed stream or read
+error ends the alias with status 0. Unrelated recognized frames are ignored.
 
 For a request the policy refuses, see [troubleshooting](./mcp-policy.md#troubleshooting).
 

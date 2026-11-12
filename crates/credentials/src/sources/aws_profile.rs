@@ -1,28 +1,9 @@
 //! Resolving a *named* AWS profile, so `aws://<profile>` signs as the identity it names.
 //!
-//! **Why this exists.** `EnvAwsProvider` reads `AWS_*` from the daemon's environment and refuses a
-//! named profile rather than substituting the ambient identity — an operator who names an identity
-//! gets that identity or an error. That refusal was correct and complete: it left
-//! `aws://<profile>` with no provider that could honour it, so every such route failed at the first
-//! request. Measured 2026-08-19 with a Codex workload: `credential denied: … the ambient AWS
-//! provider cannot sign as the declared profile "codex-DO-NOT-DELETE"`, which reached the workload as
-//! `403 blocked by egress control` and named nothing.
-//!
-//! This module closes that gap behind the existing vocabulary. `aws://<profile>` was already a
-//! documented spelling that `box.toml` already parses; nothing here adds an operator-facing surface.
-//!
-//! **Static keys only. Every other shape is refused by name.**
-//!
-//! `credential_process` was supported for part of one day and is now refused, because honouring it
-//! means the daemon executes a program named by `~/.aws/config`. No floor defends that file, and when
-//! the project is the operator's home the starter policy's own `fs:write` rule reaches it — so an
-//! agent write became daemon code execution outside containment. Separately, the daemon's environment
-//! is the storage for every `env://` route, so an inherited environment handed the helper every
-//! opaque secret the box held. Refusing the shape removes both at once.
-//!
-//! A profile that assumes a role or uses SSO needs an HTTP call to STS, and this crate holds no HTTP
-//! client, so those refuse with the setting that caused it rather than falling back to an identity the
-//! operator did not name.
+//! Static keys only: `credential_process`, SSO, assume-role, and web identity are each refused by
+//! name, because resolving them needs a subprocess or an STS call the named-profile path does not
+//! make. A bare `aws://` is the spelling that resolves the full SDK default chain; see
+//! `sources/aws_chain.rs`.
 
 use std::path::PathBuf;
 
@@ -42,8 +23,7 @@ pub(crate) fn resolve_profile(profile: &str) -> Result<AwsSessionCredentials> {
 /// Decide what a profile's settings mean, separately from finding them.
 ///
 /// **Split out so the decision is testable without a filesystem.** This crate carries no `tempfile`
-/// dev-dependency and its dependency list is deliberately six crates wide, so a test that needed one
-/// would be a dependency added for a test's convenience.
+/// dev-dependency, so a test that needed one would be a dependency added for a test's convenience.
 fn choose(profile: &str, settings: Settings) -> Result<AwsSessionCredentials> {
     // **`credential_process` is refused, and that refusal is the security boundary.** Honouring it
     // means the daemon executes a program named by `~/.aws/config` — a file no floor defends and, when
@@ -81,15 +61,17 @@ fn choose(profile: &str, settings: Settings) -> Result<AwsSessionCredentials> {
     // documented self-referencing form puts `role_arn`, `source_profile = <itself>`, and the static
     // keys in one section.
     //
-    // Refusing by shape mirrors `credential_process` directly above. This crate holds no HTTP
-    // client, so it cannot call STS, and there is no correct answer to fall back to.
+    // Refusing by shape mirrors `credential_process` directly above. The named-profile path resolves
+    // static keys only and does not drive the SDK chain, so it makes no STS call and there is no
+    // correct answer to fall back to. A bare `aws://` is the spelling that resolves the full chain.
     if let Some(setting) = unsupported_setting(&settings) {
         return Err(CredentialError::Credential(format!(
-            "AWS profile {profile:?} declares {setting}, so it names an identity this box cannot \
-             assume: resolving it needs an STS call and this crate holds no HTTP client. Any static \
-             keys in that profile are the *source* credentials for the AssumeRole, not the identity \
-             you asked for, so they are refused rather than used. Use a profile whose static keys are \
-             the identity itself, or export AWS_BEARER_TOKEN_BEDROCK and bind that instead"
+            "AWS profile {profile:?} declares {setting}, so it names an identity the named-profile \
+             path cannot assume: resolving it needs an STS call, which only the default chain (a \
+             bare aws://) makes. Any static keys in that profile are the *source* credentials for \
+             the AssumeRole, not the identity you asked for, so they are refused rather than used. \
+             Use a profile whose static keys are the identity itself, or export \
+             AWS_BEARER_TOKEN_BEDROCK and bind that instead"
         )));
     }
     if settings.contains_key("aws_access_key_id") {
@@ -106,10 +88,11 @@ fn choose(profile: &str, settings: Settings) -> Result<AwsSessionCredentials> {
 /// it used to build a parenthetical for an error the caller had already decided to return. That
 /// difference is what let a `role_arn` profile with source keys through.
 ///
-/// Each entry needs a call this crate cannot make: `sso_session` and `sso_start_url` need the SSO
-/// token endpoints, `role_arn` and `source_profile` need `AssumeRole`, and
-/// `web_identity_token_file` needs `AssumeRoleWithWebIdentity`. All are HTTP, and this crate holds
-/// no HTTP client — a deliberate constraint, since its dependency list is six crates wide.
+/// Each entry needs a call the named-profile path does not make: `sso_session` and `sso_start_url`
+/// need the SSO token endpoints, `role_arn` and `source_profile` need `AssumeRole`, and
+/// `web_identity_token_file` needs `AssumeRoleWithWebIdentity`. All are STS or SSO calls the static-
+/// key path deliberately leaves to the default chain (a bare `aws://`), rather than resolving an
+/// identity the operator did not name here.
 fn unsupported_setting(settings: &Settings) -> Option<&'static str> {
     [
         "sso_session",

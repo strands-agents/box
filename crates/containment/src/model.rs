@@ -415,8 +415,7 @@ pub enum Network {
         /// handed out per port in this order, because one `recvmsg` carries one descriptor and
         /// that order is the wire contract. An empty list or a duplicate is refused.
         connect: Vec<u16>,
-        /// Ports the workload may bind. Empty by default. The Linux namespace backend refuses a
-        /// non-empty list: it has no lowering for an inbound bind.
+        /// Ports the workload may bind, each reachable from the box. Empty by default.
         listen: Vec<u16>,
     },
 }

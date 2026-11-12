@@ -17,6 +17,52 @@ constraint is held at 15, which shares the workspace's `unicode-width` version.
 
 ## Local divergence from the pinned revision
 
+### Backport: enforce the submitted input limit for multiline commands
+
+The guard matches [strands-agents/shell#178](https://github.com/strands-agents/shell/pull/178),
+merged on 2026-10-27 as `cff867ba10310b42fb4af135b999defc4ed78c6a`.
+The pinned revision predates that fix.
+
+`exec::execute` selected `execute_sourced` for input containing a newline, which skipped the
+`max_input` check in `execute_admitted_line`. Thus an oversized submission ran when it ended in
+a newline, while the same text without that newline was refused. This is an upstream limit
+enforcement bug.
+
+`execute` now checks the full input before choosing the evaluator. Its EXIT-trap handling remains
+after the result, and direct calls to `execute_with_reader` retain their check. Files loaded by
+`source` still use `max_output`; this change adds no `max_input` check to `execute_sourced`.
+`builder_max_input` covers single-line, trailing-newline, and multiline submissions at the limit,
+one byte over it, and with the existing `0` unlimited value. The trailing-newline assertion fails
+without the fix.
+
+### Local addition: bind a host spawn to its checked directory (2026-11-04)
+
+An embedding can select a program's launch directory independently of the caller's Shell directory.
+The effect permit previously carried no launch directory to dispatch. That left the embedding to
+check one directory and execute in another. This is a generic gap in Shell's admission contract.
+Box selects the tool and checks policy. Shell owns the path from admission to dispatch.
+
+The operator approved the default `EffectPermit::spawn_working_directory()` method and
+checked-directory transport on 2026-11-04 after the design review. Its default returns `None`, so
+existing permit implementations keep the caller's directory. An interceptor that selects another
+directory checks that directory before it returns it on the permit.
+
+Shell reads the accessor once and retains a copy in `CommandPermit`, beside the admitted
+`HostProgram`. Shell refuses a relative directory before dispatch. Shell passes that directory
+to `spawn_host_program` with the program. Dispatch changes only the child process directory.
+The parent Shell keeps its directory. Shell admits every program in a pipeline before any stage
+runs.
+
+Box selects and resolves the launch directory before policy checks `ShellSpawn`. Ordinary
+`shell:spawn` actions keep home-relative spelling. Tool grammar actions keep absolute spelling.
+If selection or resolution fails, Box checks the caller's original directory and retains its
+absolute path. A command-not-found failure keeps status `127`. A launch failure keeps status `126`.
+
+Before execution, Box compares the translated launch directory with the retained checked path and
+refuses a mismatch. This binds the checked directory path to dispatch. It does not pin the
+directory's filesystem identity. The change preserves stored-record and broker-protocol shapes, so
+it requires no version bump.
+
 ### Local addition: an embedder can disable the execution timeout
 
 `ShellBuilder::disable_timeout()` selects the engine's existing no-deadline mode. The builder
@@ -29,6 +75,22 @@ TOML, Python, and Node configuration surfaces do not change.
 `builder_timeout_can_be_disabled` checks both the default and a configured deadline, including
 repeated calls that outlast the configured limit. `builder_timeout_can_be_restored_after_disabling`
 checks cancellation and a successful subsequent call after restoring a finite deadline.
+
+### Local addition: an embedder can declare the file a bare name runs
+
+At the pinned revision, a bare name the Shell does not implement is found on the trusted process's
+host `PATH`. An embedder that runs a host program under its own name, such as Box's `[tool.git]` on
+the developer folder's `git`, cannot reach that program by its name when another file of the same
+name comes first on `PATH`. This is a missing seam, not an upstream bug.
+
+`Kernel::host_program` returns the absolute path a bare name runs, and its default declares nothing.
+`VfsKernel::host_programs` and `ShellBuilder::host_programs` hold a `HostPrograms` map for the bundled
+kernel. `exec::host_program` asks the kernel after the builtin, command, and function checks and
+before the `PATH` walk, so the Shell's own programs keep precedence. A declared file binds to its
+canonical identity like a spelling with a `/`; a declared file that is gone is unbound, so the
+command is not found and `PATH` is not searched for another file. A name with a `/` ignores the map. `exec::implements_program` tells an embedder which names the
+Shell runs itself, so it does not declare a name that never reaches the declared file.
+`tests/declared_host_programs.rs` covers each case.
 
 ### Execution deadlines refuse clock overflow
 
@@ -1819,3 +1881,35 @@ each `Kernel` must forward them and cannot hide the refusal. `is_executable`, `f
 outcome, because admission refuses it first.
 `tests/kernel_effect_interception.rs::an_answered_probe_reports_a_completed_effect` and
 `a_probe_the_admission_window_refuses_reports_a_failure` pin the change.
+
+## 2026-11-10 — the SSRF floor missed translated and platform metadata addresses
+
+`is_ip_blocked` checked the IPv4 address inside IPv4-mapped, IPv4-compatible, 6to4, and Teredo
+addresses, but not inside the NAT64 well-known prefix `64:ff9b::/96` or the IPv4-translated prefix
+`::ffff:0:0:0/96`. It also had no entry for `0.0.0.0/8`, Azure WireServer `168.63.129.16`, or the
+Alibaba Cloud metadata address `100.100.100.200`. So `check_url_safe` accepted a literal such as
+`http://[64:ff9b::a9fe:a9fe]/`, which carries `169.254.169.254`. Box calls `check_url_safe` before
+the Shell `curl` and the Monty `fetch` reach the gateway, so these literals passed that check.
+Upstream would call this a bug, because its security policy names this floor as a control.
+
+This copy applies the IPv4 checks to the address inside the NAT64 and IPv4-translated prefixes,
+refuses the whole RFC 8215 local-use prefix `64:ff9b:1::/48`, and refuses `0.0.0.0/8`,
+`168.63.129.16`, and `100.100.100.200`. A `64:ff9b::/96` address that carries a public IPv4
+address stays allowed, and so does the rest of `100.64.0.0/10`. An address in `64:ff9b:1::/48` is
+refused even when a translator maps it to a public IPv4 address, because that prefix is never
+globally routed and its embedding offset is chosen by the network. `0.0.0.0/8` is refused because
+it is reserved and not globally reachable. This copy has no `allowed_urls`, so nothing permits
+it here; upstream's comment also mentions `allowed_urls`, which arrives with the vendor move.
+
+Upstream has the same change:
+[strands-agents/shell#240](https://github.com/strands-agents/shell/pull/240) merged as
+`def7ab7`, and [strands-agents/shell#244](https://github.com/strands-agents/shell/pull/244)
+corrects the `0.0.0.0/8` comment. When the vendor revision moves past both, this entry can be
+removed.
+
+`vfs_kernel.rs::url_safety_tests::check_url_safe_blocks_translated_and_platform_metadata_addresses`
+fails without the change and passes with it.
+`check_url_safe_allows_public_destinations_behind_nat64_and_shared_space` pins the addresses that
+stay allowed. In Box,
+`run::broker::python::fetch::tests::a_fetch_to_a_translated_or_platform_metadata_literal_is_refused_before_transport`
+pins that the Monty `fetch` refuses these literals before transport.

@@ -13,6 +13,7 @@ members = [
     "crates/policy",
     "crates/containment",
     "crates/egress-gateway",
+    "crates/ingress",
     "crates/shell",
     "crates/shell/strands-shell-macros",
     "crates/telemetry",

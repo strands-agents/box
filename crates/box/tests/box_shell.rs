@@ -62,6 +62,87 @@ fn box_under(policy_text: &str, name: &str) -> Configured {
 }
 
 #[test]
+fn configured_shell_input_limits_apply_independently_of_output() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    for (size, accepted) in [(16, false), (128, true), (0, true)] {
+        let box_ = Request::with_config(
+            "shell-input-size",
+            PERMISSIVE_POLICY,
+            &format!("[limits.shell]\nmax_input = {size}\nmax_output = 4\n"),
+        )
+        .expect();
+        let output = box_.bash(
+            r#"zsh -c 'printf OK                            '; first=$?
+               zsh -c 'printf OK                            '; second=$?
+               printf '\nstatuses=%s,%s\n' "$first" "$second""#,
+        );
+        let expected = if accepted {
+            "OKOK\nstatuses=0,0\n"
+        } else {
+            "\nstatuses=1,1\n"
+        };
+        assert_eq!(stdout(&output), expected, "{}", stderr(&output));
+        assert_eq!(stderr(&output).contains("input too large"), !accepted);
+    }
+}
+
+#[test]
+fn configured_shell_output_limits_control_source_loading_and_capture() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    for (settings, accepted) in [
+        ("", false),
+        ("[limits.shell]\nmax_input = 524288\n", false),
+        (
+            "[limits.shell]\nmax_input = 128\nmax_output = 262144\n",
+            true,
+        ),
+        ("[limits.shell]\nmax_input = 128\nmax_output = 0\n", true),
+    ] {
+        let box_ = Request::with_config("shell-output-size", PERMISSIVE_POLICY, settings).expect();
+        let script = format!("#{}\nprintf SOURCE_LOADED\n", "x".repeat(100 * 1024));
+        std::fs::write(box_.workspace().join("large.sh"), script).unwrap();
+        std::fs::write(box_.workspace().join("large.txt"), "x".repeat(100 * 1024)).unwrap();
+        let output = box_.bash(
+            r#"zsh -c '. ./large.sh'; printf '\nsource_status=%s\n' "$?"
+               zsh -c 'value=$(cat large.txt); printf "captured=%s\n" "${#value}"'"#,
+        );
+        if accepted {
+            assert_eq!(
+                stdout(&output),
+                "SOURCE_LOADED\nsource_status=0\ncaptured=102400\n",
+                "{}",
+                stderr(&output)
+            );
+        } else {
+            assert!(
+                stdout(&output).contains("source_status=1"),
+                "{}",
+                stdout(&output)
+            );
+            assert!(
+                !stdout(&output).contains("SOURCE_LOADED"),
+                "{}",
+                stdout(&output)
+            );
+            assert!(
+                !stdout(&output).contains("captured=102400"),
+                "{}",
+                stdout(&output)
+            );
+            assert!(
+                stderr(&output).contains("output size limit exceeded"),
+                "{}",
+                stderr(&output)
+            );
+        }
+    }
+}
+
+#[test]
 fn a_configured_timeout_allows_a_quiet_shell_call_beyond_thirty_five_seconds() {
     if !fixture::namespace_launcher_is_usable() {
         return;

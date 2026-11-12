@@ -155,19 +155,30 @@ impl Mediated {
     /// Raise one resolved-command attempt, shared by both kinds so neither can drift into
     /// a different permit lifecycle.
     async fn admit_resolved(&self, attempt: &EffectAttempt<'_>) -> io::Result<CommandPermit> {
-        match &self.interceptor {
-            Some(interceptor) => interceptor
-                .intercept(attempt)
-                .await
-                .map(|permit| CommandPermit {
-                    permit: Some(permit),
-                    spawn_program: None,
-                }),
-            None => Ok(CommandPermit {
-                permit: None,
-                spawn_program: None,
-            }),
+        let permit = match &self.interceptor {
+            Some(interceptor) => Some(interceptor.intercept(attempt).await?),
+            None => None,
+        };
+        let mut command = CommandPermit {
+            permit,
+            spawn_program: None,
+            spawn_working_directory: None,
+        };
+        if matches!(attempt, EffectAttempt::ShellSpawn { .. })
+            && let Some(directory) = command
+                .permit
+                .as_ref()
+                .and_then(|permit| permit.spawn_working_directory())
+        {
+            if !directory.is_absolute() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "the admitted spawn working directory must be absolute",
+                ));
+            }
+            command.spawn_working_directory = Some(directory.to_path_buf());
         }
+        Ok(command)
     }
 
     /// Report an operation whose return value is its complete effect.
@@ -613,6 +624,11 @@ impl Mediated {
         self.kernel.run_script(source).await
     }
 
+    /// The file a bare `name` runs, when the kernel declares one.
+    pub(crate) fn host_program(&self, name: &str) -> Option<PathBuf> {
+        self.kernel.host_program(name)
+    }
+
     /// Run a host binary through the embedder's hook, or the built-in spawn.
     ///
     /// Raises no admission, for the same reason [`run_script`](Self::run_script) does not: the
@@ -638,6 +654,7 @@ pub(crate) struct CommandPermit {
     permit: Option<Box<dyn EffectPermit>>,
     /// The host program a `shell:spawn` decision named, carried to the spawn unchanged.
     spawn_program: Option<crate::exec::HostProgram>,
+    spawn_working_directory: Option<PathBuf>,
 }
 
 impl CommandPermit {
@@ -650,6 +667,11 @@ impl CommandPermit {
     /// The host program the decision named, or `None` for a `shell:run` command.
     pub(crate) fn spawn_program(&self) -> Option<&crate::exec::HostProgram> {
         self.spawn_program.as_ref()
+    }
+
+    /// The absolute working directory this spawn's admission checked.
+    pub(crate) fn spawn_working_directory(&self) -> Option<&std::path::Path> {
+        self.spawn_working_directory.as_deref()
     }
 
     /// Report the command's exit status, consuming the permit.

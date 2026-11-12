@@ -546,10 +546,24 @@ when temporal {
 policy fails schema validation: temporal window `48h` exceeds the maximum allowed window `24h` set by the event schema's `max_window`; shorten this window to at most `24h`, or raise `max_window` in the event schema at line 3, column 3 (every temporal `within` window is capped by the event schema's `max_window` (default 24h); either shorten this window or raise the cap with a `max_window = <interval>` directive at the top of the event schema)
 ```
 
+An MCP call always records `::response`, even when the server replies with an error, so it never
+records `::error`. A predicate on `mcp:call::error`, or on a tool action's `::error`, can't match:
+
+```text
+forbid (principal, action == Box::Action::"shell:exec", resource)
+when temporal { formerly within 1h ( Box::Action::"mcp:call"::error{ input.server: "github" } ) };
+```
+
+```text
+policy uses an unsupported clause: the forbid rule with no @id (rule 1): a temporal predicate names Box::Action::"mcp:call"::error; Box records every MCP outcome as `::response`, so the predicate cannot match; name `::response` instead
+```
+
 ### A literal that nothing can match
 
-A path under the operator's home is reported `~/…`, and a directory is reported without a trailing
-slash. The refusal names the spelling to write:
+A path under the operator's home is reported `~/…`, and the home itself is reported `~`. A directory
+is reported without a trailing slash. The check also covers `context.input.cwd` on `shell:exec` and
+`shell:spawn`. A directory outside the operator's home keeps its absolute path. The refusal names the
+spelling to write:
 
 ```text
 @id("project_read")
@@ -598,7 +612,10 @@ own `has` guard, so a rule that covers both families gives each one its own clau
 @id("metadata_addresses")
 forbid (principal, action == Box::Action::"net:connect", resource)
 when {
-  (context.input has ip4 && context.input.ip4 like "169.254.*") ||
+  (context.input has ip4 && (
+    context.input.ip4 like "169.254.*" ||
+    context.input.ip4 == "168.63.129.16" ||
+    context.input.ip4 == "100.100.100.200")) ||
   (context.input has ip6 && (
     context.input.ip6 == "fd00:ec2::254" ||
     context.input.ip6 like "fe8*" || context.input.ip6 like "fe9*" ||
@@ -690,7 +707,16 @@ address it does match, so the load cannot prove it inert. Check an `ip6` pattern
 above.
 
 A `when temporal` clause is not judged either. History keeps the spelling each event was recorded
-with, so a temporal clause can still need an older one.
+with, so a temporal clause can still need an older one. Earlier shell events can carry an absolute
+`cwd` below the operator's home. A predicate on `~/project` does not match those events, and Box does
+not translate their stored values.
+
+An absolute `cwd` predicate below the operator home can match older events but misses new
+`shell:exec` and `shell:spawn` events. A `forbid` that depends on those matches can stop denying
+commands. The loader accepts these temporal predicates without a warning.
+
+Editing a history rule starts it with empty state, including edits that match both spellings.
+Plan how to preserve active budgets before upgrading a box with these predicates.
 
 **A box can hold address events that this vocabulary cannot read.** An event recorded by an earlier
 build carries one address field, and a predicate on `ip4` or `ip6` does not match it. There is no

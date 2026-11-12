@@ -6,6 +6,9 @@
 #[path = "../run/broker/protocol.rs"]
 mod shell_protocol;
 
+#[path = "alias/fallback.rs"]
+mod fallback;
+
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -41,6 +44,16 @@ const PYTHON_RESPONSE_TIMEOUT: Duration = Duration::from_secs(35);
 /// closes the command's stdin.
 const STDIN_GRACE: Duration = Duration::from_millis(200);
 
+const MCP_OPEN_TIMEOUT: Duration = Duration::from_secs(60);
+
+enum Outcome {
+    Status(i32),
+    Fallback {
+        program: String,
+        arguments: Vec<String>,
+    },
+}
+
 /// One forwarded submission: which interpreter, and the program text for it.
 #[derive(Debug)]
 struct Mode {
@@ -66,8 +79,19 @@ fn main() -> ExitCode {
             return ExitCode::from(SHELL_FAILURE_EXIT);
         }
     };
-    match runtime.block_on(run()) {
-        Ok(status) => ExitCode::from(shell_status(status)),
+    let outcome = runtime.block_on(run());
+    drop(runtime);
+    match outcome {
+        Ok(Outcome::Status(status)) => ExitCode::from(shell_status(status)),
+        Ok(Outcome::Fallback { program, arguments }) => {
+            match fallback::execute(&program, &arguments) {
+                Ok(status) => ExitCode::from(status),
+                Err(error) => {
+                    eprintln!("strands-box-sock-alias: {error}");
+                    ExitCode::from(SHELL_FAILURE_EXIT)
+                }
+            }
+        }
         Err(error) => {
             eprintln!("strands-box-sock-alias: {error}");
             ExitCode::from(SHELL_FAILURE_EXIT)
@@ -100,7 +124,7 @@ fn close_inherited_descriptors() -> io::Result<()> {
     Ok(())
 }
 
-async fn run() -> io::Result<i32> {
+async fn run() -> io::Result<Outcome> {
     let Mode {
         socket,
         interpreter,
@@ -255,7 +279,7 @@ fn parse_script_alias(executable: &Path, arguments: Vec<OsString>) -> io::Result
 }
 
 /// Pump one MCP server's traffic: stdin to the box, the box's output to stdout.
-async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Result<i32> {
+async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Result<Outcome> {
     use tokio::io::AsyncWriteExt as _;
 
     write_frame(
@@ -263,10 +287,36 @@ async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Res
         &Frame {
             version: PROTOCOL_VERSION,
             program: ALIAS_PROGRAM,
-            body: Body::Open { mode: interpreter },
+            body: Body::Open {
+                mode: interpreter.clone(),
+            },
         },
     )
     .await?;
+
+    match mcp_response(&mut stream).await?.body {
+        Body::McpReady => {}
+        Body::McpUnmatched => {
+            let Interpreter::Mcp { server, arguments } = interpreter else {
+                return Err(invalid_input(
+                    "ordinary fallback requires an MCP invocation",
+                ));
+            };
+            return Ok(Outcome::Fallback {
+                program: server,
+                arguments,
+            });
+        }
+        Body::Denied { reason, .. } => {
+            eprintln!("strands-box: {reason}");
+            return Ok(Outcome::Status(i32::from(SHELL_FAILURE_EXIT)));
+        }
+        other => {
+            return Err(invalid_input(format!(
+                "unexpected MCP routing response: {other:?}"
+            )));
+        }
+    }
 
     let (mut readable, mut writable) = stream.into_split();
 
@@ -275,7 +325,6 @@ async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Res
     // quiet between requests. The task drops the write half at end-of-file, which ends the session.
     let inbound = tokio::spawn(async move { pump_stdin(&mut writable, StdinMode::Stream).await });
 
-    // The box -> stdout.
     let mut stdout = tokio::io::stdout();
     let mut status = 0;
     loop {
@@ -284,6 +333,7 @@ async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Res
             // The box closed the connection, which is how a session ends.
             Ok(None) | Err(_) => break,
         };
+        validate_mcp_frame(&frame)?;
         match frame.body {
             Body::Output { data, .. } => {
                 let bytes = decode_payload(&data)?;
@@ -293,7 +343,7 @@ async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Res
             // A refusal is a failure exit, and it ends the alias at once.
             Body::Denied { reason, .. } => {
                 eprintln!("strands-box: {reason}");
-                return Ok(i32::from(SHELL_FAILURE_EXIT));
+                return Ok(Outcome::Status(i32::from(SHELL_FAILURE_EXIT)));
             }
             Body::Exit { status: reported } => {
                 status = reported;
@@ -309,10 +359,33 @@ async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Res
     let mut drained = false;
     loop {
         tokio::select! {
-            _ = &mut inbound => return Ok(status),
+            _ = &mut inbound => return Ok(Outcome::Status(status)),
             () = &mut draining, if !drained => drained = true,
         }
     }
+}
+
+async fn mcp_response(stream: &mut UnixStream) -> io::Result<Frame> {
+    let frame = tokio::time::timeout(MCP_OPEN_TIMEOUT, read_frame::<Frame, _>(stream))
+        .await
+        .map_err(|_| timed_out("read the MCP routing response"))??
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the box broker closed before routing",
+            )
+        })?;
+    validate_mcp_frame(&frame)?;
+    Ok(frame)
+}
+
+fn validate_mcp_frame(frame: &Frame) -> io::Result<()> {
+    if frame.version != PROTOCOL_VERSION || frame.program != ALIAS_PROGRAM {
+        return Err(invalid_input(
+            "the MCP routing response has an incompatible version or program",
+        ));
+    }
+    Ok(())
 }
 
 /// Derive a socket path from the alias's grandparent, never from an argument.
@@ -341,13 +414,13 @@ fn read_script(script: &Path) -> io::Result<String> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Alias: forward one command, relay one result, never fall back.
+// Alias: forward one command and relay its result.
 
 /// The one Program an alias opens.
 const ALIAS_PROGRAM: u32 = 1;
 
 /// Submit one Call to one Program and reproduce its result locally.
-async fn forward(socket: &Path, interpreter: Interpreter, source: String) -> io::Result<i32> {
+async fn forward(socket: &Path, interpreter: Interpreter, source: String) -> io::Result<Outcome> {
     let mut stream = tokio::time::timeout(SERVE_IO_TIMEOUT, UnixStream::connect(socket))
         .await
         .map_err(|_| timed_out("connect to the box broker"))?
@@ -492,7 +565,10 @@ async fn pump_stdin(writable: &mut tokio::net::unix::OwnedWriteHalf, mode: Stdin
 }
 
 /// Relay the Program's output to this process until it exits.
-async fn relay(readable: &mut tokio::net::unix::OwnedReadHalf, python: bool) -> io::Result<i32> {
+async fn relay(
+    readable: &mut tokio::net::unix::OwnedReadHalf,
+    python: bool,
+) -> io::Result<Outcome> {
     loop {
         let response = read_frame::<Frame, _>(&mut *readable);
         let frame = if python {
@@ -525,12 +601,12 @@ async fn relay(readable: &mut tokio::net::unix::OwnedReadHalf, python: bool) -> 
                     }
                 }
             }
-            Body::Exit { status } => return Ok(status),
+            Body::Exit { status } => return Ok(Outcome::Status(status)),
             // A transport refusal, including a version mismatch. Terminal, and reported as the
             // boundary's own failure rather than as something the program did.
             Body::Denied { reason, .. } => {
                 eprintln!("strands-box: {reason}");
-                return Ok(i32::from(SHELL_FAILURE_EXIT));
+                return Ok(Outcome::Status(i32::from(SHELL_FAILURE_EXIT)));
             }
             other => {
                 return Err(io::Error::new(
@@ -570,6 +646,19 @@ mod tests {
     // REMOVED: `the_python_alias_names_match_the_layouts`.
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn an_mcp_route_that_never_answers_times_out() {
+        let (mut alias, _broker) = UnixStream::pair().unwrap();
+        let error = tokio::time::timeout(
+            MCP_OPEN_TIMEOUT + std::time::Duration::from_secs(1),
+            mcp_response(&mut alias),
+        )
+        .await
+        .expect("the MCP response wait must finish before the outer deadline")
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
 
     /// **The alias names no harness, and it reads no vendor variable.** `TRACEPARENT` and
     /// `TRACESTATE` are the only two names this image knows, because every harness spells those the

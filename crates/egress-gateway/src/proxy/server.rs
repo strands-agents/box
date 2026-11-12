@@ -24,7 +24,7 @@ use crate::intercept::mitm::body::ResponseBody;
 use crate::intercept::mitm::connect::{self, ConnectRequest};
 use crate::intercept::mitm::l7::{self, WorkloadResponse};
 use crate::intercept::mitm::listener::open_governed_upstream;
-use crate::intercept::mitm::{SharedState, http1, tls};
+use crate::intercept::mitm::{BackendDial, SharedState, http1, tls};
 use crate::transport::socket::{self, Counted, HeadCopy, MAX_HEAD_BYTES, Socket, WriteCount};
 
 /// Serve one connection. `connect_only` refuses plain HTTP, for the AF_UNIX transport.
@@ -55,6 +55,9 @@ struct Tunnel {
     upgrade: OnUpgrade,
     connect: ConnectRequest,
     upstream: TcpStream,
+    /// The backend the upstream leg presents, or `None` when the dial stays on the original
+    /// destination.
+    backend: Option<BackendDial>,
     correlation: RequestId,
 }
 
@@ -84,8 +87,8 @@ async fn first_request(
         let connect = ConnectRequest { host, port };
         let correlation = RequestId::unique();
         // Open the upstream before the CONNECT ack, so a denial opens no socket.
-        let upstream = match admit(state, &connect, token.as_deref(), &correlation) {
-            Ok(upstream) => upstream,
+        let (upstream, backend) = match admit(state, &connect, token.as_deref(), &correlation) {
+            Ok(opened) => opened,
             Err(refusal) => return Ok(*refusal),
         };
 
@@ -94,6 +97,7 @@ async fn first_request(
             upgrade: hyper::upgrade::on(&mut request),
             connect,
             upstream,
+            backend,
             correlation,
         }));
         // The upstream is open; acknowledge the CONNECT.
@@ -114,12 +118,13 @@ async fn first_request(
     };
     let connect = ConnectRequest { host, port };
     let correlation = RequestId::unique().with_headers(&parsed.headers);
-    let upstream = match admit(state, &connect, token.as_deref(), &correlation) {
-        Ok(upstream) => upstream,
+    let (upstream, backend) = match admit(state, &connect, token.as_deref(), &correlation) {
+        Ok(opened) => opened,
         Err(refusal) => return Ok(*refusal),
     };
     l7::forward_plain(
         upstream,
+        backend.as_ref(),
         &connect,
         parsed,
         origin_target,
@@ -130,13 +135,14 @@ async fn first_request(
     .await
 }
 
-/// The token check, then the connect decisions and the pinned upstream socket.
+/// The token check, then the connect decisions and the pinned upstream socket. The optional
+/// [`BackendDial`] names the backend the upstream leg must present when the destination re-routes.
 fn admit(
     state: &SharedState,
     connect: &ConnectRequest,
     token: Option<&str>,
     correlation: &RequestId,
-) -> std::result::Result<TcpStream, Box<WorkloadResponse>> {
+) -> std::result::Result<(TcpStream, Option<BackendDial>), Box<WorkloadResponse>> {
     if !connect::token_ok(state.config.expected_token.as_deref(), token) {
         return Err(Box::new(WorkloadResponse::bare(407)));
     }
@@ -157,6 +163,7 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
     let Tunnel {
         connect,
         upstream,
+        backend,
         correlation,
         ..
     } = tunnel;
@@ -165,7 +172,16 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
     serve(client, completion, |request, head| async move {
         let max_body = state.config.response_limits.max_body_bytes;
         let parsed = http1::read_request(&head, request.into_body(), max_body).await?;
-        l7::forward_tls(parsed, upstream, &connect, state, correlation, completion).await
+        l7::forward_tls(
+            parsed,
+            upstream,
+            backend.as_ref(),
+            &connect,
+            state,
+            correlation,
+            completion,
+        )
+        .await
     })
     .await
 }

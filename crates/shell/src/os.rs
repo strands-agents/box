@@ -1193,6 +1193,9 @@ pub type HostSpawner = std::sync::Arc<dyn Fn(HostSpawn) -> HostSpawnFuture + Sen
 pub type HostSpawnFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<HostSpawnOutcome>> + Send>>;
 
+/// The absolute file each bare name runs, looked up after the Shell's own programs and before `PATH`.
+pub type HostPrograms = std::sync::Arc<std::collections::BTreeMap<String, std::path::PathBuf>>;
+
 /// One resolved host-binary spawn request handed to a [`HostSpawner`].
 pub struct HostSpawn {
     /// The resolved absolute path of the program to run.
@@ -1479,6 +1482,11 @@ pub trait Kernel: Send + Sync {
             io::ErrorKind::Unsupported,
             "host-binary spawner not available",
         ))
+    }
+
+    /// The declared file a bare `name` runs, which is not found when it is gone, or `None` for `PATH`.
+    fn host_program(&self, _name: &str) -> Option<std::path::PathBuf> {
+        None
     }
 }
 

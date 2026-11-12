@@ -6,7 +6,7 @@ Read the **"`strands-box` is interface-frozen"** section of the
 [repository guidance](../../AGENTS.md) before changing anything here. A change to an
 observable surface — the CLI verbs and flags, `box.toml`'s keys, the four box inputs, the
 on-disk records (`Record` at `RECORD_VERSION` and each later record version through
-`SHARED_PROGRAM_RECORD_VERSION`, `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
+`SHELL_SIZE_LIMITS_RECORD_VERSION`, `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
 `PROTOCOL_VERSION`, the alias names and their socket derivation, the
 policy action vocabulary, the composed workload environment — or to a foundational premise,
 needs the user's explicit approval **before** the code is written. Fixing a defect behind the
@@ -90,6 +90,15 @@ now, because `run` takes one `--config` path and searches nowhere. **That direct
   and hands off to `dispatch`, which takes one verb per arm. A fifth step, or an inline
   `insert`/`join`/`if let`, belongs in a phase. If either file grows, the phase boundary is
   wrong.
+- **Linux x86 command execution requires explicit operator consent.** `command::execute` calls
+  `platform::preflight` before hardening, runtime creation, host callbacks, or configuration reads.
+  The operator must set `EXPERIMENTAL_X86_SUPPORT` to the exact value `TRUE`. This check covers
+  the CLI and the library's `run` and `generate_policy_schema` calls. Help and version output
+  finish during argument parsing, before this check. ARM and other targets retain their startup
+  behavior. `EXPERIMENTAL_LINUX_SUPPORT` remains unused. The opt-in changes no containment
+  control and is not inherited into the workload environment.
+  `linux_startup::linux_commands_require_exact_x86_opt_in_only_on_x86` and
+  `box_library::x86_startup_matrix` cover admission and refusal through both entry paths.
 - **No stringly-typed catch-all error.** A new failure gets a variant on the owning phase's
   enum, never a `format!` into a general one.
 
@@ -683,7 +692,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   `zsh -c` needs that input. One `pump_stdin` sends it, in one of three `StdinMode`s:
   - **`Grace`, for a Shell Call** (see `STDIN_GRACE` below).
   - **`Stream`, for an MCP server**, with no grace, because a quiet client between requests must
-    not get an EOF.
+    not get an EOF. The pump starts only after the broker answers `Open` with `McpReady`. After
+    `McpUnmatched`, the alias reads no stdin and runs the ordinary program, which gets all of it.
   - **`Closed`, for a Python Call**, which is the zero-`Input` case of the same sequence. Monty has
     no `input()` and no `sys.stdin`, and reading the alias's stdin would take bytes from the
     commands after it, which breaks `while read f; do python3 …; done < list`.

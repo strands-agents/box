@@ -159,6 +159,7 @@ required-features = ["test-support"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+ingress = { package = "strands-box-ingress", path = "../ingress" }
 
 [dev-dependencies]
 cedar-policy = "=4.11.0"

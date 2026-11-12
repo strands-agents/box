@@ -209,11 +209,20 @@ pub(crate) enum RelayError {
 
     #[error("accepting on the workload's listening socket: {source}")]
     Accept { source: std::io::Error },
+
+    #[error(transparent)]
+    Ingress(#[from] ingress::IngressError),
 }
 
 /// The four inputs could not be read, parsed, or validated.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigError {
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[error(
+        "x86 support on Linux is experimental. Set EXPERIMENTAL_X86_SUPPORT=TRUE to enable it."
+    )]
+    ExperimentalX86Support,
+
     #[error(
         "experimental feature `{feature}` requires a macOS build with `native-filesystem-policy`"
     )]
