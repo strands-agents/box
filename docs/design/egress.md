@@ -69,6 +69,10 @@ flowchart LR
 A client sends either `CONNECT host:port` for HTTPS, or a plain HTTP request with an absolute
 `http://` URL. See [plain HTTP takes the same governed
 path](decisions.md#plain-http-takes-the-same-governed-path-as-https). Both pass the same decisions.
+A plain request to port 80 of a host in `[gateway] upgrade_http` is decided as that host on port
+443, and the gateway speaks TLS to the server itself. The workload's own leg stays plain, so it
+carries no credential. See [a listed host's plain HTTP is upgraded to
+HTTPS](decisions.md#a-listed-host-is-upgraded-from-plain-http-to-https-in-the-gateway).
 
 ```mermaid
 flowchart TD
