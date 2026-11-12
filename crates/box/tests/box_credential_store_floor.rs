@@ -153,7 +153,12 @@ fn a_write_entry_cannot_move_a_store_file_out_through_either_interpreter() {
     std::fs::create_dir_all(&cache).expect("a credential cache");
     std::fs::write(cache.join("shell.json"), "shell-token").expect("a token");
     std::fs::write(cache.join("python.json"), "python-token").expect("a token");
-    let box_ = request.agent_list("write", &["~/.aws/sso/cache"]).expect();
+    // Linux refuses a write-only grant, because a writable bind also reads, so both platforms take
+    // the pair. The rename refusal holds whether or not reads are open.
+    let box_ = request
+        .agent_list("read", &["~/.aws/sso/cache"])
+        .agent_list("write", &["~/.aws/sso/cache"])
+        .expect();
 
     let shell = text(&box_.bash(&format!(
         "zsh -c 'mv {} {}' 2>&1",
