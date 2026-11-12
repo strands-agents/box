@@ -3387,6 +3387,38 @@ done"#;
                 status, 0,
                 "the connection's limit cuts rather than refuses: {stderr}"
             );
+
+            // A reader past the connection's limit gets no byte and no end of input.
+            let out = marker
+                .path()
+                .canonicalize()
+                .expect("marker resolves")
+                .join("out");
+            put(
+                &mut writer,
+                over,
+                Body::Call {
+                    correlation: Default::default(),
+                    source: format!(r#"x=$(cat); printf %s "${{#x}}" > {}"#, out.display()),
+                },
+            )
+            .await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(
+                !out.exists(),
+                "the connection's limit withholds end-of-file"
+            );
+            put(
+                &mut writer,
+                over,
+                Body::Signal {
+                    kind: SignalKind::Interrupt,
+                },
+            )
+            .await;
+            let (_, status) = stderr_and_status(&mut reader).await;
+            assert_ne!(status, 0);
+            assert!(!out.exists());
         }));
     }
 
@@ -3433,6 +3465,77 @@ done"#;
                 put(&mut writer, 1, Body::InputEof).await;
                 let (stderr, status) = stderr_and_status(&mut reader).await;
                 assert_eq!(status, 0, "{source}: {stderr}");
+            }
+        }));
+    }
+
+    /// A compound that starts a pipeline and holds the stdin stops with its Call, whether the Call
+    /// ends by a refusal, a `Close`, or a disconnect, so it never acts on part of its input.
+    #[test]
+    fn a_cancelled_compound_pipeline_never_acts_on_part_of_its_input() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            for ending in ["refusal", "close", "disconnect"] {
+                let marker = tempfile::tempdir().expect("marker");
+                let root = marker.path().canonicalize().expect("marker resolves");
+                let (_dir, socket) = serving_socket(connection_spec(&root));
+                let (ready, acted) = (root.join("ready"), root.join("acted"));
+                {
+                    let (_reader, mut writer) = transport(&socket).await;
+                    put(
+                        &mut writer,
+                        1,
+                        Body::Open {
+                            mode: Interpreter::Shell,
+                        },
+                    )
+                    .await;
+                    put(
+                        &mut writer,
+                        1,
+                        Body::Call {
+                            correlation: Default::default(),
+                            source: format!(
+                                "{{ read first; printf READY > {}; x=$(cat); printf ACTED > {}; }} | cat",
+                                ready.display(),
+                                acted.display()
+                            ),
+                        },
+                    )
+                    .await;
+                    put(
+                        &mut writer,
+                        1,
+                        Body::Input {
+                            data: encode_payload(b"line\npart"),
+                        },
+                    )
+                    .await;
+                    for _ in 0..100 {
+                        if ready.exists() {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    assert!(ready.exists(), "{ending}: the compound started");
+                    match ending {
+                        "refusal" => {
+                            put(
+                                &mut writer,
+                                1,
+                                Body::Input {
+                                    data: "A".repeat(MAX_ENCODED_CHUNK_BYTES + 1),
+                                },
+                            )
+                            .await;
+                        }
+                        "close" => put(&mut writer, 1, Body::Close).await,
+                        _ => {}
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                assert!(!acted.exists(), "{ending}: the compound must not act on part of its input");
             }
         }));
     }

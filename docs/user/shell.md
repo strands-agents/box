@@ -30,14 +30,15 @@ waits for it until the Shell's timeout, or, with `shell.timeout = false`, until 
 it.
 
 A command receives at most `[limits.shell] max_stdin` bytes of this input, 64 KiB by default. Past
-that, the box discards the rest, so the writer never blocks and never gets a broken pipe. A command
-that does not read its input is not affected. A command that reads past the limit gets no end of
-input: it waits until the Shell's timeout and then fails, and it prints on standard error that its
-input was cut. A command that waits for the end of its input before it acts, such as `x=$(cat)` or
-`jq`, never acts on part of it. A command that acts as its input arrives, such as `while read -r
-line` or `cat > file`, has already acted on the first part when it fails. With `shell.timeout =
-false`, a command that reads past the limit waits until its caller stops it, like any blocked read.
-If reading the input fails, the alias stops the command and exits with status `125`.
+that, the box discards the rest, so the limit never blocks the writer. Forwarding ends when the
+command exits, so a writer that is still writing then can get a broken pipe. A command that does not
+read its input is not affected. A command that reads past the limit gets no end of input: it waits
+until the Shell's timeout and then fails, and it prints on standard error that its input was cut. A
+command that waits for the end of its input before it acts, such as `x=$(cat)` or `jq`, never acts
+on part of it. A command that acts as its input arrives, such as `while read -r line` or `cat >
+file`, has already acted on the first part when it fails. With `shell.timeout = false`, a command
+that reads past the limit waits until its caller stops it, like any blocked read. If reading the
+input fails, the alias stops the command and exits with status `125`.
 
 This limit applies only to input piped into the alias from outside the Shell, such as a hook's
 event or a program that starts `bash` with input. A pipe inside a command, such as

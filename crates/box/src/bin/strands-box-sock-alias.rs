@@ -668,9 +668,16 @@ async fn forward(
     match input {
         // Without the EOF, a command that reads stdin waits for its deadline.
         None => write_alias_frame(&mut writer, Body::InputEof).await?,
-        Some(Input { events, .. }) => {
+        Some(Input { events, refused }) => {
             tokio::spawn(async move {
-                let _ = pump_input(&mut writer, events).await;
+                if let Err(error) = pump_input(&mut writer, events).await {
+                    // Recorded so the alias fails at Exit; dropping the write half then makes the
+                    // broker reap the running Program.
+                    if let Ok(mut slot) = refused.lock() {
+                        slot.get_or_insert_with(|| format!("forward stdin: {error}"));
+                    }
+                    return;
+                }
                 // Dropping the write half shuts the socket down, and the broker then reaps the
                 // running Program, so it lives until the process exits.
                 std::future::pending::<()>().await;
@@ -1427,6 +1434,53 @@ mod tests {
                         .all(|kind| *kind == "input")
                 );
                 assert_eq!(seen.input, input);
+            })
+            .await
+            .expect("the test finishes within its limit");
+        });
+    }
+
+    /// A stdin write that times out fails the alias instead of being dropped.
+    #[cfg(unix)]
+    #[test]
+    fn a_stdin_write_that_times_out_fails_the_alias() {
+        runtime().block_on(async {
+            tokio::time::timeout(Duration::from_secs(30), async {
+                let directory = tempfile::tempdir().unwrap();
+                let socket = directory.path().join("box.sock");
+                let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+                let broker = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    for _ in 0..2 {
+                        read_frame::<Frame, _>(&mut stream).await.unwrap();
+                    }
+                    tokio::time::sleep(SERVE_IO_TIMEOUT + Duration::from_secs(1)).await;
+                    write_frame(
+                        &mut stream,
+                        &Frame {
+                            version: PROTOCOL_VERSION,
+                            program: ALIAS_PROGRAM,
+                            body: Body::Exit { status: 0 },
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    stream
+                });
+                let events =
+                    spawn_input_reader(std::io::Cursor::new(vec![b'x'; 16 * 1024 * 1024])).unwrap();
+                let Err(error) = forward(
+                    &socket,
+                    Interpreter::Shell,
+                    "true".to_string(),
+                    Some(events),
+                )
+                .await
+                else {
+                    panic!("a stdin write that timed out must fail the alias");
+                };
+                assert!(error.to_string().contains("forward stdin"), "{error}");
+                drop(broker.await.unwrap());
             })
             .await
             .expect("the test finishes within its limit");

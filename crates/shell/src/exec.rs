@@ -2666,6 +2666,8 @@ async fn execute_item_unsettled(
                 }
                 sub
             });
+            // Aborts the compound when a cancelled Call drops this future.
+            let _compound = os::Tasks(vec![handle.abort_handle()]);
 
             // Set stdin on proc so the tail pipeline inherits it.
             proc.set_channel_reader(STDIN, rx);
