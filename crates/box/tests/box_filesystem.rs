@@ -442,6 +442,68 @@ fn the_boxs_own_private_tree_is_unwritable_from_inside() {
     );
 }
 
+/// **A `deny_write` directory inside a write tree reads and refuses every write**, the rest of the
+/// tree stays writable, and the disclosure names it.
+#[test]
+fn a_deny_write_directory_reads_and_refuses_writes_inside_a_write_tree() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let request = Request::with_config(
+        "deny-write",
+        PERMIT_EVERY_EFFECT,
+        "[experimental-features]\ndeny-write = true\n",
+    );
+    let home = request.operator_home().join("agent-home");
+    let venv = home.join("venv");
+    std::fs::create_dir_all(&venv).expect("the protected directory");
+    std::fs::write(venv.join("module.py"), "original\n").expect("a protected file");
+    let box_ = request
+        .agent_list("deny_write", &[&venv.display().to_string()])
+        .expect();
+
+    let module = shell_quote(&venv.join("module.py"));
+    let output = probe(
+        &box_,
+        &format!(
+            "read -r v < {module} && printf 'READ=%s\\n' \"$v\"; \
+             printf tampered >| {module}; printf planted > {}; \
+             printf outside > {} && printf 'OUTSIDE\\n'; printf done",
+            shell_quote(&venv.join("planted.so")),
+            shell_quote(&home.join("outside.txt")),
+        ),
+    );
+
+    assert_ran(&output);
+    let seen = stdout(&output);
+    assert!(
+        seen.contains("READ=original"),
+        "the directory reads: {output:?}"
+    );
+    assert!(
+        seen.contains("OUTSIDE"),
+        "the rest of the tree is writable: {output:?}"
+    );
+    assert!(seen.ends_with("done"), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(venv.join("module.py")).expect("the file reads"),
+        "original\n",
+        "a protected file is unchanged: {output:?}"
+    );
+    assert!(
+        std::fs::symlink_metadata(venv.join("planted.so")).is_err(),
+        "nothing is created in the protected directory: {output:?}"
+    );
+    assert!(
+        raw_stderr(&output).contains(&format!(
+            "deny_write  {}  (read-only)",
+            venv.canonicalize().expect("canonical").display()
+        )),
+        "the disclosure names the directory: {}",
+        raw_stderr(&output)
+    );
+}
+
 #[test]
 fn state_written_in_one_run_is_readable_by_the_next() {
     if !fixture::namespace_launcher_is_usable() {

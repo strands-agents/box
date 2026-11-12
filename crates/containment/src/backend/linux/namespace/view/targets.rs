@@ -52,7 +52,10 @@ impl MountTarget {
             .strip_prefix("/")
             .unwrap_or(&entry.target)
             .to_path_buf();
-        let protected = matches!(entry.origin, MountOrigin::Protection { .. });
+        let protected = matches!(
+            entry.origin,
+            MountOrigin::Protection { .. } | MountOrigin::TreeProtection { .. }
+        );
         let create = (!protected).then_some((view, bind.then_some(entry.target.as_path())));
         let aliases = bind
             && entry

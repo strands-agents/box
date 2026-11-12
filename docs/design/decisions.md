@@ -380,7 +380,7 @@ access to it.
 one translator takes that type with a launch role. A spec holds four fields. `command` names the
 program and its fixed leading arguments. `workspace` sets the initial working directory and grants
 nothing. `env` supplies the literal environment with no inheritance from the surrounding OS.
-`filesystem` lists the paths the process's own syscalls can reach. It has eight lists for `[agent]`
+`filesystem` lists the paths the process's own syscalls can reach. It has nine lists for `[agent]`
 and six for `[tool.<name>]`. A tool refuses `metadata` and `exec` by name because its sandbox
 already discovers metadata and runs its toolchain through broad exec. Before this, the agent table
 and the tool table had grown apart, each with its own grant keys and its own translation. With one
@@ -413,8 +413,8 @@ the operator's home, because it runs as the operator and looks for its session t
 <a id="direct-filesystem-reach-is-declared-and-disclosed"></a>
 ### Direct filesystem reach is declared in the configuration and disclosed at startup
 
-`[agent.filesystem]` carries eight lists: `read`, `write`, `read_file`, `write_file`, `list`,
-`metadata`, `exec`, and `deny`. Each entry names one path on the surrounding OS that the process's
+`[agent.filesystem]` carries nine lists: `read`, `write`, `read_file`, `write_file`, `list`,
+`metadata`, `exec`, `deny`, and `deny_write`. Each entry names one path on the surrounding OS that the process's
 own syscalls can reach. Directory entries are recursive and file entries are exact. Paths are
 absolute or `~`-relative, with no wildcard syntax. `write` does not imply `read`. These keys let an
 unmodified coding agent edit files in a box. Its native file tools issue direct syscalls. When the
@@ -1477,6 +1477,21 @@ File identity and link-count verification at launch still apply.
 
 A backend may make the file non-executable if it cannot preserve both write subtraction and
 write-xor-execute. Callers must not rely on write protection to preserve an execute grant.
+
+<a id="a-directory-inside-a-write-grant-can-be-write-protected"></a>
+### A directory inside a write grant can be write-protected
+
+`deny_write` names a directory inside a `write` directory. The agent can read it and run the
+programs that an `exec` grant covers there, but it cannot write anything below it. A Python virtual
+environment in a writable project is the case this serves: the operator creates it before the box
+starts, and the agent runs it but cannot replace it. Containment records the directory's device and
+inode and revalidates them at the backend's last safe point. macOS denies writes and hard links
+below the directory after the write root, and pins the directories between it and the write root.
+Linux overlays a read-only bind on the directory, which keeps execution when an `exec` grant covers
+it. A write protection grants nothing, so it is not a `deny` entry and not an operation. It is
+experimental, behind `[experimental-features] deny-write`, and `[agent]` alone takes it. As with a denial, the guarantee covers paths below the directory, so a file there that also has a hard link in a writable directory stays a residual risk.
+`a_write_protected_tree_runs_its_programs_and_refuses_writes` checks each backend, and
+`a_deny_write_directory_reads_and_refuses_writes_inside_a_write_tree` checks the box.
 
 <a id="the-deny-only-floors-run-beneath-every-backend"></a>
 ### The deny-only floors run beneath every backend, in one module

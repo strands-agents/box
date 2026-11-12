@@ -681,6 +681,10 @@ impl Boundary {
             };
         }
 
+        for tree in &reach.write_protections {
+            containment = containment.protect_write_tree(tree)?;
+        }
+
         if let Some(command) = reach.command.as_ref() {
             command.verify()?;
             if command.path() != program_identity {
@@ -733,6 +737,13 @@ impl Boundary {
         // Every exec identity inside a writable grant is disclosed, the command and each interpreter
         // hop alike.
         let writable_grant = |identity: &Path| {
+            if reach
+                .write_protections
+                .iter()
+                .any(|tree| identity.starts_with(tree))
+            {
+                return None;
+            }
             reach.grants.iter().find_map(|grant| {
                 (grant.operation == Operation::Write
                     && match grant.scope {
@@ -752,6 +763,7 @@ impl Boundary {
         let disclosure = disclosure(&DisclosureInputs {
             table,
             grants: &reach.grants,
+            write_protections: &reach.write_protections,
             minimum: &minimum,
             interpreters: &interpreters,
             interpreter_aliases: &interpreter_aliases,
@@ -904,6 +916,7 @@ impl Boundary {
 struct DisclosureInputs<'a> {
     table: &'a str,
     grants: &'a [DirectGrant],
+    write_protections: &'a [PathBuf],
     minimum: &'a [MinimumCell],
     interpreters: &'a [PathBuf],
     interpreter_aliases: &'a [(PathBuf, PathBuf)],
@@ -936,6 +949,12 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
         lines.push("  (no filesystem entry)".to_string());
     }
     lines.extend(inputs.grants.iter().map(DirectGrant::disclosure));
+    lines.extend(
+        inputs
+            .write_protections
+            .iter()
+            .map(|tree| format!("  deny_write  {}  (read-only)", tree.display())),
+    );
     if !inputs.command_listed {
         lines.push(format!(
             "  exec        {}  (command, implicit)",

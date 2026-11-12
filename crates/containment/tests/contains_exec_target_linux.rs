@@ -337,6 +337,87 @@ fn a_leaf_runs_written_helpers_but_denied_paths_and_private_tmp_stay_non_executa
 /// the kernel refuses a procfs for a PID namespace the caller is not in. Mounting in
 /// the first child would report `EPERM` on every host and skip these tests everywhere.
 ///
+/// A write-protected tree inside a write root runs a program from it, and refuses every write there.
+#[test]
+fn a_write_protected_tree_runs_its_programs_and_refuses_writes() {
+    if !the_host_can_build_a_view() {
+        println!("skipping: this host cannot build a namespace mount view");
+        return;
+    }
+    let work = tempfile::tempdir().expect("work directory");
+    let work_dir = work
+        .path()
+        .canonicalize()
+        .expect("a canonical work directory");
+    let venv = work_dir.join("venv");
+    std::fs::create_dir_all(venv.join("bin")).expect("the protected tree");
+    std::fs::copy("/bin/true", venv.join("bin/true")).expect("a program in the tree");
+    std::fs::write(venv.join("module.py"), "x = 1").expect("a file in the tree");
+    let script = format!(
+        "cd {} && venv/bin/true && echo RAN; \
+         (echo y > venv/module.py) 2>/dev/null && echo WROTE; \
+         (echo z > venv/planted.so) 2>/dev/null && echo PLANTED; \
+         rm venv/module.py 2>/dev/null && echo REMOVED; \
+         echo w > out.txt && echo OUTSIDE",
+        work_dir.display()
+    );
+
+    for (label, exec, scope) in [
+        ("an exec grant over the tree", venv.clone(), Scope::Root),
+        (
+            "an exec grant on a folder inside it",
+            venv.join("bin"),
+            Scope::Root,
+        ),
+        (
+            "an exec grant on a file inside it",
+            venv.join("bin/true"),
+            Scope::File,
+        ),
+    ] {
+        let base = || {
+            ContainmentConfig::new()
+                .allow("/bin/sh", Operation::Read, Scope::File)
+                .expect("read the shell")
+                .allow("/bin/sh", Operation::Exec, Scope::File)
+                .expect("grant the shell")
+                .allow(&work_dir, Operation::Read, Scope::Root)
+                .expect("read the work directory")
+                .allow(&work_dir, Operation::Write, Scope::Root)
+                .expect("write the work directory")
+                .allow(&exec, Operation::Exec, scope)
+                .expect("the exec grant")
+        };
+        let protected = base().protect_write_tree(&venv).expect("protect the tree");
+        let (code, stdout, stderr) =
+            run_contained(&protected, &work_dir, &["/bin/sh", "-c", &script]);
+        assert_eq!(code, 0, "{label}: stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(
+            stdout.contains("RAN"),
+            "{label}: a program in the tree runs: {stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("OUTSIDE"),
+            "{label}: the rest of the root stays writable: {stdout}"
+        );
+        for refused in ["WROTE", "PLANTED", "REMOVED"] {
+            assert!(
+                !stdout.contains(refused),
+                "{label}: {refused} in the protected tree: {stdout}"
+            );
+        }
+        std::fs::write(venv.join("module.py"), "x = 1").expect("restore the file");
+
+        let (_, stdout, stderr) = run_contained(&base(), &work_dir, &["/bin/sh", "-c", &script]);
+        assert!(
+            stdout.contains("WROTE"),
+            "{label}: without the protection the tree is writable: {stdout}\n{stderr}"
+        );
+        std::fs::write(venv.join("module.py"), "x = 1").expect("restore the file");
+        let _ = std::fs::remove_file(venv.join("planted.so"));
+    }
+}
+
 /// The same measurement exists twice more — in the backend's own unit tests and in
 /// `box`'s test fixture. Each copy is forced by a module boundary rather than chosen:
 /// an integration test cannot reach a private module, and `box` is another crate.
