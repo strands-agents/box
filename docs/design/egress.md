@@ -42,7 +42,7 @@ gateway. See [local MCP servers](./containment.md#local-mcp-servers).
 Strands Shell's `curl` and Monty's `fetch()` run in the box's trusted process, and both send their
 requests through the same gateway, trusting only its certificate authority. Before they do, each
 refuses a URL that isn't `http` or `https`, or that names `localhost` or a literal loopback,
-private, or link-local address.
+private, link-local, or `0.0.0.0/8` address, or one of two cloud metadata addresses outside `169.254.0.0/16`, or an IPv4-mapped, IPv4-compatible, IPv4-translated, 6to4, Teredo, or `64:ff9b::/96` NAT64 address that carries one of these, or any `64:ff9b:1::/48` address. A NAT64 address under a network's own prefix is not covered.
 
 ```mermaid
 flowchart LR
@@ -159,10 +159,12 @@ starts TLS. A policy refusal of a request to an HTTP MCP server gets a JSON-RPC 
 
 ### Cloud instance metadata
 
-Policy provides the only check on metadata endpoints. The gateway has no built-in block. A policy
+For gateway traffic, policy provides the only check on metadata endpoints. The gateway has no
+built-in block. Strands Shell `curl` and Monty `fetch()` also refuse a literal metadata address
+before the request leaves, but a name that resolves to one reaches policy. A policy
 needs two `forbid` rules on `net:connect`: one for the metadata hostnames `metadata.google.internal`
-and `metadata.azure.internal`, and one for the metadata addresses `169.254.*`, `fd00:ec2::254`, and
-the IPv6 link-local range.
+and `metadata.azure.internal`, and one for the metadata addresses `169.254.*`, `fd00:ec2::254`,
+Azure WireServer `168.63.129.16`, Alibaba Cloud `100.100.100.200`, and the IPv6 link-local range.
 
 ## How responses reach the workload
 
