@@ -531,10 +531,10 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   waited on. `ProcessGroup` and `ForegroundTerminal` clean up on drop; do not remove those impls in
   favour of explicit calls alone.
 - **The box's trusted process hosts the Shell, and every interpreter route the workload has meets
-  the box's one Policy.** The workload reaches Monty two ways — the `python3` alias directly, and a
-  `python`/`python3` command inside the Shell
-  ([Monty two ways](../../docs/design/decisions.md#python-in-the-shell-is-monty)), and the box
-  judges both on the same `Arc<PolicyEngine>`. There is **one `Policy` per box** ([one policy
+  the box's one Policy.** The workload reaches Monty two ways — the `python3` alias, which sends its
+  name and arguments to the Shell, and a `python`/`python3` command inside the Shell
+  ([Monty two ways](../../docs/design/decisions.md#python-in-the-shell-is-monty)) — and both reach
+  the Shell's own `python3`, judged on the same `Arc<PolicyEngine>`. There is **one `Policy` per box** ([one policy
   engine](../../docs/design/decisions.md#one-policy-engine-per-box)): `broker/host` owns the one
   socket and its listener, and `broker/shell` builds the Shell on the same `Arc<PolicyEngine>` the
   egress gateway holds. The Shell is built **per connection** ([no state crosses a
@@ -551,6 +551,21 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     `["run", "box.sock"]` joined to the alias's grandparent, and **no path the box computes carries
     a `public/` component**. Accepting a socket as an argument would let the workload aim its
     requests at a socket it controls.
+  - **Every alias sends its working directory, and the broker decides it.** The `run` frame
+    carries the directory the alias was run from. `Program::enter` moves the Shell there through
+    `Mediated::change_dir`, the same `fs:read` `change_dir` decision and reachable paths check a
+    typed `cd` gets, and takes no decision when the Program is already there, so a file-scoped
+    policy still runs a `zsh -c` from the workspace. A refused directory runs nothing and exits
+    126. The directory never selects the socket. An alias that can't tell its directory exits 125
+    rather than letting the command run in the workspace.
+    `only_a_folder_other_than_the_programs_own_meets_the_change_dir_decision` and
+    `a_folder_the_box_cannot_enter_is_refused_and_runs_nothing` pin it.
+  - **A Python alias sends words, and only the trusted process quotes them.** `python3` and
+    `python` send their name and arguments as a list; `command_text` single-quotes every word
+    before the Shell parses it, so `$(…)`, backticks, and a newline in an argument stay literal.
+    The alias parses no option and reads no file, and the Shell's own `python3` refuses a bare
+    `python3` or `python3 -` with status 2. `a_command_as_words_keeps_every_argument_literal` pins
+    the quoting.
   - **The hosted Shell has no network of its own — it can reach only the gateway
     ([Shell network](../../docs/design/decisions.md#shell-network-goes-through-the-egress-gateway)).**
     The Shell itself never dials an origin: its one outbound path routes through the box's egress
@@ -686,7 +701,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   handler's own tree was granted. The floor names neither tree, because an operator makes a
   virtualenv or a `node_modules` wherever they like. An entry on a path that does not exist is
   refused, never skipped, and `record/config/filesystem.rs` states every other refusal class.
-- **The alias must send `StdinEof`.** `forward` sends `Open`, `Call`, **`StdinEof`**, and the third
+- **The alias must send `StdinEof`.** `forward` sends `Open`, `Run`, **`StdinEof`**, and the third
   frame is not optional. A harness invoking `zsh -c` supplies nothing on stdin, so without the EOF
   the Program's stdin channel stays open and any command that pre-reads stdin blocks to its
   deadline — the `lua` builtin does exactly that, so **every** `lua` call took 34–36s and came back

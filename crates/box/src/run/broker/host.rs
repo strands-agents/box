@@ -35,9 +35,9 @@ use crate::run::broker::invalid_input;
 use crate::run::broker::mcp::DiscoveryRegistry;
 use crate::run::broker::program::{Chunk, DrainOutcome, Program, ProgramControl, ProgramOutput};
 use crate::run::broker::protocol::{
-    BOUNDARY_FAILURE_STATUS, Body, DeniedKind, Frame, Interpreter, MAX_PROGRAMS_PER_CONNECTION,
-    PROTOCOL_VERSION, ProgramId, SignalKind, Stream, decode_payload, encode_payload, read_frame,
-    write_frame,
+    BOUNDARY_FAILURE_STATUS, Body, Command, DeniedKind, Frame, Interpreter,
+    MAX_PROGRAMS_PER_CONNECTION, PROTOCOL_VERSION, ProgramId, SignalKind, Stream, decode_payload,
+    encode_payload, read_frame, write_frame,
 };
 use crate::run::broker::reach::Reach;
 use crate::run::broker::shell::{EgressRouting, ShellSpec};
@@ -79,6 +79,9 @@ const OUTBOUND_FRAME_DEPTH: usize = 64;
 
 /// How often a running Call is checked for a pending `Signal`.
 const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// The status of a `run` whose directory the box refused, the Shell's status for a refused effect.
+const DIRECTORY_REFUSED_STATUS: i32 = 126;
 
 struct ConnectionTask<T> {
     task: Option<tokio::task::JoinHandle<T>>,
@@ -935,11 +938,21 @@ async fn serve_transport(
                         }
                     }
                 }
-                Body::Call {
-                    source,
-                    correlation,
-                } => {
-                    let correlation = *correlation;
+                body @ (Body::Call { .. } | Body::Run { .. }) => {
+                    // A `run` is a Call that starts in the caller's directory. Its command becomes
+                    // Shell text here, in the trusted process, never in the alias.
+                    let (source, directory, correlation) = match body {
+                        Body::Call {
+                            source,
+                            correlation,
+                        } => (source, None, *correlation),
+                        Body::Run {
+                            command,
+                            directory,
+                            correlation,
+                        } => (command_text(command), Some(directory), *correlation),
+                        _ => return Err(invalid_input("a transport client sent an unknown call")),
+                    };
                     if mcp.contains_key(&id) {
                         deny(
                         &frames,
@@ -948,6 +961,16 @@ async fn serve_transport(
                         "an MCP program answers frames on its stdin rather than a Call; send Input",
                     )
                     .await?;
+                        continue;
+                    }
+                    if python.contains(&id) && directory.is_some() {
+                        deny(
+                            &frames,
+                            id,
+                            DeniedKind::TransportError,
+                            "a Python program takes a call, not a run; a run goes to a Shell program",
+                        )
+                        .await?;
                         continue;
                     }
                     if python.contains(&id) {
@@ -1036,7 +1059,14 @@ async fn serve_transport(
                     let request_timeout = spec.request_timeout;
                     tokio::task::spawn_local(async move {
                         let status = correlation
-                            .scope(run_call(&mut slot, &source, id, request_timeout, &frames))
+                            .scope(run_call_in(
+                                &mut slot,
+                                directory.as_deref(),
+                                &source,
+                                id,
+                                request_timeout,
+                                &frames,
+                            ))
                             .await
                             .unwrap_or(BOUNDARY_FAILURE_STATUS);
                         // A send failure means the connection is already gone, which drops the slot
@@ -1346,6 +1376,55 @@ async fn deny(
 /// The connection's writer is gone, so nothing can be answered.
 fn closed_transport() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "the transport writer closed")
+}
+
+/// Shell text that runs `command`.
+///
+/// Each word is single-quoted, the quoting the Shell's own `xargs` and `find -exec` give a word
+/// before they run a command, and here every word is quoted, the program name too. So each
+/// argument reaches the program as one literal word, and none is read as an expansion, an
+/// assignment, or a reserved word.
+fn command_text(command: Command) -> String {
+    match command {
+        Command::Text(text) => text,
+        Command::Words { name, arguments } => std::iter::once(&name)
+            .chain(&arguments)
+            .map(|word| format!("'{}'", word.replace('\'', r"'\''")))
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+/// Enter `directory`, when one is given, and only then drive the Call.
+///
+/// A directory the Program can't enter runs nothing: the refusal goes to stderr, and the status is
+/// [`DIRECTORY_REFUSED_STATUS`].
+async fn run_call_in(
+    slot: &mut ProgramSlot,
+    directory: Option<&str>,
+    command: &str,
+    id: ProgramId,
+    request_timeout: Option<Duration>,
+    frames: &tokio::sync::mpsc::Sender<OutboundFrame>,
+) -> io::Result<i32> {
+    if let Some(directory) = directory
+        && let Err(error) = slot.program.enter(directory).await
+    {
+        // Through the Program's output budget and chunking, because the directory is the
+        // caller's own text and can be as long as a frame.
+        let refusal = format!("strands-box: cannot start in {directory}: {error}\n");
+        let mut pending = Vec::new();
+        let chunk = Chunk {
+            stream: Stream::Stderr,
+            data: refusal.into_bytes().into(),
+        };
+        if slot.output.admit(chunk, &mut pending) == DrainOutcome::CapReached {
+            deny(frames, id, DeniedKind::OverBudget, OUTPUT_BUDGET_SPENT).await?;
+        }
+        flush(frames, id, &mut pending).await?;
+        return Ok(DIRECTORY_REFUSED_STATUS);
+    }
+    run_call(slot, command, id, request_timeout, frames).await
 }
 
 /// Drive one Call, forwarding output as it is produced.
@@ -4996,6 +5075,391 @@ done"#;
             assert!(
                 response.0.contains("legacy_ok"),
                 "version 1 must keep working: {response:?}"
+            );
+        }));
+    }
+
+    // ── `run`: the caller's directory, and a command as words ─────────────────
+
+    /// The connection-lifetime spec, judged by `policy_text` instead.
+    fn spec_under(marker_directory: &Path, policy_text: &str) -> Arc<ShellSpec> {
+        let mut spec = Arc::try_unwrap(connection_spec(marker_directory))
+            .ok()
+            .expect("a spec no one else holds");
+        spec.policy = open_policy_text(policy_text);
+        Arc::new(spec)
+    }
+
+    /// The box's working directory in these specs: the canonical marker directory.
+    fn working_directory_of(marker: &tempfile::TempDir) -> PathBuf {
+        marker
+            .path()
+            .canonicalize()
+            .expect("the marker directory resolves")
+    }
+
+    /// One Shell Program, one `run`, over a fresh connection: what every alias does.
+    async fn run_in(socket: &Path, directory: &Path, command: Command) -> (String, i32) {
+        let (mut reader, mut writer) = transport(socket).await;
+        put(
+            &mut writer,
+            1,
+            Body::Open {
+                mode: Interpreter::Shell,
+            },
+        )
+        .await;
+        put(
+            &mut writer,
+            1,
+            Body::Run {
+                command,
+                directory: directory.display().to_string(),
+                correlation: Default::default(),
+            },
+        )
+        .await;
+        put(&mut writer, 1, Body::InputEof).await;
+        collect(&mut reader, 1).await
+    }
+
+    fn words(name: &str, arguments: &[&str]) -> Command {
+        Command::Words {
+            name: name.to_string(),
+            arguments: arguments.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    /// Every word, the program name too, is one single-quoted literal.
+    #[test]
+    fn a_command_as_words_becomes_single_quoted_shell_text() {
+        assert_eq!(
+            command_text(words("python3", &["-c", "print('$(x)')", ""])),
+            r#"'python3' '-c' 'print('\''$(x)'\'')' ''"#
+        );
+        assert_eq!(command_text(words("python3", &[])), "'python3'");
+        assert_eq!(
+            command_text(Command::Text("printf ok".to_string())),
+            "printf ok",
+            "text is the Shell's to parse, unchanged"
+        );
+    }
+
+    /// The Shell reads each quoted word back as exactly the caller's argument: no expansion, no
+    /// command substitution, no word splitting, and an empty argument survives.
+    #[test]
+    fn a_command_as_words_keeps_every_argument_literal() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            std::fs::write(workspace.join("x"), "kept")
+                .expect("a file a substitution would remove");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+
+            let arguments = [
+                "$(rm x)",
+                "`rm x`",
+                "$HOME",
+                "a b",
+                "",
+                "it's",
+                "\"double\"",
+                "line one\nline two",
+                "*",
+                "x;rm x",
+                "-c",
+            ];
+            let (output, status) = run_in(
+                &socket,
+                &workspace,
+                words("printf", &[&["<%s>\n"][..], &arguments[..]].concat()),
+            )
+            .await;
+            assert_eq!(status, 0, "{output}");
+            let expected: String = arguments.iter().map(|word| format!("<{word}>\n")).collect();
+            assert_eq!(
+                output, expected,
+                "every argument must arrive as one literal word"
+            );
+            assert!(
+                workspace.join("x").exists(),
+                "no argument may run as a command"
+            );
+
+            // A word that would be an assignment unquoted is still the program's name.
+            let (output, status) = run_in(&socket, &workspace, words("NAME=value", &[])).await;
+            assert_eq!(
+                status, 127,
+                "a quoted name is a command, not an assignment: {output}"
+            );
+        }));
+    }
+
+    /// A `run` in a folder the policy permits starts there, so a relative path means what it meant
+    /// to the caller.
+    #[test]
+    fn a_run_starts_in_the_callers_directory() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            let sub = workspace.join("sub");
+            std::fs::create_dir(&sub).expect("a sub folder");
+            std::fs::write(sub.join("here.txt"), "SUB_FILE").expect("a file in sub");
+            std::fs::write(workspace.join("here.txt"), "WORKSPACE_FILE")
+                .expect("a file in the top");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+
+            let (output, status) = run_in(
+                &socket,
+                &sub,
+                Command::Text("pwd; printf '%s\\n' \"$PWD\"; cat here.txt".to_string()),
+            )
+            .await;
+            assert_eq!(status, 0, "{output}");
+            let sub_text = sub.display().to_string();
+            assert_eq!(
+                output,
+                format!("{sub_text}\n{sub_text}\nSUB_FILE"),
+                "the command must run in the caller's directory and read its file"
+            );
+
+            let (output, status) = run_in(
+                &socket,
+                &workspace,
+                Command::Text("cat here.txt".to_string()),
+            )
+            .await;
+            assert_eq!((output.as_str(), status), ("WORKSPACE_FILE", 0));
+        }));
+    }
+
+    /// A Python alias's `run` reaches the Shell's own `python3`, which is Monty, and reads its
+    /// script from the caller's directory.
+    #[test]
+    fn a_python_run_reaches_the_shells_python_and_reads_the_callers_script() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            let sub = workspace.join("sub");
+            std::fs::create_dir(&sub).expect("a sub folder");
+            std::fs::write(sub.join("show.py"), "print('SCRIPT_IN_SUB')\n").expect("a script");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+
+            for name in ["python3", "python"] {
+                let (output, status) =
+                    run_in(&socket, &workspace, words(name, &["-c", "print(40 + 2)"])).await;
+                assert_eq!((output.as_str(), status), ("42\n", 0), "{name}");
+
+                let (output, status) =
+                    run_in(&socket, &workspace, words(name, &["--version"])).await;
+                assert_eq!(status, 0, "{output}");
+                assert!(output.contains("Monty"), "{name} is Monty: {output}");
+
+                let (output, status) = run_in(&socket, &sub, words(name, &["show.py"])).await;
+                assert_eq!(
+                    (output.as_str(), status),
+                    ("SCRIPT_IN_SUB\n", 0),
+                    "{name} must find a script that exists only in the caller's directory"
+                );
+            }
+        }));
+    }
+
+    /// A bare `python3`, and `python3 -`, are refused by the Shell's own `python3` with status 2,
+    /// never run as an empty script.
+    #[test]
+    fn a_python_run_with_no_script_is_refused_by_the_shell() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+
+            for arguments in [&[][..], &["-"][..]] {
+                let (output, status) =
+                    run_in(&socket, &workspace, words("python3", arguments)).await;
+                assert_eq!(status, 2, "python3 {arguments:?} must be refused: {output}");
+                assert!(output.contains("python:"), "the Shell says why: {output}");
+            }
+        }));
+    }
+
+    /// A Python alias's `run` is a Shell command, so it needs a `shell:exec` permit.
+    #[test]
+    fn a_python_run_needs_a_shell_exec_permit() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            let spec = spec_under(
+                marker.path(),
+                r#"permit(principal == Box::Agent::"self", action == Box::Action::"fs:read", resource);"#,
+            );
+            let (_dir, socket) = serving_socket(spec);
+
+            let (output, status) =
+                run_in(&socket, &workspace, words("python3", &["-c", "print('RAN')"])).await;
+            assert_eq!(status, 126, "a denied python3 is a refused command: {output}");
+            assert!(!output.contains("RAN"), "the script must not run: {output}");
+        }));
+    }
+
+    /// The Program's own directory raises no `change_dir` decision, so a policy that refuses every
+    /// `change_dir` still runs a command there. Any other folder meets that refusal and runs nothing.
+    #[test]
+    fn only_a_folder_other_than_the_programs_own_meets_the_change_dir_decision() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            let sub = workspace.join("sub");
+            std::fs::create_dir(&sub).expect("a sub folder");
+            let spec = spec_under(
+                marker.path(),
+                r#"permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
+                   permit(principal == Box::Agent::"self", action == Box::Action::"fs:read", resource);
+                   permit(principal == Box::Agent::"self", action == Box::Action::"fs:write", resource);
+                   forbid(principal, action == Box::Action::"fs:read", resource)
+                   when { context.input.operation == Box::FsReadOperation::"change_dir" };"#,
+            );
+            let (_dir, socket) = serving_socket(spec);
+
+            let (output, status) =
+                run_in(&socket, &workspace, Command::Text("printf RAN".to_string())).await;
+            assert_eq!(
+                (output.as_str(), status),
+                ("RAN", 0),
+                "the Program's own directory needs no decision"
+            );
+
+            let (output, status) = run_in(
+                &socket,
+                &sub,
+                Command::Text("printf RAN > ran.txt".to_string()),
+            )
+            .await;
+            assert_eq!(status, DIRECTORY_REFUSED_STATUS, "{output}");
+            assert!(
+                output.contains(&format!("strands-box: cannot start in {}", sub.display())),
+                "the refusal must name the directory: {output}"
+            );
+            assert!(
+                !sub.join("ran.txt").exists() && !workspace.join("ran.txt").exists(),
+                "a refused directory must run nothing, here or anywhere else"
+            );
+        }));
+    }
+
+    /// A folder outside the reachable paths, a missing one, a file, a relative one, and one longer
+    /// than an output chunk are each refused, and the command never runs.
+    #[test]
+    fn a_folder_the_box_cannot_enter_is_refused_and_runs_nothing() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            std::fs::write(workspace.join("file.txt"), "a file").expect("a file");
+            let outside = tempfile::tempdir().expect("a folder outside the reachable paths");
+            let outside = outside
+                .path()
+                .canonicalize()
+                .expect("the outside folder resolves");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+
+            for directory in [
+                outside.clone(),
+                workspace.join("missing"),
+                workspace.join("file.txt"),
+                PathBuf::from("relative"),
+                // Longer than one output chunk, so the refusal that names it is split.
+                PathBuf::from(format!("/{}", "d".repeat(200 * 1024))),
+            ] {
+                let (output, status) =
+                    run_in(&socket, &directory, Command::Text("printf RAN".to_string())).await;
+                assert_eq!(status, DIRECTORY_REFUSED_STATUS, "{directory:?}: {output}");
+                assert!(
+                    output.starts_with("strands-box: cannot start in ") && !output.contains("RAN"),
+                    "{directory:?} must be refused before the command runs: {output}"
+                );
+            }
+        }));
+    }
+
+    /// A `run` goes to a Shell Program; a Python Program refuses it by name.
+    #[test]
+    fn a_python_program_refuses_a_run() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let (mut reader, mut writer) = transport(&socket).await;
+            put(
+                &mut writer,
+                1,
+                Body::Open {
+                    mode: Interpreter::Python,
+                },
+            )
+            .await;
+            put(
+                &mut writer,
+                1,
+                Body::Run {
+                    command: Command::Text("print(1)".to_string()),
+                    directory: workspace.display().to_string(),
+                    correlation: Default::default(),
+                },
+            )
+            .await;
+            let frame = read_frame::<Frame, _>(&mut reader)
+                .await
+                .expect("read a frame")
+                .expect("an answer");
+            assert!(
+                matches!(
+                    frame.body,
+                    Body::Denied { kind: DeniedKind::TransportError, ref reason }
+                        if reason.contains("not a run")
+                ),
+                "{frame:?}"
+            );
+        }));
+    }
+
+    /// An alias built for version 8, before `run` existed, is refused by version.
+    #[test]
+    fn the_version_before_run_is_refused() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let mut stream = UnixStream::connect(&socket).await.expect("connect");
+            write_frame(
+                &mut stream,
+                &serde_json::json!({
+                    "version": 8,
+                    "program": 1,
+                    "frame_type": "open",
+                    "body": { "mode": "python" },
+                }),
+            )
+            .await
+            .expect("write the frame");
+            let frame = read_frame::<Frame, _>(&mut stream)
+                .await
+                .expect("read the refusal")
+                .expect("a frame");
+            assert!(
+                matches!(
+                    frame.body,
+                    Body::Denied { kind: DeniedKind::VersionMismatch, ref reason }
+                        if reason.contains("unsupported protocol version 8")
+                ),
+                "{frame:?}"
             );
         }));
     }

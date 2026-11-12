@@ -108,6 +108,28 @@ impl Program {
         std::mem::swap(&mut self.shell.proc, &mut shell.proc);
         self.shell = shell;
     }
+
+    /// Move into `directory` through the decision a `cd` gets, unless the Program is already there.
+    ///
+    /// Like `cd`, a move sets `OLDPWD` and `PWD`. A refusal leaves the working directory unchanged.
+    pub(crate) async fn enter(&mut self, directory: &str) -> io::Result<()> {
+        if self.shell.proc.cwd == std::path::Path::new(directory) {
+            return Ok(());
+        }
+        if !std::path::Path::new(directory).is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the directory is not an absolute path",
+            ));
+        }
+        let previous = self.shell.proc.cwd.to_string_lossy().into_owned();
+        let kernel = Arc::clone(self.shell.kernel());
+        kernel.change_dir(&mut self.shell.proc, directory).await?;
+        let current = self.shell.proc.cwd.to_string_lossy().into_owned();
+        self.shell.proc.set_env("OLDPWD", previous);
+        self.shell.proc.set_env("PWD", current);
+        Ok(())
+    }
 }
 
 impl ProgramOutput {

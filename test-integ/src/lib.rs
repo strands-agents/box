@@ -1299,8 +1299,7 @@ impl BoxFixture {
         self.run_sh(&format!("python3 -c {}", sh_quote(&script)))
     }
 
-    /// The positive control for a Monty case: the hosted Shell's `python3 --version` (the
-    /// supported path for the question; the direct alias accepts only `-c` or a script) must
+    /// The positive control for a Monty case: the hosted Shell's `python3 --version` must
     /// answer with Monty's version line. Panics with DET_ERROR otherwise.
     pub fn assert_python_is_monty(&self) {
         let r = self.run_mediated("python3 --version");

@@ -21,8 +21,15 @@ Any other form is refused with `Shell alias accepts only -c COMMAND, -lc COMMAND
 SCRIPT`.
 
 Each invocation is one command. A variable exported in one invocation is unset in the next. The
-Shell starts each command with `HOME` set to the agent's `HOME`, and with the workspace as its
-working directory.
+Shell starts each command with `HOME` set to the agent's `HOME`, in the directory the alias was run
+from. The alias takes that directory from `PWD` when `PWD` names it, and otherwise asks the
+operating system. A directory other than the workspace takes the same `fs:read` decision, with
+operation `change_dir`, that `cd` takes. If policy or the reachable paths check refuses it, or it
+isn't a directory, the command doesn't run and the alias exits `126`. If the alias can't tell
+which directory it was run from, it exits `125` and runs nothing.
+
+The `python3` and `python` aliases send their arguments to the Shell's own `python3` and `python`
+commands, as [Python in a box](./monty.md#running-a-script) describes.
 
 ## What runs where
 
@@ -186,8 +193,8 @@ Calls remain cancellable, and connection and write operations retain their trans
 
 Monty's 120-second active execution limit and 180-second cumulative sleep limit also apply to
 Python called inside the Shell, including with `shell.timeout = false`. Synchronous Python
-execution can delay timeout reporting. The direct `python` and `python3` aliases use their
-[own limits](monty.md#limits-and-exit-statuses).
+execution can delay timeout reporting. The `python` and `python3` aliases reach Python through the
+Shell, so these limits apply to them too.
 
 ### `[tool.<name>]`
 
@@ -301,8 +308,10 @@ refuses makes `curl` exit non-zero.
 | `1` | Submitted command text exceeds 256 KiB, including text with line breaks. Split the text across several calls, for example by appending to a file. | `strands-shell: input too large` |
 | `1` | The Shell call exceeded its execution allowance. | `strands-shell: execution timeout exceeded` |
 | `125` | Box failed to serve the command. | The failure |
+| `125` | The alias can't tell which directory it was run from. Set `PWD` to it. | `strands-box-sock-alias: read the working directory: <error>; set PWD to it` |
 | `125` | The call exceeded the broker's backup deadline, five seconds after its finite Shell allowance. | `strands-box: the call exceeded its deadline` |
 | `125` | The deadline exceeds the platform's clock range. Reduce `limits.shell.timeout`. | `strands-box: the call deadline exceeds this platform's clock range` |
+| `126` | Policy or the reachable paths check refused the directory the alias was run from, or it isn't a directory. Nothing ran. | `strands-box: cannot start in <directory>: <error>` |
 | `126` | Policy refused the command. | `strands-shell: effect denied: policy denied this operation on '<program>'`, then `[policy: <id>]` or `[default-deny]`. A tool grammar action reads the same way. |
 | `126` | A tool grammar binds the program file, and Box refused the spawn before any rule decided it. | `strands-shell: effect denied: policy denied this operation on '<program>' [tool-grammar]: <reason>. No policy can permit it.` |
 | `126` | Policy permitted a program, and nothing in [Configuration](#configuration) covers it. | ``strands-shell: <program>: no tool runs <path>: no `[tool.<name>] command` matches this program and its leading arguments`` |

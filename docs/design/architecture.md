@@ -196,7 +196,7 @@ flowchart TD
     alias -->|"one request over run/box.sock"| broker
     agent -->|"every outbound request"| gateway
     broker -->|"a shell command"| shell
-    broker -->|"a Python script"| monty
+    shell -->|"a Python script"| monty
     broker -->|"a local MCP request"| mcp
     shell -->|"asks"| policy
     monty -->|"asks"| policy

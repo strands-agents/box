@@ -1,7 +1,7 @@
 use strands_det_harness::det_case;
 
 // Monty is the box's own Python. The identity control asks the hosted Shell's `python3
-// --version` (the supported path: the direct alias accepts only `-c` or a script), then the
+// --version`, then the
 // script runs through the `python3` alias from the native bash. Every file operation Monty
 // makes is judged by the policy engine and journaled; the refusal is a `PermissionError` carrying
 // the engine's text, and Monty signs it with its footer. Measured on the native Linux run:

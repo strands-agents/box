@@ -32,8 +32,16 @@ agent's sandbox, under the agent's own filesystem grants, and sends its text. Po
 text, never the file name. A tool's sandbox gets no alias and can't connect to the broker, so a
 `bash` that a tool runs is the host OS's `bash`, inside that tool's sandbox.
 
-The alias sends one command and closes. Interpreter state does not persist between requests, so a
-variable exported in one `zsh -c` is unset in the next.
+The alias sends one command, with the directory it was run from, and closes. The `python3` and
+`python` aliases are the alias too: each sends its name and its arguments as a list, and the broker
+quotes each argument as one literal word before the Shell parses the command. Interpreter state does
+not persist between requests, so a variable exported in one `zsh -c` is unset in the next.
+
+The Shell starts each command in the workspace. When the alias sends another directory, the broker
+moves the Shell there through the same `fs:read` decision, with operation `change_dir`, and the same
+reachable paths check that a `cd` gets. If either refuses, or the path isn't a directory, the
+command doesn't run. The alias doesn't fall back to the workspace: when it can't tell which
+directory it was run from, it refuses to send the command.
 
 ## How the Shell decides a command
 
@@ -263,9 +271,9 @@ same before returning a call result. These checks reject a late result, but neit
 synchronous work nor undo effects already performed.
 
 Monty's 120-second active execution limit and 180-second cumulative sleep limit also apply,
-including with `shell.timeout = false`. A finite Shell allowance can expire first. The direct
-Python aliases retain their separate limits. A broker that stops making progress can leave a
-Shell alias waiting; the alias's wait is not proof that the call has stopped.
+including with `shell.timeout = false`. A finite Shell allowance can expire first. The Python
+aliases reach Monty through the Shell, so the same limits apply to them. A broker that stops making
+progress can leave a Shell alias waiting; the alias's wait is not proof that the call has stopped.
 
 ## Example: find the to-dos and stage them
 

@@ -1819,15 +1819,15 @@ answer. This remains an open residual risk.
 <a id="python-in-the-shell-is-monty"></a>
 ### A workload reaches Monty two ways, and Box judges both on its one policy
 
-The workload reaches Monty by running the `python3` alias directly through the broker or by typing
-`python` or `python3` in the hosted Shell. The Shell forwards source to Monty through a script
-interface. Both routes run one Monty VM per request, and Box judges both as the same principal under
-its one policy engine, so no route reaches an interpreter that policy does not see. Without the
-second route a `python` typed in the Shell exited 127, so an agent that reaches interpreters only
-through its shell never reached Monty.
+The workload reaches Monty by running the `python3` alias or by typing `python` or `python3` in the
+hosted Shell. The alias sends its name and arguments to the Shell, so both ways reach the Shell's
+own `python3`, which forwards source to Monty through a script interface. Each run is one Monty VM
+per request, and Box judges both ways as the same principal under its one policy engine, so no route
+reaches an interpreter that policy does not see. Without the Shell's `python3` a `python` typed in
+the Shell exited 127, so an agent that reaches interpreters only through its shell never reached
+Monty.
 
-The direct route adds an outer request timeout. A script file argument through the Shell can also
-reach a bind, while the direct alias cannot.
+The Shell's deadline bounds both ways, and the Shell reads a script file argument under policy.
 
 <a id="a-bare-python-name-always-means-monty"></a>
 ### A bare `python` name always means Monty, so a host interpreter needs its absolute path

@@ -31,25 +31,27 @@ refuses it, and resumes the script with the result. `import subprocess` raises
 `ModuleNotFoundError`, so a script can't start a program either.
 
 A process in the agent's sandbox reaches Monty only through an alias, a client program in the
-sandbox that forwards a request over a local socket. The broker runs the script and returns its
-output and its exit status. See [an interpreter runs beside the workload, never inside
-it](decisions.md#interpreters-are-brokered-aliases). A tool's sandbox gets no alias, so a `python3`
+sandbox that forwards a request over a local socket. The broker runs the command in Strands Shell,
+which runs the script, and returns its output and its exit status. See [an interpreter runs beside
+the workload, never inside it](decisions.md#interpreters-are-brokered-aliases). A tool's sandbox gets no alias, so a `python3`
 that a tool runs is the host OS's Python, not the box's Python.
 
 Monty supports a subset of Python. A script that imports a PyPI package or a module Monty does not
 implement fails at that `import`.
 
-## The two routes to Monty
+## How the agent reaches Monty
 
-The agent reaches Monty two ways, and Box decides both with its one policy engine, as the same
-principal. See [a workload reaches Monty two ways](decisions.md#python-in-the-shell-is-monty):
+The agent reaches Monty two ways: the harness runs the `python3` or `python` alias, as in
+`python3 -c "print(6*7)"`, or the agent's shell command runs `python3`, as in
+`zsh -c 'python3 report.py'`. Both take one route through Strands Shell. The alias reads no file and
+parses no option. It sends its name, its arguments, and the directory it was run from to the broker.
+The broker quotes each argument as one literal word and runs the command in Strands Shell, in that
+directory. See [a workload reaches Monty two ways](decisions.md#python-in-the-shell-is-monty).
 
-| | The `python3` or `python` alias | `python` or `python3` typed in Strands Shell |
-|---|---|---|
-| Example | The harness runs `python3 -c "print(6*7)"` | The agent's shell command is `python3 report.py` |
-| Command-level decision | None | `shell:exec`, with `program` set to the name typed |
-| How the script file is read | The alias reads it, with the agent's own access, before it sends the source | Strands Shell reads it, and policy decides an `fs:read` on it |
-| Effects of the script | `fs:*` for each file operation | The same |
+- The command takes a `shell:exec` decision, with `program` set to the name the agent ran.
+- Strands Shell reads a script file from the command's directory, and policy decides an `fs:read`
+  on it.
+- Each file operation the script makes takes an `fs:*` decision.
 
 Strands Shell implements `python` and `python3` as commands that run Monty. They select Monty even
 when the operator's `PATH` contains the host OS's Python. `python3 --version` prints `Monty
@@ -76,8 +78,8 @@ sequenceDiagram
     participant Disk as Filesystem
 
     Agent->>Alias: python3 -c source
-    Alias->>Broker: the source, over the local socket
-    Broker->>Monty: run the script
+    Alias->>Broker: the name, the arguments, and the directory, over the local socket
+    Broker->>Monty: run the script, through the python3 command of Strands Shell
     Monty->>Broker: pause at Path('notes.txt').read_text()
     Broker->>Broker: root notes.txt at the workspace
     Broker->>Policy: fs:read, read_content, ~/src/project/notes.txt
@@ -94,7 +96,7 @@ sequenceDiagram
 ```
 
 1. Root the path. A relative path is rooted at the workspace, the directory `[agent] workspace`
-   names, so `notes.txt` means the same file it means in Strands Shell.
+   names, even when the command started in another directory.
 2. Ask policy. Box asks the policy engine for one `fs:*` decision on the rooted path, with an
    `operation` that says which kind of access it is. A path under the operator's home reaches policy
    as `~/<relative path>`, the same spelling Strands Shell uses. A denial resumes the script with a
@@ -187,7 +189,7 @@ statuses](../user/monty.md#limits-and-exit-statuses).
 The exit status identifies the outcome. `0` means the script completed. `1` means it raised an
 exception it did not catch, such as a policy denial, a limit violation, a `NameError` for an
 undefined name, or a script error. `125` means the script did not finish because Box failed or the
-alias stopped waiting for the script. See [a suspension Box doesn't service is a Python
+call passed the Shell's deadline. See [a suspension Box doesn't service is a Python
 error](decisions.md#an-unserviced-suspension-is-a-python-error).
 
 ## Example: the write, and two refusals
