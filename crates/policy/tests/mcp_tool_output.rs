@@ -242,7 +242,6 @@ fn an_error_result_or_a_nonconforming_output_records_only_the_reply() {
         tool_error,
         result(json!({"verified": "yes"})),
         result(json!({"method": "sms"})),
-        result(json!({"verified": true, "method": "x".repeat(20 * 1024)})),
     ] {
         assert!(call(&authority, "verify_identity", user.clone(), &reply).is_allow());
         assert!(
@@ -252,7 +251,7 @@ fn an_error_result_or_a_nonconforming_output_records_only_the_reply() {
     }
     drop(authority);
     let recorded = outputs(&history);
-    assert_eq!(recorded.len(), 4, "{recorded:#?}");
+    assert_eq!(recorded.len(), 3, "{recorded:#?}");
     for output in &recorded {
         assert!(!output.contains("structured"), "{output}");
         assert!(output.contains("reply"), "{output}");
@@ -298,18 +297,13 @@ fn a_field_that_does_not_conform_costs_a_rule_on_another_field_nothing() {
     for (answer, reset_allowed) in [
         // `score` lowers to a whole number, so `0.95` is dropped and `verified` is kept.
         (json!({"verified": true, "score": 0.95}), true),
-        // A large undeclared field is dropped before the size cap, so it doesn't count.
+        // A large declared field is recorded; only the transport bounds an output, as an input.
         (
-            json!({"verified": true, "notes": "x".repeat(32 * 1024)}),
+            json!({"verified": true, "method": "x".repeat(256 * 1024)}),
             true,
         ),
         // A required field that does not conform still drops the whole output.
         (json!({"verified": "yes", "score": 7}), false),
-        // So does a declared value over the cap.
-        (
-            json!({"verified": true, "method": "x".repeat(32 * 1024)}),
-            false,
-        ),
     ] {
         let directory = tempfile::tempdir().expect("history directory");
         let authority = desk(

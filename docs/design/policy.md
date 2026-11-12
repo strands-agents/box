@@ -140,9 +140,9 @@ the server replied, and so is a cancelled or uncertain one, so a budget over res
 escaped by making calls fail. The tool's response carries `output.reply`, a string that says how the
 call ended, so a precondition can require `result` and exclude a failed or abandoned call. For a tool
 that declares an `outputSchema`, a `result` also carries `output.structured`: the reply's
-`structuredContent` reduced to the declared fields, converted like `input`, capped at 16 KiB after
-the reduction, and absent when a required field doesn't conform; an optional field that doesn't
-conform is left out. The stdio broker reads each reply frame. The gateway copies a
+`structuredContent` reduced to the declared fields, converted like `input`, and absent when a
+required field doesn't conform; an optional field that doesn't conform is left out. Like `input`,
+it has no size limit of its own: the stdio frame limit and the gateway's response limit bound it. The stdio broker reads each reply frame. The gateway copies a
 `tools/call` reply as it streams to the workload, after credential redaction, so history sees the
 bytes the workload saw, and hands the copy to the request's `ReplyObserver` once the reply matching
 the request's JSON-RPC id has passed. A reply over the gateway's response body limit (16 MiB),

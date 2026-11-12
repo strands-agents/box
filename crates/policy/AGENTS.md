@@ -123,7 +123,10 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   than `complete` (such as `input_required`): neither is the call's answer, and Box records no
   later one. The stdio broker never records an `input_required` frame as an answer either. `output.structured` is recorded only for a `result`
   whose required fields conform to the tool's `outputSchema`; an optional field that does not
-  conform is dropped, and the 16 KiB cap applies to what is kept. `generate_mcp_schema` drops an
+  conform is dropped. Like `input`, it has no size cap of its own; the stdio frame and the gateway's
+  response limit bound both. Measured on macOS, release, 100 calls: each recorded byte costs about
+  5 bytes of history, the per-call time stays near 17 ms and the rule check near 8 ms up to 1 MiB
+  outputs, and an input costs twice an output because both legs record it. `generate_mcp_schema` drops an
   `outputSchema` that does not generate, so one tool's unreadable output never costs the server its
   catalog (`mcp_schema::tests::an_output_schema_cedar_cannot_read_drops_only_that_tools_output`).
   The workload can still make its own http reply unreadable (an output over 16 MiB, or a server

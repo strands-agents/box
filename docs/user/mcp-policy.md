@@ -229,8 +229,8 @@ Key it on `::response`, and require `output.reply` to be `result`:
   The server's other tools keep their outputs, unless the problem only appears when the outputs
   are read together; then no tool on that server declares one.
 - Box records no `output.structured` when the tool declares no `outputSchema`, when the reply isn't
-  a `result`, when a required field doesn't match its declared type, or when the kept fields are
-  over 16 KiB. An optional field that doesn't match is left out, like an undeclared one. A JSON
+  a `result`, or when a required field doesn't match its declared type. An optional field that
+  doesn't match is left out, like an undeclared one. A JSON
   `number` field is read as a whole number, so a fractional value such as `22.5` doesn't match. A
   rule that reads a field Box left out isn't met; a rule on another field still is.
 - Box reads the reply on stdio and http servers alike, including a streamed (Server-Sent Events)

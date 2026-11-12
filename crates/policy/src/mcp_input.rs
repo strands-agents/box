@@ -61,14 +61,10 @@ impl ToolInputs {
     }
 
     /// A tool's `structuredContent` reduced to the fields its `outputSchema` declares, or `None`
-    /// when the tool declares none, a required field does not conform, or the reduced value is over
-    /// [`MAX_STRUCTURED_OUTPUT_BYTES`].
+    /// when the tool declares none or a required field does not conform.
     pub(crate) fn project_output(&self, action: &EntityUid, structured: &Value) -> Option<Value> {
         let resolved = self.resolved().ok()??;
-        let ty = resolved.outputs.get(action)?;
-        resolved
-            .project(structured, ty)
-            .filter(|projected| projected.to_string().len() <= MAX_STRUCTURED_OUTPUT_BYTES)
+        resolved.project(structured, resolved.outputs.get(action)?)
     }
 
     fn resolved(&self) -> Result<Option<&ResolvedInputs>, PolicyError> {
@@ -85,9 +81,6 @@ impl ToolInputs {
 
 /// The schema attribute a tool action's context declares its structured output under.
 const STRUCTURED_OUTPUT: &str = "structured";
-
-/// The most serialized `output.structured` Box records on a tool's `::response`.
-pub(crate) const MAX_STRUCTURED_OUTPUT_BYTES: usize = 16 * 1024;
 
 /// The resolved input types of the tool actions whose input declares a union.
 #[derive(Debug)]
