@@ -34,7 +34,7 @@ pub enum Operation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scope {
-    /// One path; metadata also accepts a directory or an absent entry.
+    /// This leaf, and nothing else.
     File,
     /// This directory's own entry. **Not its contents.**
     Dir,
@@ -537,8 +537,9 @@ impl PathGrant {
     /// Refuse one path, a whole tree at `Root` scope or one file at `File` scope, whether or not it
     /// exists yet.
     ///
-    /// Like exact metadata, a denial need not exist. Other authorizations are canonicalized and
-    /// refused when absent. `~/.codex` is commonly absent on a machine that has never
+    /// **A denial or exact metadata entry need not exist.** Other authorizations are canonicalized and
+    /// refused when absent, because a grant on a path that is not there grants nothing and says so
+    /// nowhere. A denial is the opposite: `~/.codex` is commonly absent on a machine that has never
     /// run Codex, and skipping the subtraction there would leave a grant enclosing its future
     /// location unsubtracted — so an absent path is named rather than dropped. macOS renders a deny
     /// on an absent path perfectly well, and the Linux view creates the mountpoint.

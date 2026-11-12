@@ -1,4 +1,4 @@
-//! A `ProcessSpec`'s filesystem lists, translated into containment cells beneath Core's guards.
+//! A `ProcessSpec`'s nine lists, translated into containment cells beneath Core's guards.
 //!
 //! | List | Entry kind | Cell |
 //! |---|---|---|
@@ -86,7 +86,7 @@ impl FileIdentity {
     }
 }
 
-/// Every grant the filesystem lists state, and the paths subtracted beneath them.
+/// Every grant the nine lists state, and the paths subtracted beneath them.
 ///
 /// One value, because a grant and the refusals that carve its interior are one decision: applying
 /// the grant without them is the configuration these keys must never produce.
