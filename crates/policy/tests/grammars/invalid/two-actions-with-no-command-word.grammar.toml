@@ -1,0 +1,15 @@
+# expect: `<grammar>.shell.version`: has a usage with no command word, and so does `<grammar>.shell.deploy`
+# One grammar holds at most one action for the bare program.
+
+name    = "vercel"
+program = "vercel"
+format  = 1
+version = 1
+
+[shell.deploy]
+usage = "vercel [options] [<path>]"
+options.prod = { flag = ["--prod"] }
+
+[shell.version]
+usage = "vercel [options]"
+options.version = { flag = ["-v", "--version"] }

@@ -1,0 +1,24 @@
+# A tool grammar for vercel, where the bare program deploys: `vercel` and `vercel ./site` deploy,
+# and `vercel ls` lists. A first operand that is a command word is never a path to deploy.
+
+name    = "vercel_bare"
+program = "vercel"
+format  = 1
+version = 1
+
+[effects]
+deploy     = "Deploys a directory"
+production = "Deploys to production"
+
+[global]
+options.token = { flag = ["-t", "--token"], value = "required" }
+options.debug = { flag = ["-d", "--debug"], anywhere = true }
+
+[shell.deploy]
+usage   = "vercel [global options] [options] [<path>]"
+aliases = ["deploy"]
+adds    = ["deploy"]
+options.prod = { flag = ["--prod"], adds = ["production"] }
+
+[shell.list]
+usage = "vercel [global options] ls [options]"
