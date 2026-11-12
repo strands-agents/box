@@ -12,11 +12,12 @@ make_public = "Makes the package public"
 
 [global]
 options.registry = { flag = "--registry", value = "required", when = [{ like = "-*", unmodeled = true }] }
+options.prefix   = { flag = "--prefix", value = "required", anywhere = true, when = [{ like = "-*", unmodeled = true }] }
 
 [shell.publish]
 usage = "pkg [global options] publish [options] [<package_spec>]"
 adds  = ["network", "publish"]
-options.tag     = { flag = "--tag", value = "required", when = [{ like = "-*", unmodeled = true }] }
+options.tag     = { flag = ["-t", "--tag"], value = "required", when = [{ like = "-*", unmodeled = true }] }
 options.access  = { flag = "--access", value = "required", when = [{ like = "public", adds = ["make_public"] }, { like = "-*", unmodeled = true }] }
 options.dry_run = { flag = "--dry-run", removes = ["publish", "make_public"] }
 operands.package_spec = { when = [{ like = ["true", "false"], unmodeled = true }] }
@@ -26,3 +27,10 @@ usage = "pkg deploy [options] [<function>...]"
 adds  = ["network"]
 options.debug = { flag = "--debug" }
 operands.function = { when = [{ like = ["true", "false"], unmodeled = true }] }
+
+[shell.dist_tag_add]
+usage = "pkg [global options] dist-tag add [options] <spec>"
+adds  = ["network"]
+options.label   = { flag = "--label", value = "required", repeated = true, when = [{ like = "-*", unmodeled = true }] }
+options.files   = { flag = "--files", value = "many", when = [{ like = "true", unmodeled = true }] }
+options.otp     = { flag = "--otp", value = "optional", when = [{ like = "", unmodeled = true }] }

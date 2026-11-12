@@ -78,3 +78,42 @@ argv = ["pkg", "deploy", "--debug", "api"]
 action = "deploy"
 fields = { debug = true, function = ["api"] }
 effects = ["network"]
+
+# A short option with the value attached is matched the same way
+[[case]]
+argv = ["pkg", "publish", "-t-x"]
+action = "unmodeled"
+
+# An `anywhere` global option between two command words
+[[case]]
+argv = ["pkg", "dist-tag", "--prefix", "-g", "add", "x"]
+action = "unmodeled"
+
+# The same option with an ordinary value stays modeled
+[[case]]
+argv = ["pkg", "dist-tag", "--prefix", "/p", "add", "x"]
+action = "dist_tag_add"
+fields = { prefix = "/p", spec = "x" }
+effects = ["network"]
+
+# One value of a repeated option is sufficient
+[[case]]
+argv = ["pkg", "dist-tag", "add", "--label", "a", "--label", "-b", "x"]
+action = "unmodeled"
+
+# One word of a `many` option is sufficient
+[[case]]
+argv = ["pkg", "dist-tag", "add", "x", "--files", "a", "true"]
+action = "unmodeled"
+
+# An `optional` option given bare has the value "", which `like = ""` matches
+[[case]]
+argv = ["pkg", "dist-tag", "add", "--otp", "x"]
+action = "unmodeled"
+
+# The same option with an attached value stays modeled
+[[case]]
+argv = ["pkg", "dist-tag", "add", "--otp=123", "x"]
+action = "dist_tag_add"
+fields = { otp = "123", spec = "x" }
+effects = ["network"]

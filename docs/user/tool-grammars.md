@@ -106,11 +106,13 @@ operands.package_spec = { when = [{ like = ["true", "false"], unmodeled = true }
 ```
 
 The entry applies before any `removes`, so a dry-run flag elsewhere on the line doesn't keep it
-modeled. An entry with `unmodeled = true` can't also have `adds` or `removes`.
+modeled. An entry with `unmodeled = true` needs a `like` pattern, and can't also have `adds` or
+`removes`.
 
 A command line that matches no `usage` is the action `unmodeled`. So is one with an option that its
-action doesn't declare, and one with a value that an `unmodeled` `when` entry matches. [A command the grammar can't read](#a-command-the-grammar-cant-read-is-unmodeled)
-says how policy decides it.
+action doesn't declare, and one with a value that an `unmodeled` `when` entry matches.
+[A command the grammar can't read](#a-command-the-grammar-cant-read-is-unmodeled) says how policy
+decides it.
 
 `name` and `program` are separate. `program` is what the agent types, and it decides which
 `[tool]` tables the grammar covers. `name` is what your rules spell. Two grammars can't share a

@@ -107,8 +107,6 @@ impl ActionGrammar {
     }
 
     /// The action, its field values, and its effects, where a removed effect is never present.
-    ///
-    /// A value like the patterns of an `unmodeled` `when` entry makes the line `unmodeled`.
     fn outcome(
         &self,
         seen: &Occurrences,

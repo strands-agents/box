@@ -363,6 +363,11 @@ impl EffectChanges {
                         removes: declared(place, entry.removes, effects)?,
                     });
                 }
+                if entry.like.is_empty() {
+                    return Err(GrammarRefusal::UnmodeledWithoutPattern {
+                        place: place.clone(),
+                    });
+                }
                 if !entry.adds.is_empty() || !entry.removes.is_empty() {
                     return Err(GrammarRefusal::UnmodeledWithEffects {
                         place: place.clone(),

@@ -107,6 +107,8 @@ pub(crate) enum GrammarRefusal {
         "{place}: a `when` entry with `unmodeled = true` cannot also carry `adds` or `removes`"
     )]
     UnmodeledWithEffects { place: Place },
+    #[error("{place}: a `when` entry with `unmodeled = true` needs at least one `like` pattern")]
+    UnmodeledWithoutPattern { place: Place },
     #[error("{place}: field {field:?} starts with `__`, which Box reserves for Cedar record keys")]
     CedarReservedField { place: Place, field: String },
 }
@@ -235,6 +237,7 @@ impl GrammarRefusal {
             | Self::FieldTaken { place, .. }
             | Self::ReservedAction { place }
             | Self::UnmodeledWithEffects { place }
+            | Self::UnmodeledWithoutPattern { place }
             | Self::ReservedField { place, .. }
             | Self::CedarReservedField { place, .. } => place.under(table),
         }
