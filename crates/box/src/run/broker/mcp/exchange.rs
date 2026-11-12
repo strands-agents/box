@@ -1056,6 +1056,14 @@ async fn forward_server_frame(
             "an MCP server frame must declare JSON-RPC 2.0",
         ));
     }
+    // A reply that also names a method would take the request branch and skip the response record.
+    if object.contains_key("method")
+        && (object.contains_key("result") || object.contains_key("error"))
+    {
+        return Err(invalid_data(
+            "an MCP server frame cannot carry both 'method' and 'result' or 'error'",
+        ));
+    }
     if let Some(method) = object.get("method") {
         if let Some(id) = object.get("id") {
             if exchange.connection.phase == McpConnectionPhase::PerRequestMetadata {
@@ -2398,6 +2406,16 @@ done"#
                     r#"{"jsonrpc":"2.0","id":99,"result":{}}"#,
                     "unknown response id",
                 ),
+                (
+                    "reply-with-method",
+                    r#"{"jsonrpc":"2.0","id":10,"result":{},"method":"notifications/progress"}"#,
+                    "cannot carry both 'method' and 'result' or 'error'",
+                ),
+                (
+                    "error-with-method",
+                    r#"{"jsonrpc":"2.0","id":10,"error":{"code":-1,"message":"x"},"method":"notifications/progress"}"#,
+                    "cannot carry both 'method' and 'result' or 'error'",
+                ),
                 ("batch", r#"[{"jsonrpc":"2.0"}]"#, "must be an object"),
                 ("bare-value", "17", "must be an object"),
                 ("malformed-json", "{not-json", "invalid MCP server frame"),
@@ -2762,7 +2780,7 @@ when { context.input has value && context.input.value == "secret" };"#;
     }
 
     /// A legacy-protocol server whose `tools/call` reply depends on the call's `value`: no
-    /// `result`, a `null` result, or a valid result.
+    /// `result`, a `null` result, a result that also names a method, or a valid result.
     fn replying_server(log: &Path) -> Vec<String> {
         let mut command = listing_server(log, SEARCH_TOOLS, ":");
         command[2] = command[2].replace(
@@ -2771,6 +2789,7 @@ when { context.input has value && context.input.value == "secret" };"#;
 case "$frame" in
   *'"method":"tools/call"'*'"value":"noresult"'*) printf '{"jsonrpc":"2.0","id":%s}\n' "$id"; continue ;;
   *'"method":"tools/call"'*'"value":"nullresult"'*) printf '{"jsonrpc":"2.0","id":%s,"result":null}\n' "$id"; continue ;;
+  *'"method":"tools/call"'*'"value":"withmethod"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[]},"method":"notifications/progress"}\n' "$id"; continue ;;
   *'"method":"tools/call"'*) printf '{"jsonrpc":"2.0","id":%s,"result":{"content":[]}}\n' "$id"; continue ;;"#,
         );
         command
@@ -2816,6 +2835,78 @@ case "$frame" in
             assert!(
                 allowed.get("error").is_none(),
                 "a valid result satisfies it: {allowed}"
+            );
+            program.stop_and_wait().await.expect("stop the exchange");
+        }));
+    }
+
+    #[test]
+    fn a_reply_that_also_names_a_method_stops_the_exchange_and_never_reaches_the_client() {
+        let (runtime, local) = local_runtime();
+        runtime.block_on(local.run_until(async {
+            let fixture = fixture(&format!(
+                r#"{PERMIT_ALL_MCP}
+                forbid (principal, action == issues_mcp::Action::"Search", resource)
+                when temporal {{ formerly within 3600s (issues_mcp::Action::"Search"::response{{output.reply: _}}) }};"#
+            ));
+            let log = tempfile::NamedTempFile::new().expect("frame log");
+            let (mut program, mut output) = exchange(replying_server(log.path()), &fixture).await;
+            initialize(&program, &mut output).await;
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+            )
+            .await;
+            assert_eq!(next_output(&mut output).await["id"], 2);
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": "Search", "arguments": {"value": "withmethod"}}}),
+            )
+            .await;
+
+            let error = tokio::time::timeout(TEST_WAIT_TIMEOUT, program.join())
+                .await
+                .expect("the exchange stops within the test deadline")
+                .expect_err("a reply that also names a method must stop the exchange");
+            assert!(
+                error
+                    .to_string()
+                    .contains("cannot carry both 'method' and 'result' or 'error'"),
+                "the wrong refusal: {error}"
+            );
+            while let Some(outbound) = output.recv().await {
+                let crate::run::broker::protocol::Body::Output { data, .. } = outbound.frame.body
+                else {
+                    continue;
+                };
+                let bytes =
+                    crate::run::broker::protocol::decode_payload(&data).expect("output payload");
+                let frame = String::from_utf8_lossy(&bytes);
+                assert!(
+                    !frame.contains("notifications/progress"),
+                    "the frame must not reach the client: {frame}"
+                );
+            }
+
+            let (mut program, mut output) = exchange(replying_server(log.path()), &fixture).await;
+            initialize(&program, &mut output).await;
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}),
+            )
+            .await;
+            assert_eq!(next_output(&mut output).await["id"], 2);
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                    "params": {"name": "Search", "arguments": {"value": "valid"}}}),
+            )
+            .await;
+            let refused = next_output(&mut output).await;
+            assert_eq!(
+                refused["error"]["code"], -32001,
+                "the stopped call still counts toward a response budget: {refused}"
             );
             program.stop_and_wait().await.expect("stop the exchange");
         }));
