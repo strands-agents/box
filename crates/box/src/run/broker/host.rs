@@ -3447,6 +3447,94 @@ done"#;
         }));
     }
 
+    /// Run `printf READY; read x; printf %s "$x" > acted`, send `part`, then each `sent` Input
+    /// payload, and report the exit status, whether a denial came, and what the Call wrote.
+    async fn read_after_part(sent: &[String]) -> (i32, bool, Option<String>) {
+        let marker = tempfile::tempdir().expect("marker");
+        let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+        let acted = marker.path().join("acted");
+        let (mut reader, mut writer) = transport(&socket).await;
+        put(
+            &mut writer,
+            1,
+            Body::Open {
+                mode: Interpreter::Shell,
+            },
+        )
+        .await;
+        put(
+            &mut writer,
+            1,
+            Body::Call {
+                correlation: Default::default(),
+                source: format!(
+                    r#"printf READY; read x; printf %s "$x" > {}"#,
+                    acted.display()
+                ),
+            },
+        )
+        .await;
+        await_output(&mut reader, 1, "READY").await;
+        put(
+            &mut writer,
+            1,
+            Body::Input {
+                data: encode_payload(b"part"),
+            },
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        for data in sent {
+            put(&mut writer, 1, Body::Input { data: data.clone() }).await;
+        }
+        let mut denied = false;
+        let status = loop {
+            let frame =
+                tokio::time::timeout(Duration::from_secs(10), read_frame::<Frame, _>(&mut reader))
+                    .await
+                    .expect("the Call ends")
+                    .expect("a frame")
+                    .expect("the daemon answers");
+            match frame.body {
+                Body::Denied { .. } => denied = true,
+                Body::Exit { status } => break status,
+                _ => {}
+            }
+        };
+        (status, denied, std::fs::read_to_string(&acted).ok())
+    }
+
+    /// Input after a refused frame never reaches the Call, so a waiting `read` never completes.
+    #[test]
+    fn input_after_a_refusal_never_completes_a_waiting_read() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let oversized = "A".repeat(MAX_ENCODED_CHUNK_BYTES + 1);
+            let newline = encode_payload(b"\n");
+            for _ in 0..5 {
+                let (status, denied, acted) =
+                    read_after_part(&[oversized.clone(), newline.clone()]).await;
+                assert!(denied, "the oversized frame is refused");
+                assert_ne!(status, 0, "the refused Call does not succeed");
+                assert_eq!(
+                    acted, None,
+                    "the Call must not act after its input was refused"
+                );
+            }
+            let (status, denied, acted) = read_after_part(&[newline.clone()]).await;
+            assert!(!denied);
+            assert_eq!(
+                (status, acted.as_deref()),
+                (0, Some("part")),
+                "valid input still acts"
+            );
+            let (status, denied, acted) = read_after_part(&[oversized.clone()]).await;
+            assert!(denied);
+            assert_ne!(status, 0);
+            assert_eq!(acted, None, "a refusal alone never acts");
+        }));
+    }
+
     /// Input that arrives after the Shell stopped reading stdin is dropped, and the Call goes on.
     #[test]
     fn late_input_for_a_command_that_does_not_read_is_dropped() {

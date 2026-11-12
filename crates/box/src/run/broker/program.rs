@@ -201,6 +201,9 @@ impl ProgramControl {
             return Err(InputRefusal::Closed);
         };
         let sender = guard.as_ref().ok_or(InputRefusal::Closed)?;
+        if self.input_refused.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         let received = self.input_received.load(Ordering::SeqCst);
         let total = received
             .checked_add(data.len())
@@ -216,9 +219,10 @@ impl ProgramControl {
         Ok(())
     }
 
-    /// Refuse all further input, stop the running Call, and refuse every later Call. Stdin stays
-    /// open, so the running Call never reads end-of-file on part of its input.
+    /// Refuse all further input, stop the running Call, and refuse every later Call. Later input is
+    /// dropped and stdin stays open, so the running Call never reads more of its input or its end.
     pub(crate) fn refuse_input(&self) {
+        let _sender = self.stdin_tx.lock();
         self.input_refused.store(true, Ordering::SeqCst);
         self.signal();
     }
