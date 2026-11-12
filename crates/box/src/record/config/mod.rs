@@ -137,9 +137,11 @@ pub(crate) fn read_remote_mcp_servers(path: &Path) -> Result<Vec<RemoteMcpServer
         if !remote.backends.is_empty() {
             return Err(ConfigError::Mcp {
                 name: remote.name,
-                reason: "re-routes to a backend, which generate-schema cannot discover: the \
+                reason: "re-routes to a backend, which generate-schema cannot discover (the \
                          re-route and its backend auth apply only at run time, in the egress \
-                         gateway. Author this server's mcp:call rules by hand"
+                         gateway). This stops the whole run; generate a schema from a box.toml \
+                         without this server for the others, then author this server's mcp:call \
+                         rules by hand"
                     .to_string(),
             }
             .into());

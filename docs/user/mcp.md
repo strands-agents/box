@@ -394,7 +394,8 @@ a `type = "stdio"` server, which is a local child with no remote endpoint.
 
 `policy generate-schema` cannot discover a re-routed server: the re-route and its backend `auth`
 apply only at `box run` time, in the egress gateway, and the offline command has no gateway. It
-refuses a `[mcp.<name>]` with a backend by name, so write that server's `mcp:call` rules by hand.
+refuses a `[mcp.<name>]` with a backend by name, which stops the whole run. Generate a schema from a
+`box.toml` without that server to get the rest, then write its `mcp:call` rules by hand.
 
 ## Errors and exit codes
 
