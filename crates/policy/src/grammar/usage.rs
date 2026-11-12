@@ -41,8 +41,6 @@ pub(crate) enum UsageFault {
     UnclosedBracket,
     #[error("uses {0:?}, which a usage line does not support")]
     Unsupported(char),
-    #[error("names no command word")]
-    NoCommandWord,
     #[error("puts command word {0:?} in `[ ]` or after an operand")]
     CommandWordOutOfPlace(String),
     #[error("has {0:?}, which is not a command word, an operand `<name>`, or `--`")]
@@ -82,6 +80,7 @@ impl Usage {
         let mut walker = Walker {
             usage: Self::default(),
             phase: Phase::Before,
+            bare: None,
         };
         for (position, node) in nodes.iter().enumerate() {
             match node {
@@ -93,9 +92,6 @@ impl Usage {
                 }
                 node => walker.node(node, false)?,
             }
-        }
-        if walker.usage.words.is_empty() {
-            return Err(UsageFault::NoCommandWord);
         }
         Ok(walker.usage)
     }
@@ -159,6 +155,7 @@ fn toolchain(group: &[Node]) -> Option<String> {
 struct Walker {
     usage: Usage,
     phase: Phase,
+    bare: Option<UsageFault>,
 }
 
 impl Walker {
@@ -183,6 +180,9 @@ impl Walker {
             return Ok(());
         }
         if command_word(word) {
+            if let Some(fault) = self.bare.take() {
+                return Err(fault);
+            }
             if optional || self.phase == Phase::After {
                 return Err(UsageFault::CommandWordOutOfPlace(word.to_string()));
             }
@@ -214,7 +214,7 @@ impl Walker {
             }
             (["options"], 1) => {
                 if self.phase == Phase::Before {
-                    return Err(UsageFault::OptionsOutOfPlace);
+                    self.bare = Some(UsageFault::OptionsOutOfPlace);
                 }
                 self.phase = Phase::After;
                 self.usage.options = true;
@@ -231,7 +231,7 @@ impl Walker {
 
     fn after_words(&mut self) -> Result<(), UsageFault> {
         if self.phase == Phase::Before {
-            return Err(UsageFault::OperandOutOfPlace);
+            self.bare = Some(UsageFault::OperandOutOfPlace);
         }
         self.phase = Phase::After;
         Ok(())

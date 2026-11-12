@@ -1,0 +1,122 @@
+# bare-program grammar corpus
+#
+# Each case is one argv, and what the shell grammar of `bare-program.grammar.toml` reads
+# it as. `fields` lists each field that does not hold its default: a Bool `false`, an
+# empty set, or an absent string. An `unmodeled` case has no fields and no effects.
+
+# The bare program
+[[case]]
+argv = ["vercel"]
+action = "deploy"
+effects = ["deploy"]
+
+# A path operand
+[[case]]
+argv = ["vercel", "./site"]
+action = "deploy"
+fields = { path = "./site" }
+effects = ["deploy"]
+
+# The alias spells the same action, and its first operand can be any word
+[[case]]
+argv = ["vercel", "deploy", "site"]
+action = "deploy"
+fields = { path = "site" }
+effects = ["deploy"]
+
+# An action option, a global option, and an `anywhere` global option, in any order
+[[case]]
+argv = ["vercel", "--prod", "--token", "x", "./site", "-d"]
+action = "deploy"
+fields = { debug = true, path = "./site", prod = true, token = "x" }
+effects = ["deploy", "production"]
+
+[[case]]
+argv = ["vercel", "--token", "x", "--prod"]
+action = "deploy"
+fields = { prod = true, token = "x" }
+effects = ["deploy", "production"]
+
+# A command word that has its own action
+[[case]]
+argv = ["vercel", "ls"]
+action = "list"
+
+[[case]]
+argv = ["vercel", "--token", "x", "ls"]
+action = "list"
+fields = { token = "x" }
+
+# A first operand that is a command word but no action's: a typo or an unmodeled subcommand
+[[case]]
+argv = ["vercel", "remove", "my-app"]
+action = "unmodeled"
+
+[[case]]
+argv = ["vercel", "lss"]
+action = "unmodeled"
+
+# Any first operand that does not read as a path is refused, because a real subcommand can be
+# spelled with uppercase letters, `_`, `:`, or `.`
+[[case]]
+argv = ["vercel", "LIST"]
+action = "unmodeled"
+
+[[case]]
+argv = ["vercel", "my_site"]
+action = "unmodeled"
+
+[[case]]
+argv = ["vercel", "apps:create"]
+action = "unmodeled"
+
+[[case]]
+argv = ["vercel", "site.v2"]
+action = "unmodeled"
+
+[[case]]
+argv = ["vercel", ""]
+action = "unmodeled"
+
+# A word that starts with `.` or holds a `/` is a path
+[[case]]
+argv = ["vercel", "./site.v2"]
+action = "deploy"
+fields = { path = "./site.v2" }
+effects = ["deploy"]
+
+[[case]]
+argv = ["vercel", "apps/web"]
+action = "deploy"
+fields = { path = "apps/web" }
+effects = ["deploy"]
+
+[[case]]
+argv = ["vercel", "--prod", "site"]
+action = "unmodeled"
+
+# A `--` before the first operand does not make a command word a path
+[[case]]
+argv = ["vercel", "--", "remove"]
+action = "unmodeled"
+
+[[case]]
+argv = ["vercel", "--prod", "--", "lss"]
+action = "unmodeled"
+
+# A `--` before a path
+[[case]]
+argv = ["vercel", "--", "./site"]
+action = "deploy"
+fields = { path = "./site" }
+effects = ["deploy"]
+
+# An undeclared option
+[[case]]
+argv = ["vercel", "--zz"]
+action = "unmodeled"
+
+# An option of the bare action before another action's words
+[[case]]
+argv = ["vercel", "--prod", "ls"]
+action = "unmodeled"

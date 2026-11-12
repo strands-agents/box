@@ -87,6 +87,8 @@ pub(crate) enum GrammarRefusal {
         spelling: String,
         other: Box<Place>,
     },
+    #[error("{place}: has a usage with no command word, and so does {other}")]
+    SecondBareAction { place: Place, other: Box<Place> },
     #[error("{place} {fault}")]
     BadUsage { place: Place, fault: UsageFault },
     #[error("{place}: declares `options`, but its usage has no `[options]`")]
@@ -209,7 +211,9 @@ impl GrammarRefusal {
     /// This refusal with each place it names put under the table `table`.
     fn under(mut self, table: &str) -> Self {
         match &mut self {
-            Self::FlagTaken { place, other, .. } | Self::SpellingTaken { place, other, .. } => {
+            Self::FlagTaken { place, other, .. }
+            | Self::SpellingTaken { place, other, .. }
+            | Self::SecondBareAction { place, other } => {
                 place.under(table);
                 other.under(table);
             }
