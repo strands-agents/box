@@ -92,6 +92,13 @@ action = "delete"
 fields = { type = "NamespacedGadgets", name = ["x"] }
 effects = ["cluster_write"]
 
+# An exact `not_like` excludes only the whole value, so text that it names inside a list keeps the effect
+[[case]]
+argv = ["kube", "delete", "namespaces,namespacedgadgets", "x"]
+action = "delete"
+fields = { type = "namespaces,namespacedgadgets", name = ["x"] }
+effects = ["broad_delete", "cluster_write"]
+
 # A `case`-sensitive field keeps exact matching: `Client` is not `client`
 [[case]]
 argv = ["kube", "delete", "--dry-run=Client", "pods", "x"]

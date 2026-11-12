@@ -260,7 +260,7 @@ apply only when a value matches:
 | Key | What it holds |
 |---|---|
 | `like` | Patterns the value must match. `*` matches any run of characters, and `\*` matches a `*`. Without `like`, every value matches. |
-| `not_like` | Patterns the value must not match. `not_like = ["localhost", "127.0.0.1", "::1"]` matches every address except those three. |
+| `not_like` | Exact values the value must not be. `not_like = ["localhost", "127.0.0.1", "::1"]` matches every address except those three. A `not_like` pattern can't hold `*`, though `\*` matches a `*`. |
 | `case` | `"sensitive"`, the default, or `"insensitive"`. With `"insensitive"`, every pattern of the option or operand, including the patterns in its `when` entries, matches in any letter case. Box folds only the ASCII letters `A` to `Z`. |
 | `when` | A list of entries, each with its own `like`, `not_like`, `adds`, and `removes`, for values that need other effects. Each entry needs `like` or `not_like`. |
 
@@ -293,6 +293,11 @@ such as Go's `strings.ToLower` turning the Kelvin sign `K` into `k`, can read a 
 An entry with `not_like` can't have `removes`, and `run` refuses the grammar at startup. That
 entry matches every value except the few it names, so the agent could take an effect away with any
 word it chooses. To remove an effect, list the values that remove it in `like`.
+
+A `not_like` pattern with `*` is refused at startup for the same reason. With
+`like = ["*namespace*"]` and `not_like = ["*gadget*"]`, the agent could type
+`namespaces,gadgets` and the `adds` would no longer apply, though the program still reads
+`namespaces`.
 
 ### A rule covers one grammar
 

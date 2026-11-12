@@ -77,6 +77,10 @@ pub(crate) enum GrammarRefusal {
         "{place}: an entry with `not_like` cannot carry `removes`, because every value outside its patterns would remove the effect"
     )]
     NegatedRemoval { place: Place },
+    #[error(
+        "{place}: `not_like` pattern {pattern:?} has a `*`, and a `not_like` pattern must be exact, because a value could hold the text it names and lose the effect"
+    )]
+    WildcardNotLike { place: Place, pattern: String },
     #[error("{place}: a `when` entry needs `like` or `not_like`")]
     WhenWithoutPattern { place: Place },
     #[error("{place}: sets `case`, but has no `like` or `not_like` pattern")]
@@ -232,6 +236,7 @@ impl GrammarRefusal {
             | Self::UndeclaredEffect { place, .. }
             | Self::BadOption { place, .. }
             | Self::NegatedRemoval { place }
+            | Self::WildcardNotLike { place, .. }
             | Self::WhenWithoutPattern { place }
             | Self::CaseWithoutPattern { place }
             | Self::BadAlias { place, .. }

@@ -417,6 +417,12 @@ impl WhenChanges {
                 place: place.clone(),
             });
         }
+        if let Some(pattern) = entry.not_like.iter().find(|pattern| has_wildcard(pattern)) {
+            return Err(GrammarRefusal::WildcardNotLike {
+                place: place.clone(),
+                pattern: pattern.clone(),
+            });
+        }
         Ok(Self {
             patterns: Patterns {
                 like: entry.like,
@@ -426,6 +432,21 @@ impl WhenChanges {
             removes: declared(place, entry.removes, effects)?,
         })
     }
+}
+
+/// Whether `pattern` holds a `*` that is not escaped as `\*`.
+fn has_wildcard(pattern: &str) -> bool {
+    let mut characters = pattern.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\\' if characters.peek() == Some(&'*') => {
+                characters.next();
+            }
+            '*' => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Whether `word` is a command word: lowercase ASCII letters, digits, and `-`, not first a `-`.
