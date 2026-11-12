@@ -68,12 +68,12 @@ constrains what the program does.
 ## The box
 
 <a id="linux-evaluation-requires-explicit-consent"></a>
-### Linux startup does not require an environment opt-in
+### Linux ARM64 startup does not require an environment opt-in
 
-The Linux command line and library validate configuration without an environment opt-in.
+The Linux ARM64 command line and library validate configuration without an environment opt-in.
 `EXPERIMENTAL_LINUX_SUPPORT` has no effect, including when an existing script sets it to `TRUE`. An
-extra environment gate would require every caller and test to supply consent separately from
-configuration. The cost is that the variable no longer prevents accidental Linux use. Host
+extra environment gate would require every ARM64 caller and test to supply consent separately from
+configuration. The cost is that the variable no longer prevents accidental Linux ARM64 use. Host
 requirements, process hardening, filesystem grants, and containment checks still apply. A missing or
 invalid configuration still fails before a workload starts.
 
@@ -84,6 +84,21 @@ publishing its archive. Linux previews always include ARM64 Linux and leave the 
 release unchanged. Removing the startup flag does not authorize a release or establish security
 acceptance. The native filesystem policy experiment retains its separate configuration and Cargo
 feature controls.
+
+<a id="linux-x86-startup-requires-explicit-consent"></a>
+### Linux x86-64 startup requires an explicit experimental opt-in
+
+Box requires `EXPERIMENTAL_X86_SUPPORT=TRUE` in its operator environment before executing a command
+on Linux x86-64. When the variable is missing or has any other value, Box refuses `run` and
+`policy generate-schema` before configuration reads, host callbacks, process hardening, or workload
+startup. The same check applies to the Rust library functions `run` and `generate_policy_schema`.
+Help and version output remain available.
+
+We accept the separate consent step for x86-64 callers and tests while support remains experimental.
+Enabling it by default would run workloads on x86-64 before the remaining compatibility and release
+checks are complete. This gate does not change filesystem grants, syscall permissions, or release
+readiness. It does not apply to ARM64, macOS, or the standalone containment library. The retired
+`EXPERIMENTAL_LINUX_SUPPORT` variable remains inactive.
 
 <a id="native-filesystem-policy-requires-explicit-selection"></a>
 ### Native filesystem policy requires explicit selection
@@ -859,9 +874,11 @@ pins Python.
 There is no credential action in the schema. An operator declares a binding in `box.toml`, and that
 binding says only which secret is attached to a request the policy already permits. Reachability
 stays the policy's decision alone, so a binding never opens a destination, and the two must name the
-same host. There is no spelling for ambient credentials: an empty `aws://` body does not parse,
-because Box must not silently use credentials from the environment. A secret travels over TLS only.
-See [credentials require TLS](#a-secret-rides-only-tls).
+same host. A bare `aws://` body parses and names the AWS default credential provider chain, so a
+binding can sign with the host's ambient identity; this is not silent, because the box warns on every
+such request and records a distinct default-chain acquisition. See
+[a bare aws:// resolves the default credential chain](#a-bare-aws-resolves-the-default-credential-chain).
+A secret travels over TLS only. See [credentials require TLS](#a-secret-rides-only-tls).
 
 <a id="temporal-rules-ride-the-closed-context"></a>
 <a id="a-temporal-rule-rides-the-same-closed-context-as-an-ordinary-rule"></a>
@@ -1299,8 +1316,8 @@ On Linux, Box builds the boundary from namespaces, a mount view, and a syscall p
 rejects Landlock as the baseline, because no Landlock right denies all network at any ABI version,
 so a contained child would keep unrestricted network. Box does not probe the kernel ABI version. A
 gate based on that probe once refused every kernel Box ships on. Platform and architecture alone
-select the mechanism. macOS uses Seatbelt, and Linux on ARM64 uses the namespace launcher. Box
-refuses every other Linux architecture by name.
+select the mechanism. macOS uses Seatbelt, and Linux on ARM64 or x86-64 uses the namespace launcher.
+Box refuses other Linux architectures by name.
 
 <a id="containment-ends-with-the-contained-process"></a>
 ### The sandbox ends with the contained process
@@ -2020,6 +2037,28 @@ the upstream routes on, so a virtual-host name cannot bypass the decision. The r
 TLS-terminated traffic therefore continues to refuse cleartext. The parser drops a URL fragment,
 because a fragment is client-only and must never reach an origin server.
 
+<a id="a-listed-host-is-upgraded-from-plain-http-to-https-in-the-gateway"></a>
+### A listed host's plain HTTP is upgraded to HTTPS in the gateway
+
+`[gateway] upgrade_http` lists hosts whose plain `http://` request to port 80 the gateway decides
+and sends as `https://` on port 443. The gateway, not the workload, then does the TLS handshake,
+against its own upstream roots and with the host as SNI. The reason is macOS. A runtime that checks
+certificates with the macOS platform verifier, such as rustup, cannot trust the per-run CA,
+because the box CA is [an environment value and not in the keychain](#ca-trust-is-a-per-process-environment-value),
+so its HTTPS through the gateway fails with `OSStatus -26276`. Sent as plain `http://`, the same
+request needs no workload trust at all. Policy decides the upgraded request on port 443, as it decides
+a `CONNECT` to that host, so the list grants no reach that a permit does not. The obvious
+alternative was to let such a tool skip the gateway, which loses the per-request decision and the
+credential swap for that tool and everything it starts, such as cargo behind rustup's proxy. The
+list is box-wide and not per route, because the hop it changes is the workload's own, before any
+route matches. The cost is that the hop from the workload to the gateway is cleartext. It stays on
+the machine, and the gateway's TLS leg protects the rest. The workload's leg is still plain, so the
+request reports `intercepted` false and [a secret still rides only TLS](#a-secret-rides-only-tls).
+rustup still checks each package against the SHA-256 hash in its channel manifest, and the
+manifest itself reaches the workload through the gateway's TLS leg.
+`a_listed_plain_request_reaches_a_tls_upstream_judged_on_443` and
+`a_credential_on_an_upgraded_plain_request_is_refused` pin it.
+
 <a id="a-remote-mcp-tool-call-passes-a-second-gate"></a>
 ### A remote MCP tool call passes a second gate after the transport gate
 
@@ -2279,14 +2318,30 @@ input. Deleting a box-side check moves its refusal one phase later, so the opera
 broken config after the box starts. Do not delete one because the other exists.
 
 <a id="a-provider-refuses-an-identity-it-cannot-honour"></a>
-### A credential provider refuses an identity it cannot honour, instead of substituting one
+<a id="a-bare-aws-resolves-the-default-credential-chain"></a>
+### An AWS binding resolves a named profile's static keys, and a bare aws:// resolves the full chain
 
-The environment-backed AWS provider reads the ambient `AWS_*` variables, so it cannot resolve a
-named profile. It never falls back to the ambient identity, because a credential that is not the one
-the operator named is a silent authority change. A named profile resolves through the AWS profile
-chain, with one exception refused by name: `credential_process`. Honouring it would make the box's
-trusted process run a program that `~/.aws/config` names, and no floor defends that file, so it
-would violate the rule against running workload-named programs in the trusted process.
+`aws://PROFILE` reads the named profile's static keys and nothing else: it never runs
+`credential_process` (which runs a subprocess), SSO, or assume-role (each an STS or SSO call),
+because a credential that is not the one the operator named is a silent authority change. A bare
+`aws://` resolves the AWS SDK default credential provider chain: the environment, the profile files
+(including `credential_process`), web identity, the container endpoint, then instance metadata.
+
+The credentials crate owns the SDK (`aws-config`, an HTTP/TLS stack, and a current-thread runtime on
+a dedicated worker thread), because the crate that already resolves `aws://PROFILE` owns every AWS
+credential path; the box crate injecting a resolver across a seam was rejected for splitting that
+ownership. The reserved tokens `aws://@instance-role` and `aws://@container-role`, and
+`aws://default`, were rejected, the last because `default` is a real profile and the overlap would
+be a silent identity substitution. The SDK's `sso` and `credentials-login` providers are compiled
+out (`default-features = false`), so a bare `aws://` does not resolve an AWS SSO or `aws login`
+default profile; such a profile is refused, and the refusal names the missing provider.
+
+The cost: the SDK, a runtime, and a TLS stack link into the one process that holds every resolved
+plaintext; and a workload with write access to `~/.aws` can name a `credential_process` program the
+trusted process runs outside the sandbox, which is remote code execution
+([how access choices change the risk](limitations.md#how-access-choices-change-the-risk)). The
+shipped box exposes no setting that refuses a bare `aws://`, so the mitigation is a named profile or
+keeping `~/.aws` unwritable.
 
 <a id="a-route-may-set-the-phantom-check-to-advisory"></a>
 ### A route may attach its secret always, not only against the phantom

@@ -1441,6 +1441,60 @@ expect!(subshell_exit_code, "(exit 42); echo $?", "42");
 // ── source / dot command ────────────────────────────────────────────
 
 #[test]
+fn line_continuations_join_source_lines() {
+    let script = r#"pri\
+ntf '<%s>\n' hel\
+lo \
+  world
+true || \
+  printf unexpected
+printf 'a\n' | \
+  tr a b
+"#;
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for command in [script, ". /tmp/continued.sh", "sh /tmp/continued.sh"] {
+            let mut shell = Shell::builder().build().unwrap();
+            let setup = shell
+                .run(&format!(
+                    "printf '%s' '{}' > /tmp/continued.sh",
+                    script.replace('\'', "'\\''")
+                ))
+                .await;
+            assert_eq!(setup.status, 0, "{}", setup.stderr);
+            let out = shell.run(command).await;
+            assert_eq!(out.status, 0, "{command}: {}", out.stderr);
+            assert_eq!(out.stderr, "", "{command}");
+            assert_eq!(out.stdout, "<hello>\n<world>\nb\n", "{command}");
+        }
+    }));
+}
+
+#[test]
+fn line_continuations_preserve_quoting_and_input_boundaries() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, expected) in [
+            ("printf '<%s>' 'a\\\nb' \"c\\\nd\"", "<a\\\nb><cd>"),
+            ("printf '<%s>' \\\\\nprintf next", "<\\>next"),
+            ("printf first # comment \\\nprintf next", "firstnext"),
+            (
+                "cat \\\n  <<'EOF'\na\\\nb\nEOF\nprintf after",
+                "a\\\nb\nafter",
+            ),
+            ("printf '<%s>' word\\\n", "<word>"),
+            ("alias a=''\nalias b=''\na b printf after", "after"),
+        ] {
+            let mut shell = Shell::builder().build().unwrap();
+            let out = shell.run(script).await;
+            assert_eq!(out.status, 0, "{script}: {}", out.stderr);
+            assert_eq!(out.stderr, "", "{script}");
+            assert_eq!(out.stdout, expected, "{script}");
+        }
+    }));
+}
+
+#[test]
 fn source_dot_script() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
@@ -3949,14 +4003,21 @@ fn builder_max_bg_jobs() {
 fn builder_max_input() {
     let (rt, local) = rt();
     rt.block_on(local.run_until(async {
-        let mut shell = Shell::builder().max_input(5).build().unwrap();
-        let out = shell.run("echo hello world").await;
-        assert_eq!(out.status, 1);
-        assert!(
-            out.stderr.contains("input too large"),
-            "stderr: {}",
-            out.stderr
-        );
+        for input in ["printf OK ", "printf OK\n", "true\nprintf OK"] {
+            for (max_input, expected) in [
+                (input.len() - 1, (1, "", "strands-shell: input too large\n")),
+                (input.len(), (0, "OK", "")),
+                (0, (0, "OK", "")),
+            ] {
+                let mut shell = Shell::builder().max_input(max_input).build().unwrap();
+                let out = shell.run(input).await;
+                assert_eq!(
+                    (out.status, out.stdout.as_str(), out.stderr.as_str()),
+                    expected,
+                    "{input:?}, max_input={max_input}"
+                );
+            }
+        }
     }));
 }
 

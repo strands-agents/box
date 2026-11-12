@@ -546,7 +546,10 @@ async fn report_stage(permit: Option<CommandPermit>, proc: &mut Process, status:
 /// `find -exec`, `xargs`, the MCP `exec_shell` tool, the REPL, `sh <file>`, `source`, and a
 /// trap body.
 pub async fn execute(os: Arc<Mediated>, proc: &mut Process, input: &str) -> (i32, bool) {
-    let result = if input.contains('\n') {
+    let result = if proc.max_input > 0 && input.len() > proc.max_input {
+        proc.err_msg("strands-shell: input too large");
+        (1, false)
+    } else if input.contains('\n') {
         execute_sourced(os.clone(), proc, input, None).await
     } else {
         execute_with_reader(os.clone(), proc, input, &mut |_| None).await
@@ -692,7 +695,7 @@ async fn execute_admitted_source(
             }
         };
 
-        match parser::parse_with_aliases(&accum, &mut reader, &proc.aliases) {
+        match parser::parse_source(&accum, &mut reader, &proc.aliases, i < lines.len()) {
             Ok(cl) if line_idx == i && i < lines.len() && ends_with_and_or(&cl) => {}
             Ok(cl) => {
                 i = line_idx; // advance past any lines consumed by heredoc

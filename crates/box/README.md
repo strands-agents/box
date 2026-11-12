@@ -38,6 +38,13 @@ strands-box run    --config <file> [-- <args>...]
 strands-box policy generate-schema --config <file> --output-dir <dir>
 ```
 
+On Linux x86-64, both verbs require the operator environment variable
+`EXPERIMENTAL_X86_SUPPORT=TRUE`. If the variable is unset or has any other value,
+Box refuses execution before reading the configuration or starting a workload. `--help` and `--version`
+remain available. The same check applies to the Rust library functions `run` and
+`generate_policy_schema`; set the variable before starting the host application.
+ARM64 does not require the flag. This startup opt-in does not change sandbox permissions.
+
 There are two verbs. The caller that created `box_dir` owns its lifecycle: it holds the path, so it
 stops a box by ending the `run` process and deletes one by removing the directory.
 
@@ -73,9 +80,9 @@ every harness's stored credentials, through an interpreter that runs outside con
 refusal tells the operator to make a directory for the workspace and to work there, and
 `the_operator_home_is_not_a_project` pins it.
 
-The config file's complete key set is **eleven**: `name`, `box_dir`, `policy`, `[agent]`,
+The config file's complete key set is **twelve**: `name`, `box_dir`, `policy`, `[agent]`,
 `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
-`[experimental-features]`, `file-attributes`, and `[limits]`. `name` and `box_dir`
+`[experimental-features]`, `file-attributes`, `[limits]`, and `[gateway]`. `name` and `box_dir`
 are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
 every removed spelling is refused by its own name with its replacement.
 `four_inputs.rs::the_config_record_carries_only_the_four_inputs` pins the set, and
@@ -88,8 +95,17 @@ which requests are governed.
 the execution timeout for each submitted Strands Shell call. The default is 30 seconds.
 For ten minutes, set `shell.timeout = 600`; for unlimited execution, set `shell.timeout = false`.
 The nested table `[limits.shell]` accepts the same values under `timeout`.
-Invalid or unrepresentable durations are load errors. Python retains its existing limits.
+`shell.max_input` and `shell.max_output` accept nonnegative integer byte counts, with defaults
+of 262144 and 65536. Shell applies the output limit to both output buffers and source-file reads.
+Set either size to `0` to disable that Shell limit, or omit it to keep its default.
+Invalid or unrepresentable durations and sizes are load errors. Python retains its existing limits.
 See [execution limits](../../docs/user/config.md#limits).
+
+`[gateway]` accepts `upgrade_http`, a list of host names whose plain `http://` request to port 80
+the egress gateway decides and sends as `https://` on port 443. Policy still decides each such
+request, on port 443, so the key grants no reach a permit does not. An entry with a scheme, a port, a
+path, a wildcard, or an IP address is a load error. See
+[upgrade plain HTTP to HTTPS](../../docs/user/egress.md#upgrade-plain-http-to-https).
 
 **`[agent]` and each `[tool.<label>]` hold the same four fields.** `[agent]` is the process the
 operator starts. A `[tool.<label>]` is a process the Shell runs for a request the policy already
@@ -308,7 +324,7 @@ secret.ref   = "aws://prod"
 |---|---|---|
 | `destinations` | required | One or more destinations this secret is attached at. Each is an exact host, a `*.` suffix wildcard, an explicit `:port`, and a path prefix or `/*suffix`. Not a regex. |
 | `protocol` | `http` | What the destination speaks. `mcp` makes the gateway parse JSON-RPC frames and raise `mcp:call`; `http` is an ordinary request. |
-| `secret.ref` | required unless a backend is declared | `env://NAME` or `aws://profile`. No other scheme. An `aws://` profile must carry **static keys**; see below. Beside a backend it must be `env://`, and it is phantom-only: the box provisions the placeholder and strips it, and never injects the real destination credential (the backend handles the destination's auth). |
+| `secret.ref` | required unless a backend is declared | `env://NAME`, `aws://profile` (static keys), or a bare `aws://` (the AWS default credential chain). No other scheme. See below. Beside a backend it must be `env://`, and it is phantom-only: the box provisions the placeholder and strips it, and never injects the real destination credential (the backend handles the destination's auth). |
 | `backends.url` | — | A single backend this destination re-routes to, as `scheme://host[:port][/prefix]` (`https` or `http`; a path prefix is allowed, a query or fragment is not). Box dials the backend, presents the backend host (SNI, certificate, and `Host`), prepends the `url`'s path prefix to the agent's path, and keeps the original destination and path in policy and audit. At most one. |
 | `backends.auth.ref` | — | `env://NAME` for the backend's own token. The box attaches it (no phantom; it takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `inject` or `phantom_prefix`). A signed (`aws://` or `credsd://`) auth is refused, and an auth needs an `https` backend. |
 | `secret.placement` | `header` | Where the credential lands: `header`, `basic_auth`, or `query_param`. |
@@ -342,17 +358,22 @@ every phantom and every signing placeholder the box provisions. No table selects
 every process shares one gateway and the gateway cannot tell which process made a call. The box is
 the credential boundary: if a process must not get a credential, put it in another box.
 
-An `aws://` credential is a **signed route**. The box resolves the profile on the trusted side and
+An `aws://` credential is a **signed route**. The box resolves the identity on the trusted side and
 signs each request, so the workload holds no credential at all. It receives placeholder AWS
 credentials, and the signed leg strips whatever it signed with before signing again.
 
-**An `aws://` profile must carry static keys.** `credential_process` is **refused**, and the refusal
-names the command it would have run. Honouring it means the trusted `run` process executes a program named by
-`~/.aws/config`, outside containment and at the operator's uid. No floor defends that file, so a policy
-permitting writes across the home would turn an agent write into trusted-process code execution.
+**`aws://PROFILE` must carry static keys.** For a named profile, `credential_process` is **refused**,
+and the refusal names the command it would have run; a profile that assumes a role or uses SSO is
+refused too, because resolving one needs an STS call. Export `AWS_BEARER_TOKEN_BEDROCK` and bind
+that instead.
 
-A profile that assumes a role or uses SSO is refused too. Resolving one needs an HTTP call to STS, and
-the credentials crate carries no HTTP client. Export `AWS_BEARER_TOKEN_BEDROCK` and bind that instead.
+**A bare `aws://` (no profile) resolves the AWS SDK default credential provider chain** — the host's
+ambient identity — and the box warns on every signed request. Because that chain reads
+`credential_process`, which the trusted process runs outside containment, a bare `aws://` is a
+remote-code-execution path when the workload can write `~/.aws`; the shipped box has no setting that
+refuses the bare form. See
+[the egress guide](../../docs/user/egress.md#credential-sources) for the chain, the warning, and the
+`~/.aws` rule.
 
 **Only `env://` and `aws://` are accepted**, and the config load refuses the rest by
 name.

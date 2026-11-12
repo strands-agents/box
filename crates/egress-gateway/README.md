@@ -199,7 +199,7 @@ fn start() -> egress_gateway::Result<MitmHandle> {
 
 `EffectAttempt` is `#[non_exhaustive]`, so an implementation needs a wildcard arm.
 
-`MitmConfig` has eleven fields:
+`MitmConfig` has twelve fields:
 
 | Field | Type | Default |
 |---|---|---|
@@ -214,6 +214,7 @@ fn start() -> egress_gateway::Result<MitmHandle> {
 | `max_connections` | `usize` | `256` |
 | `mcp_servers` | `Vec<(String, String)>` | empty |
 | `backends` | `Vec<(DestinationPattern, BackendDial)>` | empty |
+| `upgrade_http` | `Vec<String>` | empty |
 
 `unix_socket_path` selects the transport. `None` binds a localhost `TcpListener`
 at `bind_addr`; `Some(path)` binds only a `UnixListener`, at mode `0600`, and
@@ -242,6 +243,12 @@ response, which may already have delivered a processed prefix.
 dialled to that backend instead, the backend host is presented on the upstream leg, and the backend
 path prefix joins in front of the agent's path. The host decision still runs on the original
 destination and the address decision on the backend address, so policy judges the agent's intent.
+
+`upgrade_http` lists hosts whose plain `http://` request to port 80 the gateway decides and sends as
+`https://` on port 443. Every decision sees port 443, as for a `CONNECT` to the host, and the
+upstream leg speaks TLS against the same roots, with the host as SNI and `Host`. A backend that
+matches the host on 443 still re-routes it. The workload's leg stays plain, so `intercepted` is
+`false` and a credential-matched request is refused.
 
 `MitmHandle` exposes `port()`, `unix_socket_path()`, `intercept_ca_path()`,
 `env_vars()`, and `shutdown()`.

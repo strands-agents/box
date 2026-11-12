@@ -2265,6 +2265,30 @@ mod tests {
         }
     }
 
+    /// A bare `aws://` (no profile) loads and registers a signed route: the default credential
+    /// provider chain signs in-boundary, so nothing is placed in the workload environment.
+    #[test]
+    fn a_bare_aws_secret_ref_loads() {
+        let entries = load(
+            r#"
+            [egress.a]
+            destinations = ["bedrock-runtime.us-west-2.amazonaws.com"]
+            secret.ref = "aws://"
+            "#,
+        )
+        .expect("a bare aws:// secret.ref loads");
+        let routes = routes_for(&entries).expect("the bare aws route builds a binding");
+        assert_eq!(routes.len(), 1);
+        assert_eq!(
+            routes[0].provisioned_name(),
+            None,
+            "a signed route places nothing in the workload environment"
+        );
+        routes[0]
+            .to_route_spec()
+            .expect("a bare aws route maps to a signed route");
+    }
+
     /// A reserved or unset variable is refused when the binding is built, not when the
     /// file parses: the TOML is well-formed, but the box sets `PATH` itself and an unset
     /// variable would mint a phantom standing in for nothing.

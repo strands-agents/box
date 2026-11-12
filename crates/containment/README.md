@@ -339,9 +339,13 @@ The production facade selects on the platform and, on Linux, on the architecture
 | host | selection |
 |------|-----------|
 | macOS | Seatbelt, and the one checked-in profile above. |
-| Linux, ARM64 (`aarch64`) | The namespace launcher under `src/backend/linux/namespace/`. |
+| Linux, ARM64 (`aarch64`) or x86-64 (`x86_64`) | The namespace launcher under `src/backend/linux/namespace/`. |
 | Linux, any other architecture | `ContainmentError::PlatformUnsupported`, carrying the reason. |
 | Windows and other targets | `ContainmentError::PlatformUnsupported`. |
+
+This table describes the standalone containment library. The Box application separately
+requires `EXPERIMENTAL_X86_SUPPORT=TRUE` before executing a command on Linux x86-64.
+See the [Box interface](../box/README.md#the-interface) for the startup opt-in.
 
 Landlock was considered as the Linux mechanism and rejected: it restricts the calling process in
 place and expresses no right that denies all network, which is the default mode, so a contained

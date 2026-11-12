@@ -42,7 +42,7 @@ gateway. See [local MCP servers](./containment.md#local-mcp-servers).
 Strands Shell's `curl` and Monty's `fetch()` run in the box's trusted process, and both send their
 requests through the same gateway, trusting only its certificate authority. Before they do, each
 refuses a URL that isn't `http` or `https`, or that names `localhost` or a literal loopback,
-private, or link-local address.
+private, link-local, or `0.0.0.0/8` address, or one of two cloud metadata addresses outside `169.254.0.0/16`, or an IPv4-mapped, IPv4-compatible, IPv4-translated, 6to4, Teredo, or `64:ff9b::/96` NAT64 address that carries one of these, or any `64:ff9b:1::/48` address. A NAT64 address under a network's own prefix is not covered.
 
 ```mermaid
 flowchart LR
@@ -69,6 +69,10 @@ flowchart LR
 A client sends either `CONNECT host:port` for HTTPS, or a plain HTTP request with an absolute
 `http://` URL. See [plain HTTP takes the same governed
 path](decisions.md#plain-http-takes-the-same-governed-path-as-https). Both pass the same decisions.
+A plain request to port 80 of a host in `[gateway] upgrade_http` is decided as that host on port
+443, and the gateway speaks TLS to the server itself. The workload's own leg stays plain, so it
+carries no credential. See [a listed host's plain HTTP is upgraded to
+HTTPS](decisions.md#a-listed-host-is-upgraded-from-plain-http-to-https-in-the-gateway).
 
 ```mermaid
 flowchart TD
@@ -159,10 +163,12 @@ starts TLS. A policy refusal of a request to an HTTP MCP server gets a JSON-RPC 
 
 ### Cloud instance metadata
 
-Policy provides the only check on metadata endpoints. The gateway has no built-in block. A policy
+For gateway traffic, policy provides the only check on metadata endpoints. The gateway has no
+built-in block. Strands Shell `curl` and Monty `fetch()` also refuse a literal metadata address
+before the request leaves, but a name that resolves to one reaches policy. A policy
 needs two `forbid` rules on `net:connect`: one for the metadata hostnames `metadata.google.internal`
-and `metadata.azure.internal`, and one for the metadata addresses `169.254.*`, `fd00:ec2::254`, and
-the IPv6 link-local range.
+and `metadata.azure.internal`, and one for the metadata addresses `169.254.*`, `fd00:ec2::254`,
+Azure WireServer `168.63.129.16`, Alibaba Cloud `100.100.100.200`, and the IPv6 link-local range.
 
 ## How responses reach the workload
 
@@ -240,6 +246,7 @@ forward each request. The route specifies which credential to add and grants no 
 |---|---|---|
 | An environment variable | `env://NAME` | Reads `NAME` from the environment of `box run` once, at startup, and swaps it in for a placeholder |
 | An AWS profile | `aws://PROFILE` | Signs each request with SigV4, from the profile's static keys |
+| The AWS default chain | `aws://` (no profile) | Signs each request with SigV4, from the AWS SDK default credential provider chain (the host's ambient identity), and warns on every signed request |
 
 ### The placeholder swap
 
@@ -290,6 +297,12 @@ region from the host, for example `bedrock` and `us-west-2` from
 `bedrock-runtime.us-west-2.amazonaws.com`, and refuses a host it can't read them from. The process
 gets placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` values, so an AWS SDK builds its
 request, and the gateway replaces the signature.
+
+`aws://PROFILE` resolves the named profile's static keys; a bare `aws://` resolves the AWS SDK
+default credential provider chain, the host's ambient identity, which the box warns about on every
+request. The decision
+[An AWS binding resolves a named profile's static keys, and a bare aws:// resolves the full chain](decisions.md#a-bare-aws-resolves-the-default-credential-chain)
+states both forms and the writable-`~/.aws` cost.
 
 ## Example: a GitHub API request
 

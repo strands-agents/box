@@ -12,6 +12,14 @@ mechanism.
 > Platform scope. Unless a section explicitly states Linux behavior, this page describes operating
 > system enforcement and guarantees on macOS.
 
+Before reading configuration, the Box command and the Rust library functions `run`
+and `generate_policy_schema` require `EXPERIMENTAL_X86_SUPPORT=TRUE` in the
+operator environment on Linux x86-64.
+Without that exact value, Box refuses command execution before starting a workload
+or schema-discovery server. Help and version output remain available. ARM64 startup
+and the standalone containment library do not require this opt-in. Once enabled,
+x86-64 uses the Linux namespace launcher and its existing restrictions.
+
 ## Two kinds of enforcement
 
 Box restricts the agent in two ways, and they cover different paths to a resource:
@@ -331,7 +339,10 @@ it does not prevent them from being stored on that file.
 
 The syscall restriction filter rejects either bit in `fchmod`, `fchmodat`, and `fchmodat2`. It also
 rejects either bit in `mkdirat` and in the creation mode of `openat` when `O_CREAT` or `O_TMPFILE`
-is present. It checks the low 32 bits that the kernel uses. An `openat` call without creation flags
+is present. On x86-64, the same restrictions apply to `chmod` and `mkdir`. Their mode is the
+second argument; the `*at` calls take it in the third argument. The same creation checks apply to
+x86-64 `open`, whose flags and mode precede their `openat` positions by one argument. The filter
+checks the low 32 bits that the kernel uses. An `open` or `openat` call without creation flags
 ignores the mode argument, so that unused argument does not cause a refusal. The permit filter
 continues to exclude ownership-changing calls, `openat2`, and `mknodat`. Ordinary writes and
 permitted compiler output remain available. Executable-bit changes require a requested mode without

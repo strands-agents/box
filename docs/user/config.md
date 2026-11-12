@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries eleven keys. `name` and `box_dir` are required.
+The file carries twelve keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -83,8 +83,9 @@ The file carries eleven keys. `name` and `box_dir` are required.
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
 | `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, and ingress. Each is disabled by default. |
 | `[limits]` | table | Execution limits for Strands Shell. |
+| `[gateway]` | table | Settings for every request through the egress gateway: `upgrade_http`, the hosts whose plain `http://` on port 80 the gateway sends as `https://` on port 443. See [`[gateway]`](#gateway). |
 
-The example uses five of the eleven: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the twelve: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -182,6 +183,8 @@ group, the owner, and access control lists on files in its writable grants`. Lin
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `shell.timeout` | positive integer or `false` | `30` | Seconds allowed for one submitted Strands Shell call, including its commands and pipelines. `false` disables the Shell and broker execution deadlines. |
+| `shell.max_input` | nonnegative integer | `262144` | Bytes of command text submitted to Strands Shell. `0` disables this limit. |
+| `shell.max_output` | nonnegative integer | `65536` | Bytes in each Shell output buffer, including command substitution. Shell also applies this limit when loading script files with `source`. `0` disables this limit. |
 
 To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent nested table is
 `[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
@@ -189,14 +192,49 @@ Set `shell.timeout = false` to disable this limit, or omit the key for the 30-se
 Connection and write operations retain their transport timeouts.
 Configured-command [hard-link scans](#configured-command-integrity) retain their separate
 30-second budget per tree, including when `shell.timeout` is `false`.
-Zero, negative numbers, fractions, strings, `true`, and values too large for the platform's clock
+Timeout values of zero, negative numbers, fractions, strings, `true`, or values too large for the platform's clock
 are load errors.
 
-This setting applies to the calls forwarded by `zsh`, `bash`, and `sh`, including Python called
+Size limits accept a positive integer byte count or `0` to disable that limit. Negative numbers,
+booleans (including `false`), strings, fractions, and values the platform cannot represent are load
+errors. Omission preserves each default independently.
+For a larger source file, set `[limits.shell] max_output = 262144` to allow up to 256 KiB.
+This also enlarges Shell's output buffers. A larger `max_input` alone does not enlarge source-file reads.
+Stdout and stderr captures have separate buffers; `max_output` is not a combined output or
+total memory budget. Oversized command text is refused with `input too large`, but the current
+Shell implementation bypasses this check for submissions that contain a newline. An oversized
+capture can produce incomplete or empty output. An oversized source file fails before execution
+with `output size limit exceeded`.
+Raising or disabling a size limit allows Shell to hold more data in the box's trusted process;
+these settings do not bound the process's total memory use.
+
+Broker messages remain capped at 1 MiB, including encoding. Streamed stdout and stderr share
+an 8 MiB budget for the lifetime of one opened Shell program. These limits still apply when either
+Shell setting is increased or set to `0`.
+Positional script invocations such as `bash script.sh` retain the alias's separate 64 KiB script limit.
+
+The timeout setting applies to the calls forwarded by `zsh`, `bash`, and `sh`, including Python called
 inside the Shell. Python's [own limits](monty.md#limits-and-exit-statuses) also apply, including
 with `shell.timeout = false`. Synchronous Python execution can delay timeout reporting.
 See [Shell timeouts](shell.md#limitsshelltimeout) for the call scope and
 [stored configuration](native-filesystem-policy.md#stored-configuration-and-rollback) for rollback.
+
+## `[gateway]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `upgrade_http` | string array | empty | Host names whose plain `http://` request to port 80 the gateway decides and sends as `https://` on port 443. A host name alone: no scheme, port, path, `*` wildcard, or IP address. |
+
+```toml
+[gateway]
+upgrade_http = ["static.rust-lang.org"]
+```
+
+The list is for a tool that can't trust the box's CA, such as rustup on macOS. Policy decides an
+upgraded request on port 443, as it decides HTTPS to that host, and a credential is never added to
+it. A box that sets the list stores its record at version 32, and an older build refuses it.
+[Upgrade plain HTTP to HTTPS](egress.md#upgrade-plain-http-to-https) describes the behaviour and
+its limits.
 
 ## `[experimental-features]`
 
@@ -769,7 +807,7 @@ requests out. The current reference for this table is
 |---|---|---|
 | `destinations` | string array | A host, `host:port`, a path prefix or `/*` suffix, or a `*.` wildcard. A pattern that matches every host is refused, and two entries may not overlap. |
 | `protocol` | string | `http`, the default and the only accepted value. |
-| `secret.ref` | string | `env://NAME` for a variable on the operator's side, or `aws://PROFILE` for SigV4 signing. Required. A literal value is refused. |
+| `secret.ref` | string | `env://NAME` for a variable on the operator's side, `aws://PROFILE` for SigV4 signing with a named profile's static keys, or a bare `aws://` to sign with the AWS SDK default credential provider chain (the host's ambient identity). Required. A literal value, or any other scheme, is refused. |
 | `secret.placement` | string | `header` (default), `basic_auth`, or `query_param`. |
 | `secret.header` | string | The header the secret lands in. Defaults to `Authorization`. |
 | `secret.prefix` | string | Text before the secret in the header value. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |
@@ -786,7 +824,10 @@ protocol = "mcp" for a remote MCP server`. `protocol` on this table takes `http`
 remote MCP server as `[mcp.<name>]` with `type = "http"`, which the next section describes.
 
 An `aws://` route signs inside the box, so it takes no `header`, `prefix`, `placement`, `param`,
-`inject`, or `phantom_prefix`. Setting one is refused when the configuration loads.
+`inject`, or `phantom_prefix`. Setting one is refused when the configuration loads. A bare `aws://`
+(no profile) signs with the host's ambient identity and prints a warning on every signed request;
+[Credential sources](egress.md#credential-sources) describes the default chain, the profiles it does
+not resolve (AWS SSO), the warning, and the writable-`~/.aws` rule.
 
 An entry re-routes to a backend with one `[[egress.<name>.backends]]` table, holding a `url`
 (`scheme://host[:port][/prefix]`, `https` or `http`) and an optional `auth` — the backend's own
@@ -956,7 +997,7 @@ each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal, an `ingress` outside `
 five `[[agent.ingress]]` entries, an `[[agent.ingress]] listen` that is not an IP address and port, a
 port of 0, two entries with one `listen` port or one `workload_port`, and on macOS a `listen` port
 equal to any entry's `workload_port`.
-An invalid `limits.shell.timeout` is also a parse error.
+An invalid `limits.shell.timeout`, `limits.shell.max_input`, or `limits.shell.max_output` is also a parse error.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload

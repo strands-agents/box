@@ -34,7 +34,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// The largest frame either end will read or write.
 pub(crate) const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
-/// The most captured output the daemon's Shell returns per stream.
+/// The most captured output the daemon's Python interpreter returns per stream.
 pub(crate) const MAX_CAPTURE_STREAM_BYTES: usize = MAX_FRAME_BYTES / 16;
 
 /// The status reported when the boundary itself failed, as distinct from a policy refusal (126)
