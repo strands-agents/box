@@ -1,5 +1,6 @@
 # A tool grammar for cargo whose `[+<toolchain>]` word carries effects: rustup installs a missing
-# toolchain before cargo starts.
+# toolchain that the word names before cargo starts. A toolchain file can do the same with no `+`
+# word, and a grammar does not see it, so `install_toolchain` means "the line names a toolchain".
 
 name    = "cargo_toolchain"
 program = "cargo"
@@ -8,7 +9,7 @@ version = 1
 
 [effects]
 network           = "Cargo itself can contact a registry"
-install_toolchain = "The rustup proxy can download and install the toolchain that the line names"
+install_toolchain = "The line names a toolchain with `+`, which the rustup proxy installs when it is missing"
 unstable          = "Runs a nightly toolchain"
 
 [global]
