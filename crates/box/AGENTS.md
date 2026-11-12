@@ -307,7 +307,10 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   `[agent]` entries reached the translator with no credential check at all. The one punch-through is
   a store the operator names exactly, which `validate_grant` reports and
   `record::config::filesystem::a_credential_store_is_granted_only_when_named_exactly` pins. A prefix
-  of a store, or a parent of one, stays refused.
+  of a store, or a parent of one, stays refused. `Reach` reads the same rows through
+  `containment::credential_store_anchors`, so the interpreters refuse each store beneath policy,
+  except a path that an `[agent]` `read` or `write` entry names, where policy still decides; see
+  [the interpreters meet the sandbox's credential floor](../../docs/design/decisions.md#no-credential-floor-sits-beneath-the-interpreters).
 - **The authored policy is the only authorizer, at all three enforcement points.** Box builds
   three adapters over the one `Arc<PolicyEngine>`: `EgressPolicyInterceptor` for the proxy (`net:*`),
   `ShellPolicyInterceptor` for the hosted Shell (`shell:exec`, `shell:spawn`, `fs:*`), and
@@ -349,7 +352,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     box**. Read-only does not fix the first cost, because the tokens are the file. Prefer a copy
     inside the project, which the shipped examples do.
   - **`Reach`'s deny floor refuses every path resolving into `~/.strands-box`, the machine state, or
-    THIS box's own directory**, whatever a `permit` says. It is checked on the canonical identity,
+    THIS box's own directory**, whatever a `permit` says. It also refuses every credential store
+    the sandbox refuses, unless an `[agent]` `read` or `write` entry names that store, and a change to
+    a directory that holds one; `reach.rs`'s `credential_store_tests` pin it. It is checked on the canonical identity,
     because a spelling check is laundered by a symlink the workload can plant. **There is no
     exception, and a home does not earn one.** `layout::refuse_home_in_box_state` refuses a declared
     `env.HOME` that resolves into a reserved host root, into the box directory, or through a
@@ -972,6 +977,27 @@ through this path. Security finding disposition remains separate from this behav
   true for a command with one name too, so it does not depend on hard links. Only the operator can
   create such a mount. Closing it needs the mount analysis of `hard_link_alias_may_be_writable`
   for every write grant against every configured command.
+
+- **The interpreters' credential-store floor matches a store two ways, and each closes a measured
+  escape.** APFS treats `ſ` (U+017F) as `s`, and `to_lowercase` does not, so with `~/.aws` absent a
+  workload ran `mkdir ~/.awſ` and wrote `credential_process` into what the AWS CLI then read as
+  `~/.aws/config`. `folded` maps each letter that Unicode case folding sends to ASCII, which refuses
+  the creation, and `is_in_a_credential_store` reads each store's on-disk identity at decision time,
+  which refuses the write once any spelling exists and covers a store linked after startup. Remove
+  both and `box_credential_store_floor.rs::an_absent_store_cannot_be_created_under_a_spelling_that_folds_to_its_name`
+  fails; remove one and only its unit test fails. The table is not a full Unicode fold. A spelling it
+  misses could still create an absent store, by `mkdir` (then no write lands in it) or by renaming a
+  prepared directory onto that name (then its contents become the store), and only the table stops
+  the rename. Measured 2026-11-11 on case-insensitive APFS by a `stat` of every code point from U+0080
+  to U+10FFFF: only U+00DF, U+017F, U+1E9E, U+212A, and U+FB00 to U+FB06 compare equal to ASCII, and
+  the table maps all eleven. Linux case-folding directories were not measured.
+  `a_prepared_directory_cannot_be_renamed_onto_an_absent_store` pins the rename.
+  **The decision-time lookups cost one `stat` per store spelling on every request**, measured at
+  about 70 microseconds a read in a debug build. A change to a directory also resolves each store
+  spelling to test enclosure; a change to anything else skips that.
+  **A `write` entry on a store exposes reads.** Seatbelt lets the agent's own `/bin/mv` move a file
+  out of a write-granted store into any directory the agent can write, and the interpreters then read
+  it there under a broad permit. `refuse_store_relocation` closes only the interpreter route.
 
 Do not treat any of these as settled by the code existing.
 

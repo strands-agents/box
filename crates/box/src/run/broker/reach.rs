@@ -30,6 +30,7 @@ use std::path::{Component, Path, PathBuf};
 use policy::{PathRefusal, PathResolver};
 
 use crate::record::config::AuthoritySource;
+use crate::record::config::process::Grant;
 use crate::record::layout::{disk_identity, has_ancestor_among, lies_within};
 use crate::run::broker::invalid_input;
 use crate::run::commands::CommandMutationRefusal;
@@ -54,6 +55,18 @@ pub(super) struct Reach {
 
     /// The exact authority-source identities that this run loaded.
     forbidden_exactly: Vec<AuthoritySource>,
+
+    /// Every spelling of each credential store under the operator home and the agent's home.
+    credential_store_paths: Vec<PathBuf>,
+
+    /// The same spellings, folded the way a case-insensitive volume compares names.
+    credential_stores: Vec<PathBuf>,
+
+    /// The credential store paths that the agent's own `read` and `write` lists name.
+    credential_store_grants: Vec<CredentialStoreGrant>,
+
+    /// The agent's `deny` entries inside a credential store, case-folded.
+    credential_store_denials: Vec<PathBuf>,
 
     commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
     installation: Option<std::sync::Arc<crate::run::installation::TrustedInstallation>>,
@@ -152,6 +165,14 @@ impl Reach {
                 roots.push(canonical);
             }
         }
+        let mut credential_stores: Vec<PathBuf> = Vec::new();
+        for home in shared.iter().chain(std::iter::once(&canonical_home)) {
+            for store in containment::credential_store_anchors(home) {
+                if !credential_stores.contains(&store) {
+                    credential_stores.push(store);
+                }
+            }
+        }
         let mut resolver = PathResolver::over(roots).map_err(|refusal| {
             invalid_input(format!("the reachable set is unusable: {refusal}"))
         })?;
@@ -199,6 +220,13 @@ impl Reach {
                 .collect(),
             forbidden,
             forbidden_exactly: protected_sources.to_vec(),
+            credential_stores: credential_stores
+                .iter()
+                .map(|store| folded(store))
+                .collect(),
+            credential_store_paths: credential_stores,
+            credential_store_grants: Vec::new(),
+            credential_store_denials: Vec::new(),
             commands: std::sync::Arc::default(),
             installation: None,
             shared: shared
@@ -221,6 +249,56 @@ impl Reach {
         installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,
     ) -> Self {
         self.installation = Some(installation);
+        self
+    }
+
+    /// Exempt the credential stores that the agent's `read` and `write` entries name, from every
+    /// entry of the agent's filesystem lists.
+    pub(super) fn with_credential_store_grants(
+        mut self,
+        entries: impl IntoIterator<Item = (Grant, String)>,
+    ) -> Self {
+        for (kind, spelling) in entries {
+            let named = match spelling.strip_prefix("~/") {
+                Some(relative) => match &self.shared {
+                    Some(home) => Path::new(home).join(relative),
+                    None => continue,
+                },
+                None => PathBuf::from(&spelling),
+            };
+            if kind == Grant::Deny {
+                // A `deny` entry may name a path that does not exist yet, so resolve its parent.
+                let resolved = named.canonicalize().ok().or_else(|| {
+                    let parent = named.parent()?.canonicalize().ok()?;
+                    Some(parent.join(named.file_name()?))
+                });
+                let denied = folded(resolved.as_deref().unwrap_or(&named));
+                if self.is_in_a_credential_store(&denied) {
+                    self.credential_store_denials.push(denied);
+                }
+                continue;
+            }
+            let (mutates, subtree) = match kind {
+                Grant::Read => (false, true),
+                Grant::ReadFile => (false, false),
+                Grant::Write => (true, true),
+                Grant::WriteFile => (true, false),
+                Grant::List | Grant::Metadata | Grant::Exec | Grant::Deny => continue,
+            };
+            // An entry that does not resolve exempts nothing, so the floor stays closed.
+            let Ok(path) = named.canonicalize() else {
+                continue;
+            };
+            // Configuration admits an entry that names a store or a path inside it, never one above it.
+            if !self.is_in_a_credential_store(&path) {
+                continue;
+            }
+            self.credential_store_grants.push(CredentialStoreGrant {
+                path: folded(&path),
+                mutates,
+                subtree,
+            });
+        }
         self
     }
 
@@ -328,6 +406,11 @@ impl Reach {
             .approve_host(&identity)
             .map(|approved| approved.as_path().to_path_buf())
             .map_err(|refusal| {
+                // A store answers the same whether or not the named path inside it exists.
+                if let Err(refused) = self.refuse_credential_store(&identity, reported_as, mutates)
+                {
+                    return refused;
+                }
                 let mut refused = Refused::new(reported_as, reason(&refusal));
                 refused.unresolved = matches!(refusal, PathRefusal::Unresolvable { .. })
                     && self.is_an_unresolved_answer(&identity);
@@ -390,7 +473,102 @@ impl Reach {
         {
             return Err(Refused::new(reported_as, ENCLOSES_BOX_STATE));
         }
+
+        self.refuse_credential_store(approved, reported_as, mutates)
+    }
+
+    /// Refuse a path in a credential store that no `[agent.filesystem]` entry lifts the floor for,
+    /// and a change to a directory that holds a store.
+    fn refuse_credential_store(
+        &self,
+        approved: &Path,
+        reported_as: &str,
+        mutates: bool,
+    ) -> Result<(), Refused> {
+        let in_store = self.is_in_a_credential_store(approved);
+        if in_store && self.store_grant(approved, mutates).is_none() {
+            return Err(Refused::new(reported_as, CREDENTIAL_STORE));
+        }
+        if mutates && !in_store {
+            let spelled = folded(approved);
+            // A store that exists now is found where it resolves, whatever spelling made it. Only a
+            // directory can hold one, so a change to anything else skips those lookups.
+            let encloses = self
+                .credential_stores
+                .iter()
+                .any(|store| store.starts_with(&spelled))
+                || std::fs::symlink_metadata(approved).is_ok_and(|metadata| metadata.is_dir())
+                    && self.credential_store_paths.iter().any(|store| {
+                        store.canonicalize().is_ok_and(|resolved| {
+                            resolved != approved && resolved.starts_with(approved)
+                        })
+                    });
+            if encloses {
+                return Err(Refused::new(reported_as, ENCLOSES_CREDENTIAL_STORE));
+            }
+        }
         Ok(())
+    }
+
+    /// Refuse a rename that carries credential-store content out of the `write` entry that opened it.
+    ///
+    /// `destination` is `None` when the Shell names a path the host does not back.
+    pub(super) fn refuse_store_relocation(
+        &self,
+        source: &Path,
+        destination: Option<&Path>,
+        reported_as: &str,
+    ) -> Result<(), Refused> {
+        if !self.is_in_a_credential_store(source) {
+            return Ok(());
+        }
+        let same_grant = match (self.store_grant(source, true), destination) {
+            (Some(grant), Some(destination)) => self
+                .store_grant(destination, true)
+                .is_some_and(|other| std::ptr::eq(grant, other)),
+            _ => false,
+        };
+        if same_grant {
+            Ok(())
+        } else {
+            Err(Refused::new(reported_as, CREDENTIAL_STORE_RELOCATION))
+        }
+    }
+
+    /// The entry that opens `approved` for this kind of operation, unless a `deny` entry covers it.
+    fn store_grant(&self, approved: &Path, mutates: bool) -> Option<&CredentialStoreGrant> {
+        let spelled = folded(approved);
+        if self
+            .credential_store_denials
+            .iter()
+            .any(|denied| spelled.starts_with(denied))
+        {
+            return None;
+        }
+        self.credential_store_grants.iter().find(|grant| {
+            grant.mutates == mutates
+                && (grant.path == spelled || (grant.subtree && spelled.starts_with(&grant.path)))
+        })
+    }
+
+    /// Whether `approved` is a credential store or lies inside one, by folded spelling or by the
+    /// on-disk identity each store has now.
+    fn is_in_a_credential_store(&self, approved: &Path) -> bool {
+        let spelled = folded(approved);
+        if self
+            .credential_stores
+            .iter()
+            .any(|store| spelled.starts_with(store))
+        {
+            return true;
+        }
+        // Read at decision time, so a store made later, or under another spelling, still counts.
+        let identities: Vec<(u64, u64)> = self
+            .credential_store_paths
+            .iter()
+            .filter_map(|store| disk_identity(store))
+            .collect();
+        has_ancestor_among(approved, &identities)
     }
 
     /// Whether a path the resolver could not resolve crosses no symbolic link and lies beneath no deny floor.
@@ -428,6 +606,50 @@ impl Reach {
 
 /// The one refusal every path outside the set gets, spelled once.
 const OUTSIDE_THE_SET: &str = "outside this box's home and every declared bind";
+
+const CREDENTIAL_STORE: &str = "resolves into a credential store, which no policy may open \
+     unless an `[agent.filesystem]` `read` or `write` entry names that store";
+
+const ENCLOSES_CREDENTIAL_STORE: &str =
+    "contains a credential store, so no policy may change this directory";
+
+const CREDENTIAL_STORE_RELOCATION: &str = "would move credential-store content outside the \
+     `[agent.filesystem]` `write` entry that names it";
+
+/// `path` case-folded, with each letter that Unicode case folding maps to ASCII replaced by that
+/// ASCII, so a store matches every spelling a case-insensitive volume treats as the same name.
+fn folded(path: &Path) -> PathBuf {
+    let mut text = String::new();
+    for character in path.to_string_lossy().chars() {
+        match character {
+            '\u{17F}' => text.push('s'),
+            '\u{212A}' => text.push('k'),
+            '\u{130}' => text.push('i'),
+            '\u{DF}' | '\u{1E9E}' => text.push_str("ss"),
+            '\u{FB00}' => text.push_str("ff"),
+            '\u{FB01}' => text.push_str("fi"),
+            '\u{FB02}' => text.push_str("fl"),
+            '\u{FB03}' => text.push_str("ffi"),
+            '\u{FB04}' => text.push_str("ffl"),
+            '\u{FB05}' | '\u{FB06}' => text.push_str("st"),
+            other => text.extend(other.to_lowercase()),
+        }
+    }
+    PathBuf::from(text)
+}
+
+/// A credential store path that the agent's own filesystem lists name.
+#[derive(Debug)]
+struct CredentialStoreGrant {
+    /// The canonical path the entry names.
+    path: PathBuf,
+
+    /// Whether the entry is a `write` entry rather than a `read` entry.
+    mutates: bool,
+
+    /// Whether the entry covers the paths beneath it.
+    subtree: bool,
+}
 
 /// The one refusal a path beneath the deny floor gets.
 const BENEATH_THE_FLOOR: &str = "resolves into trusted Box state, which no policy may open";
@@ -1340,5 +1562,404 @@ mod linked_command_mutation_tests {
             ),
         );
         mutation_refused_for(&reach, &home.join("tools"), "tools", CONFIGURED_COMMAND);
+    }
+}
+
+#[cfg(test)]
+mod credential_store_tests {
+    use super::*;
+
+    /// An operator home holding two credential stores and an ordinary file, with a box beside them.
+    struct Fixture {
+        _operator: tempfile::TempDir,
+        home: PathBuf,
+        box_root: PathBuf,
+    }
+
+    fn fixture() -> Fixture {
+        let operator = tempfile::tempdir().expect("an operator home");
+        let home = operator.path().canonicalize().expect("the home resolves");
+        let box_root = home.join("boxes/codex");
+        std::fs::create_dir_all(&box_root).expect("a box directory");
+        for store in [".ssh", ".aws", ".config"] {
+            std::fs::create_dir_all(home.join(store)).expect("a store");
+        }
+        std::fs::write(home.join(".ssh/id_rsa"), "key").expect("a key");
+        std::fs::write(home.join(".aws/config"), "[default]\n").expect("a config");
+        std::fs::write(home.join(".aws/credentials"), "secret").expect("a credential");
+        std::fs::write(home.join("notes.txt"), "notes").expect("an ordinary file");
+        Fixture {
+            _operator: operator,
+            home,
+            box_root,
+        }
+    }
+
+    impl Fixture {
+        fn reach(&self, grants: &[(Grant, &str)]) -> Reach {
+            crate::test_support::with_operator_home(&self.home, || {
+                Reach::over_box(&self.home, Some(&self.home), None, &self.box_root, &[])
+                    .expect("the reachable set is declarable")
+                    .with_credential_store_grants(
+                        grants
+                            .iter()
+                            .map(|(kind, spelling)| (*kind, (*spelling).to_string())),
+                    )
+            })
+        }
+
+        fn read(&self, reach: &Reach, relative: &str) -> Result<PathBuf, String> {
+            let target = self.home.join(relative);
+            crate::test_support::with_operator_home(&self.home, || reach.approve(&target, relative))
+                .map_err(|refused| refused.to_string())
+        }
+
+        fn change(&self, reach: &Reach, relative: &str) -> Result<PathBuf, String> {
+            let target = self.home.join(relative);
+            crate::test_support::with_operator_home(&self.home, || {
+                reach.approve_mutation(&target, relative)
+            })
+            .map_err(|refused| refused.to_string())
+        }
+    }
+
+    fn refused_as(outcome: Result<PathBuf, String>, reason: &str, what: &str) {
+        let refusal = outcome.expect_err(what);
+        assert!(refusal.contains(reason), "{what}: {refusal}");
+    }
+
+    #[test]
+    fn a_credential_store_is_refused_when_the_reachable_set_holds_the_home() {
+        let fixture = fixture();
+        let reach = fixture.reach(&[]);
+        refused_as(
+            fixture.read(&reach, ".ssh/id_rsa"),
+            CREDENTIAL_STORE,
+            "a key read",
+        );
+        refused_as(
+            fixture.read(&reach, ".ssh"),
+            CREDENTIAL_STORE,
+            "the store itself",
+        );
+        refused_as(
+            fixture.change(&reach, ".aws/config"),
+            CREDENTIAL_STORE,
+            "a config write",
+        );
+        refused_as(
+            fixture.read(&reach, ".netrc"),
+            CREDENTIAL_STORE,
+            "an absent store",
+        );
+        fixture
+            .read(&reach, "notes.txt")
+            .expect("an ordinary file reads");
+        fixture
+            .change(&reach, "notes.txt")
+            .expect("an ordinary file changes");
+        fixture.read(&reach, "").expect("the home itself lists");
+    }
+
+    #[test]
+    fn a_store_named_by_a_read_entry_reads_and_nothing_else_opens() {
+        let fixture = fixture();
+        let reach = fixture.reach(&[(Grant::Read, "~/.aws")]);
+        fixture
+            .read(&reach, ".aws/config")
+            .expect("the named store reads");
+        fixture
+            .read(&reach, ".aws/credentials")
+            .expect("the named store reads");
+        refused_as(
+            fixture.change(&reach, ".aws/config"),
+            CREDENTIAL_STORE,
+            "a read entry writes",
+        );
+        refused_as(
+            fixture.read(&reach, ".ssh/id_rsa"),
+            CREDENTIAL_STORE,
+            "another store reads",
+        );
+    }
+
+    #[test]
+    fn a_store_named_by_a_write_entry_changes_and_does_not_read() {
+        let fixture = fixture();
+        let reach = fixture.reach(&[(Grant::Write, "~/.aws")]);
+        fixture
+            .change(&reach, ".aws/config")
+            .expect("the named store changes");
+        refused_as(
+            fixture.read(&reach, ".aws/config"),
+            CREDENTIAL_STORE,
+            "write implies read",
+        );
+    }
+
+    #[test]
+    fn a_file_entry_exempts_that_file_alone() {
+        let fixture = fixture();
+        let absolute = fixture.home.join(".aws/config");
+        let reach = fixture.reach(&[(Grant::ReadFile, absolute.to_str().expect("UTF-8"))]);
+        fixture
+            .read(&reach, ".aws/config")
+            .expect("the named file reads");
+        refused_as(
+            fixture.read(&reach, ".aws/credentials"),
+            CREDENTIAL_STORE,
+            "a sibling",
+        );
+        refused_as(
+            fixture.read(&reach, ".aws"),
+            CREDENTIAL_STORE,
+            "the store directory",
+        );
+    }
+
+    #[test]
+    fn a_list_or_metadata_entry_exempts_no_interpreter_read() {
+        let fixture = fixture();
+        let reach = fixture.reach(&[(Grant::List, "~/.aws"), (Grant::Metadata, "~/.ssh")]);
+        refused_as(
+            fixture.read(&reach, ".aws/config"),
+            CREDENTIAL_STORE,
+            "a list entry",
+        );
+        refused_as(
+            fixture.read(&reach, ".ssh/id_rsa"),
+            CREDENTIAL_STORE,
+            "a metadata entry",
+        );
+    }
+
+    #[test]
+    fn a_linked_store_is_refused_at_the_directory_it_names() {
+        let fixture = fixture();
+        let target = fixture.home.join("dotfiles/kube");
+        std::fs::create_dir_all(&target).expect("a link target");
+        std::fs::write(target.join("config"), "token").expect("a kube config");
+        std::os::unix::fs::symlink(&target, fixture.home.join(".kube")).expect("a linked store");
+        let reach = fixture.reach(&[]);
+        refused_as(
+            fixture.read(&reach, "dotfiles/kube/config"),
+            CREDENTIAL_STORE,
+            "the store's target",
+        );
+        refused_as(
+            fixture.change(&reach, "dotfiles"),
+            ENCLOSES_CREDENTIAL_STORE,
+            "its parent",
+        );
+        fixture
+            .read(&reach, ".kube/config")
+            .expect_err("the link spelling is refused too");
+    }
+
+    #[test]
+    fn a_link_planted_into_a_store_reaches_nothing() {
+        let fixture = fixture();
+        std::os::unix::fs::symlink(fixture.home.join(".ssh/id_rsa"), fixture.home.join("key"))
+            .expect("a planted link");
+        let reach = fixture.reach(&[]);
+        fixture
+            .read(&reach, "key")
+            .expect_err("a link into a store is refused");
+    }
+
+    #[test]
+    fn a_directory_that_holds_a_store_cannot_be_changed() {
+        let fixture = fixture();
+        let reach = fixture.reach(&[(Grant::Write, "~/.aws")]);
+        refused_as(
+            fixture.change(&reach, ".config"),
+            ENCLOSES_CREDENTIAL_STORE,
+            "~/.config",
+        );
+        fixture
+            .read(&reach, ".config")
+            .expect("the directory still lists");
+        fixture
+            .change(&reach, ".config/settings.json")
+            .expect("a file beside the store changes");
+        fixture
+            .change(&reach, ".aws")
+            .expect("a store named by a write entry changes itself");
+    }
+
+    #[test]
+    fn a_store_is_refused_in_every_letter_case_whether_or_not_it_exists() {
+        let fixture = fixture();
+        let reach = fixture.reach(&[]);
+        refused_as(
+            fixture.change(&reach, ".KUBE"),
+            CREDENTIAL_STORE,
+            "an absent store, upper case",
+        );
+        refused_as(
+            fixture.change(&reach, ".KUBE/config"),
+            CREDENTIAL_STORE,
+            "a file in an absent store, upper case",
+        );
+        refused_as(
+            fixture.change(&reach, ".Aws/config"),
+            CREDENTIAL_STORE,
+            "mixed case",
+        );
+        refused_as(
+            fixture.read(&reach, ".SSH/id_rsa"),
+            CREDENTIAL_STORE,
+            "a read in upper case",
+        );
+    }
+
+    #[test]
+    fn a_store_is_refused_under_each_unicode_spelling_that_folds_to_its_name() {
+        let fixture = fixture();
+        std::fs::remove_dir_all(fixture.home.join(".aws")).expect("an absent store");
+        let reach = fixture.reach(&[]);
+        for spelling in [
+            ".aw\u{17F}",
+            ".aw\u{17F}/config",
+            ".\u{DF}h/authorized_keys",
+            ".\u{212A}ube/config",
+            "Library/Application Support/\u{FB01}refox/profiles.ini",
+        ] {
+            refused_as(fixture.change(&reach, spelling), CREDENTIAL_STORE, spelling);
+        }
+    }
+
+    #[test]
+    fn a_store_linked_after_startup_is_refused_where_it_resolves() {
+        let fixture = fixture();
+        let reach = fixture.reach(&[]);
+        let target = fixture.home.join("dotfiles/kube");
+        std::fs::create_dir_all(&target).expect("a link target");
+        std::fs::write(target.join("config"), "token").expect("a kube config");
+        std::os::unix::fs::symlink(&target, fixture.home.join(".kube")).expect("a late link");
+        refused_as(
+            fixture.read(&reach, "dotfiles/kube/config"),
+            CREDENTIAL_STORE,
+            "the late store's target",
+        );
+        refused_as(
+            fixture.change(&reach, "dotfiles"),
+            ENCLOSES_CREDENTIAL_STORE,
+            "the directory that now holds it",
+        );
+    }
+
+    #[test]
+    fn a_missing_path_in_a_store_answers_like_a_present_one() {
+        let fixture = fixture();
+        let reach = fixture.reach(&[]);
+        refused_as(
+            fixture.read(&reach, ".gnupg/x"),
+            CREDENTIAL_STORE,
+            "an absent store",
+        );
+        refused_as(
+            fixture.read(&reach, ".aws/missing"),
+            CREDENTIAL_STORE,
+            "a missing file",
+        );
+    }
+
+    #[test]
+    fn a_deny_entry_inside_a_named_store_stays_refused() {
+        let fixture = fixture();
+        let reach = fixture.reach(&[(Grant::Read, "~/.aws"), (Grant::Deny, "~/.aws/credentials")]);
+        fixture
+            .read(&reach, ".aws/config")
+            .expect("the rest of the store reads");
+        refused_as(
+            fixture.read(&reach, ".aws/credentials"),
+            CREDENTIAL_STORE,
+            "the denied file",
+        );
+        refused_as(
+            fixture.read(&reach, ".AWS/credentials"),
+            CREDENTIAL_STORE,
+            "the denied file, upper case",
+        );
+    }
+
+    #[test]
+    fn a_write_entry_cannot_move_its_contents_out() {
+        let fixture = fixture();
+        let cache = fixture.home.join(".aws/sso/cache");
+        std::fs::create_dir_all(&cache).expect("a cache");
+        std::fs::write(cache.join("token.json"), "token").expect("a token");
+        let reach = fixture.reach(&[(Grant::Write, "~/.aws/sso/cache")]);
+        let source = fixture
+            .change(&reach, ".aws/sso/cache/token.json")
+            .expect("the source");
+        let outside = fixture
+            .change(&reach, "stolen.json")
+            .expect("the destination");
+        let inside = fixture
+            .change(&reach, ".aws/sso/cache/renamed.json")
+            .expect("inside");
+        reach
+            .refuse_store_relocation(&source, Some(&outside), "stolen.json")
+            .expect_err("a file leaves the store");
+        reach
+            .refuse_store_relocation(&source, None, "/tmp/stolen.json")
+            .expect_err("a file leaves for a path the host does not back");
+        let directory = fixture
+            .change(&reach, ".aws/sso/cache")
+            .expect("the directory");
+        let copy = fixture.change(&reach, "cache-copy").expect("a destination");
+        reach
+            .refuse_store_relocation(&directory, Some(&copy), "cache-copy")
+            .expect_err("the whole directory leaves the store");
+        reach
+            .refuse_store_relocation(&source, Some(&inside), "renamed.json")
+            .expect("a rename inside the entry stays allowed");
+        let notes = fixture
+            .change(&reach, "notes.txt")
+            .expect("an ordinary file");
+        reach
+            .refuse_store_relocation(&notes, Some(&outside), "stolen.json")
+            .expect("an ordinary rename is not judged");
+    }
+
+    #[test]
+    fn an_entry_outside_every_store_exempts_nothing() {
+        let fixture = fixture();
+        let reach = fixture.reach(&[(Grant::Read, "~/.config"), (Grant::Read, "~")]);
+        assert!(
+            reach.credential_store_grants.is_empty(),
+            "{:?}",
+            reach.credential_store_grants
+        );
+    }
+
+    #[test]
+    fn a_declared_home_carries_its_own_stores() {
+        let fixture = fixture();
+        let agent_home = fixture.home.join("agent-home");
+        std::fs::create_dir_all(agent_home.join(".ssh")).expect("a store in the declared home");
+        std::fs::write(agent_home.join(".ssh/id_rsa"), "key").expect("a key");
+        let reach = crate::test_support::with_operator_home(&fixture.home, || {
+            Reach::over_box(
+                &agent_home,
+                Some(&fixture.home),
+                None,
+                &fixture.box_root,
+                &[],
+            )
+            .expect("the reachable set is declarable")
+        });
+        refused_as(
+            fixture.read(&reach, "agent-home/.ssh/id_rsa"),
+            CREDENTIAL_STORE,
+            "a key under the declared home",
+        );
+        let granted =
+            reach.with_credential_store_grants([(Grant::Read, "~/agent-home/.ssh".to_string())]);
+        fixture
+            .read(&granted, "agent-home/.ssh/id_rsa")
+            .expect("a store under the declared home reads when an entry names it");
     }
 }

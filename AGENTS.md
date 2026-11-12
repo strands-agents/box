@@ -69,8 +69,10 @@ The box directory is not a home; no verb copies configuration into a private hom
 Neither `HOME` nor `workspace` grants filesystem reach. `workspace` sets the initial working
 directory, which remains unreadable until a filesystem list names it.
 
-The agent's filesystem lists govern its sandbox alone. Each tool gets its reach from its own
-`[tool.<name>]` table. An absent filesystem section grants no direct reach. These grants bypass
+The agent's filesystem lists govern its sandbox, with one exception: a `read` or `write` entry that
+names a credential store, or a path inside one, also lifts the interpreters' credential floor for that
+path, and policy still decides each Strands Shell and Monty access. Each tool gets its reach from its
+own `[tool.<name>]` table. An absent filesystem section grants no direct reach. These grants bypass
 `fs:*` decisions, so disclose each grant on stderr at startup. `write` does not imply `read`;
 on Linux, a writable bind also reads, and its disclosure must state that limit.
 Keep the box's own state unreachable from both the agent and its tools.

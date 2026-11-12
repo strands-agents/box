@@ -699,11 +699,13 @@ paths. Before changing a directory, it also scans for hard-link names of command
 the startup scan. Reads remain subject to policy. These checks are separate from the agent's own
 grants.
 
-No additional check protects credential paths from the interpreters. A broad `fs:read` permit lets
-Strands Shell read `~/.aws`, even though no grant could give the agent that path. See [credential
-paths have no additional protection from the
-interpreters](decisions.md#no-credential-floor-sits-beneath-the-interpreters). Keep filesystem
-permits to the paths the task needs.
+The interpreters refuse the same credential stores that this floor refuses. A broad `fs:read`
+permit does not let Strands Shell read `~/.aws`. An `[agent.filesystem]` entry that names the store
+grants it to the agent's own system calls, and also lifts the interpreters' refusal for it, where
+policy still decides each access. See [the interpreters
+meet the sandbox's credential
+floor](decisions.md#no-credential-floor-sits-beneath-the-interpreters). Keep filesystem permits to
+the paths the task needs, because the rest of the operator's home has no such floor.
 
 <a id="remote-mcp-servers"></a>
 ### Remote MCP servers

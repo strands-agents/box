@@ -182,7 +182,12 @@ impl BrokerHost {
             )
             .map_err(|source| ShellError::Serve { source })?
             .with_commands(commands)
-            .with_installation(installation),
+            .with_installation(installation)
+            .with_credential_store_grants(record.agent.iter().flat_map(|spec| {
+                spec.filesystem
+                    .entries()
+                    .map(|(kind, entry)| (kind, entry.display().to_string()))
+            })),
         );
         // The declared MCP servers, from the same record.
         let declared_mcp = Arc::new(record.mcp.clone());

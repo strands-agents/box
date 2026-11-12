@@ -328,9 +328,7 @@ impl ReachFloor {
                 to,
                 operation,
             } => match operation {
-                box_shell::FsPairOperation::Rename { .. } => self
-                    .approve_one(from, true)
-                    .and_then(|()| self.approve_one(to, true)),
+                box_shell::FsPairOperation::Rename { .. } => self.approve_rename(from, to),
                 box_shell::FsPairOperation::Symlink => self
                     .approve_one(from, false)
                     .and_then(|()| self.approve_one(to, true)),
@@ -341,6 +339,26 @@ impl ReachFloor {
             // An attempt this box does not map never reaches here: the policy adapter
             // beneath refuses it with `PermissionDenied` before the floor is asked.
             _ => Ok(()),
+        }
+    }
+
+    /// Approve both ends of a rename, and refuse one that carries credential-store content out.
+    fn approve_rename(&self, from: &str, to: &str) -> Result<(), Refused> {
+        let approve = |named: &str| {
+            let path = Path::new(named);
+            if self.reach.names_a_host_path(path) {
+                self.reach.approve_mutation(path, named).map(Some)
+            } else {
+                Ok(None)
+            }
+        };
+        let source = approve(from)?;
+        let destination = approve(to)?;
+        match source {
+            Some(source) => self
+                .reach
+                .refuse_store_relocation(&source, destination.as_deref(), to),
+            None => Ok(()),
         }
     }
 
