@@ -41,6 +41,7 @@ use crate::run::broker::protocol::{
 };
 use crate::run::broker::reach::Reach;
 use crate::run::broker::shell::{EgressRouting, ShellSpec};
+use crate::run::credential::ProvisionedVariable;
 
 /// How many client connections may be in flight at once.
 const SERVE_CONNECTION_CAPACITY: usize = 64;
@@ -155,6 +156,7 @@ impl BrokerHost {
         policy: Arc<PolicyEngine>,
         registry: Arc<DiscoveryRegistry>,
         egress: Option<EgressRouting>,
+        phantoms: &[ProvisionedVariable],
         recorder: Arc<crate::run::telemetry::DecisionRecorder>,
         host_spawner: Option<crate::run::hosted::ToolSpawner>,
         mcp_leaf_launcher: Option<Arc<crate::run::hosted::McpLeafLauncher>>,
@@ -182,6 +184,7 @@ impl BrokerHost {
         // The declared MCP servers, from the same record.
         let declared_mcp = Arc::new(record.mcp.clone());
         let spawn_credentials = record.tool_credential_paths();
+        let phantoms = phantoms.to_vec();
         let shell_limits = record.limits.shell.clone();
         // Resolved here, where the `BoxRoot` is in hand. `BoxRoot::open` created it.
         let mcp_working_directory = layout.mcp_working_directory();
@@ -212,6 +215,7 @@ impl BrokerHost {
                         leaf_launcher: mcp_leaf_launcher,
                     },
                     egress,
+                    phantoms,
                     recorder,
                     host_spawner,
                     host_programs,
@@ -493,6 +497,7 @@ fn host(
     spawn_credentials: std::collections::BTreeMap<String, Vec<String>>,
     mcp_hosting: McpHosting,
     egress: Option<EgressRouting>,
+    phantoms: Vec<ProvisionedVariable>,
     recorder: Arc<crate::run::telemetry::DecisionRecorder>,
     host_spawner: Option<crate::run::hosted::ToolSpawner>,
     host_programs: strands_shell::os::HostPrograms,
@@ -532,6 +537,7 @@ fn host(
             mcp_working_directory_handle: Some(mcp_hosting.working_directory_handle),
             mcp_leaf_launcher: mcp_hosting.leaf_launcher,
             egress,
+            phantoms,
             recorder,
             host_spawner,
             host_programs,
@@ -1886,6 +1892,7 @@ done"#;
             governed: GovernedBox::assigned("codex"),
             spawn_credentials: Default::default(),
             egress: None,
+            phantoms: Vec::new(),
             recorder: crate::run::telemetry::DecisionRecorder::discarding(),
             host_spawner: None,
             host_programs: Default::default(),
@@ -2148,6 +2155,7 @@ done"#;
             // These tests exercise connection lifetime, not egress; the Shell's network stays
             // off, exactly as it was before egress routing existed.
             egress: None,
+            phantoms: Vec::new(),
             recorder: crate::run::telemetry::DecisionRecorder::discarding(),
             host_spawner: None,
             host_programs: Default::default(),
@@ -2355,6 +2363,130 @@ done"#;
             assert_eq!(
                 response.0, "abandoned=",
                 "the export from the abandoned command must not survive"
+            );
+        }));
+    }
+
+    // ── Credential phantoms ──────────────────────────────────────────────────
+
+    /// A connection spec whose Shells hold `phantoms`, as a box with routes provisions them.
+    fn spec_with_phantoms(marker_directory: &Path, phantoms: &[(&str, &str)]) -> Arc<ShellSpec> {
+        let mut spec =
+            Arc::into_inner(connection_spec(marker_directory)).expect("a new spec has one owner");
+        spec.phantoms = phantoms
+            .iter()
+            .map(|(name, value)| ProvisionedVariable {
+                name: (*name).to_string(),
+                value: (*value).to_string(),
+            })
+            .collect();
+        Arc::new(spec)
+    }
+
+    /// The Shell's environment as `env` prints it, one `NAME=value` per entry, sorted.
+    async fn shell_environment(socket: &Path) -> Vec<String> {
+        let (seen, status) = submit(socket, "env").await;
+        assert_eq!(status, 0, "env runs in the Shell: {seen}");
+        let mut entries: Vec<String> = seen.lines().map(str::to_string).collect();
+        entries.sort();
+        entries
+    }
+
+    /// A new Shell holds each provisioned variable beside its own names, and nothing else.
+    #[test]
+    fn a_new_shell_holds_each_provisioned_variable_and_nothing_else() {
+        let marker_directory = tempfile::tempdir().expect("marker directory");
+        let phantoms = [
+            ("GITHUB_TOKEN", "strands_box_0123"),
+            ("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE"),
+        ];
+        let (runtime, local) = runtime();
+
+        runtime.block_on(local.run_until(async {
+            let (_plain_directory, plain) =
+                serving_socket(connection_spec(marker_directory.path()));
+            let without = shell_environment(&plain).await;
+            let names: Vec<&str> = without
+                .iter()
+                .filter_map(|entry| entry.split_once('=').map(|(name, _)| name))
+                .collect();
+            assert_eq!(
+                names,
+                ["HOME", "PATH", "PWD", "USER"],
+                "a box with no route adds no variable to the Shell"
+            );
+
+            let (_held_directory, held) =
+                serving_socket(spec_with_phantoms(marker_directory.path(), &phantoms));
+            let mut expected = without.clone();
+            expected.extend(
+                phantoms
+                    .iter()
+                    .map(|(name, value)| format!("{name}={value}")),
+            );
+            expected.sort();
+            assert_eq!(
+                shell_environment(&held).await,
+                expected,
+                "the Shell holds each provisioned variable and its own names"
+            );
+        }));
+    }
+
+    /// A provisioned variable cannot displace the Shell's own `HOME`, `PWD`, and `USER`.
+    #[test]
+    fn a_provisioned_variable_cannot_displace_the_shells_own_names() {
+        let marker_directory = tempfile::tempdir().expect("marker directory");
+        let command = r#"printf '%s|%s|%s' "$HOME" "$PWD" "$USER""#;
+        let (runtime, local) = runtime();
+
+        runtime.block_on(local.run_until(async {
+            let (_plain_directory, plain) =
+                serving_socket(connection_spec(marker_directory.path()));
+            let (own, status) = submit(&plain, command).await;
+            assert_eq!(status, 0, "the command runs: {own}");
+
+            let (_held_directory, held) = serving_socket(spec_with_phantoms(
+                marker_directory.path(),
+                &[
+                    ("HOME", "strands_box_home"),
+                    ("PWD", "strands_box_pwd"),
+                    ("USER", "strands_box_user"),
+                ],
+            ));
+            assert_eq!(
+                submit(&held, command).await,
+                (own, 0),
+                "the Shell's own names are set after the provisioned variables"
+            );
+        }));
+    }
+
+    /// Each new Program starts from the provisioned value, whatever an earlier Program exported.
+    #[test]
+    fn each_program_starts_from_the_provisioned_value() {
+        let marker_directory = tempfile::tempdir().expect("marker directory");
+        let spec = spec_with_phantoms(
+            marker_directory.path(),
+            &[("GITHUB_TOKEN", "strands_box_0123")],
+        );
+        let (runtime, local) = runtime();
+
+        runtime.block_on(local.run_until(async {
+            let (_directory, socket) = serving_socket(spec);
+            assert_eq!(
+                submit(
+                    &socket,
+                    r#"export GITHUB_TOKEN=changed; printf %s "$GITHUB_TOKEN""#
+                )
+                .await,
+                ("changed".to_string(), 0),
+                "a Call may change its own copy"
+            );
+            assert_eq!(
+                submit(&socket, r#"printf %s "$GITHUB_TOKEN""#).await,
+                ("strands_box_0123".to_string(), 0),
+                "the next Program starts from the provisioned value"
             );
         }));
     }
@@ -3575,6 +3707,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 governed: GovernedBox::assigned("codex"),
                 spawn_credentials: Default::default(),
                 egress: None,
+                phantoms: Vec::new(),
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
                 host_programs: Default::default(),
@@ -3892,6 +4025,7 @@ done"#,
                 governed: GovernedBox::assigned("codex"),
                 spawn_credentials: Default::default(),
                 egress: None,
+                phantoms: Vec::new(),
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
                 host_programs: Default::default(),
@@ -4052,6 +4186,7 @@ done"#;
                 governed: GovernedBox::assigned("codex"),
                 spawn_credentials: Default::default(),
                 egress: None,
+                phantoms: Vec::new(),
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
                 host_programs: Default::default(),

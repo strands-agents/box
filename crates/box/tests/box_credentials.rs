@@ -563,6 +563,50 @@ fn the_workload_environment_holds_only_a_phantom() {
         "the real secret must never enter the workload's environment"
     );
 }
+
+/// The hosted Shell holds the phantom the workload holds, never the secret.
+#[test]
+fn the_shell_holds_the_workloads_phantom_and_never_the_secret() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = box_with_credentials(
+        "shell-phantom",
+        &permit_egress_to("localhost", 9),
+        &target("localhost:9"),
+    );
+
+    // Single quotes leave the variable for the Shell to expand, not the workload's `bash`.
+    let output = workload(
+        &box_,
+        &format!(
+            r#"printf 'workload=%s\n' "${SECRET_VARIABLE}"
+               zsh -lc 'printf "shell=%s\n" "${SECRET_VARIABLE}"'"#
+        ),
+    );
+    assert_ran(&output);
+
+    let seen = stdout(&output);
+    let phantom = seen
+        .lines()
+        .find_map(|line| line.strip_prefix("workload="))
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        phantom.starts_with("strands_box_"),
+        "the workload must hold a minted phantom: {output:?}"
+    );
+    assert_eq!(
+        seen,
+        format!("workload={phantom}\nshell={phantom}"),
+        "the Shell must expand the variable to the workload's phantom: {output:?}"
+    );
+    assert!(
+        !format!("{output:?}").contains(REAL_SECRET),
+        "the real secret must never reach the workload or the Shell: {output:?}"
+    );
+}
+
 /// A phantom is a RUN-lifetime value, and it is stable for that run.
 ///
 /// The phantom used to be minted once per daemon load and shared by every run of the box. Each
@@ -1661,16 +1705,17 @@ when { context.input.command == "printf AUTHORITY_CONTROL" };
 /// so its *process* environment holds the operator's real secret — and moving the Shell
 /// in-process removed the `env_clear()` that the sibling shim was spawned with. What replaces
 /// it is not a process boundary but the Shell's construction: its `Process` carries a
-/// synthesized environment (`HOME`/`PATH`/`PWD`/`USER`) rather than the host's, and every
-/// filesystem and environment read is serviced by the VFS instead of `std::env`/`std::fs`.
+/// synthesized environment (`HOME`/`PATH`/`PWD`/`USER` and each route's phantom) rather than the
+/// host's, and every filesystem and environment read is serviced by the VFS instead of
+/// `std::env`/`std::fs`.
 ///
 /// Lua is probed deliberately and is the sharpest case. `mlua` is a **non-optional**
 /// dependency of the vendored Shell with `features = ["lua54", "async", "vendored"]`, so
 /// a Lua 5.4 **C** interpreter is compiled into whichever process hosts the Shell, and
 /// `builtins/mod.rs` exposes it as a reachable `lua` builtin that runs
-/// workload-supplied source. Measured 2026-08-07: `os.getenv` answers `nil`,
-/// `io.popen("env")` sees only the synthesized four variables, and
-/// `io.open("/etc/passwd")` is refused by the VFS — so the interpreter reaches the same
+/// workload-supplied source. `os.getenv` and `io.popen("env")` see the synthesized
+/// environment, where the secret's variable holds the workload's phantom, and
+/// `io.open("/etc/passwd")` is refused by the VFS, so the interpreter reaches the same
 /// mediated surface as the Shell itself, not the host's.
 ///
 /// If this test ever fails, the daemon is handing the operator's secrets to attacker-
@@ -1687,9 +1732,10 @@ fn the_shell_cannot_read_the_daemons_resolved_secrets() {
         &target("localhost:9"),
     );
     let output = box_.bash(&format!(
-        r#"zsh -lc 'env | grep -c {SECRET_VARIABLE} || true'
+        r#"printf 'workload=%s\n' "${SECRET_VARIABLE}"
+           zsh -lc 'env | grep -c {SECRET_VARIABLE} || true'
            zsh -lc 'echo "expand=${SECRET_VARIABLE}"'
-           zsh -lc 'lua -e "print(os.getenv([[{SECRET_VARIABLE}]]))"'
+           zsh -lc 'lua -e "print([[getenv=]] .. os.getenv([[{SECRET_VARIABLE}]]))"'
            zsh -lc 'lua -e "local f=io.popen([[env]]); print(f:read([[a]]))"'
            zsh -lc 'lua -e "print(io.open([[/etc/passwd]]))"'"#
     ));
@@ -1708,10 +1754,24 @@ fn the_shell_cannot_read_the_daemons_resolved_secrets() {
         all.contains("USER=strands-box"),
         "the Shell must see its own synthesized environment: {all}"
     );
+    // The secret's variable holds the workload's phantom, for the Shell and for Lua alike.
+    let phantom = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix("workload="))
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        phantom.starts_with("strands_box_"),
+        "the workload must hold a minted phantom: {all}"
+    );
+    assert!(
+        all.contains(&format!("expand={phantom}\n")),
+        "the Shell must expand the variable to the workload's phantom: {all}"
+    );
     // Lua's own escape hatches reach the same mediated surface.
     assert!(
-        all.contains("nil"),
-        "lua os.getenv must not reach the host environment: {all}"
+        all.contains(&format!("getenv={phantom}\n")),
+        "lua os.getenv must read the Shell's environment, not the host's: {all}"
     );
     assert!(
         all.contains("/etc/passwd: no such file or directory"),

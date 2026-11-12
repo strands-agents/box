@@ -236,11 +236,12 @@ and credential handling for tools and local MCP servers.
 An `[egress.<name>]` route binds a secret to a set of destinations. Policy decides whether to
 forward each request. The route specifies which credential to add and grants no access itself.
 
-> Every process in a box can use every route. The agent, each tool, and each stdio MCP server get
-> every placeholder, and the gateway adds credentials based on the destination. It cannot identify
-> which process opened a connection, so it cannot enforce a per-process credential list. A process
-> that must not use a credential belongs in a separate box. [The box is the credential
-> boundary](./decisions.md#the-box-is-the-credential-boundary) records the decision and its cost.
+> Every process in a box can use every route. The agent, each tool, each stdio MCP server, and the
+> hosted Shell get every placeholder, and the gateway adds credentials based on the destination. It
+> cannot identify which process opened a connection, so it cannot enforce a per-process credential
+> list. A process that must not use a credential belongs in a separate box. [The box is the
+> credential boundary](./decisions.md#the-box-is-the-credential-boundary) records the decision and
+> its cost.
 
 | Source | `secret.ref` | What the gateway does |
 |---|---|---|
@@ -251,8 +252,8 @@ forward each request. The route specifies which credential to add and grants no 
 ### The placeholder swap
 
 An `env://` route keeps the real secret in the box's trusted process and gives every contained
-process a placeholder instead, which `box.toml` calls a phantom. See [the workload holds a phantom,
-and the gateway holds the
+process, and the hosted Shell, a placeholder instead, which `box.toml` calls a phantom. See [the
+workload holds a phantom, and the gateway holds the
 secret](decisions.md#the-workload-holds-a-phantom-and-the-gateway-holds-the-secret).
 
 ```mermaid

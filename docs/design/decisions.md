@@ -2256,7 +2256,10 @@ credential exists.
 The box here is the whole of what one `box.toml` declares: the agent's sandbox, the box's trusted
 process, and every sandbox it starts for a tool or an MCP server. Every request and response flows
 inside it. Every process in the box gets every egress route that `box.toml` declares: the agent,
-each tool, and each MCP server hold every route's phantom or placeholder. Every process in the box
+each tool, and each MCP server hold every route's phantom or placeholder. The hosted Shell runs in
+the trusted process and holds them too. A command that the agent sends through its shell alias
+expands a route's variable to that route's phantom or placeholder.
+`the_shell_holds_the_workloads_phantom_and_never_the_secret` checks this. Every process in the box
 shares one gateway, and the gateway cannot tell which process made a call. An `aws://` route
 generates no phantom. Every process gets the same public placeholder keys, and the gateway signs
 matching requests with the real credentials. An `env://` route with `secret.inject = "always"`

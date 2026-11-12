@@ -30,12 +30,12 @@ secret.ref   = "aws://my-profile"
 `GITHUB_TOKEN`, and sends it as it would send the token. The gateway replaces the placeholder with
 the real token on each request to `api.github.com`.
 
-> **Every process in the box can use every route.** The agent, each tool, and each stdio MCP server
-> in the box get the same placeholders, and the gateway adds the real credential to a request from
-> any of them. The gateway can't tell which process sent a request, so no setting limits a route to
-> one process. To keep a credential away from a tool or a server, run it in a separate box.
-> [The box is the credential boundary](../design/decisions.md#the-box-is-the-credential-boundary)
-> explains why.
+> **Every process in the box can use every route.** The agent, each tool, each stdio MCP server, and
+> the Shell that runs the agent's commands get the same placeholders, and the gateway adds the real
+> credential to a request from any of them. The gateway can't tell which process sent a request, so
+> no setting limits a route to one process. To keep a credential away from a tool or a server, run
+> it in a separate box. [The box is the credential
+> boundary](../design/decisions.md#the-box-is-the-credential-boundary) explains why.
 
 To let the requests out, permit them in `policy.dw`:
 
@@ -159,7 +159,7 @@ available.
 
 | `secret.ref` | Read from | When |
 |---|---|---|
-| `env://NAME` | The variable `NAME` in the environment of `box run` | Once, when the box starts. The agent and each tool and MCP server get a placeholder in `NAME`. Every destination that names `NAME`, in one route or in several, accepts the same placeholder. |
+| `env://NAME` | The variable `NAME` in the environment of `box run` | Once, when the box starts. The agent, each tool, each stdio MCP server, and the Shell get a placeholder in `NAME`. Every destination that names `NAME`, in one route or in several, accepts the same placeholder. |
 | `aws://PROFILE` | The static access keys of `PROFILE` in the operator's AWS configuration | On each request. The gateway signs the request with SigV4. |
 | `aws://` (no profile) | The AWS SDK default credential provider chain on the host | On each request. The gateway signs the request with SigV4, under the host's ambient identity. |
 
