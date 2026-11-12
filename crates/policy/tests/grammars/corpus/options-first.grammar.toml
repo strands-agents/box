@@ -9,8 +9,11 @@ version = 1
 [effects]
 write_config = "Writes git configuration"
 
+[global]
+options.config_override = { flag = ["-c"], value = "required", repeated = true }
+
 [shell.config]
-usage         = "git config [options] [<name>] [<value>]"
+usage         = "git [global options] config [options] [<name>] [<value>]"
 options_first = true
 options.global = { flag = ["--global"] }
 options.file   = { flag = ["-f", "--file"], value = "required" }

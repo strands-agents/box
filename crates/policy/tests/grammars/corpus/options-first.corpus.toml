@@ -53,3 +53,10 @@ argv = ["git", "config", "set", "user.name", "--global", "Ada"]
 action = "config_set"
 fields = { global = true, name = "user.name", value = "Ada" }
 effects = ["write_config"]
+
+# A global option that is not `anywhere` goes with `options_first`
+[[case]]
+argv = ["git", "-c", "a.b=c", "config", "user.name", "--global"]
+action = "config"
+fields = { config_override = ["a.b=c"], name = "user.name", value = "--global" }
+effects = ["write_config"]
