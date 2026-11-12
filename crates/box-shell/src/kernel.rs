@@ -961,7 +961,7 @@ impl Kernel for ShellKernel {
             &request.cwd().to_string_lossy(),
         )
         .await
-        .map_err(|error| io::Error::new(error.kind(), format!("effect denied: {error}")))?;
+        .map_err(|error| self.stopped(error))?;
         self.running
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -971,10 +971,13 @@ impl Kernel for ShellKernel {
 
     /// Each stage for the fallback is decided before any stage of its pipeline starts.
     async fn check_fallback(&self, request: &CommandRequest) -> io::Result<()> {
+        if let Some(unrun) = self.take_decided(request.program(), request.args(), request.cwd()) {
+            unrun.drop_unrun();
+        }
         let decided = self
             .decide(request.program(), request.args(), request.cwd())
             .await
-            .map_err(|error| io::Error::new(error.kind(), format!("effect denied: {error}")))?;
+            .map_err(|error| self.stopped(error))?;
         self.decided
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1016,6 +1019,21 @@ impl ShellKernel {
 }
 
 impl ShellKernel {
+    /// The refusal that stops a pipeline, after every fallback stage decided for it is settled,
+    /// because none of them runs.
+    fn stopped(&self, error: io::Error) -> io::Error {
+        let unrun = std::mem::take(
+            &mut *self
+                .decided
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for (_, decided) in unrun {
+            decided.drop_unrun();
+        }
+        io::Error::new(error.kind(), format!("effect denied: {error}"))
+    }
+
     /// The decision a stage's pre-start check made for this command, when there is one.
     pub(crate) fn take_decided(
         &self,

@@ -9,7 +9,7 @@ mod support;
 use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -1449,5 +1449,102 @@ fn a_path_entry_outside_the_kernels_reach_is_not_observed() {
         exec_decisions(&seen),
         vec!["exec /tools/tool"],
         "the bound entry is found with one decision, the unbound one raises none: {seen:?}"
+    );
+}
+
+/// Numbers each `ghost` decision and records what happened to each.
+struct Ghosts {
+    decided: AtomicUsize,
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+struct GhostPermit {
+    number: usize,
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl EffectPermit for GhostPermit {
+    async fn record_outcome(self: Box<Self>, outcome: EffectOutcome) -> io::Result<()> {
+        if let EffectOutcome::ShellCommand { reported_status } = outcome {
+            let line = format!("#{} status {reported_status}", self.number);
+            self.events.lock().unwrap().push(line);
+        }
+        Ok(())
+    }
+
+    fn mark_indeterminate(self: Box<Self>) {
+        let line = format!("#{} indeterminate", self.number);
+        self.events.lock().unwrap().push(line);
+    }
+}
+
+#[async_trait]
+impl EffectInterceptor for Ghosts {
+    async fn intercept(&self, effect: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>> {
+        let EffectAttempt::ShellRun { program, .. } = effect else {
+            return Ok(Box::new(GhostPermit {
+                number: 0,
+                events: Arc::new(Mutex::new(Vec::new())),
+            }));
+        };
+        if *program == "blocked" {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "blocked"));
+        }
+        let number = self.decided.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(Box::new(GhostPermit {
+            number,
+            events: Arc::clone(&self.events),
+        }))
+    }
+}
+
+/// A fallback stage decided but never run is settled at once, so a later Call records its own
+/// outcome on its own decision.
+#[test]
+fn a_fallback_stage_that_never_runs_does_not_carry_its_decision_into_a_later_call() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let ghosts = Ghosts {
+        decided: AtomicUsize::new(0),
+        events: Arc::clone(&events),
+    };
+    let mut shell = shell_with(Arc::new(ghosts));
+    let (refused, ran) = run(async {
+        let refused = shell.run("ghost | blocked").await;
+        let after_first = events.lock().unwrap().clone();
+        let ran = shell.run("ghost").await;
+        ((refused, after_first), ran)
+    });
+    let ((refused, after_first), ran) = (refused, ran);
+    assert_eq!(refused.status, 126, "{}", refused.stderr);
+    assert_eq!(
+        after_first,
+        ["#1 indeterminate"],
+        "the first Call settles its own decision"
+    );
+    assert_eq!(ran.status, 127, "{}", ran.stderr);
+    assert_eq!(
+        *events.lock().unwrap(),
+        ["#1 indeterminate", "#2 status 127"]
+    );
+}
+
+/// A fallback stage whose redirect fails is settled by the next decision of the same command.
+#[test]
+fn a_fallback_stage_whose_redirect_fails_is_settled_by_the_next_decision() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let ghosts = Ghosts {
+        decided: AtomicUsize::new(0),
+        events: Arc::clone(&events),
+    };
+    let mut shell = shell_with(Arc::new(ghosts));
+    let ran = run(async {
+        shell.run("ghost > /denied/out").await;
+        shell.run("ghost").await
+    });
+    assert_eq!(ran.status, 127, "{}", ran.stderr);
+    assert_eq!(
+        *events.lock().unwrap(),
+        ["#1 indeterminate", "#2 status 127"]
     );
 }
