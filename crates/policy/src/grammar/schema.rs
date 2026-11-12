@@ -73,11 +73,10 @@ impl Grammar {
             } else {
                 format!(" in [{ALL_ACTIONS:?}]")
             };
-            let _ = writeln!(schema, "  type {action}Input = {{ {record} }};");
             let _ = writeln!(
                 schema,
                 "  action {action:?}{group} appliesTo {{ principal: [Box::Agent], \
-                 resource: [Box::Resource], context: {{ input: {action}Input, output?: Output }} }};"
+                 resource: [Box::Resource], context: {{ input: {{ {record} }}, output?: Output }} }};"
             );
         }
         schema.push_str("}\n");
@@ -467,6 +466,39 @@ mod tests {
         }
 
         assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn a_grammar_with_many_actions_declares_no_type_per_action_and_loads() {
+        const ACTIONS: usize = 200;
+        let mut text =
+            String::from("name = \"many\"\nprogram = \"many\"\nformat = 1\nversion = 1\n");
+        for index in 0..ACTIONS {
+            let _ = write!(
+                text,
+                "[shell.op_{index}]\nusage = \"many op-{index} [options]\"\n\
+                 options.force = {{ flag = \"--force\" }}\n"
+            );
+        }
+        let grammar = Grammar::parse(&text).expect("the generated grammar loads");
+        let fragment = grammar.schema();
+        let types: Vec<&str> = fragment
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.starts_with("type "))
+            .collect();
+        let last = ACTIONS - 1;
+        let source = format!(
+            "permit (principal, action in Tool::many::Action::\"*\", resource);\n\
+             forbid (principal, action == Tool::many::Action::\"op_{last}\", resource)\n\
+             when {{ context.input.force }}\n\
+             unless temporal {{\n\
+                 formerly within 1h Tool::many::Action::\"op_0\"::response{{ input.force: false }}\n\
+             }};\n"
+        );
+
+        assert_eq!(types, ["type Output = { status: Long };"]);
+        assert_eq!(load(&source, std::slice::from_ref(&grammar), &[]), Ok(()));
     }
 
     #[test]
