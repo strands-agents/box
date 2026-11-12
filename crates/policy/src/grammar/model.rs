@@ -77,6 +77,7 @@ pub(crate) struct ShellOption {
     pub(super) value: OptionValue,
     pub(super) repeated: bool,
     pub(super) anywhere: bool,
+    pub(super) overrides: bool,
     pub(super) effects: EffectChanges,
 }
 
@@ -291,11 +292,15 @@ impl ShellOption {
         if spec.anywhere && !global {
             return refuse(OptionFault::AnywhereOnAction);
         }
+        if spec.overrides && global {
+            return refuse(OptionFault::OverridesOnGlobal);
+        }
         Ok(Self {
             flags: spec.flag,
             value,
             repeated: spec.repeated,
             anywhere: spec.anywhere,
+            overrides: spec.overrides,
             effects: EffectChanges::read(
                 place,
                 spec.like,
@@ -486,6 +491,7 @@ operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], 
             value,
             repeated,
             anywhere,
+            overrides: false,
             effects,
         };
         let lease = EffectChanges {

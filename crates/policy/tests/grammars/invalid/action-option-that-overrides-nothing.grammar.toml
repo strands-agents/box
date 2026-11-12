@@ -1,0 +1,18 @@
+# expect: `<grammar>.shell.publish.options.offline`: sets `overrides`, but the usage has no `[global options]` with an `anywhere` option of this name
+# The usage has no `[global options]`, so no global option can be taken over.
+
+name    = "uv"
+program = "uv"
+format  = 1
+version = 1
+
+[effects]
+network = "uv may contact a package index"
+
+[global]
+options.offline = { flag = ["--offline"], removes = ["network"], anywhere = true }
+options.index   = { flag = ["--index"], value = "required", anywhere = true }
+
+[shell.publish]
+usage = "uv publish [options]"
+options.offline = { flag = ["--offline"], overrides = true }

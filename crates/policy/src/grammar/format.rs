@@ -66,6 +66,8 @@ pub(crate) struct OptionSpec {
     pub(crate) when: Vec<WhenSpec>,
     #[serde(default)]
     pub(crate) anywhere: bool,
+    #[serde(default)]
+    pub(crate) overrides: bool,
 }
 
 /// One `operands.<name>` entry.

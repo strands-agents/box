@@ -1,0 +1,18 @@
+# expect: `<grammar>.global.options.verbose`: only an action option can set `overrides`
+# `overrides` belongs on an action option.
+
+name    = "uv"
+program = "uv"
+format  = 1
+version = 1
+
+[effects]
+network = "uv may contact a package index"
+
+[global]
+options.offline = { flag = ["--offline"], removes = ["network"], anywhere = true }
+options.index   = { flag = ["--index"], value = "required", anywhere = true }
+options.verbose = { flag = ["-v"], anywhere = true, overrides = true }
+
+[shell.publish]
+usage = "uv [global options] publish [options]"
