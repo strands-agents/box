@@ -1,0 +1,15 @@
+# expect: `<grammar>.shell.publish.options.cache`: sets `overrides`, but the usage has no `[global options]` with an `anywhere` option of this name
+# No global option has the name `cache`.
+
+name    = "uv"
+program = "uv"
+format  = 1
+version = 1
+
+[global]
+options.quiet   = { flag = ["-q"], anywhere = true }
+options.offline = { flag = ["--offline"] }
+
+[shell.publish]
+usage = "uv [global options] publish [options]"
+options.cache = { flag = ["--cache"], overrides = true }
