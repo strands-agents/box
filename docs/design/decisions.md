@@ -2040,6 +2040,28 @@ the upstream routes on, so a virtual-host name cannot bypass the decision. The r
 TLS-terminated traffic therefore continues to refuse cleartext. The parser drops a URL fragment,
 because a fragment is client-only and must never reach an origin server.
 
+<a id="a-listed-host-is-upgraded-from-plain-http-to-https-in-the-gateway"></a>
+### A listed host's plain HTTP is upgraded to HTTPS in the gateway
+
+`[gateway] upgrade_http` lists hosts whose plain `http://` request to port 80 the gateway decides
+and sends as `https://` on port 443. The gateway, not the workload, then does the TLS handshake,
+against its own upstream roots and with the host as SNI. The reason is macOS. A runtime that checks
+certificates with the macOS platform verifier, such as rustup, cannot trust the per-run CA,
+because the box CA is [an environment value and not in the keychain](#ca-trust-is-a-per-process-environment-value),
+so its HTTPS through the gateway fails with `OSStatus -26276`. Sent as plain `http://`, the same
+request needs no workload trust at all. Policy decides the upgraded request on port 443, as it decides
+a `CONNECT` to that host, so the list grants no reach that a permit does not. The obvious
+alternative was to let such a tool skip the gateway, which loses the per-request decision and the
+credential swap for that tool and everything it starts, such as cargo behind rustup's proxy. The
+list is box-wide and not per route, because the hop it changes is the workload's own, before any
+route matches. The cost is that the hop from the workload to the gateway is cleartext. It stays on
+the machine, and the gateway's TLS leg protects the rest. The workload's leg is still plain, so the
+request reports `intercepted` false and [a secret still rides only TLS](#a-secret-rides-only-tls).
+rustup still checks each package against the SHA-256 hash in its channel manifest, and the
+manifest itself reaches the workload through the gateway's TLS leg.
+`a_listed_plain_request_reaches_a_tls_upstream_judged_on_443` and
+`a_credential_on_an_upgraded_plain_request_is_refused` pin it.
+
 <a id="a-remote-mcp-tool-call-passes-a-second-gate"></a>
 ### A remote MCP tool call passes a second gate after the transport gate
 

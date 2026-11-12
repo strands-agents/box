@@ -207,6 +207,43 @@ writes `aws://PROFILE` rather than a bare `aws://`.
 The gateway adds a credential only over HTTPS. A plain `http://` request to a destination a route
 names is refused.
 
+## Upgrade plain HTTP to HTTPS
+
+Some tools check certificates with the macOS platform verifier, which can't trust the box's CA.
+rustup is one: `rustup toolchain install` in a box on macOS fails with `OSStatus -26276`. Such a
+tool can send plain `http://` to the gateway instead, and the gateway makes the `https://` call
+itself. List each host in the top-level `[gateway]` table:
+
+```toml
+[gateway]
+upgrade_http = ["static.rust-lang.org"]
+```
+
+Then point the tool at the `http://` address, for rustup with
+`[agent] env.RUSTUP_DIST_SERVER = "http://static.rust-lang.org"`.
+
+A plain `http://` request to port 80 of a listed host is upgraded. The gateway decides it as
+`https://` on port 443, exactly as it decides a `CONNECT` to that host: `net:connect` and
+`http:request` see port 443, and the decision records name port 443. Permit it with the rules you
+would write for HTTPS to that host. The gateway then connects with TLS and checks the server's
+certificate against its usual roots, with the host as the server name. `Host` is the bare host.
+Every other plain `http://` request is unchanged: an unlisted host, and any port other than 80 on a
+listed host, go out as plain HTTP on their own port.
+
+The hop from the tool to the gateway stays plain HTTP. It stays on the machine, but anything in the
+box that can read that traffic can read the request. For the same reason the request's
+`intercepted` attribute is `false`, and a credential is still never added to it: a request to an
+upgraded host that a route's `destinations` match is refused with
+`credential not permitted on a plaintext request`. Use `upgrade_http` only for hosts that need no
+credential, such as a public download server. rustup still checks each package against the SHA-256
+hash in its channel manifest.
+
+The list applies to every process in the box. An entry is a host name alone: the box refuses a
+scheme, a port, a path, a `*` wildcard, or an IP address when the configuration loads, with
+``invalid Box configuration: `[gateway] upgrade_http` entry "<entry>" is not a host name: <reason>``.
+The match ignores case and a trailing dot, and names one host: listing `static.rust-lang.org` does
+not upgrade `rust-lang.org`.
+
 ## Errors and exit codes
 
 `box run` exits with an error before the agent starts when a route breaks a rule on this page.
@@ -233,6 +270,7 @@ names is refused.
 | `inject` is a value other than `phantom` or `always` | Use `phantom` or `always`. |
 | `phantom_prefix` is empty, longer than 64 characters, or holds another character | Use 1 to 64 letters, digits, `-`, `_`, `.`, or `~`. |
 | Two routes name one `env://NAME` with a different `phantom_prefix` | Set the same `phantom_prefix` on both. `NAME` holds one placeholder. |
+| A `[gateway] upgrade_http` entry names a scheme, a port, a path, a `*` wildcard, or an IP address, or holds another character | Write the host name alone, such as `static.rust-lang.org`. |
 
 A request the gateway refuses while the box runs gets an HTTP 403 with the header
 `x-strands-box-egress: refused`. The body says why:
@@ -241,7 +279,7 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 |---|---|
 | The policy decision, naming the rule | `net:connect` or `http:request` refused the request. |
 | `blocked by egress control` | A request to a route's destinations lacks the placeholder, carries a different value, or can't be signed. A bare `aws://` route whose default chain resolves no credentials can't be signed and refuses here. |
-| `credential not permitted on a plaintext request` | A plain `http://` request went to a route's destination. |
+| `credential not permitted on a plaintext request` | A plain `http://` request went to a route's destination, including one the gateway [upgrades to HTTPS](#upgrade-plain-http-to-https). |
 | `request authority rejected` | The request inside a `CONNECT` named a different host. |
 | `response blocked by egress control` | The server sent a compressed response to a credentialed request. |
 

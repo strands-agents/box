@@ -895,6 +895,8 @@ impl HostedBox {
                 mcp_servers: remote_mcp_servers,
                 // The destinations that re-route to a backend.
                 backends: backend_dials,
+                // The hosts whose plain HTTP on port 80 is decided and sent as HTTPS on 443.
+                upgrade_http: record.gateway.upgrade_http.clone(),
                 ..MitmConfig::default()
             },
             capabilities,
@@ -1214,6 +1216,7 @@ mod tests {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            gateway: Default::default(),
             limits: Default::default(),
             box_id: root.name().to_string(),
             box_dir: root.root().to_path_buf(),
@@ -3023,6 +3026,7 @@ while :; do :; done"#
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            gateway: Default::default(),
             limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/probe"),
