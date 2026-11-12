@@ -17,8 +17,7 @@ use std::time::Duration;
 
 use shell_protocol::{
     BOUNDARY_FAILURE_STATUS, Body, Frame, Interpreter, MAX_CHUNK_BYTES, MAX_FRAME_BYTES,
-    MAX_PROGRAM_INPUT_BYTES, PROTOCOL_VERSION, SignalKind, Stream, decode_payload, encode_payload,
-    read_frame, write_frame,
+    PROTOCOL_VERSION, SignalKind, Stream, decode_payload, encode_payload, read_frame, write_frame,
 };
 use tokio::net::UnixStream;
 
@@ -135,10 +134,7 @@ async fn run() -> io::Result<Outcome> {
     )?;
     let input = match interpreter {
         Interpreter::Shell => match classify_stdin(0)? {
-            StdinKind::Finite => Some(spawn_input_reader(
-                std::io::stdin(),
-                MAX_PROGRAM_INPUT_BYTES,
-            )?),
+            StdinKind::Finite => Some(spawn_input_reader(std::io::stdin())?),
             StdinKind::Absent => None,
         },
         Interpreter::Python | Interpreter::Mcp { .. } => None,
@@ -189,20 +185,18 @@ fn classify_stdin(_descriptor: i32) -> io::Result<StdinKind> {
 enum InputEvent {
     Data(Vec<u8>),
     End,
-    /// The input passed the cap; nothing more is forwarded, and no end-of-file follows.
-    Capped(String),
     Failed(String),
 }
 
-/// Read `reader` on its own thread, refusing more than `limit` bytes. The thread blocks in `read`
-/// for as long as its writer keeps the input open; the process exit ends it.
-fn spawn_input_reader(reader: impl io::Read + Send + 'static, limit: usize) -> io::Result<Input> {
+/// Read `reader` on its own thread. The thread blocks in `read` for as long as its writer keeps the
+/// input open; the process exit ends it.
+fn spawn_input_reader(reader: impl io::Read + Send + 'static) -> io::Result<Input> {
     let (sender, receiver) = tokio::sync::mpsc::channel(4);
     let refused: Refusal = Default::default();
     let failed = std::sync::Arc::clone(&refused);
     std::thread::Builder::new()
         .name("stdin".to_string())
-        .spawn(move || read_input(reader, limit, &sender, &failed))
+        .spawn(move || read_input(reader, &sender, &failed))
         .map_err(|error| io::Error::new(error.kind(), format!("read stdin: {error}")))?;
     Ok(Input {
         events: receiver,
@@ -227,34 +221,18 @@ fn fail(refused: &Refusal, sender: &tokio::sync::mpsc::Sender<InputEvent>, reaso
     let _ = sender.blocking_send(InputEvent::Failed(reason));
 }
 
-/// Send each read of `reader` as an event, then one `End` or one `Failed`.
+/// Send each read of `reader` as an event, then one `End` or one `Failed`. The broker applies the
+/// stdin limit, so every byte is sent and the writer never blocks.
 fn read_input(
     mut reader: impl io::Read,
-    limit: usize,
     sender: &tokio::sync::mpsc::Sender<InputEvent>,
     refused: &Refusal,
 ) {
     let mut buffer = vec![0_u8; MAX_CHUNK_BYTES];
-    let mut total: usize = 0;
     let last = loop {
         match reader.read(&mut buffer) {
             Ok(0) => break InputEvent::End,
             Ok(read) => {
-                let room = limit.saturating_sub(total);
-                total = total.saturating_add(read);
-                if read > room {
-                    // Forward up to the cap, then drain the rest so the writer never blocks or
-                    // gets EPIPE. No end-of-file follows: a command that reads past the cap waits
-                    // for the Shell deadline rather than reading part of its input as all of it.
-                    let _ = sender.blocking_send(InputEvent::Data(buffer[..room].to_vec()));
-                    let _ = sender.blocking_send(InputEvent::Capped(format!(
-                        "stdin is more than {limit} bytes; the command received only the first {limit}"
-                    )));
-                    if let Err(error) = drain(&mut reader, &mut buffer) {
-                        fail(refused, sender, format!("read stdin: {error}"));
-                    }
-                    return;
-                }
                 if sender
                     .blocking_send(InputEvent::Data(buffer[..read].to_vec()))
                     .is_err()
@@ -275,28 +253,11 @@ fn read_input(
     let _ = sender.blocking_send(last);
 }
 
-/// Read and discard `reader` to end-of-file, or return its read error.
-fn drain(reader: &mut impl io::Read, buffer: &mut [u8]) -> io::Result<()> {
-    loop {
-        match reader.read(buffer) {
-            Ok(0) => return Ok(()),
-            Ok(_) => {}
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => return Err(error),
-        }
-    }
-}
-
 /// Forward a Shell alias's stdin as `Input` frames, coalesced up to [`MAX_CHUNK_BYTES`], then
-/// `InputEof`. On a read error, record the reason in `refused` and interrupt the call. Past the
-/// cap, record a note in `capped` and send nothing more.
+/// `InputEof`. On a read error, record the reason in `refused` and interrupt the call.
 async fn pump_input(
     writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     mut events: tokio::sync::mpsc::Receiver<InputEvent>,
-    capped: &std::sync::Mutex<Option<String>>,
 ) -> io::Result<()> {
     loop {
         let Some(first) = events.recv().await else {
@@ -332,11 +293,6 @@ async fn pump_input(
             None | Some(InputEvent::Data(_)) => {}
             Some(InputEvent::End) => {
                 return write_alias_frame(writer, Body::InputEof).await;
-            }
-            Some(InputEvent::Capped(note)) => {
-                if let Ok(mut slot) = capped.lock() {
-                    *slot = Some(note);
-                }
             }
             // The reader recorded the refusal before it sent this.
             Some(InputEvent::Failed(_)) => {
@@ -709,14 +665,12 @@ async fn forward(
         .as_ref()
         .map(|input| std::sync::Arc::clone(&input.refused))
         .unwrap_or_default();
-    let capped: Refusal = Default::default();
     match input {
         // Without the EOF, a command that reads stdin waits for its deadline.
         None => write_alias_frame(&mut writer, Body::InputEof).await?,
         Some(Input { events, .. }) => {
-            let capped = std::sync::Arc::clone(&capped);
             tokio::spawn(async move {
-                let _ = pump_input(&mut writer, events, &capped).await;
+                let _ = pump_input(&mut writer, events).await;
                 // Dropping the write half shuts the socket down, and the broker then reaps the
                 // running Program, so it lives until the process exits.
                 std::future::pending::<()>().await;
@@ -761,11 +715,6 @@ async fn forward(
                 }
             }
             Body::Exit { status } => {
-                if status != 0
-                    && let Some(note) = capped.lock().ok().and_then(|note| note.clone())
-                {
-                    eprintln!("strands-box-sock-alias: {note}");
-                }
                 return match refusal() {
                     Some(reason) => Err(invalid_input(reason)),
                     None => Ok(Outcome::Status(status)),
@@ -776,9 +725,6 @@ async fn forward(
             Body::Denied { reason, .. } => {
                 if let Some(reason) = refusal() {
                     eprintln!("strands-box-sock-alias: {reason}");
-                }
-                if let Some(note) = capped.lock().ok().and_then(|note| note.clone()) {
-                    eprintln!("strands-box-sock-alias: {note}");
                 }
                 eprintln!("strands-box: {reason}");
                 return Ok(Outcome::Status(i32::from(SHELL_FAILURE_EXIT)));
@@ -1212,8 +1158,8 @@ mod tests {
     // ── Shell stdin ───────────────────────────────────────────────────────────
 
     /// Every event `read_input` sends for `reader`.
-    fn events_of(reader: impl io::Read + Send + 'static, limit: usize) -> Vec<InputEvent> {
-        let mut events = spawn_input_reader(reader, limit).unwrap().events;
+    fn events_of(reader: impl io::Read + Send + 'static) -> Vec<InputEvent> {
+        let mut events = spawn_input_reader(reader).unwrap().events;
         let mut seen = Vec::new();
         while let Some(event) = events.blocking_recv() {
             seen.push(event);
@@ -1240,39 +1186,26 @@ mod tests {
         use std::io::Write as _;
         writer.write_all(&input).unwrap();
         drop(writer);
-        let events = events_of(reader, MAX_PROGRAM_INPUT_BYTES);
+        let events = events_of(reader);
         assert_eq!(data_of(&events), input);
         assert_eq!(events.last(), Some(&InputEvent::End));
     }
 
-    /// Input up to the limit ends in end-of-file. Past it, exactly the limit is forwarded, a cap
-    /// note follows, and no end-of-file.
+    /// Input larger than any stdin limit is read whole and ends in end-of-file; the broker cuts it.
     #[test]
-    fn stdin_past_the_limit_is_cut_at_the_limit_with_no_end_of_file() {
-        let limit = 1024;
-        let events = events_of(std::io::Cursor::new(vec![b'x'; limit]), limit);
-        assert_eq!(data_of(&events).len(), limit);
+    fn stdin_is_read_whole_however_large() {
+        let size = 4 * 1024 * 1024;
+        let events = events_of(std::io::Cursor::new(vec![b'x'; size]));
+        assert_eq!(data_of(&events).len(), size);
         assert_eq!(events.last(), Some(&InputEvent::End));
-        for size in [limit + 1, limit * 4] {
-            let events = events_of(std::io::Cursor::new(vec![b'x'; size]), limit);
-            assert_eq!(data_of(&events).len(), limit, "{size}");
-            assert!(
-                matches!(events.last(), Some(InputEvent::Capped(note)) if note.contains("first")),
-                "{size}: {:?}",
-                events.last()
-            );
-            assert!(!events.contains(&InputEvent::End), "{size}");
-        }
     }
 
-    /// A writer that sends far more than the limit finishes without blocking or a broken pipe.
+    /// A writer that sends far more than any stdin limit finishes without blocking or a broken pipe.
     #[test]
-    fn a_writer_past_the_limit_is_drained_and_never_blocks() {
+    fn a_large_writer_never_blocks() {
         use std::io::Write as _;
         let (reader, mut writer) = std::io::pipe().unwrap();
-        let mut events = spawn_input_reader(reader, MAX_PROGRAM_INPUT_BYTES)
-            .unwrap()
-            .events;
+        let mut events = spawn_input_reader(reader).unwrap().events;
         let wrote = std::thread::spawn(move || writer.write_all(&vec![b'x'; 1024 * 1024]));
         while events.blocking_recv().is_some() {}
         wrote
@@ -1289,7 +1222,7 @@ mod tests {
         let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
         writer.write_all(b"from a socket").unwrap();
         writer.shutdown(std::net::Shutdown::Write).unwrap();
-        let events = events_of(reader, MAX_PROGRAM_INPUT_BYTES);
+        let events = events_of(reader);
         assert_eq!(data_of(&events), b"from a socket");
         assert_eq!(events.last(), Some(&InputEvent::End));
     }
@@ -1303,7 +1236,7 @@ mod tests {
                 Err(io::Error::other("device failed"))
             }
         }
-        let events = events_of(Broken, MAX_PROGRAM_INPUT_BYTES);
+        let events = events_of(Broken);
         let [InputEvent::Failed(reason)] = events.as_slice() else {
             panic!("one refusal, got {events:?}");
         };
@@ -1327,10 +1260,10 @@ mod tests {
         }
     }
 
-    /// A read error after the cap, while the rest is drained, is still a refusal.
+    /// A read error after some input is still a refusal.
     #[test]
-    fn a_read_error_while_draining_is_not_lost() {
-        let input = spawn_input_reader(FailsAfter { left: 4096 }, 1024).unwrap();
+    fn a_read_error_after_some_input_is_not_lost() {
+        let input = spawn_input_reader(FailsAfter { left: 4096 }).unwrap();
         let refused = std::sync::Arc::clone(&input.refused);
         let mut events = input.events;
         let mut seen = Vec::new();
@@ -1360,8 +1293,7 @@ mod tests {
                 let directory = tempfile::tempdir().unwrap();
                 let socket = directory.path().join("box.sock");
                 let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-                let input =
-                    spawn_input_reader(FailsAfter { left: 10 }, MAX_PROGRAM_INPUT_BYTES).unwrap();
+                let input = spawn_input_reader(FailsAfter { left: 10 }).unwrap();
                 while input.refused.lock().unwrap().is_none() {
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
@@ -1481,11 +1413,7 @@ mod tests {
                 let broker = tokio::spawn(fake_broker(listener, 0, |kinds| {
                     kinds.last() == Some(&"eof")
                 }));
-                let events = spawn_input_reader(
-                    std::io::Cursor::new(input.clone()),
-                    MAX_PROGRAM_INPUT_BYTES,
-                )
-                .unwrap();
+                let events = spawn_input_reader(std::io::Cursor::new(input.clone())).unwrap();
                 let outcome = forward(&socket, Interpreter::Shell, "cat".to_string(), Some(events))
                     .await
                     .unwrap();
@@ -1517,7 +1445,7 @@ mod tests {
             use std::io::Write as _;
             writer.write_all(b"partial").unwrap();
             let broker = tokio::spawn(fake_broker(listener, 7, |kinds| kinds.contains(&"call")));
-            let events = spawn_input_reader(reader, MAX_PROGRAM_INPUT_BYTES).unwrap();
+            let events = spawn_input_reader(reader).unwrap();
             let outcome = tokio::time::timeout(
                 Duration::from_secs(10),
                 forward(
@@ -1533,46 +1461,6 @@ mod tests {
             assert!(matches!(outcome, Outcome::Status(7)));
             drop(writer);
             broker.await.unwrap();
-        });
-    }
-
-    /// Oversized stdin does not fail a command that never reads it: the broker gets exactly the
-    /// limit, with no Signal and no end-of-file, and the command's status is reported.
-    #[cfg(unix)]
-    #[test]
-    fn oversized_stdin_does_not_fail_a_command_that_does_not_read_it() {
-        runtime().block_on(async {
-            tokio::time::timeout(Duration::from_secs(20), async {
-                let directory = tempfile::tempdir().unwrap();
-                let socket = directory.path().join("box.sock");
-                let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-                let broker = tokio::spawn(fake_broker(listener, 0, |kinds| {
-                    kinds.iter().filter(|kind| **kind == "input").count() >= 2
-                }));
-                let events = spawn_input_reader(
-                    std::io::Cursor::new(vec![b'x'; MAX_PROGRAM_INPUT_BYTES * 3]),
-                    MAX_PROGRAM_INPUT_BYTES,
-                )
-                .unwrap();
-                let outcome = forward(
-                    &socket,
-                    Interpreter::Shell,
-                    "true".to_string(),
-                    Some(events),
-                )
-                .await
-                .unwrap();
-                assert!(matches!(outcome, Outcome::Status(0)));
-                let seen = broker.await.unwrap();
-                assert_eq!(seen.input.len(), MAX_PROGRAM_INPUT_BYTES);
-                assert!(
-                    !seen.kinds.contains(&"eof") && !seen.kinds.contains(&"signal"),
-                    "{:?}",
-                    seen.kinds
-                );
-            })
-            .await
-            .expect("the test finishes within its limit");
         });
     }
 

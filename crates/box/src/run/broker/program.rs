@@ -14,10 +14,10 @@ use bytes::Bytes;
 use strands_shell::os::{STDERR, STDIN, STDOUT};
 use tokio::sync::mpsc;
 
-use super::protocol::{MAX_CALL_OUTPUT_BYTES, MAX_CHUNK_BYTES, MAX_PROGRAM_INPUT_BYTES, Stream};
+use super::protocol::{MAX_CALL_OUTPUT_BYTES, MAX_CHUNK_BYTES, Stream};
 
-/// The stdin channel depth, in frames. The bytes they hold stay under
-/// [`MAX_PROGRAM_INPUT_BYTES`].
+/// The least stdin channel depth, in frames. The bytes they hold stay under the Program's stdin
+/// limit.
 const INPUT_CHANNEL_DEPTH: usize = 256;
 
 /// The output channel depth, per stream. Bounded, so a Program that outruns its client stalls
@@ -37,8 +37,12 @@ pub(crate) struct ProgramControl {
     /// Set when a `Signal` arrives, and read by the Call loop, which stops by **dropping** the Call
     /// future.
     cancel: Arc<AtomicBool>,
-    /// The stdin bytes accepted so far, against [`MAX_PROGRAM_INPUT_BYTES`].
+    /// The stdin bytes accepted so far, against `input_limit`.
     input_received: Arc<AtomicUsize>,
+    /// The most stdin the Program receives.
+    input_limit: usize,
+    /// Set when stdin reached `input_limit`, so the rest is discarded and no end-of-file follows.
+    input_capped: Arc<AtomicBool>,
     /// Set when input was refused, so no later Call runs on partial input.
     input_refused: Arc<AtomicBool>,
 }
@@ -48,8 +52,6 @@ pub(crate) struct ProgramControl {
 pub(crate) enum InputRefusal {
     /// Nothing reads the stdin any more, or it was already closed; the bytes are dropped.
     Closed,
-    /// The Program's stdin budget would be exceeded.
-    OverBudget,
     /// The stdin queue is full.
     Full,
 }
@@ -78,8 +80,10 @@ impl Program {
     /// Wrap a freshly built Shell, installing the three standard channel descriptors.
     pub(crate) fn adopt(
         mut shell: strands_shell::Shell,
+        input_limit: usize,
     ) -> io::Result<(Self, ProgramOutput, ProgramControl)> {
-        let (stdin_tx, stdin_rx) = mpsc::channel(INPUT_CHANNEL_DEPTH);
+        let depth = INPUT_CHANNEL_DEPTH.max(input_limit.div_ceil(MAX_CHUNK_BYTES) + 1);
+        let (stdin_tx, stdin_rx) = mpsc::channel(depth);
         let (stdout_tx, stdout_rx) = mpsc::channel(OUTPUT_CHANNEL_DEPTH);
         let (stderr_tx, stderr_rx) = mpsc::channel(OUTPUT_CHANNEL_DEPTH);
 
@@ -104,6 +108,8 @@ impl Program {
                 stdin_tx: Arc::new(std::sync::Mutex::new(Some(stdin_tx))),
                 cancel,
                 input_received: Arc::new(AtomicUsize::new(0)),
+                input_limit,
+                input_capped: Arc::new(AtomicBool::new(false)),
                 input_refused: Arc::new(AtomicBool::new(false)),
             },
         ))
@@ -186,37 +192,52 @@ pub(crate) enum DrainOutcome {
 }
 
 impl ProgramControl {
-    /// Feed bytes to the Program's standard input. A refusal stops the running Call and refuses
-    /// every later one.
-    pub(crate) fn feed_stdin(&self, data: &[u8]) -> Result<(), InputRefusal> {
-        let refusal = self.try_feed(data);
-        if matches!(refusal, Err(InputRefusal::Full | InputRefusal::OverBudget)) {
+    /// Feed bytes to the Program's standard input, up to its stdin limit; past the limit the rest
+    /// is discarded. A refusal stops the running Call and refuses every later one. Returns the
+    /// bytes accepted.
+    pub(crate) fn feed_stdin(&self, data: &[u8]) -> Result<usize, InputRefusal> {
+        let accepted = self.try_feed(data);
+        if matches!(accepted, Err(InputRefusal::Full)) {
             self.refuse_input();
         }
-        refusal
+        accepted
     }
 
-    fn try_feed(&self, data: &[u8]) -> Result<(), InputRefusal> {
+    fn try_feed(&self, data: &[u8]) -> Result<usize, InputRefusal> {
         let Ok(guard) = self.stdin_tx.lock() else {
             return Err(InputRefusal::Closed);
         };
         let sender = guard.as_ref().ok_or(InputRefusal::Closed)?;
-        if self.input_refused.load(Ordering::SeqCst) {
-            return Ok(());
+        if self.input_refused.load(Ordering::SeqCst) || self.input_capped.load(Ordering::SeqCst) {
+            return Ok(0);
         }
         let received = self.input_received.load(Ordering::SeqCst);
-        let total = received
-            .checked_add(data.len())
-            .filter(|total| *total <= MAX_PROGRAM_INPUT_BYTES)
-            .ok_or(InputRefusal::OverBudget)?;
-        sender
-            .try_send(Bytes::copy_from_slice(data))
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => InputRefusal::Full,
-                mpsc::error::TrySendError::Closed(_) => InputRefusal::Closed,
-            })?;
-        self.input_received.store(total, Ordering::SeqCst);
-        Ok(())
+        let room = self.input_limit.saturating_sub(received);
+        let taken = &data[..data.len().min(room)];
+        if !taken.is_empty() {
+            sender
+                .try_send(Bytes::copy_from_slice(taken))
+                .map_err(|error| match error {
+                    mpsc::error::TrySendError::Full(_) => InputRefusal::Full,
+                    mpsc::error::TrySendError::Closed(_) => InputRefusal::Closed,
+                })?;
+            self.input_received
+                .store(received + taken.len(), Ordering::SeqCst);
+        }
+        if taken.len() < data.len() {
+            self.input_capped.store(true, Ordering::SeqCst);
+        }
+        Ok(taken.len())
+    }
+
+    /// Whether stdin reached the Program's limit, so its end-of-file never comes.
+    pub(crate) fn input_capped(&self) -> bool {
+        self.input_capped.load(Ordering::SeqCst)
+    }
+
+    /// The most stdin the Program receives.
+    pub(crate) fn input_limit(&self) -> usize {
+        self.input_limit
     }
 
     /// Refuse all further input, stop the running Call, and refuse every later Call. Later input is

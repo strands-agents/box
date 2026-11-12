@@ -69,13 +69,6 @@ pub(crate) const MAX_CHUNK_BYTES: usize = 48 * 1024;
 /// The longest base64 text one `Input` frame may carry.
 pub(crate) const MAX_ENCODED_CHUNK_BYTES: usize = MAX_CHUNK_BYTES.div_ceil(3) * 4;
 
-/// The most stdin one Shell Program receives across all of its `Input` frames.
-pub(crate) const MAX_PROGRAM_INPUT_BYTES: usize = MAX_CAPTURE_STREAM_BYTES;
-
-/// The most stdin one connection's Shell Programs receive together.
-pub(crate) const MAX_CONNECTION_INPUT_BYTES: usize =
-    MAX_PROGRAM_INPUT_BYTES * MAX_PROGRAMS_PER_CONNECTION;
-
 /// The most output one Call may produce across every `Output` frame.
 pub(crate) const MAX_CALL_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 

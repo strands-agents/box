@@ -26,7 +26,8 @@ use tokio::task::{JoinError, JoinSet};
 use crate::error::{BoxError, ShellError};
 #[cfg(test)]
 use crate::record::config::limits::{
-    DEFAULT_SHELL_MAX_INPUT, DEFAULT_SHELL_MAX_OUTPUT, DEFAULT_SHELL_TIMEOUT,
+    DEFAULT_SHELL_MAX_INPUT, DEFAULT_SHELL_MAX_OUTPUT, DEFAULT_SHELL_MAX_STDIN,
+    DEFAULT_SHELL_TIMEOUT,
 };
 use crate::record::config::limits::{SHELL_TIMEOUT_GRACE, ShellLimits};
 use crate::record::config::{AuthoritySource, Record};
@@ -38,9 +39,8 @@ use crate::run::broker::program::{
 };
 use crate::run::broker::protocol::{
     BOUNDARY_FAILURE_STATUS, Body, DeniedKind, Frame, Interpreter, MAX_CHUNK_BYTES,
-    MAX_CONNECTION_INPUT_BYTES, MAX_ENCODED_CHUNK_BYTES, MAX_PROGRAM_INPUT_BYTES,
-    MAX_PROGRAMS_PER_CONNECTION, PROTOCOL_VERSION, ProgramId, SignalKind, Stream, decode_payload,
-    encode_payload, read_frame, write_frame,
+    MAX_ENCODED_CHUNK_BYTES, MAX_PROGRAMS_PER_CONNECTION, PROTOCOL_VERSION, ProgramId, SignalKind,
+    Stream, decode_payload, encode_payload, read_frame, write_frame,
 };
 use crate::run::broker::reach::Reach;
 use crate::run::broker::shell::{EgressRouting, ShellSpec};
@@ -520,6 +520,7 @@ fn host(
     local.block_on(&runtime, async move {
         let spec = ShellSpec {
             max_input: limits.max_input(),
+            max_stdin: limits.max_stdin(),
             max_output: limits.max_output(),
             command_timeout: limits.timeout(),
             request_timeout: limits
@@ -724,7 +725,7 @@ async fn serve_transport(
     // completion can be matched against. Never reused and never reset.
     let mut calls_accepted: u64 = 0;
     // The stdin bytes this connection's Shell Programs accepted, against
-    // `MAX_CONNECTION_INPUT_BYTES`.
+    // the Shell stdin limit times `MAX_PROGRAMS_PER_CONNECTION`.
     let mut input_accepted: usize = 0;
     // Counts successful MCP opens for the same reason. A closed id can be opened again before its
     // old completion reaches this loop.
@@ -766,6 +767,22 @@ async fn serve_transport(
                                 .is_some_and(|current| current.sequence == done.sequence);
                             if is_current {
                                 running.remove(&done.id);
+                                if done.status != 0 && done.slot.control.input_capped() {
+                                    let limit = done.slot.control.input_limit();
+                                    let note = format!(
+                                        "strands-box: stdin is more than {limit} bytes; the command \
+                                         received only the first {limit}\n"
+                                    );
+                                    send(
+                                        &frames,
+                                        done.id,
+                                        Body::Output {
+                                            stream: Stream::Stderr,
+                                            data: encode_payload(note.as_bytes()),
+                                        },
+                                    )
+                                    .await?;
+                                }
                                 programs.insert(done.id, done.slot);
                                 send(&frames, done.id, Body::Exit { status: done.status }).await?;
                             }
@@ -915,7 +932,7 @@ async fn serve_transport(
                     }
                     let opened = spec.backend().and_then(|backend| {
                         let shell = spec.build_on(Arc::clone(&backend), &spec.recorder)?;
-                        Program::adopt(shell).map(|program| (backend, program))
+                        Program::adopt(shell, spec.max_stdin).map(|program| (backend, program))
                     });
                     match opened {
                         Ok((backend, (program, output, control))) => {
@@ -1135,32 +1152,23 @@ async fn serve_transport(
                     };
                     // A full stdin channel is the client outrunning its own program; report it rather
                     // than dropping the bytes silently.
-                    if input_accepted.saturating_add(bytes.len()) > MAX_CONNECTION_INPUT_BYTES {
+                    let connection_limit =
+                        spec.max_stdin.saturating_mul(MAX_PROGRAMS_PER_CONNECTION);
+                    if input_accepted.saturating_add(bytes.len()) > connection_limit
+                        && !control.input_capped()
+                    {
                         refuse_input(
                             &frames,
                             &programs,
                             &running,
                             id,
-                            &format!(
-                                "the connection's input is more than {MAX_CONNECTION_INPUT_BYTES} bytes"
-                            ),
+                            &format!("the connection's input is more than {connection_limit} bytes"),
                         )
                         .await?;
                         continue;
                     }
                     match control.feed_stdin(&bytes) {
-                        Ok(()) => input_accepted += bytes.len(),
-                        Err(InputRefusal::OverBudget) => {
-                            deny(
-                                &frames,
-                                id,
-                                DeniedKind::OverBudget,
-                                &format!(
-                                    "the program's input is more than {MAX_PROGRAM_INPUT_BYTES} bytes"
-                                ),
-                            )
-                            .await?;
-                        }
+                        Ok(accepted) => input_accepted += accepted,
                         // Nothing reads this stdin any more, so the bytes have no reader.
                         Err(InputRefusal::Closed) => {}
                         Err(InputRefusal::Full) => {
@@ -1175,10 +1183,11 @@ async fn serve_transport(
                     }
                 }
                 Body::InputEof => {
-                    // After a refusal stdin stays open, so the Call never reads end-of-file on part
-                    // of its input.
+                    // After a refusal or past the stdin limit, stdin stays open, so the Call never
+                    // reads end-of-file on part of its input.
                     if let Some(control) = control_for(&programs, &running, id)
                         && !control.input_refused()
+                        && !control.input_capped()
                     {
                         control.close_stdin();
                     }
@@ -1934,6 +1943,7 @@ done"#;
         let mcp_registry = crate::run::broker::mcp::DiscoveryRegistry::testing(&mcp);
         Arc::new(ShellSpec {
             max_input: DEFAULT_SHELL_MAX_INPUT,
+            max_stdin: DEFAULT_SHELL_MAX_STDIN,
             max_output: DEFAULT_SHELL_MAX_OUTPUT,
             command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
             request_timeout: Some(SERVE_REQUEST_TIMEOUT),
@@ -2185,6 +2195,7 @@ done"#;
     ) -> Arc<ShellSpec> {
         Arc::new(ShellSpec {
             max_input: DEFAULT_SHELL_MAX_INPUT,
+            max_stdin: DEFAULT_SHELL_MAX_STDIN,
             max_output: DEFAULT_SHELL_MAX_OUTPUT,
             command_timeout: command_timeout.into(),
             request_timeout: request_timeout.into(),
@@ -2533,7 +2544,8 @@ done"#;
             let shell = spec
                 .build_on(Arc::clone(&backend), &spec.recorder)
                 .expect("Shell");
-            let (program, output, control) = Program::adopt(shell).expect("program");
+            let (program, output, control) =
+                Program::adopt(shell, DEFAULT_SHELL_MAX_STDIN).expect("program");
             let mut slot = ProgramSlot {
                 backend,
                 program,
@@ -2605,7 +2617,8 @@ done"#;
             let shell = spec
                 .build_on(Arc::clone(&backend), &spec.recorder)
                 .expect("unlimited Shell");
-            let (program, output, control) = Program::adopt(shell).expect("program");
+            let (program, output, control) =
+                Program::adopt(shell, DEFAULT_SHELL_MAX_STDIN).expect("program");
             let mut slot = ProgramSlot {
                 backend,
                 program,
@@ -3270,7 +3283,7 @@ done"#;
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
             let (_dir, socket) = serving_socket(connection_spec(marker.path()));
-            let input: Vec<u8> = (0..MAX_PROGRAM_INPUT_BYTES)
+            let input: Vec<u8> = (0..DEFAULT_SHELL_MAX_STDIN)
                 .map(|index| (index % 256) as u8)
                 .collect();
             let (mut reader, _writer) = call_with_input(&socket, &input, "cat").await;
@@ -3336,7 +3349,7 @@ done"#;
             let marker = tempfile::tempdir().expect("marker");
             let (_dir, socket) = serving_socket(connection_spec(marker.path()));
             let (mut reader, mut writer) = transport(&socket).await;
-            let programs = MAX_CONNECTION_INPUT_BYTES / MAX_PROGRAM_INPUT_BYTES;
+            let programs = MAX_PROGRAMS_PER_CONNECTION;
             for id in 1..=programs as u32 {
                 put(
                     &mut writer,
@@ -3346,7 +3359,7 @@ done"#;
                     },
                 )
                 .await;
-                for chunk in vec![b'x'; MAX_PROGRAM_INPUT_BYTES].chunks(MAX_CHUNK_BYTES) {
+                for chunk in vec![b'x'; DEFAULT_SHELL_MAX_STDIN].chunks(MAX_CHUNK_BYTES) {
                     put(
                         &mut writer,
                         id,
@@ -3521,14 +3534,14 @@ done"#;
                     "the Call must not act after its input was refused"
                 );
             }
-            let (status, denied, acted) = read_after_part(&[newline.clone()]).await;
+            let (status, denied, acted) = read_after_part(std::slice::from_ref(&newline)).await;
             assert!(!denied);
             assert_eq!(
                 (status, acted.as_deref()),
                 (0, Some("part")),
                 "valid input still acts"
             );
-            let (status, denied, acted) = read_after_part(&[oversized.clone()]).await;
+            let (status, denied, acted) = read_after_part(std::slice::from_ref(&oversized)).await;
             assert!(denied);
             assert_ne!(status, 0);
             assert_eq!(acted, None, "a refusal alone never acts");
@@ -3844,7 +3857,7 @@ done"#;
                     },
                 )
                 .await;
-                for chunk in vec![b'x'; MAX_PROGRAM_INPUT_BYTES].chunks(MAX_CHUNK_BYTES) {
+                for chunk in vec![b'x'; DEFAULT_SHELL_MAX_STDIN].chunks(MAX_CHUNK_BYTES) {
                     put(
                         &mut writer,
                         1,
@@ -3878,26 +3891,105 @@ done"#;
         }));
     }
 
-    /// Input over the Program's budget is refused at the broker, and the Call then never runs.
+    /// Read frames until this Program exits, returning its stderr and status.
+    async fn stderr_and_status(reader: &mut tokio::net::unix::OwnedReadHalf) -> (String, i32) {
+        let mut stderr = Vec::new();
+        loop {
+            let frame =
+                tokio::time::timeout(Duration::from_secs(10), read_frame::<Frame, _>(reader))
+                    .await
+                    .expect("the Call ends")
+                    .expect("a frame")
+                    .expect("the daemon answers");
+            match frame.body {
+                Body::Output {
+                    stream: Stream::Stderr,
+                    data,
+                } => stderr.extend(decode_payload(&data).expect("valid payload")),
+                Body::Exit { status } => return (String::from_utf8_lossy(&stderr).into(), status),
+                Body::Denied { kind, reason, .. } => panic!("denied {kind:?}: {reason}"),
+                _ => {}
+            }
+        }
+    }
+
+    /// Stdin past the limit is cut at the limit with no end-of-file and no refusal: a command that
+    /// does not read it succeeds, and one that reads past the limit never finishes on part of it.
     #[test]
-    fn oversized_input_is_refused_at_the_broker_and_the_call_does_not_run() {
+    fn stdin_past_the_limit_is_cut_and_withholds_end_of_file() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
             let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let oversized = vec![b'x'; DEFAULT_SHELL_MAX_STDIN + 1];
+            let (mut reader, _writer) = call_with_input(&socket, &oversized, "printf ok").await;
+            let (stderr, status) = stderr_and_status(&mut reader).await;
+            assert_eq!(
+                status, 0,
+                "a command that does not read its stdin succeeds: {stderr}"
+            );
+            assert!(stderr.is_empty(), "{stderr}");
+
             let ran = marker.path().join("ran");
-            let (mut reader, _writer) = call_with_input(
+            let (mut reader, mut writer) = call_with_input(
                 &socket,
-                &vec![b'x'; MAX_PROGRAM_INPUT_BYTES + 1],
-                &format!("cat > /dev/null; printf ran > {}", ran.display()),
+                &oversized,
+                &format!(r#"x=$(cat); printf %s "${{#x}}" > {}"#, ran.display()),
             )
             .await;
-            let (kind, reason) = expect_denial(&mut reader, 1).await;
-            assert_eq!(kind, DeniedKind::OverBudget, "{reason}");
-            let (kind, reason) = expect_denial(&mut reader, 1).await;
-            assert_eq!(kind, DeniedKind::OverBudget, "{reason}");
-            assert!(reason.contains("does not run"), "{reason}");
-            assert!(!ran.exists(), "a Call after refused input must not run");
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            assert!(
+                !ran.exists(),
+                "a reader past the limit never gets end-of-file"
+            );
+            put(
+                &mut writer,
+                1,
+                Body::Signal {
+                    kind: SignalKind::Interrupt,
+                },
+            )
+            .await;
+            let (stderr, status) = stderr_and_status(&mut reader).await;
+            assert_ne!(status, 0);
+            assert!(!ran.exists(), "the Call must not act on part of its input");
+            assert!(
+                stderr.contains(&format!(
+                    "stdin is more than {DEFAULT_SHELL_MAX_STDIN} bytes"
+                )),
+                "{stderr}"
+            );
+        }));
+    }
+
+    /// The configured stdin limit replaces the default.
+    #[test]
+    fn the_configured_stdin_limit_is_the_cut() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let mut spec = connection_spec(marker.path());
+            Arc::get_mut(&mut spec).expect("one owner").max_stdin = 1000;
+            let (_dir, socket) = serving_socket(spec);
+            let out = marker.path().join("out");
+            let source = format!(r#"x=$(cat); printf %s "${{#x}}" > {}"#, out.display());
+            let (mut reader, _writer) = call_with_input(&socket, &[b'x'; 1000], &source).await;
+            let (stderr, status) = stderr_and_status(&mut reader).await;
+            assert_eq!(status, 0, "{stderr}");
+            assert_eq!(std::fs::read_to_string(&out).unwrap(), "1000");
+            let (mut reader, mut writer) = call_with_input(&socket, &[b'x'; 1001], &source).await;
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            put(
+                &mut writer,
+                1,
+                Body::Signal {
+                    kind: SignalKind::Interrupt,
+                },
+            )
+            .await;
+            let (stderr, status) = stderr_and_status(&mut reader).await;
+            assert_ne!(status, 0);
+            assert!(stderr.contains("stdin is more than 1000 bytes"), "{stderr}");
         }));
     }
 
@@ -4483,6 +4575,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
             let registry = discovery.registry();
             let spec = Arc::new(ShellSpec {
                 max_input: DEFAULT_SHELL_MAX_INPUT,
+                max_stdin: DEFAULT_SHELL_MAX_STDIN,
                 max_output: DEFAULT_SHELL_MAX_OUTPUT,
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
@@ -4800,6 +4893,7 @@ done"#,
                     .expect("the registry starts");
             let spec = Arc::new(ShellSpec {
                 max_input: DEFAULT_SHELL_MAX_INPUT,
+                max_stdin: DEFAULT_SHELL_MAX_STDIN,
                 max_output: DEFAULT_SHELL_MAX_OUTPUT,
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
@@ -4960,6 +5054,7 @@ done"#;
                     .expect("the registry starts");
             let spec = Arc::new(ShellSpec {
                 max_input: DEFAULT_SHELL_MAX_INPUT,
+                max_stdin: DEFAULT_SHELL_MAX_STDIN,
                 max_output: DEFAULT_SHELL_MAX_OUTPUT,
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
