@@ -704,8 +704,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   the Shell deadline and fails; a failed Call then gets a stderr note that its input was cut. On a
   read error the alias sends `Signal` and no `InputEof`, the broker drops the Call so
   `ProcessGroup::drop` kills and reaps each process it started, and the alias exits 125. The broker
-  cuts the same way at `max_stdin` times `MAX_PROGRAMS_PER_CONNECTION` per connection, and it adds no
-  buffer: input waits in the Program's existing stdin channel. It refuses an `Input` longer than `MAX_ENCODED_CHUNK_BYTES`
+  cuts the same way at `max_stdin` times `MAX_PROGRAMS_PER_CONNECTION` per connection, and
+  input waits in the same per-Program buffer; the pump sends it in frames of at most `MAX_CHUNK_BYTES`,
+  because the Shell's `ChannelReader` shifts a frame's remainder on each read. It refuses an `Input` longer than `MAX_ENCODED_CHUNK_BYTES`
   before it decodes it, and after a refused `Input` signals the running `Call`, leaves stdin open (`Close` also signals
   and leaves stdin open)
   so the Call never reads end-of-file on part of its input, drops every later `Input`, and refuses each later `Call` on that
