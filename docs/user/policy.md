@@ -612,7 +612,10 @@ own `has` guard, so a rule that covers both families gives each one its own clau
 @id("metadata_addresses")
 forbid (principal, action == Box::Action::"net:connect", resource)
 when {
-  (context.input has ip4 && context.input.ip4 like "169.254.*") ||
+  (context.input has ip4 && (
+    context.input.ip4 like "169.254.*" ||
+    context.input.ip4 == "168.63.129.16" ||
+    context.input.ip4 == "100.100.100.200")) ||
   (context.input has ip6 && (
     context.input.ip6 == "fd00:ec2::254" ||
     context.input.ip6 like "fe8*" || context.input.ip6 like "fe9*" ||
