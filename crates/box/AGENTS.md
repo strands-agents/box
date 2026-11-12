@@ -691,7 +691,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
 - **A Shell alias streams finite stdin after the Call.** It classifies fd 0 with `fstat`: a pipe,
   a regular file, or a socket is read; a terminal, another device, or a closed fd is not. A thread
   reads it and `pump_input` sends `Input` frames, coalesced for `INPUT_COALESCE_WAIT` and up to
-  `MAX_CHUNK_BYTES`, then `InputEof`. The broker's stdin channel holds at least 256 frames, and enough full chunks for `max_stdin`, so a writer's
+  `MAX_CHUNK_BYTES`, then `InputEof`. The broker's stdin channel holds one slot per byte of `max_stdin`, so a writer's
   small writes do not trip flow control while the command is not reading. The alias reads stdin
   whether or not the command reads it, so it consumes bytes a POSIX shell would leave, such as the
   rest of an inherited file. The alias returns on `Exit`, so a writer that keeps the pipe open holds nothing:
@@ -704,7 +704,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   the Shell deadline and fails; a failed Call then gets a stderr note that its input was cut. On a
   read error the alias sends `Signal` and no `InputEof`, the broker drops the Call so
   `ProcessGroup::drop` kills and reaps each process it started, and the alias exits 125. The broker
-  enforces `max_stdin` times `MAX_PROGRAMS_PER_CONNECTION` per connection, and it adds no
+  cuts the same way at `max_stdin` times `MAX_PROGRAMS_PER_CONNECTION` per connection, and it adds no
   buffer: input waits in the Program's existing stdin channel. It refuses an `Input` longer than `MAX_ENCODED_CHUNK_BYTES`
   before it decodes it, and after a refused `Input` signals the running `Call`, leaves stdin open (`Close` also signals
   and leaves stdin open)

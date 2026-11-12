@@ -1150,24 +1150,17 @@ async fn serve_transport(
                         .await?;
                         continue;
                     };
-                    // A full stdin channel is the client outrunning its own program; report it rather
-                    // than dropping the bytes silently.
+                    // The connection's limit cuts like a Program's: the bytes past it are discarded,
+                    // and the Program withholds end-of-file.
                     let connection_limit =
                         spec.max_stdin.saturating_mul(MAX_PROGRAMS_PER_CONNECTION);
-                    if input_accepted.saturating_add(bytes.len()) > connection_limit
-                        && !control.input_capped()
-                    {
-                        refuse_input(
-                            &frames,
-                            &programs,
-                            &running,
-                            id,
-                            &format!("the connection's input is more than {connection_limit} bytes"),
-                        )
-                        .await?;
-                        continue;
+                    let room = connection_limit.saturating_sub(input_accepted);
+                    let cut = bytes.len() > room;
+                    let fed = control.feed_stdin(&bytes[..bytes.len().min(room)]);
+                    if cut {
+                        control.cap_input();
                     }
-                    match control.feed_stdin(&bytes) {
+                    match fed {
                         Ok(accepted) => input_accepted += accepted,
                         // Nothing reads this stdin any more, so the bytes have no reader.
                         Err(InputRefusal::Closed) => {}
@@ -3388,9 +3381,114 @@ done"#;
                 },
             )
             .await;
-            let (kind, reason) = expect_denial(&mut reader, over).await;
-            assert_eq!(kind, DeniedKind::OverBudget, "{reason}");
-            assert!(reason.contains("connection"), "{reason}");
+            put(&mut writer, over, Body::InputEof).await;
+            put(
+                &mut writer,
+                over,
+                Body::Call {
+                    correlation: Default::default(),
+                    source: "printf ok".to_string(),
+                },
+            )
+            .await;
+            let (stderr, status) = stderr_and_status(&mut reader).await;
+            assert_eq!(
+                status, 0,
+                "the connection's limit cuts rather than refuses: {stderr}"
+            );
+        }));
+    }
+
+    /// Many small frames below the limit never fill the stdin queue, so a command that reads late,
+    /// or never, is not refused.
+    #[test]
+    fn many_small_frames_below_the_limit_never_refuse_a_slow_reader() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            for source in [
+                "sleep 1; printf done",
+                "sleep 1; x=$(cat); printf %s \"${#x}\"",
+            ] {
+                let (mut reader, mut writer) = transport(&socket).await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Open {
+                        mode: Interpreter::Shell,
+                    },
+                )
+                .await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Call {
+                        correlation: Default::default(),
+                        source: source.to_string(),
+                    },
+                )
+                .await;
+                for _ in 0..600 {
+                    put(
+                        &mut writer,
+                        1,
+                        Body::Input {
+                            data: encode_payload(b"x"),
+                        },
+                    )
+                    .await;
+                }
+                put(&mut writer, 1, Body::InputEof).await;
+                let (stderr, status) = stderr_and_status(&mut reader).await;
+                assert_eq!(status, 0, "{source}: {stderr}");
+            }
+        }));
+    }
+
+    /// A `Close` mid-input stops the Call without end-of-file, so it never acts on part of its input.
+    #[test]
+    fn a_close_mid_input_never_runs_the_command_after_the_read() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let out = marker.path().join("out");
+            let (_reader, mut writer) = transport(&socket).await;
+            for id in 1..=5_u32 {
+                put(
+                    &mut writer,
+                    id,
+                    Body::Open {
+                        mode: Interpreter::Shell,
+                    },
+                )
+                .await;
+                put(
+                    &mut writer,
+                    id,
+                    Body::Call {
+                        correlation: Default::default(),
+                        source: format!(r#"x=$(cat); printf %s "$x" > {}"#, out.display()),
+                    },
+                )
+                .await;
+                put(
+                    &mut writer,
+                    id,
+                    Body::Input {
+                        data: encode_payload(b"abc"),
+                    },
+                )
+                .await;
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                put(&mut writer, id, Body::Close).await;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            assert!(
+                !out.exists(),
+                "a closed Call must not act on part of its input"
+            );
         }));
     }
 

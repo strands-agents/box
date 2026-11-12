@@ -16,10 +16,6 @@ use tokio::sync::mpsc;
 
 use super::protocol::{MAX_CALL_OUTPUT_BYTES, MAX_CHUNK_BYTES, Stream};
 
-/// The least stdin channel depth, in frames. The bytes they hold stay under the Program's stdin
-/// limit.
-const INPUT_CHANNEL_DEPTH: usize = 256;
-
 /// The output channel depth, per stream. Bounded, so a Program that outruns its client stalls
 /// itself rather than growing a queue inside the daemon.
 const OUTPUT_CHANNEL_DEPTH: usize = 64;
@@ -82,7 +78,9 @@ impl Program {
         mut shell: strands_shell::Shell,
         input_limit: usize,
     ) -> io::Result<(Self, ProgramOutput, ProgramControl)> {
-        let depth = INPUT_CHANNEL_DEPTH.max(input_limit.div_ceil(MAX_CHUNK_BYTES) + 1);
+        // One slot per byte of the limit: every queued frame holds at least one byte, so the queue
+        // fills only past the limit, which `try_feed` never queues.
+        let depth = input_limit.clamp(1, tokio::sync::Semaphore::MAX_PERMITS);
         let (stdin_tx, stdin_rx) = mpsc::channel(depth);
         let (stdout_tx, stdout_rx) = mpsc::channel(OUTPUT_CHANNEL_DEPTH);
         let (stderr_tx, stderr_rx) = mpsc::channel(OUTPUT_CHANNEL_DEPTH);
@@ -228,6 +226,11 @@ impl ProgramControl {
             self.input_capped.store(true, Ordering::SeqCst);
         }
         Ok(taken.len())
+    }
+
+    /// Treat stdin as having reached its limit: later input is discarded and end-of-file withheld.
+    pub(crate) fn cap_input(&self) {
+        self.input_capped.store(true, Ordering::SeqCst);
     }
 
     /// Whether stdin reached the Program's limit, so its end-of-file never comes.
