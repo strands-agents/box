@@ -129,6 +129,21 @@ pub(crate) fn read_remote_mcp_servers(path: &Path) -> Result<Vec<RemoteMcpServer
     let (_, remote_mcp) = mcp::partition(&file.mcp)?;
     let mut servers = Vec::new();
     for remote in remote_mcp {
+        // A re-routed server is reachable only through the backend, and that re-route — with its
+        // SigV4/`env://` backend auth — happens at `run` time in the egress gateway. Offline
+        // `generate-schema` has no gateway, so it cannot discover a re-routed server; refuse by name
+        // rather than silently discover the ORIGINAL host (wrong tools, and it would resolve the
+        // phantom-only destination `secret` against that host).
+        if !remote.backends.is_empty() {
+            return Err(ConfigError::Mcp {
+                name: remote.name,
+                reason: "re-routes to a backend, which generate-schema cannot discover: the \
+                         re-route and its backend auth apply only at run time, in the egress \
+                         gateway. Author this server's mcp:call rules by hand"
+                    .to_string(),
+            }
+            .into());
+        }
         let Some(destination) = remote.destinations.first() else {
             continue;
         };
@@ -1658,6 +1673,38 @@ mod tests {
             read_mcp_servers(&path).unwrap()[0].arguments(),
             &["concrete"]
         );
+    }
+
+    /// Offline `generate-schema` cannot discover a re-routed MCP server: the re-route and its backend
+    /// auth apply only at run time, in the gateway. `read_remote_mcp_servers` refuses by name rather
+    /// than silently discover the ORIGINAL host (wrong tools, and resolving the phantom-only secret
+    /// against that host). Without a backend the same entry is read normally.
+    #[test]
+    fn offline_schema_generation_refuses_a_re_routed_remote_mcp_server() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("box.toml");
+        let with_backend = "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+            [mcp.web]\ntype = \"http\"\ndestinations = [\"api.example.com\"]\n\
+            [[mcp.web.backends]]\nurl = \"https://gw.example.com/mcp\"\n";
+        std::fs::write(&path, with_backend).unwrap();
+        let error = match read_remote_mcp_servers(&path) {
+            Ok(_) => panic!("a re-routed server must be refused, not discovered"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("web") && error.contains("generate-schema cannot discover"),
+            "a re-routed server is refused by name: {error}"
+        );
+        // The same entry without a backend is read normally, on its original host.
+        std::fs::write(
+            &path,
+            "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+             [mcp.web]\ntype = \"http\"\ndestinations = [\"api.example.com\"]\n",
+        )
+        .unwrap();
+        let servers = read_remote_mcp_servers(&path).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].url, "https://api.example.com/mcp");
     }
     // **The egress tests still live here.** They belong in `egress.rs` beside what they test;
     // moving them needs the `load` fixture below, which every other test also uses.
@@ -4158,33 +4205,31 @@ command = ["mcp-server-fetch"]
             .expect("the remote MCP server is stored");
         assert_eq!(entry.backends.len(), 1, "the declared backend is carried");
 
-        // The gateway still classifies the server on the ORIGINAL host: the re-route changes which
-        // bytes leave the box, not which `mcp:call`/`http:request` policy judges. See
+        // The gateway classifies EXACTLY the ORIGINAL host and nothing else: the re-route changes
+        // which bytes leave the box, not which `mcp:call`/`http:request` policy judges. Whole-value
+        // equality so a regression that also classified the backend host would fail here. See
         // docs/design/decisions.md#a-re-route-is-authorized-on-the-original-destination.
-        assert!(
-            record
-                .mcp_servers()
-                .iter()
-                .any(|(h, name)| h == "api.githubcopilot.com" && name == "github"),
-            "mcp_servers() keys the original host: {:?}",
-            record.mcp_servers()
+        assert_eq!(
+            record.mcp_servers(),
+            vec![("api.githubcopilot.com".to_string(), "github".to_string())],
+            "mcp_servers() names only the original host, never the backend"
         );
 
-        // The dial targets the backend, keyed by the original destination.
-        let dials = record.backend_dials().expect("dials build");
-        assert_eq!(dials.len(), 1, "one dial for the one destination");
-        let (pattern, target) = &dials[0];
+        // The dial targets the backend, keyed by the original destination. Whole-value equality so a
+        // wrong port or scheme is caught, not just the host.
         assert_eq!(
-            *pattern,
-            DestinationPattern::parse("api.githubcopilot.com").expect("pattern"),
-            "the dial is keyed by the original destination, not the backend"
+            record.backend_dials().expect("dials build"),
+            vec![(
+                DestinationPattern::parse("api.githubcopilot.com").expect("pattern"),
+                egress::BackendTarget {
+                    scheme: egress::BackendScheme::Https,
+                    host: "abc.gateway.bedrock-agentcore.us-east-1.amazonaws.com".to_string(),
+                    port: 443,
+                    path_prefix: "/mcp".to_string(),
+                },
+            )],
+            "one dial, keyed by the original destination, to the exact backend target"
         );
-        assert_eq!(
-            target.host,
-            "abc.gateway.bedrock-agentcore.us-east-1.amazonaws.com"
-        );
-        assert!(target.is_tls(), "an https backend dials TLS");
-        assert_eq!(target.path_prefix, "/mcp", "the url prefix is kept");
 
         // The backend's aws:// auth opens one box-owned credential vault, keyed by the original
         // destination so the gateway finds it after the Host rewrite.

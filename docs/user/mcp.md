@@ -392,6 +392,10 @@ backend address check, and how a phantom-only `env://` `secret` rides beside a b
 difference is scope: a backend here re-routes a remote MCP server, and a `backends` key is refused on
 a `type = "stdio"` server, which is a local child with no remote endpoint.
 
+`policy generate-schema` cannot discover a re-routed server: the re-route and its backend `auth`
+apply only at `box run` time, in the egress gateway, and the offline command has no gateway. It
+refuses a `[mcp.<name>]` with a backend by name, so write that server's `mcp:call` rules by hand.
+
 ## Errors and exit codes
 
 `box run` exits with an error before the agent starts when the configuration loader rejects a table.
