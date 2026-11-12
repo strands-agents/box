@@ -1,0 +1,18 @@
+# expect: `<grammar>.shell.publish.options.offline`: flag "--offline" is also a flag of `<grammar>.global.options.offline`
+# Without `overrides`, an action option cannot spell the flag of an `anywhere` global option.
+
+name    = "uv"
+program = "uv"
+format  = 1
+version = 1
+
+[effects]
+network = "uv may contact a package index"
+
+[global]
+options.offline = { flag = ["--offline"], removes = ["network"], anywhere = true }
+options.index   = { flag = ["--index"], value = "required", anywhere = true }
+
+[shell.publish]
+usage = "uv [global options] publish [options]"
+options.offline = { flag = ["--offline"] }

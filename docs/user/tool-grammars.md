@@ -84,7 +84,7 @@ The keys:
 | `name` | The name in the policy namespace, so `name = "git"` gives `Tool::git::Action::"push"`. |
 | `program` | The program name the grammar reads, which is the name the agent types. When it isn't the last part of `command[0]` in its own `[tool]`, `program` on `PATH` must reach the same file as `command[0]`. |
 | `effects` | Each effect a command can have, with a one-line description. |
-| `global.options` | Options that come before the action's words. Only an action whose `usage` has `[global options]` accepts them. |
+| `global.options` | Options that come before the action's words. Only an action whose `usage` has `[global options]` accepts them. An option with `anywhere = true` can also come between and after the words. An action can give such an option its own effects: declare an option with the same name, `flag`, `value`, and `repeated` in `shell.<action>.options`, and set `overrides = true` on it. It then takes the place of the global one for that action, wherever the line gives it. |
 | `shell.<action>` | One action, such as `shell.push`. |
 | `shell.<action>.usage` | The action's command line. Each `<name>` is an operand, and `<name>...` takes more than one word. |
 | `shell.<action>.adds` | The effects that every spelling of the action has. |

@@ -1,0 +1,37 @@
+# global-option-override grammar corpus
+#
+# Each case is one argv, and what the shell grammar of `global-option-override.grammar.toml` reads
+# it as. `fields` lists each field that does not hold its default: a Bool `false`, an
+# empty set, or an absent string. An `unmodeled` case has no fields and no effects.
+
+# The global option keeps its `removes` on an action that does not override it
+[[case]]
+argv = ["uv", "sync", "--offline"]
+action = "sync"
+fields = { offline = true }
+
+[[case]]
+argv = ["uv", "--offline", "sync"]
+action = "sync"
+fields = { offline = true }
+
+# After the command words, the action's own option applies, with no `removes`
+[[case]]
+argv = ["uv", "publish", "--offline"]
+action = "publish"
+fields = { offline = true }
+effects = ["network", "publish"]
+
+# Before the command words, the action's own option applies too
+[[case]]
+argv = ["uv", "--offline", "publish", "dist/x.whl"]
+action = "publish"
+fields = { files = ["dist/x.whl"], offline = true }
+effects = ["network", "publish"]
+
+# A global option that the action does not override still applies
+[[case]]
+argv = ["uv", "publish", "-q", "--dry-run"]
+action = "publish"
+fields = { dry_run = true, quiet = true }
+effects = ["network"]

@@ -185,22 +185,53 @@ impl ActionGrammar {
         if !action.options.is_empty() && !usage.options {
             return Err(GrammarRefusal::OptionsNotInUsage { place });
         }
-        if usage.globals {
-            for (option, shell_option) in &action.options {
-                if let Some((flag, global)) = shell_option
+        let overrides = |option: &String| {
+            usage.globals
+                && action
+                    .options
+                    .get(option)
+                    .is_some_and(|shell_option| shell_option.overrides)
+        };
+        for (option, shell_option) in &action.options {
+            let option_place = || Place::ActionOption {
+                action: name.as_str().to_string(),
+                option: option.clone(),
+            };
+            if shell_option.overrides {
+                let Some(global) = global_options
+                    .get(option)
+                    .filter(|global| global.anywhere && usage.globals)
+                else {
+                    return Err(GrammarRefusal::NothingToOverride {
+                        place: option_place(),
+                    });
+                };
+                let mut flags = shell_option.flags.clone();
+                let mut global_flags = global.flags.clone();
+                flags.sort();
+                global_flags.sort();
+                if flags != global_flags
+                    || shell_option.value != global.value
+                    || shell_option.repeated != global.repeated
+                {
+                    return Err(GrammarRefusal::BadOverride {
+                        place: option_place(),
+                        other: Box::new(Place::GlobalOption(option.clone())),
+                    });
+                }
+                continue;
+            }
+            if usage.globals
+                && let Some((flag, global)) = shell_option
                     .flags
                     .iter()
                     .find_map(|flag| anywhere.flags.get(flag).map(|slot| (flag, slot)))
-                {
-                    return Err(GrammarRefusal::FlagTaken {
-                        place: Place::ActionOption {
-                            action: name.as_str().to_string(),
-                            option: option.clone(),
-                        },
-                        flag: flag.clone(),
-                        other: Box::new(Place::GlobalOption(global.field.clone())),
-                    });
-                }
+            {
+                return Err(GrammarRefusal::FlagTaken {
+                    place: option_place(),
+                    flag: flag.clone(),
+                    other: Box::new(Place::GlobalOption(global.field.clone())),
+                });
             }
         }
         let operand_place = |operand: &str| Place::Operand {
@@ -219,7 +250,12 @@ impl ActionGrammar {
 
         let mut fields = Vec::new();
         if usage.globals {
-            fields.extend(global_options.iter().map(option_field));
+            fields.extend(
+                global_options
+                    .iter()
+                    .filter(|(option, _)| !overrides(option))
+                    .map(option_field),
+            );
         }
         fields.extend(action.options.iter().map(option_field));
         let mut operands = Vec::new();
