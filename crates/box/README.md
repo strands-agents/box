@@ -364,17 +364,16 @@ An `aws://` credential is a **signed route**. The box resolves the identity on t
 signs each request, so the workload holds no credential at all. It receives placeholder AWS
 credentials, and the signed leg strips whatever it signed with before signing again.
 
-**`aws://PROFILE` must carry static keys.** For a named profile, `credential_process` is **refused**,
-and the refusal names the command it would have run; a profile that assumes a role or uses SSO is
-refused too, because resolving one needs an STS call. Export `AWS_BEARER_TOKEN_BEDROCK` and bind
-that instead.
+**Both `aws://` forms resolve through the AWS SDK.** `aws://PROFILE` pins the default chain to the
+named profile, so it resolves that profile's static keys, `credential_process`, assume-role, or web
+identity; a bare `aws://` resolves the default chain under the host's ambient identity, and the box
+warns on every signed request. AWS SSO and `aws login` profiles are refused (the `sso` provider is
+compiled out), and the refusal names the missing provider.
 
-**A bare `aws://` (no profile) resolves the AWS SDK default credential provider chain** — the host's
-ambient identity — and the box warns on every signed request. Because that chain reads
-`credential_process`, which the trusted process runs outside containment, a bare `aws://` is a
-remote-code-execution path when the workload can write `~/.aws`; the shipped box has no setting that
-refuses the bare form. See
-[the egress guide](../../docs/user/egress.md#credential-sources) for the chain, the warning, and the
+Because either form reads `credential_process`, which the trusted process runs outside containment,
+an `aws://` route is a remote-code-execution path when the workload can write `~/.aws`; the shipped
+box has no setting that refuses the bare form. See
+[the egress guide](../../docs/user/egress.md#credential-sources) for both forms, the warning, and the
 `~/.aws` rule.
 
 **Only `env://` and `aws://` are accepted**, and the config load refuses the rest by

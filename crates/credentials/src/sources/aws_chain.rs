@@ -1,9 +1,11 @@
-//! The SDK-backed AWS default credential provider chain, driven on a dedicated worker thread.
+//! The SDK-backed AWS credential provider, driven on a dedicated worker thread.
 //!
-//! A bare `aws://` resolves the AWS SDK default credential provider chain
-//! (docs/design/decisions.md#a-bare-aws-resolves-the-default-credential-chain). See the crate
-//! AGENTS.md for the worker, cache, and region design.
+//! Both `aws://` forms resolve through the AWS SDK
+//! (docs/design/decisions.md#a-provider-refuses-an-identity-it-cannot-honour): a bare `aws://`
+//! resolves the default credential provider chain, and `aws://PROFILE` pins that same chain to the
+//! named profile. See the crate AGENTS.md for the worker, cache, region, and timeout design.
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
@@ -19,11 +21,20 @@ type Expiry = Option<SystemTime>;
 /// A resolved credential and its expiry.
 type Resolved = (AwsSessionCredentials, Expiry);
 
+/// The cache key: the scoped profile name, or `None` for the bare default chain. One slot per
+/// identity, so a bare route and a named profile (or two named profiles) never evict each other.
+type ProfileKey = Option<String>;
+
 /// How long before expiry a resolve is retried, so a request never signs with an expired token.
 const EXPIRY_BUFFER: Duration = Duration::from_secs(5 * 60);
 
 /// How long a caller waits for the worker before the resolve is a hard error.
 const CALLER_DEADLINE: Duration = Duration::from_secs(10);
+
+/// How long one resolve may run on the worker before it is a hard error, shorter than
+/// [`CALLER_DEADLINE`] so the worker thread recovers. A `credential_process` helper the AWS SDK
+/// does not time out cannot wedge the chain for the life of the box past this bound.
+const RESOLVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ===================================================================================================
 // The refresh cache
@@ -36,12 +47,12 @@ const CALLER_DEADLINE: Duration = Duration::from_secs(10);
 struct RefreshCache<R, N> {
     resolve: R,
     now: N,
-    cached: Option<(Zeroizing<AwsSessionCredentials>, Expiry)>,
+    cached: HashMap<ProfileKey, (Zeroizing<AwsSessionCredentials>, Expiry)>,
 }
 
 impl<R, N> RefreshCache<R, N>
 where
-    R: FnMut() -> Result<Resolved>,
+    R: FnMut(Option<&str>) -> Result<Resolved>,
     N: Fn() -> SystemTime,
 {
     /// A cache that resolves through `resolve` and reads the clock through `now`.
@@ -49,25 +60,28 @@ where
         Self {
             resolve,
             now,
-            cached: None,
+            cached: HashMap::new(),
         }
     }
 
-    /// Serve the cached credentials while valid; refresh inside the expiry buffer; on a failed
-    /// refresh serve still-valid cached, else return the hard error.
-    fn provide(&mut self) -> Result<AwsSessionCredentials> {
+    /// Serve the cached credentials for `profile` while valid; refresh inside the expiry buffer; on
+    /// a failed refresh serve still-valid cached, else return the hard error. Each `profile` key has
+    /// its own slot.
+    fn provide(&mut self, profile: Option<&str>) -> Result<AwsSessionCredentials> {
         let now = (self.now)();
-        if let Some((credentials, expiry)) = &self.cached
+        let key: ProfileKey = profile.map(str::to_string);
+        if let Some((credentials, expiry)) = self.cached.get(&key)
             && !should_refresh(now, *expiry)
         {
             return Ok((**credentials).clone());
         }
-        match (self.resolve)() {
+        match (self.resolve)(profile) {
             Ok((credentials, expiry)) => {
-                self.cached = Some((Zeroizing::new(credentials.clone()), expiry));
+                self.cached
+                    .insert(key, (Zeroizing::new(credentials.clone()), expiry));
                 Ok(credentials)
             }
-            Err(error) => match &self.cached {
+            Err(error) => match self.cached.get(&key) {
                 Some((credentials, expiry)) if still_valid(now, *expiry) => {
                     Ok((**credentials).clone())
                 }
@@ -100,14 +114,16 @@ fn should_refresh(now: SystemTime, expiry: Expiry) -> bool {
 // The SDK-backed provider
 // ===================================================================================================
 
-/// One resolve request to the worker: the channel the worker replies on, and the instant the caller
-/// stops waiting, so the worker can skip a resolve for a caller that already left.
+/// One resolve request to the worker: the profile to resolve (`None` is the bare default chain), the
+/// channel the worker replies on, and the instant the caller stops waiting, so the worker can skip a
+/// resolve for a caller that already left.
 struct Request {
+    profile: ProfileKey,
     reply: Sender<Result<AwsSessionCredentials>>,
     deadline: Instant,
 }
 
-/// Resolves the AWS SDK default credential provider chain on a dedicated worker thread.
+/// Resolves AWS credentials through the SDK on a dedicated worker thread, bare or named-profile.
 pub(in crate::sources) struct SdkChainProvider {
     sender: Sender<Request>,
 }
@@ -119,9 +135,13 @@ impl SdkChainProvider {
         PROVIDER.get_or_init(|| SdkChainProvider::spawn(Box::new(real_setup)))
     }
 
-    /// Resolve the default chain, waiting up to [`CALLER_DEADLINE`] for the worker.
-    pub(in crate::sources) fn provide(&self) -> Result<AwsSessionCredentials> {
-        self.provide_within(CALLER_DEADLINE)
+    /// Resolve `profile` (or the bare default chain when `None`), waiting up to [`CALLER_DEADLINE`]
+    /// for the worker.
+    pub(in crate::sources) fn provide(
+        &self,
+        profile: Option<&str>,
+    ) -> Result<AwsSessionCredentials> {
+        self.provide_within(profile, CALLER_DEADLINE)
     }
 
     /// Spawn the worker.
@@ -136,11 +156,16 @@ impl SdkChainProvider {
         Self { sender }
     }
 
-    /// Send a request and wait up to `deadline` for the worker's reply.
-    fn provide_within(&self, deadline: Duration) -> Result<AwsSessionCredentials> {
+    /// Send a request for `profile` and wait up to `deadline` for the worker's reply.
+    fn provide_within(
+        &self,
+        profile: Option<&str>,
+        deadline: Duration,
+    ) -> Result<AwsSessionCredentials> {
         let (reply, reply_rx) = mpsc::channel();
         self.sender
             .send(Request {
+                profile: profile.map(str::to_string),
                 reply,
                 deadline: Instant::now() + deadline,
             })
@@ -161,15 +186,18 @@ impl SdkChainProvider {
     }
 
     /// A provider whose worker resolves through `resolve` rather than the real SDK chain — the test
-    /// seam that exercises the worker, the runtime bridge, and the cache offline.
+    /// seam that exercises the worker, the runtime bridge, and the cache offline. `resolve` receives
+    /// the requested profile.
     #[cfg(test)]
-    fn with_resolver(resolve: impl FnMut() -> Result<Resolved> + Send + 'static) -> Self {
+    fn with_resolver(
+        resolve: impl FnMut(Option<&str>) -> Result<Resolved> + Send + 'static,
+    ) -> Self {
         Self::spawn(Box::new(move || Ok(Box::new(resolve) as ResolveFn)))
     }
 }
 
-/// The resolve closure the worker drives each request.
-type ResolveFn = Box<dyn FnMut() -> Result<Resolved> + Send>;
+/// The resolve closure the worker drives each request, given the requested profile.
+type ResolveFn = Box<dyn FnMut(Option<&str>) -> Result<Resolved> + Send>;
 
 /// Runs once on the worker thread to build the resolve closure, or fails if the runtime cannot
 /// start.
@@ -195,7 +223,9 @@ fn worker(receiver: Receiver<Request>, setup: SetupFn) {
                 if Instant::now() >= request.deadline {
                     continue;
                 }
-                let _ = request.reply.send(cache.provide());
+                let _ = request
+                    .reply
+                    .send(cache.provide(request.profile.as_deref()));
             }
         }
     }
@@ -231,34 +261,72 @@ fn real_setup() -> Result<ResolveFn> {
             .region(),
         )
         .unwrap_or_else(|| aws_config::Region::from_static("us-east-1"));
-    Ok(Box::new(move || {
+    Ok(Box::new(move |profile: Option<&str>| {
         // `without_region` carries the Tokio sleep implementation (rt-tokio). A fresh config
         // re-reads the profile files; `.region` pins the region so the rebuild does not re-run the
-        // region chain (which reaches instance metadata).
+        // region chain (which reaches instance metadata). `.profile_name` pins the whole chain to
+        // the named profile, so `aws://PROFILE` resolves that profile's `credential_process`,
+        // assume-role, or web identity; a bare `aws://` leaves it unset for the default chain.
         let http_client = http_client.clone();
         let region = region.clone();
-        let chain = runtime.block_on(async {
+        resolve_once(&runtime, || {
             let config = aws_config::provider_config::ProviderConfig::without_region()
-                .with_http_client(http_client);
-            aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
-                .region(region)
-                .configure(config)
-                .build()
-                .await
-        });
-        resolve_once(&runtime, &chain)
+                .with_http_client(http_client.clone());
+            let mut builder =
+                aws_config::default_provider::credentials::DefaultCredentialsChain::builder()
+                    .region(region.clone())
+                    .configure(config);
+            if let Some(profile) = profile {
+                builder = builder.profile_name(profile);
+            }
+            builder.build()
+        })
     }))
 }
 
-/// Resolve the chain once, mapping an unreachable or empty chain to [`CredentialError::KeystoreAccess`].
-fn resolve_once(
-    runtime: &tokio::runtime::Runtime,
-    chain: &aws_config::default_provider::credentials::DefaultCredentialsChain,
-) -> Result<Resolved> {
+/// Build a chain with `build_chain` and resolve it once under [`RESOLVE_TIMEOUT`], mapping an
+/// unreachable, empty, or timed-out chain to [`CredentialError::KeystoreAccess`]. The timeout keeps
+/// a stuck `credential_process` helper (which the SDK does not time out) from wedging the worker
+/// past this bound; the worker thread is then free to serve the next request.
+fn resolve_once<F, C>(runtime: &tokio::runtime::Runtime, build_chain: F) -> Result<Resolved>
+where
+    F: FnOnce() -> C,
+    C: std::future::Future<
+            Output = aws_config::default_provider::credentials::DefaultCredentialsChain,
+        >,
+{
     use aws_credential_types::provider::ProvideCredentials;
 
+    resolve_within(runtime, RESOLVE_TIMEOUT, async move {
+        let chain = build_chain().await;
+        chain.provide_credentials().await
+    })
+}
+
+/// Drive `resolve` on `runtime`, bounded by `timeout`. An elapsed timeout, or a provider error,
+/// maps to a hard [`CredentialError::KeystoreAccess`]. The timeout is what frees the single worker
+/// thread: the AWS SDK sets none on a `credential_process` helper, so without this a helper that
+/// never returns would wedge the chain for the life of the box. Split from [`resolve_once`] so a
+/// test drives the bound with a never-completing future, without the SDK or a real chain.
+fn resolve_within(
+    runtime: &tokio::runtime::Runtime,
+    timeout: Duration,
+    resolve: impl std::future::Future<
+        Output = std::result::Result<
+            aws_credential_types::Credentials,
+            aws_credential_types::provider::error::CredentialsError,
+        >,
+    >,
+) -> Result<Resolved> {
     let credentials = runtime
-        .block_on(chain.provide_credentials())
+        .block_on(async { tokio::time::timeout(timeout, resolve).await })
+        .map_err(|_elapsed| {
+            CredentialError::KeystoreAccess(format!(
+                "AWS credential resolution did not complete within {}s (a credential_process \
+                 helper may be stuck)",
+                timeout.as_secs().max(1)
+            ))
+        })?
         .map_err(|error| {
             CredentialError::KeystoreAccess(format!(
                 "AWS default credential chain resolved no credentials: {}",
@@ -319,16 +387,16 @@ mod tests {
         let clock = Cell::new(base);
         let expiry = Some(base + Duration::from_secs(3600));
         let mut cache = RefreshCache::new(
-            || {
+            |_profile| {
                 calls.set(calls.get() + 1);
                 Ok((creds("AKIA1"), expiry))
             },
             || clock.get(),
         );
 
-        assert_eq!(cache.provide().unwrap().access_key_id, "AKIA1");
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
         // A second call, still well before expiry, is served from the cache.
-        assert_eq!(cache.provide().unwrap().access_key_id, "AKIA1");
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
         assert_eq!(calls.get(), 1, "the chain was resolved only once");
     }
 
@@ -340,7 +408,7 @@ mod tests {
         let clock = Cell::new(base);
         // The first resolve expires one hour out; the second returns a fresh id.
         let mut cache = RefreshCache::new(
-            || {
+            |_profile| {
                 calls.set(calls.get() + 1);
                 let id = format!("AKIA{}", calls.get());
                 Ok((creds(&id), Some(clock.get() + Duration::from_secs(3600))))
@@ -348,11 +416,11 @@ mod tests {
             || clock.get(),
         );
 
-        assert_eq!(cache.provide().unwrap().access_key_id, "AKIA1");
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
         // Advance to within the buffer of the first expiry (3600 - 60 < 3600 - 300 window).
         clock.set(base + Duration::from_secs(3600) - Duration::from_secs(60));
         assert_eq!(
-            cache.provide().unwrap().access_key_id,
+            cache.provide(None).unwrap().access_key_id,
             "AKIA2",
             "a provide inside the buffer resolves again"
         );
@@ -367,7 +435,7 @@ mod tests {
         let calls = Cell::new(0u32);
         let clock = Cell::new(base);
         let mut cache = RefreshCache::new(
-            || {
+            |_profile| {
                 calls.set(calls.get() + 1);
                 let id = format!("AKIA{}", calls.get());
                 // No expiry, as a rotated static/session key in `~/.aws/credentials` carries.
@@ -376,14 +444,40 @@ mod tests {
             || clock.get(),
         );
 
-        assert_eq!(cache.provide().unwrap().access_key_id, "AKIA1");
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
         // The clock does not move, yet the next provide resolves again and sees the rotated value.
         assert_eq!(
-            cache.provide().unwrap().access_key_id,
+            cache.provide(None).unwrap().access_key_id,
             "AKIA2",
             "a non-expiring credential is re-resolved, not served forever"
         );
         assert_eq!(calls.get(), 2);
+    }
+
+    /// Each profile key has its own cache slot: a bare resolve and a named profile do not evict
+    /// each other, so one is served from cache while the other keeps its own value.
+    #[test]
+    fn cache_keys_by_profile() {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let calls = Cell::new(0u32);
+        let clock = Cell::new(base);
+        let expiry = Some(base + Duration::from_secs(3600));
+        // The resolved id echoes the requested profile, so the slot it lands in is visible.
+        let mut cache = RefreshCache::new(
+            |profile: Option<&str>| {
+                calls.set(calls.get() + 1);
+                Ok((creds(profile.unwrap_or("bare")), expiry))
+            },
+            || clock.get(),
+        );
+
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "bare");
+        assert_eq!(cache.provide(Some("prod")).unwrap().access_key_id, "prod");
+        assert_eq!(calls.get(), 2, "two distinct profiles resolved once each");
+        // Both are now cached independently; neither re-resolves and neither evicted the other.
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "bare");
+        assert_eq!(cache.provide(Some("prod")).unwrap().access_key_id, "prod");
+        assert_eq!(calls.get(), 2, "both served from their own slot");
     }
 
     /// A failed refresh while the cache is still valid serves the still-valid cached credentials.
@@ -394,7 +488,7 @@ mod tests {
         let clock = Cell::new(base);
         let expiry = Some(base + Duration::from_secs(3600));
         let mut cache = RefreshCache::new(
-            || {
+            |_profile| {
                 calls.set(calls.get() + 1);
                 if calls.get() == 1 {
                     Ok((creds("AKIA1"), expiry))
@@ -405,11 +499,11 @@ mod tests {
             || clock.get(),
         );
 
-        assert_eq!(cache.provide().unwrap().access_key_id, "AKIA1");
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
         // Move into the buffer but before expiry, so the refresh is attempted and fails.
         clock.set(base + Duration::from_secs(3600) - Duration::from_secs(60));
         assert_eq!(
-            cache.provide().unwrap().access_key_id,
+            cache.provide(None).unwrap().access_key_id,
             "AKIA1",
             "a failed refresh serves the still-valid cached credentials"
         );
@@ -424,7 +518,7 @@ mod tests {
         let clock = Cell::new(base);
         let expiry = Some(base + Duration::from_secs(3600));
         let mut cache = RefreshCache::new(
-            || {
+            |_profile| {
                 calls.set(calls.get() + 1);
                 if calls.get() == 1 {
                     Ok((creds("AKIA1"), expiry))
@@ -435,10 +529,10 @@ mod tests {
             || clock.get(),
         );
 
-        assert_eq!(cache.provide().unwrap().access_key_id, "AKIA1");
+        assert_eq!(cache.provide(None).unwrap().access_key_id, "AKIA1");
         // Past expiry: the cached credential is no longer valid, so a failed refresh is hard.
         clock.set(base + Duration::from_secs(7200));
-        let error = cache.provide().unwrap_err();
+        let error = cache.provide(None).unwrap_err();
         assert!(
             !error.is_soft(),
             "an expired cache with a failed refresh is hard"
@@ -451,13 +545,13 @@ mod tests {
     /// unsigned request.
     #[test]
     fn sdk_provider_deadline_is_hard() {
-        let provider = SdkChainProvider::with_resolver(|| {
+        let provider = SdkChainProvider::with_resolver(|_profile| {
             // Block past the caller's (short, injected) deadline so the caller times out first.
             thread::sleep(Duration::from_secs(2));
             Ok((creds("AKIA"), None))
         });
         let error = provider
-            .provide_within(Duration::from_millis(100))
+            .provide_within(None, Duration::from_millis(100))
             .unwrap_err();
         assert!(!error.is_soft(), "a deadline overrun is a hard error");
         assert!(
@@ -475,13 +569,13 @@ mod tests {
 
         let resolves = Arc::new(AtomicUsize::new(0));
         let counter = resolves.clone();
-        let provider = SdkChainProvider::with_resolver(move || {
+        let provider = SdkChainProvider::with_resolver(move |_profile| {
             counter.fetch_add(1, Ordering::SeqCst);
             Ok((creds("AKIA"), None))
         });
         // A zero deadline is already in the past when the worker dequeues the request.
         let error = provider
-            .provide_within(Duration::ZERO)
+            .provide_within(None, Duration::ZERO)
             .expect_err("a timed-out caller gets a hard error, not credentials");
         assert!(!error.is_soft());
         // Give the worker a moment; it must not have run the resolve for the departed caller.
@@ -496,28 +590,116 @@ mod tests {
     /// An empty chain result maps to `KeystoreAccess`, through the worker and the cache.
     #[test]
     fn sdk_provider_maps_empty_chain_to_keystore_access() {
-        let provider = SdkChainProvider::with_resolver(|| {
+        let provider = SdkChainProvider::with_resolver(|_profile| {
             Err(CredentialError::KeystoreAccess(
                 "no credentials found".to_string(),
             ))
         });
-        let error = provider.provide().unwrap_err();
+        let error = provider.provide(None).unwrap_err();
         assert!(
             matches!(error, CredentialError::KeystoreAccess(_)),
             "an empty chain is KeystoreAccess: {error:?}"
         );
     }
 
+    /// A named profile reaches the resolver as `Some(name)`, so `aws://PROFILE` resolves that
+    /// profile rather than the bare chain.
+    #[test]
+    fn sdk_provider_resolves_the_requested_profile() {
+        let provider = SdkChainProvider::with_resolver(|profile: Option<&str>| {
+            Ok((creds(profile.unwrap_or("bare")), None))
+        });
+        assert_eq!(provider.provide(None).unwrap().access_key_id, "bare");
+        assert_eq!(
+            provider.provide(Some("prod")).unwrap().access_key_id,
+            "prod",
+            "a named profile is resolved as itself"
+        );
+    }
+
+    /// After one resolve outlasts its caller's deadline, the worker thread recovers and serves the
+    /// next request — a resolve that overran one caller does not wedge the chain for the box's life.
+    /// This exercises `CALLER_DEADLINE` and worker reuse, not the per-resolve `RESOLVE_TIMEOUT`,
+    /// which `resolve_within_cuts_off_a_resolve_that_never_completes` pins.
+    #[test]
+    fn sdk_provider_worker_recovers_when_a_resolve_outlasts_its_caller() {
+        // The resolver blocks on the first call until the test releases it, then returns fast.
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let calls = std::cell::Cell::new(0u32);
+        let provider = SdkChainProvider::with_resolver(move |_profile| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 1 {
+                // Hold the worker until the test has observed the first caller time out.
+                let _ = release_rx.recv();
+            }
+            Ok((creds("AKIA"), None))
+        });
+
+        // First caller gives up quickly while the worker is still blocked inside the resolve.
+        let error = provider
+            .provide_within(None, Duration::from_millis(50))
+            .expect_err("the first caller times out while the resolve is stuck");
+        assert!(!error.is_soft());
+
+        // Release the stuck resolve, then a fresh request must succeed on the recovered worker.
+        release_tx.send(()).expect("release the worker");
+        let resolved = provider
+            .provide_within(None, Duration::from_secs(5))
+            .expect("the worker recovered and served the next request");
+        assert_eq!(resolved.access_key_id, "AKIA");
+    }
+
+    /// The per-resolve timeout bounds the wait even when the resolve never completes. A
+    /// never-completing future stands in for a `credential_process` helper the SDK does not time
+    /// out; `resolve_within` must return a hard error near its timeout rather than block forever.
+    /// Run on a worker thread so deleting the `tokio::time::timeout` wrapper hangs that thread and
+    /// trips `recv_timeout` here, rather than wedging the whole test binary.
+    #[test]
+    fn resolve_within_cuts_off_a_resolve_that_never_completes() {
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a current-thread runtime");
+            // A future that never resolves, of the chain's own output type.
+            let never = std::future::pending::<
+                std::result::Result<
+                    aws_credential_types::Credentials,
+                    aws_credential_types::provider::error::CredentialsError,
+                >,
+            >();
+            let outcome = match resolve_within(&runtime, Duration::from_millis(50), never) {
+                Err(error)
+                    if !error.is_soft() && error.to_string().contains("did not complete") =>
+                {
+                    Ok(())
+                }
+                other => Err(format!("{other:?}")),
+            };
+            let _ = tx.send(outcome);
+        });
+        match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(Ok(())) => {}
+            Ok(Err(unexpected)) => {
+                panic!("resolve_within returned an unexpected result: {unexpected}")
+            }
+            Err(_) => panic!(
+                "resolve_within did not return within 2s — RESOLVE_TIMEOUT did not bound the wait"
+            ),
+        }
+    }
+
     /// `provide` is callable from a thread already running a runtime, with no "runtime within a
     /// runtime" panic, because the worker owns the runtime and the caller only waits on a channel.
     #[test]
     fn sdk_provider_is_callable_from_a_runtime_thread() {
-        let provider = SdkChainProvider::with_resolver(|| Ok((creds("AKIA"), None)));
+        let provider = SdkChainProvider::with_resolver(|_profile| Ok((creds("AKIA"), None)));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("a current-thread runtime");
-        let resolved = runtime.block_on(async { provider.provide() });
+        let resolved = runtime.block_on(async { provider.provide(None) });
         assert_eq!(resolved.unwrap().access_key_id, "AKIA");
     }
 }

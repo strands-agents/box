@@ -176,7 +176,7 @@ impl Vault {
     /// signed locator is the ambient/scoped AWS source. The audit reference names the credsd
     /// environment; a structured aws route has no such non-secret label, so it keeps the
     /// `scheme://structured` form.
-    fn audit_aws_resolve(&self, config: &Locator) -> Result<AwsResolution> {
+    pub(crate) fn audit_aws_resolve(&self, config: &Locator) -> Result<AwsResolution> {
         let request_id = RequestId::new(SIGN_CORRELATION);
         let reference = match config {
             Locator::Uri(uri) if config.scheme() == CREDSD_SCHEME => uri.clone(),
@@ -197,7 +197,7 @@ impl Vault {
         if config.scheme() == CREDSD_SCHEME {
             return self.resolve_credsd(config);
         }
-        AwsSource::with_policy(self.ambient_policy()).resolve(config)
+        AwsSource::with_provider(self.aws_provider(), self.ambient_policy()).resolve(config)
     }
 
     /// Resolve a `credsd://<environment>` locator to AWS session credentials.
@@ -426,11 +426,80 @@ fn signing_name(endpoint_prefix: &str) -> String {
 mod tests {
     use super::*;
 
-    // `sign_aws`'s warn-on-bare / no-warn-on-scoped behaviour is pinned hermetically at the
-    // acquisition level by `aws::tests::default_chain_acquisition_warns` and
-    // `scoped_profile_acquisition_does_not_warn`: `sign_aws` warns exactly when
-    // `resolution.acquisition.warning()` is `Some`. An end-to-end test through `Vault::sign_aws`
-    // would have to drive the real SDK chain and the process-wide provider, which is not hermetic.
+    use crate::vault::drain_captured_warnings;
+    use crate::{
+        AwsSessionCredentials, Backend, Destination, DestinationPattern, RouteSpec, Vault,
+        VaultConfig,
+    };
+    use std::sync::Arc;
+
+    /// A provider that returns fixed credentials for any profile, without touching the SDK, the
+    /// process-wide worker, or the host environment — the injectable seam the vault now exposes.
+    #[derive(Debug)]
+    struct FixedProvider;
+
+    impl crate::sources::AwsCredentialProvider for FixedProvider {
+        fn provide(&self, _profile: Option<&str>) -> Result<AwsSessionCredentials> {
+            Ok(AwsSessionCredentials {
+                access_key_id: "AKIATESTONLYNOTREAL".to_string(),
+                secret_access_key: "test-only-not-real".to_string(),
+                session_token: None,
+                region: None,
+            })
+        }
+    }
+
+    /// Open a signed-`aws://` vault with the fake provider injected, sign one request to an AWS
+    /// host, and return the warnings `sign_aws` emitted. Drives the real `Vault::sign_aws` path end
+    /// to end — the seam that a hardcoded process-wide provider did not allow.
+    fn sign_through_fake(locator: &str) -> Vec<String> {
+        let _ = drain_captured_warnings();
+        let opened = Vault::open_with_aws_provider(
+            VaultConfig::new(Backend::local(), "tenant-a").route(RouteSpec::signed_aws(
+                DestinationPattern::parse("*.amazonaws.com").unwrap(),
+                Locator::parse_uri(locator).unwrap(),
+            )),
+            Arc::new(FixedProvider),
+        )
+        .expect("the signed route opens with the injected provider");
+        let vault = opened.into_vault();
+        vault
+            .attach_for(Outbound {
+                destination: Destination {
+                    host: "s3.us-west-2.amazonaws.com",
+                    port: 443,
+                    path: "/",
+                },
+                method: "GET",
+                url: "https://s3.us-west-2.amazonaws.com/",
+                query: "",
+                headers: &[],
+                body: b"",
+            })
+            .expect("the signed route attaches")
+            .expect("a credential is bound for this destination");
+        drain_captured_warnings()
+    }
+
+    /// End to end through `Vault::sign_aws`: a bare `aws://` warns once per sign (the ambient
+    /// identity), and a scoped `aws://PROFILE` warns not at all. Hermetic because the injected
+    /// provider resolves the credentials, so no SDK, worker, or `AWS_*` environment is reached.
+    #[test]
+    fn sign_aws_warns_on_bare_and_not_on_scoped() {
+        let bare = sign_through_fake("aws://");
+        assert_eq!(bare.len(), 1, "a bare sign warns exactly once: {bare:?}");
+        assert!(
+            bare[0].contains("ambient"),
+            "the warning names the ambient identity: {}",
+            bare[0]
+        );
+
+        let scoped = sign_through_fake("aws://prod");
+        assert!(
+            scoped.is_empty(),
+            "a scoped-profile sign emits no warning: {scoped:?}"
+        );
+    }
 
     #[test]
     fn regional_and_global_hosts_derive_their_scope() {
