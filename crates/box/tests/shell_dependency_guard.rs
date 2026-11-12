@@ -205,3 +205,62 @@ fn the_box_kernel_serves_every_kernel_method_the_shell_declares() {
         }
     }
 }
+
+/// Each non-test `.rs` file under `dir`, with its path.
+fn box_sources(dir: &Path) -> Vec<(PathBuf, String)> {
+    let mut files = Vec::new();
+    rs_files(dir, &mut files);
+    files
+        .into_iter()
+        .filter(|file| !file.components().any(|part| part.as_os_str() == "tests"))
+        .map(|file| {
+            let source = std::fs::read_to_string(&file).expect("read a box source file");
+            let source = non_test_source(&source).to_string();
+            (file, source)
+        })
+        .collect()
+}
+
+#[test]
+fn the_only_host_process_the_shell_starts_is_an_mcp_server_the_box_never_configures() {
+    let root = shell_src();
+    let mut files = Vec::new();
+    rs_files(&root, &mut files);
+    let mut starts = Vec::new();
+    for file in &files {
+        let relative = file
+            .strip_prefix(&root)
+            .expect("a path under the Shell's src")
+            .to_string_lossy()
+            .into_owned();
+        if relative == "python.rs" || relative == "js.rs" {
+            continue;
+        }
+        let source = std::fs::read_to_string(file).expect("read a Shell source file");
+        if non_test_source(&source).contains("process::Command") {
+            starts.push(relative);
+        }
+    }
+    assert_eq!(
+        starts,
+        ["mcp_client.rs"],
+        "a host process the Shell starts runs outside the box's sandbox"
+    );
+
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut configured = Vec::new();
+    for dir in [manifest.join("src"), manifest.join("../shell/src")] {
+        for (file, source) in box_sources(&dir) {
+            for token in ["Shell::builder(", "ShellBuilder", ".config_file("] {
+                if source.contains(token) {
+                    configured.push(format!("{} uses `{token}`", file.display()));
+                }
+            }
+        }
+    }
+    assert!(
+        configured.is_empty(),
+        "the box builds its Shell with `Shell::with_kernel`, which configures no MCP server; \
+         found: {configured:#?}"
+    );
+}
