@@ -2277,10 +2277,13 @@ async fn run_capturing_status(
                             let _ = tx.send(Bytes::from(captured.into_bytes())).await;
                         }
                     });
-                    proc.set_channel_reader(0, rx);
+                    let mut saved_stdin = Process::empty();
+                    proc.transfer_fd(STDIN, &mut saved_stdin);
+                    proc.set_channel_reader(STDIN, rx);
                     let (mut exit, out) = execute_pipeline_capture(os.clone(), proc, tail).await;
                     let _ = handle.await;
-                    proc.close(0);
+                    proc.close(STDIN);
+                    saved_stdin.transfer_fd(STDIN, proc);
                     if *negated {
                         exit = if exit == 0 { 1 } else { 0 };
                     }
@@ -2651,6 +2654,7 @@ async fn execute_item_unsettled(
             // stdin into the tail pipeline.
             let compound_cl = vec![(*compound.clone(), None)];
             let mut sub = proc.fork();
+            proc.transfer_fd(STDIN, &mut sub);
             let os2 = os.clone();
 
             let (tx, rx) = os::pipe(64);
@@ -2660,13 +2664,17 @@ async fn execute_item_unsettled(
                 if !output.is_empty() {
                     let _ = tx.send(Bytes::from(output.into_bytes())).await;
                 }
+                sub
             });
 
             // Set stdin on proc so the tail pipeline inherits it.
-            proc.set_channel_reader(0, rx);
+            proc.set_channel_reader(STDIN, rx);
             let mut exit = execute_pipeline(os, proc, tail).await;
-            let _ = handle.await;
-            proc.close(0);
+            let sub = handle.await;
+            proc.close(STDIN);
+            if let Ok(mut sub) = sub {
+                sub.transfer_fd(STDIN, proc);
+            }
             if *negated {
                 exit = if exit == 0 { 1 } else { 0 };
             }

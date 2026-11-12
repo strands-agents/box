@@ -1984,7 +1984,10 @@ did not take back to the caller when it ends, and a stdin redirect on that stage
 stdin aside instead of dropping it, so `x=$(date); cat` and `(cat </dev/null); cat` leave the
 input for `cat`. A single builtin with a stdin redirect, such as `printf x </dev/null`, keeps the
 caller's stdin aside the same way, on success and on a redirect error.
-`stdin_left_unread_by_a_command_reaches_the_next_reader` fails without it.
+`stdin_left_unread_by_a_command_reaches_the_next_reader` fails without it. A compound command that
+starts a pipeline, such as `{ printf x; } | cat`, reads the caller's stdin and sets it aside while
+its pipe feeds the rest of the pipeline, then hands it back, so `x=$({ printf x; } | cat); cat`
+leaves the input for `cat` (`a_compound_pipeline_hands_the_callers_stdin_back`).
 `tests/shell_integration.rs::a_command_substitution_reads_the_shells_stdin`,
 `a_subshell_reads_the_shells_stdin`, and
 `stdin_read_in_part_by_a_substitution_leaves_the_rest_to_the_shell` fail without the change.

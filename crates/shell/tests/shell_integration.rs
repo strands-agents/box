@@ -8263,3 +8263,42 @@ fn lua_reads_a_pipe_inside_a_shell_command() {
         }
     }));
 }
+
+/// A compound command as the first stage of a pipeline reads the caller's stdin and leaves the rest
+/// of it for a later command, in a substitution, in a subshell, and at the top level.
+#[test]
+fn a_compound_pipeline_hands_the_callers_stdin_back() {
+    let (rt, local) = rt();
+    rt.block_on(local.run_until(async {
+        for (script, expected) in [
+            ("x=$({ printf x; } | cat); cat", "REAL\nNEXT\n"),
+            ("x=$(printf x | cat); cat", "REAL\nNEXT\n"),
+            ("x=$( (printf x) | cat); cat", "REAL\nNEXT\n"),
+            ("x=$(if true; then printf x; fi | cat); cat", "REAL\nNEXT\n"),
+            ("x=$(while false; do :; done | cat); cat", "REAL\nNEXT\n"),
+            ("f() { printf x; }; x=$(f | cat); cat", "REAL\nNEXT\n"),
+            ("({ printf x; } | cat >/dev/null); cat", "REAL\nNEXT\n"),
+            ("( (printf x) | cat >/dev/null); cat", "REAL\nNEXT\n"),
+            (
+                "(if true; then printf x; fi | cat >/dev/null); cat",
+                "REAL\nNEXT\n",
+            ),
+            ("{ printf x; } | cat >/dev/null; cat", "REAL\nNEXT\n"),
+            ("x=$({ printf x; } | cat | cat); cat", "REAL\nNEXT\n"),
+            (
+                r#"x=$({ read a; printf %s "$a"; } | cat); printf '[%s]' "$x""#,
+                "[REAL]",
+            ),
+            (r#"{ read a; printf %s "$a"; } | cat; printf '|'"#, "REAL|"),
+        ] {
+            let out = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                run_with_stdin(script, b"REAL\nNEXT\n"),
+            )
+            .await
+            .expect("the command ends");
+            assert_eq!(out.stdout, expected, "{script}: stderr={}", out.stderr);
+            assert_eq!(out.status, 0, "{script}");
+        }
+    }));
+}
