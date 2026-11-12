@@ -1,0 +1,14 @@
+# expect: `<grammar>.shell.fetch`: two fields have the name "x"
+# One `operands.x` entry cannot cover both the `[+<x>]` word and a `<x>` operand.
+
+name    = "cargo"
+program = "cargo"
+format  = 1
+version = 1
+
+[effects]
+install_toolchain = "The rustup proxy can download and install the toolchain that the line names"
+
+[shell.fetch]
+usage = "cargo [+<x>] fetch <x>"
+operands.x = { adds = ["install_toolchain"] }

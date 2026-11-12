@@ -108,7 +108,7 @@ pub(crate) enum FieldKind {
 pub(super) enum FieldSource {
     Option(EffectChanges),
     Operand(usize, EffectChanges),
-    Toolchain,
+    Toolchain(EffectChanges),
 }
 
 impl ShellGrammar {
@@ -207,11 +207,10 @@ impl ActionGrammar {
             action: name.as_str().to_string(),
             operand: operand.to_string(),
         };
-        if let Some(operand) = action
-            .operands
-            .keys()
-            .find(|operand| !usage.operands.iter().any(|slot| &slot.name == *operand))
-        {
+        if let Some(operand) = action.operands.keys().find(|operand| {
+            usage.toolchain.as_ref() != Some(*operand)
+                && !usage.operands.iter().any(|slot| &slot.name == *operand)
+        }) {
             return Err(GrammarRefusal::OperandNotInUsage {
                 place: operand_place(operand),
             });
@@ -249,10 +248,33 @@ impl ActionGrammar {
             });
         }
         if let Some(toolchain) = &usage.toolchain {
+            let declared = action.operands.get(toolchain);
+            if declared.is_some_and(|operand| operand.rest) {
+                return Err(GrammarRefusal::BadRest {
+                    place: operand_place(toolchain),
+                });
+            }
+            if let Some(pattern) = declared.and_then(|operand| {
+                let changes = &operand.effects;
+                changes
+                    .like
+                    .iter()
+                    .chain(changes.when.iter().flat_map(|when| &when.like))
+                    .find(|pattern| pattern.starts_with('+'))
+            }) {
+                return Err(GrammarRefusal::ToolchainPattern {
+                    place: operand_place(toolchain),
+                    pattern: pattern.clone(),
+                });
+            }
             fields.push(Field {
                 name: toolchain.clone(),
                 kind: FieldKind::String,
-                source: FieldSource::Toolchain,
+                source: FieldSource::Toolchain(
+                    declared
+                        .map(|operand| operand.effects.clone())
+                        .unwrap_or_default(),
+                ),
             });
         }
         if let Some(field) = fields

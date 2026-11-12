@@ -1,0 +1,14 @@
+# expect: `<grammar>.shell.fetch.operands.toolchain`: pattern "+nightly*" starts with `+`, but a `[+<name>]` word is matched without its `+`
+# A pattern for the `[+<toolchain>]` word leaves out the `+`, so this one could never match.
+
+name    = "cargo"
+program = "cargo"
+format  = 1
+version = 1
+
+[effects]
+unstable = "Runs a nightly toolchain"
+
+[shell.fetch]
+usage = "cargo [+<toolchain>] fetch"
+operands.toolchain = { when = [{ like = "+nightly*", adds = ["unstable"] }] }

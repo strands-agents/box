@@ -1,0 +1,43 @@
+# toolchain-effects grammar corpus
+#
+# Each case is one argv, and what the shell grammar of `toolchain-effects.grammar.toml` reads
+# it as. `fields` lists each field that does not hold its default: a Bool `false`, an
+# empty set, or an absent string. An `unmodeled` case has no fields and no effects.
+
+# No toolchain word: the toolchain effects stay off
+[[case]]
+argv = ["cargo", "fetch"]
+action = "fetch"
+effects = ["network"]
+
+# A toolchain word adds its effects
+[[case]]
+argv = ["cargo", "+beta", "fetch"]
+action = "fetch"
+fields = { toolchain = "beta" }
+effects = ["install_toolchain", "network"]
+
+# A `when` entry on the toolchain word
+[[case]]
+argv = ["cargo", "+nightly-2026-01-01", "fetch"]
+action = "fetch"
+fields = { toolchain = "nightly-2026-01-01" }
+effects = ["install_toolchain", "network", "unstable"]
+
+# A global `removes` does not take away a toolchain effect that it does not name
+[[case]]
+argv = ["cargo", "+beta", "--offline", "fetch"]
+action = "fetch"
+fields = { offline = true, toolchain = "beta" }
+effects = ["install_toolchain"]
+
+# An action that declares no effects for its toolchain word
+[[case]]
+argv = ["cargo", "+beta", "version"]
+action = "version"
+fields = { toolchain = "beta" }
+
+# A toolchain word with a path separator is unmodeled
+[[case]]
+argv = ["cargo", "+../beta", "fetch"]
+action = "unmodeled"
