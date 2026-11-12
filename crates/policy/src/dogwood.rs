@@ -5,7 +5,8 @@ use std::fs::File;
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 #[cfg(test)]
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use dogwood_language::{
@@ -77,6 +78,8 @@ pub(crate) struct DogwoodEngine {
     request_schema: cedar_policy::Schema,
     tool_actions: std::collections::HashSet<cedar_policy::EntityUid>,
     tool_inputs: crate::mcp_input::ToolInputs,
+    /// Set when an outcome could not be recorded, so every later decision in this run denies.
+    outcome_lost: AtomicBool,
     #[cfg(test)]
     fixed_clock: Option<Arc<AtomicI64>>,
 }
@@ -214,6 +217,7 @@ impl DogwoodEngine {
                 request_schema: effective_schema.cedar,
                 tool_actions: effective_schema.tool_actions,
                 tool_inputs: effective_schema.tool_inputs,
+                outcome_lost: AtomicBool::new(false),
                 #[cfg(test)]
                 fixed_clock: None,
             },
@@ -288,6 +292,7 @@ impl DogwoodEngine {
             request_schema,
             tool_actions,
             tool_inputs,
+            outcome_lost: AtomicBool::new(false),
             #[cfg(test)]
             fixed_clock: None,
         })
@@ -309,7 +314,7 @@ impl DogwoodEngine {
             input,
         } = response;
         self.verify_request_id(&request_id)?;
-        self.submit(|_| {
+        self.record_outcome(|_| {
             with_request_id(
                 with_output_fields(
                     with_input(identity.event_builder(KIND_RESPONSE), input),
@@ -318,8 +323,6 @@ impl DogwoodEngine {
                 &request_id,
             )
         })
-        .map(|_| ())
-        .map_err(PolicyError::Evaluation)
     }
 
     /// A tool call's arguments with each union member placed in its declared `typeChoice` record.
@@ -426,6 +429,7 @@ impl DogwoodEngine {
             request_schema: effective_schema.cedar,
             tool_actions: effective_schema.tool_actions,
             tool_inputs: effective_schema.tool_inputs,
+            outcome_lost: AtomicBool::new(false),
             fixed_clock: None,
         })
     }
@@ -458,6 +462,7 @@ impl DogwoodEngine {
             request_schema: effective_schema.cedar,
             tool_actions: effective_schema.tool_actions,
             tool_inputs: effective_schema.tool_inputs,
+            outcome_lost: AtomicBool::new(false),
             fixed_clock: Some(now),
         })
     }
@@ -497,6 +502,10 @@ impl DogwoodEngine {
         principal: &Principal,
         request: ActionRequest<'_>,
     ) -> (Decision, Option<RequestId>, Option<Value>) {
+        if self.outcome_lost.load(Ordering::SeqCst) {
+            eprintln!("policy: warn: an earlier outcome was not recorded; denying");
+            return (Decision::internal_fault(), None, None);
+        }
         let identity = request.identity();
         let conformed_arguments = match self.conformed_arguments(request, &identity) {
             Ok(arguments) => arguments,
@@ -595,9 +604,9 @@ impl DogwoodEngine {
         outcome: &Outcome<'_>,
     ) -> Result<(), PolicyError> {
         self.verify_request_id(request_id)?;
-        self.submit(|_| with_request_id(outcome_event(governed, principal, outcome), request_id))
-            .map(|_| ())
-            .map_err(PolicyError::Evaluation)
+        self.record_outcome(|_| {
+            with_request_id(outcome_event(governed, principal, outcome), request_id)
+        })
     }
 
     /// Submit the `::response` of one completed action whose `input` is the JSON record `input`.
@@ -616,7 +625,7 @@ impl DogwoodEngine {
         status: i32,
     ) -> Result<(), PolicyError> {
         self.verify_request_id(request_id)?;
-        self.submit(|_| {
+        self.record_outcome(|_| {
             let builder = with_input(
                 identity.event_builder(KIND_RESPONSE),
                 entity_json_value(input),
@@ -626,8 +635,14 @@ impl DogwoodEngine {
                 request_id,
             )
         })
-        .map(|_| ())
-        .map_err(PolicyError::Evaluation)
+    }
+
+    /// Submit one outcome event, and deny every later decision when the history refuses it.
+    fn record_outcome(&self, build: impl FnOnce(u64) -> EventBuilder) -> Result<(), PolicyError> {
+        self.submit(build).map(|_| ()).map_err(|error| {
+            self.outcome_lost.store(true, Ordering::SeqCst);
+            PolicyError::Evaluation(error)
+        })
     }
 
     fn verify_request_id(&self, request_id: &RequestId) -> Result<(), PolicyError> {
@@ -2803,31 +2818,60 @@ when temporal {
                 )
                 .0
         };
-        let is_internal_fault = |decision: &Decision| {
-            matches!(
-                decision,
-                Decision::Deny {
-                    reason: DenyReason::InternalFault,
-                    ..
-                }
-            )
-        };
         permitted_http_request(&engine);
 
         engine.advance_clock(-200);
         assert!(
-            !is_internal_fault(&decide()),
+            decide().is_allow(),
             "a clock 200 s behind history is within the bound and is decided"
         );
         engine.advance_clock(-200);
-        assert!(
-            is_internal_fault(&decide()),
+        assert_eq!(
+            decide(),
+            Decision::internal_fault(),
             "a clock 400 s behind history is beyond the bound and denies"
         );
         engine.advance_clock(200);
         assert!(
-            !is_internal_fault(&decide()),
-            "the refusal does not persist once the clock is within the bound again"
+            decide().is_allow(),
+            "a refused request does not persist once the clock is within the bound again"
+        );
+    }
+
+    #[test]
+    fn an_outcome_refused_for_clock_skew_denies_every_later_request_in_the_run() {
+        let history = tempfile::tempdir().expect("history directory");
+        let engine = DogwoodEngine::open_with_test_clock(
+            BUDGET,
+            &history.path().join("dogwood.redb"),
+            1_000_000,
+        )
+        .expect("policy loads");
+        let request_id = permitted_http_request(&engine);
+
+        engine.advance_clock(-400);
+        let recorded = engine.observe_outcome(
+            &governed(),
+            &Principal::agent(),
+            &request_id,
+            &delivered(101),
+        );
+        assert!(
+            recorded.is_err(),
+            "an outcome 400 s behind history is refused: {recorded:?}"
+        );
+
+        engine.advance_clock(410);
+        assert_eq!(
+            engine
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http())
+                )
+                .0,
+            Decision::internal_fault(),
+            "a lost outcome must not let the budget permit the next request"
         );
     }
 

@@ -891,7 +891,10 @@ strands-box: error: policy staging failed: policy staging history failure: durab
 
 If the clock moves back more than five minutes during a run, the box denies each request and prints
 `policy: warn: durable timestamp ...; denying` on stderr. Requests are decided again once the clock
-is within five minutes of the newest history timestamp. A time-zone change does not move this clock.
+is within five minutes of the newest history timestamp. If an action finished while the clock was
+that far back, the box can't record it, so it prints
+`policy: warn: an earlier outcome was not recorded; denying` and denies every later request until
+the run restarts. A time-zone change does not move this clock.
 Correct the system clock, or remove the box directory to start again, as
 [getting started](getting-started.md#clean-up) describes.
 

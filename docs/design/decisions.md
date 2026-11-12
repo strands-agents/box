@@ -942,15 +942,17 @@ file. `open` recovers a decision-equivalent history before returning an authorit
 fails, it returns an error. The box never falls back to empty or partial history. The engine
 timestamps each event from the trusted system wall clock. Callers cannot supply timestamps. If the
 clock steps backwards, each append advances one nanosecond until it catches up. This can keep a
-restriction active longer than the apparent interval. The engine allows the newest timestamp to
-run at most five minutes ahead of the clock. Beyond that, `open` refuses the history, and during a
-run each append fails, until the clock comes within five minutes of the newest timestamp or the
-operator removes the box directory. Without that bound, one forged future-stamped event would pin
-every later timestamp one nanosecond past it, so every earlier real event would leave its window
-and no later event would expire. A forged event within the bound can still hold timestamps ahead
-for up to five minutes. A policy edit applies prospectively. A temporal identity that still matches keeps its state, and an unmatched identity starts empty. The
-contract excludes checkpoint, rewind, branch, tamper evidence, an audit record, atomic commit across
-an external effect, and any history shared between boxes.
+restriction active longer than the apparent interval. The engine allows the newest timestamp to run
+at most five minutes ahead of the clock. Beyond that, `open` refuses the history, and during a run
+each append fails, until the clock comes within five minutes of the newest timestamp or the operator
+removes the box directory. An outcome that fails to record this way denies the rest of the run,
+because history no longer holds an effect that ran. Without that bound, one forged future-stamped
+event would pin every later timestamp one nanosecond past it, so every earlier real event would
+leave its window and no later event would expire. A forged event within the bound can still hold
+timestamps ahead for up to five minutes. A policy edit applies prospectively. A temporal identity
+that still matches keeps its state, and an unmatched identity starts empty. The contract excludes
+checkpoint, rewind, branch, tamper evidence, an audit record, atomic commit across an external
+effect, and any history shared between boxes.
 
 <a id="a-temporal-rule-names-one-action"></a>
 ### A temporal rule names one action, so a budget does not span a family

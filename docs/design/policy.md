@@ -255,9 +255,11 @@ stops a restart from resetting a budget. The history follows these rules:
   budget. The cost is that a restriction can outlast its window a little. If history is stamped
   more than five minutes ahead of the clock, the box refuses to open it. During a run, the engine
   refuses to timestamp an event while the gap exceeds five minutes, so the box denies that request
-  without appending it. The refusal doesn't persist: the next request within the bound is decided.
-- If an append fails, the engine denies that request and every subsequent request. When recording an
-  outcome fails, the caller warns on stderr and nothing retries it.
+  without appending it. A refused request doesn't persist: the next request within the bound is
+  decided.
+- If a request's append fails, the engine denies that request. If recording an outcome fails, the
+  caller warns on stderr and nothing retries it. The effect already ran and history doesn't hold it,
+  so the engine denies every later request in that run.
 - The engine checkpoints as events accumulate and removes events outside the longest window. This
   bounds the file size by the window rather than the box's lifetime.
 
