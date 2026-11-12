@@ -35,7 +35,7 @@ const KERNEL_METHODS: &[(&str, Served)] = &[
     ("lstat", Served::Box),
     ("access", Served::Box),
     ("canonicalize", Served::Box),
-    ("try_stat", Served::Default),
+    ("try_stat", Served::Box),
     ("is_executable", Served::Box),
     ("glob", Served::Box),
     ("isatty", Served::Box),

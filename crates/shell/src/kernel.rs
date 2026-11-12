@@ -254,12 +254,19 @@ impl ShellKernel {
         })
     }
 
-    async fn stat_probe(&self, proc: &Process, path: &str, follow: Follow) -> Option<FileStat> {
-        let operation = metadata(follow);
-        let (resolved, permit) = self.admit_probe(proc, path, follow, operation).await?;
+    /// One metadata decision for `path`, and its answer, or the refusal.
+    async fn stat_decided(
+        &self,
+        proc: &Process,
+        path: &str,
+        follow: Follow,
+    ) -> io::Result<FileStat> {
+        let (resolved, permit) = self
+            .admit_path(proc, path, follow, metadata(follow))
+            .await?;
         let stat = self.stat_answer(proc, resolved, follow).await;
         permit.report_answer(&stat).await;
-        Some(stat.unwrap_or_default())
+        stat
     }
 
     async fn executable(&self, proc: &Process, path: &Resolved) -> bool {
@@ -520,13 +527,13 @@ impl Kernel for ShellKernel {
     }
 
     async fn stat(&self, proc: &Process, path: &str) -> FileStat {
-        self.stat_probe(proc, path, Follow::Yes)
+        self.stat_decided(proc, path, Follow::Yes)
             .await
             .unwrap_or_default()
     }
 
     async fn lstat(&self, proc: &Process, path: &str) -> FileStat {
-        self.stat_probe(proc, path, Follow::No)
+        self.stat_decided(proc, path, Follow::No)
             .await
             .unwrap_or_default()
     }
@@ -552,6 +559,15 @@ impl Kernel for ShellKernel {
         .await;
         permit.report_answer(&allowed).await;
         allowed.unwrap_or(false)
+    }
+
+    async fn try_stat(&self, proc: &Process, path: &str) -> io::Result<FileStat> {
+        let stat = self.stat_decided(proc, path, Follow::Yes).await?;
+        if stat.exists {
+            Ok(stat)
+        } else {
+            Err(not_found())
+        }
     }
 
     async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf> {

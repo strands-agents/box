@@ -1548,3 +1548,76 @@ fn each_fallback_stage_that_runs_is_decided_once() {
     let (_outputs, events) = ghosts(&["{ blocked; true; } | ghost"]);
     assert_eq!(events, ["#1 status 127", "#2 status 0"]);
 }
+
+// ── `mkdir -p` decides each component once ───────────────────────────────────────────────────
+
+/// How many metadata decisions `script` makes for each path, in the order first seen.
+fn metadata_decisions(
+    shell: &mut Shell,
+    recorder: &Recorder,
+    script: &str,
+) -> Vec<(String, usize)> {
+    recorder.attempted.lock().unwrap().clear();
+    let out = run(shell.run(script));
+    assert_eq!(out.status, 0, "{script}: {}", rendered(&out));
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for attempt in recorder.attempted.lock().unwrap().iter() {
+        let Some(path) = attempt.strip_prefix("meta(follow=true) ") else {
+            continue;
+        };
+        match counts.iter_mut().find(|(seen, _)| seen == path) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((path.to_string(), 1)),
+        }
+    }
+    counts
+}
+
+/// `mkdir -p` makes one metadata decision for each component, whether the ancestor is missing,
+/// exists, or is refused, in the memory filesystem and in a host folder.
+#[test]
+fn mkdir_p_makes_one_metadata_decision_per_component() {
+    let directory = tempfile::tempdir().expect("host folder");
+    for root in ["/home/lash", "/workspace"] {
+        let refused = format!("meta(follow=true) {root}");
+        let (recorder, _, armed) = Recorder::armable(move |effect| {
+            effect == "meta(follow=true) /home" || effect == refused
+        });
+        let mut shell = support::builder()
+            .bind_direct(directory.path().to_str().expect("UTF-8"), "/workspace")
+            .effect_interceptor(Arc::clone(&recorder) as Arc<dyn EffectInterceptor>)
+            .build()
+            .expect("shell builds");
+        let once = |paths: &[&str]| -> Vec<(String, usize)> {
+            paths
+                .iter()
+                .map(|path| (format!("{root}/{path}"), 1))
+                .collect()
+        };
+        let created = format!("cd {root} && mkdir -p m/a/b/c");
+        let missing = once(&["m", "m/a", "m/a/b", "m/a/b/c"]);
+        assert_eq!(
+            metadata_decisions(&mut shell, &recorder, &created),
+            missing,
+            "missing"
+        );
+        assert_eq!(
+            metadata_decisions(&mut shell, &recorder, &created),
+            missing,
+            "existing"
+        );
+
+        armed.store(true, Ordering::SeqCst);
+        let mut expected: Vec<(String, usize)> = if root == "/home/lash" {
+            vec![("/home".into(), 1), ("/home/lash".into(), 1)]
+        } else {
+            vec![("/workspace".into(), 1)]
+        };
+        expected.extend(once(&["r", "r/a", "r/a/b"]));
+        assert_eq!(
+            metadata_decisions(&mut shell, &recorder, &format!("mkdir -p {root}/r/a/b")),
+            expected,
+            "refused"
+        );
+    }
+}
