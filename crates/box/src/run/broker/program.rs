@@ -26,6 +26,7 @@ const OUTPUT_CHANNEL_DEPTH: usize = 64;
 /// One program: the private state a Call mutates.
 pub(crate) struct Program {
     shell: strands_shell::Shell,
+    kernel: Arc<box_shell::ShellKernel>,
     cancel: Arc<AtomicBool>,
     /// The Shell's own bound on one Call, re-armed when each Call starts.
     timeout: Option<std::time::Duration>,
@@ -66,9 +67,10 @@ pub(crate) struct ProgramOutput {
 impl Program {
     /// Wrap a freshly built Shell, installing the three standard channel descriptors.
     pub(crate) fn adopt(
-        mut shell: strands_shell::Shell,
+        hosted: super::shell::HostedShell,
         timeout: Option<std::time::Duration>,
     ) -> io::Result<(Self, ProgramOutput, ProgramControl)> {
+        let super::shell::HostedShell { mut shell, kernel } = hosted;
         let (stdin_tx, stdin_rx) = mpsc::channel(INPUT_CHANNEL_DEPTH);
         let (stdout_tx, stdout_rx) = mpsc::channel(OUTPUT_CHANNEL_DEPTH);
         let (stderr_tx, stderr_rx) = mpsc::channel(OUTPUT_CHANNEL_DEPTH);
@@ -82,6 +84,7 @@ impl Program {
         Ok((
             Self {
                 shell,
+                kernel,
                 cancel: Arc::clone(&cancel),
                 timeout,
                 stdout,
@@ -114,6 +117,7 @@ impl Program {
             }
         }
         let output = self.shell.run(command).await;
+        self.kernel.settle();
         Self::forward(&self.stdout, output.stdout).await;
         Self::forward(&self.stderr, output.stderr).await;
         CallOutcome {
@@ -131,9 +135,11 @@ impl Program {
         }
     }
 
-    pub(crate) fn use_shell(&mut self, mut shell: strands_shell::Shell) {
+    pub(crate) fn use_shell(&mut self, hosted: super::shell::HostedShell) {
+        let super::shell::HostedShell { mut shell, kernel } = hosted;
         std::mem::swap(&mut self.shell.proc, &mut shell.proc);
         self.shell = shell;
+        self.kernel = kernel;
     }
 }
 

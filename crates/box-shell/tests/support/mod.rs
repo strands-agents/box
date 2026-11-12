@@ -68,6 +68,11 @@ impl Builder {
 
     /// The Shell.
     pub fn build(self) -> io::Result<Shell> {
+        Ok(self.build_with_kernel()?.0)
+    }
+
+    /// The Shell, and its kernel.
+    pub fn build_with_kernel(self) -> io::Result<(Shell, Arc<ShellKernel>)> {
         let mut vfs = strands_shell::vfs_config::build_vfs(&Default::default())?;
         vfs.max_file_size = MAX_FILE_SIZE;
         vfs.max_inodes = MAX_INODES;
@@ -84,7 +89,9 @@ impl Builder {
         if let Some(spawner) = self.spawner {
             kernel = kernel.spawner(spawner);
         }
-        let mut shell = kernel.shell();
+        let kernel = Arc::new(kernel);
+        let mut shell =
+            Shell::with_kernel(Arc::clone(&kernel) as Arc<dyn strands_shell::os::Kernel>);
         shell.proc.max_depth = 64;
         shell.proc.max_output = 1024 * 1024;
         shell.proc.max_fds = 128;
@@ -95,8 +102,15 @@ impl Builder {
         for (key, value) in self.env {
             shell.set_env(key, value);
         }
-        Ok(shell)
+        Ok((shell, kernel))
     }
+}
+
+/// A kernel over the Shell's default filesystem, each effect decided by `interceptor`.
+pub fn kernel(interceptor: Arc<dyn EffectInterceptor>) -> ShellKernel {
+    let vfs = strands_shell::vfs_config::build_vfs(&Default::default()).expect("vfs");
+    let filesystem = Arc::new(Filesystem::serving(vfs, &[]).expect("a filesystem"));
+    ShellKernel::over(filesystem, interceptor)
 }
 
 /// Permits every attempt and records nothing.

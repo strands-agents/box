@@ -1499,52 +1499,52 @@ impl EffectInterceptor for Ghosts {
     }
 }
 
-/// A fallback stage decided but never run is settled at once, so a later Call records its own
-/// outcome on its own decision.
-#[test]
-fn a_fallback_stage_that_never_runs_does_not_carry_its_decision_into_a_later_call() {
+/// Run each script on one Shell, settling the Call after each as the box does, and return the
+/// events each decision recorded, sorted.
+fn ghosts(scripts: &[&str]) -> (Vec<strands_shell::Output>, Vec<String>) {
     let events = Arc::new(Mutex::new(Vec::new()));
-    let ghosts = Ghosts {
+    let kernel = Arc::new(support::kernel(Arc::new(Ghosts {
         decided: AtomicUsize::new(0),
         events: Arc::clone(&events),
-    };
-    let mut shell = shell_with(Arc::new(ghosts));
-    let (refused, ran) = run(async {
-        let refused = shell.run("ghost | blocked").await;
-        let after_first = events.lock().unwrap().clone();
-        let ran = shell.run("ghost").await;
-        ((refused, after_first), ran)
+    })));
+    let mut shell = Shell::with_kernel(Arc::clone(&kernel) as Arc<dyn strands_shell::os::Kernel>);
+    let outputs = run(async {
+        let mut outputs = Vec::new();
+        for script in scripts {
+            outputs.push(shell.run(script).await);
+            kernel.settle();
+        }
+        outputs
     });
-    let ((refused, after_first), ran) = (refused, ran);
-    assert_eq!(refused.status, 126, "{}", refused.stderr);
-    assert_eq!(
-        after_first,
-        ["#1 indeterminate"],
-        "the first Call settles its own decision"
-    );
-    assert_eq!(ran.status, 127, "{}", ran.stderr);
-    assert_eq!(
-        *events.lock().unwrap(),
-        ["#1 indeterminate", "#2 status 127"]
-    );
+    let mut events = events.lock().unwrap().clone();
+    events.sort();
+    (outputs, events)
 }
 
-/// A fallback stage whose redirect fails is settled by the next decision of the same command.
+/// A fallback stage decided but never run is settled when its Call ends, so a later Call
+/// records its own outcome on its own decision.
 #[test]
-fn a_fallback_stage_whose_redirect_fails_is_settled_by_the_next_decision() {
-    let events = Arc::new(Mutex::new(Vec::new()));
-    let ghosts = Ghosts {
-        decided: AtomicUsize::new(0),
-        events: Arc::clone(&events),
-    };
-    let mut shell = shell_with(Arc::new(ghosts));
-    let ran = run(async {
-        shell.run("ghost > /denied/out").await;
-        shell.run("ghost").await
-    });
-    assert_eq!(ran.status, 127, "{}", ran.stderr);
-    assert_eq!(
-        *events.lock().unwrap(),
-        ["#1 indeterminate", "#2 status 127"]
-    );
+fn a_fallback_stage_that_never_runs_does_not_carry_its_decision_into_a_later_call() {
+    let (outputs, events) = ghosts(&["ghost | blocked", "ghost"]);
+    assert_eq!(outputs[0].status, 126, "{}", outputs[0].stderr);
+    assert_eq!(outputs[1].status, 127, "{}", outputs[1].stderr);
+    assert_eq!(events, ["#1 indeterminate", "#2 status 127"]);
+}
+
+/// A fallback stage whose redirect fails is settled when its Call ends.
+#[test]
+fn a_fallback_stage_whose_redirect_fails_is_settled_when_its_call_ends() {
+    let (outputs, events) = ghosts(&["ghost > /denied/out", "ghost"]);
+    assert_eq!(outputs[1].status, 127, "{}", outputs[1].stderr);
+    assert_eq!(events, ["#1 indeterminate", "#2 status 127"]);
+}
+
+/// Each fallback stage of a pipeline that runs is decided once and records its own outcome,
+/// even when two stages are the same command or an inner pipeline is refused.
+#[test]
+fn each_fallback_stage_that_runs_is_decided_once() {
+    let (_outputs, events) = ghosts(&["ghost | ghost"]);
+    assert_eq!(events, ["#1 status 127", "#2 status 127"]);
+    let (_outputs, events) = ghosts(&["{ blocked; true; } | ghost"]);
+    assert_eq!(events, ["#1 status 127", "#2 status 0"]);
 }

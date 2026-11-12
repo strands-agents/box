@@ -961,7 +961,7 @@ impl Kernel for ShellKernel {
             &request.cwd().to_string_lossy(),
         )
         .await
-        .map_err(|error| self.stopped(error))?;
+        .map_err(denied)?;
         self.running
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -971,13 +971,10 @@ impl Kernel for ShellKernel {
 
     /// Each stage for the fallback is decided before any stage of its pipeline starts.
     async fn check_fallback(&self, request: &CommandRequest) -> io::Result<()> {
-        if let Some(unrun) = self.take_decided(request.program(), request.args(), request.cwd()) {
-            unrun.drop_unrun();
-        }
         let decided = self
             .decide(request.program(), request.args(), request.cwd())
             .await
-            .map_err(|error| self.stopped(error))?;
+            .map_err(denied)?;
         self.decided
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1019,9 +1016,8 @@ impl ShellKernel {
 }
 
 impl ShellKernel {
-    /// The refusal that stops a pipeline, after every fallback stage decided for it is settled,
-    /// because none of them runs.
-    fn stopped(&self, error: io::Error) -> io::Error {
+    /// Record each fallback stage decided in this Call that never ran as indeterminate.
+    pub fn settle(&self) {
         let unrun = std::mem::take(
             &mut *self
                 .decided
@@ -1031,10 +1027,9 @@ impl ShellKernel {
         for (_, decided) in unrun {
             decided.drop_unrun();
         }
-        io::Error::new(error.kind(), format!("effect denied: {error}"))
     }
 
-    /// The decision a stage's pre-start check made for this command, when there is one.
+    /// The latest decision a pre-start check made for this command, when one is held.
     pub(crate) fn take_decided(
         &self,
         program: &str,
@@ -1046,9 +1041,14 @@ impl ShellKernel {
             .decided
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let index = decided.iter().position(|(held, _)| *held == key)?;
+        let index = decided.iter().rposition(|(held, _)| *held == key)?;
         Some(decided.remove(index).1)
     }
+}
+
+/// The refusal a decision gave, as the Shell reports it.
+fn denied(error: io::Error) -> io::Error {
+    io::Error::new(error.kind(), format!("effect denied: {error}"))
 }
 
 impl Drop for ShellKernel {

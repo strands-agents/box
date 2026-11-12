@@ -10,7 +10,9 @@ use crate::record::config::limits::{
 use crate::run::broker::program::Program;
 use crate::run::broker::shell::{SHELL_MAX_FILE_SIZE, SHELL_MAX_INODES};
 
-use super::{backend, fixture_on, run};
+use std::sync::Arc;
+
+use super::{PermitAll, backend, fixture_on, run};
 
 #[test]
 fn captured_output_stops_at_the_output_limit() {
@@ -110,9 +112,16 @@ fn files_past_the_inode_limit_are_refused() {
 #[test]
 fn each_call_has_the_shell_timeout_from_its_own_start() {
     let (first, second) = run(async {
-        let shell = fixture_on(&backend(&[]));
+        let kernel = Arc::new(box_shell::ShellKernel::over(
+            backend(&[]),
+            Arc::new(PermitAll),
+        ));
+        let shell = strands_shell::Shell::with_kernel(
+            Arc::clone(&kernel) as Arc<dyn strands_shell::os::Kernel>
+        );
+        let hosted = crate::run::broker::shell::HostedShell { shell, kernel };
         let (mut program, _output, _control) =
-            Program::adopt(shell, Some(Duration::from_secs(1))).expect("a program");
+            Program::adopt(hosted, Some(Duration::from_secs(1))).expect("a program");
         let first = program.call("sleep 5").await.status;
         tokio::time::sleep(Duration::from_millis(1500)).await;
         let second = program.call("true").await.status;

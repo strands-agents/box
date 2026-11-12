@@ -119,3 +119,31 @@ fn python_refuses_an_invocation_it_cannot_run() {
     );
     assert_eq!(version.stdout, "Monty (Strands-Box Python subset)\n");
 }
+
+/// A Call settles each fallback stage it decided and never ran, so history sees it as
+/// indeterminate before the next Call.
+#[test]
+fn a_call_settles_a_fallback_stage_that_never_ran() {
+    let source = r#"
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource)
+when { context.input.program != "printf" && context.input.program != "blocked" };
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource)
+when { context.input.program == "printf" }
+when temporal {
+    formerly within 60s
+    Box::Action::"shell:exec"::response{ input.program: "no-such-tool", output.status: -1 }
+};
+"#;
+    let (refused, gated) = run(async {
+        let kernel = Arc::new(ShellKernel::over(backend(&[]), adapter(policy(source))));
+        let shell = Shell::with_kernel(Arc::clone(&kernel) as Arc<dyn strands_shell::os::Kernel>);
+        let hosted = crate::run::broker::shell::HostedShell { shell, kernel };
+        let (mut program, _output, _control) =
+            crate::run::broker::program::Program::adopt(hosted, None).expect("a program");
+        let refused = program.call("no-such-tool | blocked").await.status;
+        let gated = program.call("printf gated").await.status;
+        (refused, gated)
+    });
+    assert_eq!(refused, 126);
+    assert_eq!(gated, 0, "the unrun stage was recorded as indeterminate");
+}

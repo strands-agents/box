@@ -44,6 +44,12 @@ pub(crate) struct EgressRouting {
     pub(crate) ca_pem: Arc<Vec<u8>>,
 }
 
+/// One Call's Shell, and the kernel it runs on.
+pub(crate) struct HostedShell {
+    pub(crate) shell: Shell,
+    pub(crate) kernel: Arc<ShellKernel>,
+}
+
 /// Everything needed to build the hosted Shell, kept so one can be rebuilt.
 pub(super) struct ShellSpec {
     pub(super) max_input: usize,
@@ -96,7 +102,7 @@ pub(super) struct ShellSpec {
 
 impl ShellSpec {
     /// Build a Shell confined exactly as the host requires.
-    pub(super) fn build(&self) -> io::Result<Shell> {
+    pub(super) fn build(&self) -> io::Result<HostedShell> {
         self.build_on(self.backend()?, &self.recorder)
     }
 
@@ -112,7 +118,7 @@ impl ShellSpec {
         &self,
         backend: Arc<Filesystem>,
         recorder: &Arc<DecisionRecorder>,
-    ) -> io::Result<Shell> {
+    ) -> io::Result<HostedShell> {
         // Two interceptors, one above the other. PolicyEngine decides first; the reachable set is a
         // deny-only floor **beneath** it, so no `permit` can open a path outside the agent's home
         let interceptor = ReachFloor::over(
@@ -158,14 +164,16 @@ impl ShellSpec {
         if let Some(spawner) = &self.host_spawner {
             kernel = kernel.spawner(within(correlation, spawner.spawn()));
         }
-        let mut shell = kernel.shell();
+        let kernel = Arc::new(kernel);
+        let mut shell =
+            Shell::with_kernel(Arc::clone(&kernel) as Arc<dyn strands_shell::os::Kernel>);
         apply_limits(&mut shell.proc, self.max_input, self.max_output);
         shell.proc.deadline = deadline(self.command_timeout)?;
         shell.proc.cwd = PathBuf::from(self.reach.working_directory());
         shell.set_env("PWD", self.reach.working_directory());
         shell.set_env("HOME", self.reach.home_variable());
         shell.set_env("USER", WORKLOAD_USER);
-        Ok(shell)
+        Ok(HostedShell { shell, kernel })
     }
 
     fn script_interpreter(&self, correlation: telemetry::Correlation) -> ScriptRunner {
