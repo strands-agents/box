@@ -845,7 +845,13 @@ fn a_declared_file_target_is_where_the_records_go() {
         "[telemetry.decisions]\nkind = \"file\"\ndestination = \"~/declared.jsonl\"\ninclude = [\"deny\", \"permit\"]\n",
     )
     .expect();
-    assert!(configured.bash("zsh -c 'true'").status.success());
+    let output = configured.bash("zsh -c 'true'");
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("telemetry records were lost"),
+        "a target that took every record reports no loss: {stderr}"
+    );
 
     let declared = configured.operator_home().join("declared.jsonl");
     let text = std::fs::read_to_string(&declared)
@@ -854,6 +860,44 @@ fn a_declared_file_target_is_where_the_records_go() {
     assert!(
         !default_records(&configured.root()).exists(),
         "a declared target replaces the default rather than adding to it"
+    );
+}
+
+/// **A target that refuses every export is reported once on stderr, and the run still succeeds.**
+#[test]
+fn an_unreachable_target_reports_the_lost_records_once() {
+    needs_a_box!("an_unreachable_target_reports_the_lost_records_once");
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+        listener.local_addr().expect("its port").port()
+    };
+    let configured = Request::with_config(
+        "telemetry-unreachable",
+        READ_ONE_FILE,
+        &format!(
+            "[telemetry.decisions]\nkind = \"otlp\"\ndestination = \"http://127.0.0.1:{port}\"\n"
+        ),
+    )
+    .expect();
+    let output = configured.bash("zsh -c 'true'");
+
+    assert!(
+        output.status.success(),
+        "a lost record does not fail the run: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("telemetry records were lost"))
+        .collect();
+    assert_eq!(lines.len(), 1, "exactly one loss line: {stderr}");
+    assert!(
+        lines[0].starts_with("strands-box: warning: telemetry records were lost: "),
+        "{stderr}"
+    );
+    assert!(
+        lines[0].contains("failed"),
+        "the cause is a failed export: {stderr}"
     );
 }
 

@@ -248,6 +248,21 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   in this workspace**, so a full-queue drop is not counted, not printed and not observable. That is
   why the counter is not on the facade. See
   [delivery is best effort](../../docs/design/decisions.md#delivery-is-best-effort).
+  **`drained` prints one stderr line when `dropped` is not zero or the drain did not finish.** Before
+  that, a failed batch and a failed exit flush were both silent, so a workload that filled the disk
+  under the file target, or made an OTLP target hang, removed its own last records with no signal,
+  and the run still exited 0. The line is at the drain and not in `deliver`, so a workload that makes
+  every batch fail cannot fill stderr. It names its cause: failed exports, an unfinished final
+  export, or both. An unfinished drain no longer increments `dropped`, because no export failed.
+  **The receiver has its own counter.** It used to share `dropped`, so a refused agent payload (the
+  one-permit `RELAY_CAPACITY`, or the fan-out bound) counted as a lost record: the workload could
+  raise the loss line at will, and a healthy agent that exports concurrently could raise it on a run
+  whose box audit was complete. `dropped` now counts only batches an exporter failed to deliver.
+  `drain_warning` owns the text. `a_lossy_drain_reports_the_loss_once`,
+  `a_complete_drain_reports_no_loss` and `an_unfinished_drain_alone_is_a_loss` pin the text, and
+  `box_telemetry.rs::an_unreachable_target_reports_the_lost_records_once` pins the print: it fails
+  when the `eprintln!` is removed. The exit code does not change: a failed audit sink that the
+  workload can break must not also let the workload fail the run.
 - **`BODY_LIMIT` is the library's cap now, and the hand-rolled reader is why it needs to be.** That
   reader sized its buffer from the declared `Content-Length` before a byte arrived, so 64 connections
   could pin 256 MiB in the box's trusted process. `a_body_over_the_cap_is_refused` is the pin.

@@ -49,6 +49,27 @@ const _: () = assert!(
     "EXPORT_DEADLINE must be shorter than DRAIN_DEADLINE"
 );
 
+/// The one stderr line that reports lost telemetry when the run drains, or `None` when none was lost.
+fn drain_warning(failed_exports: u64, finished: bool) -> Option<String> {
+    let cause = match (failed_exports, finished) {
+        (0, true) => return None,
+        (0, false) => "the final export did not finish in time".to_owned(),
+        (1, true) => "1 export to a configured target failed".to_owned(),
+        (failed, true) => format!("{failed} exports to the configured targets failed"),
+        (1, false) => {
+            "1 export to a configured target failed, and the final export did not finish in time"
+                .to_owned()
+        }
+        (failed, false) => format!(
+            "{failed} exports to the configured targets failed, and the final export did not \
+             finish in time"
+        ),
+    };
+    Some(format!(
+        "strands-box: warning: telemetry records were lost: {cause}"
+    ))
+}
+
 /// Shut `logs` down on a thread no runtime joins, and answer what the outcome arrives on.
 ///
 /// A `std::thread` and not `spawn_blocking`, because a tokio runtime joins its blocking tasks while
@@ -133,6 +154,7 @@ pub struct Collector {
     /// The control-plane scope's own logger, so a record names which plane it came from.
     control_logger: SdkLogger,
     mcp_logger: SdkLogger,
+    /// Batches a target refused, counted by the exporters and never by the receiver.
     dropped: Arc<AtomicU64>,
     /// The union of every lane's signals, so a record nothing wants costs one load.
     accepts: [bool; Signal::SLOTS],
@@ -230,7 +252,7 @@ impl Collector {
             box_name.clone(),
             run_id,
             relays,
-            Arc::clone(&dropped),
+            Arc::new(AtomicU64::new(0)),
         ));
 
         let ids = RandomIdGenerator::default();
@@ -388,8 +410,9 @@ impl Collector {
         // teardown never waits on it.
         let ended =
             tokio::task::spawn_blocking(move || shut_down_bounded(logs, DRAIN_DEADLINE)).await;
-        if !matches!(ended, Ok(true)) {
-            self.dropped.fetch_add(1, Ordering::Relaxed);
+        let finished = matches!(ended, Ok(true));
+        if let Some(warning) = drain_warning(self.dropped.load(Ordering::Relaxed), finished) {
+            eprintln!("{warning}");
         }
     }
 
@@ -1272,6 +1295,50 @@ mod tests {
                 "the fast target must not wait on the slow one: {text}"
             );
         }
+    }
+
+    /// A drain that delivered everything prints nothing.
+    #[test]
+    fn a_complete_drain_reports_no_loss() {
+        assert_eq!(drain_warning(0, true), None);
+    }
+
+    /// A failed export or an unfinished drain each produce one loss line that names its cause.
+    #[test]
+    fn a_lossy_drain_reports_the_loss_once() {
+        for (failed, finished, cause) in [
+            (1, true, "1 export to a configured target failed"),
+            (3, true, "3 exports to the configured targets failed"),
+            (
+                1,
+                false,
+                "1 export to a configured target failed, and the final export did not finish",
+            ),
+            (
+                4,
+                false,
+                "4 exports to the configured targets failed, and the final export did not finish",
+            ),
+        ] {
+            let warning = drain_warning(failed, finished).expect("a loss is reported");
+            assert!(
+                warning.starts_with("strands-box: warning: telemetry records were lost: "),
+                "{warning}"
+            );
+            assert!(warning.contains(cause), "{warning}");
+            assert_eq!(warning.lines().count(), 1, "one line: {warning}");
+        }
+    }
+
+    /// An unfinished drain is a loss even when no export had failed, and it is not called one.
+    #[test]
+    fn an_unfinished_drain_alone_is_a_loss() {
+        let warning = drain_warning(0, false).expect("a loss is reported");
+        assert!(
+            warning.contains("the final export did not finish in time"),
+            "{warning}"
+        );
+        assert!(!warning.contains("failed"), "{warning}");
     }
 
     /// A target that cannot be reached is counted, so a failing endpoint is not silent.
