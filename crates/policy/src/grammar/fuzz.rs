@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use super::Grammar;
 use super::corpus::{Corpus, GRAMMARS, corpus_files, grammar_of};
-use super::model::{EffectChanges, OptionValue};
+use super::model::{EffectChanges, OptionValue, WhenChanges};
 use super::shell_grammar::{FieldKind, FieldSource, FieldValue, Parsed};
 
 const LONGEST_ARGV: usize = 48;
@@ -201,7 +201,7 @@ fn like_samples(changes: &EffectChanges) -> Vec<String> {
     changes
         .like
         .iter()
-        .chain(changes.when.iter().flat_map(|when| &when.like))
+        .chain(changes.when.iter().flat_map(WhenChanges::like))
         .flat_map(|pattern| {
             let filled = fill(pattern, "v");
             [

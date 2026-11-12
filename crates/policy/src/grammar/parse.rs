@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::model::{EffectChanges, EffectName, OptionValue};
+use super::model::{EffectChanges, EffectName, OptionValue, WhenChanges};
 use super::shell_grammar::{
     ActionGrammar, FieldKind, FieldSource, FieldValue, OptionTable, Parsed, ShellGrammar,
 };
@@ -146,8 +146,10 @@ impl ActionGrammar {
             if let Some(value) = value {
                 fields.insert(field.name.clone(), value);
             }
-            if let Some(values) = &values {
-                apply(changes, values, &mut adds, &mut removes);
+            if let Some(values) = &values
+                && apply(changes, values, &mut adds, &mut removes).is_none()
+            {
+                return Parsed::Unmodeled;
             }
         }
         Parsed::Action {
@@ -313,12 +315,13 @@ fn fill(
     Some(filled)
 }
 
+/// Apply `changes` for `values`, or `None` when a value makes the line `unmodeled`.
 fn apply(
     changes: &EffectChanges,
     values: &[String],
     adds: &mut BTreeSet<EffectName>,
     removes: &mut BTreeSet<EffectName>,
-) {
+) -> Option<()> {
     let matches = |patterns: &[String]| {
         values
             .iter()
@@ -329,11 +332,22 @@ fn apply(
         removes.extend(changes.removes.iter().cloned());
     }
     for when in &changes.when {
-        if matches(&when.like) {
-            adds.extend(when.adds.iter().cloned());
-            removes.extend(when.removes.iter().cloned());
+        if !matches(when.like()) {
+            continue;
+        }
+        match when {
+            WhenChanges::Unmodeled { .. } => return None,
+            WhenChanges::Effects {
+                adds: when_adds,
+                removes: when_removes,
+                ..
+            } => {
+                adds.extend(when_adds.iter().cloned());
+                removes.extend(when_removes.iter().cloned());
+            }
         }
     }
+    Some(())
 }
 
 /// Whether `value` is like `pattern`: `*` matches any run, `\*` a `*`, and each other character itself.

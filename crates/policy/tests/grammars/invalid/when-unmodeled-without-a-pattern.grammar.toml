@@ -1,0 +1,11 @@
+# expect: `<grammar>.shell.publish.options.tag`: a `when` entry with `unmodeled = true` needs at least one `like` pattern
+# A `when` entry that makes the line unmodeled, with an empty pattern list that no value matches.
+
+name    = "pkg"
+program = "pkg"
+format  = 1
+version = 1
+
+[shell.publish]
+usage = "pkg publish [options]"
+options.tag = { flag = "--tag", value = "required", when = [{ like = [], unmodeled = true }] }

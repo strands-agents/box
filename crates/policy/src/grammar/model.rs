@@ -107,13 +107,27 @@ pub(crate) struct EffectChanges {
     pub(super) when: Vec<WhenChanges>,
 }
 
-/// The effects one `when` entry adds or removes when a value is like its patterns.
+/// What one `when` entry does when a value is like its patterns.
 #[cfg_attr(test, derive(PartialEq))]
 #[derive(Debug, Clone)]
-pub(crate) struct WhenChanges {
-    pub(super) like: Vec<String>,
-    pub(super) adds: Vec<EffectName>,
-    pub(super) removes: Vec<EffectName>,
+pub(crate) enum WhenChanges {
+    Effects {
+        like: Vec<String>,
+        adds: Vec<EffectName>,
+        removes: Vec<EffectName>,
+    },
+    Unmodeled {
+        like: Vec<String>,
+    },
+}
+
+impl WhenChanges {
+    /// The patterns that a value must be like for this entry to apply.
+    pub(super) fn like(&self) -> &[String] {
+        match self {
+            Self::Effects { like, .. } | Self::Unmodeled { like } => like,
+        }
+    }
 }
 
 impl Grammar {
@@ -342,11 +356,24 @@ impl EffectChanges {
         let when = when
             .into_iter()
             .map(|entry| {
-                Ok(WhenChanges {
-                    like: entry.like,
-                    adds: declared(place, entry.adds, effects)?,
-                    removes: declared(place, entry.removes, effects)?,
-                })
+                if !entry.unmodeled {
+                    return Ok(WhenChanges::Effects {
+                        like: entry.like,
+                        adds: declared(place, entry.adds, effects)?,
+                        removes: declared(place, entry.removes, effects)?,
+                    });
+                }
+                if entry.like.is_empty() {
+                    return Err(GrammarRefusal::UnmodeledWithoutPattern {
+                        place: place.clone(),
+                    });
+                }
+                if !entry.adds.is_empty() || !entry.removes.is_empty() {
+                    return Err(GrammarRefusal::UnmodeledWithEffects {
+                        place: place.clone(),
+                    });
+                }
+                Ok(WhenChanges::Unmodeled { like: entry.like })
             })
             .collect::<Result<_, GrammarRefusal>>()?;
         Ok(Self {
@@ -479,7 +506,7 @@ aliases = ["send"]
 adds = ["network"]
 options.lease = { flag = ["--force-with-lease"], value = "optional", like = ["*:*", "*"], when = [{ like = "*", adds = ["force_push"], removes = ["network"] }] }
 options.dry_run = { flag = ["-n", "--dry-run"], removes = ["force_push"] }
-operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], when = [{ like = ["a", "b"] }], rest = true }
+operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], when = [{ like = ["a", "b"] }, { like = "-*", unmodeled = true }], rest = true }
 "#;
         let option = |flags: &[&str], value, repeated, anywhere, effects| ShellOption {
             flags: strings(flags),
@@ -489,7 +516,7 @@ operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], 
             effects,
         };
         let lease = EffectChanges {
-            when: vec![WhenChanges {
+            when: vec![WhenChanges::Effects {
                 like: strings(&["*"]),
                 adds: effects(&["force_push"]),
                 removes: effects(&["network"]),
@@ -497,11 +524,16 @@ operands.refspec = { like = "+*", adds = ["force_push"], removes = ["network"], 
             ..changes(&["*:*", "*"], &[], &[])
         };
         let refspec = EffectChanges {
-            when: vec![WhenChanges {
-                like: strings(&["a", "b"]),
-                adds: Vec::new(),
-                removes: Vec::new(),
-            }],
+            when: vec![
+                WhenChanges::Effects {
+                    like: strings(&["a", "b"]),
+                    adds: Vec::new(),
+                    removes: Vec::new(),
+                },
+                WhenChanges::Unmodeled {
+                    like: strings(&["-*"]),
+                },
+            ],
             ..changes(&["+*"], &["force_push"], &["network"])
         };
         let global_options = BTreeMap::from([

@@ -1,0 +1,119 @@
+# unmodeled-when grammar corpus
+#
+# Each case is one argv, and what the shell grammar of `unmodeled-when.grammar.toml` reads
+# it as. `fields` lists each field that does not hold its default: a Bool `false`, an
+# empty set, or an absent string. An `unmodeled` case has no fields and no effects.
+
+# A dry run removes `publish`
+[[case]]
+argv = ["pkg", "publish", "--dry-run"]
+action = "publish"
+fields = { dry_run = true }
+effects = ["network"]
+
+# The program reads `false` as the value of `--dry-run`, so the line is unmodeled
+[[case]]
+argv = ["pkg", "publish", "--dry-run", "false"]
+action = "unmodeled"
+
+# A package spec of `true` is unmodeled with no other option too
+[[case]]
+argv = ["pkg", "publish", "true"]
+action = "unmodeled"
+
+# An ordinary package spec stays modeled
+[[case]]
+argv = ["pkg", "publish", "./dist"]
+action = "publish"
+fields = { package_spec = "./dist" }
+effects = ["network", "publish"]
+
+# The program gives `--tag` an empty value and reads `--access=public`, so the line is unmodeled
+[[case]]
+argv = ["pkg", "publish", "--tag", "--access=public"]
+action = "unmodeled"
+
+# An attached value is matched the same way
+[[case]]
+argv = ["pkg", "publish", "--tag=-x"]
+action = "unmodeled"
+
+# An ordinary tag stays modeled
+[[case]]
+argv = ["pkg", "publish", "--tag", "next"]
+action = "publish"
+fields = { tag = "next" }
+effects = ["network", "publish"]
+
+# An `unmodeled` entry beside an effects entry: a value like the effects entry adds its effect
+[[case]]
+argv = ["pkg", "publish", "--access", "public"]
+action = "publish"
+fields = { access = "public" }
+effects = ["make_public", "network", "publish"]
+
+# An `unmodeled` entry beside an effects entry: a value like the `unmodeled` entry makes the line unmodeled
+[[case]]
+argv = ["pkg", "publish", "--access", "--dry-run"]
+action = "unmodeled"
+
+# A removal elsewhere on the line does not keep the line modeled
+[[case]]
+argv = ["pkg", "publish", "--dry-run", "--access", "-p"]
+action = "unmodeled"
+
+# The `unmodeled` entry of a global option applies to the action
+[[case]]
+argv = ["pkg", "--registry", "--tag", "publish"]
+action = "unmodeled"
+
+# One word of a variadic operand is sufficient
+[[case]]
+argv = ["pkg", "deploy", "--debug", "api", "false"]
+action = "unmodeled"
+
+# The same line without the literal stays modeled
+[[case]]
+argv = ["pkg", "deploy", "--debug", "api"]
+action = "deploy"
+fields = { debug = true, function = ["api"] }
+effects = ["network"]
+
+# A short option with the value attached is matched the same way
+[[case]]
+argv = ["pkg", "publish", "-t-x"]
+action = "unmodeled"
+
+# An `anywhere` global option between two command words
+[[case]]
+argv = ["pkg", "dist-tag", "--prefix", "-g", "add", "x"]
+action = "unmodeled"
+
+# The same option with an ordinary value stays modeled
+[[case]]
+argv = ["pkg", "dist-tag", "--prefix", "/p", "add", "x"]
+action = "dist_tag_add"
+fields = { prefix = "/p", spec = "x" }
+effects = ["network"]
+
+# One value of a repeated option is sufficient
+[[case]]
+argv = ["pkg", "dist-tag", "add", "--label", "a", "--label", "-b", "x"]
+action = "unmodeled"
+
+# One word of a `many` option is sufficient
+[[case]]
+argv = ["pkg", "dist-tag", "add", "x", "--files", "a", "true"]
+action = "unmodeled"
+
+# An `optional` option given bare has the value "", which `like = ""` matches
+[[case]]
+argv = ["pkg", "dist-tag", "add", "--otp", "x"]
+action = "unmodeled"
+
+# The same option with an attached value stays modeled
+[[case]]
+argv = ["pkg", "dist-tag", "add", "--otp=123", "x"]
+action = "dist_tag_add"
+fields = { otp = "123", spec = "x" }
+effects = ["network"]
