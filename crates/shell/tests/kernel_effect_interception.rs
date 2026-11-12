@@ -1622,3 +1622,22 @@ fn mkdir_p_makes_one_metadata_decision_per_component() {
         );
     }
 }
+
+/// A `sleep` that the deadline cuts short records a nonzero status.
+#[test]
+fn a_sleep_the_deadline_cuts_short_records_a_nonzero_status() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut shell = shell_with(Arc::new(Ghosts {
+        decided: AtomicUsize::new(0),
+        events: Arc::clone(&events),
+    }));
+    let out = run(async {
+        shell.proc.deadline =
+            Some(tokio::time::Instant::now() + std::time::Duration::from_millis(500));
+        shell.run("sleep 5").await
+    });
+    assert_ne!(out.status, 0, "{}", rendered(&out));
+    let events = events.lock().unwrap().clone();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_ne!(events[0], "#1 status 0", "{events:?}");
+}
