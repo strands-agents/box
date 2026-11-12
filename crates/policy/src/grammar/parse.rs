@@ -116,7 +116,7 @@ impl ActionGrammar {
             && before
                 .first()
                 .or(after.first())
-                .is_some_and(|word| like_a_command(word))
+                .is_some_and(|word| !like_a_path(word))
         {
             return None;
         }
@@ -198,13 +198,9 @@ fn spelled(
     Some(index)
 }
 
-/// Whether `word` could name a subcommand: ASCII letters, digits, `-`, and `_`, and not first a `-`.
-fn like_a_command(word: &str) -> bool {
-    !word.starts_with('-')
-        && !word.is_empty()
-        && word
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+/// Whether `word` reads as a path: it starts with `.` or holds a `/`.
+fn like_a_path(word: &str) -> bool {
+    word.starts_with('.') || word.contains('/')
 }
 
 fn is_option_word(word: &str) -> bool {
