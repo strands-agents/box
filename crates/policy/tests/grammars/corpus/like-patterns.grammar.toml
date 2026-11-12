@@ -25,7 +25,7 @@ options.dry_run = { flag = ["--dry-run"], value = "optional", like = ["", "clien
 case = "insensitive"
 [[shell.delete.operands.type.when]]
 like     = ["ns", "*namespace*", "*customresourcedefinition*", "crd", "crds"]
-not_like = ["*namespacedgadget*"]
+not_like = ["namespacedgadgets"]
 adds     = ["broad_delete"]
 
 [shell.port_forward]
