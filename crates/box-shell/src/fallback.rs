@@ -138,57 +138,95 @@ async fn finish(context: &mut CommandContext, permit: Box<dyn EffectPermit>, sta
     }
 }
 
+/// A decided command the Shell does not implement, waiting for its stage to start.
+pub(crate) enum Decided {
+    /// `python` or `python3`, decided as `shell:exec`.
+    Python(Box<dyn EffectPermit>),
+    /// A name no host program answers to, decided as `shell:exec`.
+    NotFound(Box<dyn EffectPermit>),
+    /// A host program, decided as `shell:spawn`.
+    Spawn {
+        permit: Box<dyn EffectPermit>,
+        program: crate::program::HostProgram,
+    },
+}
+
+impl Decided {
+    /// Record that the command never ran.
+    pub(crate) fn drop_unrun(self) {
+        match self {
+            Decided::Python(permit) | Decided::NotFound(permit) | Decided::Spawn { permit, .. } => {
+                permit.mark_indeterminate()
+            }
+        }
+    }
+}
+
+impl ShellKernel {
+    /// Decide one command the Shell does not implement, as the stage that runs it will.
+    pub(crate) async fn decide(
+        &self,
+        program: &str,
+        args: &[String],
+        cwd: &std::path::Path,
+    ) -> io::Result<Decided> {
+        let cwd_text = cwd.to_string_lossy();
+        if matches!(program, "python" | "python3") && self.commands.script.is_some() {
+            return admit_run(self.interceptor.as_ref(), program, args, &cwd_text)
+                .await
+                .map(Decided::Python);
+        }
+        let Some(resolved) = crate::program::host_program(&self.commands.programs, program, cwd)
+        else {
+            return admit_run(self.interceptor.as_ref(), program, args, &cwd_text)
+                .await
+                .map(Decided::NotFound);
+        };
+        let literal = vec![false; args.len()];
+        let permit = self
+            .interceptor
+            .intercept(&EffectAttempt::ShellSpawn {
+                command: &command_line(program, args),
+                program,
+                program_path: &resolved.path,
+                args,
+                literal: &literal,
+                cwd: &cwd_text,
+            })
+            .await?;
+        Ok(Decided::Spawn {
+            permit,
+            program: resolved,
+        })
+    }
+}
+
 #[async_trait::async_trait]
 impl CommandFallback for ShellKernel {
     async fn run(&self, context: &mut CommandContext) -> io::Result<Option<i32>> {
         let program = context.program().to_string();
         let args = context.args().to_vec();
-        let cwd = context.cwd().to_string_lossy().into_owned();
-        if matches!(program.as_str(), "python" | "python3") && self.commands.script.is_some() {
-            let permit = match admit_run(self.interceptor.as_ref(), &program, &args, &cwd).await {
-                Ok(permit) => permit,
+        let decided = match self.take_decided(&program, &args, context.cwd()) {
+            Some(decided) => decided,
+            None => match self.decide(&program, &args, context.cwd()).await {
+                Ok(decided) => decided,
                 Err(error) => {
                     let (status, line) = refusal(&error);
                     write_stderr(context, &line).await;
                     return Ok(Some(status));
                 }
-            };
-            let status = self.run_python(context, &args).await;
-            return Ok(Some(finish(context, permit, status).await));
-        }
-        let Some(resolved) =
-            crate::program::host_program(&self.commands.programs, &program, context.cwd())
-        else {
-            let permit = match admit_run(self.interceptor.as_ref(), &program, &args, &cwd).await {
-                Ok(permit) => permit,
-                Err(error) => {
-                    let (status, line) = refusal(&error);
-                    write_stderr(context, &line).await;
-                    return Ok(Some(status));
-                }
-            };
-            finish(context, permit, 127).await;
-            return Ok(None);
+            },
         };
-        let literal = vec![false; args.len()];
-        let admitted = self
-            .interceptor
-            .intercept(&EffectAttempt::ShellSpawn {
-                command: &command_line(&program, &args),
-                program: &program,
-                program_path: &resolved.path,
-                args: &args,
-                literal: &literal,
-                cwd: &cwd,
-            })
-            .await;
-        let permit = match admitted {
-            Ok(permit) => permit,
-            Err(error) => {
-                let (status, line) = refusal(&error);
-                write_stderr(context, &line).await;
-                return Ok(Some(status));
+        let (permit, resolved) = match decided {
+            Decided::Python(permit) => {
+                let status = self.run_python(context, &args).await;
+                return Ok(Some(finish(context, permit, status).await));
             }
+            Decided::NotFound(permit) => {
+                finish(context, permit, 127).await;
+                return Ok(None);
+            }
+            Decided::Spawn { permit, program } => (permit, program),
         };
         let working_directory = match permit.spawn_working_directory() {
             Some(directory) if !directory.is_absolute() => {

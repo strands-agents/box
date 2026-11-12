@@ -85,6 +85,8 @@ pub struct ShellKernel {
     pub(crate) commands: Commands,
     /// Permits of commands Shell runs itself, awaiting their status.
     running: StdMutex<Vec<(CommandKey, Box<dyn EffectPermit>)>>,
+    /// Commands for the fallback, decided before their pipeline started.
+    decided: StdMutex<Vec<(CommandKey, fallback::Decided)>>,
 }
 
 type CommandKey = (String, Vec<String>, PathBuf);
@@ -109,6 +111,7 @@ impl ShellKernel {
             network: None,
             commands: Commands::default(),
             running: StdMutex::new(Vec::new()),
+            decided: StdMutex::new(Vec::new()),
         }
     }
 
@@ -966,6 +969,19 @@ impl Kernel for ShellKernel {
         Ok(())
     }
 
+    /// Each stage for the fallback is decided before any stage of its pipeline starts.
+    async fn check_fallback(&self, request: &CommandRequest) -> io::Result<()> {
+        let decided = self
+            .decide(request.program(), request.args(), request.cwd())
+            .await
+            .map_err(|error| io::Error::new(error.kind(), format!("effect denied: {error}")))?;
+        self.decided
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((command_key(request), decided));
+        Ok(())
+    }
+
     async fn command_finished(&self, request: &CommandRequest, status: i32) -> io::Result<()> {
         match self.take_running(request) {
             Some(permit) => {
@@ -999,6 +1015,24 @@ impl ShellKernel {
     }
 }
 
+impl ShellKernel {
+    /// The decision a stage's pre-start check made for this command, when there is one.
+    pub(crate) fn take_decided(
+        &self,
+        program: &str,
+        args: &[String],
+        cwd: &std::path::Path,
+    ) -> Option<fallback::Decided> {
+        let key = (program.to_string(), args.to_vec(), cwd.to_path_buf());
+        let mut decided = self
+            .decided
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let index = decided.iter().position(|(held, _)| *held == key)?;
+        Some(decided.remove(index).1)
+    }
+}
+
 impl Drop for ShellKernel {
     fn drop(&mut self) {
         let running = std::mem::take(
@@ -1008,6 +1042,14 @@ impl Drop for ShellKernel {
         );
         for (_, permit) in running {
             permit.mark_indeterminate();
+        }
+        let decided = std::mem::take(
+            self.decided
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
+        for (_, decided) in decided {
+            decided.drop_unrun();
         }
     }
 }

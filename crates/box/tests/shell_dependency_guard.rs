@@ -51,6 +51,7 @@ const KERNEL_METHODS: &[(&str, Served)] = &[
     ("http_request", Served::Box),
     ("command_fallback", Served::Box),
     ("check_command", Served::Box),
+    ("check_fallback", Served::Box),
     ("command_finished", Served::Box),
     ("command_dropped", Served::Box),
 ];
