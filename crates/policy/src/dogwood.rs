@@ -2461,6 +2461,101 @@ when temporal {
         );
     }
 
+    /// `fragment` with each inline action input moved to an `<action>Input` common type.
+    fn with_input_types(fragment: &str) -> String {
+        let mut legacy = String::new();
+        for line in fragment.lines() {
+            let parts = line
+                .strip_prefix("  action \"")
+                .and_then(|rest| rest.split_once('"'))
+                .zip(line.split_once("input: { "))
+                .and_then(|((action, _), (head, rest))| {
+                    rest.split_once(" }, output?")
+                        .map(|(record, tail)| (action, head, record, tail))
+                });
+            match parts {
+                Some((action, head, record, tail)) => {
+                    legacy.push_str(&format!("  type {action}Input = {{ {record} }};\n"));
+                    legacy.push_str(&format!("{head}input: {action}Input, output?{tail}\n"));
+                }
+                None => legacy.push_str(&format!("{line}\n")),
+            }
+        }
+        legacy
+    }
+
+    #[test]
+    fn grammar_history_survives_the_move_of_action_inputs_inline() {
+        let grammar = crate::grammar::Grammar::load(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/grammars/valid/git.grammar.toml"
+        )))
+        .expect("the git grammar loads");
+        let inline = grammar.schema();
+        let legacy = with_input_types(&inline);
+        assert!(legacy.contains("type pushInput = {"), "{legacy}");
+        assert!(legacy.contains("input: pushInput, output?"), "{legacy}");
+        let source = r#"permit (principal, action, resource);
+            forbid (principal, action == Tool::git::Action::"push", resource)
+            when temporal {
+                formerly within 1h Tool::git::Action::"status"::request{ input.cwd: "/work" }
+            };"#;
+        let decide = |engine: &DogwoodEngine, args: &[&str]| {
+            let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+            let invocation = crate::grammar::GrammarInvocation::new(
+                &grammar,
+                "git",
+                &crate::grammar::ProgramFile::fixed("/usr/bin/git", 1),
+                None,
+                "/work",
+                &args,
+                &[],
+            );
+            engine
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Grammar(&invocation.request()),
+                )
+                .0
+                .is_allow()
+        };
+        let open = |fragment: &str, path: &Path| {
+            DogwoodEngine::open_with_schemas(
+                source,
+                &[fragment.to_string()],
+                &[],
+                path,
+                &Operator::unanchored(),
+            )
+            .expect("policy loads")
+            .0
+        };
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        let fresh = tempfile::tempdir().expect("history directory");
+
+        let before = {
+            let engine = open(&legacy, &path);
+            decide(&engine, &["status"])
+        };
+        let carried = !decide(&open(&inline, &path), &["push", "origin"]);
+        let control = decide(
+            &open(&inline, &fresh.path().join("dogwood.redb")),
+            &["push", "origin"],
+        );
+
+        assert!(before, "status is allowed under the legacy schema");
+        assert!(
+            carried,
+            "the status request recorded before the move still forbids push"
+        );
+        assert!(
+            control,
+            "push is allowed in a history with no status request"
+        );
+    }
+
     #[test]
     fn staged_open_reports_an_incompatible_history_schema_as_durable() {
         let history = tempfile::tempdir().expect("history directory");

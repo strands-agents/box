@@ -264,3 +264,12 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Parse the schema at `open`, never lazily: a lazy parse costs the first call ~1.5 ms and turns a
   load error into a first-request deny. `cached_uid` saves ~7 µs per verdict and still yields
   `PolicyError::Schema`.
+- Declare no common type for each grammar action. Dogwood 1.0.0 finds a common type by a scan over
+  all of them, once for each action, so one type per action makes `open` grow with the square of
+  the action count (1.6 s at 400 actions and 13.7 s at 1600, on a loaded host). `Grammar::schema`
+  writes each input record inline. Pinned by
+  `grammar/schema.rs::a_grammar_with_many_actions_declares_no_type_per_action_and_loads`.
+  `generate_mcp_schema` still declares one `<tool>Input` type for each tool, so a server with many
+  tools has the same cost. A history from before the change can replay the old schema text until
+  its next snapshot. Each decision also builds every action entity again, and only a Dogwood
+  release can fix that.
