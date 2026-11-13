@@ -138,6 +138,7 @@ fn serve(
     native: Option<&UnixStream>,
 ) -> io::Result<i32> {
     let own_pid = unsafe { libc::getpid() };
+    let mut pending: Option<(&UnixStream, libc::seccomp_notif)> = None;
     loop {
         let mut status = 0;
         // SAFETY: waitpid observes only this launcher's child.
@@ -156,9 +157,15 @@ fn serve(
             }
             return Err(error);
         }
+        // Keep at most one unsent request; leave further notifications in the kernel.
+        // Poll only the blocked socket so queued notifications cannot cause a busy loop.
+        let (fd, events) = match pending.as_ref() {
+            Some((socket, _)) => (socket.as_raw_fd(), libc::POLLOUT),
+            None => (listener.as_raw_fd(), libc::POLLIN),
+        };
         let mut poll = libc::pollfd {
-            fd: listener.as_raw_fd(),
-            events: libc::POLLIN,
+            fd,
+            events,
             revents: 0,
         };
         // SAFETY: poll receives one initialized writable pollfd.
@@ -171,7 +178,23 @@ fn serve(
             return Err(error);
         }
         if poll.revents & libc::POLLNVAL != 0 {
-            return Err(io::Error::other("filesystem listener closed unexpectedly"));
+            return Err(io::Error::other(
+                "filesystem notification descriptor closed unexpectedly",
+            ));
+        }
+        if let Some((socket, request)) = pending.as_ref() {
+            if poll.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+                return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+            }
+            if poll.revents & libc::POLLOUT != 0 {
+                match forward_request(socket, request) {
+                    Ok(()) => pending = None,
+                    // Readiness does not reserve capacity; retain the same request on retry.
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            continue;
         }
         if poll.revents & libc::POLLIN == 0 {
             if poll.revents & libc::POLLHUP != 0 {
@@ -204,7 +227,13 @@ fn serve(
             && request.flags == 0
             && is_native_operation(request.data.nr)
         {
-            forward_request(native, &request)?;
+            match forward_request(native, &request) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    pending = Some((native, request));
+                }
+                Err(error) => return Err(error),
+            }
             continue;
         }
         let result = if request.pid == 0
@@ -537,6 +566,10 @@ fn receive_listener(control: &UnixStream) -> io::Result<(OwnedFd, bool)> {
         byte == [2],
     ))
 }
+
+#[cfg(all(test, feature = "native-filesystem-policy"))]
+#[path = "filesystem_queries/forwarding_tests.rs"]
+mod forwarding_tests;
 
 #[cfg(test)]
 mod tests {

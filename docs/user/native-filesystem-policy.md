@@ -167,6 +167,8 @@ Use the durable policy history and saved file effects when assessing enforcement
 ## Filesystem operation meanings
 
 Native rename checks `fs:move` on both the source and destination, plus `fs:read` on the source.
+The source read check uses `context.input.operation == Box::FsReadOperation::"read_content"` for both files and directories on Linux and macOS.
+For example, denying `read_content` blocks a directory rename even when directory listing through `enumerate` is permitted.
 Linux outcome records use the same path spelling as their policy requests, including `~/` for paths under the workload home.
 A successful Linux rename records one completed `fs:move` on the destination, matching Shell.
 The source move check remains in history without a completion record; every permission check still runs.

@@ -75,7 +75,9 @@ impl Run {
             root.join("policy.dw"),
             if permit && mode == "delete" {
                 "permit(principal, action == Box::Action::\"fs:delete\", resource);\n"
-            } else if permit && matches!(mode, "read" | "list") {
+            } else if permit
+                && matches!(mode, "read" | "list" | "parallel-read" | "parallel-denied")
+            {
                 "permit(principal, action == Box::Action::\"fs:read\", resource);\n"
             } else if permit {
                 "permit(principal, action == Box::Action::\"fs:write\", resource);\n"
@@ -210,7 +212,10 @@ impl Drop for Run {
         let _ = self.child.kill();
         let _ = self.child.wait();
         if std::thread::panicking() {
-            let stderr = self.stderr.lock().unwrap();
+            let stderr = self
+                .stderr
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let _ = std::fs::write(self.root.join("box.stderr.log"), stderr.as_str());
             eprintln!("fixture={}\n{stderr}", self.root.display());
         }
@@ -321,9 +326,13 @@ fn immediate_exit_cannot_hide_an_outcome_storage_failure() {
     assert_eq!(run.line(), "READY");
     run.release();
     assert!(!run.wait().success());
-    let stderr = run.stderr.lock().unwrap();
+    let stderr = run.stderr.lock().unwrap().clone();
     assert!(stderr.contains("NATIVE_TEST_FAULT=outcome-storage"));
-    assert!(stderr.contains("policy history failure: durable log"));
+    assert!(
+        stderr.contains("policy history failure: durable log")
+            || stderr.contains("policy outcome kept until the history accepts it: durable log"),
+        "{stderr}"
+    );
 }
 
 #[cfg(box_native_test_faults)]
@@ -412,6 +421,33 @@ fn killing_box_with_a_pending_request_preserves_the_file() {
     );
     run.unchanged();
 }
+
+fn parallel_reads(permit: bool) {
+    let mode = if permit {
+        "parallel-read"
+    } else {
+        "parallel-denied"
+    };
+    let mut run = Run::start(mode, None, permit);
+    assert_eq!(run.line(), "READY");
+    run.release();
+    assert_eq!(run.line(), "READY 384");
+    assert_eq!(run.line(), "COMPLETED 384");
+    assert_eq!(run.line(), "FAILED 0");
+    assert!(run.wait().success());
+    run.unchanged();
+}
+
+#[test]
+fn a_burst_of_384_permitted_reads_completes_without_stopping_box() {
+    parallel_reads(true);
+}
+
+#[test]
+fn a_burst_of_384_denied_reads_preserves_policy_enforcement() {
+    parallel_reads(false);
+}
+
 #[test]
 fn sixteen_children_complete_128_checked_writes() {
     let mut run = Run::start("concurrent", None, true);
