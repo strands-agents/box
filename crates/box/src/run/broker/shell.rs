@@ -339,7 +339,8 @@ fn mutates(operation: FsOperation) -> bool {
         | FsOperation::CreateDir
         | FsOperation::RemoveFile
         | FsOperation::RemoveDir
-        | FsOperation::SetPermissions { .. } => true,
+        | FsOperation::SetPermissions { .. }
+        | FsOperation::SetTimes => true,
         FsOperation::ReadContent
         | FsOperation::ReadMetadata { .. }
         | FsOperation::Enumerate
@@ -421,7 +422,8 @@ fn fs_action(operation: FsOperation) -> &'static str {
         | FsOperation::Exec => r#"Box::Action::"fs:read""#,
         FsOperation::WriteContent { .. }
         | FsOperation::CreateDir
-        | FsOperation::SetPermissions { .. } => r#"Box::Action::"fs:write""#,
+        | FsOperation::SetPermissions { .. }
+        | FsOperation::SetTimes => r#"Box::Action::"fs:write""#,
         FsOperation::RemoveFile | FsOperation::RemoveDir => r#"Box::Action::"fs:delete""#,
         _ => r#"Box::Action::"fs:other""#,
     }
@@ -576,6 +578,7 @@ mod tests {
             FsOperation::RemoveDir,
             FsOperation::CreateDir,
             FsOperation::SetPermissions { mode: 0o644 },
+            FsOperation::SetTimes,
             FsOperation::ChangeDir,
             FsOperation::ReadLink,
         ] {

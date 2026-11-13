@@ -21,8 +21,8 @@ use crate::effect::{
     FsPairOperation, KernelPermit,
 };
 use crate::os::{
-    DirEntry, Fd, FileStat, Follow, HttpRequest, HttpResponse, Kernel, OpenFlags, Process,
-    Resolved, WriteFailure,
+    DirEntry, Fd, FileStat, FileTimes, Follow, HttpRequest, HttpResponse, Kernel, OpenFlags,
+    Process, Resolved, WriteFailure,
 };
 
 /// A kernel whose every filesystem effect is admitted before it happens.
@@ -574,6 +574,14 @@ impl Mediated {
             self.kernel.set_permissions(proc, resolved, mode).await,
         )
         .await
+    }
+
+    /// Set the access and modification times.
+    pub async fn set_times(&self, proc: &Process, path: &str, times: FileTimes) -> io::Result<()> {
+        let (resolved, permit) = self
+            .admit_path(proc, path, Follow::Yes, FsOperation::SetTimes)
+            .await?;
+        Self::report(permit, self.kernel.set_times(proc, resolved, times).await).await
     }
 
     /// Mint a process. Carries no path, so nothing to admit.

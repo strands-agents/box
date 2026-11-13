@@ -1819,3 +1819,38 @@ each `Kernel` must forward them and cannot hide the refusal. `is_executable`, `f
 outcome, because admission refuses it first.
 `tests/kernel_effect_interception.rs::an_answered_probe_reports_a_completed_effect` and
 `a_probe_the_admission_window_refuses_reports_a_failure` pin the change.
+
+## 2026-11-09 — `touch` did not change the times of an existing file, and refused every option
+
+An upstream bug and an upstream command gap
+([strands-agents/box#361](https://github.com/strands-agents/box/issues/361)). `touch` opened an
+existing file for append and closed it. Nothing was written, so the times did not change, and
+`touch` exited 0. The shell had no operation that sets a file's times. `touch` also refused every
+option except `--help`.
+
+This copy adds a time operation along the same path as `chmod`:
+
+- `Kernel::set_times(proc, Resolved, FileTimes)` has no default implementation, so each `Kernel`
+  must implement it. `FileTimes` holds one `TimeChange` (`Keep`, `Now`, or `To(SystemTime)`) for
+  the access time and one for the modification time.
+- `Mediated::set_times` admits `FsOperation::SetTimes` with `Follow::Yes`, as `touch` follows a
+  symbolic link, and the guard list in `tests/admission_window_guard_present.rs` names it.
+- On a host bind, `VfsKernel` calls `utimensat` pinned to the identity that admission checked, as
+  `set_permissions` does. A read-only bind refuses it. The in-memory VFS sets both times, and
+  permission there follows `utimensat`: the owner can set any time, and a writer can set the
+  current time.
+- `FileStat` has a new `accessed` field, and `vfs::Inode` has a new `atime` field that only a time
+  change sets. A read does not update it, as on a `noatime` mount.
+
+`touch` now accepts `-a`, `-m`, `-c`/`--no-create`, `-d`/`--date`, `-r`/`--reference`, and `-t`.
+`-d` accepts ISO 8601 and `@SECONDS` only, because the crate has no date parser, and it refuses
+a non-ASCII date before it slices one. A time with no
+zone is UTC, as `date` assumes. A missing file is created in append mode, so a file that another
+writer creates after the check is not truncated. A failure on one file is reported with its name,
+and `touch` continues with the next file and exits 1.
+
+Box maps `SetTimes` to its existing `fs:write` operation `write_content` in
+`crates/policy/src/adapters/shell.rs`, so the policy vocabulary does not change.
+`tests/touch_times.rs` pins the host and in-memory behavior (11 cases). Seven of them fail when the
+host branch does nothing, and the two in-memory `-a` and `-r` cases fail when the in-memory branch
+keeps the access time.

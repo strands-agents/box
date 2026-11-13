@@ -899,6 +899,112 @@ impl VfsKernel {
         ))
     }
 
+    /// Set a host file's times on the identity that admission resolved, never on a swapped leaf.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn set_host_times(
+        host_path: &Path,
+        times: FileTimes,
+        expected: Option<&HostIdentity>,
+    ) -> io::Result<()> {
+        let expected = expected.ok_or_else(Self::stale_resolution)?;
+        let (expected_device, expected_inode) = match expected {
+            HostIdentity::Present { device, inode, .. } => (*device, *inode),
+            HostIdentity::Missing { .. } | HostIdentity::Unavailable { .. } => {
+                return Err(Self::stale_resolution());
+            }
+        };
+        let specification = [
+            host_timespec(times.accessed)?,
+            host_timespec(times.modified)?,
+        ];
+        let (parent, leaf) = Self::opened_parent(host_path, expected)?;
+        #[cfg(target_os = "linux")]
+        {
+            // As for `chmod`: `O_PATH` pins the leaf with no access check, and `/proc/self/fd` then
+            // names that exact descriptor, so a leaf swapped for a symlink cannot redirect the change.
+            let open_flags = libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_PATH;
+            // SAFETY: parent and leaf are owned, valid handles. The returned descriptor is checked.
+            let descriptor =
+                unsafe { libc::openat(parent.as_raw_fd(), leaf.as_ptr(), open_flags, 0) };
+            if descriptor < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: openat returned this owned descriptor and File closes it once.
+            let file = unsafe { File::from_raw_fd(descriptor) };
+            let metadata = file.metadata()?;
+            if metadata.dev() != expected_device || metadata.ino() != expected_inode {
+                return Err(Self::stale_resolution());
+            }
+            let descriptor_path = CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
+                .expect("descriptor path has no NUL byte");
+            // SAFETY: the proc path names the exact open descriptor whose identity was verified, and
+            // specification holds the two timespec values utimensat reads.
+            let result = unsafe {
+                libc::utimensat(
+                    libc::AT_FDCWD,
+                    descriptor_path.as_ptr(),
+                    specification.as_ptr(),
+                    0,
+                )
+            };
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // As for `chmod`: verify the leaf identity with `fstatat`, then change it with
+            // `utimensat`, both under the pinned parent and both `AT_SYMLINK_NOFOLLOW`.
+            let mut leaf_stat = std::mem::MaybeUninit::<libc::stat>::uninit();
+            // SAFETY: parent and leaf are owned, valid handles; leaf_stat is written before it is read.
+            let statted = unsafe {
+                libc::fstatat(
+                    parent.as_raw_fd(),
+                    leaf.as_ptr(),
+                    leaf_stat.as_mut_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if statted < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: fstatat returned 0, so leaf_stat is initialized.
+            let leaf_stat = unsafe { leaf_stat.assume_init() };
+            if leaf_stat.st_dev as u64 != expected_device || leaf_stat.st_ino != expected_inode {
+                return Err(Self::stale_resolution());
+            }
+            // SAFETY: parent and leaf are owned, valid handles, and specification holds the two
+            // timespec values utimensat reads.
+            let result = unsafe {
+                libc::utimensat(
+                    parent.as_raw_fd(),
+                    leaf.as_ptr(),
+                    specification.as_ptr(),
+                    libc::AT_SYMLINK_NOFOLLOW,
+                )
+            };
+            if result == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn set_host_times(
+        _host_path: &Path,
+        _times: FileTimes,
+        _expected: Option<&HostIdentity>,
+    ) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "descriptor-bound host touch requires Linux or macOS",
+        ))
+    }
+
     #[cfg(target_arch = "wasm32")]
     async fn open_host(
         &self,
@@ -1626,6 +1732,52 @@ impl VfsKernel {
         Ok(())
     }
 
+    async fn set_times_effect(
+        &self,
+        proc: &Process,
+        path: &str,
+        times: FileTimes,
+        expected: Option<&HostIdentity>,
+    ) -> io::Result<()> {
+        let abs = Self::abs(proc, path);
+        let mut vfs = self.vfs.lock().await;
+        if let Some((host_path, ro, _)) = Self::resolve_host(&vfs, &abs) {
+            drop(vfs);
+            if ro {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "read-only bind mount",
+                ));
+            }
+            return Self::set_host_times(&host_path, times, expected);
+        }
+        let ino = vfs.resolve(&abs, true)?;
+        // As `utimensat` does: the owner may set any time, and a writer may set the current time.
+        let explicit = [times.accessed, times.modified]
+            .iter()
+            .any(|change| matches!(change, TimeChange::To(_)));
+        let owner = vfs.get(ino)?.uid == LASH_UID || LASH_UID == 0;
+        if !owner && (explicit || !vfs.check_permission(ino, LASH_UID, LASH_GID, 2)) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "permission denied",
+            ));
+        }
+        let now = std::time::SystemTime::now();
+        let inode = vfs.get_mut(ino)?;
+        for (change, slot) in [
+            (times.accessed, &mut inode.atime),
+            (times.modified, &mut inode.mtime),
+        ] {
+            match change {
+                TimeChange::Keep => {}
+                TimeChange::Now => *slot = now,
+                TimeChange::To(time) => *slot = time,
+            }
+        }
+        Ok(())
+    }
+
     fn now(&self) -> std::time::SystemTime {
         std::time::SystemTime::now()
     }
@@ -2202,6 +2354,13 @@ impl Kernel for VfsKernel {
             .await
     }
 
+    async fn set_times(&self, proc: &Process, path: Resolved, times: FileTimes) -> io::Result<()> {
+        debug_assert_eq!(path.follow(), Follow::Yes, "touch follows to its target");
+        let _generation = self.guard_resolution(&path).await?;
+        self.set_times_effect(proc, path.path(), times, path.host_identity())
+            .await
+    }
+
     /// The SSRF floor — a deny-only control, not an authorization decision.
     fn check_url(&self, url: &str) -> io::Result<()> {
         self.check_url_effect(url)
@@ -2244,6 +2403,42 @@ impl Kernel for VfsKernel {
     }
 }
 
+/// The `utimensat` form of one time change.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn host_timespec(change: TimeChange) -> io::Result<libc::timespec> {
+    let (seconds, nanoseconds) = match change {
+        TimeChange::Keep => (0, libc::UTIME_OMIT),
+        TimeChange::Now => (0, libc::UTIME_NOW),
+        TimeChange::To(time) => {
+            let out_of_range =
+                || io::Error::new(io::ErrorKind::InvalidInput, "time is out of range");
+            match time.duration_since(std::time::UNIX_EPOCH) {
+                Ok(after) => (
+                    libc::time_t::try_from(after.as_secs()).map_err(|_| out_of_range())?,
+                    libc::c_long::from(after.subsec_nanos() as i32),
+                ),
+                Err(before) => {
+                    let before = before.duration();
+                    let seconds =
+                        libc::time_t::try_from(before.as_secs()).map_err(|_| out_of_range())?;
+                    match before.subsec_nanos() {
+                        0 => (-seconds, 0),
+                        nanoseconds => (
+                            -seconds - 1,
+                            libc::c_long::from(1_000_000_000 - nanoseconds as i32),
+                        ),
+                    }
+                }
+            }
+        }
+    };
+    // SAFETY: timespec is plain data, and every field is assigned below.
+    let mut specification: libc::timespec = unsafe { std::mem::zeroed() };
+    specification.tv_sec = seconds;
+    specification.tv_nsec = nanoseconds;
+    Ok(specification)
+}
+
 // --- host stat helper ---
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -2280,6 +2475,7 @@ async fn host_stat(path: &std::path::Path, follow: Follow) -> FileStat {
         dev: 0,
         ino: 0,
         modified: meta.modified().ok(),
+        accessed: meta.accessed().ok(),
     }
 }
 
@@ -2307,6 +2503,7 @@ fn host_stat_sync(path: &std::path::Path, follow: Follow) -> FileStat {
         dev: 0,
         ino: 0,
         modified: meta.modified().ok(),
+        accessed: meta.accessed().ok(),
     }
 }
 

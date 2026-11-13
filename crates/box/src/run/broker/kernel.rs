@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use strands_shell::os::{
-    DirEntry, Fd, FileStat, Follow, HostSpawn, HostSpawnOutcome, HttpRequest, HttpResponse, Kernel,
-    OpenFlags, Process, Resolved, ScriptOutcome, WriteFailure,
+    DirEntry, Fd, FileStat, FileTimes, Follow, HostSpawn, HostSpawnOutcome, HttpRequest,
+    HttpResponse, Kernel, OpenFlags, Process, Resolved, ScriptOutcome, WriteFailure,
 };
 
 use crate::run::broker::shell::EgressRouting;
@@ -210,6 +210,10 @@ impl Kernel for CallKernel {
 
     async fn set_permissions(&self, proc: &Process, path: Resolved, mode: u32) -> io::Result<()> {
         self.backend.set_permissions(proc, path, mode).await
+    }
+
+    async fn set_times(&self, proc: &Process, path: Resolved, times: FileTimes) -> io::Result<()> {
+        self.backend.set_times(proc, path, times).await
     }
 
     fn now(&self) -> SystemTime {

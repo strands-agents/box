@@ -55,6 +55,7 @@ const SINGLE: &[(FsOperation, Expected)] = &[
         FsOperation::SetPermissions { mode: 0o644 },
         Expected::Action("fs:write"),
     ),
+    (FsOperation::SetTimes, Expected::Action("fs:write")),
     (FsOperation::ChangeDir, Expected::Action("fs:read")),
     (FsOperation::ReadLink, Expected::Action("fs:read")),
 ];
@@ -293,5 +294,52 @@ async fn a_replaced_directory_is_deleted_as_remove_dir_and_a_file_as_remove_file
                     panic!("{admitted:?} is not reached by {forbidden}: {error}")
                 }),
         );
+    }
+}
+
+/// Setting a file's times carries `write_content`, so a rule that names that operation reaches
+/// `touch` and a rule that names another write operation does not.
+#[tokio::test]
+async fn setting_times_is_decided_as_write_content() {
+    for (forbidden, refused) in [("write_content", true), ("set_permissions", false)] {
+        let policy = support::open_policy(vec![Policy {
+            origin: PathBuf::from("shell-fs-vocabulary-set-times.dw"),
+            text: format!(
+                r#"permit(principal, action, resource);
+                   @id("no-{forbidden}")
+                   forbid(principal, action == Box::Action::"fs:write", resource)
+                   when {{ context.input.operation == Box::FsWriteOperation::"{forbidden}" }};"#
+            ),
+        }])
+        .expect("policy loads");
+        let interceptor = ShellPolicyInterceptor::into_handle(
+            Arc::new(policy),
+            Principal::agent(),
+            GovernedBox::assigned("test-box"),
+        );
+        let outcome = interceptor
+            .intercept(&EffectAttempt::Filesystem {
+                path: SOURCE,
+                operation: FsOperation::SetTimes,
+            })
+            .await;
+        match outcome {
+            Err(error) => {
+                assert!(
+                    refused,
+                    "a forbid on {forbidden} must not reach SetTimes: {error}"
+                );
+                assert!(
+                    error
+                        .to_string()
+                        .contains(&format!("'{SOURCE}' [policy: no-{forbidden}]")),
+                    "{error}"
+                );
+            }
+            Ok(permit) => {
+                drop(permit);
+                assert!(!refused, "a forbid on {forbidden} must refuse SetTimes");
+            }
+        }
     }
 }

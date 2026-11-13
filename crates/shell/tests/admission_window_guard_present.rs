@@ -10,6 +10,7 @@ const MUTATING_METHODS: &[&str] = &[
     "rename",
     "symlink",
     "set_permissions",
+    "set_times",
 ];
 
 const GENERATION_CHANGES: &[&str] = &[
@@ -29,6 +30,7 @@ const HOST_DELEGATIONS: &[(&str, &str)] = &[
     ("rename_effect", "rename_host"),
     ("symlink_effect", "create_host_symlink"),
     ("set_permissions_effect", "set_host_permissions"),
+    ("set_times_effect", "set_host_times"),
 ];
 
 fn method_body<'a>(src: &'a str, section: &str, name: &str) -> &'a str {

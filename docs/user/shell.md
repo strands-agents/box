@@ -126,6 +126,9 @@ link resolved.
 | `fs:delete` | `Box::FsDeleteOperation::"remove_file"`, `"remove_dir"` |
 | `fs:move` | `Box::FsMoveOperation::"rename"` |
 
+When `touch` sets a file's times, it requests `fs:write` with `"write_content"`, so a rule that
+lets the agent write a file also lets it set that file's times.
+
 | Field | Type | Present | Value |
 |---|---|---|---|
 | `context.input.path` | String | Always | The resolved path. A path under the operator's home starts with `~/`, and the home itself is `~`. |

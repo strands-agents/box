@@ -189,6 +189,9 @@ fn fs_operation(operation: KernelFsOperation) -> FsOperation {
         // into the coarse verb: the vocabulary starts coarse, because a field can be
         // added compatibly and never removed.
         KernelFsOperation::WriteContent { .. } => FsOperation::WriteContent,
+        // Setting a file's times is reported as the write that also sets them, so the authored
+        // vocabulary does not change.
+        KernelFsOperation::SetTimes => FsOperation::WriteContent,
         KernelFsOperation::ReadMetadata { .. } => FsOperation::ReadMetadata,
         KernelFsOperation::Enumerate => FsOperation::Enumerate,
         KernelFsOperation::Exec => FsOperation::ExecFile,

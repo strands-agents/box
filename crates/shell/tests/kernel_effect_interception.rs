@@ -1624,6 +1624,14 @@ fn a_supplied_kernel_is_mediated_identically() {
         ) -> io::Result<()> {
             self.inner.set_permissions(proc, path, mode).await
         }
+        async fn set_times(
+            &self,
+            proc: &strands_shell::os::Process,
+            path: Resolved,
+            times: strands_shell::os::FileTimes,
+        ) -> io::Result<()> {
+            self.inner.set_times(proc, path, times).await
+        }
         fn check_url(&self, url: &str) -> io::Result<()> {
             self.inner.check_url(url)
         }
