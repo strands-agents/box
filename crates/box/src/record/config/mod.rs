@@ -349,11 +349,7 @@ impl RunContract {
         &self.file.experimental_features
     }
 
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     pub(crate) fn uses_native_filesystem(&self) -> bool {
         self.file.uses_native_filesystem()
     }
@@ -706,8 +702,7 @@ impl ExperimentalFeatures {
                 all(
                     target_os = "linux",
                     target_arch = "aarch64",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
+                    feature = "native-filesystem-policy"
                 )
             ))
         {
@@ -1364,11 +1359,7 @@ struct ConfigFile {
 }
 
 impl ConfigFile {
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     fn uses_native_filesystem(&self) -> bool {
         let contained = crate::record::config::mcp::contained_specs(&self.mcp);
         process::uses_native_filesystem(
@@ -1723,11 +1714,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     #[test]
     fn native_setup_includes_inherited_stdio_servers_and_respects_every_opt_out() {
         let base = r#"name = "selection"
@@ -2029,8 +2016,7 @@ native-filesystem-policy = false
             all(
                 target_os = "linux",
                 target_arch = "aarch64",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
+                feature = "native-filesystem-policy"
             )
         )) {
             assert!(

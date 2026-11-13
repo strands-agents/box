@@ -1,7 +1,6 @@
 //! Native directory and symbolic-link effects through Box and Dogwood.
 #![cfg(all(
     box_native_kernel_tests,
-    box_native_adapter_tests,
     target_os = "linux",
     target_arch = "aarch64",
     feature = "native-filesystem-policy",

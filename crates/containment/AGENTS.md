@@ -1241,7 +1241,6 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     target was exercised. Seccomp **can** scope this, unlike the macOS flag argument, because the
     mode is a scalar.
 
-
 ### Native policy and filesystem-information notifications
 
 Kevin approved one receiver in the existing containment supervisor on November 11, 2026,

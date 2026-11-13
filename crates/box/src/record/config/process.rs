@@ -58,11 +58,7 @@ pub(crate) struct ProcessSpec {
     pub(crate) ingress: Vec<super::ingress::Ingress>,
 }
 
-#[cfg(all(
-    target_os = "linux",
-    feature = "native-filesystem-policy",
-    box_native_adapter_tests
-))]
+#[cfg(all(target_os = "linux", feature = "native-filesystem-policy",))]
 pub(crate) fn uses_native_filesystem<'a>(
     processes: impl IntoIterator<Item = &'a ProcessSpec>,
     default: bool,

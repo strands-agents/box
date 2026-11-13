@@ -33,11 +33,7 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     let native_setup = match &cli.command {
         Command::Run { config, .. } => {
             match run::prepare_native(config, options.on_ready.is_some()) {
@@ -76,11 +72,7 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
             cli,
             options.terminal,
             signals,
-            #[cfg(all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            ))]
+            #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
             native_setup,
         )
         .await
@@ -98,12 +90,9 @@ async fn dispatch(
     cli: Cli,
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
-    native_setup: Option<run::NativeSetup>,
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))] native_setup: Option<
+        run::NativeSetup,
+    >,
 ) -> Result<ExitCode, BoxError> {
     match &cli.command {
         Command::Run { config, workload } => {
@@ -112,11 +101,7 @@ async fn dispatch(
                 workload,
                 terminal,
                 signals,
-                #[cfg(all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                ))]
+                #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
                 native_setup.expect("native capabilities prepared before runtime startup"),
             )
             .await

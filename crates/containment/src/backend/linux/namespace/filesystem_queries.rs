@@ -270,11 +270,11 @@ fn serve(
 }
 
 fn is_native_operation(number: i32) -> bool {
-    #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+    #[cfg(feature = "native-filesystem-policy")]
     {
         super::native_filesystem::OPERATIONS.contains(&(number as libc::c_long))
     }
-    #[cfg(not(all(feature = "native-filesystem-policy", box_native_adapter_tests)))]
+    #[cfg(not(feature = "native-filesystem-policy"))]
     {
         let _ = number;
         false
@@ -567,7 +567,7 @@ fn receive_listener(control: &UnixStream) -> io::Result<(OwnedFd, bool)> {
     ))
 }
 
-#[cfg(all(test, feature = "native-filesystem-policy", box_native_adapter_tests))]
+#[cfg(all(test, feature = "native-filesystem-policy"))]
 #[path = "filesystem_queries/forwarding_tests.rs"]
 mod forwarding_tests;
 

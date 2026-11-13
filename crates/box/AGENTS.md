@@ -1101,7 +1101,6 @@ stable `<a id>` anchor. Cite an entry by that anchor: a **relative link** from M
 a number can land on the wrong target rather than on none, and a link fails visibly. A decision
 that reaches shipped code gets its entry in the same change.
 
-
 ### Linux native notification forwarding
 
 The private version-two registration receives three descriptors: the kernel listener, a path-only

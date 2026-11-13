@@ -294,6 +294,11 @@ interpreters are part of the code the operator must trust.
    [configuration reference](../user/config.md#agentfilesystem-and-toolnamefilesystem) shows the output.
 7. It starts the trampoline, which becomes the agent, and waits for the workload to end.
 
+Before a selected Linux workload starts, native filesystem setup probes whether the kernel can transfer path-only file handles.
+When that optional transfer is unsupported, Box reports the limit on stderr and refuses those opens.
+Other supported native operations remain available. Unexpected probe errors stop startup.
+The [native policy guide](../user/native-filesystem-policy.md#linux-arm64) explains this distinction.
+
 During shutdown, Box stops and reaps the workload before closing the broker and gateway.
 It then removes the record that identifies the running box and releases the run lock.
 Holding the lock until this point prevents a second run from taking over while the first still
