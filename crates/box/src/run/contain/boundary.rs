@@ -917,6 +917,8 @@ struct DisclosureInputs<'a> {
     native_filesystem_policy: bool,
 }
 
+/// The line a box prints for a `table` that selects native file watching, at startup and again
+/// when the process starts.
 pub(crate) fn native_file_watching_disclosure(table: &str) -> String {
     format!(
         "strands-box: {table} native file watching: macOS FSEvents may disclose denied names \
@@ -2866,12 +2868,14 @@ mod tests {
         }
     }
 
+    /// **Native file watching reaches only the process that selects it, and is disclosed only where
+    /// it renders.** The agent selects it here, so a tool or MCP leaf that does not stays off.
     #[test]
     fn native_file_watching_follows_only_the_selected_process() {
         let mut fixture = Fixture::new();
         let mut selected = fixture.spec();
         selected.native_file_watching = true;
-        fixture.record.agent = Some(selected.clone());
+        fixture.record.agent = Some(selected);
         for (table, reach) in [
             ("[agent]", RuntimeReach::Agent),
             ("[tool.watcher]", RuntimeReach::Leaf),
@@ -2882,30 +2886,20 @@ mod tests {
                 spec.native_file_watching = enabled;
                 let boundary = fixture.translate_full(&spec, table, reach, EgressMode::Gateway);
                 let config: serde_json::Value =
-                    serde_json::from_str(&boundary.containment_config_text()).unwrap();
+                    serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
                 assert_eq!(
                     config["native_file_watching"].as_bool().unwrap_or(false),
                     enabled,
                     "{table}"
                 );
-                let disclosed = enabled && cfg!(target_os = "macos");
                 assert_eq!(
-                    boundary.disclosure().contains("native file watching:"),
-                    disclosed,
+                    boundary
+                        .disclosure()
+                        .contains(&native_file_watching_disclosure(table)),
+                    enabled && cfg!(target_os = "macos"),
                     "{table}: {}",
                     boundary.disclosure()
                 );
-                if disclosed {
-                    for text in [
-                        table,
-                        "denied names and event metadata",
-                        "outside the workspace",
-                        "past events",
-                        "file-content and write restrictions still apply",
-                    ] {
-                        assert!(boundary.disclosure().contains(text), "{text}");
-                    }
-                }
             }
         }
     }

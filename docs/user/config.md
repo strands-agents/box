@@ -282,53 +282,6 @@ Both tables hold one process, in one shape:
 The box adds the runtime minimum to every process; see
 [the runtime minimum](../design/containment.md#the-runtime-minimum).
 
-### Native file watching
-
-`native-file-watching = true` permits macOS FSEvents for the selected process and its descendants.
-Set it on an existing `[agent]`, `[tool.<name>]`, or local stdio `[mcp.<name>]` table.
-Each table selects the setting independently; an agent's selection does not enable its tools or MCP servers.
-Omission and `false` keep FSEvents unavailable. Linux accepts the setting and keeps its existing watcher behavior.
-
-For a Node development server, add the setting to that tool's table:
-
-```toml
-[tool.dev]
-command = ["node", "/work/project/server.js"]
-workspace = "/work/project"
-native-file-watching = true
-
-[tool.dev.filesystem]
-read = ["/work/project"]
-write = ["/work/project"]
-deny = ["/work/project/private"]
-```
-
-The process still needs the filesystem grants required by its runtime and application.
-**FSEvents can disclose names and event metadata for denied paths.**
-This includes removed or renamed paths and some historical events.
-A subscription to an accessible ancestor can disclose paths outside the workspace.
-Filesystem `deny` entries do not fully filter this event stream.
-Direct file-content access and write restrictions still apply.
-FSEvents events do not pass through `fs:*` policy decisions, including experimental native filesystem policy checks.
-
-Use this option only when that metadata disclosure is acceptable.
-Keep it disabled when denied filenames or activity must remain confidential, and use the application's polling mode if available.
-Node directory watchers can report `EMFILE` when FSEvents is unavailable; this error does not necessarily mean that file descriptors are exhausted.
-
-On macOS, the startup disclosure names each selected process before the agent starts.
-This includes stdio MCP servers that remain unstarted; Box repeats their disclosure when they start.
-
-```text
-strands-box: [tool.dev] native file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events; file-content and write restrictions still apply
-```
-
-A record with any selected process requires version 34.
-For rollback, remove the key from every process table, then follow the
-[rollback steps](native-filesystem-policy.md#stored-configuration-and-rollback).
-Older builds do not recognize the key, even when its value is `false`.
-
-### Command and environment
-
 The program is a full path or a bare name. A bare name uses `env.PATH` when set.
 Otherwise, Box uses the operator's `PATH`, or `/usr/bin:/bin` if it is absent. In the Shell, the last
 part of a `[tool]`'s program is the name that runs it, before the operator's `PATH`, and `run` prints
@@ -336,14 +289,14 @@ part of a `[tool]`'s program is the name that runs it, before the operator's `PA
 [`PATH` in the Shell reference](shell.md#path). A relative path with more than one
 component is refused: ``` `command` element 0 "<program>" is a relative path; write an absolute
 path, or a bare name that `env.PATH` resolves```. Scripts on Linux require
-[interpreter grants](#script-commands-on-linux). The opening Strands CLI example's `command` runs
+[interpreter grants](#script-commands-on-linux). The example's `command` runs
 Homebrew's `node`, which loads the preload file and then the CLI's script; the arguments after the
 script are the CLI's own.
 
 `workspace` is absolute, and it is optional: when absent, the box uses the directory `run` was
 started from. The directory must exist, and it may not be the operator's home. The box enters it.
-The process reads nothing in it until a list in `filesystem` names it.
-In the opening Strands CLI example, `workspace` is the project, and the `list` entry lets the CLI see its names.
+The process reads nothing in it until a list in `filesystem` names it: the example's `workspace` is
+the project, and the `list` entry below is what lets the CLI see the names in it.
 
 `env.PATH` contains full directory paths separated by `:`. Box uses these entries as written, so `~` stays literal.
 For example, use `/home/alex/.local/bin:/usr/bin:/bin` instead of `~/.local/bin:/usr/bin:/bin`.
@@ -392,6 +345,51 @@ egress route and starts no tool or MCP server of its own. All of them share one 
 the box is the credential boundary: a process that must not hold a credential goes in another box.
 Each tool and each `stdio` MCP server runs in its own separate sandbox (see
 [the sandboxes for tools and local MCP servers](../design/containment.md#the-agents-box-and-leaf-boxes)).
+
+### Native file watching
+
+`native-file-watching = true` permits macOS FSEvents for the selected process and its descendants.
+Set it on an existing `[agent]`, `[tool.<name>]`, or local stdio `[mcp.<name>]` table.
+Each table selects the setting independently; an agent's selection does not enable its tools or MCP servers.
+Omission and `false` keep FSEvents unavailable. Linux accepts the setting and keeps its existing watcher behavior.
+
+For a Node development server, add the setting to that tool's table:
+
+```toml
+[tool.dev]
+command = ["node", "/work/project/server.js"]
+workspace = "/work/project"
+native-file-watching = true
+
+[tool.dev.filesystem]
+read = ["/work/project"]
+write = ["/work/project"]
+deny = ["/work/project/private"]
+```
+
+The process still needs the filesystem grants required by its runtime and application.
+**FSEvents can disclose names and event metadata for denied paths.**
+This includes removed or renamed paths and some historical events.
+A subscription to an accessible ancestor can disclose paths outside the workspace.
+Filesystem `deny` entries do not fully filter this event stream.
+Direct file-content access and write restrictions still apply.
+FSEvents events do not pass through `fs:*` policy decisions, including experimental native filesystem policy checks.
+
+Use this option only when that metadata disclosure is acceptable.
+Keep it disabled when denied filenames or activity must remain confidential, and use the application's polling mode if available.
+Node directory watchers can report `EMFILE` when FSEvents is unavailable; this error does not necessarily mean that file descriptors are exhausted.
+
+On macOS, the startup disclosure names each selected process before the agent starts.
+This includes stdio MCP servers that remain unstarted; Box repeats their disclosure when they start.
+
+```text
+strands-box: [tool.dev] native file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events; file-content and write restrictions still apply
+```
+
+A record with any selected process requires version 34.
+For rollback, remove the key from every process table, then follow the
+[rollback steps](native-filesystem-policy.md#stored-configuration-and-rollback).
+Older builds do not recognize the key, even when its value is `false`.
 
 ### Script commands on Linux
 

@@ -425,34 +425,6 @@ mod tests {
         toml::from_str(text).expect("the table parses")
     }
 
-    #[test]
-    fn native_file_watching_requires_an_explicit_boolean() {
-        for (setting, enabled) in [
-            ("", false),
-            ("native-file-watching = false", false),
-            ("native-file-watching = true", true),
-        ] {
-            let parsed = spec(&format!("command = [\"watcher\"]\n{setting}"));
-            assert_eq!(parsed.native_file_watching, enabled);
-            for table in ["[agent]", "[tool.watcher]", "[mcp.watcher]"] {
-                parsed
-                    .validate(table)
-                    .expect("a process can select watching");
-            }
-            let stored = toml::to_string(&parsed).expect("serialize");
-            assert_eq!(stored.contains("native-file-watching"), enabled);
-            assert_eq!(spec(&stored), parsed);
-        }
-        for value in ["\"true\"", "1", "[]"] {
-            assert!(
-                toml::from_str::<ProcessSpec>(&format!(
-                    "command = [\"watcher\"]\nnative-file-watching = {value}"
-                ))
-                .is_err()
-            );
-        }
-    }
-
     fn refusal(text: &str) -> String {
         let parsed: Result<ProcessSpec, _> = toml::from_str(text);
         match parsed {

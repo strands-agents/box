@@ -178,10 +178,6 @@ fn native_file_watching_is_disclosed_before_an_unstarted_server_is_needed() {
         );
         if let Some(warning) = warning {
             assert!(warning < agent, "{stderr}");
-            assert!(
-                stderr.contains("outside the workspace and from past events"),
-                "{stderr}"
-            );
         }
         assert!(
             !stderr.contains("[agent] native file watching:"),

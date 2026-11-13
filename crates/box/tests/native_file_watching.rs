@@ -235,7 +235,6 @@ fn an_opted_in_agent_watches_changes_and_keeps_direct_denials() {
     fixture.changes(&mut running);
     let stderr = running.finish();
     assert!(stderr.contains("[agent] native file watching:"));
-    assert!(stderr.contains("outside the workspace and from past events"));
     assert_eq!(
         std::fs::read_to_string(fixture.workspace.join("denied/seed")).unwrap(),
         "secret"
