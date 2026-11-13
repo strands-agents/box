@@ -138,14 +138,21 @@ An MCP call records only `::response`, both as `mcp:call` and, for a `tools/call
 decided, as that tool's action with the request's `input`. A completed call is a response whatever
 the server replied, and so is a cancelled or uncertain one, so a budget over responses can't be
 escaped by making calls fail. The tool's response carries `output.reply`, a string that says how the
-call ended, so a precondition can require `result` and exclude a failed or abandoned call. Only a
-stdio reply frame records `result`, `tool_error`, or `protocol_error`. The gateway reads no http
-reply, and a streamed reply sends its status before the tool's result, so an http call records
-`indeterminate`. The load refuses a rule that reads an MCP `::error`, or an `output.reply` value Box
-never records. `output.reply` is a string rather than a Box enum type because each MCP server's
-generated schema is stored in the history, and the previous release validates it against its own Box
-schema at startup; a new Box type there would make it drop the schema and reset every per-tool
-rule's history.
+call ended, so a precondition can require `result` and exclude a failed or abandoned call. For a tool
+that declares an `outputSchema`, a `result` also carries `output.structured`: the reply's
+`structuredContent` reduced to the declared fields, converted like `input`, and absent when a
+required field doesn't conform; an optional field that doesn't conform is left out. Like `input`,
+it has no size limit of its own: the stdio frame limit and the gateway's response limit bound it. The stdio broker reads each reply frame. The gateway copies a
+`tools/call` reply as it streams to the workload, after credential redaction, so history sees the
+bytes the workload saw, and hands the copy to the request's `ReplyObserver` once the reply matching
+the request's JSON-RPC id has passed. A reply over the gateway's response body limit (16 MiB),
+compressed, cut off, or without that reply records `indeterminate`, and so does a reply that only
+accepts an MCP task or has a `resultType` other than `complete`, such as `input_required`, because
+it isn't the call's answer and Box doesn't record the later one. The load refuses a rule that
+reads an MCP `::error`, or an `output.reply` value Box never records. `output.reply` is a string
+rather than a Box enum type because each MCP server's generated schema is stored in the history, and
+the previous release validates it against its own Box schema at startup; a new Box type there would
+make it drop the schema and reset every per-tool rule's history.
 
 For an MCP command with [argument wildcards](../user/mcp.md#argument-wildcards) enabled, the
 `shell:spawn` request records the alias name and effective launch arguments, including the received
@@ -252,9 +259,16 @@ stops a restart from resetting a budget. The history follows these rules:
   subset](decisions.md#discovery-serves-the-schema-independent-subset).
 - The engine timestamps each event from the system clock. Callers cannot supply timestamps. If the
   clock steps backwards, timestamps keep moving forward, so rolling the clock back doesn't free a
-  budget. The cost is that a restriction can outlast its window a little.
-- If an append fails, the engine denies that request and every subsequent request. When recording an
-  outcome fails, the caller warns on stderr and nothing retries it.
+  budget. The cost is that a restriction can outlast its window a little. If history is stamped
+  more than five minutes ahead of the clock, the box refuses to open it. During a run, the engine
+  refuses to timestamp an event while the gap exceeds five minutes, so the box denies that request
+  without appending it. A refused request doesn't persist: the next request within the bound is
+  decided.
+- If a request's append fails, the engine denies that request. If recording an outcome fails, the
+  caller warns on stderr, and the engine keeps the event. Before each later decision it records the
+  kept events first, and it denies every request until they append. It also records them when the
+  engine shuts down. An event that still can't append then, or a run that is killed, is lost, so
+  that effect doesn't count after a restart.
 - The engine checkpoints as events accumulate and removes events outside the longest window. This
   bounds the file size by the window rather than the box's lifetime.
 

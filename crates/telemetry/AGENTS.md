@@ -248,6 +248,39 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   in this workspace**, so a full-queue drop is not counted, not printed and not observable. That is
   why the counter is not on the facade. See
   [delivery is best effort](../../docs/design/decisions.md#delivery-is-best-effort).
+  **`drained` prints one stderr line when `dropped` is not zero or the drain did not finish.** Before
+  that, a failed batch and a failed exit flush were both silent, so a workload that filled the disk
+  under the file target, or made an OTLP target hang, removed its own last records with no signal,
+  and the run still exited 0. The line is at the drain and not in `deliver`, so a workload that makes
+  every batch fail cannot fill stderr. It names its cause: failed exports, an unfinished final
+  export, or both. An unfinished drain no longer increments `dropped`, because no export failed.
+  **A failed final export is not a timeout.** The SDK answers `shutdown` with the final export's
+  own error, so a closed port or a full disk returns at once with an `Err`. `shut_down_bounded` now
+  returns a `Shutdown` (`Completed`, `Failed`, `Unanswered`), and `drain_finished` calls the drain
+  unfinished only when no answer came, or when a lane reported that its shutdown did not finish. Each
+  `TargetLane` sets a shared `cut` flag itself, because the provider joins every lane's error into
+  one `InternalFailure`. A lane sets it on `OTelSdkError::Timeout`, and on any other error unless its
+  own `SharedTarget` recorded a failed export that started inside this shutdown. The shutdown count
+  in `LaneFailures` keeps an export that began earlier, and failed late, from answering for it. A refused shutdown message (the SDK's
+  `try_send` finds the queue full, or the worker gone) exports nothing and is counted nowhere, so a
+  flag for `Timeout` alone let it pass as finished. The first version reported every fast failure as "did not
+  finish in time". The second compared `dropped` before and after the drain, which a fast-failing
+  lane or a failing relay could raise while another lane was cut, so the cut went unreported.
+  `a_counted_export_failure_is_not_reported_as_a_timeout`, `a_fast_failing_final_export_is_not_a_timeout`,
+  `a_cut_lane_is_reported_beside_a_failing_lane` (an OTLP target on a closed port beside a file
+  target on a full FIFO), and `a_shutdown_the_worker_never_receives_is_not_finished` (a burst of
+  4000 records behind a listener that never accepts) are the pins.
+  **The receiver has its own counter.** It used to share `dropped`, so a refused agent payload (the
+  one-permit `RELAY_CAPACITY`, or the fan-out bound) counted as a lost record: the workload could
+  raise the loss line at will, and a healthy agent that exports concurrently could raise it on a run
+  whose box audit was complete. `dropped` now counts only batches an exporter failed to deliver.
+  The receiver's count is read only by tests: `a_refused_agent_payload_is_not_a_lost_record` pins
+  that a refused payload raises it while `dropped` stays at 0.
+  `drain_warning` owns the text. `a_lossy_drain_reports_the_loss_once`,
+  `a_complete_drain_reports_no_loss` and `an_unfinished_drain_alone_is_a_loss` pin the text, and
+  `box_telemetry.rs::an_unreachable_target_reports_the_lost_records_once` pins the print: it fails
+  when the `eprintln!` is removed. The exit code does not change: a failed audit sink that the
+  workload can break must not also let the workload fail the run.
 - **`BODY_LIMIT` is the library's cap now, and the hand-rolled reader is why it needs to be.** That
   reader sized its buffer from the declared `Content-Length` before a byte arrived, so 64 connections
   could pin 256 MiB in the box's trusted process. `a_body_over_the_cap_is_refused` is the pin.

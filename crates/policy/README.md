@@ -35,7 +35,7 @@ the six names in the last row.
 | `ApprovedPath`, `PathResolver`, `PathRefusal` | The resolved path a `Request::Fs` demands, the only public minter of one, and why a mint fails. |
 | `Decision`, `DenyReason`, `RuleId` | Authorization verdict and determining rule. |
 | `Outcome`, `Delivery`, `FsResult` | One completed effect, submitted as history. |
-| `PendingToolResponse`, `McpReply` | The per-tool `::response` an allowed `tools/call` owes, from `refine_tool_call` to `record_tool_response`, and how the call ended. |
+| `PendingToolResponse`, `McpReply` | The per-tool `::response` an allowed `tools/call` owes, from `refine_tool_call` to `record_tool_response` (or `record_tool_reply`, which reads the reply frame and its `structuredContent`), and how the call ended. |
 | `EffectivePolicy`, `ENGINE_ID` | Active engine and source identity. |
 | `PolicyError` | Startup and history-recording errors. |
 | `PolicyCheck`, `Finding`, `RuleRef`, `Location` | What `check` finds in a policy: each finding's message, rules, source location, and help. |
@@ -66,6 +66,9 @@ An allowed decision returns `Some(RequestId)`. Retain that token until the effec
 A refusal before submission, or an unconfirmed append, returns no token.
 `RequestId::as_str()` exposes the identifier stored in the event; callers cannot construct tokens.
 A token remains valid across reload in the same engine. A separately opened engine rejects it.
+`record` returns `PolicyError::OutcomeKept` when the history refuses the outcome for now, for
+example after the clock steps back. The outcome is kept and recorded before the next decision, so
+treat it as recorded: record a tool call's own response after it too.
 `open` validates the sources, recovers the store, and installs the current source set.
 `validate` checks source text in memory. `effective` returns the engine and source identity.
 

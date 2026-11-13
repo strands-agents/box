@@ -193,9 +193,10 @@ when temporal {
 `::request` counts every attempt, including a refused one. `::response` counts calls that reached
 the server.
 
-A rule can also require that another tool call finished first, for the same argument. This rule
-refuses a password reset unless the server returned a result for a `verify_identity` of the same
-user in the last hour:
+A rule can also require that another tool call finished first, for the same argument, with a
+given answer. When `verify_identity` declares an `outputSchema` with a `verified` field, this rule
+refuses a password reset unless a `verify_identity` of the same user answered `verified: true` in
+the last hour:
 
 ```cedar
 @id("reset_after_verify")
@@ -203,7 +204,9 @@ forbid (principal, action == servicenow::Action::"reset_password", resource)
 unless temporal {
   formerly within 1h (
     servicenow::Action::"verify_identity"::response{
-      input.user_name: context.input.user_name, output.reply: "result" }
+      input.user_name: context.input.user_name,
+      output.reply: "result",
+      output.structured.verified: true }
   )
 };
 ```
@@ -214,11 +217,34 @@ Key it on `::response`, and require `output.reply` to be `result`:
 - Every call that ends records `::response`, so a budget counts it. `output.reply` says how it
   ended: `result`, `tool_error` when the result sets `isError`, `protocol_error` for a JSON-RPC
   error, `cancelled`, or `indeterminate` when its connection ended or Box didn't read the reply.
-  Requiring `result` means this rule isn't met by a call that failed, or that the agent started and
-  abandoned.
+  A reply that only accepts a background task (an MCP task), or that asks the client for input
+  first (`resultType: "input_required"`), is also `indeterminate`, because it isn't the call's
+  answer and Box doesn't record the later one. Requiring `result` means this rule isn't met by a call
+  that failed, that the agent started and abandoned, or that is still running as a task.
 - A `result` shows that the server answered without an error, not that the verification passed.
-- Over an http server, Box doesn't read the reply, so `output.reply` is always `indeterminate`
-  there, and a rule like this one refuses every reset. A budget over `::response` works on both.
+  `output.structured` is what the tool answered. It holds the reply's `structuredContent`, keeping
+  only the fields the tool's `outputSchema` declares, so a misspelled field fails at load. An
+  `outputSchema` that Box can't turn into a policy type, such as one with a field named `if` or a
+  `$ref` it can't resolve, declares no `output.structured`, so a rule that reads it fails at load.
+  The server's other tools keep their outputs, unless the problem only appears when the outputs
+  are read together; then no tool on that server declares one.
+- Box records no `output.structured` when the tool declares no `outputSchema`, when the reply isn't
+  a `result`, or when a required field doesn't match its declared type. An optional field that
+  doesn't match is left out, like an undeclared one. A JSON
+  `number` field is read as a whole number, so a fractional value such as `22.5` doesn't match. A
+  rule that reads a field Box left out isn't met; a rule on another field still is.
+- Box reads the reply on stdio and http servers alike, including a streamed (Server-Sent Events)
+  http reply. Box asks an http server for an uncompressed reply. An http reply over the gateway's
+  16 MiB response limit, compressed anyway, or cut off records `indeterminate`, and so does a reply
+  Box can't copy because many tool calls' replies are being read at once. A server that
+  always compresses its replies therefore never meets a precondition, so every call that needs one
+  is refused.
+- The agent can make its own reply unreadable, for example by asking for an output over 16 MiB.
+  So write a rule on a tool's output as a precondition (`unless temporal`, as above), which an
+  unreadable reply fails. A `forbid` that fires when an earlier output said something can be
+  avoided that way.
+- Tool outputs are stored in local history in `box_dir`, next to the inputs Box already stores.
+  They never go to telemetry.
 
 Box doesn't record `::error` for an MCP call, and the load refuses a rule that reads one, or that
 compares `output.reply` with a value other than the five above.

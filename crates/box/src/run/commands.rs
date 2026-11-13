@@ -515,6 +515,7 @@ mod tests {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            gateway: Default::default(),
             limits: Default::default(),
             box_id: "commands-test".to_string(),
             box_dir: path.parent().expect("directory").join("box-state"),

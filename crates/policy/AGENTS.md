@@ -114,12 +114,30 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Key a precondition on `::response`, because a `::request` predicate matches a denied attempt.
   Pinned by `tests/temporal_shell_e2e.rs::a_denied_attempt_satisfies_a_request_keyed_precondition`.
 - An MCP tool's `::response` also records a cancelled, cut-off, or unread call, so a precondition
-  on one also requires `output.reply: "result"`. Only a stdio reply frame records
-  `result`, `tool_error`, or `protocol_error`; the gateway reads no http reply, so every http call
-  records `indeterminate` until it does. Pinned by
+  on one also requires `output.reply: "result"`. The gateway hands a `tools/call`
+  reply, copied after redaction, to the request permit's `ReplyObserver`; the permit and the
+  observer share the pending response, and whichever ends second records it, so the tool's leg
+  records exactly when `mcp:call::response` does. A coarse outcome the history keeps for later
+  (`PolicyError::OutcomeKept`) counts as recorded, so the tool's leg queues behind it, on the http
+  and stdio paths alike (`dogwood::tests::a_tool_leg_queues_behind_a_kept_coarse_outcome_and_both_count`). An http reply over the 16 MiB response limit,
+  compressed, cut off, or without the reply matching the request's JSON-RPC id records
+  `indeterminate`, and so does a reply that only accepts an MCP task or has a `resultType` other
+  than `complete` (such as `input_required`): neither is the call's answer, and Box records no
+  later one. The stdio broker never records an `input_required` frame as an answer either. `output.structured` is recorded only for a `result`
+  whose required fields conform to the tool's `outputSchema`; an optional field that does not
+  conform is dropped. Like `input`, it has no size cap of its own; the stdio frame and the gateway's
+  response limit bound both. Measured on macOS, release, 100 calls: each recorded byte costs about
+  5 bytes of history, the per-call time stays near 17 ms and the rule check near 8 ms up to 1 MiB
+  outputs, and an input costs twice an output because both legs record it. `generate_mcp_schema` drops an
+  `outputSchema` that does not generate, so one tool's unreadable output never costs the server its
+  catalog (`mcp_schema::tests::an_output_schema_cedar_cannot_read_drops_only_that_tools_output`).
+  The workload can still make its own http reply unreadable (an output over 16 MiB, or a server
+  that compresses anyway), so only a precondition on `output.structured` is sound; a `forbid`
+  keyed on an earlier output can be avoided.
+  Pinned by
   `crates/box/.../exchange/tests/protocol_2026_07_28.rs::a_cancelled_call_does_not_satisfy_a_result_precondition`,
-  `::an_error_reply_does_not_satisfy_a_result_precondition`, and
-  `adapters/egress.rs::a_remote_tool_call_never_satisfies_a_result_precondition`.
+  `adapters/egress.rs::a_reply_observer_dropped_before_a_failed_delivery_records_nothing`,
+  `::a_remote_reply_is_matched_to_its_request_by_id`, and `tests/mcp_tool_output.rs`.
 - History is pruned to the deepest window, and the workload fills that window. State an
   availability bound.
 - Pin a destination on `host` and `port`, and refuse an address with a `forbid` on the string `ip4`

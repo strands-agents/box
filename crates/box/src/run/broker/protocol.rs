@@ -68,8 +68,11 @@ pub(crate) const PYTHON_ALIAS_NAMES: [&str; 2] = ["python3", "python"];
 /// Names one Program within one connection.
 pub(crate) type ProgramId = u32;
 
-/// The most `Output` payload one frame carries, before base64 expansion.
+/// The most `Output` or `Input` payload one frame carries, before base64 expansion.
 pub(crate) const MAX_CHUNK_BYTES: usize = 48 * 1024;
+
+/// The longest base64 text one `Input` frame may carry.
+pub(crate) const MAX_ENCODED_CHUNK_BYTES: usize = MAX_CHUNK_BYTES.div_ceil(3) * 4;
 
 /// The most output one Call may produce across every `Output` frame.
 pub(crate) const MAX_CALL_OUTPUT_BYTES: usize = 8 * 1024 * 1024;

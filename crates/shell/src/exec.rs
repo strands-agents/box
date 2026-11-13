@@ -695,7 +695,7 @@ async fn execute_admitted_source(
             }
         };
 
-        match parser::parse_with_aliases(&accum, &mut reader, &proc.aliases) {
+        match parser::parse_source(&accum, &mut reader, &proc.aliases, i < lines.len()) {
             Ok(cl) if line_idx == i && i < lines.len() && ends_with_and_or(&cl) => {}
             Ok(cl) => {
                 i = line_idx; // advance past any lines consumed by heredoc
@@ -2111,7 +2111,9 @@ async fn capture_admitted(os: Arc<Mediated>, proc: &mut Process, cmd: &str) -> (
         proc.last_exit = 1;
         return (String::new(), 1);
     }
+    proc.transfer_fd(STDIN, &mut sub);
     let (result, status) = run_capturing_status(os, &mut sub, &command_line).await;
+    sub.transfer_fd(STDIN, proc);
     if !sub.captured_stderr.is_empty() && !proc.append_captured_stderr(&sub.captured_stderr) {
         proc.last_exit = 1;
     }
@@ -2163,6 +2165,14 @@ async fn run_capturing_status(
                     let (s, exit) = Box::pin(run_capturing_status(os.clone(), proc, cl)).await;
                     (exit, s)
                 }
+                Item::Negated(inner) => {
+                    let inner_cl = vec![(*inner.clone(), None)];
+                    proc.errexit_tested += 1;
+                    let (s, exit) =
+                        Box::pin(run_capturing_status(os.clone(), proc, &inner_cl)).await;
+                    proc.errexit_tested -= 1;
+                    (if exit == 0 { 1 } else { 0 }, s)
+                }
                 Item::Subshell(cl) => {
                     let mut sub = proc.fork();
                     sub.depth += 1;
@@ -2170,8 +2180,10 @@ async fn run_capturing_status(
                         sub.err_msg(msg);
                         (1, String::new())
                     } else {
+                        proc.transfer_fd(STDIN, &mut sub);
                         let (s, exit) =
                             Box::pin(run_capturing_status(os.clone(), &mut sub, cl)).await;
+                        sub.transfer_fd(STDIN, proc);
                         (exit, s)
                     }
                 }
@@ -2265,10 +2277,13 @@ async fn run_capturing_status(
                             let _ = tx.send(Bytes::from(captured.into_bytes())).await;
                         }
                     });
-                    proc.set_channel_reader(0, rx);
+                    let mut saved_stdin = Process::empty();
+                    proc.transfer_fd(STDIN, &mut saved_stdin);
+                    proc.set_channel_reader(STDIN, rx);
                     let (mut exit, out) = execute_pipeline_capture(os.clone(), proc, tail).await;
                     let _ = handle.await;
-                    proc.close(0);
+                    proc.close(STDIN);
+                    saved_stdin.transfer_fd(STDIN, proc);
                     if *negated {
                         exit = if exit == 0 { 1 } else { 0 };
                     }
@@ -2469,14 +2484,21 @@ async fn execute_command_line_inner(
             }
 
             // Determine if this item is in a "tested" context (suppresses errexit).
-            // Tested = followed by && or ||.
-            let tested = matches!(connector, Some(Connector::And) | Some(Connector::Or));
+            // Tested = followed by && or ||, or inverted by `!`.
+            let tested = matches!(connector, Some(Connector::And) | Some(Connector::Or))
+                || matches!(
+                    item,
+                    Item::Pipeline(_, true)
+                        | Item::Negated(_)
+                        | Item::CompoundPipeline { negated: true, .. }
+                        | Item::PipelineIntoCompound { negated: true, .. }
+                );
 
             last_exit = execute_item(os.clone(), proc, item).await?;
             proc.last_exit = last_exit;
 
             // errexit: if set -e is active and command failed and not in tested context
-            if proc.opt_errexit && last_exit != 0 && !tested {
+            if proc.opt_errexit && proc.errexit_tested == 0 && last_exit != 0 && !tested {
                 return Err(ControlFlow::Exit(last_exit));
             }
         }
@@ -2547,6 +2569,12 @@ async fn execute_item_unsettled(
             }
             Ok(exit)
         }
+        Item::Negated(inner) => {
+            proc.errexit_tested += 1;
+            let exit = Box::pin(execute_item(os, proc, inner)).await;
+            proc.errexit_tested -= 1;
+            Ok(if exit? == 0 { 1 } else { 0 })
+        }
         Item::Group(cl) => Box::pin(execute_command_line_inner(os, proc, cl)).await,
         Item::Subshell(cl) => {
             let mut sub = proc.fork();
@@ -2555,7 +2583,9 @@ async fn execute_item_unsettled(
                 sub.err_msg(msg);
                 return Ok(1);
             }
+            proc.transfer_fd(STDIN, &mut sub);
             let r = Box::pin(execute_command_line_inner(os, &mut sub, cl)).await;
+            sub.transfer_fd(STDIN, proc);
             if proc.capture {
                 let complete = proc.append_captured_output(&sub.captured_output)
                     && proc.append_captured_stderr(&sub.captured_stderr);
@@ -2624,6 +2654,7 @@ async fn execute_item_unsettled(
             // stdin into the tail pipeline.
             let compound_cl = vec![(*compound.clone(), None)];
             let mut sub = proc.fork();
+            proc.transfer_fd(STDIN, &mut sub);
             let os2 = os.clone();
 
             let (tx, rx) = os::pipe(64);
@@ -2633,13 +2664,19 @@ async fn execute_item_unsettled(
                 if !output.is_empty() {
                     let _ = tx.send(Bytes::from(output.into_bytes())).await;
                 }
+                sub
             });
+            // Aborts the compound when a cancelled Call drops this future.
+            let _compound = os::Tasks(vec![handle.abort_handle()]);
 
             // Set stdin on proc so the tail pipeline inherits it.
-            proc.set_channel_reader(0, rx);
+            proc.set_channel_reader(STDIN, rx);
             let mut exit = execute_pipeline(os, proc, tail).await;
-            let _ = handle.await;
-            proc.close(0);
+            let sub = handle.await;
+            proc.close(STDIN);
+            if let Ok(mut sub) = sub {
+                sub.transfer_fd(STDIN, proc);
+            }
             if *negated {
                 exit = if exit == 0 { 1 } else { 0 };
             }
@@ -2690,13 +2727,15 @@ async fn execute_item_unsettled(
                 let diverted = redirects_stderr.then(|| DivertedStderr::begin(proc));
                 let outer_stderr = std::mem::take(&mut proc.captured_stderr);
                 let inner_cl = vec![(*item.clone(), None)];
-                let captured = Box::pin(run_capturing(os.clone(), proc, &inner_cl)).await;
+                let (captured, mut status) =
+                    Box::pin(run_capturing_status(os.clone(), proc, &inner_cl)).await;
                 let mut stderr_text = match diverted {
                     Some(diverted) => {
                         let (text, complete) = diverted.end(proc).await;
                         if !complete {
                             proc.err_msg("strands-shell: output size limit exceeded");
                             proc.last_exit = 1;
+                            status = 1;
                         }
                         text
                     }
@@ -2763,9 +2802,10 @@ async fn execute_item_unsettled(
                     if let Err(e) = written {
                         proc.err_msg(&format!("strands-shell: {path}: {e}"));
                         proc.last_exit = 1;
+                        status = 1;
                     }
                 }
-                Ok(proc.last_exit)
+                Ok(status)
             } else {
                 let result = Box::pin(execute_item(os, proc, item)).await;
                 if !stdin_expanded.is_empty() {
@@ -2776,6 +2816,31 @@ async fn execute_item_unsettled(
             }
         }
     }
+}
+
+/// Whether `redirect` replaces stdin.
+fn reads_stdin(redirect: &Redirect) -> bool {
+    matches!(
+        redirect,
+        Redirect::Read(0, _)
+            | Redirect::ReadWrite(0, _)
+            | Redirect::DupRead(0, _)
+            | Redirect::HereDoc(0, ..)
+    )
+}
+
+/// Run one pipeline stage's `body`, then hand the stdin it left unread back through `back`.
+async fn handing_back_stdin(
+    back: Option<tokio::sync::oneshot::Sender<Process>>,
+    body: impl std::future::Future<Output = i32>,
+) -> i32 {
+    let code = body.await;
+    if let Some(back) = back {
+        let mut holder = Process::empty();
+        CURRENT_PROCESS.with(|p| p.borrow_mut().transfer_fd(STDIN, &mut holder));
+        let _ = back.send(holder);
+    }
+    code
 }
 
 /// The descriptor a redirect writes, or `None` for one that reads.
@@ -3485,8 +3550,16 @@ async fn run_pipeline(
             let args: Vec<String> = expanded_args[0][1..].to_vec();
 
             let mut io_proc = shell_proc.fork();
-            // Inherit stdin from shell_proc if present (e.g. CompoundPipeline).
+            // Inherit stdin from shell_proc if present (e.g. CompoundPipeline). A stdin redirect
+            // keeps the caller's stdin aside, so it survives the redirect.
             shell_proc.transfer_fd(STDIN, &mut io_proc);
+            let mut kept_stdin = Process::empty();
+            let redirects_stdin = expanded_redirects[0]
+                .iter()
+                .any(|(redirect, _)| reads_stdin(redirect));
+            if redirects_stdin {
+                io_proc.transfer_fd(STDIN, &mut kept_stdin);
+            }
             // Inherit an embedder's output sinks the same way, and for the same reason.
             //
             // `fork` starts with an empty descriptor table, so the pipes installed below used to
@@ -3551,6 +3624,11 @@ async fn run_pipeline(
                     None => shell_proc.clear_err_tx(),
                 }
                 shell_proc.err_msg(&format!("strands-shell: {e}"));
+                if redirects_stdin {
+                    kept_stdin.transfer_fd(STDIN, shell_proc);
+                } else {
+                    io_proc.transfer_fd(STDIN, shell_proc);
+                }
                 return (1, String::new());
             }
 
@@ -3630,8 +3708,13 @@ async fn run_pipeline(
                     os.clone(),
                     CURRENT_PROCESS.scope(io_cell, async {
                         let r = f(os.as_ref(), shell_proc, &args).await;
-                        // Transfer stdin back so it survives across loop iterations
-                        CURRENT_PROCESS.with(|p| p.borrow_mut().transfer_fd(STDIN, shell_proc));
+                        // Transfer stdin back so it survives across loop iterations, unless a
+                        // redirect replaced it, which then gives back the caller's own.
+                        if redirects_stdin {
+                            kept_stdin.transfer_fd(STDIN, shell_proc);
+                        } else {
+                            CURRENT_PROCESS.with(|p| p.borrow_mut().transfer_fd(STDIN, shell_proc));
+                        }
                         r
                     }),
                 )
@@ -3714,8 +3797,18 @@ async fn run_pipeline(
     // Build a process for each stage
     let mut procs: Vec<Process> = (0..len).map(|_| shell_proc.fork()).collect();
 
-    // Inherit stdin from shell_proc if present (used by CompoundPipeline).
+    // Inherit stdin from shell_proc if present (used by CompoundPipeline). Stage 0 hands what it
+    // leaves unread back when it ends, or keeps it aside while a redirect replaces it.
     shell_proc.transfer_fd(STDIN, &mut procs[0]);
+    let mut kept_stdin = Process::empty();
+    let redirects_stdin = expanded_redirects
+        .first()
+        .is_some_and(|redirects| redirects.iter().any(|(redirect, _)| reads_stdin(redirect)));
+    if redirects_stdin {
+        procs[0].transfer_fd(STDIN, &mut kept_stdin);
+    }
+    let (stdin_back, mut stdin_returned) = tokio::sync::oneshot::channel::<Process>();
+    let mut stdin_back = (!redirects_stdin).then_some(stdin_back);
 
     // Apply per-command env prefixes
     for (i, env) in expanded_env.iter().enumerate() {
@@ -3768,6 +3861,12 @@ async fn run_pipeline(
     for (i, redirs) in expanded_redirects.iter().enumerate() {
         if let Err(e) = apply_redirects(&os, &mut procs[i], redirs).await {
             shell_proc.err_msg(&format!("strands-shell: {e}"));
+            kept_stdin.transfer_fd(STDIN, shell_proc);
+            if let Some(first) = procs.first_mut()
+                && !redirects_stdin
+            {
+                first.transfer_fd(STDIN, shell_proc);
+            }
             return (1, String::new());
         }
     }
@@ -3779,6 +3878,7 @@ async fn run_pipeline(
         if expanded_args[i].is_empty() {
             continue;
         }
+        let back = if i == 0 { stdin_back.take() } else { None };
         let name = expanded_args[i][0].clone();
         let args: Vec<String> = expanded_args[i][1..].to_vec();
         let os = os.clone();
@@ -3796,63 +3896,71 @@ async fn run_pipeline(
                 i,
                 tokio::task::spawn_local(CURRENT_KERNEL.scope(
                     os.clone(),
-                    CURRENT_PROCESS.scope(RefCell::new(child), async move {
-                        if is_script {
-                            if args.is_empty() {
-                                return 0;
-                            }
-                            let exit = run_script(os, &mut state_proc, &args[0], &args[1..]).await;
-                            forward_captured_streams(&mut state_proc).await;
-                            return exit;
-                        }
-                        if let Some(f) = builtin {
-                            return match f(os.as_ref(), &mut state_proc, &args).await {
-                                Ok(code) => code,
-                                Err(e) => {
-                                    if let Ok(mut w) = crate::io::stderr() {
-                                        let _ = w
-                                            .write_all(
-                                                format!("strands-shell: {name}: {e}\n").as_bytes(),
-                                            )
-                                            .await;
-                                    }
-                                    1
+                    CURRENT_PROCESS.scope(
+                        RefCell::new(child),
+                        handing_back_stdin(back, async move {
+                            if is_script {
+                                if args.is_empty() {
+                                    return 0;
                                 }
-                            };
-                        }
-                        if let Some(body) = func_body {
-                            state_proc.args = args;
-                            state_proc.push_local_scope();
-                            state_proc.capture = true;
-                            // Transfer stdin from child (CURRENT_PROCESS) so the
-                            // function body's commands can read pipeline input.
-                            CURRENT_PROCESS.with(|p| {
-                                p.borrow_mut().transfer_fd(STDIN, &mut state_proc);
-                            });
-                            let exit = match Box::pin(execute_command_line_inner(
-                                os.clone(),
-                                &mut state_proc,
-                                &body,
-                            ))
-                            .await
-                            {
-                                Ok(code) => code,
-                                Err(ControlFlow::Return(code)) => code,
-                                Err(ControlFlow::Exit(code)) => code,
-                                Err(_) => state_proc.last_exit,
-                            };
-                            state_proc.pop_local_scope();
-                            // Write captured output to the pipeline's stdout
-                            let output = std::mem::take(&mut state_proc.captured_output);
-                            if !output.is_empty()
-                                && let Ok(mut w) = crate::io::stdout()
-                            {
-                                let _ = w.write_all(output.as_bytes()).await;
+                                let exit =
+                                    run_script(os, &mut state_proc, &args[0], &args[1..]).await;
+                                forward_captured_streams(&mut state_proc).await;
+                                return exit;
                             }
-                            return exit;
-                        }
-                        unreachable!()
-                    }),
+                            if let Some(f) = builtin {
+                                return match f(os.as_ref(), &mut state_proc, &args).await {
+                                    Ok(code) => code,
+                                    Err(e) => {
+                                        if let Ok(mut w) = crate::io::stderr() {
+                                            let _ = w
+                                                .write_all(
+                                                    format!("strands-shell: {name}: {e}\n")
+                                                        .as_bytes(),
+                                                )
+                                                .await;
+                                        }
+                                        1
+                                    }
+                                };
+                            }
+                            if let Some(body) = func_body {
+                                state_proc.args = args;
+                                state_proc.push_local_scope();
+                                state_proc.capture = true;
+                                // Transfer stdin from child (CURRENT_PROCESS) so the
+                                // function body's commands can read pipeline input.
+                                CURRENT_PROCESS.with(|p| {
+                                    p.borrow_mut().transfer_fd(STDIN, &mut state_proc);
+                                });
+                                let exit = match Box::pin(execute_command_line_inner(
+                                    os.clone(),
+                                    &mut state_proc,
+                                    &body,
+                                ))
+                                .await
+                                {
+                                    Ok(code) => code,
+                                    Err(ControlFlow::Return(code)) => code,
+                                    Err(ControlFlow::Exit(code)) => code,
+                                    Err(_) => state_proc.last_exit,
+                                };
+                                state_proc.pop_local_scope();
+                                CURRENT_PROCESS.with(|p| {
+                                    state_proc.transfer_fd(STDIN, &mut p.borrow_mut());
+                                });
+                                // Write captured output to the pipeline's stdout
+                                let output = std::mem::take(&mut state_proc.captured_output);
+                                if !output.is_empty()
+                                    && let Ok(mut w) = crate::io::stdout()
+                                {
+                                    let _ = w.write_all(output.as_bytes()).await;
+                                }
+                                return exit;
+                            }
+                            unreachable!()
+                        }),
+                    ),
                 )),
             ));
         } else {
@@ -3870,56 +3978,60 @@ async fn run_pipeline(
                 i,
                 tokio::task::spawn_local(CURRENT_KERNEL.scope(
                     os.clone(),
-                    CURRENT_PROCESS.scope(RefCell::new(child), async move {
-                        match commands::lookup(&name) {
-                            Some(f) => match f(os.as_ref(), &args).await {
-                                Ok(code) => code,
-                                Err(e) => {
-                                    if let Ok(mut w) = crate::io::stderr() {
-                                        let _ = w
-                                            .write_all(
-                                                format!("strands-shell: {name}: {e}\n").as_bytes(),
-                                            )
-                                            .await;
-                                    }
-                                    1
-                                }
-                            },
-                            // Not a program this Shell implements. Try the host binary, which
-                            // `admit` has already judged as `shell:spawn` — and fall through to
-                            // `command not found` when no bound program reached this point.
-                            //
-                            // **127 is kept, not replaced.** A bare name that is neither internal
-                            // nor on `PATH` is "not found" before any decision; a spelling with a
-                            // separator is judged first, so it is "not found" only once a permit
-                            // let it through and no file was bound. The three outcomes stay
-                            // distinct: `126` denied, the binary's own status, `127` absent.
-                            None => match spawn_host_program(
-                                os.as_ref(),
-                                &name,
-                                &args,
-                                admitted_program,
-                                admitted_directory,
-                            )
-                            .await
-                            {
-                                Some(status) => status,
-                                None => {
-                                    if let Ok(mut w) = crate::io::stderr() {
-                                        let _ = w
-                                            .write_all(
-                                                format!(
-                                                    "strands-shell: {name}: command not found\n"
+                    CURRENT_PROCESS.scope(
+                        RefCell::new(child),
+                        handing_back_stdin(back, async move {
+                            match commands::lookup(&name) {
+                                Some(f) => match f(os.as_ref(), &args).await {
+                                    Ok(code) => code,
+                                    Err(e) => {
+                                        if let Ok(mut w) = crate::io::stderr() {
+                                            let _ = w
+                                                .write_all(
+                                                    format!("strands-shell: {name}: {e}\n")
+                                                        .as_bytes(),
                                                 )
-                                                .as_bytes(),
-                                            )
-                                            .await;
+                                                .await;
+                                        }
+                                        1
                                     }
-                                    127
-                                }
-                            },
-                        }
-                    }),
+                                },
+                                // Not a program this Shell implements. Try the host binary, which
+                                // `admit` has already judged as `shell:spawn` — and fall through to
+                                // `command not found` when no bound program reached this point.
+                                //
+                                // **127 is kept, not replaced.** A bare name that is neither internal
+                                // nor on `PATH` is "not found" before any decision; a spelling with a
+                                // separator is judged first, so it is "not found" only once a permit
+                                // let it through and no file was bound. The three outcomes stay
+                                // distinct: `126` denied, the binary's own status, `127` absent.
+                                None => match spawn_host_program(
+                                    os.as_ref(),
+                                    &name,
+                                    &args,
+                                    admitted_program,
+                                    admitted_directory,
+                                )
+                                .await
+                                {
+                                    Some(status) => status,
+                                    None => {
+                                        if let Ok(mut w) = crate::io::stderr() {
+                                            let _ = w
+                                                .write_all(
+                                                    format!(
+                                                        "strands-shell: {name}: command not found\n"
+                                                    )
+                                                    .as_bytes(),
+                                                )
+                                                .await;
+                                        }
+                                        127
+                                    }
+                                },
+                            }
+                        }),
+                    ),
                 )),
             ));
         }
@@ -4036,6 +4148,11 @@ async fn run_pipeline(
         };
         let permit = permits.get_mut(index).and_then(Option::take);
         last_exit = report_stage(permit, shell_proc, exit).await;
+    }
+    if redirects_stdin {
+        kept_stdin.transfer_fd(STDIN, shell_proc);
+    } else if let Ok(mut returned) = stdin_returned.try_recv() {
+        returned.transfer_fd(STDIN, shell_proc);
     }
     #[cfg(not(target_arch = "wasm32"))]
     if expired {

@@ -662,6 +662,7 @@ impl VfsKernel {
             proc.alloc_fd(FdKind::ChannelReader {
                 rx,
                 buf: Vec::new(),
+                outside: false,
             })
         } else if flags.write {
             let (tx, rx) = crate::os::pipe(HOST_WRITER_DEPTH);
@@ -922,6 +923,7 @@ impl VfsKernel {
             proc.alloc_fd(FdKind::ChannelReader {
                 rx,
                 buf: Vec::new(),
+                outside: false,
             })
         } else if flags.write {
             let (tx, rx) = crate::os::pipe(HOST_WRITER_DEPTH);
@@ -1073,6 +1075,7 @@ impl VfsKernel {
             proc.alloc_fd(FdKind::ChannelReader {
                 rx,
                 buf: Vec::new(),
+                outside: false,
             })
         } else if flags.read && flags.write {
             // Read-write (<>): provide existing data as a reader.
@@ -1084,6 +1087,7 @@ impl VfsKernel {
             proc.alloc_fd(FdKind::ChannelReader {
                 rx,
                 buf: Vec::new(),
+                outside: false,
             })
         } else if flags.write {
             // For writes, we use a channel that collects data and flushes to VFS
@@ -2326,6 +2330,7 @@ fn make_dev_null_fd(proc: &mut Process, flags: &OpenFlags) -> io::Result<Fd> {
         proc.alloc_fd(FdKind::ChannelReader {
             rx,
             buf: Vec::new(),
+            outside: false,
         })
     } else {
         let (tx, _rx) = crate::os::pipe(8192);
@@ -2351,6 +2356,7 @@ fn make_dev_zero_fd(proc: &mut Process, flags: &OpenFlags) -> io::Result<Fd> {
     proc.alloc_fd(FdKind::ChannelReader {
         rx,
         buf: Vec::new(),
+        outside: false,
     })
 }
 
@@ -2404,6 +2410,7 @@ fn make_dev_urandom_fd(proc: &mut Process, flags: &OpenFlags) -> io::Result<Fd> 
     proc.alloc_fd(FdKind::ChannelReader {
         rx,
         buf: Vec::new(),
+        outside: false,
     })
 }
 

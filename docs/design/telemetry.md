@@ -147,8 +147,12 @@ two-byte JSON body. A dropped payload still gets `200`.
 
 ## Limits
 
-- Delivery is best effort. A failed target write loses the record without a retry, a report of the
-  loss, or a disk copy for later delivery. See [a record can be
+- Delivery is best effort. A failed target write loses the record without a retry or a disk copy for
+  later delivery. The drain prints one stderr line when the run ends if an export to a configured
+  target failed or the final export did not finish in time. A record the SDK queue refuses, an agent
+  payload the receiver refuses, a batch the SDK cuts at its export deadline before shutdown, and a
+  relay in flight at shutdown are not counted, so the absence of
+  that line does not prove that nothing was lost. See [a record can be
   lost](decisions.md#delivery-is-best-effort). The shutdown drain runs on every exit path, even when
   startup fails before the workload starts, so Box still records that it stopped. Relayed payloads
   do not join that drain and can be lost in flight. A decision cannot be lost through that shutdown

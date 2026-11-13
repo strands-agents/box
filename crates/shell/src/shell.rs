@@ -358,6 +358,8 @@ impl Shell {
     /// # }
     /// ```
     pub async fn run(&mut self, input: &str) -> Output {
+        // A cancelled earlier call can leave a tested context counted; each call starts with none.
+        self.proc.errexit_tested = 0;
         // Admission is NOT here. `exec::execute` — which `execute_capture`
         // delegates to — is the one function every command-text route reaches, so judging
         // there covers Lua's `io.popen`/`os.execute`, `find -exec`, and `xargs`, which
@@ -397,6 +399,8 @@ impl Shell {
     /// # }
     /// ```
     pub async fn execute(&mut self, input: &str) -> i32 {
+        // A cancelled earlier call can leave a tested context counted; each call starts with none.
+        self.proc.errexit_tested = 0;
         // Admission is in `exec::execute` — see the note on `run`.
         self.refresh_deadline();
         #[cfg(not(target_arch = "wasm32"))]
