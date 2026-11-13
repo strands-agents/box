@@ -16,8 +16,9 @@ reaches the network through one function, `fetch()`.
 The box's trusted process runs outside the agent's sandbox. It holds the policy engine, the broker,
 which accepts the agent's requests to Box's interpreters, and the egress gateway, which checks and
 forwards every outbound request. The reachable paths check is deny-only and runs after policy. It
-refuses the box directory, the `box.toml` and policy this run loaded, and any path outside the
-operator's home, the agent's `HOME`, and the workspace.
+refuses the box directory, the `box.toml` and policy this run loaded, every credential store the
+sandbox refuses unless the configuration names it, and any path outside the operator's home, the
+agent's `HOME`, and the workspace.
 
 For the Python that Monty supports, the file operations, `fetch()`, and the rules to write, read
 [Python scripts in a box](../user/monty.md).
@@ -233,9 +234,9 @@ file that doesn't exist yet.
   grows in small steps can use all the memory of the box's trusted process.
 - `fetch()` returns a `403` response when the gateway refuses a request. A script that does not
   check the status may treat the refusal as a successful answer.
-- One broad rule reaches the operator's secrets. Monty reaches the whole operator home, so an
-  `fs:read` permit with no path condition reads `~/.ssh` and `~/.aws`. See [where policy
-  sits](./policy.md#where-policy-sits).
+- One broad rule reaches the operator's files. Monty reaches the whole operator home, so an
+  `fs:read` permit with no path condition reads everything there except a credential store such as
+  `~/.ssh` or `~/.aws`. See [where policy sits](./policy.md#where-policy-sits).
 
 ## See also
 

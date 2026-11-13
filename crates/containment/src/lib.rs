@@ -21,7 +21,9 @@ pub mod test_support;
 pub use config::ContainmentConfig;
 pub use error::ContainmentError;
 pub use facade::Containment;
-pub use floors::{ContainmentWarning, home_relative_path_refusal, validate_grant};
+pub use floors::{
+    ContainmentWarning, credential_store_anchors, home_relative_path_refusal, validate_grant,
+};
 pub use grants::validate_grants;
 pub use model::{
     BackendOverride, IpcMode, Network, Operation, PreparedFilesystemPath, ProcessInfoMode, Scope,

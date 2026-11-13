@@ -22,12 +22,13 @@ The public API describes one complete request and applies it once:
 | `Containment::apply(&config, egress_handoff, confirm_fd, native_filesystem_handoff)` | Detect the host backend and irreversibly contain the calling process. |
 | `ContainmentError`, `Platform` | Matchable failure and platform values. |
 | `ForbiddenClass`, `ContainmentError::forbidden_class` | What a floor row protects, and the class of the row that refused a grant. |
+| `credential_store_anchors(home)` | Every spelling of each credential store under a home: as written, through its symbolic links, and on the macOS data volume. A caller that judges a path outside a sandbox uses it to refuse the same stores this crate refuses. |
 
-The crate root exports **19 names**: `Containment`, `ContainmentConfig`,
+The crate root exports **20 names**: `Containment`, `ContainmentConfig`,
 `ContainmentError`, `ContainmentWarning`, `ForbiddenClass`, `Platform`,
 `PreparedFilesystemPath`, `Operation`, `Scope`, `Network`, `BackendOverride`,
 `IpcMode`, `ProcessInfoMode`, `SignalMode`, `os_minimum_cells`, `os_runtime_cells`,
-`validate_grant`, `validate_grants`, and `home_relative_path_refusal`. The last one is the deny-only floor's own predicate,
+`validate_grant`, `validate_grants`, `credential_store_anchors`, and `home_relative_path_refusal`. The last one is the deny-only floor's own predicate,
 which judges a `~/`-relative spelling at authoring time so a caller that holds no
 resolved path still gets the one refusal this crate owns.
 Two further items are not in that count:

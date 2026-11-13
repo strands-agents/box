@@ -455,21 +455,15 @@ pub fn validate_grant(
     Ok(credential_store)
 }
 
-fn credential_store_path(path: &Path, operator_home: &Path) -> Result<bool> {
-    if !path.is_absolute() || !operator_home.is_absolute() {
-        return Err(ContainmentError::ConfigValidation(format!(
-            "a grant path and the operator home must be absolute: path {}, home {}",
-            path.display(),
-            operator_home.display()
-        )));
-    }
-
+/// Every spelling of each credential store under `home`: as written, through its symbolic links,
+/// and on the macOS data volume.
+pub fn credential_store_anchors(home: &Path) -> Vec<PathBuf> {
     let mut anchors = Vec::new();
     for entry in forbidden_paths()
         .iter()
         .filter(|entry| entry.class == ForbiddenClass::CredentialStore)
     {
-        for anchor in [entry.lexical(operator_home), entry.resolve(operator_home)] {
+        for anchor in [entry.lexical(home), entry.resolve(home)] {
             if !anchors.contains(&anchor) {
                 anchors.push(anchor.clone());
             }
@@ -480,6 +474,19 @@ fn credential_store_path(path: &Path, operator_home: &Path) -> Result<bool> {
             }
         }
     }
+    anchors
+}
+
+fn credential_store_path(path: &Path, operator_home: &Path) -> Result<bool> {
+    if !path.is_absolute() || !operator_home.is_absolute() {
+        return Err(ContainmentError::ConfigValidation(format!(
+            "a grant path and the operator home must be absolute: path {}, home {}",
+            path.display(),
+            operator_home.display()
+        )));
+    }
+
+    let anchors = credential_store_anchors(operator_home);
 
     let classify = |candidate: &Path| {
         let inside = anchors.iter().any(|anchor| candidate.starts_with(anchor));
@@ -1858,6 +1865,49 @@ mod tests {
         assert!(
             paths.contains(&elsewhere),
             "the identity the link resolves to is missing: {paths:?}"
+        );
+    }
+
+    /// The anchors name each credential store as written, through its link, and on the data volume.
+    #[test]
+    fn the_credential_store_anchors_carry_every_spelling_of_each_store() {
+        let fixtures = tempfile::tempdir().expect("fixtures");
+        let home = fixtures.path().canonicalize().expect("canonical fixtures");
+        let elsewhere = home.join("dotfiles/ssh");
+        std::fs::create_dir_all(&elsewhere).expect("link target");
+        std::os::unix::fs::symlink(&elsewhere, home.join(".ssh")).expect("linked anchor");
+
+        let anchors = super::credential_store_anchors(&home);
+        for expected in [
+            home.join(".ssh"),
+            elsewhere.clone(),
+            home.join(".aws"),
+            Path::new(DATA_VOLUME_ROOT)
+                .join(home.join(".aws").strip_prefix("/").expect("absolute")),
+        ] {
+            assert!(
+                anchors.contains(&expected),
+                "{} is missing: {anchors:?}",
+                expected.display()
+            );
+        }
+        let mut written: Vec<String> = anchors
+            .iter()
+            .filter_map(|anchor| anchor.strip_prefix(&home).ok())
+            .filter(|relative| !relative.starts_with("dotfiles"))
+            .map(|relative| format!("~/{}", relative.display()))
+            .collect();
+        written.sort();
+        written.dedup();
+        let mut stores: Vec<String> = forbidden_paths()
+            .iter()
+            .filter(|entry| entry.class == ForbiddenClass::CredentialStore)
+            .map(|entry| entry.anchor.clone())
+            .collect();
+        stores.sort();
+        assert_eq!(
+            written, stores,
+            "the anchors must be the credential rows and no other"
         );
     }
 

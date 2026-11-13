@@ -43,9 +43,11 @@ So a history rule can't account for a read that took one of those routes. The
 [policy page](policy.md#durable-history) explains why policy history isn't a complete audit record.
 
 Strands Shell and Monty run outside every sandbox, so a broad
-filesystem permit lets them reach paths the agent's own grants never could, including credential
-stores. See [no credential floor sits beneath the interpreters](decisions.md#no-credential-floor-sits-beneath-the-interpreters).
-Keep filesystem permits to the paths the task needs.
+filesystem permit lets them reach paths the agent's own grants never could. Credential stores are
+the exception: the interpreters refuse each store that the sandbox refuses, unless the
+configuration names it. See [the interpreters meet the sandbox's credential
+floor](decisions.md#no-credential-floor-sits-beneath-the-interpreters). Keep filesystem permits to
+the paths the task needs.
 
 ## How access choices change the risk
 
@@ -57,7 +59,7 @@ access. Review each one before you run:
 | Write access to `~/.aws` with a bare `aws://` route | Let a program manage its own AWS configuration. | **Remote code execution in the box's trusted process.** The bare `aws://` default chain reads `~/.aws/config`, which can name a `credential_process` program the trusted process then executes, outside the sandbox. A workload that can write `~/.aws` can run its own program there. The shipped box has no setting to refuse the bare form, so grant write to `~/.aws` only when every writer is trusted, or write `aws://PROFILE` instead — a named profile is not exposed to this path. |
 | Read access to a directory tree | Read a project and its dependencies. | The program reads any file in the tree, with no policy decision for each read. |
 | Write access to a directory tree | Produce build output or edit source. | The program changes any file in the tree, including inputs other programs use later. |
-| A filesystem permit that doesn't restrict paths | Let Strands Shell or Monty work across many paths. | The interpreters reach beyond the agent's own grants, with no credential floor beneath them. |
+| A filesystem permit that doesn't restrict paths | Let Strands Shell or Monty work across many paths. | The interpreters reach beyond the agent's own grants. Only the credential stores stay refused. |
 | A tool, on macOS | Let a compiler or version control tool run its helpers. | Its sandbox runs any helper, loads code from its writable grants, and sees which paths exist across the home. See [a tool's sandbox](containment.md#a-tools-leaf-box). |
 | The same path under `exec` and `write` | Let a build run what it compiles. | Box warns and starts anyway, so the workload can replace that program. See [write plus execute warns](decisions.md#write-plus-execute-warns-and-does-not-refuse). |
 | A program with no tool table | Run a program under one of the agent's `exec` entries. | It gets the agent's grants plus the wider reach of a tool's sandbox, and the startup report doesn't show the wider part. |

@@ -2577,13 +2577,13 @@ fn a_matching_leaf_reads_and_writes_announced_credentials_and_the_main_workload_
 permit(principal, action == Box::Action::"shell:exec", resource);
 permit(principal, action == Box::Action::"shell:spawn", resource)
 when {
-    context.input.program == "wc" &&
+    context.input.program == "cksum" &&
     context.input has credential_reads &&
     context.input.credential_reads.contains("~/.aws")
 };
 permit(principal, action == Box::Action::"shell:spawn", resource)
 when {
-    context.input.program == "touch" &&
+    context.input.program == "dd" &&
     context.input has credential_reads &&
     context.input.credential_reads.contains("~/.aws/sso/cache")
 };
@@ -2597,14 +2597,14 @@ permit(
         "tool-credential-read",
         POLICY,
         r#"
-[tool.wc]
-command = ["wc"]
-[tool.wc.filesystem]
+[tool.cksum]
+command = ["cksum"]
+[tool.cksum.filesystem]
 read = ["~/.aws"]
 
-[tool.touch]
-command = ["touch"]
-[tool.touch.filesystem]
+[tool.dd]
+command = ["dd"]
+[tool.dd.filesystem]
 write = ["~/.aws/sso/cache"]
 "#,
     );
@@ -2630,8 +2630,8 @@ if printf main > "{main_write}"; then
 else
     printf 'MAIN_WRITE_DENIED\n'
 fi
-zsh -lc 'wc -c "{path}"'
-zsh -lc 'touch "{leaf_write}"'
+zsh -lc 'cksum "{path}"'
+zsh -lc 'dd if=/dev/null of="{leaf_write}"'
 "#,
         path = credential.display(),
         main_write = main_write.display(),
@@ -2650,17 +2650,17 @@ zsh -lc 'touch "{leaf_write}"'
     );
     assert!(
         seen.contains("22 "),
-        "the selected wc leaf must read all credential bytes: {output:?}"
+        "the selected cksum leaf must read all credential bytes: {output:?}"
     );
     assert!(
         leaf_write.exists(),
-        "the selected touch leaf must write the credential cache: {output:?}"
+        "the selected dd leaf must write the credential cache: {output:?}"
     );
     let read_announcement = errors
-        .find("strands-box: [tool.wc]: exposes ~/.aws (read)")
+        .find("strands-box: [tool.cksum]: exposes ~/.aws (read)")
         .expect("the read announcement is present");
     let write_announcement = errors
-        .find("strands-box: [tool.touch]: exposes ~/.aws/sso/cache (write)")
+        .find("strands-box: [tool.dd]: exposes ~/.aws/sso/cache (write)")
         .expect("the write announcement is present");
     let started_at = errors
         .find("strands-box: starting workload")

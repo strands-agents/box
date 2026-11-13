@@ -495,6 +495,9 @@ Private `/tmp` storage remains writable and separate from the surrounding OS.
 
 These filesystem lists govern sandbox access.
 Shell and Python requests through Box use separate policy and reach checks in the box's trusted process.
+The one overlap is a credential store. Box refuses those requests on a store unless a `read` or
+`write` entry names the store or a path inside it. Such an entry lifts that refusal, and policy still
+decides each request. A `deny` entry inside the store keeps that path refused.
 Permitted file creation retains that process's file identity.
 
 On Linux, write access permits ordinary file writes. Permission changes, including executable-bit
