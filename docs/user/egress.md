@@ -263,6 +263,7 @@ not upgrade `rust-lang.org`.
 | A `backends.auth` uses `aws://` without a valid `aws.service`/`aws.region` (or sets them on a non-`aws://` auth) | An `aws://` backend auth signs over the backend host, so state `backends.auth.aws.service` and `backends.auth.aws.region`, each non-empty and only lowercase letters, digits, or `-`. They are valid only on an `aws://` auth. |
 | `secret.ref` has a scheme other than `env` or `aws` | Use one of the two schemes. |
 | `env://NAME` names a variable that is unset, blank, or reserved by the box | Set `NAME` in the host OS's shell that runs `box run`, or choose another name. |
+| A bare `aws://` route whose default credential chain resolves no credentials at startup (no env keys, no default profile, no IMDS), or whose `credential_process` does not finish within the resolve timeout | Configure the host's AWS credentials, or name a profile with `aws://PROFILE`. The box validates a bare `aws://` chain once at startup, so a broken one stops `box run` rather than the first request. |
 | An `aws://` route sets a placement, `header`, `prefix`, `param`, `inject`, or `phantom_prefix` | Remove the key. A signed route takes none. |
 | `placement` is not `header`, `basic_auth`, or `query_param`, or is set with a key it does not take | Use one of the three, with only its own keys. |
 | `placement = "query_param"` has no `param` | Name the query parameter. |
@@ -278,7 +279,7 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 | Body | Cause |
 |---|---|
 | The policy decision, naming the rule | `net:connect` or `http:request` refused the request. |
-| `blocked by egress control` | A request to a route's destinations lacks the placeholder, carries a different value, or can't be signed. A bare `aws://` route whose default chain resolves no credentials can't be signed and refuses here. |
+| `blocked by egress control` | A request to a route's destinations lacks the placeholder, carries a different value, or can't be signed. A bare `aws://` chain that resolved at startup but later stops (a rotated-away credential, a `credential_process` that begins to fail) can't be signed and refuses here; one that is already broken at startup stops `box run` instead. |
 | `credential not permitted on a plaintext request` | A plain `http://` request went to a route's destination, including one the gateway [upgrades to HTTPS](#upgrade-plain-http-to-https). |
 | `request authority rejected` | The request inside a `CONNECT` named a different host. |
 | `response blocked by egress control` | The server sent a compressed response to a credentialed request. |
