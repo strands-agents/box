@@ -612,6 +612,7 @@ fn a_probe_the_admission_window_refuses_reports_a_failure() {
             .run("printf x > /home/lash/present && ln -s present /home/lash/link")
             .await;
         assert_eq!(setup.status, 0, "setup: {}", setup.stderr);
+        outcomes.lock().unwrap().clear();
         shell
             .run(
                 "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do mkdir /home/lash/churn; rmdir /home/lash/churn; done & \\
