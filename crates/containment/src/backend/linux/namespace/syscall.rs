@@ -290,6 +290,19 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "poll",
         number: libc::SYS_poll,
     },
+    // The libcurl that cargo vendors waits on its sockets with `select()`, which glibc issues as
+    // `pselect6` (glibc 2.32 and older issue `select` on x86_64), so an `EPERM` here fails every
+    // cargo download with "Unrecoverable error in select/poll". Like `ppoll`, it only waits on
+    // descriptors the process already holds.
+    PermittedSyscall {
+        name: "pselect6",
+        number: libc::SYS_pselect6,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "select",
+        number: libc::SYS_select,
+    },
     PermittedSyscall {
         name: "readlinkat",
         number: libc::SYS_readlinkat,
@@ -1402,10 +1415,10 @@ mod tests {
     #[test]
     fn permit_filter_has_the_expected_workload_and_installer_entries() {
         let x86_entries = usize::from(cfg!(target_arch = "x86_64"));
-        assert_eq!(WORKLOAD_PERMITTED.len(), 116 + 17 * x86_entries);
+        assert_eq!(WORKLOAD_PERMITTED.len(), 117 + 18 * x86_entries);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 119 + 18 * x86_entries);
+        assert_eq!(rules.len(), 120 + 19 * x86_entries);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
@@ -1684,6 +1697,42 @@ mod tests {
                     .any(|entry| entry.name == name && entry.number == number),
                 "'{name}' is absent from the permit table, so a Go program gets EPERM when it \
                  waits for a child and gh cannot run git"
+            );
+            assert!(!MEDIATED.iter().any(|entry| entry.name == name));
+            let number = u32::try_from(number).expect("syscall numbers are small");
+            assert!(
+                filters
+                    .permit
+                    .iter()
+                    .any(|instruction| instruction.k == number)
+            );
+            assert!(
+                !filters
+                    .restrictions
+                    .iter()
+                    .any(|instruction| instruction.k == number)
+            );
+        }
+    }
+
+    #[test]
+    fn select_waits_are_permitted_and_unmediated() {
+        let required = [
+            ("pselect6", libc::SYS_pselect6),
+            #[cfg(target_arch = "x86_64")]
+            ("select", libc::SYS_select),
+        ];
+        let filters = SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("filters compile");
+        for (name, number) in required {
+            assert!(
+                WORKLOAD_PERMITTED
+                    .iter()
+                    .any(|entry| entry.name == name && entry.number == number),
+                "'{name}' is absent from the permit table, so cargo's vendored libcurl gets \
+                 EPERM from select() and every download fails with 'Unrecoverable error in \
+                 select/poll'"
             );
             assert!(!MEDIATED.iter().any(|entry| entry.name == name));
             let number = u32::try_from(number).expect("syscall numbers are small");
