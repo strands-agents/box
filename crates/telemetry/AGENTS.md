@@ -254,10 +254,19 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   and the run still exited 0. The line is at the drain and not in `deliver`, so a workload that makes
   every batch fail cannot fill stderr. It names its cause: failed exports, an unfinished final
   export, or both. An unfinished drain no longer increments `dropped`, because no export failed.
+  **A failed final export is not a timeout.** The SDK answers `shutdown` with the final export's
+  own error, so a closed port or a full disk returns at once with an `Err`. `shut_down_bounded` now
+  returns a `Shutdown` (`Completed`, `Failed`, `Unanswered`), and `drain_finished` calls the drain
+  unfinished only when no answer came, or when the SDK failed without any exporter counting it (an
+  export the SDK cut at its own deadline). The first version reported every fast failure as "did not
+  finish in time". `a_counted_export_failure_is_not_reported_as_a_timeout` and
+  `a_fast_failing_final_export_is_not_a_timeout` are the pins, and both failed against it.
   **The receiver has its own counter.** It used to share `dropped`, so a refused agent payload (the
   one-permit `RELAY_CAPACITY`, or the fan-out bound) counted as a lost record: the workload could
   raise the loss line at will, and a healthy agent that exports concurrently could raise it on a run
   whose box audit was complete. `dropped` now counts only batches an exporter failed to deliver.
+  The receiver's count is read only by tests: `a_refused_agent_payload_is_not_a_lost_record` pins
+  that a refused payload raises it while `dropped` stays at 0.
   `drain_warning` owns the text. `a_lossy_drain_reports_the_loss_once`,
   `a_complete_drain_reports_no_loss` and `an_unfinished_drain_alone_is_a_loss` pin the text, and
   `box_telemetry.rs::an_unreachable_target_reports_the_lost_records_once` pins the print: it fails

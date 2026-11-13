@@ -96,9 +96,35 @@ fn shut_down_off_runtime(
 ///
 /// **Only a caller that is not holding a runtime thread may wait.** The batch worker needs that
 /// thread to answer, so waiting on it is what turns this bound into the deadline every time.
-fn shut_down_bounded(logs: SdkLoggerProvider, deadline: Duration) -> bool {
-    shut_down_off_runtime(logs)
-        .is_some_and(|waiting| matches!(waiting.recv_timeout(deadline), Ok(Ok(()))))
+fn shut_down_bounded(logs: SdkLoggerProvider, deadline: Duration) -> Shutdown {
+    match shut_down_off_runtime(logs).map(|waiting| waiting.recv_timeout(deadline)) {
+        Some(Ok(Ok(()))) => Shutdown::Completed,
+        Some(Ok(Err(_))) => Shutdown::Failed,
+        Some(Err(_)) | None => Shutdown::Unanswered,
+    }
+}
+
+/// How a bounded shutdown ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shutdown {
+    /// Every lane flushed and stopped.
+    Completed,
+    /// The SDK answered with an error, which a failed final export produces.
+    Failed,
+    /// No answer came before the deadline, or the drain thread did not start.
+    Unanswered,
+}
+
+/// Whether the drain finished, given how it ended and the failed-export count before and after it.
+///
+/// A failed shutdown whose export the exporters counted is a failed export and not a timeout. A
+/// failed shutdown that no exporter counted is an export the SDK cut at its own deadline.
+fn drain_finished(ended: Shutdown, failed_before: u64, failed_after: u64) -> bool {
+    match ended {
+        Shutdown::Completed => true,
+        Shutdown::Failed => failed_after > failed_before,
+        Shutdown::Unanswered => false,
+    }
 }
 
 /// One exporter, shared between the SDK lane and the agent-trace relay.
@@ -156,6 +182,9 @@ pub struct Collector {
     mcp_logger: SdkLogger,
     /// Batches a target refused, counted by the exporters and never by the receiver.
     dropped: Arc<AtomicU64>,
+    /// Agent payloads the receiver refused, which is not a loss of the box's own records.
+    #[cfg(test)]
+    refused: Arc<AtomicU64>,
     /// The union of every lane's signals, so a record nothing wants costs one load.
     accepts: [bool; Signal::SLOTS],
     port: u16,
@@ -194,6 +223,7 @@ impl Collector {
         let box_name = config.box_name().to_string();
         let run_id = RandomIdGenerator::default().new_trace_id().to_string();
         let dropped = Arc::new(AtomicU64::new(0));
+        let refused = Arc::new(AtomicU64::new(0));
 
         // Bound whatever the signals say, so the agent's exporter always finds a listener.
         let inbound = Receiver::bind()?;
@@ -252,7 +282,7 @@ impl Collector {
             box_name.clone(),
             run_id,
             relays,
-            Arc::new(AtomicU64::new(0)),
+            Arc::clone(&refused),
         ));
 
         let ids = RandomIdGenerator::default();
@@ -262,6 +292,8 @@ impl Collector {
             control_logger,
             mcp_logger,
             dropped,
+            #[cfg(test)]
+            refused,
             accepts,
             port,
             control_trace: ids.new_trace_id(),
@@ -405,13 +437,16 @@ impl Collector {
             return;
         }
         let logs = self.logs.clone();
+        let failed_before = self.dropped.load(Ordering::Relaxed);
         // `shutdown` exports what is queued before it stops the exporter, so no separate flush. The
         // blocking task returns at the deadline whatever the batch worker does, so the runtime's own
         // teardown never waits on it.
         let ended =
             tokio::task::spawn_blocking(move || shut_down_bounded(logs, DRAIN_DEADLINE)).await;
-        let finished = matches!(ended, Ok(true));
-        if let Some(warning) = drain_warning(self.dropped.load(Ordering::Relaxed), finished) {
+        let failed_after = self.dropped.load(Ordering::Relaxed);
+        let ended = ended.unwrap_or(Shutdown::Unanswered);
+        let finished = drain_finished(ended, failed_before, failed_after);
+        if let Some(warning) = drain_warning(failed_after, finished) {
             eprintln!("{warning}");
         }
     }
@@ -423,6 +458,12 @@ impl Collector {
     #[cfg(test)]
     pub(crate) fn dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+
+    /// How many agent payloads the receiver refused.
+    #[cfg(test)]
+    pub(crate) fn refused(&self) -> u64 {
+        self.refused.load(Ordering::Relaxed)
     }
 }
 
@@ -987,14 +1028,15 @@ mod tests {
 
         let deadline = Duration::from_millis(200);
         let started = std::time::Instant::now();
-        let flushed = shut_down_bounded(collector.logs.clone(), deadline);
+        let ended = shut_down_bounded(collector.logs.clone(), deadline);
         let waited = started.elapsed();
         // This drain set no flag on the collector, so `Drop` starts a second shutdown, and the
         // provider's own guard answers it.
         drop(collector);
 
-        assert!(
-            !flushed,
+        assert_eq!(
+            ended,
+            Shutdown::Unanswered,
             "a worker that cannot answer is not a successful flush"
         );
         assert!(
@@ -1339,6 +1381,74 @@ mod tests {
             "{warning}"
         );
         assert!(!warning.contains("failed"), "{warning}");
+    }
+
+    /// A failed shutdown is a timeout only when no exporter counted the failure.
+    #[test]
+    fn a_counted_export_failure_is_not_reported_as_a_timeout() {
+        assert!(drain_finished(Shutdown::Completed, 0, 0));
+        assert!(drain_finished(Shutdown::Failed, 0, 1));
+        assert!(drain_finished(Shutdown::Failed, 2, 3));
+        assert!(!drain_finished(Shutdown::Failed, 2, 2));
+        assert!(!drain_finished(Shutdown::Unanswered, 0, 1));
+    }
+
+    /// A final export that fails at once is reported as a failed export and not as a timeout.
+    #[tokio::test]
+    async fn a_fast_failing_final_export_is_not_a_timeout() {
+        let collector = Collector::start(
+            TelemetryConfig::for_box("demo")
+                .with_target(Target::new(TargetKind::Otlp, nothing_listening())),
+        )
+        .expect("open");
+        collector.record(DecisionRecord::deny(
+            r#"Box::Action::"fs:read""#,
+            "~/x",
+            "rule-1",
+            "refused",
+        ));
+        let failed_before = collector.dropped();
+        // Off the runtime thread, as `drained` does it, so the batch worker can answer.
+        let logs = collector.logs.clone();
+        let ended = tokio::task::spawn_blocking(move || shut_down_bounded(logs, DRAIN_DEADLINE))
+            .await
+            .expect("the drain task");
+        let failed_after = collector.dropped();
+
+        assert!(failed_after > failed_before, "the failed export is counted");
+        assert!(
+            drain_finished(ended, failed_before, failed_after),
+            "a counted failure is not a drain that did not finish: {ended:?}"
+        );
+        let warning = drain_warning(failed_after, true).expect("a loss is reported");
+        assert!(!warning.contains("did not finish"), "{warning}");
+    }
+
+    /// A payload the receiver refuses is counted as refused and never as a lost box record.
+    #[tokio::test]
+    async fn a_refused_agent_payload_is_not_a_lost_record() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("records.jsonl");
+        let collector = Collector::start(file_config(&path)).expect("open");
+        let resources = vec!["{}"; 1025].join(",");
+        let answered = reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/logs", collector.port()))
+            .header("content-type", "application/json")
+            .body(format!(r#"{{"resourceLogs":[{resources}]}}"#))
+            .send()
+            .await
+            .expect("the receiver answers")
+            .status()
+            .as_u16();
+        collector.drained().await;
+
+        assert_eq!(answered, 413, "the fan-out bound refuses the payload");
+        assert!(collector.refused() > 0, "the refusal is counted");
+        assert_eq!(
+            collector.dropped(),
+            0,
+            "a refused agent payload is not a lost record"
+        );
     }
 
     /// A target that cannot be reached is counted, so a failing endpoint is not silent.

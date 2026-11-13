@@ -899,6 +899,10 @@ fn an_unreachable_target_reports_the_lost_records_once() {
         lines[0].contains("failed"),
         "the cause is a failed export: {stderr}"
     );
+    assert!(
+        !lines[0].contains("did not finish"),
+        "a final export that failed at once is not a drain that ran out of time: {stderr}"
+    );
 }
 
 /// **A target narrowed to refusals never fills with permits.**
