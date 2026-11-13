@@ -185,6 +185,7 @@ group, the owner, and access control lists on files in its writable grants`. Lin
 | `shell.timeout` | positive integer or `false` | `30` | Seconds allowed for one submitted Strands Shell call, including its commands and pipelines. `false` disables the Shell and broker execution deadlines. |
 | `shell.max_input` | nonnegative integer | `262144` | Bytes of command text submitted to Strands Shell. `0` disables this limit. |
 | `shell.max_output` | nonnegative integer | `65536` | Bytes in each Shell output buffer, including command substitution. Shell also applies this limit when loading script files with `source`. `0` disables this limit. |
+| `shell.max_stdin` | positive integer | `65536` | Bytes of standard input that one command run through the `zsh`, `bash`, or `sh` alias receives from outside the Shell. Past it, the rest is discarded and the command gets no end of input, so a command that reads past it fails at the Shell timeout; a command that acts as its input arrives has acted on the first part by then. `0` is a load error. |
 
 To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent nested table is
 `[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
@@ -207,6 +208,13 @@ capture can produce incomplete or empty output. An oversized source file fails b
 with `output size limit exceeded`.
 Raising or disabling a size limit allows Shell to hold more data in the box's trusted process;
 these settings do not bound the process's total memory use.
+
+`shell.max_stdin` cannot be disabled, because it bounds the standard input that the box's trusted
+process holds for a command. Values of zero, negative numbers, fractions, strings, and booleans are
+load errors. One connection's commands receive at most `shell.max_stdin` times the most programs a
+connection opens. A command that reads its input still holds at most `shell.max_output` bytes of
+it in one buffer, so raise `shell.max_output` too when a command such as `x=$(cat)` must keep a
+larger input.
 
 Broker messages remain capped at 1 MiB, including encoding. Streamed stdout and stderr share
 an 8 MiB budget for the lifetime of one opened Shell program. These limits still apply when either
@@ -998,7 +1006,7 @@ each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal, an `ingress` outside `
 five `[[agent.ingress]]` entries, an `[[agent.ingress]] listen` that is not an IP address and port, a
 port of 0, two entries with one `listen` port or one `workload_port`, and on macOS a `listen` port
 equal to any entry's `workload_port`.
-An invalid `limits.shell.timeout`, `limits.shell.max_input`, or `limits.shell.max_output` is also a parse error.
+An invalid `limits.shell.timeout`, `limits.shell.max_input`, `limits.shell.max_output`, or `limits.shell.max_stdin` is also a parse error.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload

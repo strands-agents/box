@@ -42,6 +42,8 @@ pub(crate) struct EgressRouting {
 /// Everything needed to build the hosted Shell, kept so one can be rebuilt.
 pub(super) struct ShellSpec {
     pub(super) max_input: usize,
+    /// The most stdin one Shell Program receives.
+    pub(super) max_stdin: usize,
     pub(super) max_output: usize,
     /// The Shell's own bound on one submitted Shell call.
     pub(super) command_timeout: Option<Duration>,

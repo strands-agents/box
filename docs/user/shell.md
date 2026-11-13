@@ -20,6 +20,39 @@ command to the Shell. Each accepts one of these forms:
 Any other form is refused with `Shell alias accepts only -c COMMAND, -lc COMMAND, -c -l COMMAND, or
 SCRIPT`.
 
+### Standard input
+
+When the alias's standard input is a pipe, a file, or a socket, the command reads it as its
+standard input while it runs. Bytes arrive unchanged. A terminal or `/dev/null` gives the command
+no input. A command that does not read its input is not held by it: the alias returns when the
+command exits, even when the writer keeps the pipe open. A command that does read such an input
+waits for it until the Shell's timeout, or, with `shell.timeout = false`, until its caller stops
+it.
+
+A command receives at most `[limits.shell] max_stdin` bytes of this input, 64 KiB by default. Past
+that, the box discards the rest, so the limit never blocks the writer. Forwarding ends when the
+command exits, so a writer that is still writing then can get a broken pipe. A command that does not
+read its input is not affected. A command that reads past the limit gets no end of input: it waits
+until the Shell's timeout and then fails, and it prints on standard error that its input was cut. A
+command that waits for the end of its input before it acts, such as `x=$(cat)` or `jq`, never acts
+on part of it. A command that acts as its input arrives, such as `while read -r line` or `cat >
+file`, has already acted on the first part when it fails. With `shell.timeout = false`, a command
+that reads past the limit waits until its caller stops it, like any blocked read. If reading the
+input fails, the alias stops the command and exits with status `125`.
+
+This limit applies only to input piped into the alias from outside the Shell, such as a hook's
+event or a program that starts `bash` with input. A pipe inside a command, such as
+`cat big.json | jq .`, is not affected.
+
+Only commands that the Shell runs itself, such as `cat`, `read`, or `jq`, receive the input. A
+program that the Shell starts in its own sandbox gets no input. Text that a command reads from its
+input is still data: when a command runs it, as in `eval "$(cat)"`, or opens a file it names,
+policy decides that command or file.
+
+A Lua script that the Shell runs does not read the input piped into the alias: it reads it as empty
+and never waits for it. A pipe inside one command, such as `echo x | lua -e 'print(io.read())'`,
+still reaches the script.
+
 Each invocation is one command. A variable exported in one invocation is unset in the next. The
 Shell starts each command with `HOME` set to the agent's `HOME`, and with the workspace as its
 working directory. It also gets the placeholder of each [credential route](./egress.md), in the
