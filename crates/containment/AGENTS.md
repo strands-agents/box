@@ -755,6 +755,15 @@ by reading `src/` belongs in `src/` — the README describes the shape.
     Adding one `(allow mach-lookup)` line let the inherited bootstrap right reach
     `com.apple.pasteboard.1`, `com.apple.system.notification_center`, and `com.apple.SecurityServer`
     with a live port. The uncontained control reaches all three, which is what attributes the refusal.
+  - **Apple's certificate check needs `com.apple.trustd.agent`, and Secure Transport also needs
+    `com.apple.SecurityServer`.** Measured on macOS 26 arm64 against `api.github.com`: with both
+    denied, Go 1.26, Go 1.27 with a 1.26 `go.mod`, and `reqwest` 0.13 with
+    `rustls-platform-verifier` fail with `OSStatus -26276`, and `native-tls` fails with `-9808`.
+    trustd alone fixes the first three, and SecurityServer fixes `native-tls`. A login-keychain
+    generic password stayed unreadable through `/usr/bin/security` with both allowed, because the
+    profile refuses the keychain files. Data-protection and iCloud items were not measured; `secd`
+    stays denied. Only `Network::AllowAll` renders the two, by
+    `the_trust_services_render_only_with_native_egress`.
   - **`TIOCSTI` on the inherited PTY slave is refused by the *platform*, not by the profile.** The
     uncontained control measured the same `EPERM`, so the `file-ioctl` grant is not what closes it.
     Re-measure with the control if a macOS release changes this; a restored `TIOCSTI` would be a write
@@ -924,6 +933,17 @@ scopes.
 The Claude trace also showed a nonfatal `link` maintenance failure. That entry remains unpermitted;
 this change does not expand hard-link access or claim warning-free CLI behavior.
 
+### Waiting for a child
+
+On native ARM64 Amazon Linux 2023, Box `70eb3afcecfbe435371a60d557c6644eb83c0a06` refused `waitid`
+with `EPERM`. Go's `os/exec` calls `waitid` before it reaps a child with `wait4`, so every child of a
+Go program failed. `gh` 2.103.3 in a box printed `failed to run git: waitid: operation not permitted`
+for `gh pr create --dry-run` and `gh pr status`. With `waitid` permitted, both commands ran `git` and
+exited 0. `waitid` adds no reach beyond `wait4`: the kernel limits both to the caller's own children,
+and its `P_PIDFD` form takes a descriptor from the permitted `pidfd_open`.
+`a_child_is_awaited_with_waitid_under_the_filters` checks `P_ALL` with `WNOHANG`, `P_PIDFD`, and
+`P_PID` under the filters.
+
 ### W^X
 
 W^X closes three routes. Every writable mount, including `/tmp`, uses `MS_NOEXEC`. The permit filter
@@ -944,6 +964,36 @@ result instead of failing it.** `umask` has no failing return, so the filter's `
 caller as a mask of every bit. A linker read that mask, added the execute bits it left, and wrote
 output nothing could run — with every call it made reporting success. When you leave a call out,
 check what its wrapper returns on failure, and pin the *effect* rather than the answer.
+
+### Optimized copies
+
+`copy_file_range` and `sendfile` are permitted. libuv tries `copy_file_range`, then `sendfile`, then
+read and write. It falls back to read and write only when `sendfile` returns `EINVAL`, `EIO`,
+`ENOTSOCK`, or `EXDEV`, so `EPERM` and `ENOSYS` stop the copy. Measured on November 13, 2026, on
+ARM64 kernel 6.18 with Node 22.22.2 `--jitless` through the trampoline: before the permit,
+`fs.copyFileSync` and `fs.cp` failed with `EPERM`; after it, both copied the file. Go's
+`http.FileServer` also sends a file with `sendfile`: with `EPERM`, the response had status 200 and
+stopped after 512 bytes.
+
+**`EINVAL` from `sendfile` would also fix both, and the permit is kept for speed.** Measured on the
+same host, outside a box with a seccomp filter that set only these two calls, with `copy_file_range`
+answering `EXDEV` (a copy across filesystems): Node copied one 512 MB file from xfs to tmpfs in 217 to
+270 ms with `sendfile`, and in 501 to 533 ms with `EINVAL`. For 3000 files of 8 KB, the two ranges
+overlapped (291 to 627 ms and 349 to 432 ms). Python's `shutil.copyfile` and Go's `io.Copy` between
+files worked with every answer.
+
+Both calls act only on descriptors the workload already holds, and the kernel checks the same read
+and write modes that `read` and `write` check. `sendfile` has no address argument, so a socket
+destination reaches only a peer that `connect` already reached. `optimized_copies_linux` copies into
+a file, a pipe, and a socket, and checks that a read-only grant, an ungranted path, and an inherited
+descriptor stay closed.
+
+Residual: from Linux 5.12, `sendfile` into a pipe calls `splice_file_to_pipe`, which is the path of
+Dirty Pipe (CVE-2022-0847). Kernels 5.12 to 5.14, 5.15.0 to 5.15.24, and 5.16.0 to 5.16.10 have
+that defect, and on them a workload can change the page cache of a file it can only read. `splice`,
+`vmsplice`, `tee`, and io_uring stay refused, but seccomp cannot see the type of a descriptor, so it
+cannot refuse a pipe destination alone. Box does not defend against an unpatched kernel. If that
+changes, answer `sendfile` with `EINVAL` instead of permitting it, and accept the slower copy.
 
 ### The namespace launcher
 

@@ -1,20 +1,19 @@
-//! A pending host command stops at cancellation or the shell deadline.
+//! A pending host command stops at cancellation, at the deadline, or when its Shell drops.
 
 #![cfg(unix)]
 
+mod support;
+
+use std::os::unix::fs::PermissionsExt as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+use box_shell::HostSpawner;
+use strands_shell::Shell;
+
+/// Counts a spawn future that was dropped.
 struct Pending(Arc<AtomicUsize>);
-
-struct Directory(std::path::PathBuf);
-
-impl Drop for Directory {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 impl Drop for Pending {
     fn drop(&mut self) {
@@ -22,61 +21,118 @@ impl Drop for Pending {
     }
 }
 
-fn cleanup(deadline: bool, stages: usize) {
-    use std::os::unix::fs::PermissionsExt;
-    static NEXT: AtomicUsize = AtomicUsize::new(0);
-    let directory = Directory(std::env::temp_dir().join(format!(
-        "shell-cleanup-{}-{}",
-        std::process::id(),
-        NEXT.fetch_add(1, Ordering::SeqCst)
-    )));
-    std::fs::create_dir(&directory.0).unwrap();
-    let program = directory.0.join("cleanup-probe");
-    std::fs::write(&program, "#!/bin/sh\n").unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let stopped = Arc::new(AtomicUsize::new(0));
-    let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
-    let observed = Arc::clone(&stopped);
-    let hook: strands_shell::os::HostSpawner = Arc::new(move |_| {
-        let stopped = Arc::clone(&observed);
-        let started = started.clone();
-        Box::pin(async move {
-            let _pending = Pending(stopped);
-            started.send(()).unwrap();
-            std::future::pending().await
-        })
-    });
+/// A host folder at `/workspace` holding the host program `cleanup-probe`, and a Shell whose
+/// spawner never finishes.
+struct Probe {
+    folder: tempfile::TempDir,
+    program: String,
+    stopped: Arc<AtomicUsize>,
+    starts: tokio::sync::mpsc::UnboundedReceiver<()>,
+    shell: Option<Shell>,
+}
+
+/// Run `body` on a current-thread runtime, and do not wait for the tasks it leaves.
+fn on_runtime<F: std::future::Future>(body: F) -> F::Output {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .unwrap();
-    let local = tokio::task::LocalSet::new();
-    local.block_on(&runtime, async {
-        let mut shell = strands_shell::Shell::builder().host_spawner(hook)
-            .timeout(Duration::from_millis(if deadline { 100 } else { 5000 })).build().unwrap();
-        let command = vec![program.to_str().unwrap(); stages].join(" | ");
-        let mut call = Box::pin(shell.run(&command));
-        for _ in 0..stages {
-            tokio::select! {
-                result = &mut call => panic!("host command returned before readiness: {} {}", result.status, result.stderr),
-                result = starts.recv() => assert!(result.is_some()),
-                _ = tokio::time::sleep(Duration::from_secs(2)) => panic!("host command did not start"),
-            }
+        .expect("runtime");
+    tokio::task::LocalSet::new().block_on(&runtime, body)
+}
+
+fn probe(deadline: Duration) -> Probe {
+    let folder = tempfile::tempdir().expect("host folder");
+    let program = folder.path().join("cleanup-probe");
+    std::fs::write(&program, "#!/bin/sh\n").expect("a program");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    let stopped = Arc::new(AtomicUsize::new(0));
+    let (started, starts) = tokio::sync::mpsc::unbounded_channel();
+    let observed = Arc::clone(&stopped);
+    let spawner: HostSpawner = Arc::new(move |_| {
+        let pending = Pending(Arc::clone(&observed));
+        let started = started.clone();
+        Box::pin(async move {
+            let _pending = pending;
+            started.send(()).expect("the test listens");
+            std::future::pending().await
+        })
+    });
+    let mut shell = support::builder()
+        .bind_direct(folder.path().to_str().expect("UTF-8"), "/workspace")
+        .host_spawner(spawner)
+        .build()
+        .expect("shell builds");
+    shell.proc.deadline = Some(tokio::time::Instant::now() + deadline);
+    Probe {
+        program: program.to_str().expect("UTF-8").to_string(),
+        folder,
+        stopped,
+        starts,
+        shell: Some(shell),
+    }
+}
+
+/// Wait until `count` spawns started, failing if `call` returns first.
+async fn started<F: std::future::Future<Output = strands_shell::Output> + Unpin>(
+    starts: &mut tokio::sync::mpsc::UnboundedReceiver<()>,
+    call: &mut F,
+    count: usize,
+) {
+    for _ in 0..count {
+        tokio::select! {
+            out = &mut *call => panic!("returned before every spawn started: {} {}", out.status, out.stderr),
+            started = starts.recv() => assert!(started.is_some()),
+            () = tokio::time::sleep(Duration::from_secs(2)) => panic!("the host command did not start"),
         }
+    }
+}
+
+/// Wait until `count` spawn futures dropped while the runtime stays alive.
+async fn stopped(stopped: &AtomicUsize, count: usize) {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while stopped.load(Ordering::SeqCst) != count {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "{} of {count} pending host commands stopped",
+            stopped.load(Ordering::SeqCst)
+        )
+    });
+}
+
+fn cleanup(deadline: bool, stages: usize) {
+    let limit = Duration::from_millis(if deadline { 100 } else { 5000 });
+    let Probe {
+        folder: _folder,
+        program,
+        stopped: count,
+        mut starts,
+        mut shell,
+    } = probe(limit);
+    let shell = shell.as_mut().expect("a shell");
+    on_runtime(async {
+        let command = vec![program.as_str(); stages].join(" | ");
+        let mut call = Box::pin(shell.run(&command));
+        started(&mut starts, &mut call, stages).await;
         if deadline {
-            let output = tokio::time::timeout(Duration::from_secs(2), &mut call).await.unwrap();
-            assert_eq!(output.status, 1, "{}", output.stderr);
-            assert!(output.stderr.contains("execution timeout exceeded"), "{}", output.stderr);
+            let out = tokio::time::timeout(Duration::from_secs(2), &mut call)
+                .await
+                .expect("the deadline ends the call");
+            assert_eq!(out.status, 1, "{}", out.stderr);
+            assert!(
+                out.stderr.contains("execution timeout exceeded"),
+                "{}",
+                out.stderr
+            );
         }
         drop(call);
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while stopped.load(Ordering::SeqCst) != stages {
-                tokio::task::yield_now().await;
-            }
-        }).await.expect("each pending host command must drop while the runtime stays alive");
+        stopped(&count, stages).await;
+        shell.proc.deadline = Some(tokio::time::Instant::now() + Duration::from_secs(5));
         let next = shell.run("printf ready").await;
-        assert_eq!(next.status, 0);
-        assert_eq!(next.stdout, "ready");
+        assert_eq!((next.status, next.stdout.as_str()), (0, "ready"));
     });
 }
 
@@ -95,76 +151,63 @@ fn the_command_deadline_stops_every_host_pipeline_stage() {
     cleanup(true, 2);
 }
 
-fn background_cleanup(wait_for_jobs: bool) {
-    use std::os::unix::fs::PermissionsExt;
-    let directory = Directory(std::env::temp_dir().join(format!(
-        "shell-background-cleanup-{}-{wait_for_jobs}",
-        std::process::id()
-    )));
-    std::fs::create_dir(&directory.0).unwrap();
-    let program = directory.0.join("cleanup-probe");
-    std::fs::write(&program, "#!/bin/sh\n").unwrap();
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let stopped = Arc::new(AtomicUsize::new(0));
-    let (started, mut starts) = tokio::sync::mpsc::unbounded_channel();
-    let observed = Arc::clone(&stopped);
-    let hook: strands_shell::os::HostSpawner = Arc::new(move |_| {
-        let stopped = Arc::clone(&observed);
-        let started = started.clone();
-        Box::pin(async move {
-            let _pending = Pending(stopped);
-            started.send(()).unwrap();
-            std::future::pending().await
-        })
-    });
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let local = tokio::task::LocalSet::new();
-    local.block_on(&runtime, async {
-        let mut shell = Some(strands_shell::Shell::builder().host_spawner(hook)
-            .timeout(Duration::from_secs(25)).build().unwrap());
-        let jobs = if wait_for_jobs { 2 } else { 1 };
-        if wait_for_jobs {
-            let command = format!("{0} & {0} & wait", program.display());
-            let mut call = Box::pin(shell.as_mut().unwrap().run(&command));
-            for _ in 0..jobs {
-                tokio::select! {
-                    output = &mut call => panic!("wait returned before cancellation: {} {}", output.status, output.stderr),
-                    result = starts.recv() => assert!(result.is_some()),
-                    _ = tokio::time::sleep(Duration::from_secs(2)) => panic!("background command did not start"),
-                }
-            }
-            drop(call);
-        } else {
-            let output = shell.as_mut().unwrap().run(&format!("{} &", program.display())).await;
-            assert_eq!(output.status, 0, "{}", output.stderr);
-            tokio::time::timeout(Duration::from_secs(2), starts.recv()).await.unwrap().unwrap();
-            let next = shell.as_mut().unwrap().run("printf ready").await;
-            assert_eq!(next.stdout, "ready");
-            assert_eq!(stopped.load(Ordering::SeqCst), 0, "an open shell still owns its background job");
-            drop(shell.take());
-        }
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while stopped.load(Ordering::SeqCst) != jobs {
-                tokio::task::yield_now().await;
-            }
-        }).await.expect("background host commands must stop while the runtime stays alive");
-        if let Some(shell) = shell.as_mut() {
-            let next = shell.run("printf ready").await;
-            assert_eq!(next.status, 0);
-            assert_eq!(next.stdout, "ready");
-        }
-    });
-}
-
 #[test]
 fn dropping_a_shell_stops_its_background_host_command() {
-    background_cleanup(false);
+    let mut probe = probe(Duration::from_secs(25));
+    on_runtime(async {
+        let shell = probe.shell.as_mut().expect("a shell");
+        let out = shell.run(&format!("{} &", probe.program)).await;
+        assert_eq!(out.status, 0, "{}", out.stderr);
+        tokio::time::timeout(Duration::from_secs(2), probe.starts.recv())
+            .await
+            .expect("the background command starts")
+            .expect("a start");
+        let next = shell.run("printf ready").await;
+        assert_eq!(next.stdout, "ready");
+        assert_eq!(
+            probe.stopped.load(Ordering::SeqCst),
+            0,
+            "an open shell still owns its background job"
+        );
+        drop(probe.shell.take());
+        stopped(&probe.stopped, 1).await;
+    });
 }
 
 #[test]
 fn cancelling_wait_stops_every_background_host_command() {
-    background_cleanup(true);
+    let mut probe = probe(Duration::from_secs(25));
+    on_runtime(async {
+        let shell = probe.shell.as_mut().expect("a shell");
+        let command = format!("{0} & {0} & wait", probe.program);
+        let mut call = Box::pin(shell.run(&command));
+        started(&mut probe.starts, &mut call, 2).await;
+        drop(call);
+        stopped(&probe.stopped, 2).await;
+        let next = shell.run("printf ready").await;
+        assert_eq!((next.status, next.stdout.as_str()), (0, "ready"));
+    });
+}
+
+/// A command substitution that outlasts the deadline starts no later command and no redirect.
+#[test]
+fn an_expired_substitution_cannot_start_following_commands_or_redirects() {
+    for shape in [
+        "{program}; printf LATE > /workspace/after",
+        "printf '%s' \"$({program})\" > /workspace/after",
+        "printf '%s' \"$({program}; printf LATE > /workspace/after)\"",
+    ] {
+        let mut probe = probe(Duration::from_millis(200));
+        let command = shape.replace("{program}", &probe.program);
+        let command = command.as_str();
+        let after = probe.folder.path().join("after");
+        let out = on_runtime(async { probe.shell.as_mut().expect("a shell").run(command).await });
+        assert_eq!(out.status, 1, "{command}: {}", out.stderr);
+        assert!(
+            out.stderr.contains("execution timeout exceeded"),
+            "{command}: {}",
+            out.stderr
+        );
+        assert!(!after.exists(), "a late write ran: {command}");
+    }
 }

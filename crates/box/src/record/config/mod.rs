@@ -484,6 +484,7 @@ impl RunContract {
         Ok(ConfigureRequest {
             record: Record {
                 version: record_version(
+                    root.box_id(),
                     self.file.file_attributes,
                     &self.file.experimental_features,
                     &self.file.limits,
@@ -667,9 +668,12 @@ const UPGRADE_HTTP_RECORD_VERSION: u32 = 32;
 /// The record version of a record that sets `limits.shell.max_stdin`, so an older build refuses the
 /// box rather than resuming it with the default stdin limit.
 const SHELL_STDIN_LIMIT_RECORD_VERSION: u32 = 33;
+/// The record version of a record whose box identity a caller supplied, so an older build refuses
+/// the box by its version rather than by its identity.
+pub(crate) const SUPPLIED_IDENTITY_RECORD_VERSION: u32 = 34;
 /// The record version of a record whose process selects `native-file-watching`, so an older build
 /// refuses the box rather than resuming it with FSEvents refused.
-const NATIVE_FILE_WATCHING_RECORD_VERSION: u32 = 34;
+const NATIVE_FILE_WATCHING_RECORD_VERSION: u32 = 35;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -714,6 +718,7 @@ impl ExperimentalFeatures {
 /// The highest record version required by the features a record holds.
 #[allow(clippy::too_many_arguments)]
 fn record_version<'a>(
+    box_id: &str,
     file_attributes: bool,
     features: &ExperimentalFeatures,
     limits: &Limits,
@@ -725,6 +730,8 @@ fn record_version<'a>(
 ) -> u32 {
     if specs.clone().any(|spec| spec.native_file_watching) {
         NATIVE_FILE_WATCHING_RECORD_VERSION
+    } else if !generated_box_identity(box_id) {
+        SUPPLIED_IDENTITY_RECORD_VERSION
     } else if limits.shell.has_stdin_limit() {
         SHELL_STDIN_LIMIT_RECORD_VERSION
     } else if !gateway.is_default() {
@@ -1014,6 +1021,7 @@ impl Record {
             SHELL_SIZE_LIMITS_RECORD_VERSION,
             UPGRADE_HTTP_RECORD_VERSION,
             SHELL_STDIN_LIMIT_RECORD_VERSION,
+            SUPPLIED_IDENTITY_RECORD_VERSION,
             NATIVE_FILE_WATCHING_RECORD_VERSION,
         ]
         .contains(&stamped.version)
@@ -1028,7 +1036,13 @@ impl Record {
             path: path.to_path_buf(),
             source,
         })?;
+        if !valid_box_identity(&record.box_id) {
+            return Err(ConfigError::RecordIdentity {
+                found: record.box_id,
+            });
+        }
         let expected = record_version(
+            &record.box_id,
             record.file_attributes,
             &record.experimental_features,
             &record.limits,
@@ -1049,11 +1063,6 @@ impl Record {
             return Err(ConfigError::RecordVersion {
                 found: record.version,
                 expected,
-            });
-        }
-        if !valid_box_identity(&record.box_id) {
-            return Err(ConfigError::RecordIdentity {
-                found: record.box_id,
             });
         }
         BoxName::parse(&record.name)?;
@@ -1180,13 +1189,33 @@ impl Record {
     }
 }
 
-fn valid_box_identity(identity: &str) -> bool {
-    identity.strip_prefix("box-").is_some_and(|suffix| {
-        suffix.len() == 16
-            && suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+/// The lowercase hexadecimal digits that end every box identity.
+const BOX_IDENTITY_DIGITS: usize = 16;
+
+/// The longest prefix a caller-supplied identity may carry before its digits.
+const MAXIMUM_BOX_IDENTITY_PREFIX: usize = MAXIMUM_BOX_NAME - 1 - BOX_IDENTITY_DIGITS;
+
+/// Whether `identity` is one Box generates or one a caller may supply.
+pub(crate) fn valid_box_identity(identity: &str) -> bool {
+    identity.rsplit_once('-').is_some_and(|(prefix, digits)| {
+        identity_digits(digits)
+            && !prefix.is_empty()
+            && prefix.len() <= MAXIMUM_BOX_IDENTITY_PREFIX
+            && !prefix.starts_with(['.', '-'])
+            && prefix.chars().all(nameable)
     })
+}
+
+/// Whether `identity` has the form Box generates: `box-` and 16 lowercase hexadecimal digits.
+fn generated_box_identity(identity: &str) -> bool {
+    identity.strip_prefix("box-").is_some_and(identity_digits)
+}
+
+fn identity_digits(digits: &str) -> bool {
+    digits.len() == BOX_IDENTITY_DIGITS
+        && digits
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 /// The policy that the configuration at `path` selects, read as `run` reads it, whether `run`
@@ -1255,8 +1284,8 @@ fn read_authored_policy(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BoxName(String);
 
-/// The longest box name that leaves room for the sockets under it.
-pub(crate) const MAXIMUM_BOX_NAME: usize = 32;
+/// The longest box name, which also bounds a caller-supplied box identity.
+pub(crate) const MAXIMUM_BOX_NAME: usize = 33;
 
 /// Whether one character may appear in a box name, an MCP server name, or an alias filename.
 pub(crate) fn nameable(character: char) -> bool {
@@ -1507,6 +1536,7 @@ mod tests {
                     stored.limits = limits;
                     assert_eq!(
                         record_version(
+                            "box-0123456789abcdef",
                             stored.file_attributes,
                             &stored.experimental_features,
                             &stored.limits,
@@ -1559,6 +1589,7 @@ mod tests {
         stored.mcp[0].argument_wildcards = true;
         assert_eq!(
             record_version(
+                "box-0123456789abcdef",
                 stored.file_attributes,
                 &stored.experimental_features,
                 &stored.limits,
@@ -1728,7 +1759,7 @@ mod tests {
                 };
                 assert_eq!(selected.native_file_watching, enabled, "{table}");
                 assert!(!stored.tool["other"].native_file_watching);
-                let expected = if enabled { 34 } else { 21 };
+                let expected = if enabled { 35 } else { 21 };
                 assert_eq!(stored.version, expected, "{body}");
                 let text = stored.to_toml().unwrap();
                 assert_eq!(text.contains("native-file-watching"), enabled);
@@ -1736,7 +1767,7 @@ mod tests {
                     Record::parse(&text, Path::new("record.toml")).unwrap(),
                     stored
                 );
-                stored.version = if enabled { 33 } else { 34 };
+                stored.version = if enabled { 34 } else { 35 };
                 assert!(matches!(
                     Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
                     Err(ConfigError::RecordVersion { expected: version, .. }) if version == expected
@@ -1766,15 +1797,15 @@ mod tests {
              [agent]\ncommand = [\"watcher\"]\nnative-filesystem-policy = false\n\
              [tool.watcher]\ncommand = [\"watcher\"]\nnative-file-watching = true\n",
         );
-        assert_eq!(stored.version, 34);
+        assert_eq!(stored.version, 35);
         assert_eq!(
             Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
             stored
         );
-        stored.version = 33;
+        stored.version = 34;
         assert!(matches!(
             Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
-            Err(ConfigError::RecordVersion { expected: 34, .. })
+            Err(ConfigError::RecordVersion { expected: 35, .. })
         ));
     }
 
@@ -1893,6 +1924,7 @@ mod tests {
                         for servers in [&[][..], shared.mcp.as_slice()] {
                             assert_eq!(
                                 record_version(
+                                    "box-0123456789abcdef",
                                     file_attributes,
                                     &features,
                                     &limits,
@@ -2974,12 +3006,49 @@ env = {}
     }
 
     #[test]
+    fn a_supplied_box_identity_requires_its_own_record_version() {
+        let record = |version: u32, box_id: &str| {
+            format!(
+                "version = {version}\n\
+                 box_id = {box_id:?}\n\
+                 box_dir = \"/var/lib/box\"\n\
+                 name = \"codex\"\n"
+            )
+        };
+        let supplied = "claude-code-with-0123456789abcdef";
+
+        let parsed = parsed_record(&record(SUPPLIED_IDENTITY_RECORD_VERSION, supplied))
+            .expect("a supplied identity at its version parses");
+        assert_eq!(parsed.box_id, supplied);
+        let error = parsed_record(&record(RECORD_VERSION, supplied))
+            .expect_err("a supplied identity at the base version must be refused");
+        assert!(
+            matches!(
+                error,
+                ConfigError::RecordVersion { found, expected }
+                    if found == RECORD_VERSION && expected == SUPPLIED_IDENTITY_RECORD_VERSION
+            ),
+            "{error}"
+        );
+
+        let generated = "box-0123456789abcdef";
+        parsed_record(&record(RECORD_VERSION, generated))
+            .expect("a generated identity keeps the base version");
+        assert!(
+            parsed_record(&record(SUPPLIED_IDENTITY_RECORD_VERSION, generated)).is_err(),
+            "a generated identity must not take the supplied identity's version"
+        );
+    }
+
+    #[test]
     fn a_record_with_an_invalid_box_identity_is_refused() {
         for found in [
             "",
             "box-0123456789abcde",
             "box-0123456789abcdeG",
-            "name-0123456789abcdef",
+            "name0123456789abcdef",
+            "-name-0123456789abcdef",
+            "claude-code-withx-0123456789abcdef",
         ] {
             let text = format!(
                 "version = {RECORD_VERSION}\n\
@@ -3488,7 +3557,7 @@ env = {}
             let _lock = crate::run::lock::Lock::try_acquire(&root.lock())
                 .expect("lock opens")
                 .expect("box is free");
-            root.settle_identity().expect("identity settles");
+            root.settle_identity(None).expect("identity settles");
             RunContract::read(&config_path, &workspace)
                 .expect("run contract loads")
                 .into_request(&root)
@@ -3572,7 +3641,7 @@ env = {}
             let _lock = crate::run::lock::Lock::try_acquire(&root.lock())
                 .expect("lock opens")
                 .expect("box is free");
-            root.settle_identity().expect("identity settles");
+            root.settle_identity(None).expect("identity settles");
             RunContract::read(&config_path, &workspace)
                 .expect("run contract loads")
                 .into_request(&root)
@@ -3633,7 +3702,7 @@ env = {}
             let _lock = crate::run::lock::Lock::try_acquire(&root.lock())
                 .expect("lock opens")
                 .expect("box is free");
-            root.settle_identity().expect("identity settles");
+            root.settle_identity(None).expect("identity settles");
             let load = || {
                 RunContract::read(&config_path, &workspace)
                     .expect("run contract loads")
@@ -3715,7 +3784,7 @@ env = {}
             let _lock = crate::run::lock::Lock::try_acquire(&root.lock())
                 .expect("lock opens")
                 .expect("box is free");
-            root.settle_identity().expect("identity settles");
+            root.settle_identity(None).expect("identity settles");
             RunContract::read(&config_path, &workspace)
                 .expect("run contract loads")
                 .into_request(&root)

@@ -2,7 +2,7 @@
 //! `EgressRouting`.
 //!
 //! Monty performs no I/O of its own, so the interpreter has no client to sweep — unlike the
-//! vendored Shell, which can build a bare `reqwest` client anywhere and needs a broader guard.
+//! Shell, which can build a bare `reqwest` client anywhere and needs a broader guard.
 //! The single box-owned client lives in `fetch_inner` in `python/fetch.rs`, and it must route
 //! through the gateway (`EgressRouting`'s proxy) and trust only the gateway CA, never dialing an
 //! origin. This pins both: no client construction anywhere else in the non-test source of any file

@@ -132,7 +132,7 @@ Each box record names its origin on its resource:
 | Key | Value |
 |---|---|
 | `service.name` | `strands-box` |
-| `strands.box.name` | this box's generated identifier, as `box-` and 16 hexadecimal characters |
+| `strands.box.name` | this box's ID: the one the library caller supplied, or a generated `box-` and 16 hexadecimal characters |
 | `strands.box.source` | `box` for a record the box wrote, and `agent` for a relayed payload |
 | `strands.box.run.id` | one identifier per `strands-box run` invocation |
 
@@ -162,8 +162,8 @@ action `push` in the category `Tool::git`.
 
 Two keys are excluded: `url.full` and `process.command_line`.
 
-`process.command_args` reports an argument the script stated literally. For an argument that arrived
-from an expansion, the record reports:
+`process.command_args` reports each argument after expansion, because the Shell does not say which
+words the script stated literally. For each argument, the record reports:
 
 | The expanded argument | What the record carries |
 |---|---|

@@ -1501,6 +1501,76 @@ mod tests {
     }
 
     #[test]
+    fn a_child_is_awaited_with_waitid_under_the_filters() {
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        let outcome = in_filtered_child(&filters, || {
+            let waitid = |idtype: libc::idtype_t, id: libc::c_long, options: libc::c_int| {
+                // SAFETY: an all-zero siginfo_t is a valid output buffer.
+                let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                // SAFETY: the kernel writes only into the live siginfo_t; rusage is null.
+                let result = unsafe {
+                    libc::syscall(
+                        libc::SYS_waitid,
+                        idtype,
+                        id,
+                        &mut info,
+                        options,
+                        std::ptr::null_mut::<libc::rusage>(),
+                    )
+                };
+                (result, info)
+            };
+            let refused = |result: libc::c_long| {
+                result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+            };
+            // SAFETY: the grandchild only exits.
+            let child = unsafe { libc::fork() };
+            if child == -1 {
+                return 13;
+            }
+            if child == 0 {
+                // SAFETY: terminating the grandchild with a known status.
+                unsafe { libc::_exit(7) };
+            }
+            let (result, _) = waitid(
+                libc::P_ALL,
+                0,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            );
+            if result != 0 {
+                return if refused(result) { 10 } else { 14 };
+            }
+            // SAFETY: opening a descriptor for this process's own child.
+            let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, child, 0) };
+            if pidfd < 0 {
+                return 15;
+            }
+            let (result, info) = waitid(libc::P_PIDFD, pidfd, libc::WEXITED | libc::WNOWAIT);
+            // SAFETY: closing the descriptor this child just opened.
+            unsafe { libc::close(pidfd as libc::c_int) };
+            // SAFETY: the kernel filled a CLD_EXITED record for a child.
+            if result != 0 || unsafe { info.si_pid() } != child {
+                return if refused(result) { 11 } else { 16 };
+            }
+            let (result, info) = waitid(libc::P_PID, child.into(), libc::WEXITED);
+            // SAFETY: the kernel filled a CLD_EXITED record for a child.
+            if result != 0 || unsafe { info.si_status() } != 7 {
+                return if refused(result) { 12 } else { 17 };
+            }
+            0
+        });
+        assert_eq!(
+            outcome, 0,
+            "10/11/12 = WAITID WAS REFUSED WITH EPERM for P_ALL with WNOHANG, P_PIDFD, or P_PID, \
+             so Go's os/exec fails every child it starts and gh cannot run git, \
+             13 = fork failed, 14/16/17 = waitid failed with another errno or a wrong record, \
+             15 = pidfd_open failed, 40 = installing the filters failed"
+        );
+    }
+
+    #[test]
     fn permit_and_restriction_filters_refuse_unapproved_calls() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()

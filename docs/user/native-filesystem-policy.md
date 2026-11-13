@@ -90,8 +90,8 @@ Production use still requires further review and tests for those failures.
 
 When `[limits]` has no explicit settings, `file-attributes` is `false`, MCP argument wildcards
 are disabled, MCP executable names are bare, the agent declares no `[[agent.ingress]]`,
-no egress destination has a backend, `[gateway] upgrade_http` is empty, and every process leaves
-`native-file-watching` disabled,
+no egress destination has a backend, `[gateway] upgrade_http` is empty, the box ID is `box-` and 16 hexadecimal digits,
+and every process leaves `native-file-watching` disabled,
 configurations without process overrides retain version 21 when disabled and version 22 when enabled.
 An explicit process override requires record version 23.
 Two stdio MCP servers that share a program require record version 24.
@@ -104,7 +104,9 @@ A box whose egress re-routes a destination to a [backend](egress.md) requires re
 An explicit `limits.shell.max_input` or `limits.shell.max_output` requires record version 31,
 including values equal to the defaults.
 A non-empty [`[gateway] upgrade_http`](config.md#gateway) requires record version 32.
-Enabling [`native-file-watching`](config.md#native-file-watching) for any process requires record version 34.
+A box ID that a library caller supplied, other than `box-` and 16 hexadecimal digits, requires record
+version 34.
+Enabling [`native-file-watching`](config.md#native-file-watching) for any process requires record version 35.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 

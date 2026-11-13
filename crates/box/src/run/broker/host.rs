@@ -327,7 +327,7 @@ async fn authorize_mcp_start(
     );
     let capture = crate::run::telemetry::ObservationCapture::begin();
     let admitted = interceptor
-        .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+        .intercept(&box_shell::EffectAttempt::ShellSpawn {
             command: &command,
             program: server.program(),
             program_path: &host_program_path,
@@ -503,7 +503,7 @@ fn host(
     phantoms: Vec<ProvisionedVariable>,
     recorder: Arc<crate::run::telemetry::DecisionRecorder>,
     host_spawner: Option<crate::run::hosted::ToolSpawner>,
-    host_programs: strands_shell::os::HostPrograms,
+    host_programs: box_shell::HostPrograms,
     limits: ShellLimits,
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
     shutdown: oneshot::Receiver<()>,
@@ -938,7 +938,8 @@ async fn serve_transport(
                     }
                     let opened = spec.backend().and_then(|backend| {
                         let shell = spec.build_on(Arc::clone(&backend), &spec.recorder)?;
-                        Program::adopt(shell, spec.max_stdin).map(|program| (backend, program))
+                        Program::adopt(shell, spec.command_timeout, spec.max_stdin)
+                            .map(|program| (backend, program))
                     });
                     match opened {
                         Ok((backend, (program, output, control))) => {
@@ -1289,7 +1290,7 @@ fn open_program_count(
 }
 
 struct ProgramSlot {
-    backend: Arc<dyn strands_shell::os::Kernel>,
+    backend: Arc<box_shell::Filesystem>,
     program: Program,
     output: ProgramOutput,
     control: ProgramControl,
@@ -2572,7 +2573,7 @@ done"#;
         runtime.block_on(local.run_until(async {
             let (_directory, socket) = serving_socket(spec);
 
-            // The vendored Shell's own `timeout` stops this and reports non-zero; the point
+            // The Shell's own `timeout` stops this and reports non-zero; the point
             // is that the client is answered at all rather than left waiting.
             let response = tokio::time::timeout(
                 SHORT_COMMAND_TIMEOUT + Duration::from_secs(10),
@@ -2661,7 +2662,8 @@ done"#;
                 .build_on(Arc::clone(&backend), &spec.recorder)
                 .expect("Shell");
             let (program, output, control) =
-                Program::adopt(shell, DEFAULT_SHELL_MAX_STDIN).expect("program");
+                Program::adopt(shell, spec.command_timeout, DEFAULT_SHELL_MAX_STDIN)
+                    .expect("program");
             let mut slot = ProgramSlot {
                 backend,
                 program,
@@ -2734,7 +2736,8 @@ done"#;
                 .build_on(Arc::clone(&backend), &spec.recorder)
                 .expect("unlimited Shell");
             let (program, output, control) =
-                Program::adopt(shell, DEFAULT_SHELL_MAX_STDIN).expect("program");
+                Program::adopt(shell, spec.command_timeout, DEFAULT_SHELL_MAX_STDIN)
+                    .expect("program");
             let mut slot = ProgramSlot {
                 backend,
                 program,
@@ -4221,6 +4224,99 @@ done"#;
                     .expect("a command that ignores stdin must not wait for it");
             assert_eq!((out.as_slice(), status), (b"done".as_slice(), 0));
         }));
+    }
+
+    /// Lua reads input that the alias forwards and keeps open as empty, and never waits for it.
+    #[test]
+    fn lua_reads_forwarded_input_as_empty_and_never_waits() {
+        for (source, expected) in [
+            ("lua -e 'print(1)'", "1\n"),
+            ("lua -e 'print(\"[\" .. io.read(\"*a\") .. \"]\")'", "[]\n"),
+            ("lua; echo after", "after\n"),
+        ] {
+            let (runtime, local) = runtime();
+            runtime.block_on(local.run_until(async {
+                let marker = tempfile::tempdir().expect("marker");
+                let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+                let (mut reader, mut writer) = transport(&socket).await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Open {
+                        mode: Interpreter::Shell,
+                    },
+                )
+                .await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Input {
+                        data: encode_payload(b"print('OUTSIDE')"),
+                    },
+                )
+                .await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Call {
+                        correlation: Default::default(),
+                        source: source.to_string(),
+                    },
+                )
+                .await;
+                let (out, status) =
+                    tokio::time::timeout(Duration::from_secs(5), collect_bytes(&mut reader, 1))
+                        .await
+                        .unwrap_or_else(|_| panic!("{source}: Lua waited for forwarded input"));
+                assert_eq!(
+                    (String::from_utf8_lossy(&out).as_ref(), status),
+                    (expected, 0),
+                    "{source}"
+                );
+            }));
+        }
+    }
+
+    /// A pipe inside one Shell command still reaches Lua's stdin, as input or as source.
+    #[test]
+    fn lua_reads_a_pipe_inside_a_shell_command() {
+        for (source, expected) in [
+            ("echo x | lua -e 'print(io.read())'", "x\n"),
+            ("echo 'print(7)' | lua", "7\n"),
+        ] {
+            let (runtime, local) = runtime();
+            runtime.block_on(local.run_until(async {
+                let marker = tempfile::tempdir().expect("marker");
+                let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+                let (mut reader, mut writer) = transport(&socket).await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Open {
+                        mode: Interpreter::Shell,
+                    },
+                )
+                .await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Call {
+                        correlation: Default::default(),
+                        source: source.to_string(),
+                    },
+                )
+                .await;
+                let (out, status) =
+                    tokio::time::timeout(Duration::from_secs(5), collect_bytes(&mut reader, 1))
+                        .await
+                        .expect("the pipe ends");
+                assert_eq!(
+                    (String::from_utf8_lossy(&out).as_ref(), status),
+                    (expected, 0),
+                    "{source}"
+                );
+            }));
+        }
     }
 
     /// Read frames until this Program exits, returning its stderr and status.

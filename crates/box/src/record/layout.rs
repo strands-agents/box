@@ -448,27 +448,50 @@ impl BoxRoot {
         Ok(private)
     }
 
-    /// Read the existing identity, or generate one for first use.
-    pub(crate) fn settle_identity(&mut self) -> Result<(), BoxError> {
+    /// Read the existing identity, or take `supplied` or a generated one for first use.
+    ///
+    /// Refuses a `supplied` identity that is malformed or that differs from the stored one.
+    pub(crate) fn settle_identity(&mut self, supplied: Option<&str>) -> Result<(), BoxError> {
+        if let Some(identity) = supplied
+            && !crate::record::config::valid_box_identity(identity)
+        {
+            return Err(ConfigError::SuppliedIdentity {
+                found: identity.to_string(),
+            }
+            .into());
+        }
         self.verify_identity()?;
         if self.configured {
-            return Ok(());
+            return self.match_supplied_identity(supplied);
         }
         if self.root_handle.is_some() {
             if self.name.is_empty() {
-                self.name = new_box_identity()?;
+                self.name = first_use_identity(supplied)?;
             }
+            self.match_supplied_identity(supplied)?;
             return self.verify_identity();
         }
         let path = self.record();
         match std::fs::read_to_string(&path) {
             Ok(text) => self.name = Record::parse(&text, &path)?.box_id,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                self.name = new_box_identity()?;
+                self.name = first_use_identity(supplied)?;
             }
             Err(source) => return Err(ConfigError::Read { path, source }.into()),
         }
+        self.match_supplied_identity(supplied)?;
         self.verify_identity()
+    }
+
+    fn match_supplied_identity(&self, supplied: Option<&str>) -> Result<(), BoxError> {
+        match supplied {
+            Some(identity) if identity != self.name => Err(ConfigError::IdentityMismatch {
+                stored: self.name.clone(),
+                supplied: identity.to_string(),
+            }
+            .into()),
+            _ => Ok(()),
+        }
     }
 
     pub(crate) fn is_configured(&self) -> bool {
@@ -1292,6 +1315,13 @@ impl BoxRoot {
             }
         }
         Ok(())
+    }
+}
+
+fn first_use_identity(supplied: Option<&str>) -> Result<String, BoxError> {
+    match supplied {
+        Some(identity) => Ok(identity.to_string()),
+        None => new_box_identity(),
     }
 }
 
@@ -3560,7 +3590,7 @@ mod tests {
                 "opening must retain the exact interrupted record state"
             );
             opened
-                .settle_identity()
+                .settle_identity(None)
                 .expect("the recovered directory receives an identity");
             let record = record_for(&opened);
             opened
@@ -3613,7 +3643,7 @@ mod tests {
         });
         assert!(!opened.is_configured());
         opened
-            .settle_identity()
+            .settle_identity(None)
             .expect("the retry receives an uncommitted identity");
         assert_ne!(opened.box_id(), expected);
         let retried = opened.box_id().to_string();
@@ -3656,7 +3686,7 @@ mod tests {
         });
         assert!(!opened.is_configured());
         opened
-            .settle_identity()
+            .settle_identity(None)
             .expect("the retry receives a new identity");
         assert_ne!(opened.box_id(), uncommitted);
     }
@@ -3688,7 +3718,7 @@ mod tests {
         });
         assert!(!opened.is_configured());
         opened
-            .settle_identity()
+            .settle_identity(None)
             .expect("the retry receives a new identity");
         let record = record_for(&opened);
         opened
@@ -3716,7 +3746,7 @@ mod tests {
         let mut opened = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("empty first use opens")
         });
-        opened.settle_identity().expect("box identity");
+        opened.settle_identity(None).expect("box identity");
         let record = record_for(&opened);
         let private = opened
             .create_first_use_private()
@@ -3793,7 +3823,7 @@ mod tests {
         let mut opened = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("empty box opens")
         });
-        opened.settle_identity().expect("box identity");
+        opened.settle_identity(None).expect("box identity");
         let initial = record_for(&opened);
         opened
             .initialize_first_use(&initial)
@@ -3982,7 +4012,7 @@ mod tests {
         let mut initial = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("empty box opens")
         });
-        initial.settle_identity().expect("box identity");
+        initial.settle_identity(None).expect("box identity");
         let record = record_for(&initial);
         initial
             .initialize_first_use(&record)
@@ -4011,7 +4041,7 @@ mod tests {
         let mut opened = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("empty box opens")
         });
-        opened.settle_identity().expect("box identity");
+        opened.settle_identity(None).expect("box identity");
         let record = record_for(&opened);
         opened
             .initialize_first_use(&record)
@@ -4046,7 +4076,7 @@ mod tests {
         let mut initial = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("empty box opens")
         });
-        initial.settle_identity().expect("box identity");
+        initial.settle_identity(None).expect("box identity");
         let expected = initial.box_id().to_string();
         let record = record_for(&initial);
         initial
@@ -4072,7 +4102,7 @@ mod tests {
             .expect("replacement symlink");
 
         opened
-            .settle_identity()
+            .settle_identity(None)
             .expect("the inspected identity remains settled");
         assert_eq!(opened.box_id(), expected);
         opened
@@ -4099,7 +4129,7 @@ mod tests {
         let mut opened = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("interrupted first use opens")
         });
-        opened.settle_identity().expect("box identity");
+        opened.settle_identity(None).expect("box identity");
         let record = record_for(&opened);
         write_partial_record(&private, "inserted");
 
@@ -4133,7 +4163,7 @@ mod tests {
         let mut opened = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("interrupted first use opens")
         });
-        opened.settle_identity().expect("box identity");
+        opened.settle_identity(None).expect("box identity");
         let record = record_for(&opened);
         std::fs::rename(private.join(RECORD_FILE), &moved).expect("move opened record");
         write_partial_record(&private, "replacement");
@@ -4168,7 +4198,7 @@ mod tests {
         let mut opened = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("interrupted first use opens")
         });
-        opened.settle_identity().expect("box identity");
+        opened.settle_identity(None).expect("box identity");
         let record = record_for(&opened);
         std::fs::rename(&root, &moved).expect("move opened root");
         std::fs::create_dir(&root).expect("replacement root");
@@ -4202,7 +4232,7 @@ mod tests {
         let mut opened = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("interrupted first use opens")
         });
-        opened.settle_identity().expect("box identity");
+        opened.settle_identity(None).expect("box identity");
         let record = record_for(&opened);
         std::fs::rename(&private, &moved).expect("move opened private directory");
         std::fs::create_dir(&private).expect("replacement private directory");
@@ -4231,7 +4261,7 @@ mod tests {
         let mut initial = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("empty box opens")
         });
-        initial.settle_identity().expect("box identity");
+        initial.settle_identity(None).expect("box identity");
         let record = record_for(&initial);
         initial
             .initialize_first_use(&record)
@@ -4271,7 +4301,7 @@ mod tests {
         let mut initial = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("empty box opens")
         });
-        initial.settle_identity().expect("box identity");
+        initial.settle_identity(None).expect("box identity");
         let record = record_for(&initial);
         initial
             .initialize_first_use(&record)
@@ -5464,7 +5494,7 @@ mod tests {
         opened
             .verify_history_matches_record()
             .expect("a box with neither a record nor a history is consistent");
-        opened.settle_identity().expect("a first-use identity");
+        opened.settle_identity(None).expect("a first-use identity");
         let record = record_for(&opened);
         opened
             .initialize_first_use(&record)
@@ -5569,7 +5599,7 @@ mod tests {
         let mut opened = with_operator_home(operator_home, || {
             BoxRoot::open_directory(&root).expect("empty box opens")
         });
-        opened.settle_identity().expect("box identity");
+        opened.settle_identity(None).expect("box identity");
         let record = record_for(&opened);
         opened
             .initialize_first_use(&record)
@@ -5727,6 +5757,141 @@ mod tests {
         assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(line.matches(':').count(), 1);
         assert_ne!(text, format!("{}:{}\n", metadata.dev(), metadata.ino()));
+    }
+
+    fn configured_box_as(operator_home: &Path, parent: &Path, supplied: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = parent.join("box");
+        std::fs::create_dir(&root).expect("caller-owned box directory");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .expect("private root mode");
+        let mut opened = with_operator_home(operator_home, || {
+            BoxRoot::open_directory(&root).expect("empty box opens")
+        });
+        opened
+            .settle_identity(Some(supplied))
+            .expect("a supplied identity settles");
+        let mut record = record_for(&opened);
+        record.version = crate::record::config::SUPPLIED_IDENTITY_RECORD_VERSION;
+        opened
+            .initialize_first_use(&record)
+            .expect("first use completes");
+        root
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_supplied_identity_names_a_new_box_and_survives_reopen() {
+        let operator_home = tempfile::tempdir().expect("operator home");
+        let parent = tempfile::tempdir().expect("box parent");
+        let supplied = "claude-code-with-3f9a1c0e7b2d4a6f";
+        let root = configured_box_as(operator_home.path(), parent.path(), supplied);
+
+        for again in [None, Some(supplied)] {
+            let mut reopened = with_operator_home(operator_home.path(), || {
+                BoxRoot::open_directory(&root).expect("a configured box opens")
+            });
+            reopened
+                .settle_identity(again)
+                .expect("the stored identity settles");
+            assert!(reopened.is_configured());
+            assert_eq!(reopened.box_id(), supplied);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_supplied_identity_that_differs_from_the_stored_one_is_refused() {
+        let operator_home = tempfile::tempdir().expect("operator home");
+        let parent = tempfile::tempdir().expect("box parent");
+        let (generated_root, generated) = configured_box(operator_home.path(), parent.path());
+        let supplied_parent = tempfile::tempdir().expect("second box parent");
+        let supplied_root = configured_box_as(
+            operator_home.path(),
+            supplied_parent.path(),
+            "probe-3f9a1c0e7b2d4a6f",
+        );
+
+        for (root, stored, other) in [
+            (
+                &generated_root,
+                generated.as_str(),
+                "probe-3f9a1c0e7b2d4a6f",
+            ),
+            (
+                &supplied_root,
+                "probe-3f9a1c0e7b2d4a6f",
+                "probe-0000000000000000",
+            ),
+        ] {
+            let mut reopened = with_operator_home(operator_home.path(), || {
+                BoxRoot::open_directory(root).expect("a configured box opens")
+            });
+            let error = reopened
+                .settle_identity(Some(other))
+                .expect_err("a different identity must be refused");
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!("box ID {other:?} does not match"))
+                    && message.contains(&format!("whose ID is {stored:?}")),
+                "{message}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_malformed_supplied_identity_is_refused_before_the_box_has_one() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let operator_home = tempfile::tempdir().expect("operator home");
+        let parent = tempfile::tempdir().expect("box parent");
+        let root = parent.path().join("box");
+        std::fs::create_dir(&root).expect("caller-owned box directory");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .expect("private root mode");
+        for malformed in [
+            "",
+            "probe",
+            "probe-3f9a1c0e",
+            "probe-3F9A1C0E7B2D4A6F",
+            "-probe-3f9a1c0e7b2d4a6f",
+            ".probe-3f9a1c0e7b2d4a6f",
+            "pro/be-3f9a1c0e7b2d4a6f",
+            "claude-code-withx-3f9a1c0e7b2d4a6f",
+        ] {
+            let mut opened = with_operator_home(operator_home.path(), || {
+                BoxRoot::open_directory(&root).expect("empty box opens")
+            });
+            let error = opened
+                .settle_identity(Some(malformed))
+                .expect_err("a malformed identity must be refused");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("box ID {malformed:?} is invalid")),
+                "{error}"
+            );
+            assert!(!root.join(PRIVATE_DIRECTORY).join(RECORD_FILE).exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_supplied_identity_generates_one_as_before() {
+        let operator_home = tempfile::tempdir().expect("operator home");
+        let parent = tempfile::tempdir().expect("box parent");
+        let (_root, generated) = configured_box(operator_home.path(), parent.path());
+        assert!(
+            generated
+                .strip_prefix("box-")
+                .is_some_and(|digits| digits.len() == 16
+                    && digits
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())),
+            "{generated}"
+        );
     }
 
     #[cfg(unix)]

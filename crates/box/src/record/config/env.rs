@@ -103,6 +103,12 @@ fn box_owned_environment(name: &str) -> bool {
         return true;
     }
 
+    gateway_routing_environment(name) || matches!(name, "PWD" | "USER")
+}
+
+/// Whether `name` routes a process through the gateway or trusts the gateway's CA, which Core sets
+/// only for a gateway-routed process.
+pub(crate) fn gateway_routing_environment(name: &str) -> bool {
     matches!(
         name,
         "HTTP_PROXY"
@@ -121,9 +127,16 @@ fn box_owned_environment(name: &str) -> bool {
             | "REQUESTS_CA_BUNDLE"
             // Apple `git`'s libcurl reads this one and none of the others.
             | "GIT_SSL_CAINFO"
-            | "PWD"
-            | "USER"
     )
+}
+
+/// Why the `env` of a table with `contain_egress = false` refuses `name`: as [`refused_name`], except
+/// that the gateway's proxy and CA names are the operator's, because Core sets none of them there.
+pub(crate) fn refused_native_egress_name(name: &str) -> Option<EnvRefusal> {
+    if valid_environment_name(name) && gateway_routing_environment(name) {
+        return None;
+    }
+    refused_name(name)
 }
 
 /// Why a process table's `env` refuses the name `name`, whatever its value.

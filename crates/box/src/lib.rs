@@ -34,10 +34,22 @@ pub struct RunOptions<'a> {
     pub terminal: Option<std::fs::File>,
     /// Called after hardening and signal registration, before workload setup; an error aborts the run.
     pub on_ready: Option<Box<dyn FnOnce() -> std::io::Result<()> + 'a>>,
+    /// The box ID a new box takes; `None` generates one, a configured box refuses any other ID, and a
+    /// malformed ID is refused before `run` uses the process's one attempt.
+    pub box_id: Option<String>,
 }
 
 /// Run the existing Box command with a configuration.
 pub fn run(config: PathBuf, workload: Vec<OsString>, options: RunOptions<'_>) -> ExitCode {
+    if let Some(found) = options.box_id.as_deref()
+        && !record::config::valid_box_identity(found)
+    {
+        let error = error::ConfigError::SuppliedIdentity {
+            found: found.to_string(),
+        };
+        eprintln!("strands-box: error: {error}");
+        return ExitCode::FAILURE;
+    }
     if STARTED.swap(true, Ordering::SeqCst) {
         eprintln!("strands-box: refusing to run: this process already attempted to run a box");
         return ExitCode::FAILURE;

@@ -727,7 +727,8 @@ permits to the paths the task needs.
 
 A remote MCP server runs on another machine, so no box contains it. Naming a server in `box.toml`
 doesn't authorize a connection to it. The egress gateway decides the connection and each request,
-and policy decides each tool call. See [an MCP tool call passes two
+and policy decides each tool call to a [matching configured host](../user/mcp.md#remote-destination-matching).
+See [an MCP tool call passes two
 gates](decisions.md#mcp-authorization-is-two-gates). Three protocol methods pass without an MCP
 decision: `server/discover`, `ping`, and `subscriptions/listen`. See [the protocol floor is
 narrow](decisions.md#four-mcp-methods-are-never-gated). What the server does after an allowed call

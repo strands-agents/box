@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
 
-use super::env::{refusal_reason, refused_name, refused_value};
+use super::env::{refusal_reason, refused_name, refused_native_egress_name, refused_value};
 use super::grammar::GrammarTable;
 
 /// One process declaration, shared by `[agent]` and every `[tool.<name>]`.
@@ -323,8 +323,14 @@ impl ProcessSpec {
                 workspace.display()
             )));
         }
+        // A native-egress table's proxy and CA names are the operator's: Core sets none of them.
+        let refused = if self.native_egress() {
+            refused_native_egress_name
+        } else {
+            refused_name
+        };
         for name in self.env.keys() {
-            if let Some(kind) = refused_name(name) {
+            if let Some(kind) = refused(name) {
                 return Err(refuse(refusal_reason(kind, name, "")));
             }
         }
@@ -473,6 +479,46 @@ mod tests {
             assert!(
                 !message.contains("set by the box itself"),
                 "the box does not set {name}: {message}"
+            );
+        }
+    }
+
+    /// **A `contain_egress = false` table may set the gateway's proxy and CA names, and a gateway
+    /// table may not.** Core sets none of those names on a native-egress process, so the operator's
+    /// own value is the only one it receives. Core's other names stay refused on both.
+    #[test]
+    fn only_a_native_egress_table_may_set_the_proxy_and_ca_names() {
+        let table = |env: &str, native: bool| {
+            let network = if native {
+                "\n[network]\ncontain_egress = false"
+            } else {
+                ""
+            };
+            spec(&format!("command = [\"x\"]\nenv = {{ {env} }}{network}")).validate("[tool.x]")
+        };
+        for name in [
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "NODE_USE_ENV_PROXY",
+            "SSL_CERT_FILE",
+            "AWS_CA_BUNDLE",
+            "GIT_SSL_CAINFO",
+        ] {
+            let entry = format!("{name} = \"/etc/corp/ca.pem\"");
+            assert!(
+                table(&entry, true).is_ok(),
+                "a native-egress table sets {name}"
+            );
+            let refused = table(&entry, false).expect_err("a gateway table refuses it");
+            assert!(
+                refused.to_string().contains("set by the box itself"),
+                "{name}: {refused}"
+            );
+        }
+        for name in ["PWD", "USER", "OTEL_EXPORTER_OTLP_ENDPOINT", "LD_PRELOAD"] {
+            assert!(
+                table(&format!("{name} = \"/x\""), true).is_err(),
+                "a native-egress table still may not set {name}"
             );
         }
     }
