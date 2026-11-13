@@ -112,9 +112,21 @@ async fn write_stderr(context: &mut CommandContext, text: &str) {
     }
 }
 
-async fn write_stdout(context: &mut CommandContext, bytes: &[u8]) {
-    if let (_, Some(stdout), _) = context.stdio() {
-        let _ = stdout.write_all(bytes).await;
+async fn write_stdout(context: &mut CommandContext, bytes: &[u8]) -> io::Result<()> {
+    match context.stdio() {
+        (_, Some(stdout), _) => stdout.write_all(bytes).await,
+        _ => Ok(()),
+    }
+}
+
+/// `status`, or 1 with a diagnostic when Python's output could not be written.
+async fn python_status(context: &mut CommandContext, written: io::Result<()>, status: i32) -> i32 {
+    match written {
+        Ok(()) => status,
+        Err(error) => {
+            write_stderr(context, &format!("python: {error}\n")).await;
+            1
+        }
     }
 }
 
@@ -260,11 +272,18 @@ impl CommandFallback for ShellKernel {
         };
         let status = match spawned {
             Ok(outcome) => {
-                write_stdout(context, &outcome.stdout).await;
+                let written = write_stdout(context, &outcome.stdout).await;
                 if let (_, _, Some(stderr)) = context.stdio() {
                     let _ = stderr.write_all(&outcome.stderr).await;
                 }
-                outcome.status
+                match written {
+                    Ok(()) => outcome.status,
+                    Err(error) => {
+                        write_stderr(context, &format!("strands-shell: {program}: {error}\n"))
+                            .await;
+                        1
+                    }
+                }
             }
             Err(error) => {
                 write_stderr(context, &format!("strands-shell: {program}: {error}\n")).await;
@@ -299,12 +318,14 @@ impl ShellKernel {
             match word.as_str() {
                 "--" => positional = true,
                 "-V" | "--version" => {
-                    write_stdout(context, format!("{PYTHON_VERSION}\n").as_bytes()).await;
-                    return 0;
+                    let written =
+                        write_stdout(context, format!("{PYTHON_VERSION}\n").as_bytes()).await;
+                    return python_status(context, written, 0).await;
                 }
                 "-h" | "--help" => {
-                    write_stdout(context, format!("{PYTHON_HELP}\n").as_bytes()).await;
-                    return 0;
+                    let written =
+                        write_stdout(context, format!("{PYTHON_HELP}\n").as_bytes()).await;
+                    return python_status(context, written, 0).await;
                 }
                 "-c" => match words.next() {
                     Some(text) => source = Some(text.clone()),
@@ -352,13 +373,11 @@ impl ShellKernel {
             return 127;
         };
         let outcome = runner(script).await;
-        if !outcome.stdout.is_empty() {
-            write_stdout(context, outcome.stdout.as_bytes()).await;
-        }
+        let written = write_stdout(context, outcome.stdout.as_bytes()).await;
         if !outcome.stderr.is_empty() {
             write_stderr(context, &outcome.stderr).await;
         }
-        outcome.status
+        python_status(context, written, outcome.status).await
     }
 
     /// Read a script file through this kernel, so the read is its own `fs:read` decision.
