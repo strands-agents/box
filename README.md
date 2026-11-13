@@ -258,9 +258,11 @@ just check         # pre-push gate: fmt-check + clippy + test
 just test-all      # workspace tests and box example checks
 ```
 
-`cargo test --workspace --all-features` runs the full suite. Include
+`cargo test --workspace --all-features` runs the workspace suite. Include
 `--all-features` to run the `box_shell` and `box_credentials` suites, which require
-the `test-support` feature.
+the `test-support` feature. Linux CI also checks the three native filesystem forwarding tests
+in a separate step. See the [Linux native test guide](docs/dev/linux-native-tests.md#forwarding-buffer-tests)
+for that command and the other native test prerequisites.
 
 In pull-request CI, changes to `docs/site-manifest.json`,
 `docs/site-manifest-retirements.json`, or a publishable page under `docs/user/` run the focused
