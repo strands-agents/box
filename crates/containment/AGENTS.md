@@ -945,6 +945,25 @@ caller as a mask of every bit. A linker read that mask, added the execute bits i
 output nothing could run — with every call it made reporting success. When you leave a call out,
 check what its wrapper returns on failure, and pin the *effect* rather than the answer.
 
+### Optimized copies
+
+`copy_file_range` and `sendfile` are permitted. libuv tries `copy_file_range`, then `sendfile`, and
+treats `EPERM` from either as a real failure. Measured on November 13, 2026, on ARM64 kernel 6.18
+with Node 22.22.2 `--jitless` through the trampoline: before the permit, `fs.copyFileSync` and
+`fs.cp` failed with `EPERM`; after it, both copied the file. `ENOSYS` is not a fix: libuv falls back
+from `copy_file_range` to `sendfile`, but not from `sendfile` to read and write. Both calls act only
+on descriptors the workload already holds, and the kernel checks the same read and write modes that
+`read` and `write` check. `sendfile` has no address argument, so a socket destination reaches only
+a peer that `connect` already reached. `optimized_copies_linux` copies into a file, a pipe, and a
+socket, and checks that a read-only grant, an ungranted path, and an inherited descriptor stay
+closed.
+
+Residual: from Linux 5.12, `sendfile` into a pipe calls `splice_file_to_pipe`, which is the path of
+Dirty Pipe (CVE-2022-0847). Kernels 5.12 to 5.14, 5.15.0 to 5.15.24, and 5.16.0 to 5.16.10 have that
+defect, and on them a workload can change the page cache of a file it can only read. `splice`, `vmsplice`, `tee`,
+and io_uring stay refused, but seccomp cannot see the type of a descriptor, so it cannot refuse a
+pipe destination alone. Box does not defend against an unpatched kernel.
+
 ### The namespace launcher
 
 - Read uid and gid **before** the user-namespace unshare, and write `deny` to `setgroups` before the
