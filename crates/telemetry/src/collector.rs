@@ -1,14 +1,14 @@
 //! One provider, one lane per target, and the count of what did not fit.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use opentelemetry::InstrumentationScope;
 use opentelemetry::logs::{LogRecord as _, Logger as _, LoggerProvider as _};
 use opentelemetry::trace::{SpanId, TraceFlags, TraceId};
 use opentelemetry_sdk::Resource;
-use opentelemetry_sdk::error::OTelSdkResult;
+use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
 use opentelemetry_sdk::logs::log_processor_with_async_runtime::BatchLogProcessor;
 use opentelemetry_sdk::logs::{LogProcessor, SdkLogRecord, SdkLogger, SdkLoggerProvider};
 use opentelemetry_sdk::runtime::Tokio;
@@ -115,16 +115,12 @@ enum Shutdown {
     Unanswered,
 }
 
-/// Whether the drain finished, given how it ended and the failed-export count before and after it.
+/// Whether the drain finished, given how it ended and whether a lane's final export was cut.
 ///
-/// A failed shutdown whose export the exporters counted is a failed export and not a timeout. A
-/// failed shutdown that no exporter counted is an export the SDK cut at its own deadline.
-fn drain_finished(ended: Shutdown, failed_before: u64, failed_after: u64) -> bool {
-    match ended {
-        Shutdown::Completed => true,
-        Shutdown::Failed => failed_after > failed_before,
-        Shutdown::Unanswered => false,
-    }
+/// A failed shutdown is a timeout only when a lane reported its own cut. The SDK joins every lane's
+/// error into one, so a lane that failed fast must not hide a lane that was cut.
+fn drain_finished(ended: Shutdown, cut: bool) -> bool {
+    ended != Shutdown::Unanswered && !cut
 }
 
 /// One exporter, shared between the SDK lane and the agent-trace relay.
@@ -146,6 +142,8 @@ impl opentelemetry_sdk::logs::LogExporter for SharedTarget {
 struct TargetLane {
     accepts: [bool; Signal::SLOTS],
     inner: BatchLogProcessor<Tokio>,
+    /// Set when this lane's final export ran past [`EXPORT_DEADLINE`] and the SDK cut it.
+    cut: Arc<AtomicBool>,
 }
 
 impl LogProcessor for TargetLane {
@@ -164,7 +162,11 @@ impl LogProcessor for TargetLane {
     }
 
     fn shutdown_with_timeout(&self, timeout: Duration) -> OTelSdkResult {
-        self.inner.shutdown_with_timeout(timeout)
+        let ended = self.inner.shutdown_with_timeout(timeout);
+        if matches!(ended, Err(OTelSdkError::Timeout(_))) {
+            self.cut.store(true, Ordering::Relaxed);
+        }
+        ended
     }
 
     /// Forwarded, because the trait's default is a no-op.
@@ -185,6 +187,8 @@ pub struct Collector {
     /// Agent payloads the receiver refused, which is not a loss of the box's own records.
     #[cfg(test)]
     refused: Arc<AtomicU64>,
+    /// Set by any lane whose final export the SDK cut at [`EXPORT_DEADLINE`].
+    cut: Arc<AtomicBool>,
     /// The union of every lane's signals, so a record nothing wants costs one load.
     accepts: [bool; Signal::SLOTS],
     port: u16,
@@ -224,6 +228,7 @@ impl Collector {
         let run_id = RandomIdGenerator::default().new_trace_id().to_string();
         let dropped = Arc::new(AtomicU64::new(0));
         let refused = Arc::new(AtomicU64::new(0));
+        let cut = Arc::new(AtomicBool::new(false));
 
         // Bound whatever the signals say, so the agent's exporter always finds a listener.
         let inbound = Receiver::bind()?;
@@ -270,6 +275,7 @@ impl Collector {
                             .build(),
                     )
                     .build(),
+                cut: Arc::clone(&cut),
             });
         }
         let logs = logs.build();
@@ -294,6 +300,7 @@ impl Collector {
             dropped,
             #[cfg(test)]
             refused,
+            cut,
             accepts,
             port,
             control_trace: ids.new_trace_id(),
@@ -437,16 +444,14 @@ impl Collector {
             return;
         }
         let logs = self.logs.clone();
-        let failed_before = self.dropped.load(Ordering::Relaxed);
         // `shutdown` exports what is queued before it stops the exporter, so no separate flush. The
         // blocking task returns at the deadline whatever the batch worker does, so the runtime's own
         // teardown never waits on it.
         let ended =
             tokio::task::spawn_blocking(move || shut_down_bounded(logs, DRAIN_DEADLINE)).await;
-        let failed_after = self.dropped.load(Ordering::Relaxed);
         let ended = ended.unwrap_or(Shutdown::Unanswered);
-        let finished = drain_finished(ended, failed_before, failed_after);
-        if let Some(warning) = drain_warning(failed_after, finished) {
+        let finished = drain_finished(ended, self.cut.load(Ordering::Relaxed));
+        if let Some(warning) = drain_warning(self.dropped.load(Ordering::Relaxed), finished) {
             eprintln!("{warning}");
         }
     }
@@ -1383,14 +1388,22 @@ mod tests {
         assert!(!warning.contains("failed"), "{warning}");
     }
 
-    /// A failed shutdown is a timeout only when no exporter counted the failure.
+    /// A failed shutdown is a timeout only when a lane reported its own cut.
     #[test]
     fn a_counted_export_failure_is_not_reported_as_a_timeout() {
-        assert!(drain_finished(Shutdown::Completed, 0, 0));
-        assert!(drain_finished(Shutdown::Failed, 0, 1));
-        assert!(drain_finished(Shutdown::Failed, 2, 3));
-        assert!(!drain_finished(Shutdown::Failed, 2, 2));
-        assert!(!drain_finished(Shutdown::Unanswered, 0, 1));
+        assert!(drain_finished(Shutdown::Completed, false));
+        assert!(drain_finished(Shutdown::Failed, false));
+        assert!(!drain_finished(Shutdown::Failed, true));
+        assert!(!drain_finished(Shutdown::Completed, true));
+        assert!(!drain_finished(Shutdown::Unanswered, false));
+    }
+
+    /// Shut the collector's provider down off the runtime thread, as `drained` does it.
+    async fn shut_down_off_the_runtime_thread(collector: &Collector) -> Shutdown {
+        let logs = collector.logs.clone();
+        tokio::task::spawn_blocking(move || shut_down_bounded(logs, DRAIN_DEADLINE))
+            .await
+            .expect("the drain task")
     }
 
     /// A final export that fails at once is reported as a failed export and not as a timeout.
@@ -1407,21 +1420,105 @@ mod tests {
             "rule-1",
             "refused",
         ));
-        let failed_before = collector.dropped();
-        // Off the runtime thread, as `drained` does it, so the batch worker can answer.
-        let logs = collector.logs.clone();
-        let ended = tokio::task::spawn_blocking(move || shut_down_bounded(logs, DRAIN_DEADLINE))
-            .await
-            .expect("the drain task");
-        let failed_after = collector.dropped();
+        let ended = shut_down_off_the_runtime_thread(&collector).await;
+        let cut = collector.cut.load(Ordering::Relaxed);
 
-        assert!(failed_after > failed_before, "the failed export is counted");
+        assert!(collector.dropped() > 0, "the failed export is counted");
         assert!(
-            drain_finished(ended, failed_before, failed_after),
-            "a counted failure is not a drain that did not finish: {ended:?}"
+            drain_finished(ended, cut),
+            "a failed export is not a drain that did not finish: {ended:?}, cut {cut}"
         );
-        let warning = drain_warning(failed_after, true).expect("a loss is reported");
+        let warning = drain_warning(collector.dropped(), true).expect("a loss is reported");
         assert!(!warning.contains("did not finish"), "{warning}");
+    }
+
+    /// A lane cut at its deadline is a timeout even when another lane fails fast in the same drain.
+    #[cfg(any(
+        target_os = "macos",
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cut_lane_is_reported_beside_a_failing_lane() {
+        use std::io::{Read as _, Write as _};
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        /// `O_NONBLOCK`, which the standard library does not name.
+        #[cfg(target_os = "linux")]
+        const NONBLOCK: i32 = 0o4000;
+        /// `O_NONBLOCK`, which the standard library does not name.
+        #[cfg(target_os = "macos")]
+        const NONBLOCK: i32 = 0x0004;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let fifo = directory.path().join("stalled");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "mkfifo made the pipe");
+        // A read-write handle opens without a peer and keeps a reader on the pipe. It does not
+        // block, so the fill below ends exactly when the pipe buffer is full.
+        let mut pipe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(NONBLOCK)
+            .open(&fifo)
+            .expect("open the pipe");
+        let chunk = [0_u8; 4096];
+        loop {
+            match pipe.write(&chunk) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("fill the pipe: {error}"),
+            }
+        }
+
+        let collector = Collector::start(
+            TelemetryConfig::for_box("demo")
+                .with_target(Target::new(TargetKind::Otlp, nothing_listening()))
+                .with_target(Target::new(
+                    TargetKind::File,
+                    fifo.to_string_lossy().to_string(),
+                )),
+        )
+        .expect("open");
+        collector.record(DecisionRecord::deny(
+            r#"Box::Action::"fs:read""#,
+            "~/x",
+            "rule-1",
+            "refused",
+        ));
+        let ended = shut_down_off_the_runtime_thread(&collector).await;
+        let cut = collector.cut.load(Ordering::Relaxed);
+        // Empty the pipe, so the target's stalled write completes and no task of tokio's blocking
+        // pool outlives the test. This thread never sees an end of file and stays until the process
+        // exits.
+        std::thread::spawn(move || {
+            let mut buffer = vec![0_u8; 1 << 16];
+            loop {
+                match pipe.read(&mut buffer) {
+                    Ok(_) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(_) => return,
+                }
+            }
+        });
+
+        assert!(collector.dropped() > 0, "the fast-failing lane is counted");
+        assert!(cut, "the stalled lane reports its own cut: {ended:?}");
+        assert!(
+            !drain_finished(ended, cut),
+            "a cut lane is not a finished drain"
+        );
+        let warning =
+            drain_warning(collector.dropped(), drain_finished(ended, cut)).expect("a loss");
+        assert!(warning.contains("failed"), "{warning}");
+        assert!(warning.contains("did not finish in time"), "{warning}");
     }
 
     /// A payload the receiver refuses is counted as refused and never as a lost box record.

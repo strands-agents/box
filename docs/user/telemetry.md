@@ -282,7 +282,8 @@ strands-box: warning: telemetry records were lost: 2 exports to the configured t
 
 The count is exports, not records: one export can carry many records. The run's exit code does not
 change. The line does not cover everything that can be lost: a record that the telemetry queue
-refuses when it is full, an agent payload that Box refuses, and a relayed payload still in flight at
+refuses when it is full, an agent payload that Box refuses, a batch that a slow target does not
+accept before its export deadline while the box runs, and a relayed payload still in flight at
 shutdown are not counted. So the absence of this line does not prove that nothing was lost.
 
 ## See also

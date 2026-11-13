@@ -257,10 +257,14 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   **A failed final export is not a timeout.** The SDK answers `shutdown` with the final export's
   own error, so a closed port or a full disk returns at once with an `Err`. `shut_down_bounded` now
   returns a `Shutdown` (`Completed`, `Failed`, `Unanswered`), and `drain_finished` calls the drain
-  unfinished only when no answer came, or when the SDK failed without any exporter counting it (an
-  export the SDK cut at its own deadline). The first version reported every fast failure as "did not
-  finish in time". `a_counted_export_failure_is_not_reported_as_a_timeout` and
-  `a_fast_failing_final_export_is_not_a_timeout` are the pins, and both failed against it.
+  unfinished only when no answer came, or when a lane reported a cut. Each `TargetLane` sets a shared
+  `cut` flag when its own shutdown returns `OTelSdkError::Timeout`, because the provider joins every
+  lane's error into one `InternalFailure`. The first version reported every fast failure as "did not
+  finish in time". The second compared `dropped` before and after the drain, which a fast-failing
+  lane or a failing relay could raise while another lane was cut, so the cut went unreported.
+  `a_counted_export_failure_is_not_reported_as_a_timeout`, `a_fast_failing_final_export_is_not_a_timeout`,
+  and `a_cut_lane_is_reported_beside_a_failing_lane` (an OTLP target on a closed port beside a file
+  target on a full FIFO) are the pins.
   **The receiver has its own counter.** It used to share `dropped`, so a refused agent payload (the
   one-permit `RELAY_CAPACITY`, or the fan-out bound) counted as a lost record: the workload could
   raise the loss line at will, and a healthy agent that exports concurrently could raise it on a run
