@@ -62,7 +62,6 @@ For a development run, an administrator can supply only these capabilities:
 sudo setpriv --reuid="$(id -u)" --regid="$(id -g)" --clear-groups \
   --bounding-set=-all,+bpf,+perfmon --inh-caps=-all,+bpf,+perfmon \
   --ambient-caps=-all,+bpf,+perfmon --no-new-privs \
-  env EXPERIMENTAL_LINUX_SUPPORT=TRUE \
   /absolute/path/strands-box run --config /absolute/path/box.toml
 ```
 
