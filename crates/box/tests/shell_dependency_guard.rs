@@ -221,6 +221,15 @@ fn box_sources(dir: &Path) -> Vec<(PathBuf, String)> {
         .collect()
 }
 
+/// Whether `source` names `process::Command`, directly or in a `process::{…}` import.
+fn names_a_process_command(source: &str) -> bool {
+    source.contains("process::Command")
+        || source.match_indices("process::{").any(|(at, _)| {
+            let group = &source[at..];
+            group[..group.find('}').unwrap_or(group.len())].contains("Command")
+        })
+}
+
 #[test]
 fn the_only_host_process_the_shell_starts_is_an_mcp_server_the_box_never_configures() {
     let root = shell_src();
@@ -237,7 +246,7 @@ fn the_only_host_process_the_shell_starts_is_an_mcp_server_the_box_never_configu
             continue;
         }
         let source = std::fs::read_to_string(file).expect("read a Shell source file");
-        if non_test_source(&source).contains("process::Command") {
+        if names_a_process_command(non_test_source(&source)) {
             starts.push(relative);
         }
     }
@@ -251,7 +260,13 @@ fn the_only_host_process_the_shell_starts_is_an_mcp_server_the_box_never_configu
     let mut configured = Vec::new();
     for dir in [manifest.join("src"), manifest.join("../shell/src")] {
         for (file, source) in box_sources(&dir) {
-            for token in ["Shell::builder(", "ShellBuilder", ".config_file("] {
+            for token in [
+                "Shell::builder(",
+                "ShellBuilder",
+                ".config_file(",
+                "mcp_client::",
+                "set_mcp_clients",
+            ] {
                 if source.contains(token) {
                     configured.push(format!("{} uses `{token}`", file.display()));
                 }
