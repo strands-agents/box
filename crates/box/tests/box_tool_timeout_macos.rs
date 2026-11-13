@@ -32,45 +32,49 @@ fn eventually(mut condition: impl FnMut() -> bool) -> bool {
 
 #[test]
 fn the_shell_timeout_stops_a_tool_and_what_it_started_and_the_box_keeps_serving() {
-    let declaration = "[limits.shell]\ntimeout = 2\n\
-                       [tool.holder]\ncommand = [\"holder\"]\n\
-                       [tool.holder.filesystem]\nread = [\"{box_home}\"]\nwrite = [\"{box_home}\"]\n";
-    let request = fixture::Request::with_config(
-        "tool-timeout",
-        "permit(principal, action, resource);",
-        declaration,
-    );
-    let programs = request.operator_home().join("programs");
-    std::fs::create_dir(&programs).expect("create the fixture program directory");
-    let holder = programs.join("holder");
+    // The holder lives at an absolute path in its own folder, outside every write grant, as a
+    // configured command must.
+    let programs = fixture::short_temporary_home();
+    let holder = programs
+        .path()
+        .canonicalize()
+        .expect("the program folder resolves")
+        .join("holder");
     std::fs::write(&holder, HOLDER).expect("write the holder tool");
     {
         use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&programs, std::fs::Permissions::from_mode(0o700))
-            .expect("make the fixture program directory private");
-        std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o700))
+        std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o755))
             .expect("make the holder tool runnable");
     }
-    let path = format!("{}:/usr/bin:/bin", programs.display());
-    let configured = request.env("PATH", &path).expect();
+    let declaration = format!(
+        "[limits.shell]\ntimeout = 2\n\
+         [tool.holder]\ncommand = [{:?}]\n\
+         [tool.holder.filesystem]\nread = [\"{{box_home}}\"]\nwrite = [\"{{box_home}}\"]\n",
+        holder.display().to_string()
+    );
+    let configured = fixture::Request::with_config(
+        "tool-timeout",
+        "permit(principal, action, resource);",
+        &declaration,
+    )
+    .expect();
     let output = configured.bash(
         "zsh -lc \"holder $BOX_HOME\"; printf %s \"$?\" > \"$BOX_HOME/status\"; \
          zsh -lc 'printf STILL_SERVING' > \"$BOX_HOME/after\"",
     );
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let home = configured.box_home();
     let read = |name: &str| std::fs::read_to_string(home.join(name)).unwrap_or_default();
     assert_eq!(
         read("after"),
         "STILL_SERVING",
-        "the box serves the next call: {}",
-        String::from_utf8_lossy(&output.stderr)
+        "the box serves the next call: {stderr}"
     );
-    assert_ne!(read("status"), "0", "the timed-out call fails");
+    assert_ne!(read("status"), "0", "the timed-out call fails: {stderr}");
     for name in ["holder-sh", "holder-sleep"] {
-        let pid: libc::pid_t = read(name)
-            .trim()
-            .parse()
-            .unwrap_or_else(|_| panic!("{name} records a pid"));
+        let pid: libc::pid_t = read(name).trim().parse().unwrap_or_else(|_| {
+            panic!("{name} records a pid (status {}): {stderr}", read("status"))
+        });
         assert!(eventually(|| gone(pid)), "{name} ({pid}) must stop");
     }
 }
