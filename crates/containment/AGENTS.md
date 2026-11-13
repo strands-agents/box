@@ -47,7 +47,7 @@ by reading `src/` belongs in `src/` — the README describes the shape.
     broad to be authorized", which names the wrong defect on a path that is one file.
   - **On Linux this is a launch refusal.** `MS_NOSUID` on every bind neuters the bit, so without
     the floor a set-user-ID workload program would start and run unprivileged. On macOS the kernel
-    refuses the same configuration at exec.
+    would refuse the same configuration at exec without the floor.
   - Guard: `an_execute_grant_that_changes_identity_is_refused`, which sets each bit in turn and
     **asserts the bit survived the `chmod`** — a host that drops it would otherwise leave the test
     passing while it proved nothing. It fails rather than skips, because a floor's own pin must not

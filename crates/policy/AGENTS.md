@@ -215,8 +215,9 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   refusal of a path the caller may not reach.
 - LIVE GAP: `like` is case-sensitive and macOS is not, so `policy.DW` stays exposed. Do not widen
   the pattern to `*.dw`, which over-denies an ordinary `.dw` file.
-- `SELF_DEFENDED_FILES` is `["box.toml", "policy.dw"]`, and it is public so tests and
-  `box/src/record/layout.rs` derive from it. Add no `*.cedar` rule and no speculative entry. A
+- `SELF_DEFENDED_FILES` is `["box.toml", "policy.dw"]`, and it is public.
+  `box/src/record/layout.rs` names the same two files as `RECORD_FILE` and `POLICY_FILE`. Add no
+  `*.cedar` rule and no speculative entry. A
   defended filename costs an escalation chain, as `mcp.toml` did.
 - Raise three legs for a `FilesystemPair`: the source as the pair operation, the source as
   `fs:read_content`, and the destination. Do not reduce it to two. A rename whose destination

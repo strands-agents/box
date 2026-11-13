@@ -28,7 +28,7 @@ box's trusted half alive for one run, and `command/` is the argv parser plus one
 `command/{policy,run}` is **two modules for two verbs**. `command/cli.rs` holds the clap derive tree
 and nothing else, and `run/configure` owns **no verb at all**: it is the creation mechanism `run`
 calls, and it is not operator-facing. Read "A box has no lifecycle verbs" below before you add a
-verb that finds, lists, stops, or removes a box.
+verb that finds, lists, stops, removes, or resets a box.
 
 The three `record/` modules each answer one question. `config` is `box.toml` — the two wire records,
 plus one module per vocabulary: `process`, `filesystem`, `egress`, `env`, `mcp`, and `telemetry`.
@@ -119,12 +119,13 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   re-created.
 - **Widening the library surface.** `src/lib.rs` is the library surface. Every module is
   `pub(crate)`, and what a wider façade would hold stays out by that structure. Keep every part:
-  - Nothing outside the crate can name `run`, `contain`, or `record`, so `Boundary`, `Trampoline`, and
-    `Attachment` are unreachable. That matters most for `run`, because `flock` is per file
-    descriptor, so two in-process calls both succeed, and that breaks
+  - Nothing outside the crate can name the `run`, `contain`, or `record` modules, so `Boundary`,
+    `Trampoline`, and `Attachment` are unreachable. The public `run` function refuses a second call
+    in one process (the `STARTED` guard in `lib.rs`), because `flock` is per file descriptor and two
+    in-process runs would both hold the lock, which breaks
     [one policy engine per box](../../docs/design/decisions.md#one-policy-engine-per-box).
-  - `Boundary::assemble` and `Trampoline::command` stay `pub(crate)`. A caller that can assemble a
-    boundary can assemble a weaker one.
+  - `Boundary`, `Trampoline`, and `trampoline::command` stay `pub(crate)`. A caller that can
+    assemble a boundary can assemble a weaker one.
   - `BoxError` is an **opaque struct** over a `pub(crate)` enum. Exposing the enum leaks nine
     mechanism types.
   - **No signature names or returns a `PolicyEngine`**, a host path, a working directory, an
