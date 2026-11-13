@@ -141,3 +141,13 @@ fn a_read_grant_through_a_link_or_a_spelling_that_is_not_canonical_is_refused() 
     );
     assert_eq!(refused.kind(), GrantRefusal::NotCanonical);
 }
+
+#[test]
+fn a_read_grant_naming_a_link_to_a_file_is_accepted() {
+    let (_directory, path) = ordinary_directory();
+    let file = path.join("file");
+    std::fs::write(&file, "").expect("a file");
+    let link = path.join("link");
+    std::os::unix::fs::symlink(&file, &link).expect("a link");
+    assert!(strands_box::check_read_grant(&link).is_ok());
+}

@@ -229,6 +229,47 @@ fn reach_under_the_operator_home_is_only_what_is_listed() {
     assert!(seen.contains("done"), "{output:?}");
 }
 
+/// **A read entry naming a link to a file reads by both names**, and nothing beside them.
+#[test]
+fn a_read_entry_naming_a_link_to_a_file_reads_by_both_names() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let request = Request::with_policy("file-link", PERMIT_EVERY_EFFECT);
+    let tools = request.operator_home().join("tools");
+    std::fs::create_dir(&tools).expect("a tools folder");
+    let file = tools.join("gcc");
+    std::fs::write(&file, "linked contents\n").expect("a file");
+    std::fs::write(tools.join("sibling"), "sibling only\n").expect("a sibling");
+    let link = tools.join("cc");
+    std::os::unix::fs::symlink("gcc", &link).expect("a link to the file");
+    let box_ = request.agent_read(&[link.as_path()]).expect();
+
+    let output = probe(
+        &box_,
+        &format!(
+            "read -r v < {} && printf 'LINK=%s\\n' \"$v\"; \
+             read -r v < {} && printf 'FILE=%s\\n' \"$v\"; \
+             read -r v < {} 2>/dev/null && printf 'SIBLING=%s\\n' \"$v\"; printf done",
+            shell_quote(&link),
+            shell_quote(&file),
+            shell_quote(&tools.join("sibling"))
+        ),
+    );
+
+    assert_ran(&output);
+    let seen = stdout(&output);
+    assert!(seen.contains("LINK=linked contents"), "{output:?}");
+    assert!(seen.contains("FILE=linked contents"), "{output:?}");
+    assert!(!seen.contains("SIBLING="), "{output:?}");
+    assert!(seen.contains("done"), "{output:?}");
+    assert!(
+        raw_stderr(&output).contains(&format!("{} -> {}", link.display(), file.display())),
+        "the disclosure must name the link and its file: {}",
+        raw_stderr(&output)
+    );
+}
+
 /// **`HOME` is the operator's home when `env.HOME` is unset, and the declared value when set.**
 #[test]
 fn home_is_the_operators_unless_the_agent_declares_one() {
