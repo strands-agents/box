@@ -133,6 +133,45 @@ command is not found and `PATH` is not searched for another file. A name with a 
 Shell runs itself, so it does not declare a name that never reaches the declared file.
 `tests/declared_host_programs.rs` covers each case.
 
+### Local addition: an embedder can run a declared file in place of a Shell command
+
+An embedder that declares a file for a bare name the Shell implements still gets the Shell's own
+command, by design of the addition above. Box needs one exception: an operator who opts in runs the
+host's Python for `python3`, which the Shell otherwise runs as Monty.
+
+`Kernel::replaces_command` says whether a name's declared file runs in place of the Shell's command,
+and its default replaces nothing. `VfsKernel::replaced_commands` and
+`ShellBuilder::replaced_commands` hold a `ReplacedCommands` set for the bundled kernel, which
+replaces a name only when `host_programs` also declares it. `exec::own_command` is the one lookup of
+the Shell's commands that admission, dispatch, executable resolution, `command -v`, and `type` use,
+so a replaced name is a host program in each. Builtins and functions are never replaced.
+`tests/declared_host_programs.rs` covers each case.
+
+### Local addition: an embedder can refuse a bare name with a reason
+
+Box needs a refusal that wins over everything else for one case: an operator who turns Monty off
+(`monty = false`) without declaring a Python tool gets no Python at all, so `python3` must not run
+Monty, a `PATH` binary, or anything a policy permits.
+
+`Kernel::refused_command` gives the reason a bare name is refused, and its default refuses nothing.
+`VfsKernel::refused_commands` and `ShellBuilder::refused_commands` hold a `RefusedCommands` map of
+name to reason for the bundled kernel. `exec::admit` checks it first for a name with no `/`: a
+refused name prints `strands-shell: {name}: {reason}` and exits 126 before builtins, the Shell's
+own commands, functions, declared files, `PATH`, or any policy decision are consulted, and no
+decision is raised. The executable-resolution pass in `run_pipeline` skips a refused name, so a
+`PATH` script of that name is not rewritten to its interpreter first. `exec::own_command` and
+`exec::replacing_file` return `None` for a refused name, `command -v` prints nothing and exits 1,
+and `type` reports it not found. `tests/declared_host_programs.rs` covers each case.
+
+### Local change: Monty's refusals say how to run real Python
+
+`python3 -m ...` used to fail with lexopt's generic unexpected-argument error. `src/commands/python.rs`
+now refuses `-m` itself, exits 2, and prints `{name}: -m is not supported by Monty, Box's built-in
+Python subset.` followed by `commands::REAL_PYTHON_HINT` ("To run real Python, the operator sets
+monty = false and declares [tool.python3]."). The `python -` and no-script refusals end with the
+same sentence. Box's report of a Monty `ModuleNotFoundError` or `ImportError` uses the constant
+too, so the text lives in one place. `tests/script_interpreter.rs` covers each message.
+
 ### Execution deadlines refuse clock overflow
 
 The builder and per-call refresh use checked clock arithmetic. An unrepresentable timeout

@@ -103,13 +103,14 @@ A box whose egress re-routes a destination to a [backend](egress.md) requires re
 An explicit `limits.shell.max_input` or `limits.shell.max_output` requires record version 31,
 including values equal to the defaults.
 A non-empty [`[gateway] upgrade_http`](config.md#gateway) requires record version 32.
+[`monty = false`](config.md#monty) requires record version 34.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 
 To disable the experiment, change the global setting to `false`.
 Remove all process overrides and `[limits]` settings, give each stdio MCP server its own
-program, set `file-attributes` to `false`, and remove `[gateway] upgrade_http` before returning to
-a binary that supports only version 21.
+program, set `file-attributes` to `false`, and remove `[gateway] upgrade_http` and `monty = false`
+before returning to a binary that supports only version 21.
 If MCP argument wildcards are enabled, replace the stars with concrete arguments and disable
 `argument_wildcards` on each server too.
 Replace each absolute MCP executable path with a bare program name that the server's `PATH`

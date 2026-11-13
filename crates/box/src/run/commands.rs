@@ -1,6 +1,6 @@
 //! The configured tool programs whose identities belong to one run.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -21,7 +21,7 @@ pub(crate) struct ConfiguredCommands {
 }
 
 /// The file each bare name runs in the hosted Shell, from the `[tool]` tables that answer to it.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BareNames {
     /// Each name that one program file answers to: the spelling that runs it, and its tables.
     pub(crate) declared: BTreeMap<String, (PathBuf, Vec<String>)>,
@@ -29,9 +29,57 @@ pub(crate) struct BareNames {
     pub(crate) shared: BTreeMap<String, Vec<String>>,
     /// Each declared name that its label settled, and the tables that run other files.
     pub(crate) passed_over: BTreeMap<String, Vec<String>>,
+    /// The names the Shell implements itself that run their declared file instead: `python3` and
+    /// `python` when Monty is off and `[tool.python3]` or `[tool.python]` is declared.
+    pub(crate) replaced: BTreeSet<String>,
+    /// Whether a bare `python3` or `python` runs Monty, from the record's `monty` key.
+    pub(crate) monty: bool,
+    /// The `[tool.python3]` and `[tool.python]` tables a bare `python3` or `python` doesn't use,
+    /// because Monty is on.
+    pub(crate) unused_python: Vec<String>,
+    /// The names the Shell refuses with exit status 126, and why: `python3` and `python` when
+    /// Monty is off and no Python table is declared.
+    pub(crate) refused: BTreeMap<String, String>,
 }
 
+impl Default for BareNames {
+    fn default() -> Self {
+        Self {
+            declared: BTreeMap::new(),
+            shared: BTreeMap::new(),
+            passed_over: BTreeMap::new(),
+            replaced: BTreeSet::new(),
+            monty: true,
+            unused_python: Vec::new(),
+            refused: BTreeMap::new(),
+        }
+    }
+}
+
+/// Why `python3` and `python` exit 126 when Monty is off and no Python table is declared.
+pub(crate) const MONTY_OFF_WITHOUT_PYTHON: &str =
+    "Monty is off (monty = false) and no [tool.python3] or [tool.python] is declared";
+
 impl BareNames {
+    /// The Shell commands that run their declared file instead, as the Shell will read them.
+    pub(crate) fn replaced_commands(&self) -> Arc<BTreeSet<String>> {
+        Arc::new(self.replaced.clone())
+    }
+
+    /// The names the Shell refuses with exit status 126, and the reason it prints.
+    pub(crate) fn refused_commands(&self) -> Arc<BTreeMap<String, String>> {
+        Arc::new(self.refused.clone())
+    }
+
+    /// The tables that a bare `python3` and `python` run in place of Monty, if any.
+    pub(crate) fn python_tables(&self) -> Option<&[String]> {
+        self.replaced
+            .contains("python3")
+            .then(|| self.declared.get("python3"))
+            .flatten()
+            .map(|(_, tables)| tables.as_slice())
+    }
+
     /// The declared file of each name, as the Shell reads it.
     pub(crate) fn programs(&self) -> strands_shell::os::HostPrograms {
         Arc::new(
@@ -209,7 +257,45 @@ impl ConfiguredCommands {
                 (command.invoked.clone(), running.iter().map(label).collect()),
             );
         }
+        self.python_names(record, &mut names);
         names
+    }
+
+    /// What a bare `python3` and `python` mean. With Monty on, both run Monty, and any Python
+    /// table is listed as unused. With Monty off, `[tool.python3]` or `[tool.python]` answers to
+    /// both names whatever its command's file is called, and with neither table both are refused.
+    /// A versioned name such as `python3.14` is left to the loop above, as before.
+    fn python_names(&self, record: &Record, names: &mut BareNames) {
+        use crate::record::config::PYTHON_TABLES;
+        names.monty = record.monty;
+        let tables: Vec<(String, &ConfiguredCommand)> = PYTHON_TABLES
+            .iter()
+            .filter(|label| record.tool.contains_key(**label))
+            .filter_map(|label| {
+                self.tools
+                    .get(*label)
+                    .map(|command| (format!("[tool.{label}]"), command.as_ref()))
+            })
+            .collect();
+        if record.monty {
+            names.unused_python = tables.into_iter().map(|(table, _)| table).collect();
+            return;
+        }
+        let Some((_, command)) = tables.first() else {
+            for name in PYTHON_TABLES {
+                names
+                    .refused
+                    .insert(name.to_string(), MONTY_OFF_WITHOUT_PYTHON.to_string());
+            }
+            return;
+        };
+        let labels: Vec<String> = tables.iter().map(|(table, _)| table.clone()).collect();
+        for name in PYTHON_TABLES {
+            names
+                .declared
+                .insert(name.to_string(), (command.invoked.clone(), labels.clone()));
+            names.replaced.insert(name.to_string());
+        }
     }
 
     /// The one tool labelled `name` among `commands`, whose commands resolve to different paths,
@@ -515,6 +601,7 @@ mod tests {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             box_id: "commands-test".to_string(),
@@ -1337,7 +1424,12 @@ mod tests {
     }
 
     fn bare_names(tools: &[(&str, ProcessSpec)], at: &Path) -> BareNames {
+        bare_names_with(true, tools, at)
+    }
+
+    fn bare_names_with(monty: bool, tools: &[(&str, ProcessSpec)], at: &Path) -> BareNames {
         let mut record = record(at);
+        record.monty = monty;
         record.tool = tools
             .iter()
             .map(|(label, spec)| ((*label).to_string(), spec.clone()))
@@ -1572,6 +1664,166 @@ mod tests {
             names.declared
         );
         assert!(names.shared.is_empty(), "{:?}", names.shared);
+    }
+
+    /// The `[tool.python3]` and `[tool.python]` labels, each paired with the file it runs.
+    fn python_tools(
+        root: &Path,
+        tools: &[(&'static str, &str)],
+    ) -> Vec<(&'static str, ProcessSpec)> {
+        tools
+            .iter()
+            .map(|(label, file)| {
+                let path = root.join(file);
+                std::fs::create_dir_all(path.parent().expect("a parent")).expect("folder");
+                program(&path);
+                (*label, tool(&path, None))
+            })
+            .collect()
+    }
+
+    fn both_python_names() -> BTreeSet<String> {
+        ["python".to_string(), "python3".to_string()].into()
+    }
+
+    /// **With Monty off, `[tool.python3]` answers to both `python3` and `python`.**
+    #[test]
+    fn with_monty_off_python3_and_python_answer_to_tool_python3() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let tools = python_tools(&root, &[("python3", "venv/bin/python3")]);
+        let python = root.join("venv/bin/python3");
+
+        let names = bare_names_with(false, &tools, &python);
+
+        let expected = (python, vec!["[tool.python3]".to_string()]);
+        assert_eq!(names.declared.get("python3"), Some(&expected));
+        assert_eq!(names.declared.get("python"), Some(&expected));
+        assert_eq!(names.replaced, both_python_names());
+        assert!(!names.monty);
+        assert!(names.refused.is_empty(), "{:?}", names.refused);
+        assert!(names.unused_python.is_empty(), "{:?}", names.unused_python);
+        assert_eq!(*names.replaced_commands(), both_python_names());
+        assert!(names.refused_commands().is_empty());
+        assert_eq!(
+            names.python_tables(),
+            Some(&["[tool.python3]".to_string()][..])
+        );
+    }
+
+    /// **The table's name decides, not its command's file name**: `[tool.python]` whose file is
+    /// `native-python` answers to both Python names, and to its own file name as before.
+    #[test]
+    fn with_monty_off_tool_python_answers_to_both_names_whatever_its_file_is_called() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let tools = python_tools(&root, &[("python", "venv/bin/native-python")]);
+        let python = root.join("venv/bin/native-python");
+
+        let names = bare_names_with(false, &tools, &python);
+
+        let expected = (python, vec!["[tool.python]".to_string()]);
+        assert_eq!(names.declared.get("python3"), Some(&expected));
+        assert_eq!(names.declared.get("python"), Some(&expected));
+        assert_eq!(names.declared.get("native-python"), Some(&expected));
+        assert_eq!(names.replaced, both_python_names());
+    }
+
+    /// **Two Python tables with one command list both tables** on each name.
+    #[test]
+    fn with_monty_off_two_python_tables_with_one_command_share_both_names() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let python = root.join("venv/bin/python3");
+        std::fs::create_dir_all(root.join("venv/bin")).expect("folder");
+        program(&python);
+        let tools = [
+            ("python", tool(&python, None)),
+            ("python3", tool(&python, None)),
+        ];
+
+        let names = bare_names_with(false, &tools, &python);
+
+        let tables = vec!["[tool.python3]".to_string(), "[tool.python]".to_string()];
+        assert_eq!(
+            names.declared.get("python3"),
+            Some(&(python.clone(), tables.clone()))
+        );
+        assert_eq!(names.declared.get("python"), Some(&(python, tables)));
+        assert_eq!(names.replaced, both_python_names());
+    }
+
+    /// **With Monty off and no Python table, both names are refused**, and nothing falls back to
+    /// Monty.
+    #[test]
+    fn with_monty_off_and_no_python_table_both_names_are_refused() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let tools = python_tools(&root, &[("git", "git")]);
+
+        let names = bare_names_with(false, &tools, &root.join("git"));
+
+        assert_eq!(names.declared.keys().collect::<Vec<_>>(), vec!["git"]);
+        assert!(names.replaced.is_empty(), "{:?}", names.replaced);
+        let reason = MONTY_OFF_WITHOUT_PYTHON.to_string();
+        let expected = BTreeMap::from([
+            ("python".to_string(), reason.clone()),
+            ("python3".to_string(), reason),
+        ]);
+        assert_eq!(names.refused, expected);
+        assert_eq!(*names.refused_commands(), expected);
+        assert_eq!(
+            MONTY_OFF_WITHOUT_PYTHON,
+            "Monty is off (monty = false) and no [tool.python3] or [tool.python] is declared"
+        );
+        assert_eq!(names.python_tables(), None);
+    }
+
+    /// **With Monty on, a Python table is not used for a bare `python3` or `python`**, and is
+    /// listed so the startup notice can say so.
+    #[test]
+    fn with_monty_on_a_python_table_is_unused_and_listed() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let tools = python_tools(
+            &root,
+            &[("python3", "a/bin/python3"), ("python", "b/bin/python")],
+        );
+
+        let names = bare_names_with(true, &tools, &root.join("a/bin/python3"));
+
+        assert!(names.monty);
+        assert!(names.declared.is_empty(), "{:?}", names.declared);
+        assert!(names.replaced.is_empty(), "{:?}", names.replaced);
+        assert!(names.refused.is_empty(), "{:?}", names.refused);
+        assert_eq!(
+            names.unused_python,
+            vec!["[tool.python3]".to_string(), "[tool.python]".to_string()]
+        );
+    }
+
+    /// **A versioned name stays as today**: `[tool.python3]` whose file is `python3.14` answers to
+    /// `python3.14` by its file name whether Monty is on or off, and that name is never replaced.
+    #[test]
+    fn versioned_names_stay_separate() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let tools = python_tools(&root, &[("python3", "bin/python3.14")]);
+        let python = root.join("bin/python3.14");
+        let versioned = (python.clone(), vec!["[tool.python3]".to_string()]);
+
+        let on = bare_names_with(true, &tools, &python);
+        assert_eq!(on.declared.keys().collect::<Vec<_>>(), vec!["python3.14"]);
+        assert_eq!(on.declared.get("python3.14"), Some(&versioned));
+        assert_eq!(on.unused_python, vec!["[tool.python3]".to_string()]);
+
+        let off = bare_names_with(false, &tools, &python);
+        assert_eq!(
+            off.declared.keys().collect::<Vec<_>>(),
+            vec!["python", "python3", "python3.14"]
+        );
+        assert_eq!(off.declared.get("python3.14"), Some(&versioned));
+        assert_eq!(off.replaced, both_python_names());
     }
 
     /// **A command is declared through the spelling the run starts it by**, so a linked program

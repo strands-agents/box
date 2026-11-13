@@ -108,16 +108,24 @@ fn write_grammar_disclosures(
     Ok(())
 }
 
-/// One line for each bare name a `[tool]` answers to in the hosted Shell, and the file it runs.
+/// One line for each bare name a `[tool]` answers to in the hosted Shell, and the file it runs,
+/// then what a bare `python3` and `python` run. `shell_timeout` is `[limits.shell] timeout`, which
+/// bounds a real Python call as it bounds every Shell call.
 fn write_bare_name_disclosures(
     names: &crate::run::commands::BareNames,
+    shell_timeout: Option<std::time::Duration>,
     mut output: impl std::io::Write,
 ) -> std::io::Result<()> {
     let escaped = |text: &str| -> String { text.chars().flat_map(char::escape_default).collect() };
     for (name, (path, tables)) in &names.declared {
+        let in_place = if names.replaced.contains(name) {
+            ", in place of Monty"
+        } else {
+            ""
+        };
         writeln!(
             output,
-            "strands-box: {}: a bare `{}` in the Shell runs {}",
+            "strands-box: {}: a bare `{}` in the Shell runs {}{in_place}",
             tables.join(", "),
             escaped(name),
             escaped(&path.to_string_lossy())
@@ -142,7 +150,56 @@ fn write_bare_name_disclosures(
             escaped(name)
         )?;
     }
-    Ok(())
+    write_python_disclosures(names, shell_timeout, output)
+}
+
+/// What a bare `python3` and `python` run: Monty, the Python tool and its costs, or nothing.
+fn write_python_disclosures(
+    names: &crate::run::commands::BareNames,
+    shell_timeout: Option<std::time::Duration>,
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    if names.monty {
+        writeln!(
+            output,
+            "strands-box: a bare python3 or python in the Shell runs Monty, Box's Python subset"
+        )?;
+        for table in &names.unused_python {
+            writeln!(
+                output,
+                "strands-box: {table}: not used for a bare python3 or python, because Monty is \
+                 on. Set monty = false at the top of box.toml to use it"
+            )?;
+        }
+        return Ok(());
+    }
+    let Some(tables) = names.python_tables() else {
+        writeln!(
+            output,
+            "strands-box: {}, so python3 and python exit 126",
+            crate::run::commands::MONTY_OFF_WITHOUT_PYTHON
+        )?;
+        return Ok(());
+    };
+    let tables = tables.join(", ");
+    writeln!(
+        output,
+        "strands-box: {tables}: the fs:write rules in policy.dw don't apply inside Python; it \
+         writes its write grants directly"
+    )?;
+    match shell_timeout {
+        Some(timeout) => writeln!(
+            output,
+            "strands-box: {tables}: each python3 or python call is bounded by [limits.shell] \
+             timeout ({} s); there is no Python-only timeout",
+            timeout.as_secs()
+        ),
+        None => writeln!(
+            output,
+            "strands-box: {tables}: [limits.shell] timeout is off, so a python3 or python call \
+             runs until it exits; there is no Python-only timeout"
+        ),
+    }
 }
 
 /// Run one contained agent from one locked configuration snapshot.
@@ -245,6 +302,7 @@ async fn hosted(
             &locked.record,
             &crate::run::contain::executable::host_search_path(),
         ),
+        locked.record.limits.shell.timeout(),
         std::io::stderr().lock(),
     )
     .map_err(|source| ConfigError::Disclosure { source })?;
@@ -416,6 +474,7 @@ mod tests {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
@@ -528,10 +587,11 @@ mod tests {
                 vec!["[tool.brew_node]".to_string(), "[tool.node]".to_string()],
             )]),
             passed_over: BTreeMap::from([("git".to_string(), vec!["[tool.brew_git]".to_string()])]),
+            ..Default::default()
         };
         let mut output = Vec::new();
 
-        write_bare_name_disclosures(&names, &mut output).expect("the disclosure writes");
+        write_bare_name_disclosures(&names, None, &mut output).expect("the disclosure writes");
 
         assert_eq!(
             String::from_utf8(output).expect("the disclosure is UTF-8"),
@@ -540,7 +600,100 @@ mod tests {
              strands-box: [tool.brew_git]: runs another program path, so a bare `git` in the Shell \
              runs the file of `[tool.git]`, whose label is that name\n\
              strands-box: [tool.brew_node], [tool.node]: these tables run different program paths, \
-             so a bare `node` in the Shell runs the file that `PATH` finds\n"
+             so a bare `node` in the Shell runs the file that `PATH` finds\n\
+             strands-box: a bare python3 or python in the Shell runs Monty, Box's Python subset\n"
+        );
+    }
+
+    fn python_disclosure(names: &crate::run::commands::BareNames, timeout: Option<u64>) -> String {
+        let mut output = Vec::new();
+        write_bare_name_disclosures(
+            names,
+            timeout.map(std::time::Duration::from_secs),
+            &mut output,
+        )
+        .expect("the disclosure writes");
+        String::from_utf8(output).expect("the disclosure is UTF-8")
+    }
+
+    #[test]
+    fn startup_says_a_bare_python3_runs_monty_by_default() {
+        assert_eq!(
+            python_disclosure(&crate::run::commands::BareNames::default(), Some(30)),
+            "strands-box: a bare python3 or python in the Shell runs Monty, Box's Python subset\n"
+        );
+    }
+
+    #[test]
+    fn startup_names_a_python_table_that_monty_leaves_unused() {
+        let names = crate::run::commands::BareNames {
+            unused_python: vec!["[tool.python3]".to_string()],
+            ..Default::default()
+        };
+
+        assert_eq!(
+            python_disclosure(&names, Some(30)),
+            "strands-box: a bare python3 or python in the Shell runs Monty, Box's Python subset\n\
+             strands-box: [tool.python3]: not used for a bare python3 or python, because Monty is \
+             on. Set monty = false at the top of box.toml to use it\n"
+        );
+    }
+
+    #[test]
+    fn startup_says_python3_exits_126_when_monty_is_off_without_a_python_tool() {
+        let names = crate::run::commands::BareNames {
+            monty: false,
+            refused: BTreeMap::from([
+                (
+                    "python".to_string(),
+                    crate::run::commands::MONTY_OFF_WITHOUT_PYTHON.to_string(),
+                ),
+                (
+                    "python3".to_string(),
+                    crate::run::commands::MONTY_OFF_WITHOUT_PYTHON.to_string(),
+                ),
+            ]),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            python_disclosure(&names, Some(30)),
+            "strands-box: Monty is off (monty = false) and no [tool.python3] or [tool.python] is \
+             declared, so python3 and python exit 126\n"
+        );
+    }
+
+    #[test]
+    fn startup_says_the_python_tool_runs_in_place_of_monty_and_states_its_costs() {
+        let tables = vec!["[tool.python3]".to_string()];
+        let python = PathBuf::from("/Users/me/py-runtime/.venv/bin/python3");
+        let names = crate::run::commands::BareNames {
+            declared: BTreeMap::from([
+                ("python".to_string(), (python.clone(), tables.clone())),
+                ("python3".to_string(), (python, tables)),
+            ]),
+            replaced: ["python".to_string(), "python3".to_string()].into(),
+            monty: false,
+            ..Default::default()
+        };
+
+        assert_eq!(
+            python_disclosure(&names, Some(600)),
+            "strands-box: [tool.python3]: a bare `python` in the Shell runs \
+             /Users/me/py-runtime/.venv/bin/python3, in place of Monty\n\
+             strands-box: [tool.python3]: a bare `python3` in the Shell runs \
+             /Users/me/py-runtime/.venv/bin/python3, in place of Monty\n\
+             strands-box: [tool.python3]: the fs:write rules in policy.dw don't apply inside \
+             Python; it writes its write grants directly\n\
+             strands-box: [tool.python3]: each python3 or python call is bounded by \
+             [limits.shell] timeout (600 s); there is no Python-only timeout\n"
+        );
+        assert_eq!(
+            python_disclosure(&names, None).lines().last(),
+            Some(
+                "strands-box: [tool.python3]: [limits.shell] timeout is off, so a python3 or \
+                 python call runs until it exits; there is no Python-only timeout"
+            )
         );
     }
 

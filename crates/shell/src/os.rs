@@ -1227,6 +1227,12 @@ pub type HostSpawnFuture =
 /// The absolute file each bare name runs, looked up after the Shell's own programs and before `PATH`.
 pub type HostPrograms = std::sync::Arc<std::collections::BTreeMap<String, std::path::PathBuf>>;
 
+/// The Shell commands, such as `python3`, whose declared [`HostPrograms`] file runs in their place.
+pub type ReplacedCommands = std::sync::Arc<std::collections::BTreeSet<String>>;
+
+/// The bare names the Shell refuses to run, each with the reason it prints.
+pub type RefusedCommands = std::sync::Arc<std::collections::BTreeMap<String, String>>;
+
 /// One resolved host-binary spawn request handed to a [`HostSpawner`].
 pub struct HostSpawn {
     /// The resolved absolute path of the program to run.
@@ -1517,6 +1523,21 @@ pub trait Kernel: Send + Sync {
 
     /// The declared file a bare `name` runs, which is not found when it is gone, or `None` for `PATH`.
     fn host_program(&self, _name: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// Whether the declared file of `name` runs in place of the Shell's own command of that name.
+    /// Builtins and functions keep precedence either way.
+    fn replaces_command(&self, _name: &str) -> bool {
+        false
+    }
+
+    /// The reason the Shell refuses to run the bare name `name`, or `None` to run it as usual.
+    ///
+    /// A refused name exits 126 with `strands-shell: {name}: {reason}` before builtins, the
+    /// Shell's own commands, functions, declared files, `PATH` or any policy decision are
+    /// consulted. A spelling with a `/` is never refused here.
+    fn refused_command(&self, _name: &str) -> Option<String> {
         None
     }
 }

@@ -65,6 +65,10 @@ pub struct VfsKernel {
     pub host_spawner: Option<crate::os::HostSpawner>,
     /// The file each declared bare name runs, which `host_program` answers.
     pub host_programs: crate::os::HostPrograms,
+    /// The Shell commands whose declared file runs in their place, which `replaces_command` answers.
+    pub replaced_commands: crate::os::ReplacedCommands,
+    /// The bare names refused with a reason, which `refused_command` answers.
+    pub refused_commands: crate::os::RefusedCommands,
     resolution_generation: Arc<Mutex<u64>>,
     pending_writes: std::sync::Mutex<Vec<PendingWrite>>,
 }
@@ -88,6 +92,8 @@ impl VfsKernel {
             script_interpreter: None,
             host_spawner: None,
             host_programs: crate::os::HostPrograms::default(),
+            replaced_commands: crate::os::ReplacedCommands::default(),
+            refused_commands: crate::os::RefusedCommands::default(),
             resolution_generation: Arc::new(Mutex::new(0)),
             pending_writes: std::sync::Mutex::new(Vec::new()),
         }
@@ -2252,6 +2258,16 @@ impl Kernel for VfsKernel {
 
     fn host_program(&self, name: &str) -> Option<std::path::PathBuf> {
         self.host_programs.get(name).cloned()
+    }
+
+    fn replaces_command(&self, name: &str) -> bool {
+        // A replaced name with no declared file keeps the Shell's own command, so it never falls
+        // through to the host `PATH`.
+        self.replaced_commands.contains(name) && self.host_programs.contains_key(name)
+    }
+
+    fn refused_command(&self, name: &str) -> Option<String> {
+        self.refused_commands.get(name).cloned()
     }
 }
 

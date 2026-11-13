@@ -484,6 +484,7 @@ impl RunContract {
         Ok(ConfigureRequest {
             record: Record {
                 version: record_version(
+                    self.file.monty,
                     self.file.file_attributes,
                     &self.file.experimental_features,
                     &self.file.limits,
@@ -502,6 +503,7 @@ impl RunContract {
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 file_attributes: self.file.file_attributes,
+                monty: self.file.monty,
                 gateway: self.file.gateway.clone(),
                 limits: self.file.limits.clone(),
                 box_id: root.box_id().to_string(),
@@ -569,6 +571,10 @@ pub(crate) struct Record {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub(crate) file_attributes: bool,
+    /// Whether a bare `python3` or `python` in the Shell runs Monty, Box's Python subset. Stored only
+    /// when off, so a Monty-on record serializes as it did before the key existed.
+    #[serde(default = "monty_default", skip_serializing_if = "is_true")]
+    pub(crate) monty: bool,
     /// The box-wide egress gateway settings.
     #[serde(default, skip_serializing_if = "Gateway::is_default")]
     pub(crate) gateway: Gateway,
@@ -667,6 +673,50 @@ const UPGRADE_HTTP_RECORD_VERSION: u32 = 32;
 /// The record version of a record that sets `limits.shell.max_stdin`, so an older build refuses the
 /// box rather than resuming it with the default stdin limit.
 const SHELL_STDIN_LIMIT_RECORD_VERSION: u32 = 33;
+/// The record version of a record that sets `monty = false`, so an older build refuses the box
+/// rather than resuming it with a bare `python3` running Monty.
+const MONTY_OFF_RECORD_VERSION: u32 = 34;
+
+/// `monty` is on unless the operator writes `monty = false`.
+fn monty_default() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+/// The two `[tool.<name>]` labels that answer to a bare `python3` and `python` when Monty is off.
+pub(crate) const PYTHON_TABLES: [&str; 2] = ["python3", "python"];
+
+/// Refuse a Monty-off config whose `[tool.python3]` and `[tool.python]` name different commands.
+/// The paths are compared as written, not the files they link to: two venvs can link to one file
+/// and still load different packages.
+fn validate_python_tables(
+    monty: bool,
+    tool: &BTreeMap<String, ProcessSpec>,
+) -> Result<(), ConfigError> {
+    if monty {
+        return Ok(());
+    }
+    let (Some(python3), Some(python)) = (tool.get("python3"), tool.get("python")) else {
+        return Ok(());
+    };
+    let (Some(first), Some(second)) = (python3.command.first(), python.command.first()) else {
+        return Ok(());
+    };
+    if first != second {
+        return Err(ConfigError::Process {
+            table: "[tool.python]".to_string(),
+            reason: format!(
+                "its command `{second}` differs from [tool.python3]'s `{first}`; with \
+                 monty = false both tables answer to python3 and python, so they must name \
+                 the same command"
+            ),
+        });
+    }
+    Ok(())
+}
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -711,6 +761,7 @@ impl ExperimentalFeatures {
 /// The highest record version required by the features a record holds.
 #[allow(clippy::too_many_arguments)]
 fn record_version<'a>(
+    monty: bool,
     file_attributes: bool,
     features: &ExperimentalFeatures,
     limits: &Limits,
@@ -720,7 +771,9 @@ fn record_version<'a>(
     has_backend: bool,
     gateway: &Gateway,
 ) -> u32 {
-    if limits.shell.has_stdin_limit() {
+    if !monty {
+        MONTY_OFF_RECORD_VERSION
+    } else if limits.shell.has_stdin_limit() {
         SHELL_STDIN_LIMIT_RECORD_VERSION
     } else if !gateway.is_default() {
         UPGRADE_HTTP_RECORD_VERSION
@@ -1009,6 +1062,7 @@ impl Record {
             SHELL_SIZE_LIMITS_RECORD_VERSION,
             UPGRADE_HTTP_RECORD_VERSION,
             SHELL_STDIN_LIMIT_RECORD_VERSION,
+            MONTY_OFF_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1023,6 +1077,7 @@ impl Record {
             source,
         })?;
         let expected = record_version(
+            record.monty,
             record.file_attributes,
             &record.experimental_features,
             &record.limits,
@@ -1084,7 +1139,7 @@ impl Record {
                 self.experimental_features.native_filesystem_policy,
             )?;
         }
-        Ok(())
+        validate_python_tables(self.monty, &self.tool)
     }
 
     /// The stored `[egress.a]` entries and the remote MCP servers as validated routes, one per
@@ -1317,6 +1372,11 @@ struct ConfigFile {
     /// and ACLs. Linux accepts the key and renders nothing for it.
     #[serde(default, rename = "file-attributes")]
     file_attributes: bool,
+    /// Whether a bare `python3` or `python` in the Shell runs Monty, Box's Python subset. With
+    /// `monty = false`, both names go to `[tool.python3]` or `[tool.python]`, and with neither they
+    /// are refused.
+    #[serde(default = "monty_default")]
+    monty: bool,
     /// The box-wide egress gateway settings.
     #[serde(default)]
     gateway: Gateway,
@@ -1419,6 +1479,7 @@ impl ConfigFile {
                 self.experimental_features.tool_grammars,
             )?;
         }
+        validate_python_tables(self.monty, &self.tool)?;
         for (name, contained) in crate::record::config::mcp::contained_specs(&self.mcp) {
             contained.spec.validate(&format!("[mcp.{name}]"))?;
             contained.spec.validate_native_policy(
@@ -1501,6 +1562,7 @@ mod tests {
                     stored.limits = limits;
                     assert_eq!(
                         record_version(
+                            stored.monty,
                             stored.file_attributes,
                             &stored.experimental_features,
                             &stored.limits,
@@ -1553,6 +1615,7 @@ mod tests {
         stored.mcp[0].argument_wildcards = true;
         assert_eq!(
             record_version(
+                stored.monty,
                 stored.file_attributes,
                 &stored.experimental_features,
                 &stored.limits,
@@ -1683,6 +1746,7 @@ mod tests {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
@@ -1814,6 +1878,7 @@ mod tests {
                         for servers in [&[][..], shared.mcp.as_slice()] {
                             assert_eq!(
                                 record_version(
+                                    true,
                                     file_attributes,
                                     &features,
                                     &limits,
@@ -2014,6 +2079,163 @@ native-filesystem-policy = false
         );
         let ordinary = toml::to_string(&record(None, BTreeMap::new())).unwrap();
         assert!(!ordinary.contains("file-attributes"), "{ordinary}");
+    }
+
+    #[test]
+    fn the_monty_key_is_on_by_default_and_an_explicit_value_is_accepted() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        let absent = ConfigFile::parse(required, Path::new("box.toml")).unwrap();
+        assert!(absent.monty);
+        let off = ConfigFile::parse(&format!("monty = false\n{required}"), Path::new("box.toml"))
+            .unwrap();
+        assert!(!off.monty);
+        let on =
+            ConfigFile::parse(&format!("monty = true\n{required}"), Path::new("box.toml")).unwrap();
+        assert!(on.monty);
+    }
+
+    #[test]
+    fn monty_is_refused_when_misspelled_or_not_a_boolean() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        for text in [
+            format!("monty = \"no\"\n{required}"),
+            format!("monty = 0\n{required}"),
+            format!("Monty = false\n{required}"),
+            format!("{required}[experimental-features]\nmonty = false\n"),
+        ] {
+            assert!(
+                ConfigFile::parse(&text, Path::new("box.toml")).is_err(),
+                "{text} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn monty_off_is_stored_at_its_record_version_and_round_trips() {
+        let stored =
+            record_from_config("monty = false\n[tool.python3]\ncommand = [\"/usr/bin/python3\"]\n")
+                .expect("the configuration loads");
+        assert!(!stored.monty);
+        assert_eq!(stored.version, MONTY_OFF_RECORD_VERSION);
+        let encoded = toml::to_string(&stored).unwrap();
+        assert!(encoded.contains("monty = false"), "{encoded}");
+        assert_eq!(
+            Record::parse(&encoded, Path::new("record.toml")).unwrap(),
+            stored
+        );
+
+        let on = record_from_config("monty = true\n").expect("the configuration loads");
+        assert!(on.monty);
+        assert_eq!(on.version, RECORD_VERSION);
+        let ordinary = toml::to_string(&on).unwrap();
+        assert!(!ordinary.contains("monty"), "{ordinary}");
+    }
+
+    #[test]
+    fn the_monty_key_cannot_hide_in_a_legacy_record() {
+        let mut stored = record(None, BTreeMap::new());
+        stored.monty = false;
+        let forged = toml::to_string(&stored).unwrap();
+        assert!(forged.contains("monty = false"), "{forged}");
+        for found in [
+            RECORD_VERSION,
+            EXPERIMENTAL_RECORD_VERSION,
+            PROCESS_POLICY_RECORD_VERSION,
+            SHARED_PROGRAM_RECORD_VERSION,
+            FILE_ATTRIBUTES_RECORD_VERSION,
+            MCP_ARGUMENT_WILDCARDS_RECORD_VERSION,
+            LIMITS_RECORD_VERSION,
+            MCP_ABSOLUTE_COMMAND_RECORD_VERSION,
+            INGRESS_RECORD_VERSION,
+            BACKEND_RECORD_VERSION,
+            SHELL_SIZE_LIMITS_RECORD_VERSION,
+            UPGRADE_HTTP_RECORD_VERSION,
+            SHELL_STDIN_LIMIT_RECORD_VERSION,
+        ] {
+            stored.version = found;
+            assert!(
+                matches!(
+                    Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion {
+                        found: refused,
+                        expected: MONTY_OFF_RECORD_VERSION
+                    }) if refused == found
+                ),
+                "version {found}"
+            );
+        }
+        stored.version = MONTY_OFF_RECORD_VERSION;
+        assert_eq!(
+            Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")).unwrap(),
+            stored
+        );
+    }
+
+    /// The `[tool.python3]` and `[tool.python]` tables of a config, with `monty` as given.
+    fn python_tables(monty: bool, python3: &str, python: &str) -> String {
+        format!(
+            "monty = {monty}\nname = \"codex\"\nbox_dir = \"/var/lib/box\"\n\
+             [tool.python3]\ncommand = [{python3:?}]\n\
+             [tool.python]\ncommand = [{python:?}]\n"
+        )
+    }
+
+    #[test]
+    fn with_monty_off_two_python_tables_with_different_commands_are_refused() {
+        let text = python_tables(
+            false,
+            "/Users/me/a/.venv/bin/python3",
+            "/Users/me/b/.venv/bin/python3",
+        );
+        let refused = ConfigFile::parse(&text, Path::new("box.toml"));
+        assert!(
+            matches!(
+                &refused,
+                Err(ConfigError::Process { table, reason })
+                    if table == "[tool.python]"
+                        && reason.contains("[tool.python3]")
+                        && reason.contains("/Users/me/a/.venv/bin/python3")
+                        && reason.contains("/Users/me/b/.venv/bin/python3")
+            ),
+            "{refused:?}"
+        );
+
+        let mut stored = record(None, BTreeMap::new());
+        stored.monty = false;
+        stored.version = MONTY_OFF_RECORD_VERSION;
+        let parsed = ConfigFile::parse(&text.replacen("false", "true", 1), Path::new("box.toml"))
+            .expect("Monty on does not compare the tables");
+        stored.tool = parsed.tool;
+        assert!(
+            matches!(
+                Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")),
+                Err(ConfigError::Process { table, .. }) if table == "[tool.python]"
+            ),
+            "a stored record is judged the same way"
+        );
+    }
+
+    #[test]
+    fn two_python_tables_are_accepted_when_their_commands_match_or_monty_is_on() {
+        let same = "/Users/me/py-runtime/.venv/bin/python3";
+        assert!(
+            ConfigFile::parse(&python_tables(false, same, same), Path::new("box.toml")).is_ok()
+        );
+        // Compared as written: the same file through another spelling is a different command.
+        assert!(
+            ConfigFile::parse(
+                &python_tables(false, same, "/Users/me/py-runtime/.venv/bin/../bin/python3"),
+                Path::new("box.toml"),
+            )
+            .is_err()
+        );
+        assert!(
+            ConfigFile::parse(
+                &python_tables(true, same, "/opt/homebrew/bin/python3"),
+                Path::new("box.toml"),
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -2875,7 +3097,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, SHELL_STDIN_LIMIT_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, MONTY_OFF_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

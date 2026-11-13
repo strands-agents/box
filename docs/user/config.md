@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries twelve keys. `name` and `box_dir` are required.
+The file carries thirteen keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -81,11 +81,12 @@ The file carries twelve keys. `name` and `box_dir` are required.
 | `[mcp.<name>]` | tables | The MCP servers this box declares. |
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
+| `monty` | boolean | Whether a bare `python3` or `python` in the Shell runs Monty, Box's Python subset. `true` by default. See [`monty`](#monty). |
 | `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, and ingress. Each is disabled by default. |
 | `[limits]` | table | Execution limits for Strands Shell. |
 | `[gateway]` | table | Settings for every request through the egress gateway: `upgrade_http`, the hosts whose plain `http://` on port 80 the gateway sends as `https://` on port 443. See [`[gateway]`](#gateway). |
 
-The example uses five of the twelve: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the thirteen: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -177,6 +178,38 @@ still fails to restore the owner and the flags. Extract it with `tar -x --no-mac
 The box prints one line for each process the switch applies to, in the startup disclosure:
 `strands-box: [agent] file attributes: may set file times, set-user-ID and set-group-ID bits, the
 group, the owner, and access control lists on files in its writable grants`. Linux prints no line.
+
+## `monty`
+
+By default, a bare `python3` or `python` in the Shell runs Monty, Box's built-in Python subset.
+`monty = false` turns that off. The key goes at the top of the file, above the first table:
+
+```toml
+monty = false
+
+[tool.python3]
+command = ["/Users/me/py-runtime/.venv/bin/python3"]
+```
+
+With `monty = false`, every bare `python3` and `python` goes to `[tool.python3]` or
+`[tool.python]`, and nothing falls back to Monty. See
+[`[tool.<name>]` selection](#toolname-selection) for which table answers. With neither table,
+both names exit 126 with `Monty is off (monty = false) and no [tool.python3] or [tool.python] is
+declared`, so `monty = false` alone means no Python in the box.
+
+The default is `true`. To keep Monty, leave the key out. Box accepts `monty = true`, but a Box
+build without the key refuses the file with `unknown field 'monty'` whatever its value. A box that
+sets `monty = false` stores its record at version 34, and an older build refuses to resume it, so
+it can't quietly run Monty instead.
+
+`run` prints what a bare `python3` and `python` run, in the startup disclosure:
+
+| Configuration | Startup lines |
+|---|---|
+| Monty on | `strands-box: a bare python3 or python in the Shell runs Monty, Box's Python subset` |
+| Monty on, with a Python table | Also ``strands-box: [tool.python3]: not used for a bare python3 or python, because Monty is on. Set monty = false at the top of box.toml to use it`` |
+| Monty off, no Python table | `strands-box: Monty is off (monty = false) and no [tool.python3] or [tool.python] is declared, so python3 and python exit 126` |
+| Monty off, with a Python table | ``strands-box: [tool.python3]: a bare `python3` in the Shell runs <file>, in place of Monty``, the same for `python`, and two lines on what real Python costs: the `fs:write` rules in `policy.dw` don't apply inside Python, and each call is bounded by [`[limits.shell] timeout`](#limits), with no Python-only timeout |
 
 ## `[limits]`
 
@@ -655,6 +688,16 @@ write = ["~/box-tutorial/my-project"]
 
 A `shell:spawn` permit that admits `git` goes with the table, which by itself starts nothing.
 
+`python3` and `python` are Shell commands, so the last part of a tool's program doesn't name them.
+With [`monty = false`](#monty), they answer by table name instead: `[tool.python3]` or
+`[tool.python]` answers to both, whatever its `command` file is called. When both tables exist,
+their `command` paths must be the same as written, or the configuration is refused with
+``invalid `[tool.python]` table: its command `<path>` differs from [tool.python3]'s `<path>` ``.
+Box compares the paths as written, not the files they link to, because two venvs can link to the
+same file and still load different packages. A versioned name such as `python3.14` is not a Shell
+command; it answers to a tool whose file has that name, as any other program does. With Monty on,
+a `[tool.python3]` or `[tool.python]` doesn't change what a bare `python3` or `python` runs.
+
 A list entry that names a credential store gives the selected tool the operator's long-lived
 credential bytes. To give a tool a secret, bind it with an `[egress.<name>] secret.ref`, and keep a
 tool's `env` for non-secret literals.
@@ -1007,6 +1050,8 @@ five `[[agent.ingress]]` entries, an `[[agent.ingress]] listen` that is not an I
 port of 0, two entries with one `listen` port or one `workload_port`, and on macOS a `listen` port
 equal to any entry's `workload_port`.
 An invalid `limits.shell.timeout`, `limits.shell.max_input`, `limits.shell.max_output`, or `limits.shell.max_stdin` is also a parse error.
+So are a `monty` that is not a boolean, and, with `monty = false`, a `[tool.python3]` and a
+`[tool.python]` whose `command` paths differ.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload

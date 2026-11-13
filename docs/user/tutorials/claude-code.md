@@ -224,6 +224,7 @@ lines are cut here:
 
 ```text
 strands-box: box box-e0aeff88e5629649 created · config claude-code/box.toml
+strands-box: a bare python3 or python in the Shell runs Monty, Box's Python subset
 strands-box: starting workload
 strands-box: [agent] runs /Users/you/.local/share/claude/versions/2.1.292 with no policy decision over these paths:
   read        /Users/you/.local/share/claude/versions

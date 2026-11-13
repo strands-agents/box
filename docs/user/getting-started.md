@@ -329,6 +329,7 @@ looks like this:
 
 ```text
 strands-box: box box-4a4cdb2b114ab6ce created · config my-box/box.toml
+strands-box: a bare python3 or python in the Shell runs Monty, Box's Python subset
 strands-box: starting workload
 strands-box: [agent] runs /opt/homebrew/Cellar/node/26.5.0/bin/node with no policy decision over these paths:
   read        /opt/homebrew/lib/node_modules/@strands-agents/cli

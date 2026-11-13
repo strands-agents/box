@@ -36,6 +36,8 @@ mod r#true;
 mod uniq;
 mod wc;
 
+pub use python::REAL_PYTHON_HINT;
+
 use std::future::Future;
 use std::pin::Pin;
 

@@ -207,6 +207,7 @@ runtime minimum lines are cut here:
 
 ```text
 strands-box: box box-5c8d2fcc54cb914a created · config codex/box.toml
+strands-box: a bare python3 or python in the Shell runs Monty, Box's Python subset
 strands-box: starting workload
 strands-box: [agent] runs /opt/homebrew/lib/node_modules/@openai/codex/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex with no policy decision over these paths:
   read        /Users/you/box-tutorial/codex/home

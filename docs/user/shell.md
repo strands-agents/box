@@ -68,9 +68,10 @@ operator's home, the agent's home, and the workspace. The last case covers `/` a
 the Shell holds only in memory. If the alias can't tell which directory it was run from, or the
 directory's name isn't valid UTF-8, it exits `125` and runs nothing.
 
-The `python3` and `python` aliases send their arguments to the Shell's own `python3` and `python`
-commands, as [Python in a box](./monty.md#running-a-script) describes. They forward no standard
-input: the command reads its input as empty.
+The `python3` and `python` aliases send their arguments to the Shell's `python3` and `python`, as
+[Python in a box](./monty.md#running-a-script) describes. They forward no standard input: the
+command reads its input as empty. By default those names run Monty. With `monty = false` they run
+the Python tool instead, as [Real Python](#real-python) describes.
 
 ## What runs where
 
@@ -94,6 +95,7 @@ The Shell implements these, each in place of a program of the same name on the `
 - Files: `ls`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `ln`, `chmod`, `touch`, `mktemp`, `readlink`.
 - Data and network: `jq`, `curl`.
 - Interpreters: `lua`, and `python` and `python3`, which run in Monty, Box's Python interpreter.
+  With `monty = false`, `python` and `python3` aren't the Shell's own: see [Real Python](#real-python).
 
 Paths outside the operator's home, the agent's home, and the workspace, such as `/tmp`, exist only
 in the Shell's memory, for one command. A file written to `/tmp` is gone when the command ends.
@@ -336,6 +338,66 @@ strands-box: [tool.brew_node], [tool.node]: these tables run different program p
 A name changes only which file runs. The spawn still needs a `shell:spawn` permit, or a grammar
 action permit when a tool grammar binds the file, and `program` is still the name the agent typed.
 
+`run` also says what a bare `python3` runs. With Monty on, the default, it prints this line last:
+
+```text
+strands-box: a bare python3 or python in the Shell runs Monty, Box's Python subset
+```
+
+### Real Python
+
+`python3` and `python` are the Shell's own commands, and run Monty, unless the operator takes three
+steps:
+
+1. Write `monty = false` at the top of `box.toml`, before any table. To keep Monty, leave the key
+   out. A Box build without this key refuses the file with `unknown field 'monty'`.
+2. Declare `[tool.python3]` or `[tool.python]`. Either table answers to both `python3` and
+   `python`; the table's name decides, not the file name at the end of its `command`. If both
+   tables are declared, their `command` paths must be the same as written, or Box refuses to start.
+3. Permit `shell:spawn` on the tool's file.
+
+```toml
+monty = false
+
+[tool.python3]
+command = ["/Users/me/py-runtime/.venv/bin/python3"]
+```
+
+```cedar
+permit (principal, action == Box::Action::"shell:spawn", resource)
+when { context.input.program_path == "/Users/me/py-runtime/.venv/bin/python3" };
+```
+
+With Monty off, every `python3` and `python` the agent types, and every call through the `python3`
+and `python` aliases, runs the tool's file. Nothing falls back to Monty:
+
+- With no Python table, both names exit `126` with
+  `Monty is off (monty = false) and no [tool.python3] or [tool.python] is declared`. So
+  `monty = false` alone means no Python in the box. `command -v` and `type` find nothing.
+- With no `shell:spawn` permit for the file, both names exit `126` with `[default-deny]`.
+
+Only `python3` and `python` change. A versioned name such as `python3.12` is a separate program,
+which runs only under its own `[tool]` table and `shell:spawn` permit. Scripts in a venv's `bin/`,
+such as `pytest` or `pip`, don't answer by name either: a bare `pytest` exits `126` with
+`no tool runs`, so the agent runs `python3 -m pytest`.
+
+With a Python table and Monty on, Box leaves the table unused for `python3` and `python`, and `run`
+says so:
+
+```text
+strands-box: [tool.python3]: not used for a bare python3 or python, because Monty is on. Set monty = false at the top of box.toml to use it
+```
+
+With Monty off and a Python table, `run` names the file instead, and states what Monty did that the
+tool doesn't:
+
+```text
+strands-box: [tool.python3]: a bare `python` in the Shell runs /Users/me/py-runtime/.venv/bin/python3, in place of Monty
+strands-box: [tool.python3]: a bare `python3` in the Shell runs /Users/me/py-runtime/.venv/bin/python3, in place of Monty
+strands-box: [tool.python3]: the fs:write rules in policy.dw don't apply inside Python; it writes its write grants directly
+strands-box: [tool.python3]: each python3 or python call is bounded by [limits.shell] timeout (30 s); there is no Python-only timeout
+```
+
 ## `curl`
 
 `curl` sends each request through the egress gateway, which decides `net:connect` and
@@ -356,6 +418,8 @@ refuses makes `curl` exit non-zero.
 | `126` | Policy refused the directory the alias was run from, it isn't a directory, or it is outside the operator's home, the agent's home, and the workspace. Nothing ran. | `strands-box: cannot start in <directory>: <error>` |
 | `126` | Policy refused the command. | `strands-shell: effect denied: policy denied this operation on '<program>'`, then `[policy: <id>]` or `[default-deny]`. A tool grammar action reads the same way. |
 | `126` | A tool grammar binds the program file, and Box refused the spawn before any rule decided it. | `strands-shell: effect denied: policy denied this operation on '<program>' [tool-grammar]: <reason>. No policy can permit it.` |
+| `126` | `monty = false`, and no `[tool.python3]` or `[tool.python]` is declared, so `python3` and `python` have nothing to run. No policy decision is made. See [Real Python](#real-python). | `strands-shell: <python3 or python>: Monty is off (monty = false) and no [tool.python3] or [tool.python] is declared` |
+| `126` | `monty = false` and a Python tool is declared, but no `shell:spawn` permit matches its file. Monty doesn't run instead. | `strands-shell: effect denied: policy denied this operation on '<file>'`, then `[default-deny]` |
 | `126` | Policy permitted a program, and nothing in [Configuration](#configuration) covers it. | ``strands-shell: <program>: no tool runs <path>: no `[tool.<name>] command` matches this program and its leading arguments`` |
 | `126` | The launch directory differs from the directory policy checked. Run the command again. | `strands-shell: <program>: the tool working directory does not match the policy-approved directory` |
 | `127` | The program is not in the Shell, and not on the `PATH`. | `strands-shell: <program>: command not found` |

@@ -345,12 +345,22 @@ fn abort_error(aborted: Result<RunProgress, MontyException>) -> MontyException {
 }
 
 /// A script that raised, reported the way CPython reports one.
+///
+/// A failed import is the usual sign the agent wanted a package Monty doesn't have, so its hint
+/// says how the operator turns real Python on instead of pointing at the docs.
 fn raised(exception: &MontyException, captured: String) -> PythonOutcome {
+    let hint = match exception.exc_type() {
+        ExcType::ModuleNotFoundError | ExcType::ImportError => format!(
+            "this box's Python is Monty, Box's built-in Python subset. {}",
+            strands_shell::commands::REAL_PYTHON_HINT
+        ),
+        _ => "this box's Python is Monty, a subset — see the box's docs".to_string(),
+    };
     PythonOutcome {
         status: SCRIPT_RAISED_STATUS,
         stdout: captured,
         stderr: format!(
-            "{}: {}\n(this box's Python is Monty, a subset — see the box's docs)\n",
+            "{}: {}\n({hint})\n",
             exception.exc_type(),
             exception.message().unwrap_or_default()
         ),
@@ -443,6 +453,42 @@ mod tests {
             outcome.stdout.contains("caught"),
             "the except branch ran: stdout={}",
             outcome.stdout
+        );
+    }
+
+    /// A failed import says how the operator turns real Python on, and keeps naming Monty.
+    #[tokio::test]
+    async fn a_failed_import_says_how_to_run_real_python() {
+        let policy = permissive();
+        for source in ["import numpy", "from json import not_a_name"] {
+            let outcome = run_script(source, &policy).await;
+
+            assert_eq!(outcome.status, SCRIPT_RAISED_STATUS, "{}", outcome.stderr);
+            assert!(
+                outcome.stderr.contains("Error: "),
+                "an import error: {}",
+                outcome.stderr
+            );
+            assert!(
+                outcome.stderr.ends_with(&format!(
+                    "(this box's Python is Monty, Box's built-in Python subset. {})\n",
+                    strands_shell::commands::REAL_PYTHON_HINT
+                )),
+                "{}",
+                outcome.stderr
+            );
+        }
+    }
+
+    /// Any other raise keeps the plain footer, with no real-Python hint.
+    #[tokio::test]
+    async fn another_raise_keeps_the_plain_footer() {
+        let outcome = run_script("raise ValueError('x')", &permissive()).await;
+
+        assert_eq!(outcome.status, SCRIPT_RAISED_STATUS, "{}", outcome.stderr);
+        assert_eq!(
+            outcome.stderr,
+            "ValueError: x\n(this box's Python is Monty, a subset — see the box's docs)\n"
         );
     }
 
