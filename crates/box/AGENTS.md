@@ -309,7 +309,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   `record::config::filesystem::a_credential_store_is_granted_only_when_named_exactly` pins. A prefix
   of a store, or a parent of one, stays refused. `Reach` reads the same rows through
   `containment::credential_store_anchors`, so the interpreters refuse each store beneath policy,
-  except a path that an `[agent]` `read` or `write` entry names, where policy still decides; see
+  except a path that an `[agent]` `read` or `write` entry names (or, for a store under a declared
+  `env.HOME`, an entry enclosing it, which the sandbox also grants), where policy still decides; see
   [the interpreters meet the sandbox's credential floor](../../docs/design/decisions.md#no-credential-floor-sits-beneath-the-interpreters).
 - **The authored policy is the only authorizer, at all three enforcement points.** Box builds
   three adapters over the one `Arc<PolicyEngine>`: `EgressPolicyInterceptor` for the proxy (`net:*`),

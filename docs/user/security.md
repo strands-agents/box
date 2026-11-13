@@ -66,14 +66,14 @@ resolves to an authority source that this run loaded, which no policy may open o
 ```
 
 The second rule protects credential stores, such as `~/.ssh`, `~/.aws`, a keychain, or a browser
-profile. These are the stores the agent's own grants can never enclose. Strands Shell and Monty
+profile, under the operator's home: the stores the agent's own grants can never enclose. Strands Shell and Monty
 refuse to read or change a path in one, and refuse to change a directory that holds one, even when
 a policy permits every path under the home. To let the interpreters use a store, name the store, or
 a path inside it, in an `[agent.filesystem]` `read` or `write` entry, and permit the access in your
 policy. A `read` entry lifts the refusal for reads, and a `write` entry lifts it for changes, but not
 for a move of the store's content to a path outside that entry. A `deny` entry inside
 the store keeps that path closed. The entry also lets the agent itself reach the store, and
-`box run` prints it at startup. A `write` entry also lets the agent's own system calls move the
+`box run` prints it at startup. When `[agent] env.HOME` names its own directory, its stores follow the agent's grant on that home: a `read` or `write` entry on the home lifts the refusal for its stores too, because the agent's own system calls already reach them. A `write` entry also lets the agent's own system calls move the
 store's files to any other path the agent can write, and Strands Shell and Monty can read a file
 there, so treat a `write` entry on a store as exposing what the store holds. Box refuses a store
 under every spelling the file system treats as the same name, including one created after the box

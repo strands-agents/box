@@ -714,7 +714,8 @@ Strands Shell and Monty refuse a path in a credential store, such as `~/.aws`, `
 or a browser profile, whatever the policy permits. The two routes read one store list, which
 `containment::credential_store_anchors` returns. A `read` or `write` entry in `[agent.filesystem]`
 that names a store or a path inside it lifts this floor for that path, and policy still decides each
-access. An authored `forbid` on the store paths was the alternative, but it lost: the sandbox
+access. For a store under a declared `env.HOME`, an entry on that home lifts it too, because the
+sandbox grants it there. An authored `forbid` on the store paths was the alternative, but it lost: the sandbox
 refuses these stores in every box, so a policy without the `forbid` left the interpreters weaker than
 the agent's own system calls. A startup warning lost because it leaves the read possible. The cost:
 the floor covers only the listed stores, so a broad permit still reaches everything else the operator

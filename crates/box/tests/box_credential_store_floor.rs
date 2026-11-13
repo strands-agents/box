@@ -66,9 +66,10 @@ fn a_home_wide_permit_reaches_no_credential_store_through_either_interpreter() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let box_ = Request::with_policy("credential-floor", HOME_WIDE_POLICY).expect();
-    let home = box_.box_home();
+    let request = Request::with_policy("credential-floor", HOME_WIDE_POLICY).without_agent_home();
+    let home = request.operator_home().to_path_buf();
     plant(&home);
+    let box_ = request.expect();
 
     let notes = shell_read(&box_, &home.join("notes.txt"));
     assert!(
@@ -285,4 +286,46 @@ fn a_prepared_directory_cannot_be_renamed_onto_an_absent_store() {
             "{target}: the store holds a plant"
         );
     }
+}
+
+#[test]
+fn a_declared_home_granted_to_the_agent_lifts_the_floor_for_its_own_stores() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    // The fixture declares `env.HOME` as its own directory and grants it `read` and `write`, so the
+    // sandbox already reaches that home's `.aws`. The interpreters must match, while an
+    // operator-home store stays refused.
+    let request = Request::with_policy("credential-declared", HOME_WIDE_POLICY);
+    let operator = request.operator_home().to_path_buf();
+    plant(&operator);
+    let box_ = request.expect();
+    let declared = box_.box_home();
+    std::fs::create_dir_all(declared.join(".aws")).expect("a store in the declared home");
+    std::fs::write(
+        declared.join(".aws/config"),
+        "[default]\nregion = us-west-2\n",
+    )
+    .expect("a declared-home config");
+
+    for seen in [
+        shell_read(&box_, &declared.join(".aws/config")),
+        python_read(&box_, &declared.join(".aws/config")),
+    ] {
+        assert!(
+            seen.contains("us-west-2"),
+            "the declared home's store must read: {seen}"
+        );
+    }
+    let append = python_append(&box_, &declared.join(".aws/config"));
+    assert!(
+        append.contains("APPEND-OK"),
+        "the declared home's store must take a write: {append}"
+    );
+    let key = python_read(&box_, &operator.join(".ssh/id_rsa"));
+    assert!(!key.contains(KEY), "an operator-home store opened: {key}");
+    assert!(
+        key.contains("credential store"),
+        "the refusal must name the floor: {key}"
+    );
 }

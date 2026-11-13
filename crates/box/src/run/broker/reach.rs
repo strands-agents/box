@@ -68,6 +68,9 @@ pub(super) struct Reach {
     /// The agent's `deny` entries inside a credential store, case-folded.
     credential_store_denials: Vec<PathBuf>,
 
+    /// The stores under a declared `[agent] env.HOME` that are not also operator-home stores, folded.
+    declared_home_stores: Vec<PathBuf>,
+
     commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
     installation: Option<std::sync::Arc<crate::run::installation::TrustedInstallation>>,
 
@@ -173,6 +176,18 @@ impl Reach {
                 }
             }
         }
+        // The sandbox anchors its floor at the operator home, so a list entry that encloses one of
+        // these is a sandbox grant, and the interpreters lift their floor for it the same way.
+        let operator_stores = shared
+            .as_deref()
+            .map(containment::credential_store_anchors)
+            .unwrap_or_default();
+        let declared_home_stores: Vec<PathBuf> =
+            containment::credential_store_anchors(&canonical_home)
+                .into_iter()
+                .filter(|store| !operator_stores.contains(store))
+                .map(|store| folded(&store))
+                .collect();
         let mut resolver = PathResolver::over(roots).map_err(|refusal| {
             invalid_input(format!("the reachable set is unusable: {refusal}"))
         })?;
@@ -227,6 +242,7 @@ impl Reach {
             credential_store_paths: credential_stores,
             credential_store_grants: Vec::new(),
             credential_store_denials: Vec::new(),
+            declared_home_stores,
             commands: std::sync::Arc::default(),
             installation: None,
             shared: shared
@@ -289,8 +305,25 @@ impl Reach {
             let Ok(path) = named.canonicalize() else {
                 continue;
             };
-            // Configuration admits an entry that names a store or a path inside it, never one above it.
+            // Configuration admits an entry that names a store or a path inside it, never one above
+            // an operator-home store. Above a declared home's store, the sandbox grants it too.
             if !self.is_in_a_credential_store(&path) {
+                if subtree {
+                    let enclosing = folded(&path);
+                    let lifted: Vec<PathBuf> = self
+                        .declared_home_stores
+                        .iter()
+                        .filter(|store| store.starts_with(&enclosing))
+                        .cloned()
+                        .collect();
+                    for store in lifted {
+                        self.credential_store_grants.push(CredentialStoreGrant {
+                            path: store,
+                            mutates,
+                            subtree: true,
+                        });
+                    }
+                }
                 continue;
             }
             self.credential_store_grants.push(CredentialStoreGrant {
@@ -493,16 +526,17 @@ impl Reach {
             let spelled = folded(approved);
             // A store that exists now is found where it resolves, whatever spelling made it. Only a
             // directory can hold one, so a change to anything else skips those lookups.
-            let encloses = self
-                .credential_stores
-                .iter()
-                .any(|store| store.starts_with(&spelled))
-                || std::fs::symlink_metadata(approved).is_ok_and(|metadata| metadata.is_dir())
-                    && self.credential_store_paths.iter().any(|store| {
-                        store.canonicalize().is_ok_and(|resolved| {
-                            resolved != approved && resolved.starts_with(approved)
-                        })
-                    });
+            let encloses = self.credential_stores.iter().any(|store| {
+                store.starts_with(&spelled) && self.store_grant(store, true).is_none()
+            }) || std::fs::symlink_metadata(approved)
+                .is_ok_and(|metadata| metadata.is_dir())
+                && self.credential_store_paths.iter().any(|store| {
+                    store.canonicalize().is_ok_and(|resolved| {
+                        resolved != approved
+                            && resolved.starts_with(approved)
+                            && self.store_grant(&resolved, true).is_none()
+                    })
+                });
             if encloses {
                 return Err(Refused::new(reported_as, ENCLOSES_CREDENTIAL_STORE));
             }
@@ -1961,5 +1995,56 @@ mod credential_store_tests {
         fixture
             .read(&granted, "agent-home/.ssh/id_rsa")
             .expect("a store under the declared home reads when an entry names it");
+    }
+
+    #[test]
+    fn an_entry_enclosing_a_declared_home_lifts_the_floor_for_its_stores_only() {
+        let fixture = fixture();
+        let agent_home = fixture.home.join("agent-home");
+        for store in [".aws", ".config/gcloud"] {
+            std::fs::create_dir_all(agent_home.join(store)).expect("a declared-home store");
+        }
+        std::fs::write(agent_home.join(".aws/config"), "[default]\n").expect("a config");
+        let reach = crate::test_support::with_operator_home(&fixture.home, || {
+            Reach::over_box(
+                &agent_home,
+                Some(&fixture.home),
+                None,
+                &fixture.box_root,
+                &[],
+            )
+            .expect("the reachable set is declarable")
+            .with_credential_store_grants([
+                (Grant::Read, "~/agent-home".to_string()),
+                (Grant::Write, "~/agent-home".to_string()),
+            ])
+        });
+        fixture
+            .read(&reach, "agent-home/.aws/config")
+            .expect("the sandbox reaches this store, so the interpreters do too");
+        fixture
+            .change(&reach, "agent-home/.aws/config")
+            .expect("a write entry on the declared home lifts the floor for changes");
+        fixture
+            .change(&reach, "agent-home/.config/settings.json")
+            .expect("a file beside a lifted store changes");
+        fixture
+            .change(&reach, "agent-home/.config")
+            .expect("a directory holding only lifted stores changes");
+        refused_as(
+            fixture.read(&reach, ".ssh/id_rsa"),
+            CREDENTIAL_STORE,
+            "an operator-home store",
+        );
+        refused_as(
+            fixture.change(&reach, ".aws/config"),
+            CREDENTIAL_STORE,
+            "an operator-home store",
+        );
+        refused_as(
+            fixture.change(&reach, ".config"),
+            ENCLOSES_CREDENTIAL_STORE,
+            "a directory holding an operator-home store",
+        );
     }
 }
