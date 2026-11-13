@@ -76,31 +76,58 @@ pub(super) async fn open(
         tx,
         error_flag: Some(Arc::clone(&failed)),
     })?;
-    tokio::task::spawn_local(drain(Arc::clone(&memory.vfs), ino, rx, failed));
+    tokio::task::spawn_local(drain(
+        Arc::clone(&memory.vfs),
+        ino,
+        rx,
+        failed,
+        flags.append,
+    ));
     Ok(fd)
 }
 
-/// Append each chunk as it arrives, keeping the prefix that fits under the cap.
+/// Write each chunk as it arrives at this writer's own position, or at the end for an append,
+/// keeping the prefix that fits under the cap.
 async fn drain(
     vfs: Arc<tokio::sync::Mutex<Vfs>>,
     ino: strands_shell::vfs::Ino,
     mut rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
     failed: Arc<AtomicBool>,
+    append: bool,
 ) {
+    let mut position = 0;
     while let Some(chunk) = rx.recv().await {
         let mut vfs = match vfs.try_lock() {
             Ok(vfs) => vfs,
             Err(_) => vfs.lock().await,
         };
         let cap = vfs.max_file_size;
-        let held = vfs.read_file(ino).map_or(0, <[u8]>::len);
+        let Ok(inode) = vfs.get_mut(ino) else {
+            failed.store(true, Ordering::Relaxed);
+            return;
+        };
+        let InodeData::File(data) = &mut inode.data else {
+            failed.store(true, Ordering::Relaxed);
+            return;
+        };
+        if append {
+            position = data.len();
+        }
         let fits = if cap > 0 {
-            cap.saturating_sub(held).min(chunk.len())
+            cap.saturating_sub(position).min(chunk.len())
         } else {
             chunk.len()
         };
-        let appended = vfs.append_file(ino, &chunk[..fits]);
-        if appended.is_err() || fits < chunk.len() {
+        let end = position + fits;
+        if data.len() < position {
+            data.resize(position, 0);
+        }
+        let overlap = data.len().min(end);
+        data[position..overlap].copy_from_slice(&chunk[..overlap - position]);
+        data.extend_from_slice(&chunk[overlap - position..fits]);
+        inode.mtime = std::time::SystemTime::now();
+        position = end;
+        if fits < chunk.len() {
             failed.store(true, Ordering::Relaxed);
             return;
         }
