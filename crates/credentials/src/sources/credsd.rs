@@ -48,15 +48,40 @@ pub(crate) const CREDSD_SCHEME: &str = "credsd";
 /// The material tag an AWS credential carries.
 pub(crate) const SESSION_CREDENTIALS_TYPE: &str = "session_credentials";
 
-/// The default socket path when neither the caller nor `CREDSD_SOCKET` names one.
+/// The per-user tail beneath `HOME` for the default socket on macOS, where `credsd` runs per user.
 #[cfg(target_os = "macos")]
-const DEFAULT_SOCKET: &str = "/var/run/credsd/credsd.sock";
+const MACOS_DEFAULT_SOCKET_TAIL: &str = "Library/Application Support/credsd/credsd.sock";
 /// The default socket path when neither the caller nor `CREDSD_SOCKET` names one.
 #[cfg(not(target_os = "macos"))]
 const DEFAULT_SOCKET: &str = "/run/credsd/credsd.sock";
 
 /// The environment variable naming the socket, read once at open.
 const SOCKET_VARIABLE: &str = "CREDSD_SOCKET";
+
+/// The platform default socket path: `$HOME/Library/Application Support/credsd/credsd.sock` on
+/// macOS, refusing when `HOME` is unset; a fixed absolute path elsewhere.
+#[cfg(target_os = "macos")]
+fn default_socket() -> Result<PathBuf> {
+    default_socket_from_home(std::env::var_os("HOME").as_deref())
+}
+
+/// The macOS default socket beneath `home`, refusing an absent or empty home with a configuration
+/// error. Split from the environment read so the resolution and the refusal pin without host state.
+#[cfg(target_os = "macos")]
+fn default_socket_from_home(home: Option<&std::ffi::OsStr>) -> Result<PathBuf> {
+    let home = home.filter(|value| !value.is_empty()).ok_or_else(|| {
+        CredentialError::Credential(format!(
+            "cannot locate the default credsd socket: HOME is unset and {SOCKET_VARIABLE} is not set"
+        ))
+    })?;
+    Ok(PathBuf::from(home).join(MACOS_DEFAULT_SOCKET_TAIL))
+}
+
+/// The platform default socket path when neither the caller nor `CREDSD_SOCKET` names one.
+#[cfg(not(target_os = "macos"))]
+fn default_socket() -> Result<PathBuf> {
+    Ok(PathBuf::from(DEFAULT_SOCKET))
+}
 
 /// Resolve the effective credsd socket path — the caller's path, else `CREDSD_SOCKET`, else the
 /// platform default — refusing a relative result with a configuration error.
@@ -65,7 +90,7 @@ pub(crate) fn resolve_credsd_socket(configured: Option<&Path>) -> Result<PathBuf
         Some(path) => path.to_path_buf(),
         None => match std::env::var_os(SOCKET_VARIABLE).filter(|value| !value.is_empty()) {
             Some(value) => PathBuf::from(value),
-            None => PathBuf::from(DEFAULT_SOCKET),
+            None => default_socket()?,
         },
     };
     if path.is_relative() {
@@ -610,11 +635,43 @@ mod tests {
         );
     }
 
-    /// With no configured path and `CREDSD_SOCKET` unset, the platform default (absolute) is used.
+    /// With no configured path and `CREDSD_SOCKET` unset, the non-macOS default is absolute.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn the_default_socket_is_absolute() {
-        let path = PathBuf::from(DEFAULT_SOCKET);
+        let path = default_socket().expect("the platform default");
         assert!(path.is_absolute(), "the platform default must be absolute");
+    }
+
+    /// On macOS the default socket sits beneath the operator's `HOME`, so an absolute `HOME`
+    /// yields `$HOME/Library/Application Support/credsd/credsd.sock`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_default_socket_is_under_home() {
+        let path = default_socket_from_home(Some(std::ffi::OsStr::new("/Users/example")))
+            .expect("an absolute HOME resolves");
+        assert_eq!(
+            path,
+            PathBuf::from("/Users/example/Library/Application Support/credsd/credsd.sock"),
+        );
+        assert!(
+            path.is_absolute(),
+            "an absolute HOME yields an absolute default"
+        );
+    }
+
+    /// On macOS an absent or empty `HOME` refuses rather than resolving a relative or bare path.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_default_socket_refuses_an_absent_home() {
+        for home in [None, Some(std::ffi::OsStr::new(""))] {
+            let error =
+                default_socket_from_home(home).expect_err("an absent or empty HOME refuses");
+            assert!(
+                matches!(error, CredentialError::Credential(ref message) if message.contains("HOME is unset")),
+                "the refusal names the unset HOME: {error}"
+            );
+        }
     }
 
     // --- the socket round trip -----------------------------------------------
