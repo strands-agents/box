@@ -1,0 +1,89 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<mxfile host="drawio" type="device">
+  <diagram id="http-budget-recording" name="When HTTP request bytes enter history">
+    <mxGraphModel dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1000" pageHeight="640" math="0" shadow="0" background="#ffffff">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="&lt;div style=&quot;font-size:24px;line-height:28.799999999999997px;font-weight:normal;color:#232F3E&quot;&gt;When HTTP request bytes enter history&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=middle;strokeColor=none;fillColor=none;fontSize=18;fontColor=#5F6B7A;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="40" y="20" width="920" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="check" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold;color:#232F3E&quot;&gt;Policy checks&lt;/div&gt;&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold;color:#232F3E&quot;&gt;recorded bytes&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;verticalAlign=middle;align=center;spacing=12;fontSize=22;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="40" y="110" width="220" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="send" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold;color:#232F3E&quot;&gt;Box sends&lt;/div&gt;&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold;color:#232F3E&quot;&gt;allowed request&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;verticalAlign=middle;align=center;spacing=12;fontSize=22;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="390" y="110" width="220" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="pending" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold;color:#232F3E&quot;&gt;Response stays&lt;/div&gt;&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold;color:#232F3E&quot;&gt;pending&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;verticalAlign=middle;align=center;spacing=12;fontSize=22;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="740" y="110" width="220" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="ends" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold;color:#232F3E&quot;&gt;Exchange ends&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;Response completes,&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;fails, or times out&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;verticalAlign=middle;align=center;spacing=12;fontSize=22;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="740" y="430" width="220" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="record" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold;color:#232F3E&quot;&gt;Box records&lt;/div&gt;&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold;color:#232F3E&quot;&gt;request outcome&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;Known bytes&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;enter history&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;verticalAlign=middle;align=center;spacing=12;fontSize=22;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="390" y="430" width="220" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="later" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold;color:#232F3E&quot;&gt;Later decisions&lt;/div&gt;&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold;color:#232F3E&quot;&gt;see these bytes&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;Within the window&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;verticalAlign=middle;align=center;spacing=12;fontSize=22;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="40" y="430" width="220" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="deny" value="&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#DD344C&quot;&gt;If policy denies:&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#DD344C&quot;&gt;request not sent&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#DD344C;fillColor=#ffffff;strokeWidth=2;verticalAlign=middle;align=center;spacing=12;fontSize=22;fontStyle=1;fontColor=#DD344C;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="40" y="280" width="220" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="pending-note" value="&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;While the response is pending,&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;its request bytes are absent&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;from budget history. Other requests&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.599999999999998px;font-weight:normal;color:#5F6B7A&quot;&gt;can pass using earlier outcomes.&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=middle;strokeColor=none;fillColor=none;fontSize=18;fontColor=#5F6B7A;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="350" y="260" width="400" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="footer" value="&lt;div style=&quot;font-size:16px;line-height:19.2px;font-weight:normal;color:#5F6B7A&quot;&gt;Completion-based HTTP byte budget. Documentation clarification; runtime behavior is unchanged.&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=middle;strokeColor=none;fillColor=none;fontSize=18;fontColor=#5F6B7A;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="40" y="590" width="920" height="35" as="geometry" />
+        </mxCell>
+        <mxCell id="allowed" value="allowed" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitDx=0;exitDy=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="check" target="send">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="325" y="160" />
+            </Array>
+            <mxPoint x="0" y="-15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="sent" value="send" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;entryX=0;entryY=0.5;exitDx=0;exitDy=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="send" target="pending">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="675" y="160" />
+            </Array>
+            <mxPoint x="0" y="-15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="response-ends" value="ends" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitDx=0;exitDy=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="pending" target="ends">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="850" y="320" />
+            </Array>
+            <mxPoint x="38" y="0" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="record-outcome" value="record" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0;exitY=0.5;entryX=1;entryY=0.5;exitDx=0;exitDy=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="ends" target="record">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="675" y="495" />
+            </Array>
+            <mxPoint x="0" y="-15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="next-decision" value="next check" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0;exitY=0.5;entryX=1;entryY=0.5;exitDx=0;exitDy=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="record" target="later">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="325" y="495" />
+            </Array>
+            <mxPoint x="0" y="-15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="refuse" value="denied" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#DD344C;strokeWidth=2.5;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.5;exitY=1;entryX=0.5;entryY=0;exitDx=0;exitDy=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;fontFamily=Arial,Helvetica,sans-serif;dashed=1;dashPattern=8 6;fixDash=1;" edge="1" parent="1" source="check" target="deny">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="150" y="245" />
+            </Array>
+            <mxPoint x="42" y="0" as="offset" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

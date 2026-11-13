@@ -204,8 +204,11 @@ when temporal {
 };
 ```
 
-- The rule counts `http:request::response` events for the host, which the box records when the
-  reply arrives. A refused request does not count, and one still in flight does not count yet.
+- The rule counts `http:request::response` events for the host, using their recording times for
+  the ten-minute window. The gateway records the outcome when the exchange ends, including failure
+  or timeout. A refused request or a request that definitely failed to reach upstream does not
+  count. Pending exchanges do not count yet, so several requests can pass before earlier exchanges
+  end. Those requests can make the total exceed the limit.
 - The `when` clause scopes the `forbid` to the one host, so a request to any other host is
   unaffected. The same shape on `net:connect` limits connections rather than requests.
 - The agent receives a `403` whose body names the rule, as `[policy: github_rate_limit]`, and its
