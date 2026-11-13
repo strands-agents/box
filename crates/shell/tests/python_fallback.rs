@@ -223,3 +223,30 @@ fn output_to_a_closed_reader_keeps_the_status_and_reports_nothing() {
     }
     assert_eq!(*outcomes.lock().unwrap(), ["status 0", "status 0"]);
 }
+
+/// `command -v`, `command -V`, and `type` find both Python names.
+#[test]
+fn python_is_found_by_command_lookup() {
+    let (mut shell, _) = shell(1024, printing());
+    for query in [
+        "command -v python3",
+        "command -V python3",
+        "type python3",
+        "command -v python",
+    ] {
+        let out = run(shell.run(query));
+        assert_eq!(out.status, 0, "{query}: {}", out.stderr);
+    }
+}
+
+/// An executable script named `python3` on `PATH` does not shadow Monty.
+#[test]
+fn a_path_script_does_not_shadow_python() {
+    let (mut shell, _) = shell(1024, printing());
+    let out = run(shell.run(
+        "printf '#!/bin/sh\\nprintf SHADOW\\n' > /tmp/python3 && chmod +x /tmp/python3 && \
+         PATH=/tmp\npython3 -c x",
+    ));
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "PAYLOAD\n");
+}

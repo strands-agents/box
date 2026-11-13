@@ -245,6 +245,12 @@ impl ShellKernel {
 
 #[async_trait::async_trait]
 impl CommandFallback for ShellKernel {
+    /// `python` and `python3` name Monty ahead of `PATH`
+    /// (docs/design/decisions.md#a-bare-python-name-always-means-monty).
+    fn serves(&self, name: &str) -> bool {
+        matches!(name, "python" | "python3") && self.commands.script.is_some()
+    }
+
     async fn run(&self, context: &mut CommandContext) -> io::Result<Option<i32>> {
         let program = context.program().to_string();
         let args = context.args().to_vec();
