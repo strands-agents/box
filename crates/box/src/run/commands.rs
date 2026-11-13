@@ -281,9 +281,10 @@ impl ConfiguredCommands {
             return Err(ConfigError::Process {
                 table,
                 reason: format!(
-                    "an editable install's source {} is inside the agent's workspace {}, so the \
-                     agent could change code the Python install loads. Install that package \
-                     without -e, or move its source outside the workspace",
+                    "an editable install's source or a folder a .pth file names, {}, is inside \
+                     the agent's workspace {}, so the agent could change code the Python install \
+                     loads. Install that package without -e, or move its source outside the \
+                     workspace",
                     source.display(),
                     workspace.display()
                 ),
@@ -810,7 +811,8 @@ impl PythonTool {
         (spec, added)
     }
 
-    /// The folders Python loads code from, its venv root, and its editable sources.
+    /// The folders Python loads code from or would if they existed, its venv root, the base's
+    /// `lib/`, the folders install links point into, and its editable and `.pth` sources.
     fn protected(&self) -> impl Iterator<Item = &PathBuf> {
         self.install
             .protected
@@ -837,8 +839,9 @@ impl PythonTool {
             )
         } else if let Some(source) = self.install.editable_sources.iter().find(|s| reached(s)) {
             format!(
-                "this write grant reaches {}, the source of an editable install {} loads Python \
-                 code from. Keep the Python install outside every write grant",
+                "this write grant reaches {}, the source of an editable install or a folder a \
+                 .pth file names, which {} loads Python code from. Keep the Python install \
+                 outside every write grant",
                 source.display(),
                 self.table
             )
@@ -854,12 +857,12 @@ impl PythonTool {
     }
 }
 
-/// Whether `path` is `folder`, inside it, or above it.
 /// `path` with every link resolved, or as given when it can't be.
 fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// Whether `path` is `folder`, inside it, or above it.
 fn touches(path: &Path, folder: &Path) -> bool {
     lies_within(path, folder) || lies_within(folder, path)
 }
@@ -2573,6 +2576,117 @@ mod tests {
             error.contains("the source of an editable install"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_user_site_that_doesnt_exist_yet_is_protected_with_its_parents() {
+        let tree = PythonTree::new();
+        // The base itself, not the venv, so Python adds the user site.
+        let commands = ConfiguredCommands::load_with(
+            &tree.record(&tree.base.join("bin/python3.12"), false),
+            &tree.roots(),
+        )
+        .expect("a standard install");
+        let user_site = tree.home.join("user/.local/lib/python3.12/site-packages");
+        assert!(!user_site.exists());
+        for path in [
+            user_site.clone(),
+            user_site.join("evil.pth"),
+            tree.home.join("user/.local/lib"),
+            tree.home.join("user/.local"),
+        ] {
+            assert!(
+                matches!(
+                    commands.mutation_refusal(&path),
+                    Some(CommandMutationRefusal::PythonInstall { .. })
+                ),
+                "creating {} must be refused",
+                path.display()
+            );
+        }
+        assert!(
+            commands
+                .mutation_refusal(&tree.home.join("user/notes.txt"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn the_base_lib_folder_is_protected_with_the_zip_that_may_not_exist() {
+        let tree = PythonTree::new();
+        let commands = tree.commands();
+        for path in [
+            tree.base.join("lib/python312.zip"),
+            tree.base.join("lib/libpython3.12.dylib"),
+        ] {
+            assert!(
+                commands.mutation_refusal(&path).is_some(),
+                "{} must be refused",
+                path.display()
+            );
+        }
+    }
+
+    #[test]
+    fn a_hard_linked_install_file_refuses_startup() {
+        let tree = PythonTree::new();
+        let installed = tree.site_packages().join("pkg.py");
+        std::fs::write(&installed, "").expect("pkg.py");
+        std::fs::hard_link(&installed, tree.home.join("other-name.py")).expect("hard link");
+
+        let error = ConfiguredCommands::load_with(
+            &tree.record(&tree.venv.join("bin/python3"), false),
+            &tree.roots(),
+        )
+        .expect_err("a hard link refuses startup")
+        .to_string();
+        assert!(
+            error.contains(&format!(
+                "[tool.python3]` table: {} has another name outside the install",
+                installed.display()
+            )),
+            "{error}"
+        );
+        assert!(error.contains("--link-mode=copy"), "{error}");
+    }
+
+    #[test]
+    fn a_link_out_of_site_packages_protects_its_target() {
+        let tree = PythonTree::new();
+        let cache = tree.home.join("cache/pkg");
+        std::fs::create_dir_all(&cache).expect("cache");
+        std::fs::write(cache.join("__init__.py"), "").expect("__init__.py");
+        std::os::unix::fs::symlink(&cache, tree.site_packages().join("pkg")).expect("link");
+
+        let commands = tree.commands();
+        assert!(
+            commands
+                .mutation_refusal(&cache.join("__init__.py"))
+                .is_some()
+        );
+        commands
+            .validate_reach("[agent]", &reach(&tree.home, &tree.home.join("cache")))
+            .expect_err("a write grant on the link's target is refused");
+    }
+
+    #[test]
+    fn a_pth_folder_in_the_project_refuses_startup() {
+        let tree = PythonTree::new();
+        let source = tree.project.join("src");
+        std::fs::write(
+            tree.site_packages().join("develop.pth"),
+            format!("import os\n{}\n", source.display()),
+        )
+        .expect("develop.pth");
+
+        let error = ConfiguredCommands::load_with(
+            &tree.record(&tree.venv.join("bin/python3"), false),
+            &tree.roots(),
+        )
+        .expect_err("a .pth folder in the workspace refuses startup")
+        .to_string();
+        assert!(error.contains("a folder a .pth file names"), "{error}");
+        assert!(error.contains(&source.display().to_string()), "{error}");
     }
 
     #[test]

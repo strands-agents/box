@@ -1895,27 +1895,44 @@ a narrower write writes `[tool.python3.filesystem]`, which replaces the workspac
 
 With `monty = false`, `[tool.python3]` or `[tool.python]` runs a host Python, and that Python loads
 code from folders outside its command file: its standard library, its `site-packages`, the user
-site, a venv's own `site-packages`, the extra folders Homebrew's `sitecustomize.py` adds, and the
-sources of editable installs. Box reads these folders from the install's files without running it.
-Box refuses any write into them, both at startup and while the box runs:
+site, a venv's own `site-packages`, the extra folders Homebrew's `sitecustomize.py` adds, the
+sources of editable installs, and the folders `.pth` path lines name. It also loads the base
+install's `lib/python3XY.zip` and shared `libpython`, so Box protects the base install's whole
+`lib/` folder and a framework build's `Python` file. Box reads these folders from the install's
+files without running it. A folder Python would load from if it existed (the user site, Homebrew's
+and Debian's extra folders, the zip) is protected whether or not it exists yet, so creating it, or
+any folder above it, counts as a write into it. Box refuses any write into these folders, both at
+startup and while the box runs:
 
 - At startup, Box refuses a write grant in `[agent]`, any `[tool.<name>]` or any local `[mcp.<name>]`
   table that is at, above or inside one of those folders, or a single-file grant inside one.
-- At startup, Box also refuses an editable install whose source is inside the agent's workspace, or
-  that a write grant reaches.
+- At startup, Box also refuses an editable install or `.pth` folder that is inside the agent's
+  workspace, or that a write grant reaches.
+- At startup, Box walks the protected folders without following links. A file there with a second
+  hard link refuses startup, because the agent could change it through the other name. A link that
+  points outside the protected folders and the read-only system folders (`/usr` but not
+  `/usr/local`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc`, `/System`) adds its target's
+  `site-packages` folder, or else the target's own folder, to what is protected and granted read.
+  The walk stops and refuses after 200,000 entries or 10 seconds.
 - While the box runs, a write through Strands Shell or Monty at, inside or above one of those
   folders is refused, even when `policy.dw` permits it.
 
 Why: before this, Box protected only the command's own path. An agent could write a `.pth` file
 into a venv's `site-packages` through the Shell. Python runs a `.pth` file's `import` lines at every
 start, so that code ran inside the tool, and later again outside the box, with the operator's full
-rights, the next time anyone used the venv.
+rights, the next time anyone used the venv. A folder that didn't exist yet, a link or hard link into
+a writable cache, and a missing `python3XY.zip` each reopened the same attack.
 
 The cost: a write grant on a folder that holds the install is refused. So a write grant on `$HOME`
-is refused whenever the user site (`~/Library/Python/3.X/...` for a framework build on macOS,
-`~/.local/lib/python3.X/site-packages` otherwise) exists, and a venv inside the project is refused
-when the project is writable. Keep the venv outside the project, or use one that nothing in the box
-writes. `pip install` inside the box fails; the operator adds packages outside the box.
+is refused whenever the install loads the user site (`~/Library/Python/3.X/...` for a framework
+build on macOS, `~/.local/lib/python3.X/site-packages` otherwise), even before that folder exists,
+and a venv inside the project is refused when the project is writable. Keep the venv outside the
+project, or use one that nothing in the box writes. `pip install` inside the box fails; the operator
+adds packages outside the box. An install built with hard links is refused: uv's default on Linux
+(`--link-mode=hardlink`) and conda's default both make them, so rebuild with `uv
+--link-mode=copy` or conda's `always_copy`. The walk adds startup time: about 0.6 seconds for
+Homebrew's Python 3.14 with its 6,500-file `site-packages` and 0.15 seconds for a small venv over
+it, on an Apple-silicon Mac.
 
 <a id="monty-is-judged-at-the-effect-level-alone"></a>
 ### Monty is judged at the effect level alone, above two deny-only floors

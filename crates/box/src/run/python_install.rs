@@ -15,7 +15,13 @@
 //! | Homebrew | real file in `Cellar/python@3.X/`, standard library holds `sitecustomize.py` | the folders `sitecustomize.py` adds |
 //! | Debian | real file is `/usr/bin/python3.X`, `/usr/lib/python3/dist-packages` exists | `dist-packages` folders |
 //!
-//! Anything else is refused with "Use a venv".
+//! Anything else is refused with "Use a venv", and so is a standard layout whose standard library
+//! holds a `sitecustomize.py` Box doesn't model.
+//!
+//! [`detect`] then walks every protected folder without following links. A file with a second
+//! hard link refuses startup, because the agent could change it through the other name. A link
+//! that points outside the protected folders and the read-only system folders adds its target's
+//! folder to what is protected and granted read.
 
 // Only the protected folders and editable sources are wired in so far.
 #![allow(dead_code)]
@@ -25,12 +31,20 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::OsStringExt as _;
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Component, Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::record::layout::lies_within;
 
 /// Symbolic links followed before the chain counts as a loop, matching the kernel's `ELOOP` bound.
 const MAXIMUM_HOPS: usize = 40;
+
+/// Folder entries [`detect`] reads while checking the install for links before it refuses.
+const MAXIMUM_WALK_ENTRIES: usize = 200_000;
+
+/// Time [`detect`] spends checking the install for links before it refuses.
+const WALK_BUDGET: Duration = Duration::from_secs(10);
 
 /// One Python install, as its files describe it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,9 +63,13 @@ pub(crate) struct PythonInstall {
     pub(crate) cert_bundle: Option<PathBuf>,
     /// Each link hop after [`Self::cert_bundle`], ending at the canonical file.
     pub(crate) cert_link_chain: Vec<PathBuf>,
-    /// Source folders of editable installs (`direct_url.json` with `dir_info.editable`).
+    /// Source folders of editable installs (`direct_url.json` with `dir_info.editable`) and the
+    /// folders `.pth` path lines name.
     pub(crate) editable_sources: Vec<PathBuf>,
-    /// What nothing in the box may write: [`Self::code_folders`] plus the venv root.
+    /// What nothing in the box may write: [`Self::code_folders`], the venv root, the base install's
+    /// `lib/` and framework `Python` file, and the folders the install would load code from if
+    /// they existed (user site, Homebrew and Debian extras). A missing folder is its deepest
+    /// existing ancestor, canonical, with the rest appended.
     pub(crate) protected: Vec<PathBuf>,
 }
 
@@ -66,7 +84,8 @@ pub(crate) enum InstallKind {
 /// Where the platform's fixed folders live. Tests point these at temporary folders.
 #[derive(Debug, Clone)]
 pub(crate) struct InstallRoots {
-    /// Homebrew prefixes: `/opt/homebrew` (Apple silicon) and `/usr/local` (Intel).
+    /// Homebrew prefixes: `/opt/homebrew` (Apple silicon), `/usr/local` (Intel) and
+    /// `/home/linuxbrew/.linuxbrew` (Linux).
     pub(crate) homebrew: Vec<PathBuf>,
     /// The folder holding `Python/3.X/site-packages`: `/Library` on macOS.
     pub(crate) macos_library: PathBuf,
@@ -91,7 +110,11 @@ impl InstallRoots {
     /// This host's folders.
     pub(crate) fn host() -> Self {
         Self {
-            homebrew: vec![PathBuf::from("/opt/homebrew"), PathBuf::from("/usr/local")],
+            homebrew: vec![
+                PathBuf::from("/opt/homebrew"),
+                PathBuf::from("/usr/local"),
+                PathBuf::from("/home/linuxbrew/.linuxbrew"),
+            ],
             macos_library: PathBuf::from("/Library"),
             system: PathBuf::from("/"),
             home: std::env::var_os("HOME")
@@ -110,6 +133,12 @@ impl InstallRoots {
 pub(crate) enum InstallError {
     /// The command is no layout Box recognizes.
     Unrecognized(PathBuf),
+    /// The command is a venv whose base install is no layout Box recognizes.
+    UnrecognizedVenvBase { command: PathBuf, base: PathBuf },
+    /// A file in the install has a second hard link.
+    HardLink(PathBuf),
+    /// The install holds too many entries to check for links in the walk's budget.
+    TooLarge { folder: PathBuf },
     /// A file the layout depends on could not be read.
     Unreadable { path: PathBuf, source: io::Error },
 }
@@ -122,6 +151,25 @@ impl fmt::Display for InstallError {
                 "{} is not a Python install Box recognizes. Use a venv",
                 path.display()
             ),
+            Self::UnrecognizedVenvBase { command, base } => write!(
+                formatter,
+                "{} is a venv, but the venv's base install {} is not one Box recognizes",
+                command.display(),
+                base.display()
+            ),
+            Self::HardLink(file) => write!(
+                formatter,
+                "{} has another name outside the install, so the agent could change it through \
+                 that name. Rebuild the venv without hard links (for uv: --link-mode=copy)",
+                file.display()
+            ),
+            Self::TooLarge { folder } => write!(
+                formatter,
+                "Box stopped checking the Python install for links at {} after \
+                 {MAXIMUM_WALK_ENTRIES} entries or {} seconds. Use a smaller venv",
+                folder.display(),
+                WALK_BUDGET.as_secs()
+            ),
             Self::Unreadable { path, source } => {
                 write!(formatter, "cannot read {}: {source}", path.display())
             }
@@ -132,8 +180,8 @@ impl fmt::Display for InstallError {
 impl std::error::Error for InstallError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Unrecognized(_) => None,
             Self::Unreadable { source, .. } => Some(source),
+            _ => None,
         }
     }
 }
@@ -150,11 +198,15 @@ pub(crate) fn detect(command: &Path, roots: &InstallRoots) -> Result<PythonInsta
     if !real.is_file() {
         return Err(unrecognized());
     }
-    if let Some(venv_root) = venv_root(command) {
-        return detect_venv(command, &venv_root, &real, link_chain, roots);
-    }
-    let mut install = detect_installed(command, &real, roots)?;
-    install.link_chain = link_chain;
+    let mut install = if let Some(venv_root) = venv_root(command) {
+        detect_venv(command, &venv_root, &real, link_chain, roots)?
+    } else {
+        let mut install = detect_installed(command, &real, roots)?;
+        install.link_chain = link_chain;
+        install
+    };
+    check_links(&mut install, roots)?;
+    install.editable_sources = editable_sources(&install.code_folders)?;
     Ok(install)
 }
 
@@ -218,6 +270,10 @@ fn detect_venv(
     let unrecognized = || InstallError::Unrecognized(command.to_path_buf());
     let config = read_venv_config(&venv_root.join("pyvenv.cfg"))?;
     let venv_canonical = canonical(venv_root);
+    let unrecognized_base = |base: &Path| InstallError::UnrecognizedVenvBase {
+        command: command.to_path_buf(),
+        base: base.to_path_buf(),
+    };
 
     // A venv made with `--copies` holds its own interpreter; its base is named by `home`.
     let base_real = if lies_within(real, &venv_canonical) {
@@ -231,13 +287,13 @@ fn detect_venv(
             .map(|name| home.join(name))
             .find(|candidate| candidate.is_file())
             .map(|candidate| canonical(&candidate))
-            .ok_or_else(unrecognized)?
+            .ok_or_else(|| unrecognized_base(home))?
     } else {
         real.to_path_buf()
     };
     let mut base =
         detect_installed(&base_real, &base_real, roots).map_err(|error| match error {
-            InstallError::Unrecognized(_) => unrecognized(),
+            InstallError::Unrecognized(_) => unrecognized_base(&base_real),
             other => other,
         })?;
     base.link_chain = vec![base_real.clone()];
@@ -257,23 +313,23 @@ fn detect_venv(
         return Err(unrecognized());
     }
     let mut code_folders = vec![canonical(&site_packages), stdlib(&base)];
+    // Protected whether or not they exist; extended below with what the base adds.
+    let mut protected = vec![venv_canonical.clone()];
+    protected.extend(install_core(&base.prefix));
     if config.include_system_site_packages {
         code_folders.extend(base.code_folders.iter().cloned());
+        protected.extend(base.protected.iter().cloned());
     } else if base.kind == InstallKind::Homebrew {
         // Homebrew's `sitecustomize.py` adds its own `site-packages` only when
         // `sys.base_prefix in site.PREFIXES`, which a venv without system packages isn't. It
         // adds the split `python-tk` and `python-gdbm` folders in every venv.
-        code_folders.extend(
-            base.code_folders
-                .iter()
-                .filter(|folder| folder.file_name().is_some_and(|name| name == "libexec"))
-                .cloned(),
-        );
+        let libexec = |folder: &&PathBuf| folder.file_name().is_some_and(|name| name == "libexec");
+        code_folders.extend(base.code_folders.iter().filter(libexec).cloned());
+        protected.extend(base.protected.iter().filter(libexec).cloned());
     }
     let code_folders = dedup(code_folders);
-    let editable_sources = editable_sources(&code_folders)?;
-    let mut protected = code_folders.clone();
-    protected.push(venv_canonical.clone());
+    let mut protected_all = code_folders.clone();
+    protected_all.extend(protected);
     Ok(PythonInstall {
         version: base.version.clone(),
         cert_bundle: base.cert_bundle.clone(),
@@ -284,9 +340,21 @@ fn detect_venv(
         prefix: venv_canonical,
         code_folders,
         link_chain,
-        editable_sources,
-        protected: dedup(protected),
+        editable_sources: Vec::new(),
+        protected: dedup(protected_all),
     })
+}
+
+/// What a base install at `prefix` loads code from beyond its standard library, protected
+/// whether or not it exists: all of `lib/`, which holds `python3XY.zip` (on `sys.path` ahead of
+/// the standard library) and the shared `libpython`, and a framework build's `Python` library.
+fn install_core(prefix: &Path) -> Vec<PathBuf> {
+    let mut core = vec![prefix.join("lib")];
+    let framework = prefix.join("Python");
+    if framework.is_file() {
+        core.push(framework);
+    }
+    core
 }
 
 /// The base install's standard library, always its first code folder.
@@ -314,6 +382,8 @@ fn detect_installed(
 
     let mut code_folders = vec![library.clone()];
     push_existing(&mut code_folders, &library.join("site-packages"));
+    // Folders this install would load code from if they existed: protected either way.
+    let mut expected = install_core(&prefix);
     if let Some(home) = &roots.home {
         // Only a framework build (python.org, Homebrew) uses `~/Library/Python` on macOS; pyenv,
         // uv and other builds there use `~/.local`, as on Linux.
@@ -334,22 +404,24 @@ fn detect_installed(
                 .join(format!("python{version}"))
                 .join("site-packages"),
         };
-        push_existing(&mut code_folders, &user_site);
+        push_expected(&mut code_folders, &mut expected, &user_site);
     }
 
     let mut kind = InstallKind::Standard;
     let mut cert_bundle = None;
     if let Some(brew) = homebrew_root(real, &version, &library, roots) {
         kind = InstallKind::Homebrew;
-        push_existing(
+        push_expected(
             &mut code_folders,
+            &mut expected,
             &brew
                 .join("lib")
                 .join(format!("python{version}"))
                 .join("site-packages"),
         );
-        push_existing(
+        push_expected(
             &mut code_folders,
+            &mut expected,
             &roots
                 .macos_library
                 .join("Python")
@@ -357,8 +429,9 @@ fn detect_installed(
                 .join("site-packages"),
         );
         for module in ["tk", "gdbm"] {
-            push_existing(
+            push_expected(
                 &mut code_folders,
+                &mut expected,
                 &brew
                     .join("opt")
                     .join(format!("python-{module}@{version}"))
@@ -373,14 +446,18 @@ fn detect_installed(
             &mut code_folders,
             &system.join("usr/lib/python3/dist-packages"),
         );
-        push_existing(
+        push_expected(
             &mut code_folders,
+            &mut expected,
             &system
                 .join("usr/local/lib")
                 .join(format!("python{version}"))
                 .join("dist-packages"),
         );
         cert_bundle = Some(system.join("etc/ssl/certs/ca-certificates.crt"));
+    } else if library.join("sitecustomize.py").exists() {
+        // A `sitecustomize.py` can add folders Box can't see from the files.
+        return Err(unrecognized());
     }
 
     let cert_bundle = cert_bundle.filter(|bundle| bundle.is_file());
@@ -390,17 +467,18 @@ fn detect_installed(
         .map(|chain| chain.into_iter().skip(1).collect())
         .unwrap_or_default();
     let code_folders = dedup(code_folders);
-    let editable_sources = editable_sources(&code_folders)?;
+    let mut protected = code_folders.clone();
+    protected.extend(expected);
     Ok(PythonInstall {
         version,
         kind,
         prefix,
-        protected: code_folders.clone(),
+        protected: dedup(protected),
         code_folders,
         link_chain: vec![real.to_path_buf()],
         cert_bundle,
         cert_link_chain,
-        editable_sources,
+        editable_sources: Vec::new(),
     })
 }
 
@@ -491,7 +569,8 @@ fn normalize(path: &Path) -> PathBuf {
     normal
 }
 
-/// Every editable install's source folder, from `*.dist-info/direct_url.json` in `folders`.
+/// Every editable install's source folder, from `*.dist-info/direct_url.json` in `folders`, and
+/// every folder a `*.pth` path line in `folders` names.
 fn editable_sources(folders: &[PathBuf]) -> Result<Vec<PathBuf>, InstallError> {
     let mut sources = Vec::new();
     for folder in folders {
@@ -499,11 +578,21 @@ fn editable_sources(folders: &[PathBuf]) -> Result<Vec<PathBuf>, InstallError> {
             continue;
         };
         for entry in entries.filter_map(Result::ok) {
-            if !entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.ends_with(".dist-info"))
-            {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if name.ends_with(".pth") {
+                let path = entry.path();
+                let text = match fs::read(&path) {
+                    Ok(text) => text,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(source) => return Err(InstallError::Unreadable { path, source }),
+                };
+                sources.extend(pth_folders(folder, &text));
+                continue;
+            }
+            if !name.ends_with(".dist-info") {
                 continue;
             }
             let record = entry.path().join("direct_url.json");
@@ -524,6 +613,131 @@ fn editable_sources(folders: &[PathBuf]) -> Result<Vec<PathBuf>, InstallError> {
     }
     sources.sort();
     Ok(dedup(sources))
+}
+
+/// The folders one `.pth` file in `folder` adds to `sys.path`, as `site` reads it: every line
+/// that is not blank, not a `#` comment and not an `import` line names a folder relative to
+/// `folder`. Python skips a folder that doesn't exist, but the agent could create it, so missing
+/// ones count too.
+fn pth_folders(folder: &Path, text: &[u8]) -> Vec<PathBuf> {
+    text.split(|byte| *byte == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .filter(|line| {
+            !line.iter().all(u8::is_ascii_whitespace)
+                && !line.starts_with(b"#")
+                && !line.starts_with(b"import ")
+                && !line.starts_with(b"import\t")
+        })
+        .map(|line| {
+            let end = line
+                .iter()
+                .rposition(|byte| !byte.is_ascii_whitespace())
+                .map_or(0, |index| index + 1);
+            let named = PathBuf::from(OsString::from_vec(line[..end].to_vec()));
+            canonical_lenient(&normalize(&folder.join(named)))
+        })
+        .collect()
+}
+
+/// Walk every protected folder without following links, in a budget of
+/// [`MAXIMUM_WALK_ENTRIES`] entries and [`WALK_BUDGET`]. A regular file with a second hard link
+/// refuses; a link whose target lies outside the protected folders, the read-only system folders
+/// and the interpreter's own link chain adds the target's folder to `protected`, to
+/// `code_folders` when it exists, and to the walk.
+fn check_links(install: &mut PythonInstall, roots: &InstallRoots) -> Result<(), InstallError> {
+    let system = system_trees(roots);
+    let in_system = |path: &Path| {
+        system.trees.iter().any(|tree| lies_within(path, tree))
+            && !system.writable.iter().any(|tree| lies_within(path, tree))
+    };
+    let started = Instant::now();
+    let mut entries = 0usize;
+    let mut pending: Vec<PathBuf> = outermost(&install.protected)
+        .into_iter()
+        .filter(|path| !in_system(path))
+        .collect();
+    while let Some(path) = pending.pop() {
+        entries += 1;
+        if entries > MAXIMUM_WALK_ENTRIES || started.elapsed() > WALK_BUDGET {
+            return Err(InstallError::TooLarge { folder: path });
+        }
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let kind = metadata.file_type();
+        if kind.is_dir() {
+            let Ok(children) = fs::read_dir(&path) else {
+                continue;
+            };
+            pending.extend(children.filter_map(Result::ok).map(|child| child.path()));
+        } else if kind.is_file() {
+            if metadata.nlink() > 1 {
+                return Err(InstallError::HardLink(path));
+            }
+        } else if kind.is_symlink() {
+            let Some(target) = link_target(&path) else {
+                continue;
+            };
+            if install.link_chain.contains(&target)
+                || install
+                    .protected
+                    .iter()
+                    .any(|folder| lies_within(&target, folder))
+                || in_system(&target)
+            {
+                continue;
+            }
+            let folder = target_folder(&target);
+            install.protected.push(folder.clone());
+            if folder.is_dir() {
+                install.code_folders.push(folder.clone());
+                pending.push(folder);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Where the link at `path` points, canonical as far as it exists.
+fn link_target(path: &Path) -> Option<PathBuf> {
+    let target = fs::read_link(path).ok()?;
+    let directory = canonical(path.parent()?);
+    Some(canonical_lenient(&normalize(&directory.join(target))))
+}
+
+/// The folder to protect for a link target: its nearest `site-packages` or `dist-packages`
+/// folder, so one package tree stays one entry; otherwise the target folder, or the folder that
+/// holds a target file.
+fn target_folder(target: &Path) -> PathBuf {
+    if let Some(packages) = target.ancestors().find(|ancestor| {
+        ancestor
+            .file_name()
+            .is_some_and(|name| name == "site-packages" || name == "dist-packages")
+    }) {
+        return packages.to_path_buf();
+    }
+    if target.is_dir() {
+        return target.to_path_buf();
+    }
+    target.parent().unwrap_or(target).to_path_buf()
+}
+
+/// The folders only an administrator writes, where a link target needs no protection of its own:
+/// `/usr` (but not `/usr/local`), `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc` and `/System`.
+struct SystemTrees {
+    trees: Vec<PathBuf>,
+    writable: Vec<PathBuf>,
+}
+
+fn system_trees(roots: &InstallRoots) -> SystemTrees {
+    let system = canonical(&roots.system);
+    SystemTrees {
+        trees: ["usr", "bin", "sbin", "lib", "lib64", "etc", "System"]
+            .iter()
+            .map(|name| canonical(&system.join(name)))
+            .collect(),
+        writable: vec![canonical(&system.join("usr/local"))],
+    }
 }
 
 /// The `file://` source of one `direct_url.json` whose `dir_info.editable` is true.
@@ -579,6 +793,34 @@ fn push_existing(folders: &mut Vec<PathBuf>, folder: &Path) {
     if folder.is_dir() {
         folders.push(canonical(folder));
     }
+}
+
+/// `folder` into `expected` whether or not it exists, and into `folders` when it does.
+fn push_expected(folders: &mut Vec<PathBuf>, expected: &mut Vec<PathBuf>, folder: &Path) {
+    push_existing(folders, folder);
+    expected.push(canonical_lenient(folder));
+}
+
+/// `path` with its deepest existing ancestor canonical and the missing rest appended.
+fn canonical_lenient(path: &Path) -> PathBuf {
+    if let Ok(real) = path.canonicalize() {
+        return real;
+    }
+    let mut missing = Vec::new();
+    let mut current = path;
+    while let Some(parent) = current.parent() {
+        if let Some(name) = current.file_name() {
+            missing.push(name.to_os_string());
+        }
+        if let Ok(real) = parent.canonicalize() {
+            return missing
+                .iter()
+                .rev()
+                .fold(real, |path, name| path.join(name));
+        }
+        current = parent;
+    }
+    path.to_path_buf()
 }
 
 fn canonical(path: &Path) -> PathBuf {
@@ -697,11 +939,163 @@ mod tests {
             vec![
                 tree.path("base/lib/python3.12"),
                 tree.path("base/lib/python3.12/site-packages"),
-                user_site,
+                user_site.clone(),
             ]
         );
-        assert_eq!(install.protected, install.code_folders);
+        assert_eq!(
+            install.protected,
+            vec![
+                tree.path("base/lib/python3.12"),
+                tree.path("base/lib/python3.12/site-packages"),
+                user_site,
+                tree.path("base/lib"),
+            ]
+        );
         assert_eq!(install.cert_bundle, None);
+    }
+
+    #[test]
+    fn folders_that_dont_exist_yet_are_protected_but_not_granted() {
+        let tree = Tree::new();
+        let command = tree.standard("base", "3.12");
+
+        let install = detect(&command, &tree.roots()).expect("standard install");
+
+        let user_site = tree.path("home/.local/lib/python3.12/site-packages");
+        assert!(!user_site.exists());
+        assert!(install.protected.contains(&user_site), "{install:#?}");
+        assert!(!install.code_folders.contains(&user_site));
+        // The zip that every CPython puts ahead of the standard library is inside `lib/`.
+        assert!(
+            install
+                .protected
+                .iter()
+                .any(|folder| lies_within(&tree.path("base/lib/python312.zip"), folder))
+        );
+
+        let (tree, command) = homebrew_tree();
+        let install = detect(&command, &tree.roots()).expect("homebrew");
+        let gdbm = tree.path("brew/opt/python-gdbm@3.14/libexec");
+        assert!(install.protected.contains(&gdbm), "{install:#?}");
+        assert!(!install.code_folders.contains(&gdbm));
+    }
+
+    #[test]
+    fn a_missing_folder_is_its_canonical_ancestor_with_the_rest_appended() {
+        let tree = Tree::new();
+        tree.dir("real");
+        tree.link("alias", "real");
+
+        assert_eq!(
+            canonical_lenient(&tree.path("alias/missing/deeper")),
+            tree.path("real/missing/deeper")
+        );
+    }
+
+    #[test]
+    fn a_hard_linked_install_file_is_refused() {
+        let tree = Tree::new();
+        tree.standard("base", "3.12");
+        let command = tree.venv("venv", "base", "3.12", false);
+        let cached = tree.file("cache/archive/pkg/__init__.py", "");
+        fs::create_dir_all(tree.path("venv/lib/python3.12/site-packages/pkg")).expect("pkg");
+        let installed = tree.path("venv/lib/python3.12/site-packages/pkg/__init__.py");
+        fs::hard_link(&cached, &installed).expect("hard link");
+
+        let error = detect(&command, &tree.roots()).expect_err("a hard link refuses");
+
+        assert!(matches!(&error, InstallError::HardLink(file) if *file == installed));
+        assert!(
+            error.to_string().ends_with(
+                "has another name outside the install, so the agent could change it \
+                            through that name. Rebuild the venv without hard links (for uv: \
+                            --link-mode=copy)"
+            ),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_link_out_of_site_packages_protects_and_grants_its_target() {
+        let tree = Tree::new();
+        tree.standard("base", "3.12");
+        let command = tree.venv("venv", "base", "3.12", false);
+        let archive = tree.dir("cache/archive/pkg");
+        tree.file("cache/archive/pkg/__init__.py", "");
+        tree.link(
+            "venv/lib/python3.12/site-packages/pkg",
+            &archive.to_string_lossy(),
+        );
+        let cellar = tree.file("cellar/other/lib/python3.12/site-packages/other/a.py", "");
+        tree.link(
+            "venv/lib/python3.12/site-packages/other/a.py",
+            &cellar.to_string_lossy(),
+        );
+
+        let install = detect(&command, &tree.roots()).expect("venv");
+
+        let packages = tree.path("cellar/other/lib/python3.12/site-packages");
+        for folder in [&archive, &packages] {
+            assert!(install.protected.contains(folder), "{install:#?}");
+            assert!(install.code_folders.contains(folder), "{install:#?}");
+        }
+    }
+
+    #[test]
+    fn a_link_to_a_hard_linked_file_is_refused() {
+        let tree = Tree::new();
+        tree.standard("base", "3.12");
+        let command = tree.venv("venv", "base", "3.12", false);
+        let cached = tree.file("cache/archive/pkg/__init__.py", "");
+        fs::hard_link(&cached, tree.path("cache/second-name.py")).expect("hard link");
+        tree.link(
+            "venv/lib/python3.12/site-packages/pkg",
+            &tree.path("cache/archive/pkg").to_string_lossy(),
+        );
+
+        let error = detect(&command, &tree.roots()).expect_err("the walk follows into the target");
+
+        assert!(matches!(&error, InstallError::HardLink(file) if *file == cached));
+    }
+
+    #[test]
+    fn pth_path_lines_name_folders_and_import_lines_dont() {
+        let tree = Tree::new();
+        tree.standard("base", "3.12");
+        let command = tree.venv("project/.venv", "base", "3.12", false);
+        let packages = "project/.venv/lib/python3.12/site-packages";
+        tree.file(
+            &format!("{packages}/easy-install.pth"),
+            "# a comment\n\nimport os; os.getcwd()\n../../../../src  \r\n/elsewhere/lib\n",
+        );
+
+        let install = detect(&command, &tree.roots()).expect("venv");
+
+        assert_eq!(
+            install.editable_sources,
+            vec![PathBuf::from("/elsewhere/lib"), tree.path("project/src")]
+        );
+    }
+
+    #[test]
+    fn an_unmodeled_sitecustomize_is_refused() {
+        let tree = Tree::new();
+        let command = tree.standard("base", "3.12");
+        tree.file("base/lib/python3.12/sitecustomize.py", "import sys\n");
+
+        let error = detect(&command, &tree.roots()).expect_err("unmodeled sitecustomize");
+        assert!(matches!(error, InstallError::Unrecognized(_)), "{error}");
+
+        let venv = tree.venv("venv", "base", "3.12", false);
+        let error = detect(&venv, &tree.roots()).expect_err("a venv over it");
+        assert_eq!(
+            error.to_string(),
+            format!(
+                "{} is a venv, but the venv's base install {} is not one Box recognizes",
+                venv.display(),
+                tree.path("base/bin/python3.12").display()
+            )
+        );
     }
 
     #[test]
@@ -996,8 +1390,9 @@ mod tests {
         );
     }
 
-    /// Prints what this machine's Python installs look like: `/opt/homebrew/bin/python3`, then
-    /// each `:`-separated command in `PYTHON_INSTALL_PROBE`. Run by hand:
+    /// Prints what this machine's Python installs look like, and how long [`detect`] took on each:
+    /// `/opt/homebrew/bin/python3`, then each `:`-separated command in `PYTHON_INSTALL_PROBE`.
+    /// Run by hand:
     /// `PYTHON_INSTALL_PROBE=/path/to/.venv/bin/python3 cargo test -p strands-box --lib
     /// --all-features python_install::tests::this_machine -- --ignored --nocapture`
     #[test]
@@ -1013,8 +1408,13 @@ mod tests {
                 println!("{}: absent, skipped", command.display());
                 continue;
             }
+            let started = Instant::now();
             match detect(command, &roots) {
-                Ok(install) => println!("{}:\n{install:#?}\n", command.display()),
+                Ok(install) => println!(
+                    "{}: detected in {:?}\n{install:#?}\n",
+                    command.display(),
+                    started.elapsed()
+                ),
                 Err(error) => panic!("{error}"),
             }
         }
