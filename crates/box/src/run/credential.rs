@@ -179,8 +179,9 @@ pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError
             }
             // A signed route mints nothing to place. It does need the process to believe it holds
             // credentials, which `SIGNING_PLACEHOLDERS` supplies, once per signed route. `signs()` is
-            // asked directly, rather than inferred from the absent name, so a box-owned backend token
-            // — which also has no name and no phantom — is never mistaken for a signed route.
+            // asked directly rather than inferred from the absent name: a box-owned route shares that
+            // shape (no name, no phantom) yet must not get placeholders, so the distinction is
+            // explicit even though only ordinary routes reach here (see the next arm).
             (None, []) if binding.signs() => {
                 for (name, value) in SIGNING_PLACEHOLDERS {
                     workload_environment.push(ProvisionedVariable {
@@ -189,8 +190,9 @@ pub(crate) fn workspace(bindings: &[EgressRoute]) -> Result<Projection, BoxError
                     });
                 }
             }
-            // A box-owned token (a backend's own credential): no name, no phantom, and nothing placed
-            // in the workload environment, because the box attaches it at the gateway.
+            // Exhaustiveness for a nameless, phantomless, non-signing route: place nothing. A backend
+            // box-owned token has this shape, but it opens through `backend_capabilities`, not here
+            // (`to_bindings` skips a backend entry), so no route reaches this arm in practice.
             (None, []) => {}
             // A minted phantom this crate cannot deliver. Unreachable today — `validate` admits
             // only `env://` (which names a variable) and `aws://` (which mints none), so the two
