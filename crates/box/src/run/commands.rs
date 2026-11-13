@@ -808,7 +808,56 @@ impl PythonTool {
             };
             list.push(entry.path.clone());
         }
+        for library in self.libraries(&spec) {
+            spec.filesystem.read_file.push(library.clone());
+            added.push(AddedEntry {
+                kind: Grant::ReadFile,
+                path: library,
+                reason: "libraries",
+            });
+        }
         (spec, added)
+    }
+
+    /// The libraries the install's extension modules load that no read in `spec` reaches.
+    ///
+    /// Box walks every `.so` (and `.dylib` on macOS) under the install's code folders, up to
+    /// [`MAXIMUM_PYTHON_IMAGES`], the way containment walks an exec file's dependencies. A
+    /// dependency reached through a folder `spec` lets the tool write is not derived.
+    fn libraries(&self, spec: &ProcessSpec) -> Vec<PathBuf> {
+        let images = extension_images(&self.install.code_folders, MAXIMUM_PYTHON_IMAGES);
+        if images.is_empty() {
+            return Vec::new();
+        }
+        let mut config = containment::ContainmentConfig::new();
+        for (list, scope) in [
+            (&spec.filesystem.write, Scope::Root),
+            (&spec.filesystem.write_file, Scope::File),
+        ] {
+            for path in list {
+                if let Ok(next) = config.clone().allow(path, Operation::Write, scope) {
+                    config = next;
+                }
+            }
+        }
+        containment::loaded_libraries(&images, &config)
+            .into_iter()
+            .filter(|library| {
+                !SYSTEM_LIBRARY_FOLDERS
+                    .iter()
+                    .any(|folder| library.starts_with(folder))
+            })
+            .filter(|library| {
+                let resolved = canonical(library);
+                !spec.filesystem.read.iter().any(|folder| {
+                    lies_within(library, folder) || lies_within(&resolved, &canonical(folder))
+                }) && !spec
+                    .filesystem
+                    .read_file
+                    .iter()
+                    .any(|file| file == library || canonical(file) == resolved)
+            })
+            .collect()
     }
 
     /// The folders Python loads code from or would if they existed, its venv root, the base's
@@ -855,6 +904,51 @@ impl PythonTool {
         }
         .into())
     }
+}
+
+/// The most extension images Box walks for one Python install.
+const MAXIMUM_PYTHON_IMAGES: usize = 5000;
+
+/// Folders whose libraries the system's own grants already reach.
+const SYSTEM_LIBRARY_FOLDERS: &[&str] = &[
+    "/usr/lib",
+    "/lib",
+    "/lib64",
+    "/usr/lib64",
+    "/System",
+    "/Library/Apple",
+];
+
+/// Every `.so` (and `.dylib` on macOS) file under `folders`, at most `cap`, deduplicated.
+fn extension_images(folders: &[PathBuf], cap: usize) -> Vec<PathBuf> {
+    let mut images = std::collections::BTreeSet::new();
+    let mut pending: Vec<PathBuf> = python_install::outermost(folders);
+    let mut visited = std::collections::BTreeSet::new();
+    while let Some(folder) = pending.pop() {
+        if images.len() >= cap || !visited.insert(folder.clone()) {
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() {
+                pending.push(path);
+            } else if kind.is_file()
+                && path.extension().is_some_and(|extension| {
+                    extension == "so" || cfg!(target_os = "macos") && extension == "dylib"
+                })
+                && images.len() < cap
+            {
+                images.insert(path);
+            }
+        }
+    }
+    images.into_iter().collect()
 }
 
 /// `path` with every link resolved, or as given when it can't be.
@@ -2687,6 +2781,73 @@ mod tests {
         .to_string();
         assert!(error.contains("a folder a .pth file names"), "{error}");
         assert!(error.contains(&source.display().to_string()), "{error}");
+    }
+
+    #[test]
+    fn extension_images_finds_so_files_and_stops_at_the_cap() {
+        let tree = PythonTree::new();
+        let dynload = tree.base.join("lib/python3.12/lib-dynload");
+        std::fs::create_dir_all(&dynload).expect("lib-dynload");
+        for name in ["_ssl.so", "_lzma.so", "notes.txt"] {
+            std::fs::write(dynload.join(name), "").expect("image");
+        }
+        let folders = vec![tree.base.join("lib/python3.12")];
+        assert_eq!(
+            extension_images(&folders, 10),
+            vec![dynload.join("_lzma.so"), dynload.join("_ssl.so")]
+        );
+        assert_eq!(extension_images(&folders, 1).len(), 1);
+    }
+
+    #[test]
+    fn with_monty_on_no_library_is_seeded() {
+        let tree = PythonTree::new();
+        let commands = ConfiguredCommands::load_with(
+            &tree.record(&tree.venv.join("bin/python3"), true),
+            &tree.roots(),
+        )
+        .expect("Monty on");
+        assert!(
+            commands.python().is_none(),
+            "Monty on has no Python tool to seed"
+        );
+        let off = tree.commands();
+        let spec = tree.record(&tree.venv.join("bin/python3"), false).tool["python3"].clone();
+        let (_, added) = off.python().expect("Monty off").augmented(&spec);
+        assert!(
+            added.iter().all(|entry| entry.reason != "libraries"),
+            "an install with no images adds no library: {added:?}"
+        );
+    }
+
+    /// Time the library walk on real installs on this host:
+    /// `cargo test -p strands-box --lib library_walk_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "needs real Python installs on the host"]
+    fn library_walk_timing() {
+        let home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+        for command in [
+            PathBuf::from("/opt/homebrew/bin/python3"),
+            home.join("box-native-venv/runtime/.venv/bin/python3"),
+        ] {
+            let install = python_install::detect(&command, &InstallRoots::host())
+                .expect("a recognized install");
+            let started = std::time::Instant::now();
+            let images = extension_images(&install.code_folders, MAXIMUM_PYTHON_IMAGES);
+            let walked = started.elapsed();
+            let libraries =
+                containment::loaded_libraries(&images, &containment::ContainmentConfig::new());
+            let total = started.elapsed();
+            println!(
+                "{}: {} images found in {walked:?}; {} libraries derived; {total:?} in all",
+                command.display(),
+                images.len(),
+                libraries.len()
+            );
+            for library in &libraries {
+                println!("  {}", library.display());
+            }
+        }
     }
 
     #[test]

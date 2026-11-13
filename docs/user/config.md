@@ -530,8 +530,12 @@ what Python writes. Box still adds the install and certificate reads. An added f
 the table's own `read` entries already covers isn't added again, and a table's `read` or
 `read_file` entry inside an added folder gives way to it, so no path is granted twice.
 
-The libraries that compiled extension modules (`.so` files) load aren't added yet. Grant them in the
-table, for example `read = ["/opt/homebrew/opt/openssl@3/lib"]`.
+Box also adds `read_file` on each library the install's compiled extension modules load, marked
+`libraries`. It reads every `.so` file (and `.dylib` file on macOS) under the install's code folders,
+up to 5000, and follows their loads the way it follows a program's. On macOS with Homebrew that adds
+`/opt/homebrew/opt/{openssl@3,sqlite,xz,zstd,mpdecimal}/lib/...`, so `ssl`, `sqlite3` and `lzma`
+import. A library inside a folder the tool can already read isn't added. A library reached through
+a folder the tool can write isn't added either; grant it in the table if the tool needs it.
 
 The added workspace write is judged like any other: a venv inside a writable workspace is refused at
 startup, as [Configured command integrity](#configured-command-integrity) describes.

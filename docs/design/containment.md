@@ -399,6 +399,13 @@ On macOS and Linux, Box discovers dependencies automatically and checks their re
 starting the affected workload. If a required Read grant is missing, startup fails with guidance for
 adding the missing entries.
 
+Only an exec grant on one file seeds this walk inside containment. A library that is loaded but not
+executed, such as a Python extension module, has no exec grant. For those, containment exposes
+`loaded_libraries(images, config)`: the same walk, seeded with the given images and checked against
+`config`'s write grants. A dependency reached through a writable chain is not returned, and an image
+that can't be walked returns nothing. Box calls it for a Python tool and adds each result as a
+`read_file` grant, so the grant goes through Box's own checks and shows in the startup notice.
+
 The [read-derivation
 decision](decisions.md#box-derives-a-read-closure-and-refuses-to-derive-an-exec-closure) keeps
 discovery automatic but restricts a branch when the workload can change its executable, a library,

@@ -1874,9 +1874,12 @@ interactive frames, so a `python` with no `-c` and no script file refuses instea
 
 With `monty = false`, Box adds grants to the Python tool's lists before it judges them: read on the
 folders the install loads code from and on a venv's `pyvenv.cfg`, read on the certificate bundle,
-and, when the table has no `[tool.python3.filesystem]`, read and write on the agent's workspace. The
-startup notice marks each added grant with `(added for [tool.python3]: install)`, `certificates` or
-`workspace`.
+read on each library the install's extension modules load, and, when the table has no
+`[tool.python3.filesystem]`, read and write on the agent's workspace. The startup notice marks each
+added grant with `(added for [tool.python3]: install)`, `libraries`, `certificates` or `workspace`.
+Box finds the libraries with containment's own dependency walk, seeded with every `.so` (and
+`.dylib` on macOS) under the install's code folders and the tool's write grants, so
+[a writable chain derives no read](#box-bounds-derived-reads-from-writable-dependency-chains).
 
 Why: Box already knows these folders from the install's files, and an operator who lists them by
 hand gets one wrong (a Homebrew `site-packages` that is a link, a stdlib that encloses another

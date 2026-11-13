@@ -1,6 +1,6 @@
 //! Backend trait and platform-specific implementations.
 
-mod dependencies;
+pub(crate) mod dependencies;
 pub(crate) mod macos;
 
 #[cfg(target_os = "linux")]
@@ -39,4 +39,32 @@ pub(crate) struct SupportInfo {
     pub(crate) mechanism: String,
     /// Human-readable detail for diagnostics.
     pub(crate) details: String,
+}
+
+/// The libraries each of `images` loads from outside the system, as the spelling each load
+/// requests, deduplicated, through each library's own loads.
+///
+/// The walk is the one an exec grant's dependencies get, with `config`'s grants: a dependency
+/// reached through a folder `config` lets the workload write is not derived, and an image that
+/// can't be walked (not a loadable image, an unresolved load, too many images) adds nothing.
+/// `docs/design/decisions.md#box-bounds-derived-reads-from-writable-dependency-chains` holds why.
+pub fn loaded_libraries(
+    images: &[std::path::PathBuf],
+    config: &ContainmentConfig,
+) -> Vec<std::path::PathBuf> {
+    let mut found = std::collections::BTreeSet::new();
+    for image in images {
+        #[cfg(target_os = "macos")]
+        {
+            let mut missing = dependencies::MissingReads::default();
+            if let Ok(loaded) = macos::macho::collect_dylibs(image, config, &mut missing) {
+                found.extend(loaded.into_iter().map(|grant| grant.original));
+            }
+        }
+        #[cfg(target_os = "linux")]
+        found.extend(linux::namespace::view::loaded_libraries(image, config));
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        let _ = (image, config);
+    }
+    found.into_iter().collect()
 }

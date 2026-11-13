@@ -18,6 +18,7 @@ mod platform;
 pub mod test_support;
 
 // Public API surface
+pub use backend::loaded_libraries;
 pub use config::ContainmentConfig;
 pub use error::ContainmentError;
 pub use facade::Containment;
