@@ -109,11 +109,11 @@ request, on port 443, so the key grants no reach a permit does not. An entry wit
 path, a wildcard, or an IP address is a load error. See
 [upgrade plain HTTP to HTTPS](../../docs/user/egress.md#upgrade-plain-http-to-https).
 
-**`[agent]` and each `[tool.<label>]` share one process shape.** `[agent]` is the process the
+**`[agent]` and each `[tool.<label>]` hold the same four fields.** `[agent]` is the process the
 operator starts. A `[tool.<label>]` is a process the Shell runs for a request the policy already
 decided, so a tool needs no authority of its own.
 
-Both tables use the fields below, with role restrictions where stated:
+Both tables hold the same four fields, and a `[tool.<label>]` also holds `grammar`:
 
 | Field | What it states |
 |---|---|
@@ -121,17 +121,16 @@ Both tables use the fields below, with role restrictions where stated:
 | `workspace` | The initial working directory. It grants nothing |
 | `env` | Variables the box adds to this process's composed environment |
 | `filesystem` | The direct reach of this process's own filesystem calls |
-| `native-file-watching` | `false` by default. Permit macOS FSEvents for this process and its descendants; it can disclose denied names and event metadata, including outside the workspace and from past events. Linux ignores it |
 | `grammar` | `[tool.<label>]` only, and experimental: the tool grammar for the program the tool runs. It loads only when `[experimental-features] tool-grammars = true` |
 | `ingress` | `[agent]` only, as `[[agent.ingress]]`: up to five listeners, each an address the box listens on for callers and the agent's port it relays them to; needs `ingress = true` in `[experimental-features]` |
 
 `tool_grammars.rs` pins the `tool-grammars` switch, the startup refusals, and the grammar action
 that decides a spawn of a bound program.
 
-Local stdio `[mcp.<name>]` tables also accept `native-file-watching`; remote HTTP entries refuse it.
-Each process selects it independently. On macOS, Box prints the metadata limitation on stderr for
-each selected process. Direct file-content and write restrictions remain in force.
-See [native file watching](../../docs/user/config.md#native-file-watching) for configuration and rollback.
+`[agent]`, each `[tool.<label>]`, and each stdio `[mcp.<name>]` also take `native-file-watching`,
+`false` by default, which permits macOS FSEvents for that process alone. It can disclose denied names
+and event metadata, so Box prints that limitation at startup. See
+[native file watching](../../docs/user/config.md#native-file-watching).
 
 `filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
 `exec`, and `deny`. They give this process's own filesystem calls direct reach, because an

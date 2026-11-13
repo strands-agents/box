@@ -128,8 +128,8 @@ Box works out a box's reach in four steps:
 
 ### The process specification
 
-`[agent]`, each `[tool.<name>]`, and each stdio `[mcp.<name>]` share the process fields below.
-One translator turns each of them into a set of sandbox grants. See
+`[agent]` and each `[tool.<name>]` hold the same four fields, and a stdio `[mcp.<name>]` entry holds
+the same four plus `network`. One translator turns each of them into a set of sandbox grants. See
 [one process specification and one translator](decisions.md#one-process-spec-and-one-translator).
 
 - `command` names the program and its fixed leading arguments.

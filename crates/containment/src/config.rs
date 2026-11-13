@@ -174,7 +174,8 @@ impl ContainmentConfig {
         self.runtime_services
     }
 
-    /// Permit macOS FSEvents, which can disclose denied names and event metadata; Linux ignores this setting.
+    /// Permit macOS FSEvents, which can disclose denied names and event metadata. Linux ignores
+    /// this setting.
     #[must_use]
     pub fn allow_native_file_watching(mut self) -> Self {
         self.native_file_watching = true;

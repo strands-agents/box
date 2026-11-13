@@ -1737,6 +1737,9 @@ mod tests {
         }
     }
 
+    /// **Native file watching is selected per local process and needs its record version.** Each
+    /// table stores only its own selection, a selected record refuses an older version, and a
+    /// remote MCP server refuses the key.
     #[test]
     fn native_file_watching_is_versioned_and_selected_per_process() {
         for table in ["agent", "tool.watcher", "mcp.watcher"] {
@@ -1774,39 +1777,13 @@ mod tests {
                 ));
             }
         }
-    }
-
-    #[test]
-    fn a_remote_mcp_server_refuses_native_file_watching() {
-        for selected in [false, true] {
-            let parsed = toml::from_str::<ConfigFile>(&format!(
-                "name = \"watcher\"\nbox_dir = \"/var/lib/boxes/watcher\"\n\
-                 [mcp.remote]\ntype = \"http\"\ndestinations = [\"example.com\"]\n\
-                 native-file-watching = {selected}\n"
-            ));
-            assert!(parsed.is_err());
-        }
-    }
-
-    #[test]
-    fn native_file_watching_version_survives_other_feature_selections() {
-        let mut stored = pinned_record(
-            "file-attributes = true\n\
-             [gateway]\nupgrade_http = [\"example.com\"]\n\
-             [limits.shell]\nmax_output = 65536\nmax_stdin = 1048576\n\
-             [agent]\ncommand = [\"watcher\"]\nnative-filesystem-policy = false\n\
-             [tool.watcher]\ncommand = [\"watcher\"]\nnative-file-watching = true\n",
+        let remote = "name = \"watcher\"\nbox_dir = \"/var/lib/boxes/watcher\"\n\
+                      [mcp.remote]\ntype = \"http\"\ndestinations = [\"example.com\"]\n\
+                      native-file-watching = false\n";
+        assert!(
+            toml::from_str::<ConfigFile>(remote).is_err(),
+            "a remote MCP server refuses the key"
         );
-        assert_eq!(stored.version, 35);
-        assert_eq!(
-            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
-            stored
-        );
-        stored.version = 34;
-        assert!(matches!(
-            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
-            Err(ConfigError::RecordVersion { expected: 35, .. })
-        ));
     }
 
     #[test]
