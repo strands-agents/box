@@ -135,7 +135,8 @@ impl PreparedFilesystemPath {
 }
 
 #[cfg(target_os = "linux")]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ObjectIdentity {
     device: u64,
     inode: u64,
@@ -530,7 +531,7 @@ pub(crate) struct PathGrant {
     #[serde(skip)]
     nodes: Vec<PathBuf>,
     #[cfg(target_os = "linux")]
-    #[serde(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) identity: Option<ObjectIdentity>,
     #[cfg(target_os = "linux")]
     #[serde(skip)]
@@ -759,6 +760,9 @@ pub(crate) struct PathGrantWire {
     resolved: PathBuf,
     operation: Operation,
     scope: Scope,
+    #[cfg(target_os = "linux")]
+    #[serde(default)]
+    identity: Option<ObjectIdentity>,
 }
 
 impl TryFrom<PathGrantWire> for PathGrant {
@@ -775,6 +779,15 @@ impl TryFrom<PathGrantWire> for PathGrant {
         } else {
             Self::new(&wire.original, wire.operation, wire.scope)?
         };
+        #[cfg(target_os = "linux")]
+        if let Some(expected) = wire.identity
+            && granted.identity != Some(expected)
+        {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "filesystem grant object changed while loading config: {}",
+                granted.original.display(),
+            )));
+        }
         if granted.resolved != wire.resolved {
             return Err(ContainmentError::ConfigValidation(format!(
                 "granted path canonical path drifted while loading config: \
@@ -847,4 +860,101 @@ pub enum BackendOverride {
         /// Whether Seatbelt extension tokens are enabled.
         extensions_enabled: bool,
     },
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    fn serialized_exec_directory(path: &Path) -> (PathGrant, String) {
+        let grant =
+            PathGrant::new(path, Operation::Exec, Scope::Root).expect("prepare the directory");
+        let text = serde_json::to_string(&grant).expect("serialize the grant");
+        (grant, text)
+    }
+
+    #[test]
+    fn a_serialized_exec_directory_refuses_replacement_and_accepts_restoration() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let directory = temp.path().join("tools");
+        let original = temp.path().join("original");
+        std::fs::create_dir(&directory).expect("create the tools directory");
+        let (grant, text) = serialized_exec_directory(&directory);
+        let loaded: PathGrant = serde_json::from_str(&text).expect("the unchanged directory loads");
+        assert_eq!(loaded.identity, grant.identity);
+
+        std::fs::rename(&directory, &original).expect("move the directory");
+        std::fs::create_dir(&directory).expect("replace the directory");
+        let error = serde_json::from_str::<PathGrant>(&text)
+            .expect_err("the serialized grant must reject the replacement directory");
+        assert!(error.to_string().contains("object changed"), "{error}");
+
+        std::fs::rename(&directory, temp.path().join("replacement")).expect("move the replacement");
+        std::fs::rename(&original, &directory).expect("restore the original directory");
+        let restored: PathGrant =
+            serde_json::from_str(&text).expect("the original directory loads");
+        assert_eq!(restored.identity, grant.identity);
+    }
+
+    #[test]
+    fn a_serialized_exec_directory_refuses_an_ancestor_replacement() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let project = temp.path().join("project");
+        let directory = project.join("tools");
+        std::fs::create_dir_all(&directory).expect("create the tools directory");
+        let (_grant, text) = serialized_exec_directory(&directory);
+
+        std::fs::rename(&project, temp.path().join("original")).expect("move the ancestor");
+        std::fs::create_dir_all(&directory).expect("replace the ancestor and tools directory");
+        let error = serde_json::from_str::<PathGrant>(&text)
+            .expect_err("the serialized grant must reject the substituted subtree");
+        assert!(error.to_string().contains("object changed"), "{error}");
+    }
+
+    #[test]
+    fn a_serialized_exec_directory_refuses_a_swap_after_loading() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let directory = temp.path().join("tools");
+        std::fs::create_dir(&directory).expect("create the tools directory");
+        let (_grant, text) = serialized_exec_directory(&directory);
+        let loaded: PathGrant = serde_json::from_str(&text).expect("the unchanged directory loads");
+
+        std::fs::rename(&directory, temp.path().join("original")).expect("move the directory");
+        std::fs::create_dir(&directory).expect("replace the directory");
+        let error = loaded
+            .validate_live_identity()
+            .expect_err("the loaded grant must reject a later replacement");
+        assert!(error.to_string().contains("object changed"), "{error}");
+    }
+
+    #[test]
+    fn a_legacy_grant_without_identity_binds_the_object_present_at_load() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let directory = temp.path().join("tools");
+        std::fs::create_dir(&directory).expect("create the tools directory");
+        let (grant, text) = serialized_exec_directory(&directory);
+        let mut wire: serde_json::Value =
+            serde_json::from_str(&text).expect("the serialized grant");
+        wire.as_object_mut()
+            .expect("grant object")
+            .remove("identity");
+
+        let loaded: PathGrant = serde_json::from_value(wire).expect("the legacy grant loads");
+        assert_eq!(loaded.identity, grant.identity);
+        loaded
+            .validate_live_identity()
+            .expect("the loaded identity stays valid");
+    }
+
+    #[test]
+    fn a_serialized_denial_keeps_its_existing_shape() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let denied = temp.path().join("denied");
+        let grant = PathGrant::denial(&denied, Scope::Root).expect("prepare the absent denial");
+        let wire = serde_json::to_value(&grant).expect("serialize the denial");
+        assert!(wire.get("identity").is_none());
+        let loaded: PathGrant = serde_json::from_value(wire).expect("load the absent denial");
+        assert_eq!(loaded.operation, Operation::Deny);
+        assert_eq!(loaded.identity, None);
+    }
 }

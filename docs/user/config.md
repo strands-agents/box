@@ -607,6 +607,9 @@ Create the path first, or name the existing directory above it. The same rule ho
 `strands-home`, the preload file, and the project all exist before the first `run`, because the
 tutorial's earlier steps made them.
 
+On Linux, `filesystem grant object changed while loading config` means a granted path selected a different object during that launch's preparation.
+Let the filesystem update finish, then retry the launch.
+
 **A `write` grant alone is not runnable.** The agent's sandbox refuses to map code from a writable
 grant. When the agent's `command` or one of its interpreters lies inside a writable grant, the
 startup disclosure carries a warning:

@@ -250,6 +250,10 @@ pub(crate) struct Boundary {
     containment_config_file: std::fs::File,
     containment_digest: String,
 
+    /// Open grant references retained for this process launch.
+    #[cfg(target_os = "linux")]
+    _containment: ContainmentConfig,
+
     /// The process's environment, serialized for the trampoline.
     target_environment: String,
 
@@ -801,6 +805,8 @@ impl Boundary {
             containment_config,
             containment_config_file,
             containment_digest,
+            #[cfg(target_os = "linux")]
+            _containment: containment,
             target_environment,
             disclosure,
             #[cfg(target_os = "linux")]
@@ -2025,6 +2031,50 @@ mod tests {
                 )
             })
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_boundary_keeps_unlinked_grants_open_until_it_drops() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let fixture = Fixture::new();
+        let granted = fixture.path("retained-grant");
+        std::fs::write(&granted, "per-launch fixture").expect("write the granted file");
+        let granted = granted.canonicalize().expect("canonical granted file");
+        let metadata = std::fs::metadata(&granted).expect("record the granted object");
+        let identity = (metadata.dev(), metadata.ino());
+        let deleted = PathBuf::from(format!("{} (deleted)", granted.display()));
+        let has_open_reference = || {
+            std::fs::read_dir("/proc/self/fd")
+                .expect("inspect this process's open references")
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    let path = entry.path();
+                    let Ok(target) = std::fs::read_link(&path) else {
+                        return false;
+                    };
+                    (target == granted || target == deleted)
+                        && std::fs::metadata(&path)
+                            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == identity)
+                })
+        };
+        assert!(!has_open_reference(), "the fixture holds no file reference");
+        let mut spec = fixture.spec();
+        spec.filesystem.read_file.push(granted.clone());
+        let boundary = fixture.translate(&spec, "[tool.reader]", &[]);
+        std::fs::remove_file(&granted).expect("unlink the granted fixture");
+        assert!(!granted.exists(), "the pathname no longer holds the object");
+        assert!(
+            has_open_reference(),
+            "the translated boundary must retain its approved object"
+        );
+
+        drop(boundary);
+        assert!(
+            !has_open_reference(),
+            "the object reference must be released with its boundary"
+        );
     }
 
     /// A `box.toml` written into `directory` and loaded as one authority source.
