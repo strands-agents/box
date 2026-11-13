@@ -147,3 +147,18 @@ when temporal {
     assert_eq!(refused, 126);
     assert_eq!(gated, 0, "the unrun stage was recorded as indeterminate");
 }
+
+#[test]
+fn a_piped_loop_is_decided_on_its_own_commands() {
+    let output = run(async {
+        shell_with(
+            r#"permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource)
+               when { ["printf", "read", "echo"].contains(context.input.program) };"#,
+            None,
+        )
+        .run("printf 'x\\n' | while read x; do echo \"$x\"; done")
+        .await
+    });
+    assert_eq!(output.status, 0, "{}", output.stderr);
+    assert_eq!(output.stdout, "x\n");
+}
