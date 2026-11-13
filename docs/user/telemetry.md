@@ -132,7 +132,7 @@ Each box record names its origin on its resource:
 | Key | Value |
 |---|---|
 | `service.name` | `strands-box` |
-| `strands.box.name` | this box's generated identifier, as `box-` and 16 hexadecimal characters |
+| `strands.box.name` | this box's ID: the one the library caller supplied, or a generated `box-` and 16 hexadecimal characters |
 | `strands.box.source` | `box` for a record the box wrote, and `agent` for a relayed payload |
 | `strands.box.run.id` | one identifier per `strands-box run` invocation |
 

@@ -72,7 +72,7 @@ The file carries twelve keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `name` | string | Which box this is. One path component of letters, digits, `.`, `_`, or `-`, at most 32 bytes. |
+| `name` | string | Which box this is. One path component of letters, digits, `.`, `_`, or `-`, at most 33 bytes. |
 | `box_dir` | string | Where the box keeps its private state. Required, and absolute. |
 | `policy` | string | The Dogwood policy, relative to this file's directory unless absolute. Absent means no authored policy, and absent policy denies. |
 | `[agent]` | table | The one process the box runs. |
