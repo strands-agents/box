@@ -643,6 +643,9 @@ pub(crate) mod tests {
         Ok(result)
     }
 
+    // `loaded_libraries` reads Mach-O images on macOS and ELF images on Linux, so this Mach-O
+    // fixture only applies on macOS.
+    #[cfg(target_os = "macos")]
     #[test]
     fn a_loaded_library_seed_derives_outside_dependencies_but_not_writable_ones() {
         let directory = tempfile::tempdir().unwrap();

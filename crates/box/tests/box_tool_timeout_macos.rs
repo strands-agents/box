@@ -46,11 +46,17 @@ fn the_shell_timeout_stops_a_tool_and_what_it_started_and_the_box_keeps_serving(
         std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o755))
             .expect("make the holder tool runnable");
     }
+    // /bin/sh opens the script to read it, so the tool reads its own folder as well.
     let declaration = format!(
         "[limits.shell]\ntimeout = 2\n\
          [tool.holder]\ncommand = [{:?}]\n\
-         [tool.holder.filesystem]\nread = [\"{{box_home}}\"]\nwrite = [\"{{box_home}}\"]\n",
-        holder.display().to_string()
+         [tool.holder.filesystem]\nread = [\"{{box_home}}\", {:?}]\nwrite = [\"{{box_home}}\"]\n",
+        holder.display().to_string(),
+        holder
+            .parent()
+            .expect("the program folder")
+            .display()
+            .to_string()
     );
     let configured = fixture::Request::with_config(
         "tool-timeout",
