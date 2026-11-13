@@ -877,6 +877,60 @@ mod tests {
         assert!(opened.phantoms().is_empty());
     }
 
+    /// An AWS provider that fails hard if it is ever consulted — proves whether `open` resolved.
+    #[derive(Debug)]
+    struct FailingAwsProvider;
+
+    impl AwsCredentialProvider for FailingAwsProvider {
+        fn provide(&self, _profile: Option<&str>) -> Result<crate::AwsSessionCredentials> {
+            Err(CredentialError::KeystoreAccess(
+                "the chain is broken".to_string(),
+            ))
+        }
+    }
+
+    /// A bare `aws://` route is eagerly validated at open, so a broken chain fails `box run` rather
+    /// than the first signed request. The failing provider turns that eager resolve into a hard
+    /// error; `aws_config("")` is the bare form (`is_bare_aws_default_chain` holds).
+    #[test]
+    fn a_broken_bare_aws_chain_fails_the_open() {
+        let error = Vault::open_with_aws_provider(
+            VaultConfig::new(backend_with(Box::new(BrokenSource)), "t").route(
+                RouteSpec::signed_aws(
+                    DestinationPattern::parse("*.amazonaws.com").unwrap(),
+                    aws_config(""),
+                ),
+            ),
+            Arc::new(FailingAwsProvider),
+        )
+        .expect_err("a broken bare chain must fail the open");
+        assert!(
+            !error.is_soft(),
+            "a broken bare chain is a hard open failure: {error:?}"
+        );
+    }
+
+    /// Only a bare route is eagerly validated. A named-profile-only vault does no resolve at open, so
+    /// a box that never signs a bare route forces no credentials to exist — proven by a provider that
+    /// would fail hard if it were consulted.
+    #[test]
+    fn a_named_profile_only_vault_does_not_resolve_at_open() {
+        let opened = Vault::open_with_aws_provider(
+            VaultConfig::new(backend_with(Box::new(BrokenSource)), "t").route(
+                RouteSpec::signed_aws(
+                    DestinationPattern::parse("*.amazonaws.com").unwrap(),
+                    aws_config("prod"),
+                ),
+            ),
+            Arc::new(FailingAwsProvider),
+        )
+        .expect("a named-profile-only vault must not resolve at open");
+        assert!(
+            opened.phantoms().is_empty(),
+            "a signed route mints no phantom"
+        );
+    }
+
     // --- audit ---------------------------------------------------------------
 
     /// A successful resolve emits exactly one record, carrying the redacted reference.

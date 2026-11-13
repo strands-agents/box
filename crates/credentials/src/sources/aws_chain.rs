@@ -65,9 +65,10 @@ where
         }
     }
 
-    /// Serve the cached credentials for `profile` while valid; refresh inside the expiry buffer; on
-    /// a failed refresh serve still-valid cached, else return the hard error. Each `profile` key has
-    /// its own slot.
+    /// Serve the cached credentials for `profile` while valid, and refresh inside the expiry buffer.
+    /// A failed refresh, or a fresh resolve that is already expired, falls back to a still-valid
+    /// cached credential; with none, a failed refresh returns the hard error and an expired fresh
+    /// resolve is served as-is. Each `profile` key has its own slot.
     fn provide(&mut self, profile: Option<&str>) -> Result<AwsSessionCredentials> {
         let key: ProfileKey = profile.map(str::to_string);
         if let Some((credentials, expiry)) = self.cached.get(&key)
@@ -648,6 +649,24 @@ mod tests {
             cache.provide(None).unwrap().access_key_id,
             "AKIA1",
             "an expired fresh resolve does not displace the valid cached credential"
+        );
+    }
+
+    /// A fresh resolve that is already expired, with no cached predecessor, is served as-is: the SDK
+    /// produced a credential, so the cache returns it (the upstream rejects it) rather than inventing
+    /// a failure from a successful resolve.
+    #[test]
+    fn cache_serves_an_expired_fresh_resolve_when_there_is_no_cache() {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let clock = Cell::new(base);
+        let mut cache = RefreshCache::new(
+            |_profile| Ok((creds("EXPIRED"), Some(base - Duration::from_secs(1)))),
+            || clock.get(),
+        );
+        assert_eq!(
+            cache.provide(None).unwrap().access_key_id,
+            "EXPIRED",
+            "an expired fresh resolve with no cache is served, not turned into an error"
         );
     }
 
