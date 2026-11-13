@@ -2457,11 +2457,12 @@ mod tests {
         let grants = python_grants(&tree, filesystem, &tree.project).expect("judged");
         assert_eq!(granted(&grants), vec![("read", work, None)]);
 
-        // An operator's narrower entry inside an added folder gives way to it.
+        // An operator's narrower entry inside an added folder gives way to it. The project write
+        // keeps its read, because Linux refuses write-only access.
         let inside = tree.site_packages().join("pkg");
         std::fs::create_dir(&inside).expect("pkg");
         let filesystem = crate::record::config::process::Filesystem {
-            read: vec![inside],
+            read: vec![inside, tree.project.clone()],
             write: vec![tree.project.clone()],
             ..Default::default()
         };
@@ -2469,6 +2470,7 @@ mod tests {
         assert_eq!(
             granted(&grants),
             vec![
+                ("read", tree.project.clone(), None),
                 ("read", tree.site_packages(), added("install")),
                 ("read", tree.base.join("lib/python3.12"), added("install")),
                 ("write", tree.project.clone(), None),
@@ -2573,8 +2575,10 @@ mod tests {
         let planted = tree.site_packages().join("x.pth");
         std::fs::write(&planted, "").expect("x.pth");
         let file_reach = |path: &Path| {
+            // Linux refuses write-only access, so the file write keeps its read.
             direct_grants(
                 &Filesystem {
+                    read_file: vec![path.to_path_buf()],
                     write_file: vec![path.to_path_buf()],
                     ..Default::default()
                 },
