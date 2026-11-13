@@ -119,12 +119,18 @@ async fn write_stdout(context: &mut CommandContext, bytes: &[u8]) -> io::Result<
     }
 }
 
-/// `status`, or 1 with a diagnostic when Python's output could not be written.
-async fn python_status(context: &mut CommandContext, written: io::Result<()>, status: i32) -> i32 {
+/// `status`, or 1 with a diagnostic when output was lost for any reason but a closed reader.
+async fn written_status(
+    context: &mut CommandContext,
+    label: &str,
+    written: io::Result<()>,
+    status: i32,
+) -> i32 {
     match written {
         Ok(()) => status,
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => status,
         Err(error) => {
-            write_stderr(context, &format!("python: {error}\n")).await;
+            write_stderr(context, &format!("{label}: {error}\n")).await;
             1
         }
     }
@@ -152,6 +158,19 @@ async fn finish(context: &mut CommandContext, permit: Box<dyn EffectPermit>, sta
 
 /// A permit marked indeterminate if its command is cancelled before it records.
 struct Unsettled(Option<Box<dyn EffectPermit>>);
+
+impl Unsettled {
+    fn spawn_working_directory(&self) -> Option<&Path> {
+        self.0.as_ref()?.spawn_working_directory()
+    }
+
+    async fn finish(mut self, context: &mut CommandContext, status: i32) -> i32 {
+        match self.0.take() {
+            Some(permit) => finish(context, permit, status).await,
+            None => status,
+        }
+    }
+}
 
 impl Drop for Unsettled {
     fn drop(&mut self) {
@@ -242,18 +261,15 @@ impl CommandFallback for ShellKernel {
         };
         let (permit, resolved) = match decided {
             Decided::Python(permit) => {
-                let mut held = Unsettled(Some(permit));
+                let held = Unsettled(Some(permit));
                 let status = self.run_python(context, &args).await;
-                return Ok(Some(match held.0.take() {
-                    Some(permit) => finish(context, permit, status).await,
-                    None => status,
-                }));
+                return Ok(Some(held.finish(context, status).await));
             }
             Decided::NotFound(permit) => {
                 finish(context, permit, 127).await;
                 return Ok(None);
             }
-            Decided::Spawn { permit, program } => (permit, program),
+            Decided::Spawn { permit, program } => (Unsettled(Some(permit)), program),
         };
         let working_directory = match permit.spawn_working_directory() {
             Some(directory) if !directory.is_absolute() => {
@@ -263,13 +279,13 @@ impl CommandFallback for ShellKernel {
                      directory must be absolute\n",
                 )
                 .await;
-                return Ok(Some(finish(context, permit, FAULT_STATUS).await));
+                return Ok(Some(permit.finish(context, FAULT_STATUS).await));
             }
             Some(directory) => directory.to_path_buf(),
             None => context.cwd().to_path_buf(),
         };
         if !resolved.bound {
-            finish(context, permit, 127).await;
+            permit.finish(context, 127).await;
             return Ok(None);
         }
         let spawn = HostSpawn {
@@ -291,21 +307,20 @@ impl CommandFallback for ShellKernel {
                 if let (_, _, Some(stderr)) = context.stdio() {
                     let _ = stderr.write_all(&outcome.stderr).await;
                 }
-                match written {
-                    Ok(()) => outcome.status,
-                    Err(error) => {
-                        write_stderr(context, &format!("strands-shell: {program}: {error}\n"))
-                            .await;
-                        1
-                    }
-                }
+                written_status(
+                    context,
+                    &format!("strands-shell: {program}"),
+                    written,
+                    outcome.status,
+                )
+                .await
             }
             Err(error) => {
                 write_stderr(context, &format!("strands-shell: {program}: {error}\n")).await;
                 DENIED_STATUS
             }
         };
-        Ok(Some(finish(context, permit, status).await))
+        Ok(Some(permit.finish(context, status).await))
     }
 }
 
@@ -335,12 +350,12 @@ impl ShellKernel {
                 "-V" | "--version" => {
                     let written =
                         write_stdout(context, format!("{PYTHON_VERSION}\n").as_bytes()).await;
-                    return python_status(context, written, 0).await;
+                    return written_status(context, "python", written, 0).await;
                 }
                 "-h" | "--help" => {
                     let written =
                         write_stdout(context, format!("{PYTHON_HELP}\n").as_bytes()).await;
-                    return python_status(context, written, 0).await;
+                    return written_status(context, "python", written, 0).await;
                 }
                 "-c" => match words.next() {
                     Some(text) => source = Some(text.clone()),
@@ -392,7 +407,7 @@ impl ShellKernel {
         if !outcome.stderr.is_empty() {
             write_stderr(context, &outcome.stderr).await;
         }
-        python_status(context, written, outcome.status).await
+        written_status(context, "python", written, outcome.status).await
     }
 
     /// Read a script file through this kernel, so the read is its own `fs:read` decision.
