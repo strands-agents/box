@@ -545,6 +545,13 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "wait4",
         number: libc::SYS_wait4,
     },
+    // Go's os/exec waits for a child with `waitid` before it reaps it with `wait4`, so an `EPERM`
+    // here fails every child a Go program starts (`gh` cannot run `git`). Like `wait4`, it reaches
+    // only the caller's own children, and the pidfd it can name comes from the permitted `pidfd_open`.
+    PermittedSyscall {
+        name: "waitid",
+        number: libc::SYS_waitid,
+    },
     PermittedSyscall {
         name: "prlimit64",
         number: libc::SYS_prlimit64,
@@ -1381,10 +1388,10 @@ mod tests {
     #[test]
     fn permit_filter_has_the_expected_workload_and_installer_entries() {
         let x86_entries = usize::from(cfg!(target_arch = "x86_64"));
-        assert_eq!(WORKLOAD_PERMITTED.len(), 113 + 17 * x86_entries);
+        assert_eq!(WORKLOAD_PERMITTED.len(), 114 + 17 * x86_entries);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 116 + 18 * x86_entries);
+        assert_eq!(rules.len(), 117 + 18 * x86_entries);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
@@ -1649,6 +1656,36 @@ mod tests {
                 .iter()
                 .any(|instruction| instruction.k == number)
         );
+    }
+
+    #[test]
+    fn child_waits_are_permitted_and_unmediated() {
+        let filters = SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("filters compile");
+        for (name, number) in [("wait4", libc::SYS_wait4), ("waitid", libc::SYS_waitid)] {
+            assert!(
+                WORKLOAD_PERMITTED
+                    .iter()
+                    .any(|entry| entry.name == name && entry.number == number),
+                "'{name}' is absent from the permit table, so a Go program gets EPERM when it \
+                 waits for a child and gh cannot run git"
+            );
+            assert!(!MEDIATED.iter().any(|entry| entry.name == name));
+            let number = u32::try_from(number).expect("syscall numbers are small");
+            assert!(
+                filters
+                    .permit
+                    .iter()
+                    .any(|instruction| instruction.k == number)
+            );
+            assert!(
+                !filters
+                    .restrictions
+                    .iter()
+                    .any(|instruction| instruction.k == number)
+            );
+        }
     }
 
     #[test]
