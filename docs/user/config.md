@@ -554,6 +554,22 @@ and the refusal names what the link points at. Whether a path such as `/bin/sh` 
 on the surrounding OS, so the same `exec = ["/bin/sh"]` entry loads under one and is refused under
 another. Write the target the refusal names.
 
+A `read` or `read_file` entry is the one exception: it may name a symbolic link to a file, such as
+`/usr/bin/cc`. A program often runs a helper by that name, so the name has to be there too.
+
+- The grant is the file the link resolves to, checked like any other entry.
+- The box shows that file at the link's name as well, read-only.
+- The link must sit in its own real folder. A link reached through a linked folder is refused.
+- Two links to one file, such as `/usr/bin/cc` and `/usr/bin/gcc` on Ubuntu, are two entries. A
+  link beside a `read` folder that holds its file is kept too, because the link's name is outside
+  that folder. A link listed next to its own file is refused as granted twice.
+- A link inside a credential store, such as `~/.ssh/config`, is refused. Name the file itself.
+- The links in between, such as `/etc/alternatives/cc`, and the folders that hold them are not
+  granted.
+- A link to a directory, and a link in `write`, `write_file`, `exec`, `list` or `metadata`, is still
+  refused.
+- The disclosure shows the entry as `read_file   /usr/bin/cc -> /usr/bin/gcc`.
+
 **No policy decision covers a filesystem list**, so `run` discloses each entry on stderr before the
 workload starts, under `strands-box: [agent] runs <program> with no policy decision over these
 paths:`. Getting started shows the example's disclosure. A credential store, such as `~/.aws` or
@@ -591,7 +607,7 @@ happen after the box directory is created and before the workload starts.
 | A `..` component | ``` `filesystem.read` path "<entry>" carries `..`; name the path it means``` |
 | The same path twice in one list | ``` `filesystem.read` path <path> is duplicated``` |
 | A path that does not exist | `<path> is not there: No such file or directory (os error 2). A grant on a path that does not exist grants nothing and says so nowhere` |
-| A symbolic link | `<path> is a symbolic link to <target>. A grant carries the identity the kernel checks, so a link renders a rule that matches nothing; name <target> instead` |
+| A symbolic link, except a link to a file in `read` or `read_file` | `<path> is a symbolic link to <target>. A grant carries the identity the kernel checks, so a link renders a rule that matches nothing; name <target> instead` |
 | A spelling the kernel resolves elsewhere | `<path> is not the path the kernel checks, which is <path>. A grant carries the identity it acts on, so name that path instead` |
 | A directory in `read_file` or `write_file` | ``<path> is a directory; `read_file` names one file, and a tree belongs in `read` `` |
 | A file in `list` | ``<path> is a file, and `list` enumerates a directory tree`` |

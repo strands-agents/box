@@ -142,6 +142,9 @@ fn inside_operator_home(path: &std::path::Path, homes: &[std::path::PathBuf]) ->
 /// Group grants by resolved path, so a duplicate operation and a scope disagreement are structural.
 fn group_by_path(config: &ContainmentConfig) -> Result<Vec<(&PathGrant, BTreeSet<Operation>)>> {
     let mut groups: Vec<(&PathGrant, BTreeSet<Operation>)> = Vec::new();
+    // Each spelling granted per operation. Two links to one file are two spellings of one grant:
+    // the renderer walks each grant, so each spelling gets its own traversal rules.
+    let mut spellings: BTreeSet<(&std::path::Path, Operation)> = BTreeSet::new();
     for granted in config.authorizations() {
         // Breadth first, and independent of the cell: the widest possible grant is also a
         // well-formed one, so recognizing the cell would accept it.
@@ -163,7 +166,8 @@ fn group_by_path(config: &ContainmentConfig) -> Result<Vec<(&PathGrant, BTreeSet
                         granted.scope,
                     )));
                 }
-                if !operations.insert(granted.operation) {
+                operations.insert(granted.operation);
+                if !spellings.insert((granted.original.as_path(), granted.operation)) {
                     return Err(unsupported(format!(
                         "{} is granted {:?} twice",
                         granted.resolved.display(),
@@ -171,7 +175,10 @@ fn group_by_path(config: &ContainmentConfig) -> Result<Vec<(&PathGrant, BTreeSet
                     )));
                 }
             }
-            None => groups.push((granted, BTreeSet::from([granted.operation]))),
+            None => {
+                spellings.insert((granted.original.as_path(), granted.operation));
+                groups.push((granted, BTreeSet::from([granted.operation])));
+            }
         }
     }
     Ok(groups)
@@ -1143,6 +1150,43 @@ mod tests {
             .expect("read tree again");
         assert!(matches!(
             group_by_path(&twice),
+            Err(ContainmentError::UnsupportedCapability { .. })
+        ));
+
+        // Two links to one file are two spellings, so both render; one link twice is refused.
+        let file = root.join("gcc");
+        std::fs::write(&file, "").expect("a file");
+        for name in ["cc", "c99"] {
+            std::os::unix::fs::symlink(&file, root.join(name)).expect("a link");
+        }
+        let two_names = ContainmentConfig::new()
+            .allow(root.join("cc"), Operation::Read, Scope::File)
+            .expect("cc")
+            .allow(root.join("c99"), Operation::Read, Scope::File)
+            .expect("c99");
+        let groups = group_by_path(&two_names).expect("two names for one file");
+        assert_eq!(groups.len(), 1);
+        let program = root.join("agent");
+        std::fs::write(&program, "agent").expect("program fixture");
+        let rendered = two_names
+            .set_network(Network::localhost().connect(33085))
+            .expect("localhost")
+            .allow(&program, Operation::Exec, Scope::File)
+            .expect("exec");
+        let profile = render_profile(&rendered).expect("a profile");
+        for name in ["cc", "c99"] {
+            assert!(
+                profile.contains(&format!("{}\")", root.join(name).display())),
+                "{name} must have its own rule: {profile}"
+            );
+        }
+        let one_name_twice = ContainmentConfig::new()
+            .allow(root.join("cc"), Operation::Read, Scope::File)
+            .expect("cc")
+            .allow(root.join("cc"), Operation::Read, Scope::File)
+            .expect("cc again");
+        assert!(matches!(
+            group_by_path(&one_name_twice),
             Err(ContainmentError::UnsupportedCapability { .. })
         ));
     }

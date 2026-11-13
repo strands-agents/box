@@ -139,7 +139,7 @@ fn the_enter_only_grant_renders_before_the_direct_grants() {
         .find("for alias in layout")
         .expect("the alias grants, which follow the workspace's own");
     let direct_grants = source
-        .find("allow_operator(containment, &grant.resolved, grant.operation, grant.scope)")
+        .find("allow_operator(containment, path, grant.operation, grant.scope)")
         .expect("the direct grants, which are emitted last");
 
     assert!(
