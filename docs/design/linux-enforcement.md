@@ -53,6 +53,17 @@ Direct Linux file operations use filesystem grants rather than individual policy
 Linux refuses `[experimental-features] native-filesystem-policy = true` during configuration validation.
 See the [platform comparison](platform-differences.md#behavior-and-configuration) for the macOS build requirement and mediated alternatives.
 
+## Native request forwarding
+
+When native filesystem policy is active, the containment supervisor receives kernel notifications and forwards native file requests to Box's policy worker through a private socket.
+The supervisor handles filesystem-information queries itself.
+
+If the socket buffer is full, the supervisor retains one request and waits for space before receiving another kernel notification.
+Further notifications remain queued in the kernel. Filesystem-information queries can also wait behind the pending native request.
+Each socket wait uses a 50-millisecond poll timeout, and the supervisor checks the namespace reaper's exit status before waiting again.
+A closed socket, invalid descriptor, or incomplete request write still stops supervision.
+Waiting for buffer space does not authorize the file operation; the policy worker must still decide the request.
+
 ## Capabilities inside nested namespaces
 
 A Linux [capability](#terms) is a privilege for an operation such as namespace administration.

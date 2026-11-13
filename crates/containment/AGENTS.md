@@ -1255,5 +1255,6 @@ it forwards a fixed 80-byte, little-endian request on the private startup socket
 copy of the listener for validation, descriptor injection, and replies, but never calls notification
 receive on that copy. Finish the supervisor startup acknowledgment before allowing Box to read the
 forwarding stream. The workload must close its forwarding-socket copy before execution.
-Forwarding uses a bounded, nonblocking send: backpressure or a partial write terminates supervision.
+Forwarding uses a bounded, nonblocking send. A full buffer retains one request while the supervisor waits for write readiness and continues checking the reaper.
+A partial write or disconnected peer terminates supervision.
 Keep the existing namespace lifetime chain so supervisor failure terminates the workload.
