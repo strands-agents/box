@@ -96,7 +96,8 @@ lowercase hexadecimal digits. Box stores it, prints it, and labels telemetry wit
 already has an ID refuses a different one. Without `box_id`, Box generates `box-` and 16
 hexadecimal digits.
 Call it before starting application threads or loading secrets, and use one Box workload
-per host process. Later `run` calls fail, even if the first call failed.
+per host process. Later `run` calls fail, even if the first call failed, unless `run` refused a
+malformed `box_id`.
 Ship the matching Box helper binaries beside the host application.
 
 To replace the running box's policy from a host thread:
