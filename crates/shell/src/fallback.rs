@@ -150,6 +150,17 @@ async fn finish(context: &mut CommandContext, permit: Box<dyn EffectPermit>, sta
     }
 }
 
+/// A permit marked indeterminate if its command is cancelled before it records.
+struct Unsettled(Option<Box<dyn EffectPermit>>);
+
+impl Drop for Unsettled {
+    fn drop(&mut self) {
+        if let Some(permit) = self.0.take() {
+            permit.mark_indeterminate();
+        }
+    }
+}
+
 /// A decided command the Shell does not implement, waiting for its stage to start.
 pub(crate) enum Decided {
     /// `python` or `python3`, decided as `shell:exec`.
@@ -231,8 +242,12 @@ impl CommandFallback for ShellKernel {
         };
         let (permit, resolved) = match decided {
             Decided::Python(permit) => {
+                let mut held = Unsettled(Some(permit));
                 let status = self.run_python(context, &args).await;
-                return Ok(Some(finish(context, permit, status).await));
+                return Ok(Some(match held.0.take() {
+                    Some(permit) => finish(context, permit, status).await,
+                    None => status,
+                }));
             }
             Decided::NotFound(permit) => {
                 finish(context, permit, 127).await;

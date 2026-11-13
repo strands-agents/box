@@ -97,3 +97,16 @@ fn python_output_cut_off_at_the_file_limit_fails_and_records_the_failure() {
     assert_eq!(kept.stdout, "PAYL");
     assert_eq!(*outcomes.lock().unwrap(), ["status 1"]);
 }
+
+/// A Python command cancelled while it runs records an indeterminate outcome.
+#[test]
+fn a_cancelled_python_command_records_an_indeterminate_outcome() {
+    let hanging: ScriptRunner = Arc::new(|_| Box::pin(std::future::pending()));
+    let (mut shell, outcomes) = shell(1024, hanging);
+    run(async {
+        let call = shell.run("python3 -c 'fetch()'");
+        let cancelled = tokio::time::timeout(std::time::Duration::from_millis(200), call).await;
+        assert!(cancelled.is_err(), "the script never finishes");
+    });
+    assert_eq!(*outcomes.lock().unwrap(), ["indeterminate"]);
+}
