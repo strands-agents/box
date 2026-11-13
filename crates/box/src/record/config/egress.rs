@@ -1136,10 +1136,20 @@ impl EgressBackend {
         if host.is_empty() {
             return Err(format!("backend url {:?} names no host", self.url));
         }
-        let port = match declared_port(authority) {
-            Some(0) => return Err("backend url port must be between 1 and 65535".to_string()),
-            Some(port) => port,
+        // An omitted port takes the scheme default; an explicitly written one must parse to 1..=65535.
+        // A backend url is not range-checked by `DestinationPattern::parse` (unlike a destination), so
+        // `65536` or `not-a-port` must fail here rather than silently fall back to the default.
+        let port = match declared_port_str(authority) {
             None => scheme.default_port(),
+            Some(text) => match text.parse::<u16>() {
+                Ok(port) if port != 0 => port,
+                _ => {
+                    return Err(format!(
+                        "backend url {:?} has an invalid port {text:?}; a backend port is 1 to 65535",
+                        self.url
+                    ));
+                }
+            },
         };
         // Normalize the prefix to empty or `/segment...` with no trailing slash, so the join with
         // the agent's path is one predictable slash. A bare `/` (root) is no prefix.
@@ -1348,6 +1358,20 @@ fn validate_secret(secret: &EgressSecret, label: &str) -> Result<(), ConfigError
 fn declared_port(destination: &str) -> Option<u16> {
     let authority = destination.split('/').next()?;
     authority.rsplit_once(':')?.1.parse().ok()
+}
+
+/// The port text an authority writes, or `None` when it names only a host. Unlike [`declared_port`]
+/// this does not parse — the caller distinguishes an absent port (use the default) from a present but
+/// unparseable one (refuse). A bracketed IPv6 (`[::1]:443`) reads the port after `]`; a bare IPv6
+/// (`::1`, more than one colon) names no port.
+fn declared_port_str(authority: &str) -> Option<&str> {
+    if let Some(rest) = authority.strip_prefix('[') {
+        rest[rest.find(']')?..].strip_prefix("]:")
+    } else if authority.matches(':').count() > 1 {
+        None
+    } else {
+        authority.rsplit_once(':').map(|(_, port)| port)
+    }
 }
 
 /// Whether an AWS signing-scope component (service or region) is well-formed: non-empty and only
@@ -2737,6 +2761,12 @@ mod tests {
             ("https://", "no host"),
             ("ftp://gw.example.com", "a scheme the box cannot dial"),
             ("https://gw.example.com:0", "port zero"),
+            ("https://gw.example.com:65536", "a port above the u16 range"),
+            ("https://gw.example.com:not-a-port", "a non-numeric port"),
+            (
+                "https://gw.example.com:/github",
+                "an empty port before a prefix",
+            ),
         ] {
             let error = load(&format!(
                 "[egress.github]\ndestinations = [\"api.github.com\"]\n\n\
