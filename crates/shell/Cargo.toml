@@ -13,7 +13,7 @@ path = "src/lib.rs"
 async-trait = "0.1"
 bytes = "1"
 libc = "0.2"
-strands-shell = { git = "https://github.com/strands-agents/shell", rev = "8a203dcf3acb931953de80ff77d3cbaec79985aa", default-features = false }
+strands-shell = { git = "https://github.com/strands-agents/shell", rev = "20c642b0634e9f1a752fa884d9b21d0aadf40b33", default-features = false }
 tokio = { version = "1", features = ["io-util", "rt", "sync"] }
 # The parsed host the SSRF floor reads, as an HTTP client parses it.
 url = "2"

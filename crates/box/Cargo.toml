@@ -35,7 +35,7 @@ policy = { package = "strands-box-policy", path = "../policy", features = [
 ] }
 telemetry = { package = "strands-box-telemetry", path = "../telemetry" }
 box-shell = { package = "strands-box-shell", path = "../shell" }
-strands-shell = { git = "https://github.com/strands-agents/shell", rev = "8a203dcf3acb931953de80ff77d3cbaec79985aa", default-features = false }
+strands-shell = { git = "https://github.com/strands-agents/shell", rev = "20c642b0634e9f1a752fa884d9b21d0aadf40b33", default-features = false }
 # The interpreter behind the `python3`/`python` aliases
 # (docs/design/decisions.md#interpreters-are-brokered-aliases). Published crates, not
 # a fork: `monty` drives the run loop and `monty-types` carries the OS-call vocabulary the
