@@ -134,11 +134,6 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   **`caused_by` uses `assert!` rather than `debug_assert!`, deliberately.** A mislabelled security
   decision in an audit record is worse than a crash, so the guard fires in release too. Every call
   site in `box`'s `run/telemetry.rs` pairs a cause with a verdict it admits, so it cannot fire today.
-  **This narrowing shipped on 2026-09-23 as `d5fd87c2` and then vanished**, because the span export was
-  re-authored on the mainline-merge line and no span-export commit is an ancestor of the branch that
-  held it. The branch is `backup/vvargu/otel-stiching-impl`, which GitHub never had. The mandatory
-  `DecisionCause` went the same way. So neither is a new idea: both are a restoration, and the lesson
-  is that a re-author loses what a rebase would have carried.
   Three test files asserted `span["attributes"] == log["attributes"]` and each had to change with the
   behaviour — `collector.rs`'s
   `decisions_export_spans_and_matching_logs_with_request_parentage`, plus the span/log helpers in
@@ -331,9 +326,9 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   `strands.box.policy.determining.tokens`, `strands.box.trace.correlation`,
   `strands.box.trace.link_traceparent`, and the four Deprecated `gen_ai.*`/`mcp.*` correlation keys.
   `link_traceparent` went because it was never emitted: it needs two valid, different parents on one
-  MCP frame, and every capture on the author's machine held zero. `PROTOCOL_VERSION` moved to 6,
-  because `Correlation` is `deny_unknown_fields` and an older alias naming a removed field is now
-  refused rather than ignored.
+  MCP frame, and every capture on the author's machine held zero. Removing a `Correlation` field
+  bumps `PROTOCOL_VERSION`, because `Correlation` is `deny_unknown_fields` and an older alias naming
+  a removed field is refused rather than ignored.
 
   **Never move one half without the other.** The reserve is a prefix match, so narrowing it while a
   box key sits outside `strands.box.` makes that key forgeable: a harness payload claiming
