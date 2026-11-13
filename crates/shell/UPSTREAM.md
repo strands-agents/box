@@ -2071,3 +2071,16 @@ the left of `&&` or `||` still applies `set -e` inside it, as at the pinned revi
 A substitution or subshell that a cancelled Call drops takes the borrowed stdin with it, so a later
 Call on the same Program reads no stdin. A Shell alias opens one Program for one Call, so it is not
 affected.
+
+## 2026-11-13 — the spawn seam says whether stdin carries data
+
+`HostSpawn` gains `stdin: SpawnStdin { None, Data }`. `exec.rs::spawn_host_program` sets it from fd 0
+of the command: a pipe from an earlier stage, a heredoc, or a `<` file is `Data`; no fd 0 is `None`.
+Input fed from outside the Shell (`set_outside_reader`) is `None` only when it ends with no bytes. An
+embedder installs that reader on every Shell and ends it an instant after a call with no stdin, so a
+spawn that finds it still open waits at most 100 ms for its first bytes or its end, then counts it as
+`Data`. Bytes read while waiting stay in the reader for the next command. The built-in spawn still
+gives the program `/dev/null`. Upstream has no such field; an embedder that can't forward input uses
+it to say so. `tests/host_spawn_stdin.rs` pins each case. The pinned revision has no here-string
+(`<<<`), so it has no case.
+

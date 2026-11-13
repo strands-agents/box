@@ -22,6 +22,20 @@ SCRIPT`.
 
 ### Standard input
 
+A program the Shell starts in its own sandbox, such as a `[tool.<name>]`, gets no input: it reads
+`/dev/null`. With `monty = false`, the Python tool (`[tool.python3]` or `[tool.python]`) is handled
+so a script that needed its input fails loudly:
+
+- When the command's stdin carries data (a pipe, a `<` file, a heredoc, or input the alias
+  forwards), Python gets a stdin that fails on read. A script that reads it gets
+  `OSError: [Errno 9] Bad file descriptor`; a script that doesn't read it runs normally. When such
+  a call exits non-zero, Box adds `strands-box: python3 got no stdin: a program the Shell starts
+  can't read its input yet` to stderr, with the name the caller typed.
+- A call that would read its program from stdin exits 126 without running: no script and no `-c`
+  or `-m`, or a `-` program, as in `cat x.py | python3` or `python3 - <<EOF`. It prints
+  `python3 would read its program from stdin, which a program the Shell starts can't receive yet`.
+  `python3 --version`, `-V`, `-h`, and `--help` still run.
+
 When the alias's standard input is a pipe, a file, or a socket, the command reads it as its
 standard input while it runs. Bytes arrive unchanged. A terminal or `/dev/null` gives the command
 no input. A command that does not read its input is not held by it: the alias returns when the

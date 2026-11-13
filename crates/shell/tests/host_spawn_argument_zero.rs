@@ -50,6 +50,7 @@ fn the_builtin_spawn_gives_the_program_its_invoked_spelling() {
                 args: vec!["-c".to_string(), "printf %s \"$0\"".to_string()],
                 cwd: std::env::temp_dir(),
                 env: Vec::new(),
+                stdin: strands_shell::os::SpawnStdin::None,
             },
         ))
         .expect("the program runs");

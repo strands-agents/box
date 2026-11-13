@@ -223,6 +223,10 @@ it can't quietly run Monty instead.
 To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent nested table is
 `[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
 Set `shell.timeout = false` to disable this limit, or omit the key for the 30-second default.
+Real Python, the `[tool.python3]` or `[tool.python]` a bare `python3` runs with `monty = false`, is
+bounded by this same limit: there is no Python-only setting. At the deadline Box stops the tool and
+every process it started. For long test runs, raise `shell.timeout`, for example to `600`, which
+applies to every Shell call.
 Connection and write operations retain their transport timeouts.
 Configured-command [hard-link scans](#configured-command-integrity) retain their separate
 30-second budget per tree, including when `shell.timeout` is `false`.

@@ -1233,6 +1233,21 @@ pub type ReplacedCommands = std::sync::Arc<std::collections::BTreeSet<String>>;
 /// The bare names the Shell refuses to run, each with the reason it prints.
 pub type RefusedCommands = std::sync::Arc<std::collections::BTreeMap<String, String>>;
 
+/// Whether a started program's standard input carries data, judged when it is spawned.
+///
+/// The hook does not receive the bytes: a program the Shell starts can't read its input yet. This
+/// says only whether there was input it would have read, so an embedder can say so.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SpawnStdin {
+    /// No input: the command has no stdin, or the input fed from outside the Shell ended with no
+    /// bytes.
+    #[default]
+    None,
+    /// Input the program would read: a pipe from an earlier stage, a heredoc or here-string, a `<`
+    /// file, or input fed from outside the Shell that holds bytes or had not ended.
+    Data,
+}
+
 /// One resolved host-binary spawn request handed to a [`HostSpawner`].
 pub struct HostSpawn {
     /// The resolved absolute path of the program to run.
@@ -1247,6 +1262,9 @@ pub struct HostSpawn {
     /// The composed environment the binary runs with. The built-in spawn applies exactly this,
     /// never the process's inherited environment; an embedder's hook may compose its own instead.
     pub env: Vec<(String, String)>,
+    /// Whether the command's stdin carries data. The built-in spawn gives the program `/dev/null`
+    /// either way.
+    pub stdin: SpawnStdin,
 }
 
 // No `HttpTransport` seam. Routing the Shell's egress through a boundary is not a

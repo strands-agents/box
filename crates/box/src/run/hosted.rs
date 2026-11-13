@@ -381,6 +381,14 @@ fn tool_spawner(
                     .map_err(|error| std::io::Error::other(error.to_string()))?;
                 let cwd = caller_directory(&spawn.cwd, &selected.spec, &selection.workspace);
                 let table = selected.table.clone();
+                // The Python tool, which a bare python3 or python runs when Monty is off, can't read
+                // the command's stdin yet (decisions 5 and 14).
+                let python_tool =
+                    !selection.record.monty && crate::run::python_tool::is_python_table(&table);
+                if python_tool {
+                    crate::run::python_tool::refuse_program_from_stdin(&spawn.args)?;
+                }
+                let stdin_data = python_tool && spawn.stdin == strands_shell::os::SpawnStdin::Data;
                 // The reach this run judged for the table; every declared table was judged, so a miss
                 // is refused.
                 let reach = approved.table(&table).ok_or_else(|| {
@@ -430,18 +438,38 @@ fn tool_spawner(
                         "native-egress",
                     ));
                 }
-                let captured = crate::run::contain::supervise::LeafBox::run(
+                // With data on stdin, a write-only descriptor: a read fails with EBADF rather than
+                // seeing an empty input. Every other call keeps /dev/null.
+                let stdin = if stdin_data {
+                    std::process::Stdio::from(
+                        std::fs::File::options().write(true).open("/dev/null")?,
+                    )
+                } else {
+                    std::process::Stdio::null()
+                };
+                let captured = crate::run::contain::supervise::LeafBox::run_with_stdin(
                     boundary,
                     &layout,
+                    stdin,
                     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
                     registration,
                 )
                 .await
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
+                let mut stderr = captured.stderr;
+                if stdin_data && captured.status != 0 {
+                    let name = spawn
+                        .invoked
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("python3");
+                    stderr
+                        .extend_from_slice(crate::run::python_tool::no_stdin_line(name).as_bytes());
+                }
                 Ok(strands_shell::os::HostSpawnOutcome {
                     status: captured.status,
                     stdout: captured.stdout,
-                    stderr: captured.stderr,
+                    stderr,
                 })
             })
         });
@@ -3001,6 +3029,7 @@ while :; do :; done"#
                     args,
                     cwd: checked,
                     env: Vec::new(),
+                    stdin: strands_shell::os::SpawnStdin::None,
                 }))
                 .err()
                 .expect("the changed directory must refuse the launch");
@@ -3468,7 +3497,7 @@ while :; do :; done"#
             .find("\"egress:native\"")
             .expect("tool_spawner records egress:native");
         let run = spawner
-            .find("LeafBox::run(")
+            .find("LeafBox::run_with_stdin(")
             .expect("tool_spawner runs the leaf");
         assert!(
             record < run,

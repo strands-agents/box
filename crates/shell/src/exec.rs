@@ -453,6 +453,7 @@ async fn spawn_host_program(
     // The identity the decision bound, carried rather than resolved again, beside the spelling the
     // caller used.
     let program = admitted.filter(|program| program.bound)?;
+    let stdin = spawn_stdin().await;
 
     // Hand the resolved spawn to the kernel's host-spawn seam. The box installs a hook that runs
     // the binary inside a contained leaf box; with no hook the seam fails closed and the binary
@@ -468,6 +469,7 @@ async fn spawn_host_program(
             .iter()
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
+        stdin,
     };
     let outcome = match os.spawn_host(spawn).await {
         Ok(outcome) => outcome,
@@ -489,6 +491,65 @@ async fn spawn_host_program(
         let _ = w.write_all(&outcome.stderr).await;
     }
     Some(outcome.status)
+}
+
+/// How long a spawn waits for the outside input's first bytes or its end.
+///
+/// The embedder installs the outside reader on every Shell, and ends it with no bytes when its
+/// caller had no stdin, an instant after the command arrives. A spawn that finds the reader still
+/// open waits this long for either, then counts it as data.
+#[cfg(not(target_arch = "wasm32"))]
+const OUTSIDE_STDIN_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Whether the current process's stdin carries data, for [`os::HostSpawn::stdin`].
+///
+/// A pipe, a heredoc or here-string, or a `<` file is data; no fd 0 is none. Input fed from outside
+/// the Shell is none only once it ends with no bytes; a chunk read while looking stays in the
+/// reader, so the next command still reads it.
+async fn spawn_stdin() -> os::SpawnStdin {
+    let Ok(reader) = CURRENT_PROCESS.with(|p| p.borrow_mut().take_reader(STDIN)) else {
+        return os::SpawnStdin::None;
+    };
+    let mut kind = reader.into_fd_kind();
+    let stdin = match &mut kind {
+        os::FdKind::ChannelReader {
+            rx,
+            buf,
+            outside: true,
+        } => outside_stdin(rx, buf).await,
+        _ => os::SpawnStdin::Data,
+    };
+    CURRENT_PROCESS.with(|p| p.borrow_mut().restore_fd(STDIN, kind));
+    stdin
+}
+
+/// Whether the outside input holds bytes, waiting at most [`OUTSIDE_STDIN_WAIT`] for it to decide.
+async fn outside_stdin(rx: &mut mpsc::Receiver<Bytes>, buf: &mut Vec<u8>) -> os::SpawnStdin {
+    if !buf.is_empty() {
+        return os::SpawnStdin::Data;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let deadline = tokio::time::Instant::now() + OUTSIDE_STDIN_WAIT;
+    loop {
+        #[cfg(not(target_arch = "wasm32"))]
+        let next = tokio::time::timeout_at(deadline, rx.recv()).await;
+        #[cfg(target_arch = "wasm32")]
+        let next = match rx.try_recv() {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(mpsc::error::TryRecvError::Disconnected) => Ok(None),
+            Err(mpsc::error::TryRecvError::Empty) => Err(()),
+        };
+        match next {
+            Ok(Some(bytes)) if bytes.is_empty() => continue,
+            Ok(Some(bytes)) => {
+                buf.extend_from_slice(&bytes);
+                return os::SpawnStdin::Data;
+            }
+            Ok(None) => return os::SpawnStdin::None,
+            // Still open at the deadline: the caller may yet send bytes.
+            Err(_) => return os::SpawnStdin::Data,
+        }
+    }
 }
 
 /// The program and its arguments as one line, for `context.input.command`.
