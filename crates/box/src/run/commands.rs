@@ -813,6 +813,32 @@ impl PythonTool {
             };
             list.push(entry.path.clone());
         }
+        // Python resolves the folder its command was started from (`realpath` on `venv/bin/`),
+        // and on macOS that needs metadata on the folder. Under the operator's home the discovery
+        // rules give it; anywhere else, such as a venv in `/opt` or `/tmp`, nothing did, and Python
+        // stopped with `realpath: …/bin/: Operation not permitted`. Metadata only: nothing in the
+        // folder becomes readable, and a read that already covers the folder adds nothing. Linux
+        // needs none, because its view makes the folder traversable.
+        if cfg!(target_os = "macos")
+            && let Some(folder) = self.install.link_chain.first().and_then(|c| c.parent())
+        {
+            let folder = canonical(folder);
+            let covered = spec
+                .filesystem
+                .read
+                .iter()
+                .chain(&spec.filesystem.metadata)
+                .any(|entry| lies_within(&folder, entry));
+            if !covered {
+                spec.filesystem.metadata.push(folder.clone());
+                added.push(AddedEntry {
+                    kind: Grant::Metadata,
+                    path: folder,
+                    reason: "install",
+                    loaded_as: None,
+                });
+            }
+        }
         for entry in library_entries(self.libraries(&spec)) {
             spec.filesystem.read_file.push(entry.path.clone());
             added.push(entry);
@@ -2446,16 +2472,18 @@ mod tests {
     fn a_python_tool_with_no_lists_gets_the_workspace_and_its_install() {
         let tree = PythonTree::new();
         let grants = python_grants(&tree, Default::default(), &tree.project).expect("judged");
-        assert_eq!(
-            granted(&grants),
-            vec![
-                ("read", tree.project.clone(), added("workspace")),
-                ("read", tree.site_packages(), added("install")),
-                ("read", tree.base.join("lib/python3.12"), added("install")),
-                ("write", tree.project.clone(), added("workspace")),
-                ("read_file", tree.venv.join("pyvenv.cfg"), added("install")),
-            ]
-        );
+        let mut expected = vec![
+            ("read", tree.project.clone(), added("workspace")),
+            ("read", tree.site_packages(), added("install")),
+            ("read", tree.base.join("lib/python3.12"), added("install")),
+            ("write", tree.project.clone(), added("workspace")),
+            ("read_file", tree.venv.join("pyvenv.cfg"), added("install")),
+        ];
+        // macOS: metadata on the command's folder, which Python's `realpath` reads.
+        if cfg!(target_os = "macos") {
+            expected.push(("metadata", tree.venv.join("bin"), added("install")));
+        }
+        assert_eq!(granted(&grants), expected);
         let lines: Vec<String> = grants.iter().map(|grant| grant.disclosure()).collect();
         assert!(
             lines[0].ends_with("(read-write)  (added for [tool.python3]: workspace)"),
@@ -2480,15 +2508,16 @@ mod tests {
             ..Default::default()
         };
         let grants = python_grants(&tree, filesystem, &tree.project).expect("judged");
-        assert_eq!(
-            granted(&grants),
-            vec![
-                ("read", notes, None),
-                ("read", tree.site_packages(), added("install")),
-                ("read", tree.base.join("lib/python3.12"), added("install")),
-                ("read_file", tree.venv.join("pyvenv.cfg"), added("install")),
-            ]
-        );
+        let mut expected = vec![
+            ("read", notes, None),
+            ("read", tree.site_packages(), added("install")),
+            ("read", tree.base.join("lib/python3.12"), added("install")),
+            ("read_file", tree.venv.join("pyvenv.cfg"), added("install")),
+        ];
+        if cfg!(target_os = "macos") {
+            expected.push(("metadata", tree.venv.join("bin"), added("install")));
+        }
+        assert_eq!(granted(&grants), expected);
         assert!(
             !grants[0].disclosure().contains("added for"),
             "{}",
@@ -2517,16 +2546,17 @@ mod tests {
             ..Default::default()
         };
         let grants = python_grants(&tree, filesystem, &tree.project).expect("judged");
-        assert_eq!(
-            granted(&grants),
-            vec![
-                ("read", tree.project.clone(), None),
-                ("read", tree.site_packages(), added("install")),
-                ("read", tree.base.join("lib/python3.12"), added("install")),
-                ("write", tree.project.clone(), None),
-                ("read_file", tree.venv.join("pyvenv.cfg"), added("install")),
-            ]
-        );
+        let mut expected = vec![
+            ("read", tree.project.clone(), None),
+            ("read", tree.site_packages(), added("install")),
+            ("read", tree.base.join("lib/python3.12"), added("install")),
+            ("write", tree.project.clone(), None),
+            ("read_file", tree.venv.join("pyvenv.cfg"), added("install")),
+        ];
+        if cfg!(target_os = "macos") {
+            expected.push(("metadata", tree.venv.join("bin"), added("install")));
+        }
+        assert_eq!(granted(&grants), expected);
     }
 
     #[test]

@@ -1874,7 +1874,8 @@ interactive frames, so a `python` with no `-c` and no script file refuses instea
 
 With `monty = false`, Box adds grants to the Python tool's lists before it judges them: read on the
 folders the install loads code from and on a venv's `pyvenv.cfg`, read on the certificate bundle,
-read on each library the install's extension modules load, and, when the table has no
+read on each library the install's extension modules load, on macOS metadata on the folder that
+holds the command (Python resolves it at startup), and, when the table has no
 `[tool.python3.filesystem]`, read and write on the agent's workspace. The startup notice marks each
 added grant with `(added for [tool.python3]: install)`, `libraries`, `certificates` or `workspace`.
 Box finds the libraries with containment's own dependency walk, seeded with every `.so` (and

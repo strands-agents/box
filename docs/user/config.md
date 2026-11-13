@@ -522,6 +522,7 @@ itself, beside any the table writes:
 |---|---|---|
 | `read` | each folder the install loads code from: the standard library, `site-packages`, a venv's own `site-packages` | `(added for [tool.python3]: install)` |
 | `read_file` | a venv's `pyvenv.cfg` | `(added for [tool.python3]: install)` |
+| `metadata`, on macOS only | the folder that holds the command, such as a venv's `bin/`, which Python resolves at startup; nothing in it becomes readable, and none is added when a read already covers it | `(added for [tool.python3]: install)` |
 | `read_file`, or `read` on the folder that holds a link | the install's certificate bundle and the file it links to, such as Homebrew's `etc/openssl@3/cert.pem` | `(added for [tool.python3]: certificates)` |
 | `read` and `write` | the agent's workspace, only when the table has no `[tool.python3.filesystem]` | `(added for [tool.python3]: workspace)` |
 
