@@ -73,6 +73,26 @@ fn main() {
         );
         return;
     }
+    if let [_, mode, config, malformed, valid] = std::env::args().collect::<Vec<_>>().as_slice()
+        && mode == "--box-id-retry"
+    {
+        let attempt = |box_id: &str| {
+            strands_box::run(
+                config.into(),
+                Vec::new(),
+                strands_box::RunOptions {
+                    box_id: Some(box_id.to_string()),
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(attempt(malformed), std::process::ExitCode::FAILURE);
+        std::process::exit(if attempt(valid) == std::process::ExitCode::SUCCESS {
+            0
+        } else {
+            1
+        });
+    }
     if let [_, mode, config, rest @ ..] = std::env::args().collect::<Vec<_>>().as_slice()
         && mode == "--box-id"
     {
@@ -278,6 +298,26 @@ fn a_supplied_box_id_names_the_box_and_its_telemetry() {
     assert!(!ok, "another ID must be refused");
     assert!(stderr.contains("does not match this box"), "{stderr}");
     assert_eq!(stored(supplied), supplied);
+
+    let retried = "claude-code-with-aaaaaaaaaaaaaaaa";
+    let retry_config = config_for(retried);
+    let output = std::process::Command::new(host.join("host"))
+        .arg("--box-id-retry")
+        .arg(&retry_config)
+        .arg("claude-code-with-AAAAAAAAAAAAAAAA")
+        .arg(retried)
+        .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
+        .env("EXPERIMENTAL_X86_SUPPORT", "TRUE")
+        .output()
+        .expect("run the box ID retry probe");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "a malformed ID must leave the run attempt for a corrected one: {stderr}"
+    );
+    assert!(stderr.contains("is invalid"), "{stderr}");
+    assert!(!stderr.contains("already attempted"), "{stderr}");
+    assert_eq!(stored(retried), retried);
 
     let generated_config = config_for("generated");
     let (ok, stderr) = run(&generated_config, None);

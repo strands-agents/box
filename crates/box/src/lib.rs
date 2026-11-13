@@ -40,6 +40,15 @@ pub struct RunOptions<'a> {
 
 /// Run the existing Box command with a configuration.
 pub fn run(config: PathBuf, workload: Vec<OsString>, options: RunOptions<'_>) -> ExitCode {
+    if let Some(found) = options.box_id.as_deref()
+        && !record::config::valid_box_identity(found)
+    {
+        let error = error::ConfigError::SuppliedIdentity {
+            found: found.to_string(),
+        };
+        eprintln!("strands-box: error: {error}");
+        return ExitCode::FAILURE;
+    }
     if STARTED.swap(true, Ordering::SeqCst) {
         eprintln!("strands-box: refusing to run: this process already attempted to run a box");
         return ExitCode::FAILURE;
