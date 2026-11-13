@@ -959,7 +959,8 @@ architecture defines `__NR_select`, as x86-64 does
 ([2.32 `select.c`](https://github.com/bminor/glibc/blob/glibc-2.32/sysdeps/unix/sysv/linux/select.c)).
 glibc 2.34 issues `pselect6` on 64-bit targets
 ([2.34 `select.c`](https://github.com/bminor/glibc/blob/glibc-2.34/sysdeps/unix/sysv/linux/select.c)),
-so a binary linked against an older glibc, or a raw caller, still issues `select`. Neither call adds
+so a binary statically linked against glibc 2.32 or older, a host with that glibc, or a raw caller,
+still issues `select`. Neither call adds
 reach: Linux v6.12 runs both `select` (`kern_select`) and `pselect6` (`do_pselect`) through
 `core_sys_select` in [`fs/select.c`](https://github.com/torvalds/linux/blob/v6.12/fs/select.c),
 which waits only on descriptors the process already holds, like the permitted `ppoll`.
