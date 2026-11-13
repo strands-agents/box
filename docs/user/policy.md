@@ -22,8 +22,9 @@ Four parts of the box ask policy, each about its own boundary:
   `fs:*`.
 - **Monty**, the Python interpreter the box runs for the agent's scripts. It asks once per file
   operation, as `fs:*`.
-- **The egress gateway.** It asks once per connection, as `net:connect`, once per HTTP request, as
-  `http:request`, and once per MCP request over HTTP, as `mcp:call`.
+- **The egress gateway.** It asks once per connection, as `net:connect`, and once per HTTP request,
+  as `http:request`. It asks `mcp:call` for MCP requests whose host matches a declared server,
+  except the protocol methods listed in the [action reference](policy/actions.md#mcp).
 - **The MCP broker.** It asks once per request to a local MCP server, as `mcp:call`. On a
   `tools/call` it asks a second time, as the tool's own generated action. At startup it asks once
   for each declared server, as `shell:spawn`.
@@ -127,9 +128,11 @@ actions. [The action vocabulary](policy/actions.md) lists the fields of each one
   shell resolves its first word to a program. `shell:exec` for a program the shell implements, such
   as `cat` or `grep`, and `shell:spawn` for a program of the surrounding OS, such as `git`, and for
   the start of each stdio MCP server `box.toml` declares.
-- **[MCP](policy/actions.md#mcp)**: a request to an MCP server. `mcp:call` for each request, on
-  every method, and one generated `<server>::Action::"<tool>"` for each discovered tool, decided
-  on a `tools/call` after `mcp:call` permitted it.
+- **[MCP](policy/actions.md#mcp)**: a request through a declared MCP server, with
+  [host-based matching](mcp.md#remote-destination-matching) for remote servers.
+  `mcp:call` decides each request except the protocol methods listed in the action reference.
+  One generated `<server>::Action::"<tool>"` per discovered tool decides a `tools/call` after
+  `mcp:call` permitted it.
 
 ## Common rules
 

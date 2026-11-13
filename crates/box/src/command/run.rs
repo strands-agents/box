@@ -151,8 +151,9 @@ pub(crate) async fn execute(
     argv: &[OsString],
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
+    box_id: Option<&str>,
 ) -> Result<ExitCode, BoxError> {
-    let locked = prepare(config, argv)?;
+    let locked = prepare(config, argv, box_id)?;
     locked.announce_credential_stores()?;
     let collector = telemetry::open(&locked.root, &locked.record)?;
     let name = locked.root.name().to_string();
@@ -327,7 +328,7 @@ fn agent_home(agent: &ProcessSpec) -> Result<PathBuf, BoxError> {
     }
 }
 
-fn prepare(config: &Path, argv: &[OsString]) -> Result<LockedRun, BoxError> {
+fn prepare(config: &Path, argv: &[OsString], box_id: Option<&str>) -> Result<LockedRun, BoxError> {
     let invocation = std::env::current_dir().map_err(|source| ConfigError::Read {
         path: PathBuf::from("."),
         source,
@@ -340,7 +341,7 @@ fn prepare(config: &Path, argv: &[OsString]) -> Result<LockedRun, BoxError> {
     contract.validate_declared_directory()?;
     let (mut root, root_lock) = BoxRoot::lock_directory(contract.box_directory())?;
     contract.validate_directory(root.root())?;
-    root.settle_identity()?;
+    root.settle_identity(box_id)?;
     let workspace = contract.workspace().to_path_buf();
     let request = contract.into_request(&root)?;
     let existed = root.is_configured();

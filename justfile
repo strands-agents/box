@@ -29,21 +29,9 @@ check: fmt-check clippy test
 test:
     cargo test --workspace --all-features
 
-# Lint every crate/target; warnings are errors. The allowed lints are the ones the
-# vendored `strands-shell` carries: `cargo clippy -p` cannot skip a workspace crate that
-# an owned crate builds against, so they are allowed at the driver level. A `#[warn(...)]`
-# at an owned crate root overrides `-A`, so owned code stays fatal. Keep this list equal to
-# the one in .github/workflows/rust-test-lint.yml.
+# Lint every crate/target; warnings are errors.
 clippy:
-    cargo clippy --workspace --all-targets --all-features -- \
-        -D warnings \
-        -A clippy::too_many_arguments \
-        -A clippy::only_used_in_recursion \
-        -A clippy::await_holding_refcell_ref \
-        -A clippy::explicit_auto_deref \
-        -A clippy::chunks_exact_to_as_chunks \
-        -A dead_code \
-        -A non_snake_case
+    cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # Format all Rust code in place.
 fmt:

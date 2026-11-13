@@ -1,7 +1,8 @@
 # MCP server configuration
 
-Each MCP server the agent uses is one `[mcp.<name>]` table in `box.toml`. A stdio server is a
-program that the box starts in its own sandbox. An http server
+An `[mcp.<name>]` table in `box.toml` identifies an MCP server for Box's tool restrictions.
+MCP means Model Context Protocol. A stdio server is a program that the box starts in its own
+sandbox. An http server
 runs somewhere else, and the agent reaches it through the box's egress gateway.
 
 Audience: an operator with a working box from [getting started](./getting-started.md) who adds an
@@ -288,7 +289,7 @@ A grant in this table is direct access, outside every `fs:*` decision.
 | Value | The server's own connections |
 |---|---|
 | `true` | Go through the egress gateway. The box sets `HTTPS_PROXY` for the server. Policy decides each `net:connect` and `http:request`, the gateway attaches credentials, and the decision log records each one. |
-| `false` | Can connect directly, outside gateway policy. Direct connections receive no gateway credential. The decision log records an `egress:native` entry when the server starts. |
+| `false` | Can connect directly, outside gateway policy. The box sets no proxy variable and no CA file, so the server uses its own defaults and checks the real certificate; its `env` may set `HTTPS_PROXY`, `SSL_CERT_FILE` and the other proxy and CA names. Direct connections receive no gateway credential. The decision log records an `egress:native` entry when the server starts. |
 
 On Linux, `false` permits direct IPv4 connections through the surrounding OS. This includes
 reachable private networks, loopback services, and instance metadata endpoints.
@@ -323,7 +324,7 @@ to the server in both modes.
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `type` | string | required | `"http"`. |
-| `destinations` | string array | required | The server's hosts. Each is a host, `host:port`, a host with a path prefix, or a `*.` wildcard host. |
+| `destinations` | string array | required | Destinations for MCP identification and optional credential routing. Entries accept a host, `host:port`, or a host with a path prefix. A `*.` wildcard entry supports credential routing only. MCP identification uses the explicit host; see [remote destination matching](#remote-destination-matching). |
 | `secret.ref` | string | none | The credential the gateway attaches to each request to the server: `env://NAME`, `aws://PROFILE`, or a bare `aws://` for the AWS default credential chain. |
 | `secret.header` | string | `Authorization` | The header the credential goes in. |
 | `secret.prefix` | string | `Bearer ` on `Authorization` | The text before the credential. |
@@ -335,9 +336,37 @@ to the server in both modes.
 With `secret.ref = "env://NAME"`, `box run` reads `NAME` from its own environment. The agent gets
 a placeholder in `NAME`, and the gateway swaps in the real value on each request to the server.
 
+### Remote destination matching
+
+For MCP policy, Box compares the request's host with the explicit host in each `destinations`
+entry. Hostname comparison ignores letter case and trailing dots. IP literals match by their
+parsed address. Box does not use DNS results to treat different hostnames, or a hostname and an
+IP address, as the same MCP server.
+
+Keep equivalent hostname spellings in the same `[mcp.<name>]` table. The configuration loader
+currently fails to reject different server entries for names such as `mcp.example.com` and
+`mcp.example.com.`. Runtime matching treats those spellings as one host. Requests to either spelling can therefore
+use one entry's server name and tool rules, leaving the other entry's rules unapplied. Use one
+server table for the host; its declared hostname already matches with and without trailing dots.
+
+MCP matching ignores an entry's port and path. A request to the matching host enters MCP checks
+on any port and path that network and HTTP policy permit.
+
+A `*.` wildcard entry does not select the parent domain or any concrete subdomain for MCP checks.
+For example, `*.example.com` selects neither `example.com` nor `api.example.com`. If a server lists
+only wildcard destinations, requests to those hosts receive no `mcp:call` or per-tool checks for
+that server. Its configured credential can still attach when the credential pattern matches and
+network and HTTP policy permit the request. List each intended hostname or IP address explicitly.
+
+Credential routing uses the [destination patterns](egress.md#destinations), including their port,
+path, and wildcard rules. Attaching a credential does not establish an MCP server identity.
+Requests to destinations without an MCP match remain subject to network and HTTP policy.
+Follow [the remote-server policy guidance](mcp-policy.md#scope-of-remote-server-rules) to restrict
+alternative routes to the same application.
+
 ## Errors and exit codes
 
-`box run` exits with an error before the agent starts when a table breaks a rule on this page.
+`box run` exits with an error before the agent starts when the configuration loader rejects a table.
 
 | Message | Cause |
 |---|---|

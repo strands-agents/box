@@ -9,10 +9,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use box_shell::{EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit};
 use policy::{
     GovernedBox, Outcome, Policy, PolicyEngine, Principal, Request, ShellPolicyInterceptor,
 };
-use strands_shell::{EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit};
 
 const HOME: &str = "/home/operator";
 const PROJECT: &str = "/home/operator/project";

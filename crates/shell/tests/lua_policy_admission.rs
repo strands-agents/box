@@ -1,36 +1,16 @@
-//! Every Lua filesystem and command effect is admitted individually and fails closed.
-//!
-//! Lua runs in an in-process `mlua` VM, not through the `run_script` interpreter hook that
-//! backs Python. Its `io.*`/`os.*` shims route back through the same `Mediated` kernel as the
-//! shell's own builtins, so a policy that denies a path must deny it just as well when a Lua
-//! script reaches it. These tests pin that parity — presence in the admitted list, and
-//! fail-closed enforcement on denial — and probe the routes a script could use to launder a
-//! denied read: a nested command, a resolved `..` spelling, `require`/`loadfile`, and a
-//! read-only bind.
-//!
-//! One route is deliberately pinned as **unmediated**: `os.getenv` reflects the shell's own
-//! environment with no admission, exactly as `$VAR` does in the shell. That is safe because
-//! the shell does not inherit the operator's process environment — it seeds a fixed synthetic
-//! `HOME`/`PWD`/`PATH`/`USER` rather than `std::env::vars()`. Two tests hold this:
-//! one that `os.getenv` reflects what the session sets, and one that a seeded name carries the
-//! box's value while every other operator variable is absent.
-//!
-//! NOT COVERED HERE — MCP still needs a test. A Lua script can `require` an MCP tool module,
-//! whose functions call `client.call_tool` directly rather than through the `Mediated` kernel.
-//! In the shipped box that client route is unreachable (the box writes no MCP client config),
-//! and the box's own MCP *server* tools reach `Mediated` and enforce identically — but neither
-//! fact is pinned at this layer. A follow-up should stand up an MCP fixture and assert that a
-//! tool call driven from Lua raises an `mcp:call` decision and fails closed when denied.
+//! Each Lua filesystem and command effect is admitted on its own and fails closed when denied.
+
+mod support;
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use strands_shell::{
+use box_shell::{
     EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, FsOperation, FsPairOperation,
-    Shell,
 };
+use strands_shell::Shell;
 
 /// One admitted effect, rendered as the stable string the deny predicate matches on.
 fn render(effect: &EffectAttempt<'_>) -> String {
@@ -86,10 +66,6 @@ fn render(effect: &EffectAttempt<'_>) -> String {
 }
 
 /// Records every admission and denies whatever a test's predicate names.
-///
-/// These tests assert on the admitted list and on the operation's observable side effect, not
-/// on the recorded kernel outcome, so this recorder keeps no outcome state; the permit is a
-/// no-op. The sibling `kernel_effect_interception.rs` carries the outcome-recording shape.
 struct Recorder {
     admitted: Arc<Mutex<Vec<String>>>,
     denied: Arc<Mutex<Vec<String>>>,
@@ -114,14 +90,12 @@ impl Recorder {
         (interceptor, admitted)
     }
 
-    /// The effects this recorder refused, for a probe that must confirm a denial actually
-    /// fired rather than pass vacuously because the effect was never reached.
+    /// The effects this recorder refused.
     fn denied(&self) -> Arc<Mutex<Vec<String>>> {
         Arc::clone(&self.denied)
     }
 
-    /// A recorder whose denial only bites once `armed` is set, so setup may legitimately
-    /// touch the path the payload is then forbidden to touch.
+    /// A recorder whose denial only takes effect once `armed` is set.
     fn armable<F>(deny: F) -> (Arc<Self>, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>)
     where
         F: Fn(&str) -> bool + Send + Sync + 'static,
@@ -150,7 +124,7 @@ impl EffectInterceptor for Recorder {
     }
 }
 
-/// A permit that records nothing: these tests read the admitted list, not the outcome.
+/// A permit that records nothing.
 struct NoopPermit;
 
 #[async_trait]
@@ -176,13 +150,17 @@ where
 }
 
 fn shell_with(interceptor: Arc<dyn EffectInterceptor>) -> Shell {
-    Shell::builder()
+    support::builder()
         .effect_interceptor(interceptor)
         .build()
         .expect("shell builds")
 }
 
-// ── Admission presence: each Lua effect is a decision of its own ────────────────────
+/// The bytes at `path`, or `None` when `cat` cannot read them.
+async fn read_file(shell: &mut Shell, path: &str) -> Option<String> {
+    let out = shell.run(&format!("cat {path}")).await;
+    (out.status == 0).then_some(out.stdout)
+}
 
 /// A Lua `io.open` read is admitted as `read <resolved-path>`.
 #[test]
@@ -209,7 +187,7 @@ fn lua_io_open_read_is_admitted() {
     );
 }
 
-/// A Lua `io.open` write is admitted as `write(...) <resolved-path>` — raised on `close`.
+/// A Lua `io.open` write is admitted as `write(...) <resolved-path>`.
 #[test]
 fn lua_io_open_write_is_admitted() {
     let (interceptor, admitted) = Recorder::allowing_everything();
@@ -220,7 +198,10 @@ fn lua_io_open_write_is_admitted() {
             .run(r#"lua -e "local f=io.open([[/home/lash/w.txt]],[[w]]); f:write([[X]]); f:close()""#)
             .await;
         assert_eq!(out.status, 0, "lua io.open write: {}", out.stderr);
-        assert_eq!(shell.read_file("/home/lash/w.txt").await.unwrap(), b"X");
+        assert_eq!(
+            read_file(&mut shell, "/home/lash/w.txt").await.as_deref(),
+            Some("X")
+        );
     });
 
     let seen = admitted.lock().unwrap().clone();
@@ -266,8 +247,6 @@ fn lua_os_remove_and_rename_are_admitted() {
     );
 }
 
-// ── Enforcement: a denied effect fails closed and leaves no trace ────────────────────
-
 /// A denied read raises in Lua and returns none of the file's bytes.
 #[test]
 fn lua_io_open_read_denied_leaks_no_content() {
@@ -304,12 +283,15 @@ fn lua_io_open_write_denied_creates_nothing() {
         let out = shell
             .run(r#"lua -e "local f=io.open([[/home/lash/blocked.txt]],[[w]]); f:write([[no]]); f:close()""#)
             .await;
-        let content = shell.read_file("/home/lash/blocked.txt").await;
+        let content = read_file(&mut shell, "/home/lash/blocked.txt").await;
         (out, content)
     });
 
     assert_ne!(out.status, 0, "a denied write must fail the script");
-    assert!(content.is_err(), "a denied write must leave no file behind");
+    assert!(
+        content.is_none(),
+        "a denied write must leave no file behind"
+    );
 }
 
 /// A denied `os.remove` fails, and the file survives.
@@ -326,20 +308,19 @@ fn lua_os_remove_denied_file_survives() {
         let out = shell
             .run(r#"lua -e "os.remove([[/home/lash/keep.txt]])""#)
             .await;
-        let content = shell.read_file("/home/lash/keep.txt").await;
+        let content = read_file(&mut shell, "/home/lash/keep.txt").await;
         (out, content)
     });
 
     assert_ne!(out.status, 0, "a denied remove must fail");
     assert_eq!(
-        content.unwrap(),
-        b"KEEP",
+        content.as_deref(),
+        Some("KEEP"),
         "the file must survive a denied remove"
     );
 }
 
-/// `rm -f` on a policy-refused path fails and names the refusal. `-f` suppresses only a
-/// nonexistent operand, never a denial, so the forced delete must not swallow it.
+/// `rm -f` on a policy-refused path fails and names the refused path.
 #[test]
 fn rm_force_on_denied_path_reports_and_fails() {
     let (interceptor, _, armed) =
@@ -351,7 +332,7 @@ fn rm_force_on_denied_path_reports_and_fails() {
         assert_eq!(setup.status, 0, "setup: {}", setup.stderr);
         armed.store(true, Ordering::SeqCst);
         let out = shell.run("rm -f /home/lash/keep.txt").await;
-        let content = shell.read_file("/home/lash/keep.txt").await;
+        let content = read_file(&mut shell, "/home/lash/keep.txt").await;
         (out, content)
     });
 
@@ -362,14 +343,13 @@ fn rm_force_on_denied_path_reports_and_fails() {
         out.stderr
     );
     assert_eq!(
-        content.unwrap(),
-        b"KEEP",
+        content.as_deref(),
+        Some("KEEP"),
         "the file must survive a denied rm -f"
     );
 }
 
-/// `rm -f` on a genuinely absent path still exits 0. That is the POSIX behaviour `-f` exists
-/// for, and it stays intact beside the denial case above.
+/// `rm -f` on an absent path exits 0.
 #[test]
 fn rm_force_on_absent_path_succeeds() {
     let (interceptor, _) = Recorder::allowing_everything();
@@ -384,8 +364,7 @@ fn rm_force_on_absent_path_succeeds() {
     );
 }
 
-/// `rm -r` names the refused child by its own path, not its parent's. Recursion reports the
-/// entry the denial fell on, so an operator reading stderr sees which path survived.
+/// `rm -r` names a refused child by its own path, not by its parent's path.
 #[test]
 fn rm_recursive_denied_child_is_named_by_its_own_path() {
     let (interceptor, _, armed) =
@@ -399,7 +378,7 @@ fn rm_recursive_denied_child_is_named_by_its_own_path() {
         assert_eq!(setup.status, 0, "setup: {}", setup.stderr);
         armed.store(true, Ordering::SeqCst);
         let out = shell.run("rm -r /home/lash/tree").await;
-        let inner = shell.read_file("/home/lash/tree/inner.txt").await;
+        let inner = read_file(&mut shell, "/home/lash/tree/inner.txt").await;
         (out, inner)
     });
 
@@ -409,12 +388,14 @@ fn rm_recursive_denied_child_is_named_by_its_own_path() {
         "rm -r must name the refused child, not its parent: stderr={:?}",
         out.stderr
     );
-    assert_eq!(inner.unwrap(), b"X", "the refused child must survive");
+    assert_eq!(
+        inner.as_deref(),
+        Some("X"),
+        "the refused child must survive"
+    );
 }
 
-/// The directory itself reaches a delete decision even when a child is refused. Recursion no
-/// longer aborts on the first denied entry, so auditing "was deleting this directory refused?"
-/// finds a `remove_dir` record for the directory rather than nothing.
+/// The directory itself reaches a delete decision when a child is refused.
 #[test]
 fn rm_recursive_directory_itself_reaches_a_decision() {
     let (interceptor, admitted, armed) =
@@ -452,19 +433,19 @@ fn lua_os_rename_denied_source_survives() {
         let out = shell
             .run(r#"lua -e "os.rename([[/home/lash/mv-src.txt]],[[/home/lash/mv-dst.txt]])""#)
             .await;
-        let src = shell.read_file("/home/lash/mv-src.txt").await;
-        let dst = shell.read_file("/home/lash/mv-dst.txt").await;
+        let src = read_file(&mut shell, "/home/lash/mv-src.txt").await;
+        let dst = read_file(&mut shell, "/home/lash/mv-dst.txt").await;
         (out, src, dst)
     });
 
     assert_ne!(out.status, 0, "a denied rename must fail");
     assert_eq!(
-        src.unwrap(),
-        b"SRC",
+        src.as_deref(),
+        Some("SRC"),
         "the source must survive a denied rename"
     );
     assert!(
-        dst.is_err(),
+        dst.is_none(),
         "the target must not exist after a denied rename"
     );
 }
@@ -516,10 +497,7 @@ fn lua_loadfile_denied_path_is_refused() {
     assert_ne!(out.status, 0, "loadfile on a denied path must fail");
 }
 
-// ── Leak probes: routes a script could use to launder a denied effect ────────────────
-
-/// A denied read cannot be laundered through `os.execute` or `io.popen`: the nested
-/// command's own read effect is judged, so no bytes escape.
+/// A denied read cannot be laundered through `os.execute` or `io.popen`.
 #[test]
 fn lua_cannot_launder_a_denied_read_through_a_command() {
     for payload in [
@@ -538,16 +516,12 @@ fn lua_cannot_launder_a_denied_read_through_a_command() {
             shell.run(payload).await
         });
 
-        // No bytes escaped …
         assert!(
             !out.stdout.contains("VAULTBYTES"),
             "a denied read laundered through a command must reveal nothing: {payload:?} \
              produced {:?}",
             out.stdout
         );
-        // … *because* the nested command reached the mediated read and was refused there. This
-        // positive check keeps the probe from passing vacuously if the payload ever stops
-        // reaching the read (a missing `cat`, a shim change, a quoting change).
         let denied = denied.lock().unwrap().clone();
         assert!(
             denied
@@ -559,8 +533,7 @@ fn lua_cannot_launder_a_denied_read_through_a_command() {
     }
 }
 
-/// A relative, dot-segment path from Lua is resolved before admission: no effect
-/// admission carries a `..`.
+/// A relative dot-segment path from Lua is resolved before admission.
 #[test]
 fn lua_paths_are_resolved_before_admission() {
     let (interceptor, admitted) = Recorder::allowing_everything();
@@ -595,9 +568,7 @@ fn lua_paths_are_resolved_before_admission() {
     );
 }
 
-/// `os.getenv` reads the process environment with **no** admission — pinned so a change
-/// that starts leaking a new data class through it is visible. This matches `$VAR` in the
-/// shell; the shim never calls the kernel.
+/// `os.getenv` reads the Shell's own environment with no effect admission.
 #[test]
 fn lua_getenv_is_unmediated_and_reflects_the_environment() {
     let (interceptor, admitted) = Recorder::allowing_everything();
@@ -615,8 +586,6 @@ fn lua_getenv_is_unmediated_and_reflects_the_environment() {
         "os.getenv reflects the env: {}",
         out.stderr
     );
-    // Only the two command-level `shell:run` decisions carry the marker (it is their raw
-    // text). No effect-level admission touches the env read: the shim never calls the kernel.
     let seen = admitted.lock().unwrap().clone();
     let effects: Vec<_> = seen
         .iter()
@@ -630,22 +599,9 @@ fn lua_getenv_is_unmediated_and_reflects_the_environment() {
     );
 }
 
-/// The shell does not inherit the operator's process environment, so a Lua `os.getenv`
-/// cannot read the operator's values. The default shell synthesizes a fixed env — `HOME`,
-/// `PWD`, `PATH`, `USER` — with the box's own values rather than `std::env::vars()`. This is
-/// the shell-layer half of the box premise "the environment is composed, never inherited" —
-/// the boundary that keeps an operator `AWS_*`/`GITHUB_TOKEN` out of reach.
-///
-/// The probe only *reads* the process environment; it never mutates it. `std::env::set_var` is
-/// `unsafe` because it races every concurrent reader (another parallel test, or libc), and a
-/// unique name would not make it sound. The proof is environment-independent — it holds even
-/// under the bare environment a build sandbox runs with, where the operator process has no
-/// `HOME` at all: the shell serves fixed synthetic values (`USER=lash`, `PATH=/usr/bin:/bin`),
-/// which cannot be inherited from an operator process that has different ones or none.
+/// A Lua `os.getenv` cannot read the operator's process environment.
 #[test]
 fn lua_cannot_read_the_operators_process_environment() {
-    // The names the default shell synthesizes (`VfsKernel::new_process`); every other name a
-    // script asks for is absent.
     const SEEDED: [&str; 4] = ["HOME", "PWD", "PATH", "USER"];
 
     let (interceptor, _admitted) = Recorder::allowing_everything();
@@ -653,9 +609,6 @@ fn lua_cannot_read_the_operators_process_environment() {
 
     let getenv = |name: &str| format!(r#"lua -e "io.write(os.getenv([[{name}]]) or [[ABSENT]])""#);
 
-    // The shell serves its own fixed synthetic values, independent of the process environment.
-    // Inheriting `std::env::vars()` would instead surface the operator's real `USER` and `PATH`
-    // (or `ABSENT` under a bare sandbox environment) — never these constants.
     let (user, path, home, pwd) = run(async {
         let user = shell.run(&getenv("USER")).await.stdout;
         let path = shell.run(&getenv("PATH")).await.stdout;
@@ -674,9 +627,6 @@ fn lua_cannot_read_the_operators_process_environment() {
     assert_eq!(home, "/home/lash", "HOME is the box's synthetic value");
     assert_eq!(pwd, "/home/lash", "PWD is the box's synthetic value");
 
-    // A complement, when the harness runs with a real environment: a variable the operator
-    // process holds that the shell does not seed is absent to the script. Skipped under a bare
-    // sandbox environment, where the synthetic-value checks above already carry the property.
     let operator_only = std::env::vars().map(|(k, _)| k).find(|k| {
         !SEEDED.contains(&k.as_str())
             && !k.is_empty()

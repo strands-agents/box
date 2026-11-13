@@ -268,7 +268,7 @@ fn caller_exec_covers(caller: &ProcessSpec, program: &Path) -> bool {
 
 #[derive(Clone)]
 pub(crate) struct ToolSpawner {
-    spawn: strands_shell::os::HostSpawner,
+    spawn: box_shell::HostSpawner,
     selection: Arc<ToolSelection>,
 }
 
@@ -323,7 +323,7 @@ impl ToolSelection {
 }
 
 impl ToolSpawner {
-    pub(crate) fn spawn(&self) -> strands_shell::os::HostSpawner {
+    pub(crate) fn spawn(&self) -> box_shell::HostSpawner {
         Arc::clone(&self.spawn)
     }
 
@@ -342,7 +342,7 @@ impl ToolSpawner {
 /// Build the hook that runs a host binary in its own boundary
 /// (docs/design/decisions.md#the-box-runs-a-host-binary-through-the-spawn-host-seam).
 ///
-/// The box installs this on the hosted Shell in place of the vendored crate's built-in spawn. Each
+/// The box's kernel runs every host binary the Shell does not implement through this. Each
 /// call selects the tool the invocation matches, translates that tool's `ProcessSpec` through the
 /// same translator the agent used, runs it through the trampoline, and hands the captured output
 /// back.
@@ -366,85 +366,84 @@ fn tool_spawner(
         commands: Arc::clone(approved.commands()),
     });
     let spawn_selection = Arc::clone(&selection);
-    let spawn: strands_shell::os::HostSpawner =
-        Arc::new(move |spawn: strands_shell::os::HostSpawn| {
-            let recorder = Arc::clone(&recorder);
-            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-            let registration = registration.clone();
-            let selection = Arc::clone(&spawn_selection);
-            let layout = layout.clone();
-            let approved = Arc::clone(&approved);
-            let protected_sources = protected_sources.clone();
-            Box::pin(async move {
-                let mut selected = selection
-                    .select(&spawn.program, &spawn.invoked, &spawn.args)
-                    .map_err(|error| std::io::Error::other(error.to_string()))?;
-                let cwd = caller_directory(&spawn.cwd, &selected.spec, &selection.workspace);
-                let table = selected.table.clone();
-                // The reach this run judged for the table; every declared table was judged, so a miss
-                // is refused.
-                let reach = approved.table(&table).ok_or_else(|| {
-                    std::io::Error::other(format!("{table} has no reach judged for this run"))
-                })?;
-                if let Some(command) = reach.command.as_ref() {
-                    selected.spec.command[0] = command.invoked().display().to_string();
-                }
-                let site = Site {
-                    attachment: &selection.attachment,
-                    layout: &layout,
-                    stored: &selection.record,
-                    protected_sources: &protected_sources,
-                };
-                let boundary = Boundary::translate(
-                    &selected.spec,
-                    Launch {
-                        table: &table,
-                        trailing: &selected.trailing,
-                        fallback_workspace: &cwd,
-                        shebang_interpreters: selected.shebang_interpreters,
-                        // A spawned host binary is the toolchain case: it loads frameworks and
-                        // libraries the agent's own program never touches.
-                        runtime_reach: RuntimeReach::Leaf,
-                        argument_zero: Some(&spawn.invoked),
-                        egress: EgressMode::for_spec(&selected.spec),
-                        approved: Some(reach),
-                    },
-                    &site,
-                )
+    let spawn: box_shell::HostSpawner = Arc::new(move |spawn: box_shell::HostSpawn| {
+        let recorder = Arc::clone(&recorder);
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+        let registration = registration.clone();
+        let selection = Arc::clone(&spawn_selection);
+        let layout = layout.clone();
+        let approved = Arc::clone(&approved);
+        let protected_sources = protected_sources.clone();
+        Box::pin(async move {
+            let mut selected = selection
+                .select(&spawn.program, &spawn.invoked, &spawn.args)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
-                if boundary.working_directory() != spawn.cwd.as_path() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "the tool working directory does not match the policy-approved directory",
-                    ));
-                }
-                // Recorded before the run, so a call the agent cancels or outlasts still leaves it.
-                if selected.spec.native_egress() {
-                    let label = table
-                        .strip_prefix("[tool.")
-                        .and_then(|rest| rest.strip_suffix(']'))
-                        .unwrap_or(&table);
-                    recorder.record(telemetry::EffectiveDecision::enforcement_permit(
-                        "egress:native",
-                        label.to_string(),
-                        "native-egress",
-                    ));
-                }
-                let captured = crate::run::contain::supervise::LeafBox::run(
-                    boundary,
-                    &layout,
-                    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-                    registration,
-                )
-                .await
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-                Ok(strands_shell::os::HostSpawnOutcome {
-                    status: captured.status,
-                    stdout: captured.stdout,
-                    stderr: captured.stderr,
-                })
+            let cwd = caller_directory(&spawn.cwd, &selected.spec, &selection.workspace);
+            let table = selected.table.clone();
+            // The reach this run judged for the table; every declared table was judged, so a miss
+            // is refused.
+            let reach = approved.table(&table).ok_or_else(|| {
+                std::io::Error::other(format!("{table} has no reach judged for this run"))
+            })?;
+            if let Some(command) = reach.command.as_ref() {
+                selected.spec.command[0] = command.invoked().display().to_string();
+            }
+            let site = Site {
+                attachment: &selection.attachment,
+                layout: &layout,
+                stored: &selection.record,
+                protected_sources: &protected_sources,
+            };
+            let boundary = Boundary::translate(
+                &selected.spec,
+                Launch {
+                    table: &table,
+                    trailing: &selected.trailing,
+                    fallback_workspace: &cwd,
+                    shebang_interpreters: selected.shebang_interpreters,
+                    // A spawned host binary is the toolchain case: it loads frameworks and
+                    // libraries the agent's own program never touches.
+                    runtime_reach: RuntimeReach::Leaf,
+                    argument_zero: Some(&spawn.invoked),
+                    egress: EgressMode::for_spec(&selected.spec),
+                    approved: Some(reach),
+                },
+                &site,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if boundary.working_directory() != spawn.cwd.as_path() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "the tool working directory does not match the policy-approved directory",
+                ));
+            }
+            // Recorded before the run, so a call the agent cancels or outlasts still leaves it.
+            if selected.spec.native_egress() {
+                let label = table
+                    .strip_prefix("[tool.")
+                    .and_then(|rest| rest.strip_suffix(']'))
+                    .unwrap_or(&table);
+                recorder.record(telemetry::EffectiveDecision::enforcement_permit(
+                    "egress:native",
+                    label.to_string(),
+                    "native-egress",
+                ));
+            }
+            let captured = crate::run::contain::supervise::LeafBox::run(
+                boundary,
+                &layout,
+                #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+                registration,
+            )
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            Ok(box_shell::HostSpawnOutcome {
+                status: captured.status,
+                stdout: captured.stdout,
+                stderr: captured.stderr,
             })
-        });
+        })
+    });
     ToolSpawner { spawn, selection }
 }
 
@@ -1452,7 +1451,7 @@ mod tests {
             Principal::agent(),
             GovernedBox::assigned("codex"),
         )
-        .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+        .intercept(&box_shell::EffectAttempt::ShellSpawn {
             command: program,
             program,
             program_path,
@@ -1567,7 +1566,7 @@ mod tests {
             None,
             Default::default(),
         )
-        .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+        .intercept(&box_shell::EffectAttempt::ShellSpawn {
             command: "git-mcp",
             program: &server.display().to_string(),
             program_path: &program.display().to_string(),
@@ -1589,7 +1588,7 @@ mod tests {
             Principal::agent(),
             GovernedBox::assigned("codex"),
         )
-        .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+        .intercept(&box_shell::EffectAttempt::ShellSpawn {
             command: "git-mcp",
             program: &server.display().to_string(),
             program_path: &program.display().to_string(),
@@ -1785,7 +1784,7 @@ mod tests {
                 None,
                 Default::default(),
             )
-            .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+            .intercept(&box_shell::EffectAttempt::ShellSpawn {
                 command: spec.program(),
                 program: spec.program(),
                 program_path: &program.granted_path().display().to_string(),
@@ -2994,12 +2993,11 @@ while :; do :; done"#
                 .build()
                 .expect("tool runtime");
             let refusal = runtime
-                .block_on((spawner.spawn())(strands_shell::os::HostSpawn {
+                .block_on((spawner.spawn())(box_shell::HostSpawn {
                     program,
                     invoked: PathBuf::from("/bin/sh"),
                     args,
                     cwd: checked,
-                    env: Vec::new(),
                 }))
                 .err()
                 .expect("the changed directory must refuse the launch");
