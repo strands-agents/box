@@ -138,8 +138,12 @@ when temporal {
         let kernel = Arc::new(ShellKernel::over(backend(&[]), adapter(policy(source))));
         let shell = Shell::with_kernel(Arc::clone(&kernel) as Arc<dyn strands_shell::os::Kernel>);
         let hosted = crate::run::broker::shell::HostedShell { shell, kernel };
-        let (mut program, _output, _control) =
-            crate::run::broker::program::Program::adopt(hosted, None).expect("a program");
+        let (mut program, _output, _control) = crate::run::broker::program::Program::adopt(
+            hosted,
+            None,
+            crate::record::config::limits::DEFAULT_SHELL_MAX_STDIN,
+        )
+        .expect("a program");
         let refused = program.call("no-such-tool | blocked").await.status;
         let gated = program.call("printf gated").await.status;
         (refused, gated)

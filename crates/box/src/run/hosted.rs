@@ -1024,6 +1024,7 @@ impl HostedBox {
             Arc::clone(&policy),
             discovery.registry(),
             egress,
+            &attachment.phantoms,
             Arc::clone(&recorder),
             host_spawner,
             mcp_leaf_launcher,

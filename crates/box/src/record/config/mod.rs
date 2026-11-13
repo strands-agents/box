@@ -664,6 +664,9 @@ const SHELL_SIZE_LIMITS_RECORD_VERSION: u32 = 31;
 /// The record version of a record whose `[gateway]` upgrades a host's plain HTTP, so an older build
 /// refuses the box rather than resuming it with those requests refused on port 80.
 const UPGRADE_HTTP_RECORD_VERSION: u32 = 32;
+/// The record version of a record that sets `limits.shell.max_stdin`, so an older build refuses the
+/// box rather than resuming it with the default stdin limit.
+const SHELL_STDIN_LIMIT_RECORD_VERSION: u32 = 33;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -717,7 +720,9 @@ fn record_version<'a>(
     has_backend: bool,
     gateway: &Gateway,
 ) -> u32 {
-    if !gateway.is_default() {
+    if limits.shell.has_stdin_limit() {
+        SHELL_STDIN_LIMIT_RECORD_VERSION
+    } else if !gateway.is_default() {
         UPGRADE_HTTP_RECORD_VERSION
     } else if limits.shell.has_size_limits() {
         SHELL_SIZE_LIMITS_RECORD_VERSION
@@ -1003,6 +1008,7 @@ impl Record {
             BACKEND_RECORD_VERSION,
             SHELL_SIZE_LIMITS_RECORD_VERSION,
             UPGRADE_HTTP_RECORD_VERSION,
+            SHELL_STDIN_LIMIT_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -2869,7 +2875,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, UPGRADE_HTTP_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, SHELL_STDIN_LIMIT_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -3765,6 +3771,27 @@ command = ["mcp-server-fetch"]
                 .expect("this build reads its own record"),
             stored
         );
+    }
+
+    /// A stdin limit stores its own record version, so an earlier build refuses the box.
+    #[test]
+    fn a_stdin_limit_stores_a_version_no_earlier_build_reads() {
+        let mut stored = record_from_config("[limits.shell]\nmax_stdin = 1048576\n")
+            .expect("a stdin limit loads");
+        assert_eq!(stored.version, SHELL_STDIN_LIMIT_RECORD_VERSION);
+        assert_eq!(stored.limits.shell.max_stdin(), 1048576);
+        assert_eq!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+            stored
+        );
+        stored.version = UPGRADE_HTTP_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: UPGRADE_HTTP_RECORD_VERSION,
+                expected: SHELL_STDIN_LIMIT_RECORD_VERSION
+            })
+        ));
     }
 
     #[test]

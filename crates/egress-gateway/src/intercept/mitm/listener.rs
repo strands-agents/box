@@ -551,6 +551,7 @@ mod tests {
             upstream_config: Arc::new(super::super::tls::upstream_client_config(&[]).unwrap()),
             emitter: Box::new(StubEmitter::new()),
             effect_interceptor: policy,
+            reply_copies: Arc::new(super::super::body::CopyBudget::for_limit(1024)),
         }
     }
 
@@ -777,6 +778,7 @@ mod tests {
             upstream_config: Arc::new(super::super::tls::upstream_client_config(&[]).unwrap()),
             emitter: Box::new(StubEmitter::new()),
             effect_interceptor: policy,
+            reply_copies: Arc::new(super::super::body::CopyBudget::for_limit(1024)),
         }
     }
 

@@ -1913,3 +1913,299 @@ fn attempt_schema_never_carries_body_or_header_content() {
         );
     }
 }
+
+/// What a reply observer was told: the finished reply, or that it was abandoned.
+#[derive(Debug, PartialEq)]
+enum Observed {
+    Finished(Vec<u8>),
+    Abandoned,
+}
+
+struct RecordingObserver(Arc<Mutex<Vec<Observed>>>);
+
+impl egress_gateway::ReplyObserver for RecordingObserver {
+    // Like the policy's observer: an SSE event that carries a result is a whole answer.
+    fn complete(&mut self, reply: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(reply);
+        text.starts_with("data:") && text.contains("\"result\"") && text.ends_with("\n\n")
+    }
+
+    fn finished(self: Box<Self>, reply: &[u8]) {
+        self.0
+            .lock()
+            .unwrap()
+            .push(Observed::Finished(reply.to_vec()));
+    }
+
+    fn abandoned(self: Box<Self>) {
+        self.0.lock().unwrap().push(Observed::Abandoned);
+    }
+}
+
+struct ObservingPermit(Box<dyn EffectPermit>, Arc<Mutex<Vec<Observed>>>);
+
+impl EffectPermit for ObservingPermit {
+    fn record_outcome(self: Box<Self>, outcome: EffectOutcome) -> io::Result<()> {
+        self.0.record_outcome(outcome)
+    }
+
+    fn mark_indeterminate(self: Box<Self>) {
+        self.0.mark_indeterminate();
+    }
+
+    fn reply_observer(
+        &mut self,
+        _request_id: Option<&str>,
+    ) -> Option<Box<dyn egress_gateway::ReplyObserver>> {
+        Some(Box::new(RecordingObserver(self.1.clone())))
+    }
+}
+
+/// Offers a reply observer on every request permit, and records what each one is told.
+struct ObservingInterceptor(RecordingInterceptor, Arc<Mutex<Vec<Observed>>>);
+
+impl EffectInterceptor for ObservingInterceptor {
+    fn intercept(&self, attempt: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>> {
+        let permit = self.0.intercept(attempt)?;
+        Ok(match attempt {
+            EffectAttempt::HttpRequest { .. } => Box::new(ObservingPermit(permit, self.1.clone())),
+            _ => permit,
+        })
+    }
+}
+
+/// One MCP request through the gateway to a controlled upstream, whose reply arrives in two
+/// writes. Returns what the reply observers were told, and the reply the workload read, if it
+/// read one.
+fn observe_one_mcp_reply(
+    host: &str,
+    request: &str,
+    reply: &str,
+    redacting: bool,
+    upstream_cut_off: bool,
+) -> (Vec<Observed>, Option<String>) {
+    let (upstream, sender) = TlsUpstream::start_controlled(host);
+    let (controls, authorization) = if redacting {
+        credential_route(host, upstream.port(), "observer-secret")
+    } else {
+        (no_injection(), String::new())
+    };
+    let shared = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let handle = MitmInterceptor::start(
+        MitmConfig {
+            mcp_servers: vec![(host.to_string(), "test-server".to_string())],
+            ..config_for(host, &upstream)
+        },
+        controls,
+        Arc::new(ObservingInterceptor(
+            RecordingInterceptor::allowing(shared.clone()),
+            observed.clone(),
+        )),
+    )
+    .unwrap();
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+    client.set_read_timeout(Duration::from_secs(3));
+    let mut headers = vec![("Content-Type", "application/json")];
+    if redacting {
+        headers.push(("Authorization", authorization.as_str()));
+    }
+    client.send_request("POST", "/mcp", &headers, request.as_bytes());
+    let split = reply.len() / 2;
+    sender
+        .send(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                reply.len(),
+                &reply[..split],
+            )
+            .into_bytes(),
+        )
+        .unwrap();
+    let read = if upstream_cut_off {
+        drop(sender);
+        None
+    } else {
+        sender.send(reply.as_bytes()[split..].to_vec()).unwrap();
+        drop(sender);
+        Some(client.read_response())
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while observed.lock().unwrap().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    let observed = std::mem::take(&mut *observed.lock().unwrap());
+    (observed, read)
+}
+
+const TOOL_CALL: &str =
+    r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#;
+const TOOL_REPLY: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"hello there, the tool's whole answer echoes observer-secret"}],"structuredContent":{"verified":true}}}"#;
+
+#[test]
+fn a_tool_call_reply_reaches_its_observer_whole_after_it_streams() {
+    for redacting in [false, true] {
+        let host = if redacting {
+            "observe-redact.test"
+        } else {
+            "observe-plain.test"
+        };
+        let (observed, read) = observe_one_mcp_reply(host, TOOL_CALL, TOOL_REPLY, redacting, false);
+        // The upstream echoes the credential, so the observer must see the redacted bytes.
+        let delivered = if redacting {
+            TOOL_REPLY.replace("observer-secret", "[REDACTED]")
+        } else {
+            TOOL_REPLY.to_string()
+        };
+        assert!(
+            read.expect("the workload read the reply")
+                .ends_with(&delivered),
+            "redacting={redacting}"
+        );
+        assert_eq!(
+            observed,
+            [Observed::Finished(delivered.into_bytes())],
+            "redacting={redacting}"
+        );
+    }
+}
+
+/// One `tools/call` (sent with `Accept-Encoding: gzip`) to an upstream that answers `response`.
+/// Returns what the reply observer was told and the request the upstream saw.
+fn observe_one_canned_reply(
+    host: &str,
+    response: &'static [u8],
+    max_body_bytes: usize,
+) -> (Vec<Observed>, harness::SeenRequest) {
+    let upstream = TlsUpstream::start_with_response(host, response);
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let handle = MitmInterceptor::start(
+        MitmConfig {
+            mcp_servers: vec![(host.to_string(), "test-server".to_string())],
+            response_limits: egress_gateway::ResponseLimits { max_body_bytes },
+            ..config_for(host, &upstream)
+        },
+        no_injection(),
+        Arc::new(ObservingInterceptor(
+            RecordingInterceptor::allowing(Arc::new(Mutex::new(Vec::new()))),
+            observed.clone(),
+        )),
+    )
+    .unwrap();
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+    client.set_read_timeout(Duration::from_secs(3));
+    client.send_request(
+        "POST",
+        "/mcp",
+        &[
+            ("Content-Type", "application/json"),
+            ("Accept-Encoding", "gzip"),
+        ],
+        TOOL_CALL.as_bytes(),
+    );
+    // Read until the gateway stops sending; a refused or cut-off reply ends with a read error.
+    let mut received = Vec::new();
+    let _ = std::io::Read::read_to_end(&mut client, &mut received);
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while observed.lock().unwrap().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let observed = std::mem::take(&mut *observed.lock().unwrap());
+    (observed, upstream.last_request())
+}
+
+#[test]
+fn a_tool_call_asks_the_server_for_an_uncompressed_reply() {
+    const REPLY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 49\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[]}}";
+    let (observed, seen) = observe_one_canned_reply("observe-identity.test", REPLY, 1024 * 1024);
+    assert_eq!(
+        seen.header("accept-encoding").as_deref(),
+        Some("identity"),
+        "a compressed reply would go unread, so the workload cannot ask for one"
+    );
+    assert_eq!(observed.len(), 1);
+}
+
+/// A server that compresses anyway hands the observer bytes no JSON parser reads, so the policy
+/// records `indeterminate` and a precondition on that server is never met.
+#[test]
+fn a_reply_compressed_anyway_reaches_the_observer_as_its_encoded_bytes() {
+    const ENCODED: &[u8] = b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03not json";
+    const REPLY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: 18\r\n\r\n\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03not json";
+    let (observed, _) = observe_one_canned_reply("observe-gzip.test", REPLY, 1024 * 1024);
+    assert_eq!(observed, [Observed::Finished(ENCODED.to_vec())]);
+}
+
+#[test]
+fn a_reply_over_the_body_limit_is_reported_abandoned() {
+    const REPLY: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 300\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[{\"type\":\"text\",\"text\":\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"}]}}";
+    let (observed, _) = observe_one_canned_reply("observe-limit.test", REPLY, 200);
+    assert_eq!(observed, [Observed::Abandoned]);
+}
+
+#[test]
+fn a_tool_call_reply_cut_off_upstream_is_reported_abandoned() {
+    let (observed, _) =
+        observe_one_mcp_reply("observe-cut.test", TOOL_CALL, TOOL_REPLY, false, true);
+    assert_eq!(observed, [Observed::Abandoned]);
+}
+
+#[test]
+fn only_a_tool_call_reply_is_observed() {
+    let list = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}"#;
+    let tools = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#;
+    let (observed, read) = observe_one_mcp_reply("observe-list.test", list, tools, false, false);
+    assert!(read.expect("the workload read the reply").ends_with(tools));
+    assert!(observed.is_empty(), "{observed:?}");
+}
+
+#[test]
+fn a_reply_the_server_holds_open_finishes_once_its_answer_arrives() {
+    let host = "observe-open.test";
+    let (upstream, sender) = TlsUpstream::start_controlled(host);
+    let shared = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let handle = MitmInterceptor::start(
+        MitmConfig {
+            mcp_servers: vec![(host.to_string(), "test-server".to_string())],
+            ..config_for(host, &upstream)
+        },
+        no_injection(),
+        Arc::new(ObservingInterceptor(
+            RecordingInterceptor::allowing(shared.clone()),
+            observed.clone(),
+        )),
+    )
+    .unwrap();
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+    client.set_read_timeout(Duration::from_secs(3));
+    client.send_request(
+        "POST",
+        "/mcp",
+        &[("Content-Type", "application/json")],
+        TOOL_CALL.as_bytes(),
+    );
+    let event = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[]}}\n\n";
+    sender
+        .send(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{event}\r\n",
+                event.len()
+            )
+            .into_bytes(),
+        )
+        .unwrap();
+    let head = client.read_head();
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while observed.lock().unwrap().is_empty() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        *observed.lock().unwrap(),
+        [Observed::Finished(event.as_bytes().to_vec())],
+        "the observer finishes while the stream is still open"
+    );
+    drop(sender);
+}

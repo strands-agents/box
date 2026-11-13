@@ -18,6 +18,7 @@ use crate::run::broker::invalid_input;
 use crate::run::broker::mcp::DiscoveryRegistry;
 use crate::run::broker::reach::{Reach, Refused};
 use crate::run::contain::boundary::environment::WORKLOAD_USER;
+use crate::run::credential::ProvisionedVariable;
 use crate::run::telemetry::{DecisionRecorder, EffectiveDecision, ObservationCapture};
 use box_shell::{Filesystem, ScriptOutcome, ScriptRunner, ShellKernel};
 
@@ -53,6 +54,8 @@ pub(crate) struct HostedShell {
 /// Everything needed to build the hosted Shell, kept so one can be rebuilt.
 pub(super) struct ShellSpec {
     pub(super) max_input: usize,
+    /// The most stdin one Shell Program receives.
+    pub(super) max_stdin: usize,
     pub(super) max_output: usize,
     /// The Shell's own bound on one submitted Shell call.
     pub(super) command_timeout: Option<Duration>,
@@ -89,6 +92,9 @@ pub(super) struct ShellSpec {
     /// How the Shell reaches the network. `Some` routes outbound HTTP through this box's egress
     /// gateway; `None` leaves the network off.
     pub(super) egress: Option<EgressRouting>,
+
+    /// Every variable a route provisions, which each new Shell holds beneath its own names.
+    pub(super) phantoms: Vec<ProvisionedVariable>,
 
     /// Where final policy enforcement point decisions are submitted.
     pub(super) recorder: Arc<crate::run::telemetry::DecisionRecorder>,
@@ -170,6 +176,11 @@ impl ShellSpec {
         apply_limits(&mut shell.proc, self.max_input, self.max_output);
         shell.proc.deadline = deadline(self.command_timeout)?;
         shell.proc.cwd = PathBuf::from(self.reach.working_directory());
+        // Each route's phantom, beneath the Shell's own names, in the order `environment::compose`
+        // keeps (docs/design/decisions.md#the-box-is-the-credential-boundary).
+        for phantom in &self.phantoms {
+            shell.set_env(phantom.name.as_str(), phantom.value.as_str());
+        }
         shell.set_env("PWD", self.reach.working_directory());
         shell.set_env("HOME", self.reach.home_variable());
         shell.set_env("USER", WORKLOAD_USER);

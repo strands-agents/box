@@ -431,7 +431,7 @@ async fn run_mcp_program(
         recorded = recorded.and(record_response_leg(
             &exchange,
             call,
-            McpReply::Indeterminate,
+            CallEnd::Ended(McpReply::Indeterminate),
         ));
     }
     result.and(cleanup).and(recorded)
@@ -1133,45 +1133,52 @@ async fn forward_server_frame(
     }
     let response_leg = exchange.connection.decided_calls.remove(&key);
     if let Some(call) = response_leg.filter(|_| terminal) {
-        record_response_leg(exchange, call, McpReply::of_reply(&response))?;
+        record_response_leg(exchange, call, CallEnd::Reply(&response))?;
     }
     emit_text(exchange.frames, exchange.program, raw, None).await?;
     Ok(ProgramAction::Continue)
 }
 
-/// Record a call's response legs; `reply` is how the call ended.
+/// How an item call ended: with the server's reply frame, or without one.
+pub(super) enum CallEnd<'a> {
+    /// The server's terminal reply.
+    Reply(&'a Value),
+    /// The call ended without a reply: cancelled, or its connection ended.
+    Ended(McpReply),
+}
+
+/// Record a call's response legs, with the reply frame when the server sent one.
 fn record_response_leg(
     exchange: &Exchange<'_>,
     call: RecordedCall,
-    reply: McpReply,
+    end: CallEnd<'_>,
 ) -> io::Result<()> {
-    exchange
-        .connection
-        .policy
-        .record(
-            &exchange.connection.governed,
-            &Principal::agent(),
-            &call.request_id,
-            &Outcome::Mcp {
-                server: exchange.running.server(),
-                method: &call.method,
-                tool: call.tool.as_deref(),
-                prompt: call.prompt.as_deref(),
-                uri: call.uri.as_deref(),
-            },
-        )
-        .and_then(|()| {
-            call.tool_response.map_or(Ok(()), |response| {
-                exchange
-                    .connection
-                    .policy
-                    .record_tool_response(response, reply)
-            })
-        })
-        .map_err(|error| {
-            eprintln!("[broker] failed to record mcp:call response leg: {error}");
-            io::Error::other(format!("failed to record MCP response: {error}"))
-        })
+    let policy = &exchange.connection.policy;
+    let coarse = policy.record(
+        &exchange.connection.governed,
+        &Principal::agent(),
+        &call.request_id,
+        &Outcome::Mcp {
+            server: exchange.running.server(),
+            method: &call.method,
+            tool: call.tool.as_deref(),
+            prompt: call.prompt.as_deref(),
+            uri: call.uri.as_deref(),
+        },
+    );
+    // A kept coarse event appends later, and the tool's leg queues behind it.
+    let coarse_recorded = matches!(coarse, Ok(()) | Err(policy::PolicyError::OutcomeKept(_)));
+    let tool = match call.tool_response {
+        Some(response) if coarse_recorded => match end {
+            CallEnd::Reply(frame) => policy.record_tool_reply(response, frame),
+            CallEnd::Ended(reply) => policy.record_tool_response(response, reply),
+        },
+        _ => Ok(()),
+    };
+    coarse.and(tool).map_err(|error| {
+        eprintln!("[broker] failed to record mcp:call response leg: {error}");
+        io::Error::other(format!("failed to record MCP response: {error}"))
+    })
 }
 
 /// Capture one `tools/list` reply, and hold the final page until its schema stages.

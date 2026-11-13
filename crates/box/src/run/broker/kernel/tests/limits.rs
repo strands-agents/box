@@ -120,8 +120,12 @@ fn each_call_has_the_shell_timeout_from_its_own_start() {
             Arc::clone(&kernel) as Arc<dyn strands_shell::os::Kernel>
         );
         let hosted = crate::run::broker::shell::HostedShell { shell, kernel };
-        let (mut program, _output, _control) =
-            Program::adopt(hosted, Some(Duration::from_secs(1))).expect("a program");
+        let (mut program, _output, _control) = Program::adopt(
+            hosted,
+            Some(Duration::from_secs(1)),
+            crate::record::config::limits::DEFAULT_SHELL_MAX_STDIN,
+        )
+        .expect("a program");
         let first = program.call("sleep 5").await.status;
         tokio::time::sleep(Duration::from_millis(1500)).await;
         let second = program.call("true").await.status;

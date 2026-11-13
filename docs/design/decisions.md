@@ -648,9 +648,9 @@ fails with `EPERM: operation not permitted, posix_spawn '/bin/sh'` for every hoo
 reaches stderr, and `run` exits 0, so the operator sees no failure. Granting `process-exec` on
 `/bin/sh` would make it work, but the commands the hook issues would then raise no decision, so an
 authored `forbid` would never see them. Once rewritten, each hook command reaches the mediated Shell
-and raises `shell:exec`, and each file it touches raises its own `fs:*`. Two limits remain. A hook
-that reads its payload on stdin sees nothing because the alias forwards no input. Plugin hooks
-remain broken because most of them exec a script.
+and raises `shell:exec`, and each file it touches raises its own `fs:*`. The alias forwards a hook's finite stdin to the Shell, so a hook reads its payload with a Shell
+command such as `cat` or `jq`. A program that the Shell starts in its own sandbox still reads no
+stdin. Plugin hooks remain broken because most of them exec a script.
 
 ## Policy
 
@@ -957,10 +957,17 @@ file. `open` recovers a decision-equivalent history before returning an authorit
 fails, it returns an error. The box never falls back to empty or partial history. The engine
 timestamps each event from the trusted system wall clock. Callers cannot supply timestamps. If the
 clock steps backwards, each append advances one nanosecond until it catches up. This can keep a
-restriction active longer than the apparent interval. A policy edit applies prospectively. A
-temporal identity that still matches keeps its state, and an unmatched identity starts empty. The
-contract excludes checkpoint, rewind, branch, tamper evidence, an audit record, atomic commit across
-an external effect, and any history shared between boxes.
+restriction active longer than the apparent interval. The engine allows the newest timestamp to run
+at most five minutes ahead of the clock. Beyond that, `open` refuses the history, and during a run
+each append fails, until the clock comes within five minutes of the newest timestamp or the operator
+removes the box directory. An outcome refused this way is kept and recorded before the next decision
+or at shutdown, and every request is denied until it is. Without that bound, one forged
+future-stamped event would pin every later timestamp one nanosecond past it, so every earlier real
+event would leave its window and no later event would expire. A forged event within the bound can
+still hold timestamps ahead for up to five minutes. A policy edit applies prospectively. A temporal
+identity that still matches keeps its state, and an unmatched identity starts empty. The contract
+excludes checkpoint, rewind, branch, tamper evidence, an audit record, atomic commit across an
+external effect, and any history shared between boxes.
 
 <a id="a-temporal-rule-names-one-action"></a>
 ### A temporal rule names one action, so a budget does not span a family
@@ -2252,7 +2259,10 @@ credential exists.
 The box here is the whole of what one `box.toml` declares: the agent's sandbox, the box's trusted
 process, and every sandbox it starts for a tool or an MCP server. Every request and response flows
 inside it. Every process in the box gets every egress route that `box.toml` declares: the agent,
-each tool, and each MCP server hold every route's phantom or placeholder. Every process in the box
+each tool, and each MCP server hold every route's phantom or placeholder. The hosted Shell runs in
+the trusted process and holds them too. A command that the agent sends through its shell alias
+expands a route's variable to that route's phantom or placeholder.
+`the_shell_holds_the_workloads_phantom_and_never_the_secret` checks this. Every process in the box
 shares one gateway, and the gateway cannot tell which process made a call. An `aws://` route
 generates no phantom. Every process gets the same public placeholder keys, and the gateway signs
 matching requests with the real credentials. An `env://` route with `secret.inject = "always"`
