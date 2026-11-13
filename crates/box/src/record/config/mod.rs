@@ -1187,7 +1187,7 @@ impl Record {
 const BOX_IDENTITY_DIGITS: usize = 16;
 
 /// The longest prefix a caller-supplied identity may carry before its digits.
-const MAXIMUM_BOX_IDENTITY_PREFIX: usize = MAXIMUM_BOX_NAME - 1 - BOX_IDENTITY_DIGITS;
+pub(crate) const MAXIMUM_BOX_IDENTITY_PREFIX: usize = MAXIMUM_BOX_NAME - 1 - BOX_IDENTITY_DIGITS;
 
 /// Whether `identity` is one Box generates or one a caller may supply.
 pub(crate) fn valid_box_identity(identity: &str) -> bool {
@@ -2932,10 +2932,13 @@ env = {}
         assert_eq!(longest.len(), MAXIMUM_BOX_NAME);
         assert!(valid_box_identity(&longest));
         BoxName::parse(&longest).expect("a caller can use its box ID as the name");
-        assert!(!valid_box_identity(&format!(
-            "{}-0123456789abcdef",
-            "a".repeat(16)
-        )));
+        let too_long = format!("{}-0123456789abcdef", "a".repeat(16));
+        assert!(!valid_box_identity(&too_long));
+        let message = ConfigError::SuppliedIdentity { found: too_long }.to_string();
+        assert!(
+            message.contains(&format!("1 to {MAXIMUM_BOX_IDENTITY_PREFIX} letters")),
+            "the refusal names the limit that applies: {message}"
+        );
     }
 
     #[test]
