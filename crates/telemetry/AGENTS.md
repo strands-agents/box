@@ -257,14 +257,19 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   **A failed final export is not a timeout.** The SDK answers `shutdown` with the final export's
   own error, so a closed port or a full disk returns at once with an `Err`. `shut_down_bounded` now
   returns a `Shutdown` (`Completed`, `Failed`, `Unanswered`), and `drain_finished` calls the drain
-  unfinished only when no answer came, or when a lane reported a cut. Each `TargetLane` sets a shared
-  `cut` flag when its own shutdown returns `OTelSdkError::Timeout`, because the provider joins every
-  lane's error into one `InternalFailure`. The first version reported every fast failure as "did not
+  unfinished only when no answer came, or when a lane reported that its shutdown did not finish. Each
+  `TargetLane` sets a shared `cut` flag itself, because the provider joins every lane's error into
+  one `InternalFailure`. A lane sets it on `OTelSdkError::Timeout`, and on any other error unless its
+  own `SharedTarget` recorded a failed export that started inside this shutdown. The shutdown count
+  in `LaneFailures` keeps an export that began earlier, and failed late, from answering for it. A refused shutdown message (the SDK's
+  `try_send` finds the queue full, or the worker gone) exports nothing and is counted nowhere, so a
+  flag for `Timeout` alone let it pass as finished. The first version reported every fast failure as "did not
   finish in time". The second compared `dropped` before and after the drain, which a fast-failing
   lane or a failing relay could raise while another lane was cut, so the cut went unreported.
   `a_counted_export_failure_is_not_reported_as_a_timeout`, `a_fast_failing_final_export_is_not_a_timeout`,
-  and `a_cut_lane_is_reported_beside_a_failing_lane` (an OTLP target on a closed port beside a file
-  target on a full FIFO) are the pins.
+  `a_cut_lane_is_reported_beside_a_failing_lane` (an OTLP target on a closed port beside a file
+  target on a full FIFO), and `a_shutdown_the_worker_never_receives_is_not_finished` (a burst of
+  4000 records behind a listener that never accepts) are the pins.
   **The receiver has its own counter.** It used to share `dropped`, so a refused agent payload (the
   one-permit `RELAY_CAPACITY`, or the fan-out bound) counted as a lost record: the workload could
   raise the loss line at will, and a healthy agent that exports concurrently could raise it on a run
