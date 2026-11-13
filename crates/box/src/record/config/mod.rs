@@ -671,6 +671,9 @@ const SHELL_STDIN_LIMIT_RECORD_VERSION: u32 = 33;
 /// The record version of a record whose box identity a caller supplied, so an older build refuses
 /// the box by its version rather than by its identity.
 pub(crate) const SUPPLIED_IDENTITY_RECORD_VERSION: u32 = 34;
+/// The record version of a record whose process selects `native-file-watching`, so an older build
+/// refuses the box rather than resuming it with FSEvents refused.
+const NATIVE_FILE_WATCHING_RECORD_VERSION: u32 = 35;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -719,13 +722,15 @@ fn record_version<'a>(
     file_attributes: bool,
     features: &ExperimentalFeatures,
     limits: &Limits,
-    specs: impl Iterator<Item = &'a ProcessSpec>,
+    specs: impl Iterator<Item = &'a ProcessSpec> + Clone,
     mcp: &[crate::record::config::mcp::McpServer],
     ingress: bool,
     has_backend: bool,
     gateway: &Gateway,
 ) -> u32 {
-    if !generated_box_identity(box_id) {
+    if specs.clone().any(|spec| spec.native_file_watching) {
+        NATIVE_FILE_WATCHING_RECORD_VERSION
+    } else if !generated_box_identity(box_id) {
         SUPPLIED_IDENTITY_RECORD_VERSION
     } else if limits.shell.has_stdin_limit() {
         SHELL_STDIN_LIMIT_RECORD_VERSION
@@ -1017,6 +1022,7 @@ impl Record {
             UPGRADE_HTTP_RECORD_VERSION,
             SHELL_STDIN_LIMIT_RECORD_VERSION,
             SUPPLIED_IDENTITY_RECORD_VERSION,
+            NATIVE_FILE_WATCHING_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1697,6 +1703,7 @@ mod tests {
     /// One `[agent]` with the given command and nothing else.
     fn agent(command: &[&str]) -> ProcessSpec {
         ProcessSpec {
+            native_file_watching: false,
             native_filesystem_policy: None,
             command: command.iter().map(|word| (*word).to_string()).collect(),
             workspace: None,
@@ -1728,6 +1735,55 @@ mod tests {
             contained_mcp: BTreeMap::new(),
             telemetry: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// **Native file watching is selected per local process and needs its record version.** Each
+    /// table stores only its own selection, a selected record refuses an older version, and a
+    /// remote MCP server refuses the key.
+    #[test]
+    fn native_file_watching_is_versioned_and_selected_per_process() {
+        for table in ["agent", "tool.watcher", "mcp.watcher"] {
+            for enabled in [false, true] {
+                let transport = if table.starts_with("mcp.") {
+                    "type = \"stdio\"\n"
+                } else {
+                    ""
+                };
+                let body = format!(
+                    "[{table}]\n{transport}command = [\"watcher\"]\n\
+                     native-file-watching = {enabled}\n\
+                     [tool.other]\ncommand = [\"other\"]\n"
+                );
+                let mut stored = pinned_record(&body);
+                let selected = match table {
+                    "agent" => stored.agent.as_ref().unwrap(),
+                    "tool.watcher" => &stored.tool["watcher"],
+                    _ => &stored.contained_mcp["watcher"].spec,
+                };
+                assert_eq!(selected.native_file_watching, enabled, "{table}");
+                assert!(!stored.tool["other"].native_file_watching);
+                let expected = if enabled { 35 } else { 21 };
+                assert_eq!(stored.version, expected, "{body}");
+                let text = stored.to_toml().unwrap();
+                assert_eq!(text.contains("native-file-watching"), enabled);
+                assert_eq!(
+                    Record::parse(&text, Path::new("record.toml")).unwrap(),
+                    stored
+                );
+                stored.version = if enabled { 34 } else { 35 };
+                assert!(matches!(
+                    Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion { expected: version, .. }) if version == expected
+                ));
+            }
+        }
+        let remote = "name = \"watcher\"\nbox_dir = \"/var/lib/boxes/watcher\"\n\
+                      [mcp.remote]\ntype = \"http\"\ndestinations = [\"example.com\"]\n\
+                      native-file-watching = false\n";
+        assert!(
+            toml::from_str::<ConfigFile>(remote).is_err(),
+            "a remote MCP server refuses the key"
+        );
     }
 
     #[test]
@@ -2907,7 +2963,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, SUPPLIED_IDENTITY_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, NATIVE_FILE_WATCHING_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

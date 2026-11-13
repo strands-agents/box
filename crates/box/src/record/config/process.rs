@@ -22,6 +22,14 @@ use super::grammar::GrammarTable;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProcessSpec {
+    /// Permit macOS FSEvents, including possible disclosure of denied names and event metadata.
+    #[serde(
+        default,
+        rename = "native-file-watching",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub(crate) native_file_watching: bool,
+
     /// Override the box-wide native filesystem policy selection for this process tree.
     #[serde(
         default,

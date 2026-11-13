@@ -1532,6 +1532,26 @@ fn agent_account_lookup_does_not_grant_leaf_network_runtime_services() {
 }
 
 #[test]
+fn native_file_watching_adds_only_the_exact_fsevents_lookup() {
+    for leaf in [false, true] {
+        let (_directory, mut config) = fixed_config();
+        if leaf {
+            config = config.allow_broad_exec().allow_runtime_services();
+        }
+        let baseline = generate_seatbelt_profile(&config).unwrap();
+        assert!(!baseline.contains("com.apple.FSEvents"));
+        let selected = generate_seatbelt_profile(&config.allow_native_file_watching()).unwrap();
+        let grant = "(allow mach-lookup (global-name \"com.apple.FSEvents\"))\n";
+        assert_eq!(selected.matches(grant).count(), 1);
+        assert_eq!(
+            selected.replace(grant, ""),
+            baseline,
+            "selecting FSEvents changes no filesystem, network, or other service rule"
+        );
+    }
+}
+
+#[test]
 fn strict_inputs_survive_the_exec_boundary() {
     let (_directory, config) = fixed_config();
     let json = config.to_json().expect("serialize");

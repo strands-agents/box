@@ -420,6 +420,7 @@ The box writes its own errors to stderr. To keep them, add `2> my-box/box-run.lo
 | `getaddrinfo ENOTFOUND bedrock-runtime.us-west-2.amazonaws.com` | Node didn't load the preload file. Check the `--import` path in `command`. |
 | `Authentication failed: Please make sure your API Key is valid.` | Your key has expired, or you made it in another region. Make a new one in `us-west-2`. |
 | `OpenSSL configuration error` ... `openssl.cnf` | Add `openssl.cnf` to `read_file`. |
+| `EMFILE` from a directory watcher on macOS | Use the application's polling mode, or explicitly enable [native file watching](config.md#native-file-watching) after accepting its denied-name disclosure. |
 | `EPERM: process.cwd failed with error operation not permitted, uv_cwd` | Add the project to `list`. |
 | `Unexpected token 'b', "blocked by"... is not valid JSON` | The box refused a model request. Find its `deny` in the decision log, and read the reason. |
 | `unsafe box directory ...: it is not empty and contains no valid private record` | You removed part of `my-box/state`. Remove all of it; `run` recreates it. Never remove `state/private` alone. |

@@ -654,6 +654,9 @@ impl Boundary {
         if stored.file_attributes {
             containment = containment.allow_file_attributes();
         }
+        if spec.native_file_watching {
+            containment = containment.allow_native_file_watching();
+        }
 
         // **Every refusal the grants need, applied before the grants themselves.** macOS renders
         // these after every allow and Linux overmounts them empty, so each subtracts from the grant
@@ -763,6 +766,7 @@ impl Boundary {
             command_listed,
             broad_exec,
             file_attributes: cfg!(target_os = "macos") && stored.file_attributes,
+            native_file_watching: cfg!(target_os = "macos") && spec.native_file_watching,
             native_egress: launch.egress == EgressMode::Native,
             native_filesystem_policy: spec
                 .native_filesystem_policy
@@ -915,8 +919,19 @@ struct DisclosureInputs<'a> {
     command_listed: bool,
     broad_exec: bool,
     file_attributes: bool,
+    native_file_watching: bool,
     native_egress: bool,
     native_filesystem_policy: bool,
+}
+
+/// The line a box prints for a `table` that selects native file watching, at startup and again
+/// when the process starts.
+pub(crate) fn native_file_watching_disclosure(table: &str) -> String {
+    format!(
+        "strands-box: {table} native file watching: macOS FSEvents may disclose denied names \
+         and event metadata, including outside the workspace and from past events; \
+         file-content and write restrictions still apply"
+    )
 }
 
 /// The text a box prints for one spec: its grants, selected policy checks, Core's own additions,
@@ -981,6 +996,9 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
             "strands-box: {table} file attributes: may set file times, set-user-ID and set-group-ID \
              bits, the group, the owner, and access control lists on files in its writable grants"
         ));
+    }
+    if inputs.native_file_watching {
+        lines.push(native_file_watching_disclosure(table));
     }
     if inputs.native_egress {
         let arguments = if table.starts_with("[tool.") {
@@ -1944,6 +1962,7 @@ mod tests {
         /// variables, and one entry in every list Linux lowers.
         fn spec(&self) -> ProcessSpec {
             ProcessSpec {
+                native_file_watching: false,
                 native_filesystem_policy: None,
                 command: vec!["/bin/sh".to_string(), "-c".to_string()],
                 workspace: Some(self.path("project")),
@@ -3059,6 +3078,42 @@ mod tests {
                 serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
             assert_eq!(config["broad_exec"], expected);
             assert_eq!(boundary.disclosure().contains("broad exec:"), expected);
+        }
+    }
+
+    /// **Native file watching reaches only the process that selects it, and is disclosed only where
+    /// it renders.** The agent selects it here, so a tool or MCP leaf that does not stays off.
+    #[test]
+    fn native_file_watching_follows_only_the_selected_process() {
+        let mut fixture = Fixture::new();
+        let mut selected = fixture.spec();
+        selected.native_file_watching = true;
+        fixture.record.agent = Some(selected);
+        for (table, reach) in [
+            ("[agent]", RuntimeReach::Agent),
+            ("[tool.watcher]", RuntimeReach::Leaf),
+            ("[mcp.watcher]", RuntimeReach::Leaf),
+        ] {
+            for enabled in [false, true] {
+                let mut spec = fixture.spec();
+                spec.native_file_watching = enabled;
+                let boundary = fixture.translate_full(&spec, table, reach, EgressMode::Gateway);
+                let config: serde_json::Value =
+                    serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
+                assert_eq!(
+                    config["native_file_watching"].as_bool().unwrap_or(false),
+                    enabled,
+                    "{table}"
+                );
+                assert_eq!(
+                    boundary
+                        .disclosure()
+                        .contains(&native_file_watching_disclosure(table)),
+                    enabled && cfg!(target_os = "macos"),
+                    "{table}: {}",
+                    boundary.disclosure()
+                );
+            }
         }
     }
 
