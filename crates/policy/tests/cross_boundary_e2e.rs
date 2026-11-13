@@ -22,32 +22,18 @@ mod harness;
 
 mod support;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use egress_gateway::{CapabilitySet, MitmConfig, MitmHandle, MitmInterceptor};
-use policy::{
-    EgressPolicyInterceptor, GovernedBox, Policy, PolicyEngine, Principal, ShellPolicyInterceptor,
-};
+use policy::{EgressPolicyInterceptor, GovernedBox, PolicyEngine, Principal};
 use strands_shell::Shell;
 
 use harness::{TlsUpstream, WorkloadClient};
 
+use support::shell::{adapter, backend, policy, run, shell_on};
+
 /// The box this suite governs. One box, so one name.
 const BOX_NAME: &str = "cross-boundary";
-
-/// Run a future on the current-thread runtime the Shell requires.
-fn run<F, T>(body: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime builds");
-    let local = tokio::task::LocalSet::new();
-    runtime.block_on(local.run_until(body))
-}
 
 fn proxy_port(handle: &MitmHandle) -> u16 {
     handle.port().expect("a TCP-mode proxy always has a port")
@@ -83,25 +69,14 @@ unless temporal {
 "#;
 
 fn shared_policy(sources: &[&str]) -> Arc<PolicyEngine> {
-    let text = sources.join("\n");
-    Arc::new(
-        support::open_policy(vec![Policy {
-            origin: PathBuf::from("cross-boundary.dw"),
-            text,
-        }])
-        .expect("policy loads"),
-    )
+    policy(&sources.join(
+        "
+",
+    ))
 }
 
-fn shell_on(policy: &Arc<PolicyEngine>) -> Shell {
-    Shell::builder()
-        .effect_interceptor(ShellPolicyInterceptor::into_handle(
-            Arc::clone(policy),
-            Principal::agent(),
-            GovernedBox::assigned(BOX_NAME),
-        ))
-        .build()
-        .expect("shell builds")
+fn shell_governed_by(policy: &Arc<PolicyEngine>) -> Shell {
+    shell_on(&backend(&[]), adapter(Arc::clone(policy), None))
 }
 
 fn proxy_on(policy: &Arc<PolicyEngine>, host: &str, upstream: &TlsUpstream) -> MitmHandle {
@@ -136,7 +111,7 @@ fn reading_a_secret_in_the_shell_closes_egress_in_the_proxy() {
     let port = upstream.port();
 
     let policy = shared_policy(&[TRANSPORT, SHELL_ACCESS, NO_EGRESS_AFTER_SECRET_READ]);
-    let mut shell = shell_on(&policy);
+    let mut shell = shell_governed_by(&policy);
     let handle = proxy_on(&policy, host, &upstream);
 
     run(async {
@@ -189,7 +164,7 @@ fn reading_an_unrelated_file_leaves_egress_open() {
     let port = upstream.port();
 
     let policy = shared_policy(&[TRANSPORT, SHELL_ACCESS, NO_EGRESS_AFTER_SECRET_READ]);
-    let mut shell = shell_on(&policy);
+    let mut shell = shell_governed_by(&policy);
     let handle = proxy_on(&policy, host, &upstream);
 
     run(async {
@@ -228,7 +203,7 @@ fn each_boundary_still_enforces_its_own_rules_independently() {
         r#"permit(principal == Box::Agent::"self", action == Box::Action::"http:request", resource);"#,
         r#"permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);"#,
     ]);
-    let mut shell = shell_on(&policy);
+    let mut shell = shell_governed_by(&policy);
     let handle = proxy_on(&policy, host, &upstream);
 
     run(async {

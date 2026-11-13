@@ -835,7 +835,7 @@ fn e9a_the_bind_passes_through_to_the_host_rather_than_copying() {
 
 /// A write refused through a REDIRECT says *why*, not just exit non-zero.
 ///
-/// Regression guard on a defect in the vendored shell's `exec.rs`, found while establishing
+/// Regression guard on a defect in the Shell's `exec.rs`, found while establishing
 /// that the bind passes through. Its single-builtin path calls `set_err_tx` to route
 /// `err_msg` into a channel, then returns on a redirect failure *before* spawning the task
 /// that drains it — so the message went into a receiver nobody read, and the failure surfaced

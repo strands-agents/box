@@ -1,5 +1,9 @@
 //! Durable Dogwood databases for integration tests.
 
+#[cfg(feature = "shell-adapter")]
+#[allow(dead_code)]
+pub(crate) mod shell;
+
 use std::cell::RefCell;
 
 use policy::{Policy, PolicyEngine, PolicyError};
