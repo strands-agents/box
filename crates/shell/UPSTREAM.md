@@ -2033,7 +2033,7 @@ A substitution or subshell that a cancelled Call drops takes the borrowed stdin 
 Call on the same Program reads no stdin. A Shell alias opens one Program for one Call, so it is not
 affected.
 
-## 2026-11-09 — `touch` did not change the times of an existing file, and refused every option
+## 2026-11-13 — `touch` did not change the times of an existing file, and refused every option
 
 An upstream bug and an upstream command gap
 ([strands-agents/box#361](https://github.com/strands-agents/box/issues/361)). `touch` opened an
