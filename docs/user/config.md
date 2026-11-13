@@ -974,7 +974,7 @@ sign or a daemon that does not answer stops the run.
 When the run ends, Box prints one stderr line if an export to a configured target failed, or if the
 final export did not finish in time. Set `STRANDS_BOX_TELEMETRY_DEBUG` to any non-empty value in the
 environment of `strands-box run` to also print each failed export as it happens, with its full cause
-and the start of the endpoint's answer.
+and the start of the endpoint's answer, with each credential Box attached redacted.
 
 A file destination inside the box directory and outside `private/` is refused: `"<path>" is inside
 the box directory <path> but outside its private tree, where a process could truncate it; name a
