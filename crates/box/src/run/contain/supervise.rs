@@ -826,6 +826,7 @@ impl LeafBox {
     /// Linux — its own netns relay to the parent gateway. A containment setup failure is a
     /// [`TrampolineError::SetupFailed`], not a workload status. Buffered: the streams come back
     /// whole; a long-lived session uses [`spawn_streaming`](Self::spawn_streaming).
+    #[cfg(test)]
     pub(crate) async fn run(
         boundary: Boundary,
         layout: &BoxRoot,
@@ -833,8 +834,30 @@ impl LeafBox {
             crate::run::macos_enforcement::Registration,
         >,
     ) -> Result<CapturedLeaf, BoxError> {
-        // Captured, so the bytes come back to the Shell and leave through its own streams. stdin is
-        // null: a leaf binary reads no stdin, and one that blocked would hold the Call to its deadline.
+        // stdin is null: a leaf binary reads no stdin, and one that blocked would hold the Call to its
+        // deadline.
+        Self::run_with_stdin(
+            boundary,
+            layout,
+            Stdio::null(),
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            registration,
+        )
+        .await
+    }
+
+    /// [`Self::run`] with the child's stdin given. The Python tool passes a write-only descriptor
+    /// when the command's stdin carried data, so a read fails at once instead of seeing an empty
+    /// input. Nothing is ever forwarded on it.
+    pub(crate) async fn run_with_stdin(
+        boundary: Boundary,
+        layout: &BoxRoot,
+        stdin: Stdio,
+        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
+            crate::run::macos_enforcement::Registration,
+        >,
+    ) -> Result<CapturedLeaf, BoxError> {
+        // Captured, so the bytes come back to the Shell and leave through its own streams.
         let LaunchedLeaf {
             mut group,
             mut trampoline,
@@ -843,7 +866,7 @@ impl LeafBox {
         } = Self::launch_contained(
             &boundary,
             layout,
-            Stdio::null(),
+            stdin,
             Stdio::piped(),
             Stdio::piped(),
             #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]

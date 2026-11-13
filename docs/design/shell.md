@@ -97,8 +97,26 @@ flowchart TD
 A command the Shell implements raises `shell:exec`. That covers its builtins, shell functions the
 command defines, and its own commands, such as `cat`, `grep`, `jq`, and `curl`. See [the full
 list](../user/shell.md#what-runs-where). A `python` or `python3` typed in the Shell runs in Monty,
-Box's Python interpreter. See [a workload reaches Monty two
-ways](decisions.md#python-in-the-shell-is-monty).
+Box's Python interpreter, unless the operator turned Monty off. See [Monty is the default
+Python](decisions.md#python-in-the-shell-is-monty).
+
+### Replaced and refused commands
+
+Box can take a command name away from the Shell when it builds it. It hands the Shell two lists,
+next to the declared file of each bare name:
+
+- A **replaced** command is one the Shell implements but no longer runs. When the name is also
+  declared, the Shell resolves it to the declared file, so it is a spawn: `shell:spawn` on that
+  file, then its own sandbox, as for any external program. `command -v` and `type` name the file.
+- A **refused** command exits 126 with the reason Box gave, as `strands-shell: <name>: <reason>`.
+  The Shell checks it in `admit`, before builtins, its own commands, functions, declared files and
+  `PATH`, so no rule decides it and nothing runs. `command -v` and `type` find nothing.
+
+Today Box uses both lists for one case only. With `monty = false` and a `[tool.python3]` or
+`[tool.python]` table, `python3` and `python` are replaced by the table's file. With `monty = false`
+and neither table, both are refused with
+`Monty is off (monty = false) and no [tool.python3] or [tool.python] is declared`. While Monty is
+on, both lists are empty and the precedence below holds for every name.
 
 When a Shell command and an external program share a name, the Shell command takes precedence. For
 example, `echo` selects the Shell command even when `/bin/echo` is on `PATH`. A `shell:exec` rule

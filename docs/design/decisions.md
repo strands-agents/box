@@ -1824,31 +1824,124 @@ response carrying a `403` status. A script that does not check the status reads 
 answer. This remains an open residual risk.
 
 <a id="python-in-the-shell-is-monty"></a>
-### A workload reaches Monty two ways, and Box judges both on its one policy
+### Monty is the default Python, and real Python is an opt-in with no fallback
 
-The workload reaches Monty by running the `python3` alias or by typing `python` or `python3` in the
-hosted Shell. The alias sends its name and arguments to the Shell, so both ways reach the Shell's
-own `python3`, which forwards source to Monty through a script interface. Each run is one Monty VM
-per request, and Box judges both ways as the same principal under its one policy engine, so no route
-reaches an interpreter that policy does not see. Without the Shell's `python3` a `python` typed in
-the Shell exited 127, so an agent that reaches interpreters only through its shell never reached
-Monty.
+With no setting, a bare `python3` or `python` runs Monty, Box's built-in Python subset. The
+workload reaches it by running the `python3` alias or by typing `python` or `python3` in the hosted
+Shell. The alias sends its name, its arguments and the folder it was run from to the Shell, so both
+ways reach the Shell's own `python3`, which forwards source to Monty through a script interface.
+Each run is one Monty VM per request, and Box judges both ways as the same principal under its one
+policy engine, so no route reaches an interpreter that policy does not see. The broker refuses a
+request that opens Monty without the Shell, so a `shell:exec` decision covers every route.
 
-The Shell's deadline bounds both ways, and the Shell reads a script file argument under policy.
-The broker refuses a request that opens Monty without the Shell, so a `shell:exec` decision covers
-every route.
+The operator turns real Python on with three steps: `monty = false` at the top of `box.toml`, a
+`[tool.python3]` or `[tool.python]` table, and a `shell:spawn` permit for that table's file. Then
+Box tells the Shell to run the tool's file in place of its own `python3` and `python`, and every
+bare `python3` and `python`, typed or sent by the alias, is a spawn of that file in its own sandbox.
+Either table answers to both names, because the table's name decides, not the file name at the end
+of its `command`. Two tables whose `command` paths differ as written are refused at startup, since
+two venvs can link to one interpreter and still load different packages.
+
+Nothing falls back to Monty. With `monty = false` and no Python table, the Shell refuses both names
+with exit status 126 and the reason, before any policy decision; without the permit, the spawn is
+refused with `default-deny`. A fallback would make the Python an agent gets depend on which step the
+operator missed, and a script written for real Python would run, and fail differently, in Monty.
+Versioned names such as `python3.12`, and scripts in a venv's `bin/` such as `pytest`, don't change:
+each is its own program, run only under its own table and permit.
+
+The key is new, so a Box build without it refuses `monty = false` as an unknown field, and a box
+created with it is stored at a record version an older build refuses to resume. An older build that
+ignored the key would quietly run Monty.
+
+The Shell's deadline bounds both Monty and the tool, and the Shell reads a script file argument for
+Monty under policy. Real Python costs what Monty doesn't: the `fs:write` rules in the policy don't
+apply inside the tool, which writes its write grants directly, and `run` says so at startup.
 
 <a id="a-bare-python-name-always-means-monty"></a>
-### A bare `python` name always means Monty, so a host interpreter needs its absolute path
+### While Monty is on, a bare `python` name means Monty, and Box says so
 
-The Shell's registered `python` and `python3` commands win over any host interpreter on `PATH`, and
-over a declared `[tool.<name>]` table that names a host interpreter. So `python --version` returns a
-Monty identifying string, and `python3 -m venv` fails. That precedence prevents a declared tool from
-taking over the bare name. This is a known gap. A workload that runs an interpreter by its own
-absolute path, or runs a virtual environment's `python` by absolute path, reaches the host OS's
-Python under the `[tool.<name>]` table whose `command` names that path. Monty is stateless and
-refuses the interactive frames, so a `python` with no `-c` and no script file refuses instead of
-opening a REPL.
+While Monty is on, the Shell's registered `python` and `python3` commands win over any host
+interpreter on `PATH`, and over a declared `[tool.python3]` or `[tool.python]`. So
+`python --version` returns a Monty identifying string, and `python3 -m venv` fails. Box no longer
+leaves that silent: `run` prints that a bare `python3` runs Monty, names any Python table Monty
+leaves unused, and Monty's refusals end with how the operator turns real Python on. To reach a host
+interpreter without turning Monty off, a workload runs it by its absolute path, or by another name,
+under the `[tool.<name>]` table whose `command` names that path. Monty is stateless and refuses the
+interactive frames, so a `python` with no `-c` and no script file refuses instead of opening a REPL.
+
+<a id="box-grants-a-python-tool-its-install-and-the-workspace"></a>
+### Box grants a Python tool its install and the workspace
+
+With `monty = false`, Box adds grants to the Python tool's lists before it judges them: read on the
+folders the install loads code from and on a venv's `pyvenv.cfg`, read on the certificate bundle,
+read on each library the install's extension modules load, on macOS metadata on the folder that
+holds the command (Python resolves it at startup), and, when the table has no
+`[tool.python3.filesystem]`, read and write on the agent's workspace. The startup notice marks each
+added grant with `(added for [tool.python3]: install)`, `libraries`, `certificates` or `workspace`.
+Box finds the libraries with containment's own dependency walk, seeded with every `.so` (and
+`.dylib` on macOS) under the install's code folders and the tool's write grants, so
+[a writable chain derives no read](#box-bounds-derived-reads-from-writable-dependency-chains).
+Box's lists name the file the kernel checks and refuse a link, but a load usually names its library
+through links, such as Homebrew's `/opt/homebrew/opt/<formula>` folders or a Linux `libz.so.1`. So
+each added library is a `read_file` on the real file that carries the name the load requests, and
+containment grants the file once, under that name: on macOS with metadata on every link on the way,
+on Linux with the file bound under both names, the same rules a program's own libraries get.
+
+Why: Box already knows these folders from the install's files, and an operator who lists them by
+hand gets one wrong (a Homebrew `site-packages` that is a link, a stdlib that encloses another
+entry). The added grants go through the same checks as the operator's own, including
+[the install's write protection](#box-refuses-writes-into-the-python-install), so the default
+workspace write is refused when the workspace holds the venv.
+
+The cost: inside Python, the `fs:write` rules in `policy.dw` don't apply. The tool writes the
+workspace directly through its own sandbox, so a policy that refuses `echo x > .github/a` in the
+Shell doesn't refuse `python3 -c "open('.github/a', 'w')"`. Monty follows those rules. Python can
+also write a program into the workspace and run it inside the tool's sandbox. An operator who needs
+a narrower write writes `[tool.python3.filesystem]`, which replaces the workspace grant.
+
+<a id="box-refuses-writes-into-the-python-install"></a>
+### Box refuses writes into the Python install a Python tool runs
+
+With `monty = false`, `[tool.python3]` or `[tool.python]` runs a host Python, and that Python loads
+code from folders outside its command file: its standard library, its `site-packages`, the user
+site, a venv's own `site-packages`, the extra folders Homebrew's `sitecustomize.py` adds, the
+sources of editable installs, and the folders `.pth` path lines name. It also loads the base
+install's `lib/python3XY.zip` and shared `libpython`, so Box protects the base install's whole
+`lib/` folder and a framework build's `Python` file. Box reads these folders from the install's
+files without running it. A folder Python would load from if it existed (the user site, Homebrew's
+and Debian's extra folders, the zip) is protected whether or not it exists yet, so creating it, or
+any folder above it, counts as a write into it. Box refuses any write into these folders, both at
+startup and while the box runs:
+
+- At startup, Box refuses a write grant in `[agent]`, any `[tool.<name>]` or any local `[mcp.<name>]`
+  table that is at, above or inside one of those folders, or a single-file grant inside one.
+- At startup, Box also refuses an editable install or `.pth` folder that is inside the agent's
+  workspace, or that a write grant reaches.
+- At startup, Box walks the protected folders without following links. A file there with a second
+  hard link refuses startup, because the agent could change it through the other name. A link that
+  points outside the protected folders and the read-only system folders (`/usr` but not
+  `/usr/local`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc`, `/System`) adds its target's
+  `site-packages` folder, or else the target's own folder, to what is protected and granted read.
+  The walk stops and refuses after 200,000 entries or 10 seconds.
+- While the box runs, a write through Strands Shell or Monty at, inside or above one of those
+  folders is refused, even when `policy.dw` permits it.
+
+Why: before this, Box protected only the command's own path. An agent could write a `.pth` file
+into a venv's `site-packages` through the Shell. Python runs a `.pth` file's `import` lines at every
+start, so that code ran inside the tool, and later again outside the box, with the operator's full
+rights, the next time anyone used the venv. A folder that didn't exist yet, a link or hard link into
+a writable cache, and a missing `python3XY.zip` each reopened the same attack.
+
+The cost: a write grant on a folder that holds the install is refused. So a write grant on `$HOME`
+is refused whenever the install loads the user site (`~/Library/Python/3.X/...` for a framework
+build on macOS, `~/.local/lib/python3.X/site-packages` otherwise), even before that folder exists,
+and a venv inside the project is refused when the project is writable. Keep the venv outside the
+project, or use one that nothing in the box writes. `pip install` inside the box fails; the operator
+adds packages outside the box. An install built with hard links is refused: uv's default on Linux
+(`--link-mode=hardlink`) and conda's default both make them, so rebuild with `uv
+--link-mode=copy` or conda's `always_copy`. The walk adds startup time: about 0.6 seconds for
+Homebrew's Python 3.14 with its 6,500-file `site-packages` and 0.15 seconds for a small venv over
+it, on an Apple-silicon Mac.
 
 <a id="monty-is-judged-at-the-effect-level-alone"></a>
 ### Monty is judged at the effect level alone, above two deny-only floors

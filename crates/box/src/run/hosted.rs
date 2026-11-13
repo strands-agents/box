@@ -125,15 +125,26 @@ fn select_tool(
     args: &[String],
 ) -> Result<SelectedTool, BoxError> {
     let commands = crate::run::commands::ConfiguredCommands::load(record)?;
-    select_tool_with_commands(record, attachment, program, called, args, &commands)
+    select_tool_with_commands(
+        record,
+        attachment,
+        program,
+        called,
+        args,
+        typed_name(called),
+        &commands,
+    )
 }
 
+/// `name` is the name the caller typed. A bare `python3` or `python` with Monty off runs the
+/// Python table, chosen by its label, never by which file or prefix matches.
 fn select_tool_with_commands(
     record: &Record,
     attachment: &Attachment,
     program: &Path,
     called: &Path,
     args: &[String],
+    name: &str,
     commands: &crate::run::commands::ConfiguredCommands,
 ) -> Result<SelectedTool, BoxError> {
     let refuse = |reason: String| {
@@ -142,6 +153,26 @@ fn select_tool_with_commands(
             reason,
         })
     };
+    if let Some(label) = python_table_for(record, name) {
+        let spec = &record.tool[label];
+        let command = commands.get(label).ok_or_else(|| {
+            refuse(format!(
+                "`[tool.{label}]` has no command judged for this run"
+            ))
+        })?;
+        if command.path() != program {
+            return Err(refuse(format!(
+                "`{name}` runs `[tool.{label}]`, and this program is not its command"
+            )));
+        }
+        command.verify()?;
+        return Ok(SelectedTool {
+            table: format!("[tool.{label}]"),
+            spec: spec.clone(),
+            trailing: args.to_vec(),
+            shebang_interpreters: ShebangInterpreters::Granted,
+        });
+    }
     let caller = record
         .agent
         .as_ref()
@@ -285,6 +316,7 @@ impl ToolSelection {
         program: &Path,
         called: &Path,
         args: &[String],
+        name: &str,
     ) -> Result<SelectedTool, BoxError> {
         select_tool_with_commands(
             &self.record,
@@ -292,6 +324,7 @@ impl ToolSelection {
             program,
             called,
             args,
+            name,
             &self.commands,
         )
     }
@@ -303,8 +336,9 @@ impl ToolSelection {
         args: &[String],
         requested: &Path,
     ) -> std::io::Result<PathBuf> {
+        // The admission names the program by the name the caller typed.
         let selected = self
-            .select(program, called, args)
+            .select(program, called, args, typed_name(called))
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         let directory = selected
             .spec
@@ -337,6 +371,30 @@ impl ToolSpawner {
         self.selection
             .working_directory(program, called, args, requested)
     }
+}
+
+/// The name the caller typed, when `called` is that bare name rather than a path.
+fn typed_name(called: &Path) -> &str {
+    called
+        .to_str()
+        .filter(|name| !name.contains('/'))
+        .unwrap_or_default()
+}
+
+/// The Python table a bare `name` runs: `[tool.python3]`, else `[tool.python]`, when Monty is off
+/// and `name` is `python3` or `python`.
+fn python_table_for<'record>(record: &'record Record, name: &str) -> Option<&'record str> {
+    if record.monty || !crate::record::config::PYTHON_TABLES.contains(&name) {
+        return None;
+    }
+    crate::record::config::PYTHON_TABLES
+        .iter()
+        .find_map(|label| {
+            record
+                .tool
+                .get_key_value(*label)
+                .map(|(label, _)| label.as_str())
+        })
 }
 
 /// Build the hook that runs a host binary in its own boundary
@@ -377,10 +435,19 @@ fn tool_spawner(
             let protected_sources = protected_sources.clone();
             Box::pin(async move {
                 let mut selected = selection
-                    .select(&spawn.program, &spawn.invoked, &spawn.args)
+                    .select(&spawn.program, &spawn.invoked, &spawn.args, &spawn.name)
                     .map_err(|error| std::io::Error::other(error.to_string()))?;
                 let cwd = caller_directory(&spawn.cwd, &selected.spec, &selection.workspace);
                 let table = selected.table.clone();
+                // The Python tool, which a bare python3 or python runs when Monty is off, can't read
+                // the command's stdin yet
+                // (docs/design/decisions.md#python-in-the-shell-is-monty).
+                let python_tool =
+                    !selection.record.monty && crate::run::python_tool::is_python_table(&table);
+                if python_tool {
+                    crate::run::python_tool::refuse_program_from_stdin(&spawn.name, &spawn.args)?;
+                }
+                let stdin_data = python_tool && spawn.stdin == strands_shell::os::SpawnStdin::Data;
                 // The reach this run judged for the table; every declared table was judged, so a miss
                 // is refused.
                 let reach = approved.table(&table).ok_or_else(|| {
@@ -430,18 +497,45 @@ fn tool_spawner(
                         "native-egress",
                     ));
                 }
-                let captured = crate::run::contain::supervise::LeafBox::run(
+                // With data on stdin, a write-only descriptor: a read fails with EBADF rather than
+                // seeing an empty input. Every other call keeps /dev/null.
+                let stdin = if stdin_data {
+                    std::process::Stdio::from(
+                        std::fs::File::options().write(true).open("/dev/null")?,
+                    )
+                } else {
+                    std::process::Stdio::null()
+                };
+                let captured = crate::run::contain::supervise::LeafBox::run_with_stdin(
                     boundary,
                     &layout,
+                    stdin,
                     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
                     registration,
                 )
                 .await
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
+                let mut stderr = captured.stderr;
+                if stdin_data && captured.status != 0 {
+                    stderr.extend_from_slice(
+                        crate::run::python_tool::no_stdin_line(&spawn.name).as_bytes(),
+                    );
+                }
+                if python_tool
+                    && crate::run::commands::read_only_install_hint(
+                        captured.status,
+                        &stderr,
+                        &approved.commands().python_protected(),
+                    )
+                {
+                    stderr.extend_from_slice(
+                        crate::run::python_tool::READ_ONLY_INSTALL_LINE.as_bytes(),
+                    );
+                }
                 Ok(strands_shell::os::HostSpawnOutcome {
                     status: captured.status,
                     stdout: captured.stdout,
-                    stderr: captured.stderr,
+                    stderr,
                 })
             })
         });
@@ -1218,6 +1312,7 @@ mod tests {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             box_id: root.name().to_string(),
@@ -2995,11 +3090,13 @@ while :; do :; done"#
                 .expect("tool runtime");
             let refusal = runtime
                 .block_on((spawner.spawn())(strands_shell::os::HostSpawn {
+                    name: "sh".to_string(),
                     program,
                     invoked: PathBuf::from("/bin/sh"),
                     args,
                     cwd: checked,
                     env: Vec::new(),
+                    stdin: strands_shell::os::SpawnStdin::None,
                 }))
                 .err()
                 .expect("the changed directory must refuse the launch");
@@ -3029,6 +3126,7 @@ while :; do :; done"#
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
@@ -3466,7 +3564,7 @@ while :; do :; done"#
             .find("\"egress:native\"")
             .expect("tool_spawner records egress:native");
         let run = spawner
-            .find("LeafBox::run(")
+            .find("LeafBox::run_with_stdin(")
             .expect("tool_spawner runs the leaf");
         assert!(
             record < run,

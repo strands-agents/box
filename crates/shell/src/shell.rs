@@ -699,6 +699,8 @@ pub struct ShellBuilder {
     script_interpreter: Option<crate::os::ScriptInterpreter>,
     host_spawner: Option<crate::os::HostSpawner>,
     host_programs: crate::os::HostPrograms,
+    replaced_commands: crate::os::ReplacedCommands,
+    refused_commands: crate::os::RefusedCommands,
     egress_refusal_header: Option<String>,
     effect_interceptor: Option<Arc<dyn EffectInterceptor>>,
     kernel: Option<Arc<dyn Kernel>>,
@@ -725,6 +727,8 @@ impl Default for ShellBuilder {
             script_interpreter: None,
             host_spawner: None,
             host_programs: crate::os::HostPrograms::default(),
+            replaced_commands: crate::os::ReplacedCommands::default(),
+            refused_commands: crate::os::RefusedCommands::default(),
             egress_refusal_header: None,
             effect_interceptor: None,
             kernel: None,
@@ -1088,6 +1092,22 @@ impl ShellBuilder {
         self
     }
 
+    /// Run the declared [`host_programs`](Self::host_programs) file of each name in `commands` in
+    /// place of the Shell's own command of that name, for the bundled kernel only.
+    pub fn replaced_commands(mut self, commands: crate::os::ReplacedCommands) -> Self {
+        self.replaced_commands = commands;
+        self
+    }
+
+    /// Refuse each bare name in `commands` with its reason, for the bundled kernel only.
+    ///
+    /// A refused name exits 126 with `strands-shell: {name}: {reason}`, and `command -v` and `type`
+    /// do not find it.
+    pub fn refused_commands(mut self, commands: crate::os::RefusedCommands) -> Self {
+        self.refused_commands = commands;
+        self
+    }
+
     /// Name the response header the egress proxy sets on a refusal it originates itself.
     ///
     /// State it before [`egress_proxy`](Self::egress_proxy), which reads it. Without it a refusal the
@@ -1236,6 +1256,8 @@ impl ShellBuilder {
                 kernel.script_interpreter = self.script_interpreter;
                 kernel.host_spawner = self.host_spawner;
                 kernel.host_programs = self.host_programs;
+                kernel.replaced_commands = self.replaced_commands;
+                kernel.refused_commands = self.refused_commands;
                 Arc::new(kernel)
             }
         };

@@ -93,6 +93,13 @@ pub(super) struct ShellSpec {
 
     /// The `[tool]` file each declared bare name runs, in place of a host `PATH` lookup.
     pub(super) host_programs: strands_shell::os::HostPrograms,
+
+    /// The Shell commands that run their declared file instead: `python3` and `python` when
+    /// `monty = false` and a Python tool is declared.
+    pub(super) replaced_commands: strands_shell::os::ReplacedCommands,
+
+    /// The bare names the Shell refuses with exit status 126, and the reason it prints.
+    pub(super) refused_commands: strands_shell::os::RefusedCommands,
 }
 
 impl ShellSpec {
@@ -131,6 +138,8 @@ impl ShellSpec {
             .as_ref()
             .map(crate::run::hosted::ToolSpawner::spawn);
         backend.host_programs = Arc::clone(&self.host_programs);
+        backend.replaced_commands = Arc::clone(&self.replaced_commands);
+        backend.refused_commands = Arc::clone(&self.refused_commands);
         Ok(Arc::new(backend))
     }
 

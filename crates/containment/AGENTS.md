@@ -146,9 +146,16 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   - **Spell every link target canonically when you measure this.** A target reached through `/tmp`
     adds an unrendered `/private` hop, and the run then fails at every depth — which reads as "chain
     depth is not the cause". It cost an hour.
-  - **It adds no rule to any profile a box renders today.** Box canonicalizes every path it owns
-    before granting it, `/etc` is one link whose head already rendered, and no other floor path is a
-    link. The growth is bounded by the links a caller's own program carries.
+  - **It adds no rule to any profile a box renders today** for a path Box owns. Box canonicalizes
+    every path it owns before granting it, `/etc` is one link whose head already rendered, and no
+    other floor path is a link. The growth is bounded by the links a caller's own program carries.
+  - **A linked directory on the chain is a node too.** The kernel reads a folder link as it reads
+    a file link, and the walk once recorded only file links. A Homebrew venv's command
+    (`python3.14 -> /opt/homebrew/opt/python@3.14/bin/python3.14`) then failed to exec with
+    `Operation not permitted`, because nothing rendered `/opt/homebrew/opt/python@3.14`; and Box
+    grants a Python tool's libraries under Homebrew's `opt/<formula>` names. So the walk adds each
+    linked directory any spelling on the chain passes through, parent-canonical, and walks that
+    link's own target. Being nodes, they are judged by the floor and the refusals like the rest.
   - **A firmlink spelling still renders a dead rule, and that residual is not closed.**
     `parent_canonical` is `realpath`, which does not collapse a firmlink, so a link target spelled
     through `/System/Volumes/Data` renders a node rule the kernel never matches and the exec is

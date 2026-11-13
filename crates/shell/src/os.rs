@@ -1227,8 +1227,31 @@ pub type HostSpawnFuture =
 /// The absolute file each bare name runs, looked up after the Shell's own programs and before `PATH`.
 pub type HostPrograms = std::sync::Arc<std::collections::BTreeMap<String, std::path::PathBuf>>;
 
+/// The Shell commands, such as `python3`, whose declared [`HostPrograms`] file runs in their place.
+pub type ReplacedCommands = std::sync::Arc<std::collections::BTreeSet<String>>;
+
+/// The bare names the Shell refuses to run, each with the reason it prints.
+pub type RefusedCommands = std::sync::Arc<std::collections::BTreeMap<String, String>>;
+
+/// Whether a started program's standard input carries data, judged when it is spawned.
+///
+/// The hook does not receive the bytes: a program the Shell starts can't read its input yet. This
+/// says only whether there was input it would have read, so an embedder can say so.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SpawnStdin {
+    /// No input: the command has no stdin, or the input fed from outside the Shell ended with no
+    /// bytes.
+    #[default]
+    None,
+    /// Input the program would read: a pipe from an earlier stage, a heredoc or here-string, a `<`
+    /// file, or input fed from outside the Shell that holds bytes or had not ended.
+    Data,
+}
+
 /// One resolved host-binary spawn request handed to a [`HostSpawner`].
 pub struct HostSpawn {
+    /// The name the caller typed for the program, such as `python3` or `python`.
+    pub name: String,
     /// The resolved absolute path of the program to run.
     pub program: std::path::PathBuf,
     /// The spelling the caller invoked the program by, made absolute, which the program reads as
@@ -1241,6 +1264,11 @@ pub struct HostSpawn {
     /// The composed environment the binary runs with. The built-in spawn applies exactly this,
     /// never the process's inherited environment; an embedder's hook may compose its own instead.
     pub env: Vec<(String, String)>,
+    /// Whether the command's stdin carries data. The Shell decides it only for a name the
+    /// embedder replaces ([`Kernel::replaces_command`]); every other spawn gets
+    /// [`SpawnStdin::None`] with no wait. The built-in spawn gives the program `/dev/null` either
+    /// way.
+    pub stdin: SpawnStdin,
 }
 
 // No `HttpTransport` seam. Routing the Shell's egress through a boundary is not a
@@ -1517,6 +1545,21 @@ pub trait Kernel: Send + Sync {
 
     /// The declared file a bare `name` runs, which is not found when it is gone, or `None` for `PATH`.
     fn host_program(&self, _name: &str) -> Option<std::path::PathBuf> {
+        None
+    }
+
+    /// Whether the declared file of `name` runs in place of the Shell's own command of that name.
+    /// Builtins and functions keep precedence either way.
+    fn replaces_command(&self, _name: &str) -> bool {
+        false
+    }
+
+    /// The reason the Shell refuses to run the bare name `name`, or `None` to run it as usual.
+    ///
+    /// A refused name exits 126 with `strands-shell: {name}: {reason}` before builtins, the
+    /// Shell's own commands, functions, declared files, `PATH` or any policy decision are
+    /// consulted. A spelling with a `/` is never refused here.
+    fn refused_command(&self, _name: &str) -> Option<String> {
         None
     }
 }

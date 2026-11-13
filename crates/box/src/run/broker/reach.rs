@@ -457,6 +457,10 @@ fn command_mutation_reason(refusal: CommandMutationRefusal) -> Cow<'static, str>
         CommandMutationRefusal::IncompleteScan(error) => {
             format!("{COMMAND_SCAN_INCOMPLETE}: {error}").into()
         }
+        CommandMutationRefusal::PythonInstall { table } => format!(
+            "is inside the Python install {table} runs, which this run does not allow to change"
+        )
+        .into(),
     }
 }
 
@@ -1187,6 +1191,7 @@ mod linked_command_mutation_tests {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             box_id: "linked-command-reach".to_string(),

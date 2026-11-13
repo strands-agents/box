@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use strands_shell::os::{HostPrograms, HostSpawn, HostSpawnOutcome, HostSpawner};
+use strands_shell::os::{
+    HostPrograms, HostSpawn, HostSpawnOutcome, HostSpawner, RefusedCommands, ReplacedCommands,
+};
 use strands_shell::{EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, Shell};
 
 /// A permit that records nothing and refuses nothing.
@@ -73,15 +75,40 @@ fn recording_spawner(received: Arc<Mutex<Vec<(PathBuf, PathBuf)>>>) -> HostSpawn
     })
 }
 
-/// What one script did: its status and stderr, each decision, and each spawn.
+/// What one script did: its status, stdout and stderr, each decision, and each spawn.
 struct Ran {
     status: i32,
+    stdout: String,
     stderr: String,
     decided: Vec<Decided>,
     received: Vec<(PathBuf, PathBuf)>,
 }
 
 fn run(script: &str, declared: &[(&str, &Path)]) -> Ran {
+    run_replacing(script, declared, &[])
+}
+
+/// Run `script` with `declared` files, each name in `replaced` running its file in place of the
+/// Shell's own command.
+fn run_replacing(script: &str, declared: &[(&str, &Path)], replaced: &[&str]) -> Ran {
+    run_refusing(script, declared, replaced, &[])
+}
+
+/// Run `script` as [`run_replacing`] does, each `(name, reason)` in `refused` refused by name.
+fn run_refusing(
+    script: &str,
+    declared: &[(&str, &Path)],
+    replaced: &[&str],
+    refused: &[(&str, &str)],
+) -> Ran {
+    let replaced: ReplacedCommands =
+        Arc::new(replaced.iter().map(|name| (*name).to_string()).collect());
+    let refused: RefusedCommands = Arc::new(
+        refused
+            .iter()
+            .map(|(name, reason)| ((*name).to_string(), (*reason).to_string()))
+            .collect(),
+    );
     let programs: HostPrograms = Arc::new(
         declared
             .iter()
@@ -101,6 +128,8 @@ fn run(script: &str, declared: &[(&str, &Path)]) -> Ran {
             .effect_interceptor(Arc::new(Recorder(Arc::clone(&decided))))
             .host_spawner(recording_spawner(Arc::clone(&received)))
             .host_programs(programs)
+            .replaced_commands(replaced)
+            .refused_commands(refused)
             .build()
             .expect("shell builds");
         shell.run(script).await
@@ -108,6 +137,7 @@ fn run(script: &str, declared: &[(&str, &Path)]) -> Ran {
     rt.block_on(local);
     Ran {
         status: out.status,
+        stdout: out.stdout,
         stderr: out.stderr,
         decided: decided.lock().expect("read").clone(),
         received: received.lock().expect("read").clone(),
@@ -254,4 +284,184 @@ fn a_missing_declared_file_is_not_found_on_path_instead() {
         }]
     );
     assert!(ran.received.is_empty(), "{:?}", ran.received);
+}
+
+/// **A replaced command runs its declared file, with every argument.** `python3 -m venv .venv` is a
+/// `shell:spawn` of the declared file, not the Shell's own `python3`, which refuses `-m`.
+#[cfg(unix)]
+#[test]
+fn a_replaced_command_runs_its_declared_file() {
+    let base = fixture("replaced-command");
+    let declared = base.join("bin/tool");
+    let ran = run_replacing(
+        "python3 -m venv .venv",
+        &[("python3", &declared)],
+        &["python3"],
+    );
+
+    assert_eq!(ran.status, 0, "stderr: {}", ran.stderr);
+    assert_eq!(
+        ran.decided,
+        vec![Decided::Spawn {
+            program: "python3".into(),
+            path: base.join("real/tool").display().to_string(),
+        }]
+    );
+    assert_eq!(ran.received, vec![(base.join("real/tool"), declared)]);
+}
+
+/// **Declaring a file for a Shell command does not replace it, and neither does a replacement with
+/// no declared file.** Both keep the Shell's own `python3`, so nothing reaches the host `PATH`.
+#[cfg(unix)]
+#[test]
+fn a_command_is_replaced_only_when_it_is_both_declared_and_replaced() {
+    let base = fixture("declared-not-replaced");
+    let declared = base.join("bin/tool");
+    for ran in [
+        run_replacing("python3 --version", &[("python3", &declared)], &[]),
+        run_replacing("python3 --version", &[], &["python3"]),
+    ] {
+        assert_eq!(ran.status, 0, "stderr: {}", ran.stderr);
+        assert!(ran.stdout.contains("Monty"), "{}", ran.stdout);
+        assert_eq!(ran.decided, vec![Decided::Run("python3".into())]);
+        assert!(ran.received.is_empty(), "{:?}", ran.received);
+    }
+}
+
+/// **A builtin keeps precedence over a replacement.** Only the Shell's commands can be replaced.
+#[cfg(unix)]
+#[test]
+fn a_builtin_is_not_replaced() {
+    let base = fixture("builtin-not-replaced");
+    let declared = base.join("bin/tool");
+    let ran = run_replacing("cd .", &[("cd", &declared)], &["cd"]);
+
+    assert_eq!(ran.status, 0, "stderr: {}", ran.stderr);
+    assert!(ran.received.is_empty(), "{:?}", ran.received);
+}
+
+/// **`type` and `command -v` name the file that runs in place of a replaced command**, so a script
+/// that checks for `python3` before it runs it sees the real program.
+#[cfg(unix)]
+#[test]
+fn type_and_command_v_name_the_replacing_file() {
+    let base = fixture("replaced-lookup");
+    let declared = base.join("bin/tool");
+    let ran = run_replacing(
+        "type python3; command -v python3; command -V python3",
+        &[("python3", &declared)],
+        &["python3"],
+    );
+
+    assert_eq!(ran.status, 0, "stderr: {}", ran.stderr);
+    let path = declared.display().to_string();
+    assert_eq!(
+        ran.stdout,
+        format!("python3 is {path}\n{path}\npython3 is {path}\n")
+    );
+}
+
+/// The reason Box gives when Monty is off and no Python tool is declared.
+const MONTY_OFF: &str =
+    "Monty is off (monty = false) and no [tool.python3] or [tool.python] is declared";
+
+/// **A refused name exits 126 with its reason, and raises no decision.** `python3 --version` is
+/// otherwise the Shell's own Monty command, which answers 0.
+#[cfg(unix)]
+#[test]
+fn a_refused_name_exits_126_with_its_reason() {
+    let ran = run_refusing("python3 --version", &[], &[], &[("python3", MONTY_OFF)]);
+
+    assert_eq!(ran.status, 126, "stderr: {}", ran.stderr);
+    assert_eq!(ran.stderr, format!("strands-shell: python3: {MONTY_OFF}\n"));
+    assert_eq!(ran.stdout, "");
+    assert!(ran.decided.is_empty(), "{:?}", ran.decided);
+    assert!(ran.received.is_empty(), "{:?}", ran.received);
+}
+
+/// **A refusal wins over Monty, a declared file, a replacement, and `PATH`.** The only refused name
+/// is the one listed: `python` still runs Monty.
+#[cfg(unix)]
+#[test]
+fn a_refusal_wins_over_monty_a_declared_file_and_path() {
+    let base = fixture("refused-wins");
+    let declared = base.join("bin/tool");
+    for ran in [
+        run_refusing("python3 -c 'x'", &[], &[], &[("python3", MONTY_OFF)]),
+        run_refusing(
+            "python3 -m venv .venv",
+            &[("python3", &declared)],
+            &["python3"],
+            &[("python3", MONTY_OFF)],
+        ),
+    ] {
+        assert_eq!(ran.status, 126, "stderr: {}", ran.stderr);
+        assert!(ran.stderr.contains(MONTY_OFF), "{}", ran.stderr);
+        assert!(ran.decided.is_empty(), "{:?}", ran.decided);
+        assert!(ran.received.is_empty(), "{:?}", ran.received);
+    }
+
+    let ran = run_refusing("python --version", &[], &[], &[("python3", MONTY_OFF)]);
+    assert_eq!(ran.status, 0, "stderr: {}", ran.stderr);
+    assert!(ran.stdout.contains("Monty"), "{}", ran.stdout);
+
+    if on_path("hostname").is_none() {
+        eprintln!("skipping the PATH half: no `hostname` on PATH");
+        return;
+    }
+    let ran = run_refusing("hostname", &[], &[], &[("hostname", "refused here")]);
+    assert_eq!(ran.status, 126, "stderr: {}", ran.stderr);
+    assert_eq!(ran.stderr, "strands-shell: hostname: refused here\n");
+    assert!(ran.decided.is_empty(), "{:?}", ran.decided);
+    assert!(ran.received.is_empty(), "{:?}", ran.received);
+}
+
+/// **A refusal stops the whole pipeline before any stage runs**, like any other refused stage.
+#[cfg(unix)]
+#[test]
+fn a_refused_stage_stops_the_pipeline() {
+    let ran = run_refusing(
+        "echo hi | python3 -c 'x'",
+        &[],
+        &[],
+        &[("python3", MONTY_OFF)],
+    );
+
+    assert_eq!(ran.status, 126, "stderr: {}", ran.stderr);
+    assert_eq!(ran.stdout, "");
+    assert!(ran.stderr.contains(MONTY_OFF), "{}", ran.stderr);
+}
+
+/// **A spelling with a `/` is not refused by name.** The refusal is of the bare name only.
+#[cfg(unix)]
+#[test]
+fn a_spelling_with_a_separator_is_not_refused() {
+    let base = fixture("refused-separator");
+    let spelled = base.join("real/tool").display().to_string();
+    let ran = run_refusing(&spelled, &[], &[], &[(spelled.as_str(), "refused")]);
+
+    assert_eq!(ran.status, 0, "stderr: {}", ran.stderr);
+    assert_eq!(ran.received.len(), 1, "{:?}", ran.received);
+}
+
+/// **`command -v` and `type` find nothing for a refused name**, so a script that checks for
+/// `python3` before it runs it sees there is none.
+#[cfg(unix)]
+#[test]
+fn command_v_and_type_find_nothing_for_a_refused_name() {
+    let base = fixture("refused-lookup");
+    let declared = base.join("bin/tool");
+    for declared in [&[][..], &[("python3", declared.as_path())][..]] {
+        let ran = run_refusing(
+            "command -v python3; echo \"v=$?\"; command -V python3; echo \"V=$?\"; type python3; echo \"t=$?\"",
+            declared,
+            &["python3"],
+            &[("python3", MONTY_OFF)],
+        );
+        assert_eq!(
+            ran.stdout, "v=1\nV=1\nstrands-shell: type: python3: not found\nt=1\n",
+            "stderr: {}",
+            ran.stderr
+        );
+    }
 }

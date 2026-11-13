@@ -50,7 +50,7 @@ fn dylib_closure(executable: &Path) -> Result<Vec<PathBuf>, ContainmentError> {
     Ok(images.into_iter().map(|grant| grant.resolved).collect())
 }
 
-pub(super) fn collect_dylibs(
+pub(crate) fn collect_dylibs(
     executable: &Path,
     config: &ContainmentConfig,
     missing: &mut MissingReads,
@@ -641,6 +641,54 @@ pub(crate) mod tests {
         let result = collect_dylibs(app, config, &mut missing)?;
         missing.require_complete(MECHANISM)?;
         Ok(result)
+    }
+
+    // `loaded_libraries` reads Mach-O images on macOS and ELF images on Linux, so this Mach-O
+    // fixture only applies on macOS.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_loaded_library_seed_derives_outside_dependencies_but_not_writable_ones() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let ssl = planted_image(
+            &root,
+            "opt/ssl/lib/libssl.dylib",
+            &synthetic_macho(&[], &[]),
+        );
+        let planted = planted_image(&root, "work/libplanted.dylib", &synthetic_macho(&[], &[]));
+        let extension = planted_image(
+            &root,
+            "install/lib-dynload/_ssl.so",
+            &synthetic_macho(
+                &[
+                    (ssl.to_str().unwrap(), false),
+                    (planted.to_str().unwrap(), false),
+                ],
+                &[],
+            ),
+        );
+        let readonly = ContainmentConfig::new();
+        assert_eq!(
+            crate::loaded_libraries(std::slice::from_ref(&extension), &readonly),
+            vec![ssl.clone(), planted.clone()]
+        );
+        let writable_work = ContainmentConfig::new()
+            .allow(root.join("work"), Operation::Write, Scope::Root)
+            .unwrap();
+        assert_eq!(
+            crate::loaded_libraries(std::slice::from_ref(&extension), &writable_work),
+            vec![ssl.clone()],
+            "a dependency under a writable folder is not derived"
+        );
+        let writable_install = ContainmentConfig::new()
+            .allow(root.join("install"), Operation::Write, Scope::Root)
+            .unwrap();
+        assert!(
+            crate::loaded_libraries(std::slice::from_ref(&extension), &writable_install).is_empty(),
+            "a seed under a writable folder derives nothing"
+        );
+        let not_an_image = planted_image(&root, "install/notes.so", b"text");
+        assert!(crate::loaded_libraries(&[not_an_image], &readonly).is_empty());
     }
 
     #[test]

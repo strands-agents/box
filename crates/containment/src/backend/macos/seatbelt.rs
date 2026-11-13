@@ -1549,6 +1549,130 @@ mod tests {
         );
     }
 
+    /// **A file read spelled the way Homebrew names a library renders every link on the way**:
+    /// `opt/<formula>` is a link to the keg, and `lib/libmpdec.4.dylib` in the keg is a link to the
+    /// versioned file. The read gets `file-read*` on the file, and metadata on the linked folder and
+    /// on the keg's file link, the same rules a program's own library gets.
+    #[test]
+    fn a_file_read_spelled_through_homebrew_links_renders_metadata_on_each_link() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical");
+        let keg = root.join("Cellar/mpdecimal/4.0.1/lib");
+        std::fs::create_dir_all(&keg).expect("keg");
+        std::fs::create_dir_all(root.join("opt")).expect("opt");
+        let file = keg.join("libmpdec.4.0.1.dylib");
+        std::fs::write(&file, b"image").expect("library");
+        std::os::unix::fs::symlink("libmpdec.4.0.1.dylib", keg.join("libmpdec.4.dylib"))
+            .expect("the file link");
+        std::os::unix::fs::symlink("../Cellar/mpdecimal/4.0.1", root.join("opt/mpdecimal"))
+            .expect("the folder link");
+        let requested = root.join("opt/mpdecimal/lib/libmpdec.4.dylib");
+        let program = root.join("agent");
+        std::fs::write(&program, "agent").expect("program fixture");
+        let config = ContainmentConfig::new()
+            .set_network(Network::Localhost {
+                connect: vec![41080],
+                listen: Vec::new(),
+            })
+            .expect("localhost")
+            .allow(&program, Operation::Exec, Scope::File)
+            .expect("exec grant")
+            .allow(&requested, Operation::Read, Scope::File)
+            .expect("a read under the requested name");
+
+        let profile = render_profile(&config).expect("the profile renders");
+
+        for rule in [
+            format!("(allow file-read* (literal \"{}\"))", file.display()),
+            format!(
+                "(allow file-read-metadata (literal \"{}\"))",
+                keg.join("libmpdec.4.dylib").display()
+            ),
+            format!(
+                "(allow file-read-metadata (literal \"{}\"))",
+                root.join("opt/mpdecimal").display()
+            ),
+        ] {
+            assert!(profile.contains(&rule), "{rule} is missing: {profile}");
+        }
+        assert!(
+            !profile.contains(&format!(
+                "(allow file-read* (literal \"{}\"))",
+                root.join("opt/mpdecimal").display()
+            )),
+            "the linked folder gets metadata, never its contents: {profile}"
+        );
+    }
+
+    /// **An exec chain whose link target passes through a linked folder renders that link.** A
+    /// Homebrew venv's chain: `venv/bin/python3 -> python3.14 -> <prefix>/opt/py/bin/python3.14`,
+    /// with `opt/py` a link to the keg and the keg's `bin/python3.14` a link to the framework's
+    /// file. The lookup reads the `opt/py` folder link, which none of the chain's own file nodes
+    /// names, so the exec cell renders metadata on it.
+    #[test]
+    fn an_exec_chain_through_a_linked_folder_renders_metadata_on_the_folder_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical");
+        let framework = root.join("Cellar/py/1.0/Frameworks/bin");
+        std::fs::create_dir_all(&framework).expect("framework");
+        std::fs::create_dir_all(root.join("Cellar/py/1.0/bin")).expect("keg bin");
+        std::fs::create_dir_all(root.join("opt")).expect("opt");
+        std::fs::create_dir_all(root.join("venv/bin")).expect("venv bin");
+        let program = framework.join("python3.14");
+        std::fs::write(&program, "python").expect("the program");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+        std::os::unix::fs::symlink(
+            "../Frameworks/bin/python3.14",
+            root.join("Cellar/py/1.0/bin/python3.14"),
+        )
+        .expect("the keg's link");
+        std::os::unix::fs::symlink("../Cellar/py/1.0", root.join("opt/py")).expect("folder link");
+        std::os::unix::fs::symlink(
+            root.join("opt/py/bin/python3.14"),
+            root.join("venv/bin/python3.14"),
+        )
+        .expect("the venv's link into opt");
+        std::os::unix::fs::symlink("python3.14", root.join("venv/bin/python3"))
+            .expect("the venv's python3");
+        let config = ContainmentConfig::new()
+            .set_network(Network::Localhost {
+                connect: vec![41080],
+                listen: Vec::new(),
+            })
+            .expect("localhost")
+            .allow(root.join("venv/bin/python3"), Operation::Exec, Scope::File)
+            .expect("exec grant through the chain");
+
+        let profile = render_profile(&config).expect("the profile renders");
+
+        for rule in [
+            format!("(allow process-exec (literal \"{}\"))", program.display()),
+            format!(
+                "(allow file-read-metadata (literal \"{}\"))",
+                root.join("venv/bin/python3.14").display()
+            ),
+            format!(
+                "(allow file-read-metadata (literal \"{}\"))",
+                root.join("Cellar/py/1.0/bin/python3.14").display()
+            ),
+            format!(
+                "(allow file-read-metadata (literal \"{}\"))",
+                root.join("opt/py").display()
+            ),
+        ] {
+            assert!(profile.contains(&rule), "{rule} is missing: {profile}");
+        }
+        assert!(
+            !profile.contains(&format!(
+                "(allow file-read* (literal \"{}\"))",
+                root.join("opt/py").display()
+            )),
+            "the linked folder gets metadata, never its contents: {profile}"
+        );
+    }
+
     /// **The agent (non-broad) profile carries no `process-exec*`, enumerates one `process-exec` rule
     /// per exec grant, and keeps write-xor-execute.** A leaf may render broad exec
     /// (docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds); this

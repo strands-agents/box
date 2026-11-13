@@ -629,6 +629,16 @@ impl Mediated {
         self.kernel.host_program(name)
     }
 
+    /// Whether the kernel's declared file of `name` runs in place of the Shell's own command.
+    pub(crate) fn replaces_command(&self, name: &str) -> bool {
+        self.kernel.replaces_command(name)
+    }
+
+    /// The reason the kernel refuses to run the bare name `name`, if it does.
+    pub(crate) fn refused_command(&self, name: &str) -> Option<String> {
+        self.kernel.refused_command(name)
+    }
+
     /// Run a host binary through the embedder's hook, or the built-in spawn.
     ///
     /// Raises no admission, for the same reason [`run_script`](Self::run_script) does not: the

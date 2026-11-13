@@ -399,6 +399,20 @@ On macOS and Linux, Box discovers dependencies automatically and checks their re
 starting the affected workload. If a required Read grant is missing, startup fails with guidance for
 adding the missing entries.
 
+Only an exec grant on one file seeds this walk inside containment. A library that is loaded but not
+executed, such as a Python extension module, has no exec grant. For those, containment exposes
+`loaded_libraries(images, config)`: the same walk, seeded with the given images and checked against
+`config`'s write grants. A dependency reached through a writable chain is not returned, and an image
+that can't be walked returns nothing. Box calls it for a Python tool and adds each result as a
+`read_file` grant on the real file, so the grant goes through Box's own checks and shows in the
+startup notice. The walk returns each library as the name its load requests, which is often a link.
+At launch Box grants the file under that name instead, once, and a file read spelled through links
+renders the same rules a derived library gets: on macOS, `file-read*` on the file and
+`file-read-metadata` on each link on the way, including a linked folder; on Linux, the file bound
+under both names. A grant's traversal walk records each linked folder its chain passes through, so
+an exec chain such as a venv's `python3.14 -> /opt/homebrew/opt/python@3.14/bin/python3.14` gets
+the same rule on `/opt/homebrew/opt/python@3.14`, and the floor judges it like any other node.
+
 The [read-derivation
 decision](decisions.md#box-derives-a-read-closure-and-refuses-to-derive-an-exec-closure) keeps
 discovery automatic but restricts a branch when the workload can change its executable, a library,
@@ -584,6 +598,12 @@ After Box authorizes a tool launch, the tool makes its own system calls, which i
 restricts. Opening a file produces no `fs:*` decision, and its children raise no decisions of
 their own. See [a tool reaches only what its own lists
 name](decisions.md#a-tool-reaches-only-the-paths-its-own-lists-name).
+
+With `monty = false`, the Python tool's lists get the grants Box adds for its install before they
+are judged: read on the install's code folders, its venv's `pyvenv.cfg` and its certificate
+bundle, and read and write on the agent's workspace when the table names no lists. See [Box grants
+a Python tool its install and the
+workspace](decisions.md#box-grants-a-python-tool-its-install-and-the-workspace).
 
 A tool's sandbox grants more access than the agent's. A toolchain needs to run helpers that cannot
 all be listed before startup, load its build output, and check for optional configuration files

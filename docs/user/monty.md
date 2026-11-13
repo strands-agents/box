@@ -76,13 +76,77 @@ The `python3` and `python` aliases send their name and arguments, unchanged, to 
 - **Policy decisions:** `shell:exec` for the command, `fs:read` for a script file, and the script's
   file operations.
 
-In Strands Shell, `python` and `python3` always run Monty, whatever the operator's `PATH` holds, and
-`python3 --version` prints `Monty (Strands-Box Python subset)`. Strands Shell refuses these forms
-with exit status `2`:
+By default, `python` and `python3` in Strands Shell run Monty, whatever the operator's `PATH`
+holds, and `python3 --version` prints `Monty (Strands-Box Python subset)`. Strands Shell refuses
+these forms with exit status `2`:
 
 - `python` alone, or `python` that reads its source from stdin, such as a pipe or a heredoc.
 - `python -`.
+- `python -m MODULE`.
 - Any argument after the `-c` source or the script file.
+
+## Turning Monty off
+
+To run real Python instead, the operator takes three steps:
+
+1. Writes `monty = false` at the top of `box.toml`, before any table. To keep Monty, leave the key
+   out.
+2. Declares `[tool.python3]` or `[tool.python]`, whose `command` is the Python to run.
+3. Permits `shell:spawn` on that file.
+
+```toml
+monty = false
+
+[tool.python3]
+command = ["/Users/me/py-runtime/.venv/bin/python3"]
+```
+
+`program_path` is the file with every link resolved. A venv's `bin/python3` is a link to its base
+Python, so for a venv built on Homebrew's Python 3.14 the permit names the file in Homebrew's Cellar
+(`realpath` prints it):
+
+```cedar
+permit (principal, action == Box::Action::"shell:spawn", resource)
+when {
+  context.input.program_path ==
+    "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14"
+};
+```
+
+Then every `python3` and `python`, typed in Strands Shell or sent by the aliases, runs that file in
+its own sandbox, and Monty doesn't run at all. A call that can't run the tool exits `126` and never
+runs Monty instead: with `monty = false` and no Python table, the reason is
+`Monty is off (monty = false) and no [tool.python3] or [tool.python] is declared`, and without the
+permit it's `[default-deny]`. [Real Python](./shell.md#real-python) has the rules for which table
+answers, and the lines `run` prints. The rest of this page is about Monty, and doesn't apply to the
+tool.
+
+A Box build without this feature refuses `monty = false` with `unknown field 'monty'`, and refuses
+to resume a box created with it.
+
+While Monty is on, its refusals tell the agent how the operator turns real Python on. Each ends
+with this sentence:
+
+```text
+To run real Python, the operator sets monty = false, declares [tool.python3], and permits shell:spawn on its file.
+```
+
+For example, `python3 -m pytest` exits `2` with:
+
+```text
+python3: -m is not supported by Monty, Box's built-in Python subset. To run real Python, the operator sets monty = false, declares [tool.python3], and permits shell:spawn on its file.
+```
+
+The `python -` and no-script refusals end with the same sentence, and so does the note after a
+failed import:
+
+```text
+ModuleNotFoundError: No module named 'numpy'
+(this box's Python is Monty, Box's built-in Python subset. To run real Python, the operator sets monty = false, declares [tool.python3], and permits shell:spawn on its file.)
+```
+
+At startup, `run` prints `strands-box: a bare python3 or python in the Shell runs Monty, Box's
+Python subset` while Monty is on.
 
 ## File operations
 
@@ -199,7 +263,7 @@ Example output:
 | `2` | A form the command refuses. |
 | `125` | Box did not run the script to its end: Box failed, or the call ran longer than [`limits.shell.timeout`](./shell.md#limitsshelltimeout). Box checks that limit only when Monty hands control back, so a script that never pauses, such as `while True: pass`, runs until Monty's own 120-second limit stops it, however short `limits.shell.timeout` is. |
 | `125` | The alias couldn't tell which directory it was run from, or that directory's name isn't valid UTF-8. Nothing ran. |
-| `126` | Policy refused `shell:exec` for the command, or Box refused the directory the alias was run from. |
+| `126` | Policy refused `shell:exec` for the command, or Box refused the directory the alias was run from. With `monty = false`, see [Turning Monty off](#turning-monty-off). |
 
 ## Policy
 

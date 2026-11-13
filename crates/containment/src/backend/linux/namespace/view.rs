@@ -1455,6 +1455,20 @@ fn elf_dependencies(
     Ok(dependencies)
 }
 
+/// The shared libraries `image` loads, as the spelling each load requests, or none when the image
+/// can't be walked. A dependency reached through a workload-writable chain is not derived.
+pub(crate) fn loaded_libraries(image: &Path, config: &ContainmentConfig) -> Vec<PathBuf> {
+    let mut missing = MissingReads::default();
+    collect_elf_dependencies(image, config, &mut missing)
+        .map(|found| {
+            found
+                .into_iter()
+                .map(|dependency| dependency.path)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn collect_elf_dependencies(
     executable: &Path,
     config: &ContainmentConfig,

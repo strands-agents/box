@@ -207,6 +207,7 @@ here:
 
 ```text
 strands-box: box box-e86f327fe83e07e9 created · config pi/box.toml
+strands-box: a bare python3 or python in the Shell runs Monty, Box's Python subset
 strands-box: starting workload
 strands-box: [agent] runs /opt/homebrew/Cellar/node/<node version>/bin/node with no policy decision over these paths:
   read        /Users/you/.pi/agent/install

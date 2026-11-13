@@ -571,3 +571,64 @@ fn a_late_interpreter_does_not_wait_for_an_open_output_channel() {
         retained.lock().unwrap().take();
     }));
 }
+
+/// Run `script` with the recording hook, returning `(status, stderr)` and whether the hook ran.
+fn run_with_hook(script: &str) -> (i32, String, bool) {
+    let (hook, seen) = recording_hook();
+    let (rt, local) = rt();
+    let (status, stderr) = rt.block_on(local.run_until(async {
+        let mut shell = Shell::builder().script_interpreter(hook).build().unwrap();
+        let out = shell.run(script).await;
+        (out.status, out.stderr)
+    }));
+    let ran = !seen.lock().unwrap().is_empty();
+    (status, stderr, ran)
+}
+
+/// `python3 -m` refuses with its own message that names Monty and says how to run real Python,
+/// under the name the agent typed.
+#[test]
+fn dash_m_says_how_to_run_real_python() {
+    for (script, name) in [
+        ("python3 -m venv .venv", "python3"),
+        ("python -mpytest", "python"),
+    ] {
+        let (status, stderr, ran) = run_with_hook(script);
+        assert_eq!(status, 2, "{stderr}");
+        assert_eq!(
+            stderr,
+            format!(
+                "{name}: -m is not supported by Monty, Box's built-in Python subset. {}\n",
+                strands_shell::commands::REAL_PYTHON_HINT
+            )
+        );
+        assert!(!ran, "a refused -m must not reach the interpreter");
+    }
+    assert_eq!(
+        strands_shell::commands::REAL_PYTHON_HINT,
+        "To run real Python, the operator sets monty = false, declares [tool.python3], and \
+         permits shell:spawn on its file."
+    );
+}
+
+/// `python -` and a no-script `python` end their refusals with the same real-Python sentence.
+#[test]
+fn stdin_and_no_script_refusals_say_how_to_run_real_python() {
+    for (script, reason) in [
+        ("python3 -", "reading a script from stdin is not supported"),
+        ("python3", "no script given"),
+        ("echo 'print(1)' | python3", "no script given"),
+    ] {
+        let (status, stderr, ran) = run_with_hook(script);
+        assert_eq!(status, 2, "{script}: {stderr}");
+        assert!(stderr.contains(reason), "{script}: {stderr}");
+        assert!(
+            stderr.ends_with(&format!(
+                ". {}\n",
+                strands_shell::commands::REAL_PYTHON_HINT
+            )),
+            "{script}: {stderr}"
+        );
+        assert!(!ran, "{script}: a refusal must not reach the interpreter");
+    }
+}

@@ -46,7 +46,7 @@ The agent reaches Monty two ways: the harness runs the `python3` or `python` ali
 `zsh -c 'python3 report.py'`. Both take one route through Strands Shell. The alias reads no file and
 parses no option. It sends its name, its arguments, and the directory it was run from to the broker.
 The broker quotes each argument as one literal word and runs the command in Strands Shell, in that
-directory. See [a workload reaches Monty two ways](decisions.md#python-in-the-shell-is-monty).
+directory. See [Monty is the default Python](decisions.md#python-in-the-shell-is-monty).
 The broker refuses a request that asks for Monty without the Shell, so no route skips these
 decisions:
 
@@ -55,10 +55,37 @@ decisions:
   on it.
 - Each file operation the script makes takes an `fs:*` decision.
 
-Strands Shell implements `python` and `python3` as commands that run Monty. They select Monty even
-when the operator's `PATH` contains the host OS's Python. `python3 --version` prints `Monty
-(Strands-Box Python subset)`. See [a bare `python` name always means
+Strands Shell implements `python` and `python3` as commands that run Monty. By default they select
+Monty even when the operator's `PATH` contains the host OS's Python. `python3 --version` prints
+`Monty (Strands-Box Python subset)`. See [while Monty is on, a bare `python` name means
 Monty](decisions.md#a-bare-python-name-always-means-monty).
+
+### When Monty is off
+
+With `monty = false` at the top of `box.toml`, Box hands the Shell two lists when it builds it, and
+the Shell's `python` and `python3` commands stop answering to their names:
+
+- **Replaced commands.** With a `[tool.python3]` or `[tool.python]` table, Box declares both
+  `python3` and `python` to that table's file, and lists both as replaced. The Shell then skips its
+  own command for a replaced name, wherever it would look it up: running the command, resolving it
+  before `admit`, `command -v`, and `type`. The name resolves to the declared file instead, so
+  running it is a `shell:spawn` of that file, judged by policy and run in its own sandbox under the
+  tool's grants. A name is replaced only while it is also declared, so a replaced name never falls
+  through to `PATH`. A builtin is never replaced.
+- **Refused commands.** With neither table, Box lists both names as refused, with the reason
+  `Monty is off (monty = false) and no [tool.python3] or [tool.python] is declared`. The Shell's
+  `admit` checks this list first, before builtins, its own commands, functions, declared files and
+  `PATH`, and before any policy decision. A refused name prints `strands-shell: <name>: <reason>`
+  and exits 126, and the pipeline it is in doesn't start. `command -v` and `type` find nothing for
+  it. Refusal wins over replacement.
+
+Box fills both lists from the same bare-name answer that gives the Shell its declared files, so the
+startup lines, the Shell, and the aliases agree. Neither list ever holds a versioned name such as
+`python3.12`. While Monty is on, both lists are empty, and a Python table is left unused and named
+at startup.
+
+Monty's refusals, and the note after a failed import, end with how the operator turns real Python
+on: `To run real Python, the operator sets monty = false, declares [tool.python3], and permits shell:spawn on its file.`
 
 The broker provides no standard input and forwards no signals to a Python program. `input()` raises
 `NameError`. In Strands Shell a `python` with no `-c` and no script file is refused rather than

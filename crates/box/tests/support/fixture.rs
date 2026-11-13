@@ -145,6 +145,8 @@ pub struct Request {
     policy: PathBuf,
     /// Extra tables appended after `[agent]`: `[egress.*]`, `[mcp.*]`, `[tool.*]`, `[telemetry.*]`.
     config_body: Option<String>,
+    /// Top-level keys written before `[agent]`, such as `monty = false`.
+    top_level: String,
     /// What the creating run should see in its environment.
     ///
     /// Carried rather than set on this process: an `env://` locator dereferences in
@@ -257,10 +259,20 @@ impl Request {
             name: format!("{name}-{}", std::process::id()),
             policy: PathBuf::new(),
             config_body: None,
+            top_level: String::new(),
             environment: Vec::new(),
             agent: AgentTable::default(),
             with_agent_home: true,
         }
+    }
+
+    /// Add top-level keys, such as `monty = false`, which must come before `[agent]`.
+    pub fn top_level(mut self, text: &str) -> Self {
+        self.top_level.push_str(text);
+        if !self.top_level.ends_with('\n') {
+            self.top_level.push('\n');
+        }
+        self
     }
 
     /// Add `[agent.filesystem] read` trees, as host paths.
@@ -335,6 +347,7 @@ impl Request {
         if !self.policy.as_os_str().is_empty() {
             toml.push_str("policy = \"policy.dw\"\n");
         }
+        toml.push_str(&self.top_level);
         toml.push_str(&format!(
             "\n[agent]\ncommand = {{command}}\nworkspace = {}\n",
             quoted(&workspace.display().to_string())

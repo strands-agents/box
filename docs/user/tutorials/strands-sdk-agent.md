@@ -221,6 +221,7 @@ lines are cut here:
 
 ```text
 strands-box: box box-6b8ee845f22b265a created · config strands-agent/box.toml
+strands-box: a bare python3 or python in the Shell runs Monty, Box's Python subset
 strands-box: starting workload
 strands-box: [agent] runs /opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14 with no policy decision over these paths:
   read        /Users/you/box-tutorial/strands-agent/runtime/.venv

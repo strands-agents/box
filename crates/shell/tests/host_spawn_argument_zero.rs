@@ -45,11 +45,13 @@ fn the_builtin_spawn_gives_the_program_its_invoked_spelling() {
     let outcome = rt
         .block_on(strands_shell::os::builtin_spawn_host(
             strands_shell::os::HostSpawn {
+                name: "sh".to_string(),
                 program: shell_identity,
                 invoked: spelling.clone(),
                 args: vec!["-c".to_string(), "printf %s \"$0\"".to_string()],
                 cwd: std::env::temp_dir(),
                 env: Vec::new(),
+                stdin: strands_shell::os::SpawnStdin::None,
             },
         ))
         .expect("the program runs");

@@ -99,7 +99,20 @@ impl ApprovedReach {
             .chain(tools)
             .chain(servers)
             .map(|(table, spec)| {
-                let mut reach = judge_filesystem(spec, &table, stored, protected_sources)?;
+                // The Python tool gets the grants its install needs, judged and protected like the
+                // operator's own.
+                let python = commands
+                    .python()
+                    .filter(|python| python.table() == table.as_str());
+                let (spec, added) = match python {
+                    Some(python) => {
+                        let (spec, added) = python.augmented(spec);
+                        (std::borrow::Cow::Owned(spec), added)
+                    }
+                    None => (std::borrow::Cow::Borrowed(spec), Vec::new()),
+                };
+                let mut reach = judge_filesystem(&spec, &table, stored, protected_sources)?;
+                filesystem::mark_added(&mut reach, &added, &table);
                 commands.validate_reach(&table, &reach)?;
                 installation.validate_reach(&table, &reach)?;
                 reach.installation = Some(std::sync::Arc::clone(&installation));
@@ -674,6 +687,26 @@ impl Boundary {
                 // path, which the credential-store exception validates on its own terms.
                 guard.judge(&grant.resolved, grant.operation, grant.scope)?;
                 containment.allow_credential_store(&grant.lexical, grant.operation, grant.scope)?
+            } else if let Some(name) = &grant.loaded_as {
+                // A library Box added is granted under the name its load requests, so containment
+                // renders every link on the way, as it does for a program's own libraries. One grant
+                // per file, because containment refuses a file granted the same operation twice.
+                // The name must still lead to the file judged above.
+                let prepared = ContainmentConfig::prepare_filesystem_path(name)?;
+                if prepared.resolved_path() != grant.resolved {
+                    return Err(ConfigError::Process {
+                        table: table.to_string(),
+                        reason: format!(
+                            "{} led to {} when Box judged it and leads to {} now",
+                            name.display(),
+                            grant.resolved.display(),
+                            prepared.resolved_path().display()
+                        ),
+                    }
+                    .into());
+                }
+                guard.judge(prepared.resolved_path(), grant.operation, grant.scope)?;
+                containment.allow_prepared(prepared, grant.operation, grant.scope)?
             } else {
                 allow_operator(containment, &grant.resolved, grant.operation, grant.scope)?
             };
@@ -1821,6 +1854,7 @@ mod tests {
                 version: RECORD_VERSION,
                 experimental_features: Default::default(),
                 file_attributes: false,
+                monty: true,
                 gateway: Default::default(),
                 limits: Default::default(),
                 box_id: root.name().to_string(),
@@ -2398,6 +2432,111 @@ mod tests {
             .expect("a replaced deny path refuses the spawn")
             .to_string();
         assert!(refused.contains("was replaced"), "{refused}");
+    }
+
+    /// **A library Box added is granted once, under the name its load requests.** The name is
+    /// Homebrew's shape: `opt/x` links to the keg, and the keg's `libx.4.dylib` links to the
+    /// versioned file. Containment refuses a file granted the same operation twice, so the grant on
+    /// the real file is replaced by the grant under the name, and the profile renders with the
+    /// linked folder's metadata. A name that leads to another file at launch is refused.
+    #[test]
+    fn a_library_is_granted_once_under_the_name_its_load_requests() {
+        let fixture = Fixture::new();
+        let keg = fixture.path("Cellar/x/1.0/lib");
+        std::fs::create_dir_all(&keg).expect("keg");
+        std::fs::create_dir_all(fixture.path("opt")).expect("opt");
+        let file = keg.join("libx.4.0.1.dylib");
+        std::fs::write(&file, "image").expect("library");
+        std::os::unix::fs::symlink("libx.4.0.1.dylib", keg.join("libx.4.dylib"))
+            .expect("file link");
+        std::os::unix::fs::symlink("../Cellar/x/1.0", fixture.path("opt/x")).expect("folder link");
+        let name = fixture.path("opt/x/lib/libx.4.dylib");
+
+        let mut spec = fixture.spec();
+        spec.filesystem = Filesystem {
+            read_file: vec![file.clone()],
+            ..Filesystem::default()
+        };
+        let judge = || {
+            let mut reach =
+                crate::test_support::with_operator_home(fixture.operator.path(), || {
+                    judge_filesystem(&spec, "[tool.t]", &fixture.record, &[])
+                })
+                .expect("the library entry is judged");
+            let grant = reach
+                .grants
+                .iter_mut()
+                .find(|grant| grant.resolved == file)
+                .expect("the library's grant");
+            grant.loaded_as = Some(name.clone());
+            reach
+        };
+        let fallback = fixture.path("project");
+        let translate = |reach: &DirectReach| {
+            crate::test_support::with_operator_home(fixture.operator.path(), || {
+                Boundary::translate(
+                    &spec,
+                    Launch {
+                        table: "[tool.t]",
+                        trailing: &[],
+                        fallback_workspace: &fallback,
+                        shebang_interpreters: ShebangInterpreters::Granted,
+                        runtime_reach: RuntimeReach::Leaf,
+                        argument_zero: None,
+                        egress: EgressMode::Gateway,
+                        approved: Some(reach),
+                    },
+                    &Site {
+                        attachment: &fixture.attachment,
+                        layout: &fixture.root,
+                        stored: &fixture.record,
+                        protected_sources: &[],
+                    },
+                )
+            })
+        };
+
+        let boundary = translate(&judge()).expect("the library is granted");
+        let config: serde_json::Value =
+            serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
+        let reads: Vec<_> = config["paths"]
+            .as_array()
+            .expect("the config lists its paths")
+            .iter()
+            .filter(|grant| grant["resolved"].as_str() == file.to_str())
+            .collect();
+        assert_eq!(reads.len(), 1, "one grant for the file: {reads:?}");
+        assert_eq!(
+            reads[0]["original"].as_str(),
+            name.to_str(),
+            "granted under the requested name: {reads:?}"
+        );
+        #[cfg(target_os = "macos")]
+        {
+            let config = ContainmentConfig::from_json(&boundary.containment_config_text())
+                .expect("the translated config");
+            let profile = containment::test_support::generate_seatbelt_profile(&config)
+                .expect("the translated profile renders");
+            assert!(
+                profile.contains(&format!(
+                    "(allow file-read-metadata (literal \"{}\"))",
+                    fixture.path("opt/x").display()
+                )),
+                "the linked folder gets metadata: {profile}"
+            );
+        }
+
+        let reach = judge();
+        let other = fixture.path("Cellar/x/2.0/lib");
+        std::fs::create_dir_all(&other).expect("another keg");
+        std::fs::write(other.join("libx.4.dylib"), "other").expect("another library");
+        std::fs::remove_file(fixture.path("opt/x")).expect("unlink");
+        std::os::unix::fs::symlink("../Cellar/x/2.0", fixture.path("opt/x")).expect("relink");
+        let refused = translate(&reach)
+            .err()
+            .expect("a name that now leads elsewhere refuses the spawn")
+            .to_string();
+        assert!(refused.contains("leads to"), "{refused}");
     }
 
     #[test]

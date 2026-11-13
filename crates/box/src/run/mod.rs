@@ -30,6 +30,8 @@ pub(crate) mod lock;
 pub(crate) mod macos_enforcement;
 #[cfg(target_os = "linux")]
 pub(crate) mod netns_relay;
+pub(crate) mod python_install;
+pub(crate) mod python_tool;
 pub(crate) mod telemetry;
 
 #[cfg(all(

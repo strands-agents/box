@@ -23,16 +23,22 @@ heredoc), and `python -`. See the box's docs for the subset.";
 /// Monty, never a host interpreter.
 const VERSION: &str = "Monty (Strands-Box Python subset)";
 
+/// The sentence Monty's refusals end with, telling the agent how real Python is turned on.
+///
+/// Box's own report of a Monty `ImportError` ends with the same sentence, so it lives here once.
+pub const REAL_PYTHON_HINT: &str = "To run real Python, the operator sets monty = false, declares [tool.python3], and permits \
+     shell:spawn on its file.";
+
 /// `python` — forward a script to the box's interpreter (Monty).
 #[command("python")]
 async fn cmd_python(os: &Mediated, args: &[String]) -> CommandResult {
-    run_python_command(os, args).await
+    run_python_command(os, "python", args).await
 }
 
 /// `python3` — the same command under the other alias name.
 #[command("python3")]
 async fn cmd_python3(os: &Mediated, args: &[String]) -> CommandResult {
-    run_python_command(os, args).await
+    run_python_command(os, "python3", args).await
 }
 
 /// The shared implementation behind both `python` and `python3`.
@@ -40,7 +46,7 @@ async fn cmd_python3(os: &Mediated, args: &[String]) -> CommandResult {
 /// Accepts exactly one of `-c SOURCE` or a single script file, plus `--version` and
 /// `--help`. It does **not** read stdin: a no-`-c`, no-file invocation — a REPL, a
 /// pipe, or a heredoc — refuses loudly rather than silently dropping stdin.
-async fn run_python_command(os: &Mediated, args: &[String]) -> CommandResult {
+async fn run_python_command(os: &Mediated, name: &str, args: &[String]) -> CommandResult {
     let mut source: Option<String> = None;
     let mut file: Option<String> = None;
 
@@ -73,6 +79,18 @@ async fn run_python_command(os: &Mediated, args: &[String]) -> CommandResult {
                 return Ok(0);
             }
             Value(val) => file = Some(val.string()?),
+            // `python3 -m venv` or `-m pytest` is the common first try at real Python, so it gets
+            // its own refusal that says how to turn real Python on, not lexopt's generic one.
+            Short('m') => {
+                let mut w = io::stderr()?;
+                wprintln!(
+                    w,
+                    "{}: -m is not supported by Monty, Box's built-in Python subset. {}",
+                    name,
+                    REAL_PYTHON_HINT
+                )?;
+                return Ok(2);
+            }
             _ => return Err(arg.unexpected().into()),
         }
     }
@@ -87,7 +105,8 @@ async fn run_python_command(os: &Mediated, args: &[String]) -> CommandResult {
             let mut w = io::stderr()?;
             wprintln!(
                 w,
-                "python: reading a script from stdin is not supported; use `-c SOURCE` or a script file"
+                "python: reading a script from stdin is not supported; use `-c SOURCE` or a script file. {}",
+                REAL_PYTHON_HINT
             )?;
             return Ok(2);
         }
@@ -106,7 +125,8 @@ async fn run_python_command(os: &Mediated, args: &[String]) -> CommandResult {
         let mut w = io::stderr()?;
         wprintln!(
             w,
-            "python: no script given; this box's Python runs only `-c SOURCE` or a script file (no REPL, pipe, or heredoc)"
+            "python: no script given; this box's Python runs only `-c SOURCE` or a script file (no REPL, pipe, or heredoc). {}",
+            REAL_PYTHON_HINT
         )?;
         return Ok(2);
     };

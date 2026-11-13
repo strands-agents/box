@@ -6,7 +6,7 @@ Read the **"`strands-box` is interface-frozen"** section of the
 [repository guidance](../../AGENTS.md) before changing anything here. A change to an
 observable surface — the CLI verbs and flags, `box.toml`'s keys, the four box inputs, the
 on-disk records (`Record` at `RECORD_VERSION` and each later record version through
-`SHELL_SIZE_LIMITS_RECORD_VERSION`, `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
+`MONTY_OFF_RECORD_VERSION`, `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
 `PROTOCOL_VERSION`, the alias names and their socket derivation, the
 policy action vocabulary, the composed workload environment — or to a foundational premise,
 needs the user's explicit approval **before** the code is written. Fixing a defect behind the
@@ -78,6 +78,12 @@ now, because `run` takes one `--config` path and searches nowhere. **That direct
   *One narrowed property:* one listener is one failure domain, so a bind failure refuses the
   whole box rather than leaving one interpreter serving. A box where Python silently does not
   work is worse than one that refuses to load.
+- **Two modules own the Python tool.** `run/python_install` reads a Python install from its files,
+  without running it, and answers which folders it loads code from and which must stay read-only.
+  `run/python_tool` owns the checks on one call to `[tool.python3]` or `[tool.python]` when
+  `monty = false`: the program-from-stdin refusal and the stderr lines Box adds.
+  *Why separate:* the first is decided once at startup from the disk, the second on every call
+  from its arguments; neither needs the other's inputs.
 - **Two names are stale by scope, deferred deliberately.** `ShellError` is the *broker*
   listener's error type (`Bind`, `Serve`) and also covers `aliases.rs`'s image materialization
   for the **Python** alias. And `host.rs` still threads `Arc<ShellSpec>` through four
