@@ -1700,7 +1700,7 @@ interpreter.
 ### Box runs a pinned Strands Shell, never the host OS's shell
 
 Box runs every shell command the agent issues through Strands Shell, an open-source interpreter. Box
-builds against a pinned upstream revision, `46eb349`, and holds no copy of its source. It never runs
+builds against a pinned upstream revision, `8a203dc`, and holds no copy of its source. It never runs
 `bash` or `zsh` from the surrounding OS for the agent's sandbox. A tool's or MCP server's sandbox
 runs programs of the surrounding OS, a shell included, inside that sandbox. A harness runs a real
 shell for its command tool, so Box gives it something with the same exit codes, the same stdout and
