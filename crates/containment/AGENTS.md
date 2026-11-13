@@ -950,11 +950,22 @@ On November 13, 2026, on Amazon Linux 2023 ARM64, `strace -f` of a contained `ca
 showed one refused wait call: `pselect6` on the registry socket returned `EPERM`. The libcurl that
 cargo vendors waits with `select()`, which glibc issues as `pselect6` on ARM64, and curl treats any
 error other than `EINTR` as fatal: cargo printed `Unrecoverable error in select/poll`. With
-`pselect6` permitted, the same command downloaded its crates. Permit `pselect6` on every
-architecture and `select` on x86-64, where older glibc and raw callers issue it. Both only wait on
-descriptors the process already holds, like the permitted `ppoll` and `epoll_pwait`.
+`pselect6` permitted, the same command downloaded its crates, and the Ubuntu ARM64 corpus bench
+cells RS-01 to RS-03 got past their downloads.
+
+Permit `pselect6` on every architecture. Permit `select` on x86-64 too. No trace here shows an x86
+caller; the rationale is glibc's source. glibc 2.32's `select()` issues `select` wherever the
+architecture defines `__NR_select`, as x86-64 does
+([2.32 `select.c`](https://github.com/bminor/glibc/blob/glibc-2.32/sysdeps/unix/sysv/linux/select.c)).
+glibc 2.34 issues `pselect6` on 64-bit targets
+([2.34 `select.c`](https://github.com/bminor/glibc/blob/glibc-2.34/sysdeps/unix/sysv/linux/select.c)),
+so a binary linked against an older glibc, or a raw caller, still issues `select`. Neither call adds
+reach: Linux v6.12 runs both `select` (`kern_select`) and `pselect6` (`do_pselect`) through
+`core_sys_select` in [`fs/select.c`](https://github.com/torvalds/linux/blob/v6.12/fs/select.c),
+which waits only on descriptors the process already holds, like the permitted `ppoll`.
 `select_waits_on_held_descriptors_under_the_filters` runs glibc's `select()` and each raw call on a
-readable pipe under the filters, so x86 CI measures the x86 spelling.
+readable pipe under the filters. Its raw rows check the permits; they do not show that a caller
+needs them.
 
 ### W^X
 

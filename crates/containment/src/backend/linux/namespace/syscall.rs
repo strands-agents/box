@@ -291,9 +291,9 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         number: libc::SYS_poll,
     },
     // The libcurl that cargo vendors waits on its sockets with `select()`, which glibc issues as
-    // `pselect6` (and possibly `select` on x86_64), so an `EPERM` here fails every cargo download
-    // with "Unrecoverable error in select/poll". Like `ppoll`, it only waits on descriptors the
-    // process already holds.
+    // `pselect6` (glibc 2.32 and older issue `select` on x86_64), so an `EPERM` here fails every
+    // cargo download with "Unrecoverable error in select/poll". Like `ppoll`, it only waits on
+    // descriptors the process already holds.
     PermittedSyscall {
         name: "pselect6",
         number: libc::SYS_pselect6,
