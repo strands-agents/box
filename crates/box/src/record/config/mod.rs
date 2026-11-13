@@ -1187,7 +1187,7 @@ impl Record {
 const BOX_IDENTITY_DIGITS: usize = 16;
 
 /// The longest prefix a caller-supplied identity may carry before its digits.
-const MAXIMUM_BOX_IDENTITY_PREFIX: usize = MAXIMUM_BOX_NAME - 1 - BOX_IDENTITY_DIGITS;
+pub(crate) const MAXIMUM_BOX_IDENTITY_PREFIX: usize = MAXIMUM_BOX_NAME - 1 - BOX_IDENTITY_DIGITS;
 
 /// Whether `identity` is one Box generates or one a caller may supply.
 pub(crate) fn valid_box_identity(identity: &str) -> bool {
@@ -1279,7 +1279,7 @@ fn read_authored_policy(
 pub(crate) struct BoxName(String);
 
 /// The longest box name, which also bounds a caller-supplied box identity.
-pub(crate) const MAXIMUM_BOX_NAME: usize = 33;
+pub(crate) const MAXIMUM_BOX_NAME: usize = 32;
 
 /// Whether one character may appear in a box name, an MCP server name, or an alias filename.
 pub(crate) fn nameable(character: char) -> bool {
@@ -2927,6 +2927,21 @@ env = {}
     }
 
     #[test]
+    fn the_longest_supplied_box_identity_is_also_a_valid_box_name() {
+        let longest = format!("{}-0123456789abcdef", "a".repeat(15));
+        assert_eq!(longest.len(), MAXIMUM_BOX_NAME);
+        assert!(valid_box_identity(&longest));
+        BoxName::parse(&longest).expect("a caller can use its box ID as the name");
+        let too_long = format!("{}-0123456789abcdef", "a".repeat(16));
+        assert!(!valid_box_identity(&too_long));
+        let message = ConfigError::SuppliedIdentity { found: too_long }.to_string();
+        assert!(
+            message.contains(&format!("1 to {MAXIMUM_BOX_IDENTITY_PREFIX} letters")),
+            "the refusal names the limit that applies: {message}"
+        );
+    }
+
+    #[test]
     fn a_supplied_box_identity_requires_its_own_record_version() {
         let record = |version: u32, box_id: &str| {
             format!(
@@ -2936,7 +2951,7 @@ env = {}
                  name = \"codex\"\n"
             )
         };
-        let supplied = "claude-code-with-0123456789abcdef";
+        let supplied = "claude-code-wit-0123456789abcdef";
 
         let parsed = parsed_record(&record(SUPPLIED_IDENTITY_RECORD_VERSION, supplied))
             .expect("a supplied identity at its version parses");
@@ -2969,7 +2984,7 @@ env = {}
             "box-0123456789abcdeG",
             "name0123456789abcdef",
             "-name-0123456789abcdef",
-            "claude-code-withx-0123456789abcdef",
+            "claude-code-with-0123456789abcdef",
         ] {
             let text = format!(
                 "version = {RECORD_VERSION}\n\
