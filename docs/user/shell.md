@@ -366,9 +366,12 @@ steps:
 1. Write `monty = false` at the top of `box.toml`, before any table. To keep Monty, leave the key
    out. A Box build without this key refuses the file with `unknown field 'monty'`.
 2. Declare `[tool.python3]` or `[tool.python]`. Either table answers to both `python3` and
-   `python`; the table's name decides, not the file name at the end of its `command`. If both
-   tables are declared, their `command` paths must be the same as written, or Box refuses to start.
-3. Permit `shell:spawn` on the tool's file.
+   `python`; the table's name decides, not the file name at the end of its `command` or another
+   table that names the same file. The `command` is one file with no fixed arguments, or Box
+   refuses to start. If both tables are declared, their `command` paths must be the same as
+   written, or Box refuses to start.
+3. Permit `shell:spawn` on the tool's file. `program_path` is the file with every link resolved,
+   so the rule names the real file, not the venv's `bin/python3` link.
 
 ```toml
 monty = false
@@ -377,10 +380,20 @@ monty = false
 command = ["/Users/me/py-runtime/.venv/bin/python3"]
 ```
 
+A venv's `bin/python3` is a link to its base Python. For a venv built on Homebrew's Python 3.14 the
+real file is in Homebrew's Cellar, so the permit names that path:
+
 ```cedar
 permit (principal, action == Box::Action::"shell:spawn", resource)
-when { context.input.program_path == "/Users/me/py-runtime/.venv/bin/python3" };
+when {
+  context.input.program_path ==
+    "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14"
+};
 ```
+
+To find the path, run `realpath /Users/me/py-runtime/.venv/bin/python3`. A venv built with
+`--copies` has its own file, so the permit names the venv's path, under `~/` when it is in your
+home. See [the `program_path` row in shell policy](shell-policy.md).
 
 The table needs no `[tool.python3.filesystem]`. Box adds the grants Python needs to start: read on
 the folders the install loads code from, read on a venv's `pyvenv.cfg`, read on the install's
@@ -415,6 +428,7 @@ tool doesn't:
 strands-box: [tool.python3]: a bare `python` in the Shell runs /Users/me/py-runtime/.venv/bin/python3, in place of Monty
 strands-box: [tool.python3]: a bare `python3` in the Shell runs /Users/me/py-runtime/.venv/bin/python3, in place of Monty
 strands-box: [tool.python3]: the fs:write rules in policy.dw don't apply inside Python; it writes its write grants directly
+strands-box: [tool.python3]: Python can write a program into its write grants and run it inside its sandbox
 strands-box: [tool.python3]: each python3 or python call is bounded by [limits.shell] timeout (30 s); there is no Python-only timeout
 ```
 

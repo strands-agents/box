@@ -1250,6 +1250,8 @@ pub enum SpawnStdin {
 
 /// One resolved host-binary spawn request handed to a [`HostSpawner`].
 pub struct HostSpawn {
+    /// The name the caller typed for the program, such as `python3` or `python`.
+    pub name: String,
     /// The resolved absolute path of the program to run.
     pub program: std::path::PathBuf,
     /// The spelling the caller invoked the program by, made absolute, which the program reads as
@@ -1262,8 +1264,10 @@ pub struct HostSpawn {
     /// The composed environment the binary runs with. The built-in spawn applies exactly this,
     /// never the process's inherited environment; an embedder's hook may compose its own instead.
     pub env: Vec<(String, String)>,
-    /// Whether the command's stdin carries data. The built-in spawn gives the program `/dev/null`
-    /// either way.
+    /// Whether the command's stdin carries data. The Shell decides it only for a name the
+    /// embedder replaces ([`Kernel::replaces_command`]); every other spawn gets
+    /// [`SpawnStdin::None`] with no wait. The built-in spawn gives the program `/dev/null` either
+    /// way.
     pub stdin: SpawnStdin,
 }
 

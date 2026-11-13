@@ -279,6 +279,12 @@ interpreters are part of the code the operator must trust.
    For each `[tool]` or stdio `[mcp.<name>]` entry covered by a grammar, Box prints a line on stderr.
    Rules for `shell:spawn` do not apply to a spawn of those programs by the bound name.
    Box also prints, for each bare name a `[tool]` answers to, the file the Shell runs for it.
+   Every run prints what a bare `python3` or `python` runs. With Monty on, that is Monty, plus a
+   line for each `[tool.python3]` or `[tool.python]` it leaves unused. With `monty = false`, Box
+   prints the Python tool's file and the three things it does that Monty didn't: the `fs:write`
+   rules in `policy.dw` don't apply inside it, it can write a program into its write grants and
+   run it inside its sandbox, and `[limits.shell] timeout` is its only time limit
+   ([decision](decisions.md#python-in-the-shell-is-monty)).
 5. It resolves bound secrets and starts the gateway with its own certificate authority.
    It checks each process specification's filesystem grants, then binds the broker socket.
    A grant it cannot check stops startup.

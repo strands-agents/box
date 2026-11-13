@@ -80,9 +80,9 @@ every harness's stored credentials, through an interpreter that runs outside con
 refusal tells the operator to make a directory for the workspace and to work there, and
 `the_operator_home_is_not_a_project` pins it.
 
-The config file's complete key set is **twelve**: `name`, `box_dir`, `policy`, `[agent]`,
+The config file's complete key set is **thirteen**: `name`, `box_dir`, `policy`, `[agent]`,
 `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
-`[experimental-features]`, `file-attributes`, `[limits]`, and `[gateway]`. `name` and `box_dir`
+`[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`. `name` and `box_dir`
 are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
 every removed spelling is refused by its own name with its replacement.
 `four_inputs.rs::the_config_record_carries_only_the_four_inputs` pins the set, and

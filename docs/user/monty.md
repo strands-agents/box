@@ -101,9 +101,16 @@ monty = false
 command = ["/Users/me/py-runtime/.venv/bin/python3"]
 ```
 
+`program_path` is the file with every link resolved. A venv's `bin/python3` is a link to its base
+Python, so for a venv built on Homebrew's Python 3.14 the permit names the file in Homebrew's Cellar
+(`realpath` prints it):
+
 ```cedar
 permit (principal, action == Box::Action::"shell:spawn", resource)
-when { context.input.program_path == "/Users/me/py-runtime/.venv/bin/python3" };
+when {
+  context.input.program_path ==
+    "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14"
+};
 ```
 
 Then every `python3` and `python`, typed in Strands Shell or sent by the aliases, runs that file in
@@ -121,13 +128,13 @@ While Monty is on, its refusals tell the agent how the operator turns real Pytho
 with this sentence:
 
 ```text
-To run real Python, the operator sets monty = false and declares [tool.python3].
+To run real Python, the operator sets monty = false, declares [tool.python3], and permits shell:spawn on its file.
 ```
 
 For example, `python3 -m pytest` exits `2` with:
 
 ```text
-python3: -m is not supported by Monty, Box's built-in Python subset. To run real Python, the operator sets monty = false and declares [tool.python3].
+python3: -m is not supported by Monty, Box's built-in Python subset. To run real Python, the operator sets monty = false, declares [tool.python3], and permits shell:spawn on its file.
 ```
 
 The `python -` and no-script refusals end with the same sentence, and so does the note after a
@@ -135,7 +142,7 @@ failed import:
 
 ```text
 ModuleNotFoundError: No module named 'numpy'
-(this box's Python is Monty, Box's built-in Python subset. To run real Python, the operator sets monty = false and declares [tool.python3].)
+(this box's Python is Monty, Box's built-in Python subset. To run real Python, the operator sets monty = false, declares [tool.python3], and permits shell:spawn on its file.)
 ```
 
 At startup, `run` prints `strands-box: a bare python3 or python in the Shell runs Monty, Box's

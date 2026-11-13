@@ -168,7 +168,7 @@ and `type` reports it not found. `tests/declared_host_programs.rs` covers each c
 `python3 -m ...` used to fail with lexopt's generic unexpected-argument error. `src/commands/python.rs`
 now refuses `-m` itself, exits 2, and prints `{name}: -m is not supported by Monty, Box's built-in
 Python subset.` followed by `commands::REAL_PYTHON_HINT` ("To run real Python, the operator sets
-monty = false and declares [tool.python3]."). The `python -` and no-script refusals end with the
+monty = false, declares [tool.python3], and permits shell:spawn on its file."). The `python -` and no-script refusals end with the
 same sentence. Box's report of a Monty `ModuleNotFoundError` or `ImportError` uses the constant
 too, so the text lives in one place. `tests/script_interpreter.rs` covers each message.
 
@@ -2074,13 +2074,17 @@ affected.
 
 ## 2026-11-13 — the spawn seam says whether stdin carries data
 
-`HostSpawn` gains `stdin: SpawnStdin { None, Data }`. `exec.rs::spawn_host_program` sets it from fd 0
-of the command: a pipe from an earlier stage, a heredoc, or a `<` file is `Data`; no fd 0 is `None`.
+`HostSpawn` gains `name`, the name the caller typed, and `stdin: SpawnStdin { None, Data }`.
+`exec.rs::spawn_host_program` decides `stdin` only for a name the embedder replaces
+(`Kernel::replaces_command`); every other spawn gets `None` with no wait. For a replaced name it reads
+fd 0 of the command: a pipe from an earlier stage, a heredoc, or a `<` file with bytes is `Data`; no fd
+0, an empty `<` file such as `/dev/null`, or a pipe that already ended with no bytes is `None`.
 Input fed from outside the Shell (`set_outside_reader`) is `None` only when it ends with no bytes. An
 embedder installs that reader on every Shell and ends it an instant after a call with no stdin, so a
-spawn that finds it still open waits at most 100 ms for its first bytes or its end, then counts it as
-`Data`. Bytes read while waiting stay in the reader for the next command. The built-in spawn still
-gives the program `/dev/null`. Upstream has no such field; an embedder that can't forward input uses
-it to say so. `tests/host_spawn_stdin.rs` pins each case. The pinned revision has no here-string
-(`<<<`), so it has no case.
+replaced-name spawn that finds it still open waits at most 100 ms for its first bytes or its end, then
+counts it as `Data`. Bytes read while waiting stay in the reader for the next command. The built-in
+spawn still gives the program `/dev/null`. Upstream has no such fields; an embedder that can't forward
+input uses `stdin` to say so, and `name` to name the program in its own messages.
+`tests/host_spawn_stdin.rs` pins each case. The pinned revision has no here-string (`<<<`), so it has
+no case.
 

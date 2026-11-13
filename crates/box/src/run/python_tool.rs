@@ -6,10 +6,18 @@
 
 use std::io;
 
-/// The reason a call that would read its program from stdin is refused. The Shell prints it and
-/// exits 126.
-pub(crate) const PROGRAM_FROM_STDIN: &str =
-    "python3 would read its program from stdin, which a program the Shell starts can't receive yet";
+/// The reason a call to `name` that would read its program from stdin is refused. The Shell prints
+/// it and exits 126.
+pub(crate) fn program_from_stdin(name: &str) -> String {
+    format!(
+        "{name} would read its program from stdin, which a program the Shell starts can't receive \
+         yet"
+    )
+}
+
+/// The line Box adds to stderr when a Python tool call fails on a write into its read-only install.
+pub(crate) const READ_ONLY_INSTALL_LINE: &str =
+    "strands-box: the Python install is read-only in this box; ask the operator to add packages\n";
 
 /// Whether `table` is one of the two Python tool tables.
 pub(crate) fn is_python_table(table: &str) -> bool {
@@ -28,10 +36,10 @@ pub(crate) fn no_stdin_line(name: &str) -> String {
     )
 }
 
-/// Refuse a call whose arguments make Python read its program from stdin.
-pub(crate) fn refuse_program_from_stdin(args: &[String]) -> io::Result<()> {
+/// Refuse a call to `name` whose arguments make Python read its program from stdin.
+pub(crate) fn refuse_program_from_stdin(name: &str, args: &[String]) -> io::Result<()> {
     if reads_program_from_stdin(args) {
-        return Err(io::Error::other(PROGRAM_FROM_STDIN));
+        return Err(io::Error::other(program_from_stdin(name)));
     }
     Ok(())
 }
@@ -40,7 +48,7 @@ pub(crate) fn refuse_program_from_stdin(args: &[String]) -> io::Result<()> {
 const SHORT_WITH_VALUE: &[char] = &['c', 'm', 'W', 'X'];
 /// Short options that take no value. `-OO` is two `O`s.
 const SHORT_FLAGS: &[char] = &[
-    'b', 'B', 'd', 'E', 'h', 'i', 'I', 'O', 'P', 'q', 'R', 's', 'S', 'u', 'v', 'V', 'x',
+    'b', 'B', 'd', 'E', 'h', 'i', 'I', 'O', 'P', 'q', 'R', 's', 'S', 't', 'u', 'v', 'V', 'x',
 ];
 /// Long options that print and exit without running a program.
 const LONG_INFO: &[&str] = &[
@@ -132,7 +140,7 @@ mod tests {
 
     fn refused(args: &[&str]) -> bool {
         let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
-        refuse_program_from_stdin(&args).is_err()
+        refuse_program_from_stdin("python3", &args).is_err()
     }
 
     #[test]
@@ -202,11 +210,19 @@ mod tests {
 
     #[test]
     fn python_tool_refusal_names_the_reason() {
-        let error = refuse_program_from_stdin(&[]).unwrap_err();
+        let error = refuse_program_from_stdin("python", &[]).unwrap_err();
         assert_eq!(
             error.to_string(),
-            "python3 would read its program from stdin, which a program the Shell starts can't receive yet"
+            "python would read its program from stdin, which a program the Shell starts can't receive yet"
         );
+    }
+
+    #[test]
+    fn python_tool_refuses_t_like_python_does() {
+        // CPython accepts `-t` and ignores it, so `python3 -t` still reads its program from stdin.
+        assert!(refused(&["-t"]));
+        assert!(refused(&["-tt", "-"]));
+        assert!(!refused(&["-t", "x.py"]));
     }
 
     #[test]

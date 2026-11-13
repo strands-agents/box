@@ -1,5 +1,5 @@
 //! On macOS, `[limits.shell] timeout` stops a started tool and every process it left behind, and
-//! the box keeps serving (decision: one timeout bounds real Python too). The Linux counterpart is
+//! the box keeps serving (docs/design/decisions.md#python-in-the-shell-is-monty). The Linux counterpart is
 //! `command_timeout_stops_tool_descendants_and_box_keeps_serving` in `box_process_cleanup.rs`.
 
 #![cfg(all(target_os = "macos", feature = "test-support"))]

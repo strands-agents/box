@@ -699,6 +699,21 @@ fn validate_python_tables(
     if monty {
         return Ok(());
     }
+    // A bare python3 or python runs the table's command with the agent's arguments after it, so a
+    // fixed argument would change every call and make `python3 x.py` mean something else.
+    for name in PYTHON_TABLES {
+        if let Some(spec) = tool.get(name)
+            && spec.command.len() > 1
+        {
+            return Err(ConfigError::Process {
+                table: format!("[tool.{name}]"),
+                reason: "with monty = false its command must be one file with no fixed \
+                         arguments, because a bare python3 or python runs it with the agent's \
+                         arguments"
+                    .to_string(),
+            });
+        }
+    }
     let (Some(python3), Some(python)) = (tool.get("python3"), tool.get("python")) else {
         return Ok(());
     };
@@ -2212,6 +2227,28 @@ native-filesystem-policy = false
                 Err(ConfigError::Process { table, .. }) if table == "[tool.python]"
             ),
             "a stored record is judged the same way"
+        );
+    }
+
+    #[test]
+    fn with_monty_off_a_python_table_with_fixed_arguments_is_refused() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        let table = "[tool.python3]\ncommand = [\"/Users/me/py/.venv/bin/python3\", \"-I\"]\n";
+        let refused = ConfigFile::parse(
+            &format!("monty = false\n{required}{table}"),
+            Path::new("box.toml"),
+        );
+        assert!(
+            matches!(
+                &refused,
+                Err(ConfigError::Process { table, reason })
+                    if table == "[tool.python3]" && reason.contains("no fixed arguments")
+            ),
+            "{refused:?}"
+        );
+        assert!(
+            ConfigFile::parse(&format!("{required}{table}"), Path::new("box.toml")).is_ok(),
+            "with Monty on, [tool.python3] is an ordinary table"
         );
     }
 

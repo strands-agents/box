@@ -85,7 +85,7 @@ startup lines, the Shell, and the aliases agree. Neither list ever holds a versi
 at startup.
 
 Monty's refusals, and the note after a failed import, end with how the operator turns real Python
-on: `To run real Python, the operator sets monty = false and declares [tool.python3].`
+on: `To run real Python, the operator sets monty = false, declares [tool.python3], and permits shell:spawn on its file.`
 
 The broker provides no standard input and forwards no signals to a Python program. `input()` raises
 `NameError`. In Strands Shell a `python` with no `-c` and no script file is refused rather than

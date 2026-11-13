@@ -187,6 +187,11 @@ fn write_python_disclosures(
         "strands-box: {tables}: the fs:write rules in policy.dw don't apply inside Python; it \
          writes its write grants directly"
     )?;
+    writeln!(
+        output,
+        "strands-box: {tables}: Python can write a program into its write grants and run it \
+         inside its sandbox"
+    )?;
     match shell_timeout {
         Some(timeout) => writeln!(
             output,
@@ -688,6 +693,8 @@ mod tests {
              /Users/me/py-runtime/.venv/bin/python3, in place of Monty\n\
              strands-box: [tool.python3]: the fs:write rules in policy.dw don't apply inside \
              Python; it writes its write grants directly\n\
+             strands-box: [tool.python3]: Python can write a program into its write grants and \
+             run it inside its sandbox\n\
              strands-box: [tool.python3]: each python3 or python call is bounded by \
              [limits.shell] timeout (600 s); there is no Python-only timeout\n"
         );

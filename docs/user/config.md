@@ -192,7 +192,8 @@ command = ["/Users/me/py-runtime/.venv/bin/python3"]
 ```
 
 With `monty = false`, every bare `python3` and `python` goes to `[tool.python3]` or
-`[tool.python]`, and nothing falls back to Monty. See
+`[tool.python]`, chosen by the table's name, and nothing falls back to Monty. The table's
+`command` must be one file with no fixed arguments, or Box refuses to start. See
 [`[tool.<name>]` selection](#toolname-selection) for which table answers. With neither table,
 both names exit 126 with `Monty is off (monty = false) and no [tool.python3] or [tool.python] is
 declared`, so `monty = false` alone means no Python in the box.

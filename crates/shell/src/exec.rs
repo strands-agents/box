@@ -453,13 +453,19 @@ async fn spawn_host_program(
     // The identity the decision bound, carried rather than resolved again, beside the spelling the
     // caller used.
     let program = admitted.filter(|program| program.bound)?;
-    let stdin = spawn_stdin().await;
+    // Only a replaced name's embedder reads the answer, so only it waits for the outside input.
+    let stdin = if os.replaces_command(name) {
+        spawn_stdin().await
+    } else {
+        os::SpawnStdin::None
+    };
 
     // Hand the resolved spawn to the kernel's host-spawn seam. The box installs a hook that runs
     // the binary inside a contained leaf box; with no hook the seam fails closed and the binary
     // is refused, not run uncontained. The environment is the Shell's composed one — cleared
     // and never inherited — so a spawned binary sees no daemon environment.
     let spawn = crate::os::HostSpawn {
+        name: name.to_owned(),
         program: program.path.into(),
         invoked: program.spelling.into(),
         args: args.to_vec(),
@@ -503,9 +509,10 @@ const OUTSIDE_STDIN_WAIT: std::time::Duration = std::time::Duration::from_millis
 
 /// Whether the current process's stdin carries data, for [`os::HostSpawn::stdin`].
 ///
-/// A pipe, a heredoc or here-string, or a `<` file is data; no fd 0 is none. Input fed from outside
-/// the Shell is none only once it ends with no bytes; a chunk read while looking stays in the
-/// reader, so the next command still reads it.
+/// A pipe, a heredoc or here-string, or a `<` file with bytes is data; no fd 0 is none. A `<` file
+/// that is empty, such as `/dev/null`, is none, and so is a pipe that already ended with no bytes.
+/// Input fed from outside the Shell is none only once it ends with no bytes. A chunk read while
+/// looking stays in the reader, so the next command still reads it.
 async fn spawn_stdin() -> os::SpawnStdin {
     let Ok(reader) = CURRENT_PROCESS.with(|p| p.borrow_mut().take_reader(STDIN)) else {
         return os::SpawnStdin::None;
@@ -517,10 +524,37 @@ async fn spawn_stdin() -> os::SpawnStdin {
             buf,
             outside: true,
         } => outside_stdin(rx, buf).await,
+        os::FdKind::ChannelReader {
+            rx,
+            buf,
+            outside: false,
+        } => ended_stdin(rx, buf),
         _ => os::SpawnStdin::Data,
     };
     CURRENT_PROCESS.with(|p| p.borrow_mut().restore_fd(STDIN, kind));
     stdin
+}
+
+/// Whether a Shell-made reader holds bytes, without waiting.
+///
+/// A `<` file arrives as a reader that already holds the file's bytes and has ended, so an empty
+/// file or `/dev/null` is none. A reader that is still open, such as a pipe whose writer is
+/// running, is data.
+fn ended_stdin(rx: &mut mpsc::Receiver<Bytes>, buf: &mut Vec<u8>) -> os::SpawnStdin {
+    if !buf.is_empty() {
+        return os::SpawnStdin::Data;
+    }
+    loop {
+        match rx.try_recv() {
+            Ok(bytes) if bytes.is_empty() => continue,
+            Ok(bytes) => {
+                buf.extend_from_slice(&bytes);
+                return os::SpawnStdin::Data;
+            }
+            Err(mpsc::error::TryRecvError::Disconnected) => return os::SpawnStdin::None,
+            Err(mpsc::error::TryRecvError::Empty) => return os::SpawnStdin::Data,
+        }
+    }
 }
 
 /// Whether the outside input holds bytes, waiting at most [`OUTSIDE_STDIN_WAIT`] for it to decide.

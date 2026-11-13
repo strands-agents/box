@@ -606,7 +606,8 @@ fn dash_m_says_how_to_run_real_python() {
     }
     assert_eq!(
         strands_shell::commands::REAL_PYTHON_HINT,
-        "To run real Python, the operator sets monty = false and declares [tool.python3]."
+        "To run real Python, the operator sets monty = false, declares [tool.python3], and \
+         permits shell:spawn on its file."
     );
 }
 

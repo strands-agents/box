@@ -26,8 +26,8 @@ const VERSION: &str = "Monty (Strands-Box Python subset)";
 /// The sentence Monty's refusals end with, telling the agent how real Python is turned on.
 ///
 /// Box's own report of a Monty `ImportError` ends with the same sentence, so it lives here once.
-pub const REAL_PYTHON_HINT: &str =
-    "To run real Python, the operator sets monty = false and declares [tool.python3].";
+pub const REAL_PYTHON_HINT: &str = "To run real Python, the operator sets monty = false, declares [tool.python3], and permits \
+     shell:spawn on its file.";
 
 /// `python` — forward a script to the box's interpreter (Monty).
 #[command("python")]

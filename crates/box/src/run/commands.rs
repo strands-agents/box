@@ -304,10 +304,6 @@ impl ConfiguredCommands {
 
     /// The folders the Python tool loads code from, its venv root, and its editable sources.
     /// Empty when Monty answers `python3`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the stderr hint is wired in by a later change")
-    )]
     pub(crate) fn python_protected(&self) -> Vec<PathBuf> {
         self.python
             .iter()
@@ -418,6 +414,21 @@ impl ConfiguredCommands {
                 .declared
                 .insert(name.to_string(), (command.invoked.clone(), labels.clone()));
             names.replaced.insert(name.to_string());
+        }
+        // A replaced name with no file would run the Shell's own command, Monty, so it is refused.
+        let unfiled: Vec<String> = names
+            .replaced
+            .iter()
+            .filter(|name| !names.declared.contains_key(*name))
+            .cloned()
+            .collect();
+        for name in unfiled {
+            names.replaced.remove(&name);
+            names.refused.insert(
+                name,
+                "Monty is off (monty = false) and no Python tool file answers to this name"
+                    .to_string(),
+            );
         }
     }
 
@@ -855,10 +866,6 @@ fn touches(path: &Path, folder: &Path) -> bool {
 
 /// Whether a failed call's stderr shows a write the read-only Python install refused: a non-zero
 /// `status`, a protected folder (or a path inside one) named in `stderr`, and a permission error.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the stderr hint is wired in by a later change")
-)]
 pub(crate) fn read_only_install_hint(status: i32, stderr: &[u8], protected: &[PathBuf]) -> bool {
     const REFUSALS: [&str; 3] = [
         "Permission denied",
