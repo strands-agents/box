@@ -16,6 +16,12 @@ pub(crate) fn namespace_launcher_is_usable() -> bool {
     if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
         return false;
     }
+    #[cfg(target_arch = "x86_64")]
+    if std::env::var_os("EXPERIMENTAL_X86_SUPPORT").as_deref() != Some(std::ffi::OsStr::new("TRUE"))
+    {
+        eprintln!("skipping: Linux x86-64 Box tests require EXPERIMENTAL_X86_SUPPORT=TRUE");
+        return false;
+    }
     use std::sync::OnceLock;
     static USABLE: OnceLock<bool> = OnceLock::new();
     *USABLE.get_or_init(|| {

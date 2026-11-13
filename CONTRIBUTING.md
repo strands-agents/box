@@ -32,6 +32,10 @@ Please read before contributing: [Strands AI usage policy](https://github.com/st
 
 ## Before you open a pull request
 
+On Linux x86-64, run `export EXPERIMENTAL_X86_SUPPORT=TRUE` before testing to opt in to
+Box's experimental runtime. The value must be exactly `TRUE`. Without it, the shared Box
+test helper reports a prerequisite skip.
+
 Run the gates with [`just`](https://github.com/casey/just):
 
 ```console
