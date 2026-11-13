@@ -183,7 +183,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   the box hands that process, and the box inherits nothing from the host. It grants no reach and
   cannot claim a name the box owns: `ProcessSpec` refuses every name in `box_owned_environment`, so
   proxy routing, CA trust, `PWD`, `USER`, and the OTLP exporter are out of its reach, and `compose`
-  applies the table *before* every box-owned name as a second line. It also refuses every
+  applies the table *before* every box-owned name as a second line. A `contain_egress = false`
+  table is the one exception: Core composes no `gateway_routing_environment` name for it, so its
+  `env` may state them (`refused_native_egress_name`). It also refuses every
   `dynamic_loader_environment` name (`LD_*`, `DYLD_*`), because Box's own aliases run in the box. A
   runtime's own option variable, such as `NODE_OPTIONS` or `PYTHONPATH`, is the operator's literal:
   it reaches only the process whose table names it, which

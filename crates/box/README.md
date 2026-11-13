@@ -585,6 +585,9 @@ credential phantom can never displace proxy routing or CA trust:
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL` | This box's loopback collector, and `http/protobuf`. Always set |
 | one per `env://` binding | The minted phantom |
 
+A `contain_egress = false` process gets none of the proxy and CA rows above. Its table's `env` may
+set them instead.
+
 `PATH` is composed rather than owned. The box prepends its alias directory and keeps the rest, so
 an alias wins a bare-name search while the operator's own tools stay resolvable. A profile still
 permits exec on the literals the box granted, so a longer `PATH` advertises nothing the box will

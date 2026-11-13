@@ -611,7 +611,7 @@ impl Boundary {
             )?;
         }
         // A gateway process trusts the gateway's CA; a native-egress process never reaches the
-        // gateway, so it gets no grant on that CA and trusts the system's own bundle instead.
+        // gateway, so it gets no grant on that CA and keeps its own client's roots.
         let trust_bundle = match (launch.egress, attachment.trust_bundle.as_ref()) {
             (EgressMode::Gateway, Some(bundle)) => {
                 // `File` scope, not `Root`: a `Root` grant plans a fresh empty `tmpfs` at the path on
@@ -622,30 +622,6 @@ impl Boundary {
             }
             _ => None,
         };
-        let system_bundle = match launch.egress {
-            EgressMode::Native => environment::SYSTEM_TRUST_BUNDLE.map(Path::new),
-            EgressMode::Gateway => None,
-        };
-        if let Some(bundle) = system_bundle {
-            let read_cells = minimum
-                .iter()
-                .map(|cell| (cell.path.as_path(), cell.operation, cell.scope))
-                .chain(
-                    reach
-                        .grants
-                        .iter()
-                        .map(|grant| (grant.resolved.as_path(), grant.operation, grant.scope)),
-                );
-            if !reads(read_cells, bundle) {
-                let cell = MinimumCell {
-                    path: bundle.to_path_buf(),
-                    operation: Operation::Read,
-                    scope: Scope::File,
-                };
-                containment = allow(containment, &cell.path, cell.operation, cell.scope)?;
-                minimum.push(cell);
-            }
-        }
 
         // The floor anchors its home-relative credential rows at `passwd(getuid())`, which is not
         // this value whenever the two disagree, and the trampoline applies the config with a cleared
@@ -748,7 +724,7 @@ impl Boundary {
                 EgressMode::Gateway => environment::Route::Gateway {
                     trust_bundle: trust_bundle.as_deref(),
                 },
-                EgressMode::Native => environment::Route::Native { system_bundle },
+                EgressMode::Native => environment::Route::Native,
             },
         })?;
         let target_environment = serde_json::to_string(&composed)
@@ -788,7 +764,6 @@ impl Boundary {
             broad_exec,
             file_attributes: cfg!(target_os = "macos") && stored.file_attributes,
             native_egress: launch.egress == EgressMode::Native,
-            system_bundle,
             native_filesystem_policy: spec
                 .native_filesystem_policy
                 .unwrap_or(stored.experimental_features.native_filesystem_policy),
@@ -941,7 +916,6 @@ struct DisclosureInputs<'a> {
     broad_exec: bool,
     file_attributes: bool,
     native_egress: bool,
-    system_bundle: Option<&'a Path>,
     native_filesystem_policy: bool,
 }
 
@@ -1018,18 +992,15 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
             "strands-box: {table} native egress: connects to the network directly{arguments} with \
              no egress gateway, no net:connect or http:request decision, and no credential injection"
         ));
-        lines.push(match inputs.system_bundle {
-            Some(bundle) => format!(
-                "strands-box: {table} native trust: no proxy variables and no gateway CA; \
-                 SSL_CERT_FILE={} (the system bundle), and the trustd and SecurityServer services \
-                 for the system's certificate checks",
-                bundle.display()
-            ),
-            None => format!(
-                "strands-box: {table} native trust: no proxy variables and no gateway CA; \
-                 clients use their own default roots"
-            ),
-        });
+        lines.push(format!(
+            "strands-box: {table} native trust: no proxy and no CA variable from Box, so its \
+             client uses its own defaults or its table's `env`{services}",
+            services = if cfg!(target_os = "macos") {
+                "; the trustd and SecurityServer services for the system's certificate checks"
+            } else {
+                ""
+            }
+        ));
     }
     lines.push(format!(
         "strands-box: {table} HOME={} PATH={}",
@@ -1053,6 +1024,7 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
 }
 
 /// Whether one of `cells` grants a read of `file`, compared by identity.
+#[cfg(test)]
 fn reads<'a>(cells: impl IntoIterator<Item = (&'a Path, Operation, Scope)>, file: &Path) -> bool {
     let identity = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let file = identity(file);
@@ -1447,13 +1419,6 @@ pub(crate) mod environment {
         "GIT_SSL_CAINFO",
     ];
 
-    /// The system's own certificate bundle, which a native-egress process trusts in place of the
-    /// gateway's CA. macOS names one file; a Linux client finds its distribution's bundle itself.
-    #[cfg(target_os = "macos")]
-    pub(crate) const SYSTEM_TRUST_BUNDLE: Option<&str> = Some("/private/etc/ssl/cert.pem");
-    #[cfg(not(target_os = "macos"))]
-    pub(crate) const SYSTEM_TRUST_BUNDLE: Option<&str> = None;
-
     /// The names Core sets whatever a spec says. Every one but `PATH` is refused to a spec by
     /// `reserved_workload_environment`; `PATH` is the operator's, with the alias directory prepended.
     #[cfg(test)]
@@ -1510,9 +1475,9 @@ pub(crate) mod environment {
         /// Through the gateway: every proxy name, and every trust name at the gateway's CA when the
         /// gateway has one.
         Gateway { trust_bundle: Option<&'a Path> },
-        /// Direct: no proxy name and no gateway CA, and `SSL_CERT_FILE` at the system's bundle when
-        /// the platform names one.
-        Native { system_bundle: Option<&'a Path> },
+        /// Direct: no proxy name and no CA name, so the spec's own `env` and the client's
+        /// defaults decide.
+        Native,
     }
 
     /// Compose the environment the process receives: phantoms beneath the spec's variables beneath
@@ -1563,18 +1528,7 @@ pub(crate) mod environment {
                     environment.insert(name.to_string(), value.clone());
                 }
             }
-            Route::Native {
-                system_bundle: Some(system_bundle),
-            } => {
-                environment.insert(
-                    "SSL_CERT_FILE".to_string(),
-                    utf8(system_bundle, "system CA path")?,
-                );
-            }
-            Route::Gateway { trust_bundle: None }
-            | Route::Native {
-                system_bundle: None,
-            } => {}
+            Route::Gateway { trust_bundle: None } | Route::Native => {}
         }
         Ok(environment)
     }
@@ -2600,18 +2554,10 @@ mod tests {
             "{}",
             gateway.disclosure()
         );
-        let trust = match environment::SYSTEM_TRUST_BUNDLE {
-            Some(bundle) => format!(
-                "strands-box: [tool.sso-cli] native trust: no proxy variables and no gateway CA; \
-                 SSL_CERT_FILE={bundle} (the system bundle), and the trustd and SecurityServer \
-                 services for the system's certificate checks"
-            ),
-            None => "strands-box: [tool.sso-cli] native trust: no proxy variables and no gateway \
-                     CA; clients use their own default roots"
-                .to_string(),
-        };
+        let trust = "strands-box: [tool.sso-cli] native trust: no proxy and no CA variable from \
+                     Box, so its client uses its own defaults or its table's `env`";
         assert!(
-            native.disclosure().contains(&trust),
+            native.disclosure().contains(trust),
             "{}",
             native.disclosure()
         );
@@ -2676,11 +2622,11 @@ mod tests {
         );
     }
 
-    /// **A native-egress leaf gets no proxy and no gateway CA**: no proxy name, no trust name at the
-    /// gateway's CA and no grant on it, and `SSL_CERT_FILE` at the system's bundle where the
-    /// platform names one, with a read grant on that bundle.
+    /// **A native-egress leaf gets no proxy and no CA name from Core, and keeps its spec's own**:
+    /// no proxy name, no trust name, no grant on the gateway's CA, and the operator's `env` values
+    /// for those names reach the process unchanged.
     #[test]
-    fn a_native_egress_leaf_gets_no_proxy_and_trusts_the_system_bundle() {
+    fn a_native_egress_leaf_gets_no_proxy_or_ca_from_core_and_keeps_its_own() {
         let (fixture, bundle) = fixture_with_trust_bundle();
         let leaf = fixture.translate_full(
             &fixture.spec(),
@@ -2689,51 +2635,75 @@ mod tests {
             EgressMode::Native,
         );
         let environment = environment_of(&leaf);
-        for name in environment::GATEWAY_ROUTING {
+        for name in environment::GATEWAY_ROUTING
+            .into_iter()
+            .chain(environment::TRUST_NAMES)
+        {
             assert!(
                 !environment.contains_key(name),
                 "a native-egress leaf receives no {name}"
             );
         }
-        for name in environment::TRUST_NAMES {
-            assert_ne!(
-                environment.get(name).map(String::as_str),
-                bundle.to_str(),
-                "{name} must not name the gateway's CA"
-            );
-        }
-        let granted: Vec<(PathBuf, Operation, Scope)> = cells(&leaf);
-        let granted = || {
-            granted
-                .iter()
-                .map(|(path, operation, scope)| (path.as_path(), *operation, *scope))
-        };
         assert!(
-            !reads(granted(), &bundle),
+            !reads(
+                cells(&leaf).iter().map(|(path, operation, scope)| (
+                    path.as_path(),
+                    *operation,
+                    *scope
+                )),
+                &bundle
+            ),
             "a native-egress leaf has no grant on the gateway's CA"
         );
-        match environment::SYSTEM_TRUST_BUNDLE {
-            Some(system) => {
-                assert_eq!(
-                    environment.get("SSL_CERT_FILE").map(String::as_str),
-                    Some(system)
-                );
-                for name in environment::TRUST_NAMES
-                    .into_iter()
-                    .filter(|name| *name != "SSL_CERT_FILE")
-                {
-                    assert!(!environment.contains_key(name), "no {name}");
-                }
-                assert!(
-                    reads(granted(), Path::new(system)),
-                    "a native-egress leaf reads the system bundle"
-                );
-            }
-            None => {
-                for name in environment::TRUST_NAMES {
-                    assert!(!environment.contains_key(name), "no {name}");
-                }
-            }
+
+        let mut spec = fixture.spec();
+        spec.env.insert(
+            "HTTPS_PROXY".to_string(),
+            "http://proxy.corp:3128".to_string(),
+        );
+        spec.env
+            .insert("SSL_CERT_FILE".to_string(), "/etc/corp/ca.pem".to_string());
+        let declared = environment_of(&fixture.translate_full(
+            &spec,
+            "[tool.gh]",
+            RuntimeReach::Leaf,
+            EgressMode::Native,
+        ));
+        assert_eq!(declared["HTTPS_PROXY"], "http://proxy.corp:3128");
+        assert_eq!(declared["SSL_CERT_FILE"], "/etc/corp/ca.pem");
+        assert!(
+            !declared.contains_key("http_proxy"),
+            "Core adds no spelling of its own"
+        );
+    }
+
+    /// **The trust services reach a native-egress leaf alone (macOS render).** The agent and a
+    /// gateway leaf render neither `com.apple.trustd.agent` nor `com.apple.SecurityServer`.
+    #[test]
+    fn only_a_native_egress_leaf_renders_the_trust_services() {
+        const SERVICES: [&str; 2] = ["com.apple.trustd.agent", "com.apple.SecurityServer"];
+        let fixture = Fixture::new();
+        let spec = fixture.spec();
+        let agent = rendered(&fixture.translate_with_reach(&spec, "[agent]", RuntimeReach::Agent));
+        let gateway = rendered(&fixture.translate_full(
+            &spec,
+            "[tool.gh]",
+            RuntimeReach::Leaf,
+            EgressMode::Gateway,
+        ));
+        let native = rendered(&fixture.translate_full(
+            &spec,
+            "[tool.gh]",
+            RuntimeReach::Leaf,
+            EgressMode::Native,
+        ));
+        for service in SERVICES {
+            assert!(!agent.contains(service), "the agent renders no {service}");
+            assert!(
+                !gateway.contains(service),
+                "a gateway leaf renders no {service}"
+            );
+            assert!(native.contains(service), "a native leaf renders {service}");
         }
     }
 
@@ -3682,7 +3652,6 @@ mod tests {
                         .map(|phantom| phantom.name.as_str()),
                 )
                 .chain(environment::CORE_OWNED)
-                .chain(environment::SYSTEM_TRUST_BUNDLE.map(|_| "SSL_CERT_FILE"))
                 .collect();
             for name in environment.keys() {
                 assert!(
