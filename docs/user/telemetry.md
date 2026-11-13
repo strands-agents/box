@@ -272,8 +272,19 @@ message does: Box prefixes every line it prints with `strands-box:`.
 
 Each message names the table it came from.
 
-A target that fails while the box runs loses the record. Box reports no such loss, and it does not
-retry.
+A target that fails while the box runs loses the record, and Box does not retry. When the run ends,
+Box prints one line on stderr if an export to a configured target failed, or if the final export did
+not finish in time:
+
+```text
+strands-box: warning: telemetry records were lost: 2 exports to the configured targets failed
+```
+
+The count is exports, not records: one export can carry many records. The run's exit code does not
+change. The line does not cover everything that can be lost: a record that the telemetry queue
+refuses when it is full, an agent payload that Box refuses, a batch that a slow target does not
+accept before its export deadline while the box runs, and a relayed payload still in flight at
+shutdown are not counted. So the absence of this line does not prove that nothing was lost.
 
 ## See also
 
