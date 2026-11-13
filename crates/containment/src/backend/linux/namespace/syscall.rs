@@ -267,6 +267,20 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "pwrite64",
         number: libc::SYS_pwrite64,
     },
+    // libuv copies a file with `copy_file_range`, then `sendfile`, and reads `EPERM` from either
+    // as a real failure, so Node's `fs.copyFile` and every scaffolder built on it stop. An `EINVAL`
+    // from `sendfile` would also let libuv fall back to read and write, but the permit keeps the
+    // kernel copy, which is faster for a large file across filesystems. Both calls move bytes
+    // between two descriptors the workload already holds, and the kernel requires the same read
+    // and write modes on them that `read` and `write` do.
+    PermittedSyscall {
+        name: "copy_file_range",
+        number: libc::SYS_copy_file_range,
+    },
+    PermittedSyscall {
+        name: "sendfile",
+        number: libc::SYS_sendfile,
+    },
     PermittedSyscall {
         name: "ppoll",
         number: libc::SYS_ppoll,
@@ -1388,10 +1402,10 @@ mod tests {
     #[test]
     fn permit_filter_has_the_expected_workload_and_installer_entries() {
         let x86_entries = usize::from(cfg!(target_arch = "x86_64"));
-        assert_eq!(WORKLOAD_PERMITTED.len(), 114 + 17 * x86_entries);
+        assert_eq!(WORKLOAD_PERMITTED.len(), 116 + 17 * x86_entries);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 117 + 18 * x86_entries);
+        assert_eq!(rules.len(), 119 + 18 * x86_entries);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
