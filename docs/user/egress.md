@@ -69,7 +69,7 @@ when { context.input.host == "api.github.com" };
 | `secret.header` | string | `Authorization` | For `env://` with `placement = "header"`: the header name. |
 | `secret.prefix` | string | `Bearer ` on `Authorization`, empty on any other header | For `env://` with `placement = "header"`: the text before the credential. |
 | `secret.param` | string | none | For `env://` with `placement = "query_param"`: the query parameter name. Required for that placement. |
-| `secret.inject` | string | `phantom` | For `env://`: `phantom` adds the credential only to a request that carries the placeholder, and refuses any other request to the destinations. `always` adds it to every request to the destinations. |
+| `secret.inject` | string | `phantom` | For `env://`: `phantom` adds the credential only to a request that carries the placeholder, and refuses any other request to the destinations. `always` adds it to every request to the destinations. Refused beside a backend, where the destination secret is phantom-only and the box injects nothing. |
 | `secret.phantom_prefix` | string | `strands_box_` | For `env://`: the start of the placeholder, such as `sk-ant-` for a client that checks the key's format. 1 to 64 letters, digits, `-`, `_`, `.`, or `~`. |
 
 ### Placement
@@ -118,7 +118,7 @@ auth.ref = "env://BOX_GW_TOKEN"
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `backends.url` | string | required | The backend to dial, as `scheme://host[:port][/prefix]`. `https` or `http`. A path prefix is allowed; a query or fragment is not. |
+| `backends.url` | string | required | The backend to dial, as `scheme://host[:port][/prefix]`. `https` or `http`. An explicit port must be 1 to 65535. A path prefix is allowed; a query or fragment is not. A prefix adds a request-path restriction — see the note below. |
 | `backends.auth.ref` | string | none | The backend's own credential: `env://NAME` for a static token (takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `inject` or `phantom_prefix`), or `aws://PROFILE` to SigV4-sign the request over the backend host (requires `backends.auth.aws.service` and `backends.auth.aws.region`). |
 | `backends.auth.aws.service` / `backends.auth.aws.region` | string | none | The SigV4 service (e.g. `bedrock-agentcore`) and region (e.g. `us-east-1`) to sign under. Each must be non-empty and only lowercase letters, digits, or `-`, because the signer uses the value verbatim. Required for an `aws://` auth, refused otherwise. |
 
@@ -129,6 +129,21 @@ with a backend `url` of `https://gateway-1.example.com/github` leaves as
 `gateway-1.example.com/github/zen`. The original destination and the agent's own path stay in policy
 and in the audit record. The box checks the backend's address against policy before it connects, so
 a `forbid` on a metadata or private address refuses a backend that resolves there.
+
+A `secret` on the entry may sit beside a backend, but only as `env://`, and it is phantom-only: the
+box provisions a placeholder in the named variable (so the agent's credential-shaped code works) and
+strips it from the request, and never sends the real value — the backend handles the destination's
+auth downstream. Because the box never reads the real value, the named variable may be unset, and
+`secret.inject` is refused (there is nothing to inject). A signed destination `secret` (`aws://` or
+`credsd://`) is refused beside a backend, because it mints no placeholder to strip.
+
+When the backend `url` has a path prefix, the box refuses a request whose path contains an encoded
+slash (`%2F`) or backslash (`%5C`): joining a prefix in front of an escaped separator could change
+which path the backend sees, so the box fails the request rather than risk a traversal. This rejects
+some legitimate requests — for example a GitLab path such as
+`/api/v4/projects/1/repository/files/src%2FREADME.md`. If a destination needs encoded separators,
+give the backend a **dedicated host with no path prefix** (`url = "https://gw.example.com"`), which
+carries no join and so no restriction.
 
 A backend's `auth` rides an `https` backend. An `env://` token is attached as-is; an `aws://` profile
 is SigV4-signed over the **backend** host — the box signs the request after it rewrites the `Host` to

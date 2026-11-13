@@ -49,9 +49,12 @@ route that names no profile then fails at signing time, per request, rather than
 than not starting: the request goes upstream bare, and the upstream's `401` reads
 like the boundary denying the call.
 
-A route is either **opaque** (`RouteSpec::opaque`) — one secret attached
-at one location, standing behind a phantom — or **signed AWS**
-(`RouteSpec::signed_aws`), SigV4-signed across several headers. A signed
+A route is one of four kinds. **Opaque** (`RouteSpec::opaque`) — one secret attached
+at one location, standing behind a phantom. **Signed AWS**
+(`RouteSpec::signed_aws`), SigV4-signed across several headers. And two for a re-route to a backend:
+**box-owned** (`RouteSpec::box_owned`) attaches the box's own credential — a backend token — at one
+location with no phantom; and **strip-phantom** (`RouteSpec::strip_phantom`) mints a placeholder the
+workload presents and strips it, attaching nothing (a re-routed destination's own secret). A signed
 route takes no inject location and mints no phantom, because nothing is placed for
 the vault to recognize. Add `harness_location(mode)` to an opaque route when the
 workload presents the phantom somewhere other than where the real secret attaches. It returns
