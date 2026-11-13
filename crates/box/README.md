@@ -476,7 +476,7 @@ the policy copy, and the containment configs out of the workload's reach.
 
 Distinct directories are distinct boxes and share no state. The `box_id` labels a box but does not
 locate it. A generated one is `box-` and 16 lowercase hexadecimal digits. A supplied one is a prefix
-of 1 to 16 letters, digits, `.`, `_`, or `-`, then `-` and 16 lowercase hexadecimal digits. A box
+of 1 to 15 letters, digits, `.`, `_`, or `-`, then `-` and 16 lowercase hexadecimal digits. A box
 that already has an ID refuses a different supplied one, so a box first run without a supplied ID
 keeps the ID it generated. `run` checks a supplied ID's format before it starts, so a malformed ID
 does not use up the process's one `run` attempt.

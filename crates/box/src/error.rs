@@ -331,7 +331,7 @@ pub(crate) enum ConfigError {
     RecordIdentity { found: String },
 
     #[error(
-        "box ID {found:?} is invalid; a box ID is a prefix of 1 to 16 letters, digits, `.`, `_`, \
+        "box ID {found:?} is invalid; a box ID is a prefix of 1 to 15 letters, digits, `.`, `_`, \
          or `-` that does not start with `.` or `-`, then `-` and 16 lowercase hexadecimal digits"
     )]
     SuppliedIdentity { found: String },

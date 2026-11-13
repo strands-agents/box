@@ -270,7 +270,7 @@ fn a_supplied_box_id_names_the_box_and_its_telemetry() {
             .expect("stored box_id")
     };
 
-    let supplied = "claude-code-with-3f9a1c0e7b2d4a6f";
+    let supplied = "claude-code-wit-3f9a1c0e7b2d4a6f";
     let config = config_for(supplied);
     let (ok, stderr) = run(&config, Some(supplied));
     assert!(ok, "{stderr}");
@@ -294,17 +294,17 @@ fn a_supplied_box_id_names_the_box_and_its_telemetry() {
 
     let (ok, stderr) = run(&config, Some(supplied));
     assert!(ok, "the same ID reopens its box: {stderr}");
-    let (ok, stderr) = run(&config, Some("claude-code-with-0000000000000000"));
+    let (ok, stderr) = run(&config, Some("claude-code-wit-0000000000000000"));
     assert!(!ok, "another ID must be refused");
     assert!(stderr.contains("does not match this box"), "{stderr}");
     assert_eq!(stored(supplied), supplied);
 
-    let retried = "claude-code-with-aaaaaaaaaaaaaaaa";
+    let retried = "claude-code-wit-aaaaaaaaaaaaaaaa";
     let retry_config = config_for(retried);
     let output = std::process::Command::new(host.join("host"))
         .arg("--box-id-retry")
         .arg(&retry_config)
-        .arg("claude-code-with-AAAAAAAAAAAAAAAA")
+        .arg("claude-code-wit-AAAAAAAAAAAAAAAA")
         .arg(retried)
         .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
         .env("EXPERIMENTAL_X86_SUPPORT", "TRUE")

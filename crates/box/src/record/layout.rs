@@ -5784,7 +5784,7 @@ mod tests {
     fn a_supplied_identity_names_a_new_box_and_survives_reopen() {
         let operator_home = tempfile::tempdir().expect("operator home");
         let parent = tempfile::tempdir().expect("box parent");
-        let supplied = "claude-code-with-3f9a1c0e7b2d4a6f";
+        let supplied = "claude-code-wit-3f9a1c0e7b2d4a6f";
         let root = configured_box_as(operator_home.path(), parent.path(), supplied);
 
         for again in [None, Some(supplied)] {
@@ -5858,7 +5858,7 @@ mod tests {
             "-probe-3f9a1c0e7b2d4a6f",
             ".probe-3f9a1c0e7b2d4a6f",
             "pro/be-3f9a1c0e7b2d4a6f",
-            "claude-code-withx-3f9a1c0e7b2d4a6f",
+            "claude-code-with-3f9a1c0e7b2d4a6f",
         ] {
             let mut opened = with_operator_home(operator_home.path(), || {
                 BoxRoot::open_directory(&root).expect("empty box opens")
