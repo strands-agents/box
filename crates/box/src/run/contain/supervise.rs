@@ -1,5 +1,7 @@
 //! The contained child's OS lifetime: its process group and the terminal.
 
+#[cfg(unix)]
+use std::io::IsTerminal;
 use std::process::{ExitCode, ExitStatus, Stdio};
 use std::time::Duration;
 
@@ -401,10 +403,16 @@ pub(crate) struct Contained {
     #[cfg(target_os = "linux")]
     _relays: Vec<crate::run::netns_relay::NetnsRelay>,
 
+    /// The agent's ingress relays, one per `[[agent.ingress]]` entry, held for exactly the
+    /// workload's lifetime.
+    _ingress: Vec<ingress::Ingress>,
+
     /// This box's trusted half. It outlives the workload it decides for: dropping it unbinds the
     /// broker socket, joins the gateway's thread, withdraws the live record, and releases the box
     /// lock. [`Contained::wait`] also watches its broker, because a boundary that stopped serving
     hosted: crate::run::hosted::HostedBox,
+    #[cfg(unix)]
+    diagnostics: Option<crate::run::diagnostics::Diagnostics>,
 }
 
 impl Contained {
@@ -455,7 +463,9 @@ impl Contained {
             _boundary: boundary,
             #[cfg(target_os = "linux")]
             _relays: Vec::new(),
+            _ingress: Vec::new(),
             hosted,
+            diagnostics: None,
         })
     }
 
@@ -475,6 +485,31 @@ impl Contained {
         let (relay_box_side, relay_child_side) =
             crate::run::netns_relay::NetnsRelay::control_pair()?;
 
+        // Bound before the spawn, so a port that is in use refuses the run before the agent starts.
+        let mut ingress = Vec::with_capacity(boundary.ingress().len());
+        for &(address, workload_port) in boundary.ingress() {
+            #[cfg(target_os = "macos")]
+            refuse_a_held_workload_port(workload_port)?;
+            let listener = std::net::TcpListener::bind(address).map_err(|source| {
+                crate::error::SuperviseError::Control {
+                    reason: format!("binding the ingress {address}: {source}"),
+                }
+            })?;
+            ingress.push((listener, address, workload_port));
+        }
+        // The callers the relays hold at once, split evenly across the listeners.
+        let limit = if ingress.is_empty() {
+            0
+        } else {
+            (ingress_connection_limit() / ingress.len()).max(1)
+        };
+        for (_, address, workload_port) in &ingress {
+            eprintln!(
+                "strands-box: [ingress] {address} is relayed to the agent's port \
+                 {workload_port}, at most {limit} callers at once"
+            );
+        }
+
         let own_terminal = terminal.is_some();
         let mut signals = match signals {
             Some(signals) => signals,
@@ -483,6 +518,25 @@ impl Contained {
         if own_terminal {
             signals.restore_default = false;
         }
+        #[cfg(unix)]
+        let diagnostics = if own_terminal || std::io::stderr().is_terminal() {
+            Some(
+                crate::run::diagnostics::Diagnostics::capture()
+                    .map_err(|source| SuperviseError::Diagnostics { source })?,
+            )
+        } else {
+            None
+        };
+        let stderr = Stdio::inherit();
+        #[cfg(unix)]
+        let stderr = match &diagnostics {
+            Some(diagnostics) => Stdio::from(
+                diagnostics
+                    .stderr()
+                    .map_err(|source| SuperviseError::Diagnostics { source })?,
+            ),
+            None => stderr,
+        };
         let (stdin, stdout, stderr) = match terminal {
             Some(file) => {
                 let input = file
@@ -493,7 +547,7 @@ impl Contained {
                     .map_err(|source| SuperviseError::Spawn { source })?;
                 (Stdio::from(input), Stdio::from(output), Stdio::from(file))
             }
-            None => (stdio(), stdio(), Stdio::inherit()),
+            None => (stdio(), stdio(), stderr),
         };
         let (mut group, trampoline) = spawn_registered(
             &boundary,
@@ -523,14 +577,36 @@ impl Contained {
         // Start the relay only after the child is spawned. `NetnsRelay::start_each` blocks until
         // the descriptor arrives, and the descriptor comes *from* the trampoline.
         #[cfg(target_os = "linux")]
-        let relays = {
+        let (relays, ingress) = {
             drop(relay_child_side);
-            // **The same list the containment config was built from**, gateway first.
-            match crate::run::netns_relay::NetnsRelay::start_each(
-                relay_box_side,
+            // **The same list the containment config was built from**, gateway first. The ingress
+            // relay takes the control socket after the last egress listener has arrived on it.
+            let started = crate::run::netns_relay::NetnsRelay::start_each(
+                &relay_box_side,
                 boundary.served_ports(),
-            ) {
-                Ok(relays) => relays,
+            )
+            .and_then(|relays| {
+                if ingress.is_empty() {
+                    return Ok((relays, Vec::new()));
+                }
+                let ports: Vec<u16> = ingress.iter().map(|(_, _, port)| *port).collect();
+                let workloads = ingress::Workload::in_namespace_ports(relay_box_side, &ports)
+                    .map_err(crate::error::RelayError::from)?;
+                let started = ingress
+                    .into_iter()
+                    .zip(workloads)
+                    .map(|((listener, _, _), workload)| {
+                        ingress::Ingress::start(
+                            ingress::IngressConfig::new(ingress::Source::tcp(listener), workload)
+                                .connection_limit(limit),
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(crate::error::RelayError::from)?;
+                Ok((relays, started))
+            });
+            match started {
+                Ok(started) => started,
                 Err(error) => {
                     // No route out means every model request would fail. Tear the
                     // child down rather than run a workload that cannot work.
@@ -543,6 +619,34 @@ impl Contained {
             }
         };
 
+        // On macOS the agent listens on the host's loopback, so each relay connects to it directly.
+        #[cfg(target_os = "macos")]
+        let ingress = match ingress
+            .into_iter()
+            .map(|(listener, _, port)| {
+                ingress::Ingress::start(
+                    ingress::IngressConfig::new(
+                        ingress::Source::tcp(listener),
+                        ingress::Workload::loopback(port),
+                    )
+                    .connection_limit(limit),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(started) => started,
+            Err(error) => {
+                let _ = group.stop().await;
+                if let Some(mut terminal) = terminal {
+                    let _ = terminal.restore();
+                }
+                return Err(crate::error::SuperviseError::Control {
+                    reason: format!("starting the ingress relay: {error}"),
+                }
+                .into());
+            }
+        };
+
         Ok(Self {
             group,
             signals,
@@ -551,7 +655,10 @@ impl Contained {
             _boundary: boundary,
             #[cfg(target_os = "linux")]
             _relays: relays,
+            _ingress: ingress,
             hosted,
+            #[cfg(unix)]
+            diagnostics,
         })
     }
 
@@ -585,6 +692,16 @@ impl Contained {
             None => Ok(()),
         };
         let setup_result = self.trampoline.setup_failure();
+        #[cfg(unix)]
+        let diagnostics_result = match self.diagnostics.as_mut() {
+            Some(diagnostics) => {
+                drop(self.hosted);
+                diagnostics
+                    .finish()
+                    .map_err(|source| SuperviseError::Diagnostics { source })
+            }
+            None => Ok(()),
+        };
 
         // The drain moved to `command::run::execute`, which is the one point every exit reaches —
         // including the failures before a `HostedBox` exists. A run that ends in an error still
@@ -597,6 +714,8 @@ impl Contained {
         termination_result?;
         native_result?;
         terminal_result?;
+        #[cfg(unix)]
+        diagnostics_result?;
         contained_exit_code(status, setup_result)
     }
 }
@@ -671,7 +790,7 @@ impl LeafBox {
         let relays = {
             drop(relay_child_side);
             match crate::run::netns_relay::NetnsRelay::start_each(
-                relay_box_side,
+                &relay_box_side,
                 boundary.served_ports(),
             ) {
                 Ok(relays) => relays,
@@ -1077,12 +1196,60 @@ fn exit_code(status: ExitStatus) -> ExitCode {
     ExitCode::from(value)
 }
 
+/// The callers the ingress relay holds at once: an eighth of this process's raised descriptor limit,
+/// so each caller's relay and egress descriptors leave the rest of the box room.
+fn ingress_connection_limit() -> usize {
+    let Some(limit) = crate::run::descriptor_limit::raise() else {
+        return INGRESS_CONNECTION_FLOOR;
+    };
+    connection_limit_for(limit)
+}
+
+fn connection_limit_for(descriptor_limit: u64) -> usize {
+    usize::try_from(descriptor_limit / 8)
+        .unwrap_or(INGRESS_CONNECTION_CEILING)
+        .clamp(INGRESS_CONNECTION_FLOOR, INGRESS_CONNECTION_CEILING)
+}
+
+/// The fewest callers the ingress relay holds at once, however low the descriptor limit.
+const INGRESS_CONNECTION_FLOOR: usize = 16;
+/// The most callers the ingress relay holds at once, however high the descriptor limit.
+const INGRESS_CONNECTION_CEILING: usize = 10_000;
+
+/// Refuse the run when another process already listens on the agent's port: on macOS the port is on
+/// the host's loopback, so the relay would carry callers to that process.
+#[cfg(target_os = "macos")]
+fn refuse_a_held_workload_port(port: u16) -> Result<(), BoxError> {
+    let address = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port));
+    if std::net::TcpStream::connect_timeout(&address, std::time::Duration::from_millis(200)).is_ok()
+    {
+        return Err(crate::error::SuperviseError::Control {
+            reason: format!(
+                "the agent's port {port} already has a listener at {address}; another process \
+                 holds it, so the ingress relay would reach that process and not the agent"
+            ),
+        }
+        .into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::error::SetupStage;
     use crate::test_support::{HELD_GROUP, SIGNALS, processes_exit, wait_for_pids};
     use std::os::unix::process::ExitStatusExt as _;
+
+    /// **The relay holds an eighth of the descriptor limit in callers**, within its floor and
+    /// ceiling.
+    #[test]
+    fn the_ingress_connection_limit_is_an_eighth_of_the_descriptor_limit() {
+        assert_eq!(connection_limit_for(1_024), 128);
+        assert_eq!(connection_limit_for(10_240), 1_280);
+        assert_eq!(connection_limit_for(64), INGRESS_CONNECTION_FLOOR);
+        assert_eq!(connection_limit_for(1_048_576), INGRESS_CONNECTION_CEILING);
+    }
 
     /// **A leaf setup failure carries the trampoline's message**, which names the binary and the
     /// library the view could not resolve, rather than the stage alone.

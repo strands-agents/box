@@ -243,6 +243,10 @@ impl Kernel for CallKernel {
     async fn spawn_host(&self, spawn: HostSpawn) -> io::Result<HostSpawnOutcome> {
         self.correlation.scope(self.backend.spawn_host(spawn)).await
     }
+
+    fn host_program(&self, name: &str) -> Option<std::path::PathBuf> {
+        self.backend.host_program(name)
+    }
 }
 
 #[cfg(all(test, feature = "test-support"))]

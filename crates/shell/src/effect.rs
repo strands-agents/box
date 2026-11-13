@@ -230,6 +230,11 @@ pub trait EffectInterceptor: Send + Sync {
 /// Correlates one admitted effect with its eventual outcome.
 #[async_trait]
 pub trait EffectPermit: Send {
+    /// The absolute directory this spawn's admission checked, or `None` to retain the caller's directory.
+    fn spawn_working_directory(&self) -> Option<&std::path::Path> {
+        None
+    }
+
     /// Record the outcome after the admitted effect has executed.
     ///
     /// An error cannot undo an already-completed effect. The Shell reports it

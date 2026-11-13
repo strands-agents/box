@@ -448,21 +448,13 @@ fn e4b_concurrent_python_requests_are_admitted() {
 // E5 — Bidirectionality: what request/reply cannot carry
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/// The alias forwards no stdin, so a command that reads gets nothing.
+/// A command that reads stdin through the alias gets what the workload piped to it.
 ///
-/// `ShellRequest` carries `version` and `command` and nothing else, and the alias closes
-/// every descriptor above stdio before connecting. So there is no channel for input at
-/// all — not an empty one, none.
-///
-/// This was the concrete blocker behind an MCP-over-stdio plan: an MCP server is a bidirectional
-/// stdio session, and version 1 of this protocol has no frame that could carry one.
-///
-/// The decision that answers it is docs/design/decisions.md#a-box-is-one-kernel-and-many-programs.
-/// The blocker is now lifted for the *transport* protocol (version 2), which carries in-band stdin
-/// and many frames per connection; this test pins version 1's behaviour, which is unchanged and
-/// still what the alias speaks.
+/// **Inverted 2026-11-11.** This asserted that no stdin arrived, and its own failure message said
+/// to update the decisions once the protocol carried input. The Shell alias now streams finite
+/// stdin as `Input` frames after its `Call`.
 #[test]
-fn e5a_no_stdin_reaches_a_shell_command() {
+fn e5a_stdin_reaches_a_shell_command() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
@@ -476,10 +468,8 @@ fn e5a_no_stdin_reaches_a_shell_command() {
     eprintln!("E5a stdin: {text:?} stderr={:?}", stderr(&output));
     assert_workload_launched(&output, "E5a");
     assert!(
-        !text.contains("read=[from_workload_stdin]"),
-        "EXPERIMENT E5a: the protocol carries no stdin, so a piped value cannot arrive. \
-         If this ever passes, the protocol gained an input channel, so update \
-         docs/design/decisions.md#no-state-crosses-a-call-boundary. \
+        text.contains("read=[from_workload_stdin]|status=0"),
+        "EXPERIMENT E5a: a piped value must reach the command through the alias. \
          output={output:?}"
     );
 }

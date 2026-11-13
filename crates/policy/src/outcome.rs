@@ -152,18 +152,7 @@ pub enum Outcome<'a> {
         /// How the operation ended.
         result: FsResult,
     },
-    /// One completed MCP call (`mcp:call::response`).
-    ///
-    /// A call that COMPLETED is a `response`, whatever the server then said — a JSON-RPC error reply
-    /// is still `::response`, exactly as an HTTP 500 is a `Http` `::response` and a non-zero exit is a
-    /// `ShellRun` `::response`. `::error` across this codebase means the box's effect did not occur,
-    /// not that the counterparty was unhappy; a call that never completes simply records nothing.
-    ///
-    /// The response names the same `mcp:call` action whose request was authorized, so a temporal rule
-    /// can `count`/`formerly` over `mcp:call::response`. The per-item identity — `tool` for a
-    /// `tools/call`, `prompt` for a `prompts/get`, `uri` for a `resources/read` — rides the same
-    /// `McpCallInput` fields the request carried, so a rule keyed on any of them joins the two legs
-    /// on identity (mirroring the request leg, which emits all three together).
+    /// One terminal or indeterminate MCP call (`mcp:call::response`).
     Mcp {
         /// The MCP server name, from the operator's file.
         server: &'a str,
@@ -178,4 +167,89 @@ pub enum Outcome<'a> {
         /// The resource uri a `resources/read` named, if any.
         uri: Option<&'a str>,
     },
+}
+
+/// The per-tool `::response` an allowed `tools/call` owes, from `refine_tool_call` to `record_tool_response`.
+#[must_use = "a dropped pending tool response is a `::response` that history never sees"]
+pub struct PendingToolResponse {
+    pub(crate) request_id: crate::RequestId,
+    pub(crate) identity: crate::schema::ActionIdentity,
+    pub(crate) input: dogwood_language::Value,
+}
+
+impl std::fmt::Debug for PendingToolResponse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("PendingToolResponse")
+            .field("identity", &self.identity)
+            .finish_non_exhaustive()
+    }
+}
+
+/// How one MCP tool call ended, recorded on its own `::response` as `output.reply`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpReply {
+    /// The server answered with a result that does not report an error.
+    Result,
+    /// The server answered with a result that sets `isError`.
+    ToolError,
+    /// The server answered with a JSON-RPC error.
+    ProtocolError,
+    /// The client cancelled the call.
+    Cancelled,
+    /// The call's end is uncertain: its connection ended, the reply was not read, or the reply only
+    /// accepted an MCP task.
+    Indeterminate,
+}
+
+impl McpReply {
+    /// The value a JSON-RPC reply to a `tools/call` reports.
+    ///
+    /// Only a `result` that is an object, with an `isError` that is absent or a boolean, is a
+    /// `Result` or a `ToolError`. A result that only accepts an MCP task or has a `resultType` other
+    /// than `complete`, and any other shape, is `Indeterminate`, so it cannot satisfy a precondition
+    /// that requires `result`.
+    #[must_use]
+    pub fn of_reply(reply: &serde_json::Value) -> Self {
+        if reply.get("error").is_some() {
+            return Self::ProtocolError;
+        }
+        let Some(serde_json::Value::Object(result)) = reply.get("result") else {
+            return Self::Indeterminate;
+        };
+        // A task's result arrives later, through `tasks/result`, and any `resultType` but
+        // `complete` (such as `input_required`) is not the call's answer; Box records neither.
+        if result.contains_key("task")
+            || result
+                .get("resultType")
+                .is_some_and(|kind| kind.as_str() != Some("complete"))
+        {
+            return Self::Indeterminate;
+        }
+        match result.get("isError") {
+            None | Some(serde_json::Value::Bool(false)) => Self::Result,
+            Some(serde_json::Value::Bool(true)) => Self::ToolError,
+            Some(_) => Self::Indeterminate,
+        }
+    }
+
+    /// Every value, as a rule spells it on `output.reply`.
+    pub(crate) const VALUES: [&'static str; 5] = [
+        "result",
+        "tool_error",
+        "protocol_error",
+        "cancelled",
+        "indeterminate",
+    ];
+
+    /// The value as `output.reply` records it.
+    pub(crate) fn eid(self) -> &'static str {
+        match self {
+            Self::Result => "result",
+            Self::ToolError => "tool_error",
+            Self::ProtocolError => "protocol_error",
+            Self::Cancelled => "cancelled",
+            Self::Indeterminate => "indeterminate",
+        }
+    }
 }

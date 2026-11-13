@@ -24,6 +24,7 @@ pub use boundary::{
 pub use capability::{CapabilitySet, CredentialCapability, is_bindable_host, normalize_host};
 pub use effect::{
     EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, McpFrame, McpListReply,
+    ReplyObserver,
 };
 pub use error::{PROXY_ORIGIN_HEADER, PROXY_ORIGIN_VALUE, ProxyError, Result};
 pub use mcp::{
@@ -33,4 +34,4 @@ pub use mcp::{
 pub use seams::{Emitter, StubEmitter};
 
 #[cfg(feature = "tls-intercept")]
-pub use intercept::{MitmConfig, MitmHandle, MitmInterceptor, ResponseLimits};
+pub use intercept::{BackendDial, MitmConfig, MitmHandle, MitmInterceptor, ResponseLimits};

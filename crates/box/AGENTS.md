@@ -6,7 +6,7 @@ Read the **"`strands-box` is interface-frozen"** section of the
 [repository guidance](../../AGENTS.md) before changing anything here. A change to an
 observable surface — the CLI verbs and flags, `box.toml`'s keys, the four box inputs, the
 on-disk records (`Record` at `RECORD_VERSION` and each later record version through
-`SHARED_PROGRAM_RECORD_VERSION`, `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
+`SHELL_SIZE_LIMITS_RECORD_VERSION`, `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
 `PROTOCOL_VERSION`, the alias names and their socket derivation, the
 policy action vocabulary, the composed workload environment — or to a foundational premise,
 needs the user's explicit approval **before** the code is written. Fixing a defect behind the
@@ -90,6 +90,15 @@ now, because `run` takes one `--config` path and searches nowhere. **That direct
   and hands off to `dispatch`, which takes one verb per arm. A fifth step, or an inline
   `insert`/`join`/`if let`, belongs in a phase. If either file grows, the phase boundary is
   wrong.
+- **Linux x86 command execution requires explicit operator consent.** `command::execute` calls
+  `platform::preflight` before hardening, runtime creation, host callbacks, or configuration reads.
+  The operator must set `EXPERIMENTAL_X86_SUPPORT` to the exact value `TRUE`. This check covers
+  the CLI and the library's `run` and `generate_policy_schema` calls. Help and version output
+  finish during argument parsing, before this check. ARM and other targets retain their startup
+  behavior. `EXPERIMENTAL_LINUX_SUPPORT` remains unused. The opt-in changes no containment
+  control and is not inherited into the workload environment.
+  `linux_startup::linux_commands_require_exact_x86_opt_in_only_on_x86` and
+  `box_library::x86_startup_matrix` cover admission and refusal through both entry paths.
 - **No stringly-typed catch-all error.** A new failure gets a variant on the owning phase's
   enum, never a `format!` into a general one.
 
@@ -157,8 +166,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   caller wanting determinism passes an absolute program path).
 
   **`tests/four_inputs.rs` is the guard.** It asserts both halves: no withheld flag is a box
-  argument, and `ConfigFile` carries exactly **ten** keys — `agent`, `box_dir`, `egress`, `mcp`,
-  `name`, `policy`, `telemetry`, `tool`, `experimental-features`, and `file-attributes`. That is the `box.toml` key set, and it is
+  argument, and `ConfigFile` carries exactly **twelve** keys — `agent`, `box_dir`, `egress`, `mcp`,
+  `name`, `policy`, `telemetry`, `tool`, `experimental-features`, `file-attributes`, `limits`, and
+  `gateway`. That is the `box.toml` key set, and it is
   **not** the stored `Record`'s key set: `Record` adds `version` and `box_id`, which no operator
   authors. Read
   which one a passage means before you change a count. The withheld-flag guard is split in two —
@@ -243,12 +253,13 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   about one box. **Do not reintroduce `--name`**; reconciling a flag against the file is the shape in
   which the file's key became silently dead once already.
 
-  **`box.toml` carries ten top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
+  **`box.toml` carries twelve top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
   `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
-  `[experimental-features]`, and `file-attributes`.** The experimental settings select native file
+  `[experimental-features]`, `file-attributes`, `[limits]`, and `[gateway]`.** The experimental settings select native file
   checks and tool grammars. They add no authority beyond the authored policy. `file-attributes` adds
   no grant: it widens what the workload's own `write` lists allow on macOS, so it is part of the
-  workload input, and each process discloses it. `[agent]` and each
+  workload input, and each process discloses it. `[gateway] upgrade_http` adds no grant either:
+  policy decides each upgraded request on port 443, as it decides a `CONNECT` to that host. `[agent]` and each
   `[tool.<label>]` hold one `ProcessSpec`, which is six fields — `command`, `workspace`, `env`,
   `filesystem`, `native-filesystem-policy`, and `grammar`. Only a `[tool.<label>]` takes
   `grammar`, behind `[experimental-features] tool-grammars`, and `[agent]` refuses it. `filesystem` holds the path lists: eight for `[agent]`, six
@@ -677,8 +688,32 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   handler's own tree was granted. The floor names neither tree, because an operator makes a
   virtualenv or a `node_modules` wherever they like. An entry on a path that does not exist is
   refused, never skipped, and `record/config/filesystem.rs` states every other refusal class.
-- **The alias must send `StdinEof`.** `forward` sends `Open`, `Call`, **`StdinEof`**, and the third
-  frame is not optional. A harness invoking `zsh -c` supplies nothing on stdin, so without the EOF
+- **A Shell alias streams finite stdin after the Call.** It classifies fd 0 with `fstat`: a pipe,
+  a regular file, or a socket is read; a terminal, another device, or a closed fd is not. A thread
+  reads it and `pump_input` sends `Input` frames, coalesced for `INPUT_COALESCE_WAIT` and up to
+  `MAX_CHUNK_BYTES`, then `InputEof`. The broker merges a Program's unread stdin into one buffer, at most `max_stdin` bytes, behind a two-frame channel, so a writer's
+  small writes do not trip flow control while the command is not reading. The alias reads stdin
+  whether or not the command reads it, so it consumes bytes a POSIX shell would leave, such as the
+  rest of an inherited file. The alias returns on `Exit`, so a writer that keeps the pipe open holds nothing:
+  Claude Code 2.1.292 gives its Bash tool such a stdin, and collecting to EOF before the Call made
+  every agent command wait 10 s and fail. A command that reads such a stdin waits until the Shell
+  deadline. The alias forwards every byte, and the broker applies `[limits.shell] max_stdin`
+  (`ShellLimits::max_stdin`, 64 KiB by default, never 0): it feeds exactly the first `max_stdin`
+  bytes, discards the rest, sends no Denied, and ignores `InputEof`, so the writer never blocks or
+  gets EPIPE, a command that does not read is unaffected, and one that reads past the cap waits for
+  the Shell deadline and fails; a failed Call then gets a stderr note that its input was cut. On a
+  read error the alias sends `Signal` and no `InputEof`, the broker drops the Call so
+  `ProcessGroup::drop` kills and reaps each process it started, and the alias exits 125. The broker
+  cuts the same way at `max_stdin` times `MAX_PROGRAMS_PER_CONNECTION` per connection, and
+  input waits in the same per-Program buffer; the pump sends it in frames of at most `MAX_CHUNK_BYTES`,
+  because the Shell's `ChannelReader` shifts a frame's remainder on each read. It refuses an `Input` longer than `MAX_ENCODED_CHUNK_BYTES`
+  before it decodes it, and after a refused `Input` signals the running `Call`, leaves stdin open (`Close` also signals
+  and leaves stdin open)
+  so the Call never reads end-of-file on part of its input, drops every later `Input`, and refuses each later `Call` on that
+  Program. Input for a Program whose Shell no longer reads stdin is dropped. Python and MCP aliases read no stdin here, and a tool leaf still gets
+  `Stdio::null()`.
+- **The alias must send `StdinEof`.** A Shell alias's `forward` sends `Open`, `Call`, each `Input`,
+  and **`StdinEof`**. The EOF frame is not optional. A harness invoking `zsh -c` often supplies nothing on stdin, so without the EOF
   the Program's stdin channel stays open and any command that pre-reads stdin blocks to its
   deadline — the `lua` builtin does exactly that, so **every** `lua` call took 34–36s and came back
   as `the call exceeded its deadline`. Two things worth not repeating:
@@ -846,18 +881,24 @@ box_root_path, default_box_directory}`, `BoxRoot::{sited, open}`, `config::selec
 argue it as an addition and note what `ls` cannot mean any more: there is no set of boxes to list, so
 the verb would report on one directory the caller already named.
 
-## Open findings — divergences no decision covers
+## Root-owned output
 
-- **Root ownership remains on policy-mediated file creation.** The Linux sandbox startup check
-  refuses directory write grants, but Shell and Python requests execute in the trusted process.
-  They pass policy and `Reach` checks without becoming containment authorizations.
-  `VfsKernel::open_host_file` and Python's `write` through `HeldPath` can create files with that process's
-  identity. A root launch therefore retains root ownership on permitted new files.
-  The later privileged-consumer effect for this route remains unmeasured. The sandbox restriction
-  does not establish closure of the broader ownership finding.
-  The Shell's symlink path still requires source read/write and destination write permission.
-  `VfsKernel::verify_symlink_target` also refuses absolute targets and escape beyond the bind root.
-  A project-only policy cannot plant the review's `/etc/shadow` example through this path.
+Root-owned output is permitted when the operation passes the controls for its route.
+A Linux sandbox workload uses its filesystem grants; see
+[root sandbox launches](../../docs/design/containment.md#linux-root-sandbox-launches).
+Shell and Python requests execute in the box's trusted process, outside the sandbox.
+They pass policy and `Reach` checks without becoming containment authorizations.
+`VfsKernel::open_host_file` and Python's `write` through `HeldPath` can create files with that
+process's identity. A root launch therefore retains root ownership on permitted new files.
+
+A separate program that later consumes those files uses its own authority.
+Its later access does not by itself establish a failed Box policy, reach check, or sandbox grant.
+Keep the controls on Box's own operations: the Shell's symlink path requires source read/write
+and destination write permission. `VfsKernel::verify_symlink_target` also refuses absolute targets
+and escape beyond the bind root. A project-only policy cannot create a link to `/etc/shadow`
+through this path. Security finding disposition remains separate from this behavior contract.
+
+## Open findings — divergences no decision covers
 
 - **An unresolved metadata read is classified by a second lookup.** `Reach::is_an_unresolved_answer`
   walks the path with `symlink_metadata` after `approve_host` refused it, so the two lookups are not
@@ -870,18 +911,34 @@ the verb would report on one directory the caller already named.
   The maintainers approved this premise for macOS and Linux: protect configured commands from
   workload writes. Writes by unrelated host programs remain outside this boundary.
   `ConfiguredCommands::load` accepts an operator-writable command with multiple hard links and
-  records that it needs alias scans. `validate_reach` checks every process's write grants,
-  including the agent, tools, and local MCP servers. The command, its symbolic-link routes, and
-  their ancestors cannot overlap those grants. Each writable directory must pass a complete
-  scan that finds no hard-link alias, including in subdirectories excluded by `deny`.
+  records that Box must check whether the workload can write through its other filesystem names.
+  `validate_reach` checks every process's write grants, including the agent, tools, and local
+  MCP servers. The command, its symbolic-link routes, and their ancestors cannot overlap those grants. Unless the guarded Linux shortcut applies,
+  each writable directory must pass a complete scan that finds no filesystem hard link to the
+  command, including in subdirectories excluded by `deny`.
   The scan retains directory descriptors, does not follow symbolic links, and refuses unreadable
   entries, observable directory changes, or exhausted inspection limits. It is not an atomic
   snapshot. Each tree has one 30-second inspection budget across recursion and a 128-level depth
   limit. The budget replaces an uncalibrated 100,000-entry cutoff that rejected large, fast scans.
   Thirty seconds matches the default Shell allowance; it is not a guarantee for every filesystem.
   Time checks cannot interrupt a blocked filesystem call, and per-tree budgets do not bound total
-  startup time. Shell and Monty also scan directories involved in brokered mutations, so a move
-  cannot import a command alias into a writable grant.
+  startup time. Shell and Monty apply the same guarded check or scan before directory changes,
+  so a move cannot import a filesystem hard link to a command into a writable grant.
+
+  The Linux shortcut requires every hard-link name to be in the program's own directory.
+  `mutable_aliases` attempts the optional mount check only when `symlink_metadata` identifies
+  the current target as a directory. For regular files, missing paths, symbolic links, or
+  metadata errors, it keeps the command identities for the existing path lookup.
+  Box counts matching directory entries against the open file's current link count and checks
+  for changes during inspection. The program, its directory, and the directory named by the
+  current write grant or requested change must share one ext4, XFS, or tmpfs mount exposing the
+  filesystem's root (`/`). No other mount may share its device or mount point, or occur at or below the
+  program's directory or the checked path. Mount-table snapshots before and after counting
+  must match. Box repeats this inspection before each skip, with a separate 30-second budget
+  checked between filesystem calls. The budget cannot interrupt a blocked call. Any unmet
+  condition, inspection error, or timeout returns to the existing scan. macOS retains the scan
+  for directory targets.
+
   Native containment prevents the workload from creating an alias from a protected command.
   Seatbelt requires source write authority for hard links and renames on macOS.
   Linux permits `linkat` within a writable mount; read-only mounts and separate grant mounts
@@ -897,8 +954,8 @@ the verb would report on one directory the caller already named.
   that other names are safe. On Linux, only `EACCES` is a refusal by itself.
   `ConfiguredCommand::verify` requires the startup identity, link count, owner, group, and mode
   before each multi-link command launch. It repeats the kernel write check for a command admitted
-  without an alias scan. `ContainmentConfig::require_command_identity` records the link count
-  in `command_identities`; single-name commands retain `require_file_identity`.
+  because the operator cannot write it. `ContainmentConfig::require_command_identity` records
+  the link count in `command_identities`; single-name commands retain `require_file_identity`.
   Other `identity_requirements` and `write_protections` still require one name.
   A tool grammar has no additional single-name requirement.
   Rejected: dropping alias checks, because a writable directory can contain another name for

@@ -38,12 +38,12 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `Finding`, `Location`, `PolicyCheck`, `RuleRef`, `Decision`, `DenyReason`, `PolicyAttribution`,
   `RuleId`, `event_schema_source`, `PolicyDiagnostic`, `PolicyError`, `PolicyStagingError`,
   `McpSchemaError`, `compose_action_schema`, `generate_mcp_schema`,
-  `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `Outcome`,
-  `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`, `EffectivePolicy`, `Policy`,
-  `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`, `FsOperation`, `Principal`,
-  `Request`, `RequestId`, `GovernedBox`, `Operator`, `PolicyWarning`, `ToolGrammar`, `ToolGrammars`,
-  `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`. That is 58 names with `--all-features`
-  and 52 by default; recompute it when you touch the façade.
+  `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `McpReply`,
+  `Outcome`, `PendingToolResponse`, `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`,
+  `EffectivePolicy`, `Policy`, `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`,
+  `FsOperation`, `Principal`, `Request`, `RequestId`, `GovernedBox`, `Operator`, `PolicyWarning`,
+  `ToolGrammar`, `ToolGrammars`, `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`. That is 60
+  names with `--all-features` and 54 by default; recompute it when you touch the façade.
 - `check` and `validate` share one composition (`check_and_expand`), and the staged check repeats
   the steps of `open_staged_with_engine` with no engine. A finding keeps a span only when the span
   is an offset into the authored text: a Dogwood parse error and a Cedar validation error over
@@ -113,6 +113,31 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   Do not reintroduce a group action.
 - Key a precondition on `::response`, because a `::request` predicate matches a denied attempt.
   Pinned by `tests/temporal_shell_e2e.rs::a_denied_attempt_satisfies_a_request_keyed_precondition`.
+- An MCP tool's `::response` also records a cancelled, cut-off, or unread call, so a precondition
+  on one also requires `output.reply: "result"`. The gateway hands a `tools/call`
+  reply, copied after redaction, to the request permit's `ReplyObserver`; the permit and the
+  observer share the pending response, and whichever ends second records it, so the tool's leg
+  records exactly when `mcp:call::response` does. A coarse outcome the history keeps for later
+  (`PolicyError::OutcomeKept`) counts as recorded, so the tool's leg queues behind it, on the http
+  and stdio paths alike (`dogwood::tests::a_tool_leg_queues_behind_a_kept_coarse_outcome_and_both_count`). An http reply over the 16 MiB response limit,
+  compressed, cut off, or without the reply matching the request's JSON-RPC id records
+  `indeterminate`, and so does a reply that only accepts an MCP task or has a `resultType` other
+  than `complete` (such as `input_required`): neither is the call's answer, and Box records no
+  later one. The stdio broker never records an `input_required` frame as an answer either. `output.structured` is recorded only for a `result`
+  whose required fields conform to the tool's `outputSchema`; an optional field that does not
+  conform is dropped. Like `input`, it has no size cap of its own; the stdio frame and the gateway's
+  response limit bound both. Measured on macOS, release, 100 calls: each recorded byte costs about
+  5 bytes of history, the per-call time stays near 17 ms and the rule check near 8 ms up to 1 MiB
+  outputs, and an input costs twice an output because both legs record it. `generate_mcp_schema` drops an
+  `outputSchema` that does not generate, so one tool's unreadable output never costs the server its
+  catalog (`mcp_schema::tests::an_output_schema_cedar_cannot_read_drops_only_that_tools_output`).
+  The workload can still make its own http reply unreadable (an output over 16 MiB, or a server
+  that compresses anyway), so only a precondition on `output.structured` is sound; a `forbid`
+  keyed on an earlier output can be avoided.
+  Pinned by
+  `crates/box/.../exchange/tests/protocol_2026_07_28.rs::a_cancelled_call_does_not_satisfy_a_result_precondition`,
+  `adapters/egress.rs::a_reply_observer_dropped_before_a_failed_delivery_records_nothing`,
+  `::a_remote_reply_is_matched_to_its_request_by_id`, and `tests/mcp_tool_output.rs`.
 - History is pruned to the deepest window, and the workload fills that window. State an
   availability bound.
 - Pin a destination on `host` and `port`, and refuse an address with a `forbid` on the string `ip4`
@@ -138,6 +163,17 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `mcp_schema::tests::a_union_argument_accepts_each_member_and_refuses_a_non_member` and
   `tests/runtime_mcp_policy_staging.rs::a_union_argument_is_decided_by_the_policy` and
   `a_datetime_union_member_is_placed_and_its_rule_cannot_be_bypassed`.
+- A per-tool rule keeps its history across a restart only when its head names per-tool actions
+  alone. `commit_discovering` keeps it installed under the server fragments that
+  `mcp_schema::mcp_schemas_in` recovers from the stored action schema. The tools it decides stay
+  held until their schemas stage. A rule with a Box head that reads per-tool history, and a rule
+  whose server never lists in that run, start fresh. Pinned by
+  `tests/runtime_mcp_policy_staging.rs::a_rule_that_names_a_tool_keeps_its_history_across_a_restart`,
+  `::a_rule_that_names_two_servers_keeps_its_history_while_they_list_one_at_a_time`,
+  `::a_rule_that_decides_a_box_action_from_tool_history_is_not_kept_from_the_previous_run`, and
+  `::a_server_that_never_lists_its_tools_unloads_the_kept_rule`. A namespace that this build's
+  base schema declares is never read as a server, which
+  `mcp_schema::tests::a_previous_build_of_the_box_actions_is_not_read_as_a_server` pins.
 - `body_bytes` is the offer on a `::request` and the delivery on a `::response`.
 - Sum an outbound budget over `http:request::response`, as `tests/policies/egress_byte_budget.dw`
   does. One exchange records one such event, at reply time, with the delivered request bytes and

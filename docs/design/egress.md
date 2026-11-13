@@ -42,7 +42,7 @@ gateway. See [local MCP servers](./containment.md#local-mcp-servers).
 Strands Shell's `curl` and Monty's `fetch()` run in the box's trusted process, and both send their
 requests through the same gateway, trusting only its certificate authority. Before they do, each
 refuses a URL that isn't `http` or `https`, or that names `localhost` or a literal loopback,
-private, or link-local address.
+private, link-local, or `0.0.0.0/8` address, or one of two cloud metadata addresses outside `169.254.0.0/16`, or an IPv4-mapped, IPv4-compatible, IPv4-translated, 6to4, Teredo, or `64:ff9b::/96` NAT64 address that carries one of these, or any `64:ff9b:1::/48` address. A NAT64 address under a network's own prefix is not covered.
 
 ```mermaid
 flowchart LR
@@ -69,6 +69,10 @@ flowchart LR
 A client sends either `CONNECT host:port` for HTTPS, or a plain HTTP request with an absolute
 `http://` URL. See [plain HTTP takes the same governed
 path](decisions.md#plain-http-takes-the-same-governed-path-as-https). Both pass the same decisions.
+A plain request to port 80 of a host in `[gateway] upgrade_http` is decided as that host on port
+443, and the gateway speaks TLS to the server itself. The workload's own leg stays plain, so it
+carries no credential. See [a listed host's plain HTTP is upgraded to
+HTTPS](decisions.md#a-listed-host-is-upgraded-from-plain-http-to-https-in-the-gateway).
 
 ```mermaid
 flowchart TD
@@ -141,7 +145,13 @@ handshake with a certificate for that host, signed by the box's certificate auth
 Policy decides `http:request` for every request. It sees the host, the port, the method, the path,
 the body size, and whether the request came inside a `CONNECT`. The gateway puts the path in one
 canonical form first. It decodes percent-escapes only for unreserved characters, leaving `%2F`
-encoded. It removes `.` and `..` segments and omits the query.
+encoded. It removes `.` and `..` segments and omits the query from the policy path.
+
+The forwarded request retains its query, including an explicitly empty `?`. This applies to plain
+HTTP and intercepted HTTPS: `/report?` reaches the origin as `/report?`, while `/report` remains
+`/report`. Header or path edits preserve an empty query unless the replacement path supplies its
+own query. Credential edits can add or remove query parameters. Removing the last parameter from
+an originally nonempty query still removes the delimiter.
 
 After `http:request` permits the request, the gateway opens TLS to the server. It verifies the
 server's certificate against a compiled-in set of public root certificates, then forwards the
@@ -153,10 +163,12 @@ starts TLS. A policy refusal of a request to an HTTP MCP server gets a JSON-RPC 
 
 ### Cloud instance metadata
 
-Policy provides the only check on metadata endpoints. The gateway has no built-in block. A policy
+For gateway traffic, policy provides the only check on metadata endpoints. The gateway has no
+built-in block. Strands Shell `curl` and Monty `fetch()` also refuse a literal metadata address
+before the request leaves, but a name that resolves to one reaches policy. A policy
 needs two `forbid` rules on `net:connect`: one for the metadata hostnames `metadata.google.internal`
-and `metadata.azure.internal`, and one for the metadata addresses `169.254.*`, `fd00:ec2::254`, and
-the IPv6 link-local range.
+and `metadata.azure.internal`, and one for the metadata addresses `169.254.*`, `fd00:ec2::254`,
+Azure WireServer `168.63.129.16`, Alibaba Cloud `100.100.100.200`, and the IPv6 link-local range.
 
 ## How responses reach the workload
 
@@ -170,11 +182,59 @@ HTTP MCP `tools/list` keeps bounded capture for each page and the existing schem
 ([runtime tool discovery](decisions.md#remote-tool-schemas-are-discovered-at-runtime-in-memory)).
 The default 16 MiB cap still applies to requests and these catalog responses.
 
+For an HTTP MCP `tools/call`, the gateway asks the server for an uncompressed reply, and copies the
+reply as it streams, after redaction, so policy history sees the bytes the workload saw. It hands the copy to the request's reply observer
+once the reply matching the request's JSON-RPC id has passed, or when the stream ends. The copy is
+capped at the same 16 MiB, and all copies held at once share 64 MiB, so concurrent tool calls can't
+make the gateway hold a full copy for each connection. A longer reply, a reply over the shared
+budget, a cut-off stream, or a compressed body is recorded as `indeterminate`
+([how a tool call ended](./policy.md)).
+
 One absolute upstream deadline covers request transmission and response receipt, with a default of
 300 seconds. Chunks do not reset it. A later timeout or framing error closes the unfinished response,
 so the workload can receive a processed prefix followed by an error. Box records the request outcome
 when the upstream response completes, fails, or is abandoned, and records delivery completion
 separately.
+
+### Re-routing to a backend
+
+A destination can name a backend, and the gateway dials the backend instead of the destination. The
+two `net:connect` checks split across the two hosts:
+
+1. **The host check stays on the original destination.** The gateway decides `net:connect` on the
+   host the agent named, before DNS. This is the agent's intent, and policy authorizes it exactly as
+   it would a direct request. The re-route is the box's action, so it needs no rule of its own.
+2. **The gateway resolves the backend,** not the original destination, and pins the backend's
+   addresses. It never resolves or dials the original.
+3. **The address check runs on each backend address,** with the original host and port still in the
+   decision. Policy reads the backend address as `ip4` or `ip6`, so the same `forbid` rules on
+   metadata and private ranges refuse a backend that resolves there. A backend that resolves to
+   nothing fails the request, with no fallback to the original.
+
+The gateway presents the backend as the real server on the upstream leg: it sets the TLS name and
+the `Host` header to the backend host, and validates the backend's certificate against the backend
+host. The original host rewrites to the backend only after the request's `Host` has been checked
+against the `CONNECT` authority, so the agent cannot pivot. The original host stays in the
+`http:request` decision and in the audit record; the connected address records the backend.
+
+A backend URL can carry a **path prefix**, and the gateway puts it in front of the agent's request
+path, so a request to `api.github.com/zen` with a backend of `https://gw.example.com/github` leaves
+as `gw.example.com/github/zen`. This is origin substitution, not request rewriting: the prefix is
+operator-authored, and it joins the agent's already-canonicalized path. The `http:request` decision
+and the audit record keep the agent's own path, so policy judges `/zen`, and only the bytes to the
+backend carry `/github/zen`.
+
+The backend carries its own credential as `backends.auth`, which the agent never sees. An `env://`
+token the box attaches to the backend connection with no placeholder. An `aws://` profile is
+SigV4-signed over the **backend** host: the box signs the request after it rewrites the `Host` to the
+backend, so the signature covers the bytes the backend receives, deriving the service and region from
+the backend host (a Bedrock AgentCore Gateway signs as `bedrock-agentcore`). The entry may also keep
+its own `env://` `secret`: the box provisions that placeholder to the workload and strips it from the
+request, never injecting the real destination credential, because the backend handles the
+destination's auth. The destination secret keys on the original destination and the backend token on
+the backend host, so on the same header the box strips the destination placeholder first and the
+backend credential wins, and no placeholder rides upstream. A `credsd://` backend credential is not
+available, and a destination `secret` must be `env://`.
 
 ## How credentials are added
 
@@ -184,22 +244,24 @@ and credential handling for tools and local MCP servers.
 An `[egress.<name>]` route binds a secret to a set of destinations. Policy decides whether to
 forward each request. The route specifies which credential to add and grants no access itself.
 
-> Every process in a box can use every route. The agent, each tool, and each stdio MCP server get
-> every placeholder, and the gateway adds credentials based on the destination. It cannot identify
-> which process opened a connection, so it cannot enforce a per-process credential list. A process
-> that must not use a credential belongs in a separate box. [The box is the credential
-> boundary](./decisions.md#the-box-is-the-credential-boundary) records the decision and its cost.
+> Every process in a box can use every route. The agent, each tool, each stdio MCP server, and the
+> hosted Shell get every placeholder, and the gateway adds credentials based on the destination. It
+> cannot identify which process opened a connection, so it cannot enforce a per-process credential
+> list. A process that must not use a credential belongs in a separate box. [The box is the
+> credential boundary](./decisions.md#the-box-is-the-credential-boundary) records the decision and
+> its cost.
 
 | Source | `secret.ref` | What the gateway does |
 |---|---|---|
 | An environment variable | `env://NAME` | Reads `NAME` from the environment of `box run` once, at startup, and swaps it in for a placeholder |
 | An AWS profile | `aws://PROFILE` | Signs each request with SigV4, from the profile's static keys |
+| The AWS default chain | `aws://` (no profile) | Signs each request with SigV4, from the AWS SDK default credential provider chain (the host's ambient identity), and warns on every signed request |
 
 ### The placeholder swap
 
 An `env://` route keeps the real secret in the box's trusted process and gives every contained
-process a placeholder instead, which `box.toml` calls a phantom. See [the workload holds a phantom,
-and the gateway holds the
+process, and the hosted Shell, a placeholder instead, which `box.toml` calls a phantom. See [the
+workload holds a phantom, and the gateway holds the
 secret](decisions.md#the-workload-holds-a-phantom-and-the-gateway-holds-the-secret).
 
 ```mermaid
@@ -244,6 +306,12 @@ region from the host, for example `bedrock` and `us-west-2` from
 `bedrock-runtime.us-west-2.amazonaws.com`, and refuses a host it can't read them from. The process
 gets placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` values, so an AWS SDK builds its
 request, and the gateway replaces the signature.
+
+`aws://PROFILE` resolves the named profile's static keys; a bare `aws://` resolves the AWS SDK
+default credential provider chain, the host's ambient identity, which the box warns about on every
+request. The decision
+[An AWS binding resolves a named profile's static keys, and a bare aws:// resolves the full chain](decisions.md#a-bare-aws-resolves-the-default-credential-chain)
+states both forms and the writable-`~/.aws` cost.
 
 ## Example: a GitHub API request
 

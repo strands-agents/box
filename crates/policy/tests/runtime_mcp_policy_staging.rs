@@ -303,13 +303,15 @@ when { context.input.path == "/workspace/secret" };
         "the later listing completes the bundle"
     );
 
-    let forbidden = authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        "alpha",
-        "read",
-        &json!({"path": "/workspace/secret"}),
-    );
+    let forbidden = authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            "read",
+            &json!({"path": "/workspace/secret"}),
+        )
+        .0;
     assert!(
         matches!(
             forbidden,
@@ -322,13 +324,15 @@ when { context.input.path == "/workspace/secret" };
          forbid rather than from a stale degraded mark: {forbidden:?}"
     );
 
-    let permitted = authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        "alpha",
-        "read",
-        &json!({"path": "/workspace/input"}),
-    );
+    let permitted = authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            "read",
+            &json!({"path": "/workspace/input"}),
+        )
+        .0;
     assert!(
         matches!(&permitted, Decision::Allow { rule, .. } if rule.as_str() != RuleId::DEFAULT_DENY),
         "a path the forbid does not name must stay allowed by the staged per-tool permit itself, \
@@ -375,13 +379,15 @@ when { context.input.env == "prod" };
         "the tool whose rule never staged degrades its server"
     );
 
-    let decision = authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        "alpha",
-        "deploy",
-        &json!({"env": "prod"}),
-    );
+    let decision = authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            "deploy",
+            &json!({"env": "prod"}),
+        )
+        .0;
     // Not merely "not allowed": the refusal is the degraded mark's, not the transient hold a
     // pending tool takes, because discovery finished without this rule.
     assert!(
@@ -425,13 +431,15 @@ when { context.input.env == "prod" };
         "the tool whose rule never staged degrades its server"
     );
 
-    let decision = authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        "alpha",
-        "status",
-        &json!({}),
-    );
+    let decision = authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            "status",
+            &json!({}),
+        )
+        .0;
     assert!(
         matches!(decision, Decision::Allow { .. }),
         "a tool the catalog never declared and no rule names must ride the coarse permit, \
@@ -459,13 +467,15 @@ when { context.input.env == "prod" };
         &history.path().join("dogwood.redb"),
     );
 
-    let held = authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        "alpha",
-        "deploy",
-        &json!({"env": "prod"}),
-    );
+    let held = authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            "deploy",
+            &json!({"env": "prod"}),
+        )
+        .0;
     assert!(
         matches!(
             held,
@@ -484,13 +494,15 @@ when { context.input.env == "prod" };
         .finish_mcp_discovery()
         .expect("completion degrades rather than fataling");
 
-    let refused = authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        "alpha",
-        "deploy",
-        &json!({"env": "prod"}),
-    );
+    let refused = authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            "deploy",
+            &json!({"env": "prod"}),
+        )
+        .0;
     assert!(
         matches!(
             refused,
@@ -532,13 +544,15 @@ permit(principal, action == alpha::Action::"{literal}", resource);
 
         let arguments = json!({"path": "/secret/x"});
         let call = |authority: &PolicyEngine| {
-            authority.refine_tool_call(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                "alpha",
-                raw,
-                &arguments,
-            )
+            authority
+                .refine_tool_call(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    "alpha",
+                    raw,
+                    &arguments,
+                )
+                .0
         };
 
         assert!(
@@ -590,13 +604,15 @@ forbid(principal, action, resource) when { action == srv::Action::"read" };
 
     let arguments = json!({"path": "/secret/x"});
     let call = || {
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "srv",
-            "read",
-            &arguments,
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "srv",
+                "read",
+                &arguments,
+            )
+            .0
     };
     assert!(
         matches!(
@@ -666,13 +682,15 @@ forbid(principal, action, resource) when {{ action == srv::Action::"{literal}" }
 
         let arguments = json!({"path": "/secret/x"});
         let call = || {
-            authority.refine_tool_call(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                "srv",
-                raw,
-                &arguments,
-            )
+            authority
+                .refine_tool_call(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    "srv",
+                    raw,
+                    &arguments,
+                )
+                .0
         };
         assert!(
             matches!(
@@ -735,13 +753,15 @@ when { context.input.server == "srv" };"#;
 
     let arguments = json!({"path": "/secret/x"});
     let call = |authority: &PolicyEngine| {
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "srv",
-            raw,
-            &arguments,
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "srv",
+                raw,
+                &arguments,
+            )
+            .0
     };
 
     assert_eq!(
@@ -960,13 +980,15 @@ unless temporal {{
         );
 
         let call = |server: &str, tool: &str, arguments: serde_json::Value| {
-            authority.refine_tool_call(
-                &GovernedBox::assigned("test-box"),
-                &Principal::agent(),
-                server,
-                tool,
-                &arguments,
-            )
+            authority
+                .refine_tool_call(
+                    &GovernedBox::assigned("test-box"),
+                    &Principal::agent(),
+                    server,
+                    tool,
+                    &arguments,
+                )
+                .0
         };
 
         assert!(
@@ -1059,13 +1081,15 @@ unless temporal {
     );
 
     let call = |tool: &str, arguments: serde_json::Value| {
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "svc",
-            tool,
-            &arguments,
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "svc",
+                tool,
+                &arguments,
+            )
+            .0
     };
 
     assert!(
@@ -1133,13 +1157,15 @@ unless temporal {
     );
 
     let call = |server: &str, tool: &str, arguments: serde_json::Value| {
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            server,
-            tool,
-            &arguments,
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                server,
+                tool,
+                &arguments,
+            )
+            .0
     };
 
     assert_eq!(
@@ -1386,13 +1412,15 @@ unless temporal {{
             ),
             &history.path().join("dogwood.redb"),
         );
-        let decision = authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            server,
-            tool,
-            &json!({"id": "x"}),
-        );
+        let decision = authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                server,
+                tool,
+                &json!({"id": "x"}),
+            )
+            .0;
         assert_eq!(
             matches!(
                 decision,
@@ -1428,13 +1456,15 @@ when { context.input.server == "svc" && context.input.tool == "approve" };
         .expect("svc stages");
 
     let call = |server: &str, tool: &str| {
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            server,
-            tool,
-            &json!({"id": "x"}),
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                server,
+                tool,
+                &json!({"id": "x"}),
+            )
+            .0
     };
 
     assert!(
@@ -1474,13 +1504,15 @@ unless temporal {
     );
 
     let call = || {
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "ghost",
-            "wipe",
-            &json!({"id": "x"}),
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "ghost",
+                "wipe",
+                &json!({"id": "x"}),
+            )
+            .0
     };
 
     assert!(
@@ -1564,13 +1596,15 @@ permit(principal, action == alpha::Action::"foo\"bar", resource);
 
     let refine = |path: &str| {
         let arguments = json!({"path": path});
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "alpha",
-            tool,
-            &arguments,
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "alpha",
+                tool,
+                &arguments,
+            )
+            .0
     };
     assert!(
         matches!(
@@ -1646,13 +1680,15 @@ permit(principal, action == deepwiki::Action::"ask_wiki_question", resource);
     );
 
     let decide = |repo_name: serde_json::Value| {
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "deepwiki",
-            "ask_wiki_question",
-            &json!({"repoName": repo_name, "question": "How does it work?"}),
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "deepwiki",
+                "ask_wiki_question",
+                &json!({"repoName": repo_name, "question": "How does it work?"}),
+            )
+            .0
     };
     assert!(
         decide(json!("strands-agents/sdk-python")).is_allow(),
@@ -1762,13 +1798,15 @@ permit(principal, action == events::Action::"count_events", resource);
     );
 
     let decide = |tool: &str, since: &str| {
-        authority.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "events",
-            tool,
-            &json!({"since": since}),
-        )
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "events",
+                tool,
+                &json!({"since": since}),
+            )
+            .0
     };
     assert!(
         decide("count_events", "2025-06-01T00:00:00Z").is_allow(),
@@ -2888,6 +2926,7 @@ when temporal {
                     tool,
                     &arguments,
                 )
+                .0
                 .is_allow()
         );
     }
@@ -3308,13 +3347,15 @@ when { context.input.path == "/workspace/secret" };
 
 /// One server's `read` of `path`, through the per-tool refinement.
 fn read(authority: &PolicyEngine, server: &str, path: &str) -> Decision {
-    authority.refine_tool_call(
-        &GovernedBox::assigned("test-box"),
-        &Principal::agent(),
-        server,
-        "read",
-        &json!({ "path": path }),
-    )
+    authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            server,
+            "read",
+            &json!({ "path": path }),
+        )
+        .0
 }
 
 /// With two schemas missing, a late list from either server is `Rejected` in either order, and
@@ -3524,5 +3565,360 @@ when { context.input.path == "/workspace/secret" };
         ),
         "the refused list must not lift beta's degraded refusal, or beta's read rides the coarse \
          grant past its forbid: {call:?}"
+    );
+}
+
+/// The same past-call precondition, once over the tool's own action and once over `mcp:call`.
+const PRECONDITION_IN_TWO_FORMS: &str = r#"
+permit(principal, action == Box::Action::"http:request", resource);
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "alpha" };
+permit(principal, action == alpha::Action::"read", resource);
+@id("tool_form")
+forbid(principal, action == alpha::Action::"read", resource)
+when { context.input.path == "/second" }
+when temporal { formerly within 1h ( alpha::Action::"read"::request{ input.path: "/first" } ) };
+@id("call_form")
+forbid(principal, action == Box::Action::"http:request", resource)
+when temporal {
+    formerly within 1h (
+        Box::Action::"mcp:call"::request{ input.server: "alpha", input.method: "tools/call" }
+    )
+};
+"#;
+
+/// One `tools/call` of alpha's `read`, through both gates Box applies.
+fn call_alpha_read(authority: &PolicyEngine, path: &str) -> Decision {
+    let coarse = Request::McpCall {
+        server: "alpha",
+        method: "tools/call",
+        tool: Some("read"),
+        prompt: None,
+        uri: None,
+        arguments: None,
+    };
+    let (decision, _) = authority.decide(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        &coarse,
+    );
+    if !decision.is_allow() {
+        return decision;
+    }
+    authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            "alpha",
+            "read",
+            &json!({ "path": path }),
+        )
+        .0
+}
+
+fn allows(authority: &PolicyEngine, request: &Request<'_>) -> bool {
+    authority
+        .decide(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            request,
+        )
+        .0
+        .is_allow()
+}
+
+fn stored_rules(history: &Path) -> Vec<(String, String)> {
+    DurableTemporalEngine::open(history, 10_000)
+        .expect("the store opens")
+        .list()
+        .into_iter()
+        .map(|entry| (entry.token.0, entry.statement))
+        .collect()
+}
+
+fn stage_alpha(authority: &PolicyEngine) {
+    assert_eq!(
+        authority
+            .stage_mcp_schema("alpha", generated("alpha", "read", "path", "string"))
+            .expect("alpha's schema stages"),
+        SchemaStage::Accepted {
+            authority_ready: true,
+        }
+    );
+}
+
+/// Run one: the precondition is met. Returns the stored rules after the run.
+fn first_run_meets_the_precondition(history: &Path) -> Vec<(String, String)> {
+    let first_run = staged_engine(PRECONDITION_IN_TWO_FORMS, history);
+    stage_alpha(&first_run);
+    assert!(allows(&first_run, &http_request()), "no call yet");
+    assert!(call_alpha_read(&first_run, "/first").is_allow());
+    assert!(
+        !call_alpha_read(&first_run, "/second").is_allow(),
+        "tool form, same run"
+    );
+    assert!(!allows(&first_run, &http_request()), "call form, same run");
+    drop(first_run);
+    stored_rules(history)
+}
+
+#[test]
+fn a_rule_that_names_a_tool_keeps_its_history_across_a_restart() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+    let after_first_run = first_run_meets_the_precondition(&history);
+
+    let second_run = staged_engine(PRECONDITION_IN_TWO_FORMS, &history);
+    assert!(
+        matches!(
+            call_alpha_read(&second_run, "/second"),
+            Decision::Deny {
+                reason: DenyReason::PolicyPending,
+                ..
+            }
+        ),
+        "a call to the tool is held until its schema stages"
+    );
+    assert!(
+        !allows(&second_run, &http_request()),
+        "call form, next run, before discovery"
+    );
+    stage_alpha(&second_run);
+    assert!(!allows(&second_run, &http_request()), "call form, next run");
+    let tool_form = call_alpha_read(&second_run, "/second");
+    drop(second_run);
+    let after_second_run = stored_rules(&history);
+    assert!(
+        !tool_form.is_allow(),
+        "tool form, next run: the rule lost its history ({tool_form:?})\n\
+         after run 1: {after_first_run:?}\n\
+         after run 2: {after_second_run:?}"
+    );
+    assert_eq!(
+        after_first_run, after_second_run,
+        "every stored rule kept its token and its text"
+    );
+}
+
+fn tool_form_is_stored(history: &Path) -> bool {
+    stored_rules(history)
+        .iter()
+        .any(|(_, statement)| statement.contains("tool_form"))
+}
+
+#[test]
+fn a_crash_while_tools_are_listing_keeps_the_history() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+    let after_first_run = first_run_meets_the_precondition(&history);
+
+    drop(staged_engine(PRECONDITION_IN_TWO_FORMS, &history));
+    assert_eq!(
+        stored_rules(&history),
+        after_first_run,
+        "an open that never finishes listing deletes nothing"
+    );
+
+    let third_run = staged_engine(PRECONDITION_IN_TWO_FORMS, &history);
+    stage_alpha(&third_run);
+    assert!(!call_alpha_read(&third_run, "/second").is_allow());
+}
+
+#[test]
+fn a_server_that_never_lists_its_tools_unloads_the_kept_rule() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+    first_run_meets_the_precondition(&history);
+
+    let second_run = staged_engine(PRECONDITION_IN_TWO_FORMS, &history);
+    assert_eq!(
+        second_run
+            .finish_mcp_discovery()
+            .expect("discovery finishes"),
+        vec!["alpha".to_string()],
+        "the server the rule waits for is named"
+    );
+    assert!(
+        !call_alpha_read(&second_run, "/first").is_allow(),
+        "the degraded tool is refused"
+    );
+    drop(second_run);
+    assert!(
+        !tool_form_is_stored(&history),
+        "a rule whose server never listed is unloaded"
+    );
+}
+
+#[test]
+fn a_tool_whose_schema_changed_drops_the_rule_it_no_longer_validates() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+    first_run_meets_the_precondition(&history);
+
+    let second_run = staged_engine(PRECONDITION_IN_TWO_FORMS, &history);
+    drop(second_run);
+    assert!(
+        tool_form_is_stored(&history),
+        "the rule is kept while the tools list"
+    );
+    let second_run = staged_engine(PRECONDITION_IN_TWO_FORMS, &history);
+    assert_eq!(
+        second_run
+            .stage_mcp_schema("alpha", generated("alpha", "read", "path", "integer"))
+            .expect("the changed schema stages"),
+        SchemaStage::Accepted {
+            authority_ready: false,
+        }
+    );
+    drop(second_run);
+    assert!(
+        !tool_form_is_stored(&history),
+        "a rule the real schema does not validate is not kept"
+    );
+}
+
+#[test]
+fn a_reload_while_tools_are_listing_keeps_the_history() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+    first_run_meets_the_precondition(&history);
+
+    let second_run = staged_engine(PRECONDITION_IN_TWO_FORMS, &history);
+    assert!(
+        second_run
+            .reload(&[source("staged.dw", PRECONDITION_IN_TWO_FORMS)])
+            .is_err(),
+        "a reload before the tools list is refused and changes nothing"
+    );
+    stage_alpha(&second_run);
+    assert!(!call_alpha_read(&second_run, "/second").is_allow());
+    second_run
+        .reload(&[source("staged.dw", PRECONDITION_IN_TWO_FORMS)])
+        .expect("a reload after the tools list installs");
+    assert!(!call_alpha_read(&second_run, "/second").is_allow());
+}
+
+#[test]
+fn an_edited_tool_rule_starts_with_empty_history() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+    first_run_meets_the_precondition(&history);
+
+    let edited = PRECONDITION_IN_TWO_FORMS.replace("within 1h", "within 2h");
+    drop(staged_engine(&edited, &history));
+    assert!(
+        !stored_rules(&history)
+            .iter()
+            .any(|(_, statement)| statement.contains("tool_form") && statement.contains("2h")),
+        "an edited rule is not installed early under the previous run's schema"
+    );
+    let second_run = staged_engine(&edited, &history);
+    stage_alpha(&second_run);
+    assert!(
+        call_alpha_read(&second_run, "/second").is_allow(),
+        "an edited rule is a different rule"
+    );
+}
+
+#[test]
+fn a_rule_that_decides_a_box_action_from_tool_history_is_not_kept_from_the_previous_run() {
+    let policy = r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "alpha" };
+permit(principal, action == alpha::Action::"read", resource);
+@id("after_first")
+permit(principal, action == Box::Action::"http:request", resource)
+when temporal { formerly within 1h ( alpha::Action::"read"::request{ input.path: "/first" } ) };
+"#;
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+    let first_run = staged_engine(policy, &history);
+    stage_alpha(&first_run);
+    assert!(call_alpha_read(&first_run, "/first").is_allow());
+    assert!(
+        allows(&first_run, &http_request()),
+        "the permit holds in its own run"
+    );
+    drop(first_run);
+
+    let second_run = staged_engine(policy, &history);
+    assert!(
+        !allows(&second_run, &http_request()),
+        "before discovery, the previous run's schema must not decide a Box action"
+    );
+}
+
+/// One `tools/call` through both gates Box applies, with one `path` argument.
+fn call_tool(authority: &PolicyEngine, server: &str, tool: &str, path: &str) -> Decision {
+    let coarse = Request::McpCall {
+        server,
+        method: "tools/call",
+        tool: Some(tool),
+        prompt: None,
+        uri: None,
+        arguments: None,
+    };
+    let (decision, _) = authority.decide(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        &coarse,
+    );
+    if !decision.is_allow() {
+        return decision;
+    }
+    authority
+        .refine_tool_call(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            server,
+            tool,
+            &json!({ "path": path }),
+        )
+        .0
+}
+
+#[test]
+fn a_rule_that_names_two_servers_keeps_its_history_while_they_list_one_at_a_time() {
+    let policy = r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "alpha" || context.input.server == "beta" };
+permit(principal, action == alpha::Action::"read", resource);
+permit(principal, action == beta::Action::"verify", resource);
+@id("read_after_verify")
+forbid(principal, action == alpha::Action::"read", resource)
+when { context.input.path == "/second" }
+when temporal { formerly within 1h ( beta::Action::"verify"::request{ input.path: "/x" } ) };
+"#;
+    let stage_both = |authority: &PolicyEngine| {
+        authority
+            .stage_mcp_schema("alpha", generated("alpha", "read", "path", "string"))
+            .expect("alpha's schema stages");
+        assert_eq!(
+            authority
+                .stage_mcp_schema("beta", generated("beta", "verify", "path", "string"))
+                .expect("beta's schema stages"),
+            SchemaStage::Accepted {
+                authority_ready: true,
+            }
+        );
+    };
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("dogwood.redb");
+
+    let first_run = staged_engine(policy, &history);
+    stage_both(&first_run);
+    assert!(call_tool(&first_run, "beta", "verify", "/x").is_allow());
+    assert!(
+        !call_tool(&first_run, "alpha", "read", "/second").is_allow(),
+        "same run"
+    );
+    drop(first_run);
+
+    let second_run = staged_engine(policy, &history);
+    stage_both(&second_run);
+    let decision = call_tool(&second_run, "alpha", "read", "/second");
+    assert!(
+        !decision.is_allow(),
+        "next run: the rule lost its history when alpha listed first ({decision:?})"
     );
 }

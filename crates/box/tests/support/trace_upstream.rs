@@ -117,16 +117,60 @@ fn serve(mut stream: TcpStream) -> io::Result<Option<ReceivedRequest>> {
     stream.read_exact(&mut body)?;
     let body: Value = serde_json::from_slice(&body)?;
     let result = match body["method"].as_str() {
-        Some("tools/list") => json!({
-            "tools": (["echo", "blocked"].map(|name| json!({
-                "name": name,
+        Some("tools/list") => {
+            let mut tools = ["echo", "blocked"]
+                .map(|name| {
+                    json!({
+                        "name": name,
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"text": {"type": "string"}},
+                            "required": ["text"]
+                        }
+                    })
+                })
+                .to_vec();
+            tools.push(json!({
+                "name": "verify",
                 "inputSchema": {
                     "type": "object",
                     "properties": {"text": {"type": "string"}},
                     "required": ["text"]
+                },
+                "outputSchema": {
+                    "type": "object",
+                    "properties": {"verified": {"type": "boolean"}},
+                    "required": ["verified"]
                 }
-            })))
-        }),
+            }));
+            json!({ "tools": tools })
+        }
+        Some("tools/call") if body["params"]["name"] == "verify" => {
+            let text = body["params"]["arguments"]["text"]
+                .as_str()
+                .unwrap_or_default();
+            let result = json!({
+                "content": [{"type": "text", "text": text}],
+                "structuredContent": {"verified": text.ends_with("yes")}
+            });
+            if text.starts_with("sse") {
+                let progress = json!({"jsonrpc": "2.0", "method": "notifications/progress",
+                    "params": {"progressToken": 1, "progress": 1}});
+                let reply = json!({"jsonrpc": "2.0", "id": body["id"], "result": result});
+                let events = format!(
+                    "event: message\ndata: {progress}\n\nevent: message\ndata: {reply}\n\n"
+                );
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{events}",
+                    events.len()
+                )?;
+                stream.flush()?;
+                return Ok(Some(ReceivedRequest { headers, body }));
+            }
+            result
+        }
         Some("tools/call") => json!({
             "content": [{"type": "text", "text": body["params"]["arguments"]["text"]}]
         }),

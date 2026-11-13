@@ -17,6 +17,93 @@ constraint is held at 15, which shares the workspace's `unicode-width` version.
 
 ## Local divergence from the pinned revision
 
+### Continued source lines and empty lexer words
+
+Two upstream parsing defects caused backslash-newline continuations to execute commands
+prematurely or introduce empty words. This could alter arguments or reject valid grouped
+commands. For example, this is one command written across two physical lines:
+
+```sh
+printf '<%s>\n' first \
+  second
+```
+
+Before the fix, the first line ran too early with `first` and an unintended empty argument:
+
+```text
+<first>
+<>
+```
+
+The shell then treated `second` as a separate command, reported
+`strands-shell: second: command not found`, and returned exit status 127.
+
+After the fix, it runs as `printf '<%s>\n' first second` and returns exit status 0:
+
+```text
+<first>
+<second>
+```
+
+The source executor now collects continued lines before executing commands or reading heredocs.
+The lexer omits words emptied by continuation removal and retains quoted empty words as tokens.
+End-of-input escape handling is unchanged. Alias expansion handles empty replacements without
+cursor underflow.
+
+`line_continuations_join_source_lines`, `line_continuations_do_not_create_words`, and
+`line_continuations_preserve_quoting_and_input_boundaries` cover execution, argument boundaries,
+quoting, heredocs, aliases, and end of input.
+
+Existing limitations remain: some quoted empty arguments are lost during execution, large source
+statements incur repeated parsing, and continuations within operators or variable names are
+unsupported.
+
+### Backport: enforce the submitted input limit for multiline commands
+
+The guard matches [strands-agents/shell#178](https://github.com/strands-agents/shell/pull/178),
+merged on 2026-10-27 as `cff867ba10310b42fb4af135b999defc4ed78c6a`.
+The pinned revision predates that fix.
+
+`exec::execute` selected `execute_sourced` for input containing a newline, which skipped the
+`max_input` check in `execute_admitted_line`. Thus an oversized submission ran when it ended in
+a newline, while the same text without that newline was refused. This is an upstream limit
+enforcement bug.
+
+`execute` now checks the full input before choosing the evaluator. Its EXIT-trap handling remains
+after the result, and direct calls to `execute_with_reader` retain their check. Files loaded by
+`source` still use `max_output`; this change adds no `max_input` check to `execute_sourced`.
+`builder_max_input` covers single-line, trailing-newline, and multiline submissions at the limit,
+one byte over it, and with the existing `0` unlimited value. The trailing-newline assertion fails
+without the fix.
+
+### Local addition: bind a host spawn to its checked directory (2026-11-04)
+
+An embedding can select a program's launch directory independently of the caller's Shell directory.
+The effect permit previously carried no launch directory to dispatch. That left the embedding to
+check one directory and execute in another. This is a generic gap in Shell's admission contract.
+Box selects the tool and checks policy. Shell owns the path from admission to dispatch.
+
+The operator approved the default `EffectPermit::spawn_working_directory()` method and
+checked-directory transport on 2026-11-04 after the design review. Its default returns `None`, so
+existing permit implementations keep the caller's directory. An interceptor that selects another
+directory checks that directory before it returns it on the permit.
+
+Shell reads the accessor once and retains a copy in `CommandPermit`, beside the admitted
+`HostProgram`. Shell refuses a relative directory before dispatch. Shell passes that directory
+to `spawn_host_program` with the program. Dispatch changes only the child process directory.
+The parent Shell keeps its directory. Shell admits every program in a pipeline before any stage
+runs.
+
+Box selects and resolves the launch directory before policy checks `ShellSpawn`. Ordinary
+`shell:spawn` actions keep home-relative spelling. Tool grammar actions keep absolute spelling.
+If selection or resolution fails, Box checks the caller's original directory and retains its
+absolute path. A command-not-found failure keeps status `127`. A launch failure keeps status `126`.
+
+Before execution, Box compares the translated launch directory with the retained checked path and
+refuses a mismatch. This binds the checked directory path to dispatch. It does not pin the
+directory's filesystem identity. The change preserves stored-record and broker-protocol shapes, so
+it requires no version bump.
+
 ### Local addition: an embedder can disable the execution timeout
 
 `ShellBuilder::disable_timeout()` selects the engine's existing no-deadline mode. The builder
@@ -29,6 +116,22 @@ TOML, Python, and Node configuration surfaces do not change.
 `builder_timeout_can_be_disabled` checks both the default and a configured deadline, including
 repeated calls that outlast the configured limit. `builder_timeout_can_be_restored_after_disabling`
 checks cancellation and a successful subsequent call after restoring a finite deadline.
+
+### Local addition: an embedder can declare the file a bare name runs
+
+At the pinned revision, a bare name the Shell does not implement is found on the trusted process's
+host `PATH`. An embedder that runs a host program under its own name, such as Box's `[tool.git]` on
+the developer folder's `git`, cannot reach that program by its name when another file of the same
+name comes first on `PATH`. This is a missing seam, not an upstream bug.
+
+`Kernel::host_program` returns the absolute path a bare name runs, and its default declares nothing.
+`VfsKernel::host_programs` and `ShellBuilder::host_programs` hold a `HostPrograms` map for the bundled
+kernel. `exec::host_program` asks the kernel after the builtin, command, and function checks and
+before the `PATH` walk, so the Shell's own programs keep precedence. A declared file binds to its
+canonical identity like a spelling with a `/`; a declared file that is gone is unbound, so the
+command is not found and `PATH` is not searched for another file. A name with a `/` ignores the map. `exec::implements_program` tells an embedder which names the
+Shell runs itself, so it does not declare a name that never reaches the declared file.
+`tests/declared_host_programs.rs` covers each case.
 
 ### Execution deadlines refuse clock overflow
 
@@ -1819,6 +1922,116 @@ each `Kernel` must forward them and cannot hide the refusal. `is_executable`, `f
 outcome, because admission refuses it first.
 `tests/kernel_effect_interception.rs::an_answered_probe_reports_a_completed_effect` and
 `a_probe_the_admission_window_refuses_reports_a_failure` pin the change.
+
+## 2026-11-10 — the SSRF floor missed translated and platform metadata addresses
+
+`is_ip_blocked` checked the IPv4 address inside IPv4-mapped, IPv4-compatible, 6to4, and Teredo
+addresses, but not inside the NAT64 well-known prefix `64:ff9b::/96` or the IPv4-translated prefix
+`::ffff:0:0:0/96`. It also had no entry for `0.0.0.0/8`, Azure WireServer `168.63.129.16`, or the
+Alibaba Cloud metadata address `100.100.100.200`. So `check_url_safe` accepted a literal such as
+`http://[64:ff9b::a9fe:a9fe]/`, which carries `169.254.169.254`. Box calls `check_url_safe` before
+the Shell `curl` and the Monty `fetch` reach the gateway, so these literals passed that check.
+Upstream would call this a bug, because its security policy names this floor as a control.
+
+This copy applies the IPv4 checks to the address inside the NAT64 and IPv4-translated prefixes,
+refuses the whole RFC 8215 local-use prefix `64:ff9b:1::/48`, and refuses `0.0.0.0/8`,
+`168.63.129.16`, and `100.100.100.200`. A `64:ff9b::/96` address that carries a public IPv4
+address stays allowed, and so does the rest of `100.64.0.0/10`. An address in `64:ff9b:1::/48` is
+refused even when a translator maps it to a public IPv4 address, because that prefix is never
+globally routed and its embedding offset is chosen by the network. `0.0.0.0/8` is refused because
+it is reserved and not globally reachable. This copy has no `allowed_urls`, so nothing permits
+it here; upstream's comment also mentions `allowed_urls`, which arrives with the vendor move.
+
+Upstream has the same change:
+[strands-agents/shell#240](https://github.com/strands-agents/shell/pull/240) merged as
+`def7ab7`, and [strands-agents/shell#244](https://github.com/strands-agents/shell/pull/244)
+corrects the `0.0.0.0/8` comment. When the vendor revision moves past both, this entry can be
+removed.
+
+`vfs_kernel.rs::url_safety_tests::check_url_safe_blocks_translated_and_platform_metadata_addresses`
+fails without the change and passes with it.
+`check_url_safe_allows_public_destinations_behind_nat64_and_shared_space` pins the addresses that
+stay allowed. In Box,
+`run::broker::python::fetch::tests::a_fetch_to_a_translated_or_platform_metadata_literal_is_refused_before_transport`
+pins that the Monty `fetch` refuses these literals before transport.
+
+## 2026-11-11 — a redirected group reported status 0
+
+A group with an output redirect, such as `{ false; } > f`, reported status 0 at the pinned revision.
+`exec::execute_item_unsettled` ran the group through `run_capturing`, which drops the group's
+status, and then returned `proc.last_exit`, which the group did not set. A condition such as
+`if { false; } > f; then ...` took its success branch. Upstream would call this a bug, because the
+status is wrong.
+
+This copy runs the group through `run_capturing_status` and returns the group's own status. A
+failed redirect write or a stderr diversion over its size limit still reports status 1.
+`tests/shell_integration.rs::a_redirected_group_keeps_its_failure_status`,
+`a_redirected_group_keeps_its_last_command_status`,
+`a_condition_on_a_redirected_group_takes_the_failure_branch`, and
+`a_redirected_group_is_the_calls_status` fail without the change.
+
+## 2026-11-11 — a command substitution and a subshell read no stdin
+
+At the pinned revision, `Process::fork` gives the child an empty descriptor table, and a command
+substitution and a subshell run in such a child. So `input=$(cat)` and `(cat)` read nothing, while
+a POSIX shell gives both the caller's stdin. Upstream would call this a bug, because the result is
+wrong: a script that reads its input with `$(cat)` sees an empty string.
+
+This copy moves the caller's stdin into the child for the span of the substitution or subshell,
+and back when it ends. The caller waits for the child, so only one of them reads at a time, and
+input the child does not read stays for the caller. A pipeline's first stage hands the stdin it
+did not take back to the caller when it ends, and a stdin redirect on that stage sets the caller's
+stdin aside instead of dropping it, so `x=$(date); cat` and `(cat </dev/null); cat` leave the
+input for `cat`. A single builtin with a stdin redirect, such as `printf x </dev/null`, keeps the
+caller's stdin aside the same way, on success and on a redirect error.
+`stdin_left_unread_by_a_command_reaches_the_next_reader` fails without it. A compound command that
+starts a pipeline, such as `{ printf x; } | cat`, reads the caller's stdin and sets it aside while
+its pipe feeds the rest of the pipeline, then hands it back, so `x=$({ printf x; } | cat); cat`
+leaves the input for `cat` (`a_compound_pipeline_hands_the_callers_stdin_back`).
+`tests/shell_integration.rs::a_command_substitution_reads_the_shells_stdin`,
+`a_subshell_reads_the_shells_stdin`, and
+`stdin_read_in_part_by_a_substitution_leaves_the_rest_to_the_shell` fail without the change.
+
+## 2026-11-11 — `!` before a compound command was ignored
+
+At the pinned revision, the parser kept `!` only for a simple pipeline and for a compound piped into
+a pipeline. `! (false)`, `! { false; }`, and `! if ...; fi` reported the compound's own status.
+Upstream would call this a bug, because the status is wrong. The wrong redirect status above hid
+this defect in `if ! (cmd) >/dev/null 2>&1; then`, which Claude Code's shell snapshot uses: with only
+the redirect fix, `tests/claude_code_preamble.rs` fails. The two fixes ship together.
+
+This copy adds `parser::Item::Negated`, which holds the compound that `!` inverts, and
+`exec::execute_item_unsettled` and `run_capturing_status` invert its status.
+`tests/shell_integration.rs::negation_inverts_a_subshell`, `negation_inverts_a_group`,
+`negation_inverts_a_redirected_compound`, `negation_inverts_an_if_compound`, and
+`negation_inverts_a_compound_inside_a_substitution` fail without the change.
+
+## 2026-11-11 — Lua reads input from outside the Shell as empty
+
+`builtin_lua` reads stdin to end of input before it runs a script from `-e` or a file. When the
+embedder feeds stdin from outside the Shell and keeps it open, every such script waits for it.
+Upstream has no such input, so this is box's, not upstream's. `Process::set_outside_reader` marks
+that input, and `builtin_lua` reads it as empty, as source and as input, as it read before box
+forwarded any. A pipe or a
+redirect inside a command still reaches Lua. `io.read` and `io.lines` are unchanged.
+`tests/shell_integration.rs::lua_reads_input_from_outside_the_shell_as_empty_and_never_waits` fails
+without the change; `lua_reads_a_pipe_inside_a_shell_command` pins the pipe.
+
+## 2026-11-11 — `set -e` stopped at a command that `!` inverts
+
+`set -e` exited at `! true`, and with `Item::Negated` also at `! (true)`. POSIX exempts a command
+that `!` inverts. This copy treats an inverted pipeline or compound as tested, and counts each
+enclosing inverted compound in `Process::errexit_tested`, which suppresses `set -e` without
+changing the option, so a `set -e` or `set +e` inside the compound still applies after it
+(`an_option_change_inside_a_negated_group_is_kept` and the three `errexit_*_negated_group*`
+tests). `Shell::run` and `Shell::execute` reset the count, so a call cancelled inside `!` leaves no
+suppression for the next call (`a_cancelled_negated_call_leaves_errexit_for_the_next_call`). `tests/shell_integration.rs::errexit_ignores_a_negated_command`
+and `errexit_ignores_a_failure_inside_a_negated_group` fail without the change. A compound on
+the left of `&&` or `||` still applies `set -e` inside it, as at the pinned revision.
+
+A substitution or subshell that a cancelled Call drops takes the borrowed stdin with it, so a later
+Call on the same Program reads no stdin. A Shell alias opens one Program for one Call, so it is not
+affected.
 
 ## 2026-11-09 — `touch` did not change the times of an existing file, and refused every option
 

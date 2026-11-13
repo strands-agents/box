@@ -34,6 +34,11 @@ fn main() {
     }
     #[cfg(target_os = "linux")]
     if std::env::args().any(|argument| argument == "--linux-startup") {
+        let admitted = !cfg!(target_arch = "x86_64")
+            || std::env::var_os("EXPERIMENTAL_X86_SUPPORT").as_deref()
+                == Some(std::ffi::OsStr::new("TRUE"));
+        // SAFETY: this isolated probe holds no Box credentials or workload.
+        assert_eq!(unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) }, 0);
         let mut called = false;
         assert_eq!(
             strands_box::run(
@@ -49,7 +54,16 @@ fn main() {
             ),
             std::process::ExitCode::FAILURE
         );
-        assert!(called, "startup must reach the callback without an opt-in");
+        assert_eq!(
+            called, admitted,
+            "only admitted startup reaches the callback"
+        );
+        // SAFETY: PR_GET_DUMPABLE reads this isolated process's current setting.
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0) },
+            i32::from(!admitted),
+            "platform refusal precedes hardening"
+        );
         assert_eq!(
             strands_box::generate_policy_schema(
                 "/missing-linux-schema.toml".into(),
@@ -97,6 +111,7 @@ fn main() {
     let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
         .arg("--probe")
         .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
+        .env("EXPERIMENTAL_X86_SUPPORT", "TRUE")
         .output()
         .expect("run the library probe");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -111,6 +126,7 @@ fn main() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("--callback-error")
         .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
+        .env("EXPERIMENTAL_X86_SUPPORT", "TRUE")
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -124,6 +140,7 @@ fn main() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("--callback-config")
         .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
+        .env("EXPERIMENTAL_X86_SUPPORT", "TRUE")
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -139,7 +156,8 @@ fn main() {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command
             .arg("--linux-startup")
-            .env_remove("EXPERIMENTAL_LINUX_SUPPORT");
+            .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
+            .env("EXPERIMENTAL_X86_SUPPORT", "TRUE");
         if let Some(value) = value {
             command.env("EXPERIMENTAL_LINUX_SUPPORT", value);
         }
@@ -150,7 +168,50 @@ fn main() {
         assert!(stderr.contains("missing-linux-schema.toml"), "{stderr}");
         assert!(!stderr.contains("EXPERIMENTAL_LINUX_SUPPORT"), "{stderr}");
     }
+    #[cfg(target_os = "linux")]
+    x86_startup_matrix();
     reload_tests::suite();
+}
+
+#[cfg(target_os = "linux")]
+fn x86_startup_matrix() {
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::ffi::OsStringExt;
+
+    for value in [
+        None,
+        Some(OsString::from("")),
+        Some(OsString::from("TRUE")),
+        Some(OsString::from("true")),
+        Some(OsString::from("1")),
+        Some(OsString::from("FALSE")),
+        Some(OsString::from(" TRUE")),
+        Some(OsString::from("TRUE ")),
+        Some(OsString::from_vec(vec![0xff])),
+    ] {
+        let admitted =
+            !cfg!(target_arch = "x86_64") || value.as_deref() == Some(OsStr::new("TRUE"));
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("--linux-startup")
+            .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE")
+            .env_remove("EXPERIMENTAL_X86_SUPPORT");
+        if let Some(value) = value {
+            command.env("EXPERIMENTAL_X86_SUPPORT", value);
+        }
+        let output = command.output().expect("run the platform startup probe");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        if admitted {
+            assert!(stderr.contains("missing-linux-library.toml"), "{stderr}");
+            assert!(stderr.contains("missing-linux-schema.toml"), "{stderr}");
+            assert!(!stderr.contains("EXPERIMENTAL_X86_SUPPORT"), "{stderr}");
+        } else {
+            let refusal = "strands-box: refusing to run: x86 support on Linux is experimental. Set EXPERIMENTAL_X86_SUPPORT=TRUE to enable it.";
+            assert_eq!(stderr.lines().collect::<Vec<_>>(), [refusal, refusal]);
+        }
+        assert!(!stderr.contains("EXPERIMENTAL_LINUX_SUPPORT"), "{stderr}");
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -382,7 +443,8 @@ mod reload_tests {
             .arg(configured.config())
             .arg(configured.box_home())
             .env("HOME", configured.operator_home())
-            .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE");
+            .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE")
+            .env("EXPERIMENTAL_X86_SUPPORT", "TRUE");
         let output = bounded_output::bounded_output(command);
         assert!(
             output.status.success(),

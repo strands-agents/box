@@ -20,6 +20,29 @@ pub(crate) struct ConfiguredCommands {
     tools: BTreeMap<String, Arc<ConfiguredCommand>>,
 }
 
+/// The file each bare name runs in the hosted Shell, from the `[tool]` tables that answer to it.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct BareNames {
+    /// Each name that one program file answers to: the spelling that runs it, and its tables.
+    pub(crate) declared: BTreeMap<String, (PathBuf, Vec<String>)>,
+    /// Each name that tables with different program files answer to, and those tables.
+    pub(crate) shared: BTreeMap<String, Vec<String>>,
+    /// Each declared name that its label settled, and the tables that run other files.
+    pub(crate) passed_over: BTreeMap<String, Vec<String>>,
+}
+
+impl BareNames {
+    /// The declared file of each name, as the Shell reads it.
+    pub(crate) fn programs(&self) -> strands_shell::os::HostPrograms {
+        Arc::new(
+            self.declared
+                .iter()
+                .map(|(name, (path, _))| (name.clone(), path.clone()))
+                .collect(),
+        )
+    }
+}
+
 /// Why command protection refuses a mutation.
 #[derive(Debug)]
 pub(crate) enum CommandMutationRefusal {
@@ -130,13 +153,96 @@ impl ConfiguredCommands {
         self.tools.get(label)
     }
 
+    /// The bare names that `record`'s tools answer to: each one's bound name, which a grammar whose
+    /// `program` is not its command's file name leaves to `PATH`, and none the Shell implements.
+    /// Among tools whose commands resolve to different paths, including hard links to one file,
+    /// `search_path` decides when it finds one of them, else the one tool whose label is the name.
+    pub(crate) fn bare_names(&self, record: &Record, search_path: &std::ffi::OsStr) -> BareNames {
+        use crate::record::config::grammar::{bound_name, called_name};
+        let mut found: BTreeMap<&str, Vec<(&str, &ConfiguredCommand, bool)>> = BTreeMap::new();
+        for (label, spec) in &record.tool {
+            let (Some(name), Some(command)) = (bound_name(spec), self.tools.get(label)) else {
+                continue;
+            };
+            if strands_shell::exec::implements_program(name) {
+                continue;
+            }
+            let declares = name == called_name(spec);
+            found
+                .entry(name)
+                .or_default()
+                .push((label, command, declares));
+        }
+        let mut names = BareNames::default();
+        for (name, commands) in found {
+            let Some((_, declaring, _)) = commands.iter().find(|(_, _, declares)| *declares) else {
+                continue;
+            };
+            let tables = commands
+                .iter()
+                .map(|(label, _, _)| format!("[tool.{label}]"))
+                .collect();
+            let chosen = if commands
+                .iter()
+                .all(|(_, command, _)| command.path == declaring.path)
+            {
+                Some(*declaring)
+            } else {
+                Self::label_choice(name, &commands, search_path)
+            };
+            let Some(command) = chosen else {
+                names.shared.insert(name.to_string(), tables);
+                continue;
+            };
+            let (running, other): (Vec<_>, Vec<_>) = commands
+                .iter()
+                .partition(|(_, candidate, _)| candidate.path == command.path);
+            let label =
+                |(label, _, _): &(&str, &ConfiguredCommand, bool)| format!("[tool.{label}]");
+            if !other.is_empty() {
+                names
+                    .passed_over
+                    .insert(name.to_string(), other.iter().map(label).collect());
+            }
+            names.declared.insert(
+                name.to_string(),
+                (command.invoked.clone(), running.iter().map(label).collect()),
+            );
+        }
+        names
+    }
+
+    /// The one tool labelled `name` among `commands`, whose commands resolve to different paths,
+    /// when `search_path` finds none of those paths for `name`.
+    fn label_choice<'a>(
+        name: &str,
+        commands: &[(&str, &'a ConfiguredCommand, bool)],
+        search_path: &std::ffi::OsStr,
+    ) -> Option<&'a ConfiguredCommand> {
+        let found = super::contain::executable::find_on(name, search_path)
+            .and_then(|path| path.canonicalize().ok());
+        if commands
+            .iter()
+            .any(|(_, command, _)| Some(&command.path) == found.as_ref())
+        {
+            return None;
+        }
+        let mut labelled = commands
+            .iter()
+            .filter(|(label, _, declares)| *declares && *label == name);
+        match (labelled.next(), labelled.next()) {
+            (Some((_, command, _)), None) => Some(command),
+            _ => None,
+        }
+    }
+
     pub(crate) fn mutation_refusal(&self, path: &Path) -> Option<CommandMutationRefusal> {
         if self.tools.values().any(|command| command.enclosed_by(path)) {
             return Some(CommandMutationRefusal::CommandOrAncestor);
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
-            let identities = self.mutable_aliases();
+            let identities = self.mutable_aliases(path);
             if !identities.is_empty() {
                 return match aliases::contains(path, &identities) {
                     Ok(true) => Some(CommandMutationRefusal::HardLinkAlias),
@@ -175,7 +281,7 @@ impl ConfiguredCommands {
             }
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             if grant.scope != Scope::File {
-                let identities = self.mutable_aliases();
+                let identities = self.mutable_aliases(&grant.resolved);
                 if identities.is_empty() {
                     continue;
                 }
@@ -201,16 +307,25 @@ impl ConfiguredCommands {
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    fn mutable_aliases(&self) -> Vec<(u64, u64)> {
+    fn mutable_aliases(&self, target: &Path) -> Vec<(u64, u64)> {
+        let directory = std::fs::symlink_metadata(target).is_ok_and(|metadata| metadata.is_dir());
         self.tools
             .values()
-            .filter(|command| command.needs_alias_scan)
+            .filter(|command| {
+                command.needs_alias_scan && (!directory || !command.every_name_beside(target))
+            })
             .map(|command| command.identity)
             .collect()
     }
 }
 
 impl ConfiguredCommand {
+    /// Whether the current target can omit the hard-link scan for this command.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn every_name_beside(&self, target: &Path) -> bool {
+        aliases::every_name_beside(&self.path, &self.opened, self.identity, target)
+    }
+
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -400,6 +515,7 @@ mod tests {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            gateway: Default::default(),
             limits: Default::default(),
             box_id: "commands-test".to_string(),
             box_dir: path.parent().expect("directory").join("box-state"),
@@ -416,6 +532,7 @@ mod tests {
                     filesystem: Default::default(),
                     network: None,
                     grammar: None,
+                    ingress: Vec::new(),
                 },
             )]),
             egress: Default::default(),
@@ -519,6 +636,247 @@ mod tests {
             assert!(error.contains(table), "{error}");
             assert!(error.contains("contains a hard link"), "{error}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn shortcut_fixture_skip_reason(home: &Path, tools: &Path, work: &Path) -> Option<String> {
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::fs::MetadataExt as _;
+
+        let inspect = || -> Result<(), String> {
+            let file = File::open(home).map_err(|error| error.to_string())?;
+            let metadata = file.metadata().map_err(|error| error.to_string())?;
+            let device = format!(
+                "{}:{}",
+                libc::major(metadata.dev()),
+                libc::minor(metadata.dev())
+            );
+            let table = std::fs::read_to_string("/proc/self/mountinfo")
+                .map_err(|error| error.to_string())?;
+            let mut mounts = Vec::new();
+            for line in table.lines().filter(|line| !line.is_empty()) {
+                let fields: Vec<_> = line.split_ascii_whitespace().collect();
+                let separator = fields
+                    .iter()
+                    .position(|field| *field == "-")
+                    .ok_or("mount table row has no separator")?;
+                if separator < 6 || fields.len() != separator + 4 {
+                    return Err("mount table row is incomplete".into());
+                }
+                for field in &fields[..2] {
+                    field
+                        .parse::<u64>()
+                        .map_err(|_| "mount identity is not numeric")?;
+                }
+                let (major, minor) = fields[2]
+                    .split_once(':')
+                    .ok_or("mount device is incomplete")?;
+                for field in [major, minor] {
+                    field
+                        .parse::<u32>()
+                        .map_err(|_| "mount device is not numeric")?;
+                }
+                if (!Path::new(fields[3]).is_absolute() && fields[separator + 1] != "nsfs")
+                    || !Path::new(fields[4]).is_absolute()
+                    || fields[3].contains('\\')
+                    || fields[4].contains('\\')
+                {
+                    return Err("fixture requires absolute mount points and unescaped filesystem paths or nsfs roots".into());
+                }
+                mounts.push((
+                    fields[2],
+                    fields[3],
+                    Path::new(fields[4]),
+                    fields[separator + 1],
+                ));
+            }
+            let matching: Vec<_> = mounts.iter().filter(|mount| mount.0 == device).collect();
+            if matching.len() != 1 {
+                return Err("fixture device does not have exactly one mount".into());
+            }
+            let selected = matching[0];
+            if selected.1 != "/" || !tools.starts_with(selected.2) || !work.starts_with(selected.2)
+            {
+                return Err("fixture is not below one complete filesystem mount".into());
+            }
+            let expected_type = match selected.3 {
+                "ext4" => libc::EXT4_SUPER_MAGIC,
+                "xfs" => libc::XFS_SUPER_MAGIC,
+                "tmpfs" => libc::TMPFS_MAGIC,
+                _ => return Err("fixture filesystem is not ext4, XFS, or tmpfs".into()),
+            };
+            if mounts.iter().filter(|mount| mount.2 == selected.2).count() != 1
+                || mounts
+                    .iter()
+                    .any(|mount| mount.2.starts_with(tools) || mount.2.starts_with(work))
+            {
+                return Err("fixture paths overlap another mount".into());
+            }
+            let mut filesystem = std::mem::MaybeUninit::<libc::statfs>::uninit();
+            // SAFETY: the descriptor is live and the output points to writable statfs storage.
+            if unsafe { libc::fstatfs(file.as_raw_fd(), filesystem.as_mut_ptr()) } != 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            // SAFETY: fstatfs succeeded and initialized the output.
+            let filesystem = unsafe { filesystem.assume_init() };
+            if filesystem.f_type != expected_type {
+                return Err("statfs disagrees with the fixture mount type".into());
+            }
+            Ok(())
+        };
+        inspect().err()
+    }
+
+    /// Co-located hard links skip inspection on supported Linux layouts and retain the macOS scan.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_linked_command_whose_names_share_its_folder_skips_the_scan_until_a_name_lands_elsewhere() {
+        let directory = tempfile::tempdir().expect("directory");
+        let home = directory.path().canonicalize().unwrap();
+        let tools = home.join("tools");
+        let work = home.join("work");
+        let locked = work.join("locked");
+        std::fs::create_dir(&tools).unwrap();
+        std::fs::create_dir_all(&locked).unwrap();
+        #[cfg(target_os = "linux")]
+        if let Some(reason) = shortcut_fixture_skip_reason(&home, &tools, &work) {
+            eprintln!("skipping: linked-command shortcut fixture: {reason}");
+            return;
+        }
+        // SAFETY: these calls only read process credentials.
+        if unsafe { [libc::getuid(), libc::geteuid()] }.contains(&0) {
+            eprintln!("skipping: linked-command shortcut fixture requires a non-root user");
+            return;
+        }
+        std::fs::write(locked.join("entry"), "").unwrap();
+        let command = tools.join("reader");
+        program(&command);
+        std::fs::hard_link(&command, tools.join("alias")).unwrap();
+        let commands = ConfiguredCommands::load(&record(&command)).expect("linked commands load");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = std::fs::read_dir(&locked).is_err();
+        let identities = commands.mutable_aliases(&work);
+        let skipped = commands.validate_reach("[agent]", &reach(&home, &work));
+        let mutation = commands.mutation_refusal(&work);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !unreadable {
+            eprintln!("skipping: mode-000 directories remain readable for this test user");
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            assert!(
+                identities.is_empty(),
+                "a supported Linux fixture must use the shortcut"
+            );
+            skipped.expect("the verified layout needs no scan");
+            assert!(mutation.is_none(), "the verified layout needs no scan");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(identities, vec![commands.get("reader").unwrap().identity]);
+            assert!(skipped.is_err(), "macOS keeps the existing scan");
+            assert!(
+                matches!(mutation, Some(CommandMutationRefusal::IncompleteScan(_))),
+                "macOS also scans mutation targets"
+            );
+        }
+        commands.get("reader").unwrap().verify().unwrap();
+
+        std::fs::hard_link(&command, work.join("elsewhere")).unwrap();
+        assert_eq!(
+            commands.mutable_aliases(&work),
+            vec![commands.get("reader").unwrap().identity],
+            "a name outside the folder brings the scan back"
+        );
+        let error = commands
+            .validate_reach("[agent]", &reach(&home, &work))
+            .expect_err("the scan finds the new name")
+            .to_string();
+        assert!(error.contains("contains a hard link"), "{error}");
+        assert!(
+            commands.get("reader").unwrap().verify().is_err(),
+            "the added name also changes the link count"
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn file_and_missing_targets_retain_direct_command_identity_checks() {
+        let directory = tempfile::tempdir().unwrap();
+        let tools = directory.path().join("tools");
+        let work = directory.path().join("work");
+        std::fs::create_dir(&tools).unwrap();
+        std::fs::create_dir(&work).unwrap();
+        let command = tools.join("reader");
+        let alias = tools.join("alias");
+        program(&command);
+        std::fs::hard_link(&command, &alias).unwrap();
+        let commands = ConfiguredCommands::load(&record(&command)).unwrap();
+        let ordinary = work.join("ordinary");
+        std::fs::write(&ordinary, "unchanged").unwrap();
+        for target in [&ordinary, &work.join("missing")] {
+            assert_eq!(
+                commands.mutable_aliases(target),
+                vec![commands.get("reader").unwrap().identity],
+                "file and missing targets retain direct identity checks"
+            );
+            assert!(commands.mutation_refusal(target).is_none());
+        }
+        assert!(
+            commands.mutation_refusal(&alias).is_some(),
+            "a direct hard-link file remains protected"
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_name_outside_the_command_folder_requires_a_complete_directory_scan() {
+        // SAFETY: these calls only read process credentials.
+        if unsafe { [libc::getuid(), libc::geteuid()] }.contains(&0) {
+            eprintln!("skipping: unreadable alias-scan fixture requires a non-root user");
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let home = directory.path().canonicalize().unwrap();
+        let tools = home.join("tools");
+        let work = home.join("work");
+        let locked = work.join("locked");
+        std::fs::create_dir(&tools).unwrap();
+        std::fs::create_dir_all(&locked).unwrap();
+        let command = tools.join("reader");
+        program(&command);
+        std::fs::hard_link(&command, home.join("outside")).unwrap();
+        let commands = ConfiguredCommands::load(&record(&command)).unwrap();
+        let expected = vec![commands.get("reader").unwrap().identity];
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = std::fs::read_dir(&locked).is_err();
+        let identities = commands.mutable_aliases(&work);
+        let validation = commands.validate_reach("[agent]", &reach(&home, &work));
+        let mutation = commands.mutation_refusal(&work);
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !unreadable {
+            eprintln!("skipping: mode-000 directories remain readable for this test user");
+            return;
+        }
+        assert_eq!(
+            identities, expected,
+            "the name outside the folder requires a scan"
+        );
+        let error = validation
+            .expect_err("an incomplete scan must refuse startup")
+            .to_string();
+        assert!(error.contains("cannot be inspected"), "{error}");
+        assert!(
+            matches!(mutation, Some(CommandMutationRefusal::IncompleteScan(_))),
+            "a directory mutation also requires a complete scan"
+        );
+        let alias = work.join("alias");
+        std::fs::hard_link(&command, &alias).unwrap();
+        assert!(
+            commands.mutation_refusal(&alias).is_some(),
+            "a direct hard-link file remains protected"
+        );
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -956,5 +1314,285 @@ mod tests {
             .unwrap()
             .verify()
             .expect_err("a changed route refuses launch");
+    }
+
+    fn tool(command: &Path, program: Option<&str>) -> ProcessSpec {
+        ProcessSpec {
+            native_filesystem_policy: None,
+            command: vec![command.display().to_string()],
+            workspace: None,
+            env: Default::default(),
+            filesystem: Default::default(),
+            network: None,
+            grammar: program.map(|program| {
+                toml::Value::Table(toml::Table::from_iter([(
+                    "program".to_string(),
+                    toml::Value::String(program.to_string()),
+                )]))
+                .try_into()
+                .expect("a grammar table")
+            }),
+            ingress: Vec::new(),
+        }
+    }
+
+    fn bare_names(tools: &[(&str, ProcessSpec)], at: &Path) -> BareNames {
+        let mut record = record(at);
+        record.tool = tools
+            .iter()
+            .map(|(label, spec)| ((*label).to_string(), spec.clone()))
+            .collect();
+        ConfiguredCommands::load(&record)
+            .expect("the commands load")
+            .bare_names(&record, std::ffi::OsStr::new(""))
+    }
+
+    /// **A tool answers to its command's file name, not its label**, and several tables that run
+    /// one file under one name share that name.
+    #[test]
+    fn a_tool_answers_to_its_commands_file_name() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        std::fs::create_dir_all(root.join("developer/usr/bin")).expect("folder");
+        let git = root.join("developer/usr/bin/git");
+        program(&git);
+
+        let names = bare_names(
+            &[
+                ("brew_git", tool(&git, None)),
+                ("git_status", tool(&git, None)),
+            ],
+            &git,
+        );
+
+        assert_eq!(
+            names.declared,
+            BTreeMap::from([(
+                "git".to_string(),
+                (
+                    git.clone(),
+                    vec![
+                        "[tool.brew_git]".to_string(),
+                        "[tool.git_status]".to_string()
+                    ]
+                )
+            )])
+        );
+        assert!(names.shared.is_empty());
+        assert_eq!(
+            *names.programs(),
+            BTreeMap::from([("git".to_string(), git)])
+        );
+    }
+
+    /// **A name that two different program files answer to, with no table labelled that name, is
+    /// declared by neither**, so the Shell finds it on `PATH` as before.
+    #[test]
+    fn a_name_two_files_answer_to_is_left_to_path() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        for folder in ["system", "brew"] {
+            std::fs::create_dir_all(root.join(folder)).expect("folder");
+            program(&root.join(folder).join("git"));
+        }
+
+        let names = bare_names(
+            &[
+                ("system_git", tool(&root.join("system/git"), None)),
+                ("brew_git", tool(&root.join("brew/git"), None)),
+            ],
+            &root.join("system/git"),
+        );
+
+        assert!(names.declared.is_empty(), "{:?}", names.declared);
+        assert_eq!(
+            names.shared,
+            BTreeMap::from([(
+                "git".to_string(),
+                vec![
+                    "[tool.brew_git]".to_string(),
+                    "[tool.system_git]".to_string()
+                ]
+            )])
+        );
+    }
+
+    /// **Hard links at two paths keep the table that `PATH` selects**, because a spawn selects its
+    /// tool by the resolved path, not by the file the two paths share. The label settles the name
+    /// only when `PATH` finds neither path.
+    #[test]
+    fn hard_links_at_two_paths_keep_the_table_that_path_selects() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        for folder in ["developer", "project", "stub"] {
+            std::fs::create_dir_all(root.join(folder)).expect("folder");
+        }
+        program(&root.join("developer/git"));
+        program(&root.join("stub/git"));
+        std::fs::hard_link(root.join("developer/git"), root.join("project/git"))
+            .expect("a hard link");
+        let mut record = record(&root.join("developer/git"));
+        record.tool = BTreeMap::from([
+            ("git".to_string(), tool(&root.join("developer/git"), None)),
+            (
+                "project_git".to_string(),
+                tool(&root.join("project/git"), None),
+            ),
+        ]);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+
+        let project_first = commands.bare_names(&record, root.join("project").as_os_str());
+        let past_the_stub = commands.bare_names(&record, root.join("stub").as_os_str());
+
+        assert!(
+            project_first.declared.is_empty() && project_first.shared.contains_key("git"),
+            "{project_first:?}"
+        );
+        assert_eq!(
+            past_the_stub.declared.get("git"),
+            Some(&(root.join("developer/git"), vec!["[tool.git]".to_string()])),
+            "{past_the_stub:?}"
+        );
+        assert_eq!(
+            past_the_stub.passed_over.get("git"),
+            Some(&vec!["[tool.project_git]".to_string()]),
+            "{past_the_stub:?}"
+        );
+    }
+
+    /// **A grammar whose `program` is not its command's file name declares no bare name**, so a
+    /// shim that its called name selects keeps the spelling that `PATH` finds.
+    #[test]
+    fn a_grammar_on_another_program_name_declares_no_bare_name() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let cli = root.join("npm-cli.js");
+        program(&cli);
+        let git = root.join("git");
+        program(&git);
+
+        let names = bare_names(
+            &[
+                ("npm", tool(&cli, Some("npm"))),
+                ("git", tool(&git, Some("git"))),
+            ],
+            &cli,
+        );
+
+        assert_eq!(
+            names.declared.keys().collect::<Vec<_>>(),
+            vec!["git"],
+            "{:?}",
+            names.declared
+        );
+    }
+
+    /// **Among tools with different command paths under one name, `PATH` decides when it finds one
+    /// of them, and otherwise the tool whose label is the name runs.**
+    #[test]
+    fn the_label_breaks_a_tie_that_path_does_not_settle() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        for folder in ["developer", "brew", "stub"] {
+            std::fs::create_dir_all(root.join(folder)).expect("folder");
+            program(&root.join(folder).join("git"));
+        }
+        let mut record = record(&root.join("developer/git"));
+        record.tool = BTreeMap::from([
+            ("git".to_string(), tool(&root.join("developer/git"), None)),
+            ("brew_git".to_string(), tool(&root.join("brew/git"), None)),
+        ]);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+
+        let past_the_stub = commands.bare_names(&record, root.join("stub").as_os_str());
+        let brew_first = commands.bare_names(&record, root.join("brew").as_os_str());
+
+        assert_eq!(
+            past_the_stub.declared.get("git"),
+            Some(&(root.join("developer/git"), vec!["[tool.git]".to_string()])),
+            "{past_the_stub:?}"
+        );
+        assert_eq!(
+            past_the_stub.passed_over.get("git"),
+            Some(&vec!["[tool.brew_git]".to_string()]),
+            "{past_the_stub:?}"
+        );
+        assert!(
+            brew_first.declared.is_empty() && brew_first.shared.contains_key("git"),
+            "{brew_first:?}"
+        );
+    }
+
+    /// **A grammar's `program` that another tool's different file answers to is left to `PATH`**,
+    /// so the startup check that `PATH` reaches the grammar's file still holds for the Shell.
+    #[test]
+    fn a_grammar_program_another_file_answers_to_is_left_to_path() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let cli = root.join("npm-cli.js");
+        program(&cli);
+        std::fs::create_dir_all(root.join("brew")).expect("folder");
+        let brew = root.join("brew/npm");
+        program(&brew);
+        let mut ci = tool(&brew, None);
+        ci.command.push("ci".to_string());
+
+        let names = bare_names(&[("npm", tool(&cli, Some("npm"))), ("npm_ci", ci)], &cli);
+
+        assert!(names.declared.is_empty(), "{:?}", names.declared);
+        assert_eq!(
+            names.shared,
+            BTreeMap::from([(
+                "npm".to_string(),
+                vec!["[tool.npm]".to_string(), "[tool.npm_ci]".to_string()]
+            )])
+        );
+    }
+
+    /// **A name the Shell runs itself is never declared**, because the Shell's own program wins.
+    #[test]
+    fn a_name_the_shell_implements_is_not_declared() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let tools: Vec<(&str, ProcessSpec)> = ["python3", "cat", "sh", "echo", "git"]
+            .into_iter()
+            .map(|name| {
+                let path = root.join(name);
+                program(&path);
+                (name, tool(&path, None))
+            })
+            .collect();
+
+        let names = bare_names(&tools, &root.join("git"));
+
+        assert_eq!(
+            names.declared.keys().collect::<Vec<_>>(),
+            vec!["git"],
+            "{:?}",
+            names.declared
+        );
+        assert!(names.shared.is_empty(), "{:?}", names.shared);
+    }
+
+    /// **A command is declared through the spelling the run starts it by**, so a linked program
+    /// keeps its link as `argv[0]`.
+    #[test]
+    fn a_linked_command_is_declared_through_its_link() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        std::fs::create_dir_all(root.join("cellar")).expect("folder");
+        std::fs::create_dir_all(root.join("bin")).expect("folder");
+        program(&root.join("cellar/git"));
+        std::os::unix::fs::symlink(root.join("cellar/git"), root.join("bin/git")).expect("link");
+
+        let names = bare_names(
+            &[("git", tool(&root.join("bin/git"), None))],
+            &root.join("bin/git"),
+        );
+
+        assert_eq!(
+            names.declared.get("git").map(|(path, _)| path.clone()),
+            Some(root.join("bin/git"))
+        );
     }
 }

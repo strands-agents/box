@@ -15,13 +15,11 @@ use strands_shell::{
 
 use crate::run::broker::invalid_input;
 use crate::run::broker::mcp::DiscoveryRegistry;
-use crate::run::broker::protocol::MAX_CAPTURE_STREAM_BYTES;
 use crate::run::broker::reach::{Reach, Refused};
 use crate::run::contain::boundary::environment::WORKLOAD_USER;
+use crate::run::credential::ProvisionedVariable;
 use crate::run::telemetry::{DecisionRecorder, EffectiveDecision, ObservationCapture};
 
-/// The most command text the broker will accept into the Shell.
-const SHELL_MAX_INPUT: usize = 256 * 1024;
 const SHELL_MAX_FILE_SIZE: usize = 10 * 1024 * 1024;
 const SHELL_MAX_INODES: usize = 10_000;
 
@@ -43,6 +41,10 @@ pub(crate) struct EgressRouting {
 
 /// Everything needed to build the hosted Shell, kept so one can be rebuilt.
 pub(super) struct ShellSpec {
+    pub(super) max_input: usize,
+    /// The most stdin one Shell Program receives.
+    pub(super) max_stdin: usize,
+    pub(super) max_output: usize,
     /// The Shell's own bound on one submitted Shell call.
     pub(super) command_timeout: Option<Duration>,
     /// The broker's backstop deadline on one Call, distinct from `command_timeout`. The Shell's own
@@ -79,12 +81,18 @@ pub(super) struct ShellSpec {
     /// gateway; `None` leaves the network off.
     pub(super) egress: Option<EgressRouting>,
 
+    /// Every variable a route provisions, which each new Shell holds beneath its own names.
+    pub(super) phantoms: Vec<ProvisionedVariable>,
+
     /// Where final policy enforcement point decisions are submitted.
     pub(super) recorder: Arc<crate::run::telemetry::DecisionRecorder>,
 
     /// The hook that runs a host binary in a contained leaf box. `None` leaves the
     /// vendored crate's built-in spawn, which the box never wants; the box always installs it.
-    pub(super) host_spawner: Option<strands_shell::os::HostSpawner>,
+    pub(super) host_spawner: Option<crate::run::hosted::ToolSpawner>,
+
+    /// The `[tool]` file each declared bare name runs, in place of a host `PATH` lookup.
+    pub(super) host_programs: strands_shell::os::HostPrograms,
 }
 
 impl ShellSpec {
@@ -118,7 +126,11 @@ impl ShellSpec {
         // `CallKernel` sends HTTP through the gateway, so the vendored client never dials.
         backend.network_enabled = false;
         backend.script_interpreter = Some(self.script_interpreter());
-        backend.host_spawner = self.host_spawner.clone();
+        backend.host_spawner = self
+            .host_spawner
+            .as_ref()
+            .map(crate::run::hosted::ToolSpawner::spawn);
+        backend.host_programs = Arc::clone(&self.host_programs);
         Ok(Arc::new(backend))
     }
 
@@ -132,6 +144,7 @@ impl ShellSpec {
         let interceptor = ReachFloor::over(
             Arc::clone(&self.reach),
             Arc::clone(recorder),
+            self.host_spawner.clone(),
             // **Reporting under the operator home, so a rule reads `~/<relative>`.** A policy is
             // checked into the operator's repository and has to hold in every clone; a host path
             match self.reach.reported_home() {
@@ -161,8 +174,8 @@ impl ShellSpec {
         }
         let builder = builder
             .effect_interceptor(interceptor)
-            .max_input(SHELL_MAX_INPUT)
-            .max_output(MAX_CAPTURE_STREAM_BYTES)
+            .max_input(self.max_input)
+            .max_output(self.max_output)
             .max_file_size(SHELL_MAX_FILE_SIZE)
             .max_inodes(SHELL_MAX_INODES);
         let builder = match self.command_timeout {
@@ -189,6 +202,11 @@ impl ShellSpec {
             .build()?;
         verify_direct_binds(&shell, &binds)?;
         shell.proc.cwd = PathBuf::from(self.reach.working_directory());
+        // Each route's phantom, beneath the Shell's own names, in the order `environment::compose`
+        // keeps (docs/design/decisions.md#the-box-is-the-credential-boundary).
+        for phantom in &self.phantoms {
+            shell.set_env(phantom.name.as_str(), phantom.value.as_str());
+        }
         shell.set_env("PWD", self.reach.working_directory());
         shell.set_env("HOME", self.reach.home_variable());
         shell.set_env("USER", WORKLOAD_USER);
@@ -260,6 +278,7 @@ fn verify_direct_binds(shell: &Shell, declared: &[(&str, &str)]) -> io::Result<(
 
 /// The reachable set, as a deny-only floor over the Shell's own admission seam.
 struct ReachFloor {
+    host_spawner: Option<crate::run::hosted::ToolSpawner>,
     reach: Arc<Reach>,
     inner: Arc<dyn EffectInterceptor>,
     recorder: Arc<DecisionRecorder>,
@@ -269,9 +288,11 @@ impl ReachFloor {
     fn over(
         reach: Arc<Reach>,
         recorder: Arc<DecisionRecorder>,
+        host_spawner: Option<crate::run::hosted::ToolSpawner>,
         inner: Arc<dyn EffectInterceptor>,
     ) -> Arc<dyn EffectInterceptor> {
         Arc::new(Self {
+            host_spawner,
             reach,
             inner,
             recorder,
@@ -440,6 +461,42 @@ fn reported_path(path: &str, home: Option<&Path>) -> String {
     }
 }
 
+struct SpawnDirectoryPermit {
+    inner: Option<Box<dyn EffectPermit>>,
+    working_directory: PathBuf,
+}
+
+impl EffectPermit for SpawnDirectoryPermit {
+    fn spawn_working_directory(&self) -> Option<&Path> {
+        Some(&self.working_directory)
+    }
+
+    fn record_outcome<'future>(
+        mut self: Box<Self>,
+        outcome: EffectOutcome,
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'future>>
+    where
+        Self: 'future,
+    {
+        self.inner
+            .take()
+            .expect("the checked spawn owns its policy permit")
+            .record_outcome(outcome)
+    }
+
+    fn mark_indeterminate(self: Box<Self>) {
+        drop(self);
+    }
+}
+
+impl Drop for SpawnDirectoryPermit {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            inner.mark_indeterminate();
+        }
+    }
+}
+
 impl EffectInterceptor for ReachFloor {
     /// Hand-written rather than `#[async_trait]`, which the box does not depend on.
     fn intercept<'this, 'effect, 'attempt, 'future>(
@@ -453,6 +510,50 @@ impl EffectInterceptor for ReachFloor {
         Self: 'future,
     {
         Box::pin(async move {
+            let spawn_directory = match (effect, &self.host_spawner) {
+                (
+                    EffectAttempt::ShellSpawn {
+                        program,
+                        program_path,
+                        args,
+                        cwd,
+                        ..
+                    },
+                    Some(spawner),
+                ) => Some(
+                    spawner
+                        .working_directory(
+                            Path::new(program_path),
+                            Path::new(program),
+                            args,
+                            Path::new(cwd),
+                        )
+                        .unwrap_or_else(|_| PathBuf::from(*cwd)),
+                ),
+                _ => None,
+            };
+            let checked = match (effect, spawn_directory.as_ref()) {
+                (
+                    EffectAttempt::ShellSpawn {
+                        command,
+                        program,
+                        program_path,
+                        args,
+                        literal,
+                        ..
+                    },
+                    Some(directory),
+                ) => Some(EffectAttempt::ShellSpawn {
+                    command,
+                    program,
+                    program_path,
+                    args,
+                    literal,
+                    cwd: directory.to_str().expect("the checked directory is UTF-8"),
+                }),
+                _ => None,
+            };
+            let effect = checked.as_ref().unwrap_or(effect);
             let subject =
                 decision_subject(effect, self.reach.reported_home().map(std::path::Path::new));
             // PolicyEngine first, always. The floor cannot widen what policy refused, and asking
@@ -499,7 +600,14 @@ impl EffectInterceptor for ReachFloor {
                             .about(subject.reported),
                         );
                     }
-                    Ok(permit)
+                    Ok(match spawn_directory {
+                        Some(working_directory) => Box::new(SpawnDirectoryPermit {
+                            inner: Some(permit),
+                            working_directory,
+                        })
+                            as Box<dyn EffectPermit>,
+                        None => permit,
+                    })
                 }
                 Err(refused) => {
                     if let Some(subject) = subject {
@@ -542,6 +650,149 @@ mod tests {
     use crate::record::config::AuthoritySource;
     use crate::run::telemetry::{EffectiveRule, EffectiveVerdict, PolicyDecisionObserver};
     use crate::test_support::open_policy;
+
+    #[derive(Clone, Copy)]
+    enum RecordingMode {
+        Complete,
+        Fail,
+        Suspend,
+    }
+
+    struct RecordingPermit {
+        events: Arc<std::sync::Mutex<Vec<&'static str>>>,
+        mode: RecordingMode,
+    }
+
+    struct PendingRecording(Option<Arc<std::sync::Mutex<Vec<&'static str>>>>);
+
+    impl Drop for PendingRecording {
+        fn drop(&mut self) {
+            if let Some(events) = self.0.take() {
+                events
+                    .lock()
+                    .expect("recorded events")
+                    .push("cancelled recording");
+            }
+        }
+    }
+
+    impl EffectPermit for RecordingPermit {
+        fn record_outcome<'future>(
+            self: Box<Self>,
+            outcome: EffectOutcome,
+        ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'future>>
+        where
+            Self: 'future,
+        {
+            assert!(matches!(
+                outcome,
+                EffectOutcome::ShellCommand {
+                    reported_status: 23
+                }
+            ));
+            self.events.lock().expect("recorded events").push("record");
+            let mut pending = PendingRecording(Some(Arc::clone(&self.events)));
+            Box::pin(async move {
+                let result = match self.mode {
+                    RecordingMode::Complete => Ok(()),
+                    RecordingMode::Fail => Err(io::Error::other("recording failed")),
+                    RecordingMode::Suspend => std::future::pending().await,
+                };
+                pending.0.take();
+                result
+            })
+        }
+
+        fn mark_indeterminate(self: Box<Self>) {
+            self.events
+                .lock()
+                .expect("recorded events")
+                .push("indeterminate");
+        }
+    }
+
+    fn directory_permit(
+        events: &Arc<std::sync::Mutex<Vec<&'static str>>>,
+        mode: RecordingMode,
+    ) -> Box<dyn EffectPermit> {
+        Box::new(SpawnDirectoryPermit {
+            inner: Some(Box::new(RecordingPermit {
+                events: Arc::clone(events),
+                mode,
+            })),
+            working_directory: PathBuf::from("/checked/workspace"),
+        })
+    }
+
+    #[test]
+    fn a_checked_spawn_marks_every_exit_before_recording_indeterminate_once() {
+        for exit in ["drop", "mark"] {
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let permit = directory_permit(&events, RecordingMode::Complete);
+            assert_eq!(
+                permit.spawn_working_directory(),
+                Some(Path::new("/checked/workspace"))
+            );
+            match exit {
+                "drop" => drop(permit),
+                _ => permit.mark_indeterminate(),
+            }
+            assert_eq!(
+                *events.lock().expect("recorded events"),
+                ["indeterminate"],
+                "{exit}"
+            );
+        }
+    }
+
+    #[test]
+    fn cancelling_an_unpolled_spawn_recording_leaves_reconciliation_to_its_owner() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let recording = directory_permit(&events, RecordingMode::Complete).record_outcome(
+            EffectOutcome::ShellCommand {
+                reported_status: 23,
+            },
+        );
+        drop(recording);
+        assert_eq!(
+            *events.lock().expect("recorded events"),
+            ["record", "cancelled recording"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_checked_spawn_forwards_the_outcome_and_recording_error_once() {
+        for mode in [RecordingMode::Complete, RecordingMode::Fail] {
+            let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let result = directory_permit(&events, mode)
+                .record_outcome(EffectOutcome::ShellCommand {
+                    reported_status: 23,
+                })
+                .await;
+            assert_eq!(result.is_ok(), matches!(mode, RecordingMode::Complete));
+            if let Err(error) = result {
+                assert_eq!(error.to_string(), "recording failed");
+            }
+            assert_eq!(*events.lock().expect("recorded events"), ["record"]);
+        }
+    }
+
+    #[test]
+    fn cancelling_a_forwarded_spawn_recording_leaves_reconciliation_to_its_owner() {
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut recording = directory_permit(&events, RecordingMode::Suspend).record_outcome(
+            EffectOutcome::ShellCommand {
+                reported_status: 23,
+            },
+        );
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(recording.as_mut().poll(&mut context).is_pending());
+        drop(recording);
+        assert_eq!(
+            *events.lock().expect("recorded events"),
+            ["record", "cancelled recording"]
+        );
+    }
 
     /// **The box's label table agrees with the policy adapter on every kernel verb listed here,
     /// no listed verb reaches `fs:other`, and `Locate` is no decision on either side.** The policy
@@ -693,6 +944,7 @@ mod tests {
     fn floor(reach: Arc<Reach>) -> ReachFloor {
         let policy = Arc::new(open_policy(Vec::<Policy>::new()));
         ReachFloor {
+            host_spawner: None,
             reach,
             inner: ShellPolicyInterceptor::into_handle(
                 policy,
@@ -715,6 +967,7 @@ mod tests {
         let recorder = DecisionRecorder::discarding();
         (
             ReachFloor {
+                host_spawner: None,
                 reach,
                 inner: ShellPolicyInterceptor::into_handle(
                     policy,
@@ -927,6 +1180,7 @@ mod tests {
         );
         let recorder = DecisionRecorder::discarding();
         let floor = ReachFloor {
+            host_spawner: None,
             reach,
             inner: ShellPolicyInterceptor::into_handle_reporting_under(
                 policy,
@@ -999,6 +1253,7 @@ mod tests {
             .to_string(),
         }]));
         let floor = ReachFloor {
+            host_spawner: None,
             reach,
             inner: ShellPolicyInterceptor::into_handle_reporting_under(
                 policy,
@@ -1070,6 +1325,7 @@ mod tests {
             ),
         }]));
         ReachFloor {
+            host_spawner: None,
             reach,
             inner: ShellPolicyInterceptor::into_handle_reporting_under(
                 policy,

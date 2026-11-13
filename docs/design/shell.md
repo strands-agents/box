@@ -153,12 +153,13 @@ every `fs:read` permit to a path. See [where policy sits](./policy.md#where-poli
 
 ### Programs outside the Shell
 
-A program the Shell doesn't implement raises `shell:spawn`. A bare name is looked up on the `PATH`
-of the box's trusted process, which is the `PATH` of the host OS's shell where the operator ran `box
-run`, with `/usr/bin:/bin` as the fallback. A name with a `/` is that path, relative to the Shell's
-working directory. Either way, the Shell resolves every link, and `program_path` is the file that
-will run, and the program gets the agent's spelling as its `argv[0]`. See [a program resolves on the
-operator's `PATH`](decisions.md#a-host-binary-resolves-on-the-operator-path).
+A program the Shell doesn't implement raises `shell:spawn`. A bare name that a `[tool]` answers to,
+the last part of its `command` element 0, runs that tool's file, which Box opened and checked at
+startup. Any other bare name is looked up on the `PATH` of the box's trusted process, which is the
+`PATH` of the host OS's shell where the operator ran `box run`, with `/usr/bin:/bin` as the
+fallback. A name with a `/` is that path, relative to the Shell's working directory. Either way, the Shell resolves every link, and `program_path` is the file that
+will run, and the program gets the agent's spelling as its `argv[0]`. See [a bare name runs its tool's
+file](decisions.md#a-host-binary-resolves-on-the-operator-path).
 
 Use `context.input.program_path` to allow a program by its resolved file, which reads as `~/…` under
 the operator's home, as a path does. `program` and the argument fields work as they do for
@@ -234,7 +235,14 @@ The Shell uses distinct exit statuses so a harness can identify the outcome: `12
 fails the command the way the operation's own error would. The
 [reference](../user/shell.md#exit-statuses) lists each status and its message.
 
-## Execution deadlines
+<a id="execution-deadlines"></a>
+## Execution limits
+
+The stored configuration supplies `max_input` and `max_output` whenever the broker constructs
+Strands Shell, including each new call. Omitted sizes retain the 256 KiB input and 64 KiB output
+defaults; an explicit `0` disables the corresponding Shell size limit. The output limit also bounds
+script files that Shell loads with `source`.
+The broker's framing and streamed-output budgets remain separate.
 
 **Each call uses the operator's execution limit.** The operator sets
 [`limits.shell.timeout`](../user/config.md#limits), keeps the 30-second default, or selects

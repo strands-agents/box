@@ -6,6 +6,9 @@
 #[path = "../run/broker/protocol.rs"]
 mod shell_protocol;
 
+#[path = "alias/fallback.rs"]
+mod fallback;
+
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -13,8 +16,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use shell_protocol::{
-    BOUNDARY_FAILURE_STATUS, Body, Frame, Interpreter, MAX_FRAME_BYTES, PROTOCOL_VERSION, Stream,
-    decode_payload, encode_payload, read_frame, write_frame,
+    BOUNDARY_FAILURE_STATUS, Body, Frame, Interpreter, MAX_CHUNK_BYTES, MAX_FRAME_BYTES,
+    PROTOCOL_VERSION, SignalKind, Stream, decode_payload, encode_payload, read_frame, write_frame,
 };
 use tokio::net::UnixStream;
 
@@ -36,6 +39,19 @@ const SERVE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Bound on waiting for the daemon's direct Python interpreter to answer.
 const PYTHON_RESPONSE_TIMEOUT: Duration = Duration::from_secs(35);
+
+const MCP_OPEN_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// How long a Shell alias waits after a read of stdin for more before it sends a frame.
+const INPUT_COALESCE_WAIT: Duration = Duration::from_millis(10);
+
+enum Outcome {
+    Status(i32),
+    Fallback {
+        program: String,
+        arguments: Vec<String>,
+    },
+}
 
 /// One forwarded submission: which interpreter, and the program text for it.
 #[derive(Debug)]
@@ -62,8 +78,19 @@ fn main() -> ExitCode {
             return ExitCode::from(SHELL_FAILURE_EXIT);
         }
     };
-    match runtime.block_on(run()) {
-        Ok(status) => ExitCode::from(shell_status(status)),
+    let outcome = runtime.block_on(run());
+    drop(runtime);
+    match outcome {
+        Ok(Outcome::Status(status)) => ExitCode::from(shell_status(status)),
+        Ok(Outcome::Fallback { program, arguments }) => {
+            match fallback::execute(&program, &arguments) {
+                Ok(status) => ExitCode::from(status),
+                Err(error) => {
+                    eprintln!("strands-box-sock-alias: {error}");
+                    ExitCode::from(SHELL_FAILURE_EXIT)
+                }
+            }
+        }
         Err(error) => {
             eprintln!("strands-box-sock-alias: {error}");
             ExitCode::from(SHELL_FAILURE_EXIT)
@@ -96,7 +123,7 @@ fn close_inherited_descriptors() -> io::Result<()> {
     Ok(())
 }
 
-async fn run() -> io::Result<i32> {
+async fn run() -> io::Result<Outcome> {
     let Mode {
         socket,
         interpreter,
@@ -105,7 +132,201 @@ async fn run() -> io::Result<i32> {
         std::env::current_exe()?,
         std::env::args_os().skip(1).collect(),
     )?;
-    forward(&socket, interpreter, source).await
+    let input = match interpreter {
+        Interpreter::Shell => match classify_stdin(0)? {
+            StdinKind::Finite => Some(spawn_input_reader(std::io::stdin())?),
+            StdinKind::Absent => None,
+        },
+        Interpreter::Python | Interpreter::Mcp { .. } => None,
+    };
+    forward(&socket, interpreter, source, input).await
+}
+
+/// Whether a stdin descriptor holds finite input this alias forwards.
+#[derive(Debug, PartialEq, Eq)]
+enum StdinKind {
+    /// A pipe, a regular file, or a socket.
+    Finite,
+    /// A terminal, another device, or no descriptor.
+    Absent,
+}
+
+/// Classify a descriptor by its own `fstat`, never by a path.
+#[cfg(unix)]
+fn classify_stdin(descriptor: libc::c_int) -> io::Result<StdinKind> {
+    let mut status = std::mem::MaybeUninit::<libc::stat>::uninit();
+    // SAFETY: fstat writes one `stat` into the buffer it receives, and the buffer is read only
+    // after fstat reports success.
+    if unsafe { libc::fstat(descriptor, status.as_mut_ptr()) } == -1 {
+        let error = io::Error::last_os_error();
+        return match error.raw_os_error() {
+            Some(libc::EBADF) => Ok(StdinKind::Absent),
+            _ => Err(io::Error::new(
+                error.kind(),
+                format!("inspect stdin: {error}"),
+            )),
+        };
+    }
+    // SAFETY: fstat succeeded, so it initialized the buffer.
+    let mode = unsafe { status.assume_init() }.st_mode & libc::S_IFMT;
+    Ok(match mode {
+        libc::S_IFIFO | libc::S_IFREG | libc::S_IFSOCK => StdinKind::Finite,
+        _ => StdinKind::Absent,
+    })
+}
+
+#[cfg(not(unix))]
+fn classify_stdin(_descriptor: i32) -> io::Result<StdinKind> {
+    Ok(StdinKind::Absent)
+}
+
+/// One event from the thread that reads a Shell alias's stdin.
+#[derive(Debug, PartialEq, Eq)]
+enum InputEvent {
+    Data(Vec<u8>),
+    End,
+    Failed(String),
+}
+
+/// Read `reader` on its own thread. The thread blocks in `read` for as long as its writer keeps the
+/// input open; the process exit ends it.
+fn spawn_input_reader(reader: impl io::Read + Send + 'static) -> io::Result<Input> {
+    let (sender, receiver) = tokio::sync::mpsc::channel(4);
+    let refused: Refusal = Default::default();
+    let failed = std::sync::Arc::clone(&refused);
+    std::thread::Builder::new()
+        .name("stdin".to_string())
+        .spawn(move || read_input(reader, &sender, &failed))
+        .map_err(|error| io::Error::new(error.kind(), format!("read stdin: {error}")))?;
+    Ok(Input {
+        events: receiver,
+        refused,
+    })
+}
+
+/// Why the alias refused its stdin, recorded by the thread that saw it.
+type Refusal = std::sync::Arc<std::sync::Mutex<Option<String>>>;
+
+/// A Shell alias's stdin: the reader's events, and the refusal it records when a read fails.
+struct Input {
+    events: tokio::sync::mpsc::Receiver<InputEvent>,
+    refused: Refusal,
+}
+
+/// Record `reason` as the refusal, and send it so the pump interrupts the call.
+fn fail(refused: &Refusal, sender: &tokio::sync::mpsc::Sender<InputEvent>, reason: String) {
+    if let Ok(mut slot) = refused.lock() {
+        slot.get_or_insert_with(|| reason.clone());
+    }
+    let _ = sender.blocking_send(InputEvent::Failed(reason));
+}
+
+/// Send each read of `reader` as an event, then one `End` or one `Failed`. The broker applies the
+/// stdin limit, so every byte is sent and the writer never blocks.
+fn read_input(
+    mut reader: impl io::Read,
+    sender: &tokio::sync::mpsc::Sender<InputEvent>,
+    refused: &Refusal,
+) {
+    let mut buffer = vec![0_u8; MAX_CHUNK_BYTES];
+    let last = loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break InputEvent::End,
+            Ok(read) => {
+                if sender
+                    .blocking_send(InputEvent::Data(buffer[..read].to_vec()))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => {
+                fail(refused, sender, format!("read stdin: {error}"));
+                return;
+            }
+        }
+    };
+    let _ = sender.blocking_send(last);
+}
+
+/// Forward a Shell alias's stdin as `Input` frames, coalesced up to [`MAX_CHUNK_BYTES`], then
+/// `InputEof`. On a read error, record the reason in `refused` and interrupt the call.
+async fn pump_input(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    mut events: tokio::sync::mpsc::Receiver<InputEvent>,
+) -> io::Result<()> {
+    loop {
+        let Some(first) = events.recv().await else {
+            return Ok(());
+        };
+        let mut pending = Vec::new();
+        let mut last = None;
+        match first {
+            InputEvent::Data(bytes) => {
+                pending.extend(bytes);
+                // A short wait merges a writer's small writes into one frame.
+                tokio::time::sleep(INPUT_COALESCE_WAIT).await;
+            }
+            other => last = Some(other),
+        }
+        while last.is_none() && pending.len() < MAX_CHUNK_BYTES {
+            match events.try_recv() {
+                Ok(InputEvent::Data(bytes)) => pending.extend(bytes),
+                Ok(other) => last = Some(other),
+                Err(_) => break,
+            }
+        }
+        for chunk in pending.chunks(MAX_CHUNK_BYTES) {
+            write_alias_frame(
+                writer,
+                Body::Input {
+                    data: encode_payload(chunk),
+                },
+            )
+            .await?;
+        }
+        match last {
+            None | Some(InputEvent::Data(_)) => {}
+            Some(InputEvent::End) => {
+                return write_alias_frame(writer, Body::InputEof).await;
+            }
+            // The reader recorded the refusal before it sent this.
+            Some(InputEvent::Failed(_)) => {
+                // No `InputEof`: the Call would read end-of-file on part of its input.
+                return write_alias_frame(
+                    writer,
+                    Body::Signal {
+                        kind: SignalKind::Interrupt,
+                    },
+                )
+                .await;
+            }
+        }
+    }
+}
+
+/// Write one frame of this alias's Program, within [`SERVE_IO_TIMEOUT`].
+async fn write_alias_frame(
+    writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    body: Body,
+) -> io::Result<()> {
+    tokio::time::timeout(
+        SERVE_IO_TIMEOUT,
+        write_frame(
+            writer,
+            &Frame {
+                version: PROTOCOL_VERSION,
+                program: ALIAS_PROGRAM,
+                body,
+            },
+        ),
+    )
+    .await
+    .map_err(|_| timed_out("write a transport frame"))?
 }
 
 /// Parse the alias invocation, refusing this image's own name.
@@ -251,7 +472,7 @@ fn parse_script_alias(executable: &Path, arguments: Vec<OsString>) -> io::Result
 }
 
 /// Pump one MCP server's traffic: stdin to the box, the box's output to stdout.
-async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Result<i32> {
+async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Result<Outcome> {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     write_frame(
@@ -259,10 +480,36 @@ async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Res
         &Frame {
             version: PROTOCOL_VERSION,
             program: ALIAS_PROGRAM,
-            body: Body::Open { mode: interpreter },
+            body: Body::Open {
+                mode: interpreter.clone(),
+            },
         },
     )
     .await?;
+
+    match mcp_response(&mut stream).await?.body {
+        Body::McpReady => {}
+        Body::McpUnmatched => {
+            let Interpreter::Mcp { server, arguments } = interpreter else {
+                return Err(invalid_input(
+                    "ordinary fallback requires an MCP invocation",
+                ));
+            };
+            return Ok(Outcome::Fallback {
+                program: server,
+                arguments,
+            });
+        }
+        Body::Denied { reason, .. } => {
+            eprintln!("strands-box: {reason}");
+            return Ok(Outcome::Status(i32::from(SHELL_FAILURE_EXIT)));
+        }
+        other => {
+            return Err(invalid_input(format!(
+                "unexpected MCP routing response: {other:?}"
+            )));
+        }
+    }
 
     let (mut readable, mut writable) = stream.into_split();
 
@@ -298,36 +545,55 @@ async fn stream_mcp(mut stream: UnixStream, interpreter: Interpreter) -> io::Res
         .await;
     });
 
-    // The box -> stdout.
-    let mut stdout = tokio::io::stdout();
-    let mut status = 0;
-    loop {
-        let frame = match read_frame::<Frame, _>(&mut readable).await {
-            Ok(Some(frame)) => frame,
-            // The box closed the connection, which is how a session ends.
-            Ok(None) | Err(_) => break,
-        };
-        match frame.body {
-            Body::Output { data, .. } => {
-                let bytes = decode_payload(&data)?;
-                stdout.write_all(&bytes).await?;
-                stdout.flush().await?;
+    let outcome = async {
+        let mut stdout = tokio::io::stdout();
+        loop {
+            let frame = match read_frame::<Frame, _>(&mut readable).await {
+                Ok(Some(frame)) => frame,
+                Ok(None) | Err(_) => return Ok(Outcome::Status(0)),
+            };
+            validate_mcp_frame(&frame)?;
+            match frame.body {
+                Body::Output { data, .. } => {
+                    let bytes = decode_payload(&data)?;
+                    stdout.write_all(&bytes).await?;
+                    stdout.flush().await?;
+                }
+                Body::Denied { reason, .. } => {
+                    eprintln!("strands-box: {reason}");
+                    return Ok(Outcome::Status(i32::from(SHELL_FAILURE_EXIT)));
+                }
+                Body::Exit { status } => return Ok(Outcome::Status(status)),
+                _ => {}
             }
-            // A refusal is a failure exit and is terminal. Printing the reason and looping left
-            // `status` at 0, so a refused MCP server closed the connection and the alias exited
-            Body::Denied { reason, .. } => {
-                eprintln!("strands-box: {reason}");
-                return Ok(i32::from(SHELL_FAILURE_EXIT));
-            }
-            Body::Exit { status: reported } => {
-                status = reported;
-                break;
-            }
-            _ => {}
         }
     }
+    .await;
     inbound.abort();
-    Ok(status)
+    outcome
+}
+
+async fn mcp_response(stream: &mut UnixStream) -> io::Result<Frame> {
+    let frame = tokio::time::timeout(MCP_OPEN_TIMEOUT, read_frame::<Frame, _>(stream))
+        .await
+        .map_err(|_| timed_out("read the MCP routing response"))??
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the box broker closed before routing",
+            )
+        })?;
+    validate_mcp_frame(&frame)?;
+    Ok(frame)
+}
+
+fn validate_mcp_frame(frame: &Frame) -> io::Result<()> {
+    if frame.version != PROTOCOL_VERSION || frame.program != ALIAS_PROGRAM {
+        return Err(invalid_input(
+            "the MCP routing response has an incompatible version or program",
+        ));
+    }
+    Ok(())
 }
 
 /// Derive a socket path from the alias's grandparent, never from an argument.
@@ -356,13 +622,19 @@ fn read_script(script: &Path) -> io::Result<String> {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// Alias: forward one command, relay one result, never fall back.
+// Alias: forward one command and relay its result.
 
 /// The one Program an alias opens.
 const ALIAS_PROGRAM: u32 = 1;
 
-/// Submit one Call to one Program and reproduce its result locally.
-async fn forward(socket: &Path, interpreter: Interpreter, source: String) -> io::Result<i32> {
+/// Submit one Call to one Program, stream `input` to it while it runs, and reproduce its result
+/// locally.
+async fn forward(
+    socket: &Path,
+    interpreter: Interpreter,
+    source: String,
+    input: Option<Input>,
+) -> io::Result<Outcome> {
     let mut stream = tokio::time::timeout(SERVE_IO_TIMEOUT, UnixStream::connect(socket))
         .await
         .map_err(|_| timed_out("connect to the box broker"))?
@@ -379,31 +651,40 @@ async fn forward(socket: &Path, interpreter: Interpreter, source: String) -> io:
         return stream_mcp(stream, interpreter).await;
     }
     let python = matches!(interpreter, Interpreter::Python);
-
-    // `InputEof` immediately after the Call, because this alias forwards no input: a harness
-    // invoking `zsh -c` gives the command nothing on stdin, and without the EOF the Program's stdin
-    for body in [
-        Body::Open { mode: interpreter },
+    write_alias_frame(&mut stream, Body::Open { mode: interpreter }).await?;
+    write_alias_frame(
+        &mut stream,
         Body::Call {
             source,
             correlation: Box::new(call_correlation()),
         },
-        Body::InputEof,
-    ] {
-        tokio::time::timeout(
-            SERVE_IO_TIMEOUT,
-            write_frame(
-                &mut stream,
-                &Frame {
-                    version: PROTOCOL_VERSION,
-                    program: ALIAS_PROGRAM,
-                    body,
-                },
-            ),
-        )
-        .await
-        .map_err(|_| timed_out("write a transport frame"))??;
+    )
+    .await?;
+    let (mut stream, mut writer) = stream.into_split();
+    let refused: Refusal = input
+        .as_ref()
+        .map(|input| std::sync::Arc::clone(&input.refused))
+        .unwrap_or_default();
+    match input {
+        // Without the EOF, a command that reads stdin waits for its deadline.
+        None => write_alias_frame(&mut writer, Body::InputEof).await?,
+        Some(Input { events, refused }) => {
+            tokio::spawn(async move {
+                if let Err(error) = pump_input(&mut writer, events).await {
+                    // Recorded so the alias fails at Exit; dropping the write half then makes the
+                    // broker reap the running Program.
+                    if let Ok(mut slot) = refused.lock() {
+                        slot.get_or_insert_with(|| format!("forward stdin: {error}"));
+                    }
+                    return;
+                }
+                // Dropping the write half shuts the socket down, and the broker then reaps the
+                // running Program, so it lives until the process exits.
+                std::future::pending::<()>().await;
+            });
+        }
     }
+    let refusal = || refused.lock().ok().and_then(|reason| reason.clone());
 
     // Relayed as it arrives rather than accumulated, so a long-running command is observable
     // while it runs.
@@ -423,28 +704,37 @@ async fn forward(socket: &Path, interpreter: Interpreter, source: String) -> io:
                 stream: which,
                 data,
             } => {
-                use std::io::Write as _;
+                use tokio::io::AsyncWriteExt as _;
                 let bytes = decode_payload(&data)?;
-                // Flushed per chunk, not at exit.
+                // Flushed per chunk, not at exit. Asynchronous, so a full stdout does not stop the
+                // stdin pump on this one-thread runtime.
                 match which {
                     Stream::Stdout => {
-                        let mut out = std::io::stdout();
-                        out.write_all(&bytes)?;
-                        out.flush()?;
+                        let mut out = tokio::io::stdout();
+                        out.write_all(&bytes).await?;
+                        out.flush().await?;
                     }
                     Stream::Stderr => {
-                        let mut err = std::io::stderr();
-                        err.write_all(&bytes)?;
-                        err.flush()?;
+                        let mut err = tokio::io::stderr();
+                        err.write_all(&bytes).await?;
+                        err.flush().await?;
                     }
                 }
             }
-            Body::Exit { status } => return Ok(status),
+            Body::Exit { status } => {
+                return match refusal() {
+                    Some(reason) => Err(invalid_input(reason)),
+                    None => Ok(Outcome::Status(status)),
+                };
+            }
             // A transport refusal, including a version mismatch. Terminal, and reported as the
             // boundary's own failure rather than as something the program did.
             Body::Denied { reason, .. } => {
+                if let Some(reason) = refusal() {
+                    eprintln!("strands-box-sock-alias: {reason}");
+                }
                 eprintln!("strands-box: {reason}");
-                return Ok(i32::from(SHELL_FAILURE_EXIT));
+                return Ok(Outcome::Status(i32::from(SHELL_FAILURE_EXIT)));
             }
             other => {
                 return Err(io::Error::new(
@@ -484,6 +774,19 @@ mod tests {
     // REMOVED: `the_python_alias_names_match_the_layouts`.
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn an_mcp_route_that_never_answers_times_out() {
+        let (mut alias, _broker) = UnixStream::pair().unwrap();
+        let error = tokio::time::timeout(
+            MCP_OPEN_TIMEOUT + std::time::Duration::from_secs(1),
+            mcp_response(&mut alias),
+        )
+        .await
+        .expect("the MCP response wait must finish before the outer deadline")
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
 
     /// **The alias names no harness, and it reads no vendor variable.** `TRACEPARENT` and
     /// `TRACESTATE` are the only two names this image knows, because every harness spells those the
@@ -857,6 +1160,381 @@ mod tests {
             }
             Err(_) => {}
         }
+    }
+
+    // ── Shell stdin ───────────────────────────────────────────────────────────
+
+    /// Every event `read_input` sends for `reader`.
+    fn events_of(reader: impl io::Read + Send + 'static) -> Vec<InputEvent> {
+        let mut events = spawn_input_reader(reader).unwrap().events;
+        let mut seen = Vec::new();
+        while let Some(event) = events.blocking_recv() {
+            seen.push(event);
+        }
+        seen
+    }
+
+    fn data_of(events: &[InputEvent]) -> Vec<u8> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                InputEvent::Data(bytes) => Some(bytes.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Every byte of a finite input arrives unchanged, including NUL and non-UTF-8 bytes.
+    #[test]
+    fn a_finite_pipe_is_read_byte_for_byte() {
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        let input: Vec<u8> = b"{\"tool\":\"Edit\"}\n\0\xff\xfe tail".to_vec();
+        use std::io::Write as _;
+        writer.write_all(&input).unwrap();
+        drop(writer);
+        let events = events_of(reader);
+        assert_eq!(data_of(&events), input);
+        assert_eq!(events.last(), Some(&InputEvent::End));
+    }
+
+    /// Input larger than any stdin limit is read whole and ends in end-of-file; the broker cuts it.
+    #[test]
+    fn stdin_is_read_whole_however_large() {
+        let size = 4 * 1024 * 1024;
+        let events = events_of(std::io::Cursor::new(vec![b'x'; size]));
+        assert_eq!(data_of(&events).len(), size);
+        assert_eq!(events.last(), Some(&InputEvent::End));
+    }
+
+    /// A writer that sends far more than any stdin limit finishes without blocking or a broken pipe.
+    #[test]
+    fn a_large_writer_never_blocks() {
+        use std::io::Write as _;
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        let mut events = spawn_input_reader(reader).unwrap().events;
+        let wrote = std::thread::spawn(move || writer.write_all(&vec![b'x'; 1024 * 1024]));
+        while events.blocking_recv().is_some() {}
+        wrote
+            .join()
+            .unwrap()
+            .expect("the writer must not block or get a broken pipe");
+    }
+
+    /// A socket, which a runtime may give a child as its stdio, is read like a pipe.
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_backed_stdin_is_read() {
+        use std::io::Write as _;
+        let (reader, mut writer) = std::os::unix::net::UnixStream::pair().unwrap();
+        writer.write_all(b"from a socket").unwrap();
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
+        let events = events_of(reader);
+        assert_eq!(data_of(&events), b"from a socket");
+        assert_eq!(events.last(), Some(&InputEvent::End));
+    }
+
+    /// A read error is a refusal, never an empty input.
+    #[test]
+    fn a_read_error_is_refused_rather_than_sent_as_empty_input() {
+        struct Broken;
+        impl io::Read for Broken {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("device failed"))
+            }
+        }
+        let events = events_of(Broken);
+        let [InputEvent::Failed(reason)] = events.as_slice() else {
+            panic!("one refusal, got {events:?}");
+        };
+        assert!(reason.contains("device failed"), "{reason}");
+    }
+
+    /// A reader that returns some bytes and then fails.
+    struct FailsAfter {
+        left: usize,
+    }
+
+    impl io::Read for FailsAfter {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            if self.left == 0 {
+                return Err(io::Error::other("device failed"));
+            }
+            let read = self.left.min(buffer.len());
+            buffer[..read].fill(b'x');
+            self.left -= read;
+            Ok(read)
+        }
+    }
+
+    /// A read error after some input is still a refusal.
+    #[test]
+    fn a_read_error_after_some_input_is_not_lost() {
+        let input = spawn_input_reader(FailsAfter { left: 4096 }).unwrap();
+        let refused = std::sync::Arc::clone(&input.refused);
+        let mut events = input.events;
+        let mut seen = Vec::new();
+        while let Some(event) = events.blocking_recv() {
+            seen.push(event);
+        }
+        assert!(
+            matches!(seen.last(), Some(InputEvent::Failed(_))),
+            "{seen:?}"
+        );
+        assert!(
+            refused
+                .lock()
+                .unwrap()
+                .as_deref()
+                .is_some_and(|reason| reason.contains("device failed"))
+        );
+    }
+
+    /// A read error the reader saw before the command exits fails the alias, even when the command
+    /// exits before the pump forwards the error.
+    #[cfg(unix)]
+    #[test]
+    fn a_read_error_seen_before_exit_is_not_lost() {
+        runtime().block_on(async {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                let directory = tempfile::tempdir().unwrap();
+                let socket = directory.path().join("box.sock");
+                let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+                let input = spawn_input_reader(FailsAfter { left: 10 }).unwrap();
+                while input.refused.lock().unwrap().is_none() {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                let broker =
+                    tokio::spawn(fake_broker(listener, 0, |kinds| kinds.contains(&"call")));
+                let Err(error) =
+                    forward(&socket, Interpreter::Shell, "true".to_string(), Some(input)).await
+                else {
+                    panic!("a read error must fail the alias");
+                };
+                assert!(error.to_string().contains("device failed"), "{error}");
+                broker.await.unwrap();
+            })
+            .await
+            .expect("the test finishes within its limit");
+        });
+    }
+
+    /// Pipes, regular files, and sockets are finite input; a device or a closed descriptor is not.
+    #[cfg(unix)]
+    #[test]
+    fn stdin_is_classified_by_its_descriptor() {
+        use std::os::fd::AsRawFd as _;
+        let (pipe, _writer) = std::io::pipe().unwrap();
+        let file = tempfile::tempfile().unwrap();
+        let (socket, _peer) = std::os::unix::net::UnixStream::pair().unwrap();
+        let null = std::fs::File::open("/dev/null").unwrap();
+        for (descriptor, expected) in [
+            (pipe.as_raw_fd(), StdinKind::Finite),
+            (file.as_raw_fd(), StdinKind::Finite),
+            (socket.as_raw_fd(), StdinKind::Finite),
+            (null.as_raw_fd(), StdinKind::Absent),
+        ] {
+            assert_eq!(classify_stdin(descriptor).unwrap(), expected);
+        }
+        // A descriptor number far above any open one, so a parallel test cannot reuse it.
+        let closed = 1 << 20;
+        assert_eq!(classify_stdin(closed).unwrap(), StdinKind::Absent);
+    }
+
+    /// What a fake broker saw of one forwarded call, and the status it answered with.
+    struct Seen {
+        kinds: Vec<&'static str>,
+        input: Vec<u8>,
+    }
+
+    /// Serve one alias connection: record each frame, and answer `Exit { status }` once `answer`
+    /// says the frames so far are enough.
+    async fn fake_broker(
+        listener: tokio::net::UnixListener,
+        status: i32,
+        answer: fn(&[&'static str]) -> bool,
+    ) -> Seen {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut seen = Seen {
+            kinds: Vec::new(),
+            input: Vec::new(),
+        };
+        loop {
+            let Some(frame) = read_frame::<Frame, _>(&mut stream).await.unwrap() else {
+                return seen;
+            };
+            seen.kinds.push(match frame.body {
+                Body::Open { .. } => "open",
+                Body::Call { .. } => "call",
+                Body::Input { data } => {
+                    seen.input.extend(decode_payload(&data).unwrap());
+                    "input"
+                }
+                Body::InputEof => "eof",
+                Body::Signal { .. } => "signal",
+                other => panic!("unexpected frame {other:?}"),
+            });
+            if answer(&seen.kinds) {
+                let lingering = tokio::time::timeout(
+                    Duration::from_millis(200),
+                    read_frame::<Frame, _>(&mut stream),
+                )
+                .await;
+                if let Ok(Ok(None)) = lingering {
+                    seen.kinds.push("closed");
+                }
+                write_frame(
+                    &mut stream,
+                    &Frame {
+                        version: PROTOCOL_VERSION,
+                        program: ALIAS_PROGRAM,
+                        body: Body::Exit { status },
+                    },
+                )
+                .await
+                .unwrap();
+                return seen;
+            }
+        }
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    /// The alias sends the Call first, then all of its stdin, then end-of-file.
+    #[cfg(unix)]
+    #[test]
+    fn the_alias_streams_its_stdin_after_the_call() {
+        runtime().block_on(async {
+            tokio::time::timeout(Duration::from_secs(20), async {
+                let directory = tempfile::tempdir().unwrap();
+                let socket = directory.path().join("box.sock");
+                let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+                let input: Vec<u8> = (0..MAX_CHUNK_BYTES + 100)
+                    .map(|index| (index % 251) as u8)
+                    .collect();
+                let broker = tokio::spawn(fake_broker(listener, 0, |kinds| {
+                    kinds.last() == Some(&"eof")
+                }));
+                let events = spawn_input_reader(std::io::Cursor::new(input.clone())).unwrap();
+                let outcome = forward(&socket, Interpreter::Shell, "cat".to_string(), Some(events))
+                    .await
+                    .unwrap();
+                assert!(matches!(outcome, Outcome::Status(0)));
+                let seen = broker.await.unwrap();
+                assert_eq!(seen.kinds[..2], ["open", "call"]);
+                assert_eq!(seen.kinds.last(), Some(&"eof"));
+                assert!(
+                    seen.kinds[2..seen.kinds.len() - 1]
+                        .iter()
+                        .all(|kind| *kind == "input")
+                );
+                assert_eq!(seen.input, input);
+            })
+            .await
+            .expect("the test finishes within its limit");
+        });
+    }
+
+    /// A stdin write that times out fails the alias instead of being dropped.
+    #[cfg(unix)]
+    #[test]
+    fn a_stdin_write_that_times_out_fails_the_alias() {
+        runtime().block_on(async {
+            tokio::time::timeout(Duration::from_secs(30), async {
+                let directory = tempfile::tempdir().unwrap();
+                let socket = directory.path().join("box.sock");
+                let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+                let broker = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    for _ in 0..2 {
+                        read_frame::<Frame, _>(&mut stream).await.unwrap();
+                    }
+                    tokio::time::sleep(SERVE_IO_TIMEOUT + Duration::from_secs(1)).await;
+                    write_frame(
+                        &mut stream,
+                        &Frame {
+                            version: PROTOCOL_VERSION,
+                            program: ALIAS_PROGRAM,
+                            body: Body::Exit { status: 0 },
+                        },
+                    )
+                    .await
+                    .unwrap();
+                    stream
+                });
+                let events =
+                    spawn_input_reader(std::io::Cursor::new(vec![b'x'; 16 * 1024 * 1024])).unwrap();
+                let Err(error) = forward(
+                    &socket,
+                    Interpreter::Shell,
+                    "true".to_string(),
+                    Some(events),
+                )
+                .await
+                else {
+                    panic!("a stdin write that timed out must fail the alias");
+                };
+                assert!(error.to_string().contains("forward stdin"), "{error}");
+                drop(broker.await.unwrap());
+            })
+            .await
+            .expect("the test finishes within its limit");
+        });
+    }
+
+    /// A command that finishes is not held by a stdin that its writer keeps open.
+    #[cfg(unix)]
+    #[test]
+    fn a_stdin_held_open_does_not_hold_a_command_that_finishes() {
+        runtime().block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("box.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let (reader, mut writer) = std::io::pipe().unwrap();
+            use std::io::Write as _;
+            writer.write_all(b"partial").unwrap();
+            let broker = tokio::spawn(fake_broker(listener, 7, |kinds| kinds.contains(&"call")));
+            let events = spawn_input_reader(reader).unwrap();
+            let outcome = tokio::time::timeout(
+                Duration::from_secs(10),
+                forward(
+                    &socket,
+                    Interpreter::Shell,
+                    "true".to_string(),
+                    Some(events),
+                ),
+            )
+            .await
+            .expect("the alias returns when the command exits")
+            .unwrap();
+            assert!(matches!(outcome, Outcome::Status(7)));
+            drop(writer);
+            broker.await.unwrap();
+        });
+    }
+
+    /// A Shell alias with no stdin sends end-of-file right after the Call.
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_alias_with_no_stdin_sends_end_of_file_after_the_call() {
+        runtime().block_on(async {
+            let directory = tempfile::tempdir().unwrap();
+            let socket = directory.path().join("box.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            let broker = tokio::spawn(fake_broker(listener, 3, |kinds| {
+                kinds.last() == Some(&"eof")
+            }));
+            let outcome = forward(&socket, Interpreter::Shell, "true".to_string(), None)
+                .await
+                .unwrap();
+            assert!(matches!(outcome, Outcome::Status(3)));
+            assert_eq!(broker.await.unwrap().kinds, ["open", "call", "eof"]);
+        });
     }
 
     // ── Fail-closed exit status ───────────────────────────────────────────────

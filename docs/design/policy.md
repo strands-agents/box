@@ -134,9 +134,29 @@ three kinds of event:
 - `::response` for an operation that happened, or may have happened.
 - `::error` for an operation that definitely didn't happen.
 
+An MCP call records only `::response`, both as `mcp:call` and, for a `tools/call` a per-tool action
+decided, as that tool's action with the request's `input`. A completed call is a response whatever
+the server replied, and so is a cancelled or uncertain one, so a budget over responses can't be
+escaped by making calls fail. The tool's response carries `output.reply`, a string that says how the
+call ended, so a precondition can require `result` and exclude a failed or abandoned call. For a tool
+that declares an `outputSchema`, a `result` also carries `output.structured`: the reply's
+`structuredContent` reduced to the declared fields, converted like `input`, and absent when a
+required field doesn't conform; an optional field that doesn't conform is left out. Like `input`,
+it has no size limit of its own: the stdio frame limit and the gateway's response limit bound it. The stdio broker reads each reply frame. The gateway copies a
+`tools/call` reply as it streams to the workload, after credential redaction, so history sees the
+bytes the workload saw, and hands the copy to the request's `ReplyObserver` once the reply matching
+the request's JSON-RPC id has passed. A reply over the gateway's response body limit (16 MiB),
+compressed, cut off, or without that reply records `indeterminate`, and so does a reply that only
+accepts an MCP task or has a `resultType` other than `complete`, such as `input_required`, because
+it isn't the call's answer and Box doesn't record the later one. The load refuses a rule that
+reads an MCP `::error`, or an `output.reply` value Box never records. `output.reply` is a string
+rather than a Box enum type because each MCP server's generated schema is stored in the history, and
+the previous release validates it against its own Box schema at startup; a new Box type there would
+make it drop the schema and reset every per-tool rule's history.
+
 For an MCP command with [argument wildcards](../user/mcp.md#argument-wildcards) enabled, the
-`shell:spawn` request records the effective launch command and arguments, including the received
-values in the `*` positions.
+`shell:spawn` request records the alias name and effective launch arguments, including the received
+values in the `*` positions. The `program_path` field identifies the resolved executable file.
 
 A metadata read has occurred once the workload receives its answer. A Shell `test -e`, `test -L`, or
 `test -r` on a missing file in an existing folder therefore records a `::response`. The same applies
@@ -166,6 +186,24 @@ Each recorded outcome uses its own check's token. A check that records no outcom
 Existing events without identifiers remain unchanged; their other facts and recovered monitor state remain available.
 Those events cannot satisfy a predicate that requires `requestId`, because the missing association cannot be reconstructed.
 
+On `shell:exec`, `input.cwd` names the Shell's working directory. For programs launched through
+Strands Shell, Box selects the launch directory before the `shell:spawn` decision. The selected
+`[tool.<name>]` or `[agent]` table's `workspace` takes precedence. Otherwise, Box uses the caller's
+resolved directory inside the agent's workspace or the selected table's `read`, `write`, `list`,
+and `metadata` trees. Box uses the agent's workspace for other caller directories.
+
+Both actions use `~` for the operator's home and `~/…` for a directory below it. A directory outside
+that home stays absolute. The decision, request event, and outcome event use the same spelling.
+For `shell:spawn`, Box uses the selected absolute directory to start the program. A tool grammar maps
+a command line to a policy action for that tool. For programs launched through Strands Shell, that
+action uses the same selected launch directory, with an absolute `cwd` in decisions and history.
+
+If Box cannot select or resolve a directory for a Strands Shell launch, policy checks the Shell's
+original directory. The command then follows its existing dispatch and failure path. Before that
+program starts, Box checks that its launch directory matches the absolute directory retained from
+the policy check.
+The caller's Shell keeps its own working directory.
+
 Each caller fills in the outcome from what it saw. A filesystem response carries `output.result` as
 `completed`, `descriptor_issued`, or `indeterminate`, so a rule that counts certain completions can
 leave the other two out. A shell response carries the command's exit status as `output.status`, and
@@ -181,13 +219,19 @@ the remaining body under the same deadline before recording the outcome.
 Partial or uncertain outcomes still count as `::response`, which does not prove tool success.
 Response delivery adds no second policy event.
 
+For stdio MCP item calls, the broker records terminal outcomes before client delivery.
+A modern cancellation records an indeterminate outcome for an admitted call.
+The broker records the same outcome for admitted calls still pending after it stops the server.
+A valid `input_required` result received before cancellation records no outcome.
+See [MCP call accounting](mcp.md#modern-stdio-requests).
+
 Because a denied attempt is still a `::request`, asking and being refused satisfies a precondition
 keyed on `::request`. Key a precondition on `::response` instead. See [temporal rules are enforced
 against recorded history](decisions.md#temporal-rules-are-enforced-against-recorded-history).
 Counting differs the same way. Each request is appended under the one lock before the next is
 decided, so a `::request` count includes every earlier attempt, and a budget keyed on `::request`
-admits exactly N attempts, even when they arrive together. A `::response` count only sees operations
-that have finished, so several requests in flight at once can each pass before any of them finishes.
+admits exactly N attempts, even when they arrive together. A `::response` count only sees recorded
+outcomes, so several requests in flight at once can each pass before any outcome is recorded.
 
 A `when temporal` clause names one action, with no group, no `or`, and no wildcard, so a budget over
 several actions needs one clause per action. See [a temporal rule names one
@@ -206,13 +250,31 @@ stops a restart from resetting a budget. The history follows these rules:
   a history exists but the record says the box has never run.
 - After a policy edit, unchanged history rules keep their state. New or changed rules start with
   empty state.
+- A rule whose head names only per-tool MCP actions keeps its state across a restart, although its
+  schema arrives only when the server lists its tools again. Box keeps it installed under the server
+  schemas the history declares, and holds the calls it decides until they arrive. It starts with
+  empty state when the new tool list doesn't validate it, or when the server doesn't list its tools
+  in that run. A rule whose head names a Box action and whose `when temporal` clause reads a
+  per-tool action starts with empty state at each run. See [discovery serves the schema-independent
+  subset](decisions.md#discovery-serves-the-schema-independent-subset).
 - The engine timestamps each event from the system clock. Callers cannot supply timestamps. If the
   clock steps backwards, timestamps keep moving forward, so rolling the clock back doesn't free a
-  budget. The cost is that a restriction can outlast its window a little.
-- If an append fails, the engine denies that request and every subsequent request. When recording an
-  outcome fails, the caller warns on stderr and nothing retries it.
+  budget. The cost is that a restriction can outlast its window a little. If history is stamped
+  more than five minutes ahead of the clock, the box refuses to open it. During a run, the engine
+  refuses to timestamp an event while the gap exceeds five minutes, so the box denies that request
+  without appending it. A refused request doesn't persist: the next request within the bound is
+  decided.
+- If a request's append fails, the engine denies that request. If recording an outcome fails, the
+  caller warns on stderr, and the engine keeps the event. Before each later decision it records the
+  kept events first, and it denies every request until they append. It also records them when the
+  engine shuts down. An event that still can't append then, or a run that is killed, is lost, so
+  that effect doesn't count after a restart.
 - The engine checkpoints as events accumulate and removes events outside the longest window. This
   bounds the file size by the window rather than the box's lifetime.
+
+Recovery preserves each event's path spelling. Older shell events can carry an absolute `cwd` below
+the operator's home. A temporal predicate on `~/project` does not match those events. Box does not
+translate those stored values.
 
 History is not an audit record and has no tamper evidence. It cannot be rewound or shared by boxes.
 The operation and its recorded outcome do not commit together. If the process stops between them,
@@ -228,18 +290,20 @@ every rule it can prove will never match. See [a rule that can't fire is refused
 load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns). It also
 refuses a rule that reads `context.input` under actions of more than one family, or under no action,
 because a field means what the action makes it mean. See [a rule that reads the input names one
-action family](decisions.md#a-rule-that-reads-the-input-names-one-action-family).
+action family](decisions.md#a-rule-that-reads-the-input-names-one-action-family). It also refuses a
+temporal predicate on `mcp:call::error` or a per-tool `::error`, because an MCP call records only
+`::response`.
 
 The `run` verb validates the policy before it writes any box state. A box with no local MCP server
 validates against the complete action schema, and that check accepts and refuses exactly what the
 later load does, so a policy that passes it loads at the next run.
 
 A box with a local MCP server can finish the check only after the server reports its tools. Up
-front, `run` checks syntax, macro expansion, provider use, and the action family of each rule that
-reads `context.input`. The per-tool actions don't exist until a server reports its tools, so `run`
-stages each server's schema as it arrives and validates the whole policy once more when every server
-has reported. Until then a tool call for that server is denied without reaching the engine. See
-[discovery serves the schema-independent
+front, `run` checks syntax, macro expansion, provider use, MCP `::error` predicates, and the action
+family of each rule that reads `context.input`. The per-tool actions don't exist until a server
+reports its tools, so `run` stages each server's schema as it arrives and validates the whole policy
+once more when every server has reported. Until then a tool call for that server is denied without
+reaching the engine. See [discovery serves the schema-independent
 subset](decisions.md#discovery-serves-the-schema-independent-subset). A rule that names only tool
 grammar `Tool::<name>` actions doesn't wait for a server: the grammar's actions are in the schema
 from the start, so the rule loads at once or the box refuses it. If policy refuses a server's tool
@@ -264,10 +328,12 @@ of every process's declared writable directories. The scan includes subdirectori
 [Configured command integrity](../user/config.md#configured-command-integrity) describes those
 constraints.
 
-When two MCP entries enable [argument wildcards](../user/mcp.md#argument-wildcards), Box also refuses wildcard commands that can select different servers for the same request. Box
-also refuses installed trusted programs with unaccounted hard-link names or overlap with any
-process's writable grants. [Installation integrity](../user/config.md#installation-integrity)
-describes these refusals.
+MCP command matching uses the executable's filename and the arguments, including for an absolute
+executable path. Box refuses duplicate exact invocations. When two MCP entries enable
+[argument wildcards](../user/mcp.md#argument-wildcards), Box also refuses wildcard commands that can
+select different servers for the same request. Box also refuses installed trusted programs with
+unaccounted hard-link names or overlap with any process's writable grants.
+[Installation integrity](../user/config.md#installation-integrity) describes these refusals.
 
 The inert-rule check sorts each rule into one of three classes:
 
@@ -282,6 +348,8 @@ The inert-rule check sorts each rule into one of three classes:
   A rule waiting for an MCP server's schema goes through the same checks when Box stages the schema.
   If the rule is provably inert, Box refuses the schema. Holding the rule for a later schema cannot
   make it match.
+  The path checks include `cwd` on `shell:exec` and `shell:spawn`: an absolute literal below the
+  operator's home must use `~/…` instead.
 
   The `ip` refusal is a check of Box's own, ahead of strict validation, and prevents a rule from
   loading without effect. `net:connect` carries `ip4` and `ip6` and no `ip`, so `context.input has

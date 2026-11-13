@@ -82,6 +82,8 @@ pub fn builtin_lua<'a>(
                 .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                     format!("lua: {path}: {e}").into()
                 })?
+        } else if sio::stdin_is_outside() {
+            String::new()
         } else {
             // Read from stdin
             let mut reader = sio::stdin()?;
@@ -92,18 +94,20 @@ pub fn builtin_lua<'a>(
                 })?
         };
 
-        // Pre-read stdin for io.read() when script comes from file or -e
-        let stdin_data = if script_file.is_some() || eval_code.is_some() {
-            if let Ok(mut r) = sio::stdin() {
-                os::read_to_string_limited(&mut r, proc.max_output)
-                    .await
-                    .unwrap_or_default()
+        // Pre-read stdin for io.read() when script comes from file or -e. Input fed from outside
+        // the Shell reads as empty, so a script never waits for it.
+        let stdin_data =
+            if (script_file.is_some() || eval_code.is_some()) && !sio::stdin_is_outside() {
+                if let Ok(mut r) = sio::stdin() {
+                    os::read_to_string_limited(&mut r, proc.max_output)
+                        .await
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                }
             } else {
                 String::new()
-            }
-        } else {
-            String::new()
-        };
+            };
 
         // Strip shebang
         let code = if code.starts_with("#!") {
