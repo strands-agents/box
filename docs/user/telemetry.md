@@ -140,11 +140,14 @@ A credential needs an `https://` destination, unless the destination is loopback
 
 ### Failed sends
 
-Box sends each batch once, with a four-second deadline. A batch that fails is counted, and the box
+Box sends each batch once, with one four-second deadline that covers the credential lookup and the
+send. A batch that fails is counted, and the box
 does not retry it. When the run ends, Box prints one line on stderr with the count (see [Errors and
 exit codes](#errors-and-exit-codes)). To see why a send failed, set `STRANDS_BOX_TELEMETRY_DEBUG` to
 any non-empty value in the environment of `strands-box run`. Box then also prints each failure on
-stderr as it happens, with its full cause and the start of the endpoint's answer:
+stderr as it happens, with its full cause and the start of the endpoint's answer. Box redacts each
+credential it attached from that answer, so an endpoint that echoes a refused key does not put the
+key in your logs:
 
 ```text
 strands-box: telemetry export failed: https://cloud.langfuse.com/api/public/otel/v1/traces answered 401 Unauthorized: ...

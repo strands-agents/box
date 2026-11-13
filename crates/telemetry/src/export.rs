@@ -251,13 +251,26 @@ impl TargetExporter {
                 headers,
                 vault,
             } => {
+                // One deadline covers the credential lookup and the send, so a slow `credsd`
+                // cannot outlast the export and leave the failure uncounted.
+                let started = std::time::Instant::now();
                 let url = format!("{base}{route}");
                 let body = request.encode_to_vec();
                 let mut fixed: Vec<(String, String)> =
                     vec![("content-type".to_string(), PROTOBUF.to_string())];
                 fixed.extend(headers.iter().cloned());
                 let attachment = match vault {
-                    Some(vault) => attachment_for(vault, &url, &fixed, &body).await?,
+                    Some(vault) => tokio::time::timeout(
+                        REQUEST_DEADLINE,
+                        attachment_for(vault, &url, &fixed, &body),
+                    )
+                    .await
+                    .map_err(|_| {
+                        OTelSdkError::InternalFailure(format!(
+                            "the credential for {url} did not attach within {} s",
+                            REQUEST_DEADLINE.as_secs()
+                        ))
+                    })??,
                     None => None,
                 };
                 if let Some(attachment) = &attachment {
@@ -267,7 +280,10 @@ impl TargetExporter {
                             .any(|stripped| stripped.eq_ignore_ascii_case(name))
                     });
                 }
-                let mut sending = client.post(&url).body(body);
+                let mut sending = client
+                    .post(&url)
+                    .timeout(REQUEST_DEADLINE.saturating_sub(started.elapsed()))
+                    .body(body);
                 for (name, value) in &fixed {
                     sending = sending.header(name, value);
                 }
@@ -297,7 +313,17 @@ impl TargetExporter {
                     Ok(())
                 } else {
                     let detail = if self.reports_failures {
-                        let body = response.text().await.unwrap_or_default();
+                        let mut attached: Vec<&str> = Vec::new();
+                        if let Some(secret) = secret {
+                            attached.push(secret.value());
+                        }
+                        if let Some(attachment) = &attachment {
+                            for (_, value) in attachment.set_headers() {
+                                attached.push(value.as_str());
+                            }
+                        }
+                        let fragments = credential_fragments(attached.into_iter());
+                        let body = redacted(&response.text().await.unwrap_or_default(), &fragments);
                         let body: String = body.chars().take(FAILURE_DETAIL_CHARS).collect();
                         format!(": {}", body.trim())
                     } else {
@@ -315,6 +341,47 @@ impl TargetExporter {
 /// How much of a refusing endpoint's answer a failure report quotes.
 const FAILURE_DETAIL_CHARS: usize = 300;
 
+/// The shortest piece of a credential a failure report redacts, so a scheme word such as `Bearer`
+/// or a date in a SigV4 scope stays readable.
+const SHORTEST_REDACTED: usize = 12;
+
+/// Every form of the attached credentials an endpoint could echo: each whole value, each token in
+/// it, and for HTTP Basic the decoded pair and each half.
+fn credential_fragments<'a>(
+    attached: impl Iterator<Item = &'a str>,
+) -> Vec<zeroize::Zeroizing<String>> {
+    use base64::Engine as _;
+
+    let mut fragments = Vec::new();
+    for value in attached {
+        fragments.push(zeroize::Zeroizing::new(value.to_string()));
+        for token in value.split([' ', ',', '=', '/']) {
+            fragments.push(zeroize::Zeroizing::new(token.to_string()));
+        }
+        if let Some(encoded) = value.strip_prefix("Basic ")
+            && let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded.trim())
+            && let Ok(pair) = String::from_utf8(decoded)
+        {
+            for half in pair.split(':') {
+                fragments.push(zeroize::Zeroizing::new(half.to_string()));
+            }
+            fragments.push(zeroize::Zeroizing::new(pair));
+        }
+    }
+    fragments.retain(|fragment| fragment.len() >= SHORTEST_REDACTED);
+    fragments.sort_by_key(|fragment| std::cmp::Reverse(fragment.len()));
+    fragments
+}
+
+/// `text` with every credential fragment replaced, longest first.
+fn redacted(text: &str, fragments: &[zeroize::Zeroizing<String>]) -> String {
+    let mut text = text.to_string();
+    for fragment in fragments {
+        text = text.replace(fragment.as_str(), "[REDACTED]");
+    }
+    text
+}
+
 /// An error and each cause beneath it, on one line.
 fn with_causes(error: &dyn std::error::Error) -> String {
     let mut text = error.to_string();
@@ -330,8 +397,9 @@ fn with_causes(error: &dyn std::error::Error) -> String {
 /// The OTLP/HTTP body encoding every request carries.
 const PROTOBUF: &str = "application/x-protobuf";
 
-/// What the vault attaches to one request, asked off the runtime thread because a signing resolve
-/// may read a file or a socket.
+/// What the vault attaches to one request, asked on a detached thread because a signing resolve
+/// may read a file or a socket. Not the runtime's blocking pool: the runtime waits for that pool on
+/// shutdown, so a lookup the deadline gave up on would hold the process open.
 async fn attachment_for(
     vault: &std::sync::Arc<credentials::Vault>,
     url: &str,
@@ -342,7 +410,8 @@ async fn attachment_for(
     let url = url.to_string();
     let headers = headers.to_vec();
     let body = body.to_vec();
-    let attachment = tokio::task::spawn_blocking(move || {
+    let (answer, answered) = tokio::sync::oneshot::channel();
+    let lookup = move || {
         let parsed =
             url::Url::parse(&url).map_err(|_| format!("{url} is not a URL the vault can match"))?;
         let host = parsed
@@ -359,16 +428,25 @@ async fn attachment_for(
                     path: parsed.path(),
                 },
                 method: "POST",
-                url: &url,
+                // The URL as the client sends it: `reqwest` drops a default port and lowercases
+                // the host, so signing the written URL would cover a different `Host`.
+                url: parsed.as_str(),
                 query: parsed.query().unwrap_or(""),
                 headers: &headers,
                 body: &body,
             })
             .map_err(|error| format!("the credential for {url} did not attach: {error}"))
-    })
-    .await
-    .map_err(|error| OTelSdkError::InternalFailure(error.to_string()))?
-    .map_err(OTelSdkError::InternalFailure)?;
+    };
+    std::thread::Builder::new()
+        .name("telemetry-credential".to_string())
+        .spawn(move || {
+            let _ = answer.send(lookup());
+        })
+        .map_err(|error| OTelSdkError::InternalFailure(error.to_string()))?;
+    let attachment = answered
+        .await
+        .map_err(|_| OTelSdkError::InternalFailure("the credential lookup stopped".to_string()))?
+        .map_err(OTelSdkError::InternalFailure)?;
     match attachment {
         Some(attachment)
             if attachment.rewrite_path_to().is_some()
@@ -1154,6 +1232,197 @@ mod tests {
         assert!(
             printed.contains("x-api-key"),
             "the header name is not secret"
+        );
+    }
+
+    /// **A failure report never quotes the credential**, even when the endpoint echoes back the key
+    /// it refused.
+    #[tokio::test]
+    async fn a_failure_report_redacts_an_echoed_credential() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("address");
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut buffer = vec![0u8; 16384];
+            let mut read = 0;
+            loop {
+                let more = stream.read(&mut buffer[read..]).await.unwrap_or(0);
+                read += more;
+                if more == 0
+                    || buffer[..read]
+                        .windows(4)
+                        .any(|window| window == b"\r\n\r\n")
+                {
+                    break;
+                }
+            }
+            let head = String::from_utf8_lossy(&buffer[..read]).to_string();
+            let key = head
+                .lines()
+                .find_map(|line| line.strip_prefix("x-api-key: "))
+                .unwrap_or_default()
+                .to_string();
+            let body = format!("Invalid API key: {key}");
+            let reply = format!(
+                "HTTP/1.1 401 Unauthorized\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(reply.as_bytes()).await;
+        });
+        let directory = tempfile::tempdir().expect("tempdir");
+        let mode = credentials::InjectMode::header("{}", Some("x-api-key".to_string()))
+            .expect("a header mode");
+        let (vault, phantom) = opaque_vault(
+            address,
+            secret_file(&directory, "lsv2_pt_echoed_real_key"),
+            mode,
+        );
+        let target = Target::new(TargetKind::Otlp, format!("http://{address}"))
+            .with_header("x-api-key", phantom)
+            .with_vault(vault);
+        let exporter = opened(&target).reporting_failures(true);
+
+        let error = exporter
+            .relay_trace(&empty_spans())
+            .await
+            .expect_err("a 401 is a failure")
+            .to_string();
+        assert!(
+            error.contains("401") && error.contains("Invalid API key: [REDACTED]"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("lsv2_pt_echoed_real_key"),
+            "the key leaked: {error}"
+        );
+    }
+
+    /// **The signature covers the URL the client sends.** `reqwest` drops a default port and
+    /// lowercases the host, so a signature over the written URL would cover another `Host`.
+    #[tokio::test]
+    async fn a_signature_covers_the_url_the_client_sends() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let socket = stand_in_credsd(&directory);
+        let opened = credentials::Vault::open(
+            credentials::VaultConfig::new(credentials::Backend::local(), "telemetry-test")
+                .credsd_socket(&socket)
+                .route(credentials::RouteSpec::signed_aws(
+                    credentials::DestinationPattern::parse("logs.us-west-2.amazonaws.com")
+                        .expect("a pattern"),
+                    credentials::Locator::parse_uri("credsd://telemetry").expect("a locator"),
+                ))
+                .require_every_route(),
+        )
+        .expect("the vault opens");
+        let vault = std::sync::Arc::new(opened.into_vault());
+        let fixed = vec![("content-type".to_string(), PROTOBUF.to_string())];
+        let named = |attachment: &credentials::Attachment, name: &str| {
+            attachment
+                .set_headers()
+                .find(|(header, _)| header.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str().to_string())
+        };
+        let normal = "https://logs.us-west-2.amazonaws.com/v1/logs";
+        for written in [
+            "https://LOGS.us-west-2.amazonaws.com/v1/logs",
+            "https://logs.us-west-2.amazonaws.com:443/v1/logs",
+        ] {
+            // Sign both spellings within one second, so their signing times agree.
+            let mut compared = false;
+            for _ in 0..5 {
+                let sent = attachment_for(&vault, written, &fixed, b"batch")
+                    .await
+                    .expect("signed")
+                    .expect("an attachment");
+                let expected = attachment_for(&vault, normal, &fixed, b"batch")
+                    .await
+                    .expect("signed")
+                    .expect("an attachment");
+                if named(&sent, "x-amz-date") != named(&expected, "x-amz-date") {
+                    continue;
+                }
+                assert_eq!(
+                    named(&sent, "authorization"),
+                    named(&expected, "authorization"),
+                    "{written} is signed as {normal}"
+                );
+                compared = true;
+                break;
+            }
+            assert!(compared, "no two signatures shared a signing time");
+        }
+    }
+
+    /// **A credential lookup that never answers is bounded by the export deadline, and does not
+    /// hold the runtime open when it shuts down.**
+    #[test]
+    fn a_slow_credential_lookup_is_bounded_and_does_not_hold_shutdown() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let socket = directory.path().join("credsd.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).expect("bind credsd");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                // Accept and never answer.
+                std::thread::sleep(Duration::from_secs(30));
+                drop(stream);
+            }
+        });
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let error = runtime.block_on(async {
+            let (address, _received) = stand_in().await;
+            let host = "logs.us-west-2.amazonaws.com";
+            let opened = credentials::Vault::open(
+                credentials::VaultConfig::new(credentials::Backend::local(), "telemetry-test")
+                    .credsd_socket(&socket)
+                    .route(credentials::RouteSpec::signed_aws(
+                        credentials::DestinationPattern::parse(&format!(
+                            "{host}:{}",
+                            address.port()
+                        ))
+                        .expect("a pattern"),
+                        credentials::Locator::parse_uri("credsd://telemetry").expect("a locator"),
+                    ))
+                    .require_every_route(),
+            )
+            .expect("the vault opens");
+            let target = Target::new(
+                TargetKind::Otlp,
+                format!("http://{host}:{}", address.port()),
+            )
+            .with_vault(std::sync::Arc::new(opened.into_vault()));
+            let exporter = TargetExporter::open_with(
+                &target,
+                std::sync::Arc::default(),
+                reqwest::Client::builder().resolve(host, address),
+            )
+            .expect("open");
+            let started = std::time::Instant::now();
+            let error = exporter
+                .relay_logs(&empty_logs())
+                .await
+                .expect_err("the lookup never answers")
+                .to_string();
+            assert!(
+                started.elapsed() < REQUEST_DEADLINE + Duration::from_secs(1),
+                "{:?}",
+                started.elapsed()
+            );
+            error
+        });
+        assert!(error.contains("did not attach within"), "{error}");
+        let stopping = std::time::Instant::now();
+        drop(runtime);
+        assert!(
+            stopping.elapsed() < Duration::from_secs(1),
+            "shutdown waited {:?} for the abandoned lookup",
+            stopping.elapsed()
         );
     }
 }
