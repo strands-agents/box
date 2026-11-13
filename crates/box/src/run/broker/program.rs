@@ -148,7 +148,7 @@ impl Program {
         let (stdout_tx, stdout_rx) = mpsc::channel(OUTPUT_CHANNEL_DEPTH);
         let (stderr_tx, stderr_rx) = mpsc::channel(OUTPUT_CHANNEL_DEPTH);
 
-        shell.proc.set_channel_reader(STDIN, stdin_rx);
+        shell.proc.set_outside_reader(STDIN, stdin_rx);
         let (stdout, stderr) = (stdout_tx.downgrade(), stderr_tx.downgrade());
         shell.proc.set_channel_writer(STDOUT, stdout_tx);
         shell.proc.set_channel_writer(STDERR, stderr_tx);
