@@ -637,6 +637,34 @@ async fn handle_client_frame(
                     String::from_utf8_lossy(&canonical).into_owned()
                 });
             let request = parse_client_frame(&text)?;
+            // A request that also answers would cross as an undecided method and skip the reply's
+            // decision. A modern request with an id meets the same refusal in its own parser.
+            if exchange.connection.phase != McpConnectionPhase::PerRequestMetadata
+                && request.get("method").is_some()
+                && (request.get("result").is_some() || request.get("error").is_some())
+            {
+                let reason =
+                    "an MCP client frame cannot carry both 'method' and 'result' or 'error'";
+                exchange
+                    .connection
+                    .recorder
+                    .record(EffectiveDecision::enforcement_deny(
+                        r#"Box::Action::"mcp:call""#,
+                        exchange.running.server(),
+                        "mcp-frame",
+                        reason,
+                    ));
+                emit_request_error(
+                    exchange.frames,
+                    exchange.program,
+                    None,
+                    -32600,
+                    reason,
+                    None,
+                )
+                .await?;
+                return Ok(ProgramAction::Continue);
+            }
             let Some(method) = request.get("method").and_then(Value::as_str) else {
                 if exchange.connection.phase == McpConnectionPhase::PerRequestMetadata {
                     return Err(invalid_data(
@@ -1767,6 +1795,77 @@ done"#
             assert!(
                 reply.get("result").is_none(),
                 "the client's answer must not reach the server"
+            );
+            program.stop_and_wait().await.expect("stop the exchange");
+        }));
+    }
+
+    #[test]
+    fn a_client_answer_that_also_names_a_method_is_refused_and_the_request_is_still_decided() {
+        let (runtime, local) = local_runtime();
+        runtime.block_on(local.run_until(async {
+            let fixture = fixture(&format!(
+                r#"{PERMIT_ALL_MCP}
+                forbid (principal, action == Box::Action::"mcp:call", resource)
+                when {{ context.input.method == "elicitation/create" }};"#
+            ));
+            let log = tempfile::NamedTempFile::new().expect("frame log");
+            let (mut program, mut output, recorder) = recorded_exchange(
+                requesting_server(
+                    log.path(),
+                    r#"{"jsonrpc":"2.0","id":5,"method":"elicitation/create","params":{}}"#,
+                ),
+                &fixture,
+            )
+            .await;
+            initialize(&program, &mut output).await;
+            assert_eq!(
+                next_output(&mut output).await["method"],
+                "elicitation/create"
+            );
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 5, "method": "ping",
+                    "result": {"action": "accept", "content": {"secret": "x"}}}),
+            )
+            .await;
+
+            let before = recorder.recorded().len();
+            let refused = next_output(&mut output).await;
+            assert_eq!(refused["error"]["code"], -32600, "{refused}");
+            let decisions = recorder.recorded();
+            assert!(
+                decisions[before..].iter().any(|decision| {
+                    let (action, resource, rule, verdict, _) = decision.parts();
+                    action == r#"Box::Action::"mcp:call""#
+                        && resource == "issues-mcp"
+                        && rule == &crate::run::telemetry::EffectiveRule::Enforcement("mcp-frame")
+                        && verdict == crate::run::telemetry::EffectiveVerdict::Deny
+                }),
+                "the refusal is recorded as an mcp-frame deny: {:?}",
+                &decisions[before..]
+            );
+            assert!(
+                refused["error"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("cannot carry both 'method'")),
+                "the wrong refusal: {refused}"
+            );
+
+            send(
+                &program,
+                json!({"jsonrpc": "2.0", "id": 5, "result": {"action": "accept", "content": {"value": "y"}}}),
+            )
+            .await;
+            let reply = wait_for_logged(log.path(), |frame| frame["id"] == 5).await;
+            assert_eq!(
+                reply["error"]["code"], -32001,
+                "a plain answer to the same request is still decided and denied: {reply}"
+            );
+            let logged = std::fs::read_to_string(log.path()).expect("frame log");
+            assert!(
+                !logged.contains("secret"),
+                "the forbidden answer must not reach the server: {logged}"
             );
             program.stop_and_wait().await.expect("stop the exchange");
         }));
