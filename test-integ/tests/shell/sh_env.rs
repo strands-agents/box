@@ -1,11 +1,11 @@
 use strands_det_harness::{det_case, user_home};
 
-// The hosted Shell's environment is exactly HOME, PATH, PWD and USER. A variable set on the box
-// process, and a variable the agent exports, are both absent.
+// With no egress route, the hosted Shell's environment is exactly HOME, PATH, PWD and USER. A
+// variable set on the box process, and a variable the agent exports, are both absent.
 det_case! {
     name: sh_env,
     id:   "SH-ENV",
-    desc: "Composed environment: the hosted Shell's env is exactly HOME, PATH, PWD and USER; host and agent variables are absent",
+    desc: "Composed environment: with no egress route, the hosted Shell's env is exactly HOME, PATH, PWD and USER; host and agent variables are absent",
     run: |b| {
         b.reset_policy();
         let r = b.run_sh_with_host_env(

@@ -99,12 +99,65 @@ pub enum McpSchemaError {
 
 /// Generate one Cedar schema from an MCP server's raw tools/list response.
 pub fn generate_mcp_schema(server: &str, tools_list: &str) -> Result<String, McpSchemaError> {
+    let generated = generate_from_tools(server, tools_list);
+    if generated.is_ok() {
+        return generated;
+    }
+    // An `outputSchema` only adds `output.structured`, so one that Cedar cannot read must not
+    // cost the server every tool.
+    match without_unreadable_outputs(server, tools_list) {
+        Some(readable) => generate_from_tools(server, &readable).or(generated),
+        None => generated,
+    }
+}
+
+/// `tools_list` without each `outputSchema` that does not generate alone, or without every
+/// `outputSchema` when none fails alone; `None` when no tool declares one.
+fn without_unreadable_outputs(server: &str, tools_list: &str) -> Option<String> {
+    let mut response = serde_json::from_str::<serde_json::Value>(tools_list).ok()?;
+    let pointer = if response.pointer("/result/tools").is_some() {
+        "/result/tools"
+    } else {
+        "/tools"
+    };
+    let tools = response
+        .pointer_mut(pointer)
+        .and_then(serde_json::Value::as_array_mut)?;
+    let mut removed = false;
+    for tool in tools.iter_mut() {
+        if !tool
+            .get("outputSchema")
+            .is_some_and(serde_json::Value::is_object)
+        {
+            continue;
+        }
+        let alone = serde_json::json!({ "result": { "tools": [tool.clone()] } }).to_string();
+        if generate_from_tools(server, &alone).is_err()
+            && let Some(tool) = tool.as_object_mut()
+        {
+            removed |= tool.remove("outputSchema").is_some();
+        }
+    }
+    if !removed {
+        for tool in tools
+            .iter_mut()
+            .filter_map(serde_json::Value::as_object_mut)
+        {
+            removed |= tool.remove("outputSchema").is_some();
+        }
+    }
+    removed.then(|| response.to_string())
+}
+
+/// [`generate_mcp_schema`] for one tools/list response, with no retry.
+fn generate_from_tools(server: &str, tools_list: &str) -> Result<String, McpSchemaError> {
     refuse_reserved_namespace(server)?;
     refuse_duplicate_tool_names(server, tools_list)?;
     // Lower each tool argument to a base Cedar type before generation, so a rule reads the
     // workload's bare value directly. The generator otherwise maps a JSON `enum` to a Cedar enum
     // *entity* and a JSON `number` to an opaque `Number` entity — neither of which the raw value a
     // tool call carries can satisfy, so the request fails schema conformance. See `lower_arg_types`.
+    let tools_with_output = tools_declaring_output(tools_list);
     let compatible_tools_list = make_unsupported_schema_references_opaque(tools_list);
     let tools_list = lower_arg_types(&compatible_tools_list);
     let description = ServerDescription::from_json_str(&tools_list).map_err(|source| {
@@ -118,7 +171,8 @@ pub fn generate_mcp_schema(server: &str, tools_list: &str) -> Result<String, Mcp
     let schema_stub = SCHEMA_STUB.replace(SCHEMA_STUB_NAMESPACE, &server_namespace);
     let config = SchemaGeneratorConfig::default()
         .objects_as_records(true)
-        .flatten_namespaces(true);
+        .flatten_namespaces(true)
+        .include_outputs(true);
     let mut generator = SchemaGenerator::from_cedarschema_str_with_config(&schema_stub, config)
         .map_err(|source| McpSchemaError::Generate {
             server: server.to_string(),
@@ -220,6 +274,7 @@ pub fn generate_mcp_schema(server: &str, tools_list: &str) -> Result<String, Mcp
             }
         })?;
         use_box_entities(&mut definition_value, &server_namespace);
+        declare_reply_output(&mut definition_value, &tools_with_output);
         *definition = serde_json::from_value(definition_value).map_err(|_| {
             McpSchemaError::GeneratedShape {
                 server: server.to_string(),
@@ -868,6 +923,61 @@ fn rewrite_schema_name_list(value: &mut serde_json::Value, renames: &BTreeMap<St
     }
 }
 
+/// Declare the Box-owned `output.reply` on every generated tool action's context, and move the
+/// generator's `output` (the tool's `<tool>Output` type, from its `outputSchema`) under it as
+/// `output.structured`, so a tool output field never collides with a Box field.
+fn declare_reply_output(value: &mut serde_json::Value, tools_with_output: &BTreeSet<String>) {
+    let Some(actions) = value
+        .get_mut("actions")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return;
+    };
+    for (name, action) in actions.iter_mut() {
+        if let Some(attributes) = action
+            .pointer_mut("/appliesTo/context/attributes")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            let generated = attributes.remove("output");
+            let mut output = serde_json::json!({
+                "reply": { "type": "String" }
+            });
+            if let Some(mut structured) = generated.filter(|_| tools_with_output.contains(name)) {
+                structured["required"] = serde_json::Value::Bool(false);
+                output["structured"] = structured;
+            }
+            attributes.insert(
+                "output".to_string(),
+                serde_json::json!({
+                    "type": "Record",
+                    "required": false,
+                    "attributes": output
+                }),
+            );
+        }
+    }
+}
+
+/// The action names (as generated) of tools that declare an `outputSchema`.
+fn tools_declaring_output(tools_list: &str) -> BTreeSet<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(tools_list) else {
+        return BTreeSet::new();
+    };
+    value
+        .pointer("/result/tools")
+        .or_else(|| value.get("tools"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|tool| {
+            tool.get("outputSchema")
+                .is_some_and(serde_json::Value::is_object)
+        })
+        .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+        .map(|name| name.to_string())
+        .collect()
+}
+
 fn use_box_entities(value: &mut serde_json::Value, namespace: &str) {
     let Some(definition) = value.as_object_mut() else {
         return;
@@ -927,6 +1037,45 @@ mod tests {
     use cedar_policy::{PolicySet, ValidationMode, Validator};
 
     use super::*;
+
+    #[test]
+    fn an_output_schema_cedar_cannot_read_drops_only_that_tools_output() {
+        for unreadable in [
+            r#"{"type":"object","properties":{"if":{"type":"string"}}}"#,
+            r##"{"type":"object","properties":{"a":{"$ref":"#/$defs/Missing"}}}"##,
+            r#"{"type":"object","properties":{"a b":{"type":"string"}}}"#,
+            r#"{"type":"object","properties":{"__cedar":{"type":"string"}}}"#,
+        ] {
+            let tools = format!(
+                r#"{{"result":{{"tools":[
+                    {{"name":"read","inputSchema":{{"type":"object","properties":{{"q":{{"type":"string"}}}}}},
+                      "outputSchema":{{"type":"object","properties":{{"verified":{{"type":"boolean"}}}}}}}},
+                    {{"name":"broken","inputSchema":{{"type":"object","properties":{{"q":{{"type":"string"}}}}}},
+                      "outputSchema":{unreadable}}}]}}}}"#
+            );
+            let schema = generate_mcp_schema("desk", &tools)
+                .unwrap_or_else(|error| panic!("{unreadable}: {error:?}"));
+            assert!(schema.contains(r#"action "broken""#), "{unreadable}");
+            let action = |name: &str| {
+                let start = schema
+                    .find(&format!("action \"{name}\""))
+                    .expect("the action is declared");
+                schema[start..]
+                    .split("};")
+                    .next()
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            assert!(
+                action("read").contains("structured?: readOutput"),
+                "a readable output is kept: {unreadable}\n{schema}"
+            );
+            assert!(
+                !action("broken").contains("structured"),
+                "the unreadable output is dropped: {unreadable}\n{schema}"
+            );
+        }
+    }
 
     const TOOLS: &str = r#"
     {

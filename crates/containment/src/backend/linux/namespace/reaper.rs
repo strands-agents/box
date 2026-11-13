@@ -39,12 +39,21 @@ fn transfer_byte(control: &std::os::unix::net::UnixStream, sending: bool) -> boo
     }
 }
 
-/// Run as the namespace's PID 1: forward signals, reap orphans, and return the
-/// workload's exit status.
-pub(crate) fn supervise(workload: libc::pid_t) -> i32 {
+/// Creates the sockets for the namespace's inbound connections, on the box's request.
+pub(crate) struct Connector {
+    /// The box's handoff socket, kept open in PID 1.
+    pub(crate) handoff: std::os::fd::RawFd,
+}
+
+/// Run as the namespace's PID 1: forward signals, reap orphans, serve the connector, and return
+/// the workload's exit status.
+pub(crate) fn supervise(workload: libc::pid_t, connector: Option<Connector>) -> i32 {
     // Store the pid BEFORE installing the handlers.
     WORKLOAD_PID.store(workload, std::sync::atomic::Ordering::Relaxed);
     install_forwarding_handlers();
+    if let Some(connector) = connector {
+        start_connector(connector);
+    }
 
     loop {
         let mut status: libc::c_int = 0;
@@ -78,6 +87,27 @@ pub(crate) fn supervise(workload: libc::pid_t) -> i32 {
             return SIGNAL_EXIT_BASE + libc::WTERMSIG(status);
         }
         return 125;
+    }
+}
+
+/// Serve `connector` on its own thread, with every signal blocked so the reaping loop receives them.
+fn start_connector(connector: Connector) {
+    use std::os::fd::FromRawFd as _;
+    // SAFETY: PID 1 owns its copy of the handoff descriptor, and nothing else here closes it.
+    let handoff = unsafe { std::os::unix::net::UnixStream::from_raw_fd(connector.handoff) };
+    let spawned = std::thread::Builder::new()
+        .name("inbound-connector".to_string())
+        .spawn(move || {
+            // SAFETY: `sigfillset` and `pthread_sigmask` on a local set, for this thread only.
+            unsafe {
+                let mut all: libc::sigset_t = std::mem::zeroed();
+                libc::sigfillset(&mut all);
+                libc::pthread_sigmask(libc::SIG_BLOCK, &all, std::ptr::null_mut());
+            }
+            super::netns::serve_inbound(handoff);
+        });
+    if let Err(error) = spawned {
+        eprintln!("strands-box: namespace reaper could not start the inbound connector: {error}");
     }
 }
 
@@ -126,7 +156,7 @@ mod tests {
                 install_forwarding_handlers();
                 // SAFETY: raise invokes the installed handler in this isolated test process.
                 assert_eq!(unsafe { libc::raise(signal) }, 0);
-                assert_eq!(supervise(pid), SIGNAL_EXIT_BASE + signal);
+                assert_eq!(supervise(pid, None), SIGNAL_EXIT_BASE + signal);
                 assert_eq!(child.wait().unwrap_err().raw_os_error(), Some(libc::ECHILD));
             }
             WORKLOAD_PID.store(0, std::sync::atomic::Ordering::Relaxed);
@@ -246,7 +276,7 @@ mod tests {
                 // SAFETY: a distinctive status to propagate.
                 unsafe { libc::_exit(42) };
             }
-            supervise(workload)
+            supervise(workload, None)
         }) else {
             println!("skipping: this host forbids user namespaces");
             return;
@@ -280,7 +310,7 @@ mod tests {
                 // SAFETY: the workload exits first, orphaning its child.
                 unsafe { libc::_exit(7) };
             }
-            supervise(workload)
+            supervise(workload, None)
         }) else {
             println!("skipping: this host forbids user namespaces");
             return;
@@ -356,7 +386,7 @@ mod tests {
                     libc::_exit(97);
                 }
             }
-            supervise(workload)
+            supervise(workload, None)
         }) else {
             println!("skipping: this host forbids user namespaces");
             return;
@@ -388,7 +418,7 @@ mod tests {
                 // SAFETY: exit immediately, orphaning the sleeper.
                 unsafe { libc::_exit(0) };
             }
-            supervise(workload)
+            supervise(workload, None)
         }) else {
             println!("skipping: this host forbids user namespaces");
             return;

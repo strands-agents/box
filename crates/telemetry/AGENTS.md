@@ -158,13 +158,15 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   context, so even a widened scope test would have skipped every control record for want of a span ID.
   The scope test is now `Plane::of`, an exhaustive match on the two scope constants, and the constants
   are `pub(crate)` so the two files cannot drift on the spelling. The agent's own scopes fall through to
-  `None` and relay untouched.
+  `None` and relay untouched. MCP routing diagnostics in `strands-box.mcp` are log records only and
+  stay outside `Plane::of`.
 - **Severity is what routes a record to a lane, so two signals may never share one.** `TargetLane::emit`
   reads `Signal::of_severity` and nothing else — not the scope, not the attributes. So adding a signal
   means adding a severity no other signal holds; `control_plane` took `Info2`. Sharing one would file a
   control-plane record as a permit, silently. `no_two_signals_share_a_severity` is the pin.
-- **The two planes share one destination, and a reader must select a scope.** Decisions carry
-  `strands-box.policy` and control-plane records carry `strands-box.control`. Two box tests indexed
+- **Box record kinds share one destination, and a reader must select a scope.** Decisions carry
+  `strands-box.policy`, control-plane records carry `strands-box.control`, and unmatched MCP routes
+  carry `strands-box.mcp`. Two box tests indexed
   `scopeLogs[0]` and broke the moment control records started arriving first — a box records that it
   started before it decides anything. A query over one file that does not name a scope will read the
   wrong record shape, and the shipped `jq` recipes had to gain a `select(.scope.name == …)` for that
@@ -182,14 +184,14 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   acceptance union first. That is the operator's list working as
   [a target names a set of signals](../../docs/design/decisions.md#a-target-names-a-set-of-signals) says it should.
   An absent list takes **every** signal, and a list that is written must name `trace` to keep
-  the control plane, because `trace` expands to both `agent_trace` and `control_plane`. The six
-  spellings here are this crate's own; `box.toml` takes five words — `deny`, `permit`, `trace`,
-  `logs`, `metrics` — and the box expands them.
+  the control plane, because `trace` expands to both `agent_trace` and `control_plane`. `logs` expands
+  to `agent_logs` and `mcp_unmatched`. The seven spellings here are this crate's own.
+  `box.toml` takes five words: `deny`, `permit`, `trace`, `logs`, and `metrics`. Box expands them.
 - **`agent_logs` and `agent_metrics` are UNCONDITIONAL, and no list narrows them away.**
   `Collector::start` unions `Signal::always_received()` into every target's lane, by the maintainers'
   direction on 2026-09-29, so `include = ["deny"]` holds the refusals **and** the agent's own log
-  records and metrics. The two words stay in `box.toml`'s vocabulary, and each now names what a
-  target already holds.
+  records and metrics. `metrics` names what a target already holds. `logs` also selects
+  `mcp_unmatched`, which is not unconditional.
   `a_target_naming_only_refusals_still_receives_the_agents_logs_and_metrics` is the pin, and it
   fails with an **empty** file when the `chain` is removed.
   **The union is in `start` rather than in `Target::receiving`, deliberately.** `validate` reads the
@@ -246,6 +248,39 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   in this workspace**, so a full-queue drop is not counted, not printed and not observable. That is
   why the counter is not on the facade. See
   [delivery is best effort](../../docs/design/decisions.md#delivery-is-best-effort).
+  **`drained` prints one stderr line when `dropped` is not zero or the drain did not finish.** Before
+  that, a failed batch and a failed exit flush were both silent, so a workload that filled the disk
+  under the file target, or made an OTLP target hang, removed its own last records with no signal,
+  and the run still exited 0. The line is at the drain and not in `deliver`, so a workload that makes
+  every batch fail cannot fill stderr. It names its cause: failed exports, an unfinished final
+  export, or both. An unfinished drain no longer increments `dropped`, because no export failed.
+  **A failed final export is not a timeout.** The SDK answers `shutdown` with the final export's
+  own error, so a closed port or a full disk returns at once with an `Err`. `shut_down_bounded` now
+  returns a `Shutdown` (`Completed`, `Failed`, `Unanswered`), and `drain_finished` calls the drain
+  unfinished only when no answer came, or when a lane reported that its shutdown did not finish. Each
+  `TargetLane` sets a shared `cut` flag itself, because the provider joins every lane's error into
+  one `InternalFailure`. A lane sets it on `OTelSdkError::Timeout`, and on any other error unless its
+  own `SharedTarget` recorded a failed export that started inside this shutdown. The shutdown count
+  in `LaneFailures` keeps an export that began earlier, and failed late, from answering for it. A refused shutdown message (the SDK's
+  `try_send` finds the queue full, or the worker gone) exports nothing and is counted nowhere, so a
+  flag for `Timeout` alone let it pass as finished. The first version reported every fast failure as "did not
+  finish in time". The second compared `dropped` before and after the drain, which a fast-failing
+  lane or a failing relay could raise while another lane was cut, so the cut went unreported.
+  `a_counted_export_failure_is_not_reported_as_a_timeout`, `a_fast_failing_final_export_is_not_a_timeout`,
+  `a_cut_lane_is_reported_beside_a_failing_lane` (an OTLP target on a closed port beside a file
+  target on a full FIFO), and `a_shutdown_the_worker_never_receives_is_not_finished` (a burst of
+  4000 records behind a listener that never accepts) are the pins.
+  **The receiver has its own counter.** It used to share `dropped`, so a refused agent payload (the
+  one-permit `RELAY_CAPACITY`, or the fan-out bound) counted as a lost record: the workload could
+  raise the loss line at will, and a healthy agent that exports concurrently could raise it on a run
+  whose box audit was complete. `dropped` now counts only batches an exporter failed to deliver.
+  The receiver's count is read only by tests: `a_refused_agent_payload_is_not_a_lost_record` pins
+  that a refused payload raises it while `dropped` stays at 0.
+  `drain_warning` owns the text. `a_lossy_drain_reports_the_loss_once`,
+  `a_complete_drain_reports_no_loss` and `an_unfinished_drain_alone_is_a_loss` pin the text, and
+  `box_telemetry.rs::an_unreachable_target_reports_the_lost_records_once` pins the print: it fails
+  when the `eprintln!` is removed. The exit code does not change: a failed audit sink that the
+  workload can break must not also let the workload fail the run.
 - **`BODY_LIMIT` is the library's cap now, and the hand-rolled reader is why it needs to be.** That
   reader sized its buffer from the declared `Content-Length` before a byte arrived, so 64 connections
   could pin 256 MiB in the box's trusted process. `a_body_over_the_cap_is_refused` is the pin.
@@ -361,9 +396,10 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
 
 ## Public surface
 
-Fifteen names — `Collector`, `Target`, `TargetKind`, `TargetSecret`, `TelemetryConfig`, `Result`,
+Sixteen names: `Collector`, `Target`, `TargetKind`, `TargetSecret`, `TelemetryConfig`, `Result`,
 `TelemetryError`, `DecisionRecord`, `DecisionCause`, `DeterminingPolicy`, `Subject`, `Correlation`,
-`ControlRecord`, `ControlOperation`, `Signal` — reached through `telemetry::open`, then:
+`ControlRecord`, `ControlOperation`, `Signal`, and `McpUnmatched`, reached through `telemetry::open`,
+then:
 
 **Three of those carry one decision's context, and each exists because a caller holds the value and
 this crate must not re-derive it.** `Correlation` is the request's W3C parent, the transport request
@@ -402,6 +438,9 @@ copies it unchanged.
   authority itself changes — a policy install, a schema install, discovery completing, a box starting
   or stopping. **Each operation also reaches a span**, under `strands-box.control`, named
   `control <operation>`, with the same span ID as its log record.
+- `Collector::mcp_unmatched` records one unmatched MCP route under `strands-box.mcp`, with event name
+  `strands.box.mcp.unmatched`. It carries bounded, redacted process arguments and available request
+  context. It reports no policy verdict or execution outcome and produces no span.
 - `Collector::drained` is the SDK's `shutdown`, which exports what is queued before it stops, so it
   needs no separate flush. Call it before teardown. `DRAIN_DEADLINE` bounds the whole shutdown, and two
   compile-time asserts order the three deadlines:

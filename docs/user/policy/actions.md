@@ -150,7 +150,7 @@ a program. Each nested command, such as the one `find -exec` or `xargs` runs, is
 | `arg1?` | String | The first argument after the program. |
 | `arg2?` | String | The second argument. |
 | `arg_count` | Long | How many arguments follow the program. |
-| `cwd` | String | The working directory. |
+| `cwd` | String | The Shell's working directory: `~` for the operator's home, `~/…` below it, and an absolute path elsewhere. |
 
 **`shell:spawn`**, for a program of the surrounding OS, carries the six `shell:exec` fields and two
 more:
@@ -159,6 +159,22 @@ more:
 |---|---|---|
 | `program_path` | String | The resolved binary, spelled `~/…` under the operator's home and absolute elsewhere. |
 | `credential_reads?` | Set of String | The credential stores that `box.toml` names for this program under its `[tool.<name>]` table, such as `~/.aws`. |
+
+On `shell:spawn`, `cwd` names the program's launch directory. For programs launched through
+Strands Shell, the selected `[tool.<name>]` or `[agent]` table's `workspace` takes precedence.
+Otherwise, Box checks the caller's resolved directory against the agent's workspace and the
+selected table's `read`, `write`, `list`, and `metadata` trees. It uses the caller's directory when
+one of those trees covers it, or the agent's workspace otherwise.
+
+The decision, request, and outcome use the same `cwd` spelling. The program starts in the
+corresponding absolute directory. If Box cannot select or resolve a directory for a Strands Shell
+launch, `cwd` names the Shell's original directory. A program launched through Strands Shell starts
+only when its resolved directory matches the directory policy checked.
+
+A program bound to a tool grammar raises its `Tool::<name>::Action`. For programs launched through
+Strands Shell, its `cwd` names the same selected launch directory and stays absolute in decisions
+and history, including paths below the operator home. Use that absolute path in directory predicates
+for those grammar actions.
 
 When a tool grammar binds the program, the grammar action decides the spawn, and the spawn enters
 history as that action and not as `shell:spawn`. A spawn that the grammar binding refuses before
@@ -175,9 +191,7 @@ and wider than it. Its own file operations raise no `fs:*` decision;
 ## MCP
 
 **`mcp:call`**, once per request through a declared MCP server, except the protocol methods
-listed below. For an HTTP server, the request's host must match the server's configured
-`destinations`; [remote destination matching](../mcp.md#remote-destination-matching) defines that scope.
-A request to an unmatched destination receives network and HTTP checks without `mcp:call`.
+listed below. Remote MCP checks require a [matching configured host](../mcp.md#remote-destination-matching).
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -246,7 +260,7 @@ Every action of a grammar carries these fields, and `unmodeled` carries only the
 |---|---|---|
 | `program` | String | The first word after expansion, as on `shell:spawn`. |
 | `program_path` | String | The resolved program file, spelled `~/…` under the operator's home and absolute elsewhere. |
-| `cwd` | String | The Shell's working directory, as an absolute path. |
+| `cwd` | String | The program's selected launch directory, as an absolute path. See [directory selection](#shell). |
 | `args` | Set of String | Every word after the program. |
 | `effects` | Set of `Tool::<name>::Effect` | The effects of this command. A grammar that declares no effect has no `effects` field. |
 | `credential_reads?` | Set of String | The credential stores that the program's `[tool.<name>]` lists name, as on `shell:spawn`. |
@@ -303,6 +317,11 @@ What each caller records as a response:
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |
 | A tool grammar action, `Tool::<name>::Action::"<action>"` | When a program the Shell started ends | `status`, as on `shell:spawn` |
 | `mcp:call` | For `tools/call`, `prompts/get`, and `resources/read`: when the call completes or ends indeterminately over stdio, or when the upstream response completes, fails, or reaches its deadline over HTTP | none |
+| A per-tool action, `<server>::Action::"<tool>"` | Beside each `mcp:call::response` for a `tools/call` that the per-tool action decided and allowed. Its `input` is the call's arguments, as its `::request` recorded them | `reply`, a string: `result`, `tool_error`, or `protocol_error` for the server's answer; `cancelled`; or `indeterminate` when the connection ended, when the reply only accepted an MCP task or asked for input (`resultType` other than `complete`), or when Box couldn't read an http reply in full (over 16 MiB, compressed, or cut off). `structured`, when the tool declares an `outputSchema` and the reply is a `result`: the reply's `structuredContent`, keeping only the fields the `outputSchema` declares, converted like `input`. An optional field that doesn't match its declared type is left out. Box records no `structured` when a required field doesn't match |
+
+An MCP outcome is always a response, so Box never records `mcp:call::error` or a per-tool
+`::error`. The load refuses a `when temporal` clause that names one, because it could never match.
+A `tools/call` to a tool that no per-tool action declares records only `mcp:call::response`.
 
 Each temporal operator carries a window of at most `24h`. A temporal predicate names exactly one
 action, so a budget that spans `fs:read` and `fs:write` is one clause per action.

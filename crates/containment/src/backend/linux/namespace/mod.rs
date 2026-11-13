@@ -92,17 +92,15 @@ impl ContainmentBackend for NamespaceBackend {
         // `AllowAll` is the operator's `contain_egress = false` trust grant: this leaf joins the host
         // network namespace (see `enter_namespaces`) rather than a private, routeless one, so the
         // host's routes are already present and there is nothing to lower here. `Blocked` and
-        // `Localhost` are set up in `apply`. The listen-port refusal below still applies to
-        // `Localhost`; `AllowAll` carries no listen ports.
+        // `Localhost` are set up in `apply`.
 
-        if let Network::Localhost { listen, .. } = config.network()
-            && !listen.is_empty()
+        if let Network::Localhost { connect, listen } = config.network()
+            && let Some(port) = listen.iter().find(|port| connect.contains(port))
         {
-            return Err(unenforceable(
-                "Localhost listen ports: this backend passes one listening \
-                 descriptor into the namespace and has no lowering for an \
-                 inbound bind",
-            ));
+            return Err(unenforceable(&format!(
+                "Localhost listen port {port}: the port is also a connect port, and that port's \
+                 listener already holds it inside the namespace"
+            )));
         }
 
         // Breadth before cell.
@@ -179,8 +177,9 @@ impl ContainmentBackend for NamespaceBackend {
         // descriptor and that order is the wire contract. A socket's network namespace is fixed
         // when the socket is created, so none of them can be bound anywhere else.
         let mut listeners = Vec::new();
+        let mut connector = None;
         match config.network() {
-            Network::Localhost { connect, .. } => {
+            Network::Localhost { connect, listen } => {
                 // Without a handoff the endpoint would be bound and unreachable: the box could
                 // never accept on it, so every request would hang rather than fail.
                 let handoff = egress_handoff.ok_or_else(|| {
@@ -197,6 +196,16 @@ impl ContainmentBackend for NamespaceBackend {
                     let listener = netns::listen_on_loopback(*port)?;
                     netns::send_descriptor(handoff, &listener)?;
                     listeners.push(listener);
+                }
+                // PID 1 creates each inbound connection's socket in this namespace, on the box's
+                // request, and the box connects it. The workload's copy of the handoff closes at its
+                // `exec`.
+                if !listen.is_empty() {
+                    use std::os::fd::AsRawFd as _;
+                    netns::close_on_exec(handoff.as_raw_fd())?;
+                    connector = Some(reaper::Connector {
+                        handoff: handoff.as_raw_fd(),
+                    });
                 }
             }
             // `Blocked` gets the namespace and no listener, so there is no route.
@@ -215,7 +224,9 @@ impl ContainmentBackend for NamespaceBackend {
             use std::os::fd::AsRawFd as _;
             keep.extend(listeners.iter().map(|listener| listener.as_raw_fd()));
         }
-        let filesystem_handoff = establish_pid_namespace_and_reaper(&view, &keep, confirm_fd)?;
+        keep.extend(connector.as_ref().map(|connector| connector.handoff));
+        let filesystem_handoff =
+            establish_pid_namespace_and_reaper(&view, &keep, confirm_fd, connector)?;
 
         // Only the workload process reaches here, in the pivoted view.
         authority::drop_all_capabilities()?;
@@ -468,6 +479,7 @@ fn establish_pid_namespace_and_reaper(
     view: &view::MountView,
     keep: &[libc::c_int],
     confirm_fd: Option<std::os::fd::RawFd>,
+    connector: Option<reaper::Connector>,
 ) -> Result<std::os::unix::net::UnixStream, ContainmentError> {
     use std::os::fd::AsRawFd as _;
     let proc = filesystem_queries::open_proc()
@@ -576,7 +588,7 @@ fn establish_pid_namespace_and_reaper(
 
         // Supervise, then exit. Exiting is what makes the kernel terminate every
         // survivor in the namespace.
-        let code = reaper::supervise(workload);
+        let code = reaper::supervise(workload, connector);
         // SAFETY: terminating namespace PID 1.
         unsafe { libc::_exit(code) };
     }
@@ -739,18 +751,28 @@ mod tests {
             .expect("Localhost is this backend's supported network");
     }
 
-    /// An inbound bind has no lowering, so asking for one is refused rather than silently dropped
-    /// -- a dropped bind port would look like a working listener that no one can reach.
     #[test]
-    fn a_requested_bind_port_is_refused_rather_than_dropped() {
+    fn a_listen_port_validates() {
         let backend = NamespaceBackend::with_probe_result(true);
         let config = acceptable()
             .set_network(Network::localhost().connect(33085).listen(8080))
             .expect("a listen port is a valid request to make");
 
+        backend
+            .validate_config(&config)
+            .expect("a listen port has a lowering");
+    }
+
+    #[test]
+    fn a_listen_port_that_is_also_a_connect_port_is_refused() {
+        let backend = NamespaceBackend::with_probe_result(true);
+        let config = acceptable()
+            .set_network(Network::localhost().connect(33085).listen(33085))
+            .expect("the vocabulary does not compare the two lists");
+
         let error = backend
             .validate_config(&config)
-            .expect_err("a bind port must be refused, not dropped");
+            .expect_err("the connect port's listener already holds the port");
 
         assert!(
             matches!(error, ContainmentError::UnsupportedCapability { .. }),
@@ -1371,6 +1393,84 @@ mod tests {
             "the probe child must exit normally rather than be signalled: {status}"
         );
         libc::WEXITSTATUS(status)
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn x86_access_distinguishes_readable_and_missing_files_under_the_filters() {
+        let directory = tempfile::tempdir().expect("create the access fixture");
+        let present = directory.path().join("present");
+        std::fs::write(&present, b"readable").expect("write the access fixture");
+        let present = std::ffi::CString::new(present.as_os_str().as_encoded_bytes()).unwrap();
+        let missing = std::ffi::CString::new(
+            directory
+                .path()
+                .join("missing")
+                .as_os_str()
+                .as_encoded_bytes(),
+        )
+        .unwrap();
+        let probe = || {
+            for mode in [libc::F_OK, libc::R_OK] {
+                // SAFETY: the live C string names this test's existing readable file.
+                if unsafe { libc::syscall(libc::SYS_access, present.as_ptr(), mode) } != 0 {
+                    return 10;
+                }
+            }
+            // SAFETY: the live C string names an absent child of the same test directory.
+            let result = unsafe { libc::syscall(libc::SYS_access, missing.as_ptr(), libc::F_OK) };
+            if result != -1 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT)
+            {
+                return 11;
+            }
+            0
+        };
+        assert_eq!(probe(), 0, "the unfiltered access control must work");
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        assert_eq!(
+            in_filtered_child(&filters, probe),
+            0,
+            "10 = an existing readable file was refused, 11 = a missing file did not report ENOENT, 40 = filter installation failed"
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn x86_thread_setup_is_permitted_without_other_arch_commands() {
+        let mut fs_base: libc::c_ulong = 0;
+        // SAFETY: the kernel writes the current thread's base into a valid output slot.
+        let current = unsafe { libc::syscall(libc::SYS_arch_prctl, 0x1003_u64, &mut fs_base) };
+        assert_eq!(current, 0, "the unfiltered thread-state query must work");
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        let outcome = in_filtered_child(&filters, || {
+            for high in [0_u64, 1_u64 << 32] {
+                // SAFETY: restoring the existing base preserves this child's thread-local state.
+                if unsafe { libc::syscall(libc::SYS_arch_prctl, high | 0x1002, fs_base) } != 0 {
+                    return 10;
+                }
+                for operation in [0x1003_u64, 0x1004_u64, 0x7fff_ffff_u64] {
+                    let mut observed: libc::c_ulong = 0;
+                    // SAFETY: queries receive a valid output slot; the unknown command has no effect.
+                    let result = unsafe {
+                        libc::syscall(libc::SYS_arch_prctl, high | operation, &mut observed)
+                    };
+                    if result != -1
+                        || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
+                    {
+                        return 11;
+                    }
+                }
+            }
+            0
+        });
+        assert_eq!(
+            outcome, 0,
+            "10 = thread setup refused, 11 = another architecture command was not denied, 40 = filter installation failed"
+        );
     }
 
     #[test]

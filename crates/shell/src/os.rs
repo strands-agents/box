@@ -114,6 +114,8 @@ pub enum FdKind {
     ChannelReader {
         rx: mpsc::Receiver<Bytes>,
         buf: Vec<u8>,
+        /// Whether this is the input that the Shell's embedder feeds from outside the Shell.
+        outside: bool,
     },
     ChannelWriter {
         tx: mpsc::Sender<Bytes>,
@@ -215,6 +217,8 @@ pub struct Process {
     pub args: Vec<String>,
     /// Shell option flags.
     pub opt_errexit: bool,
+    /// How many enclosing tested contexts, such as a command that `!` inverts, suppress `set -e`.
+    pub errexit_tested: u32,
     pub opt_nounset: bool,
     pub opt_xtrace: bool,
     /// Set when a nounset error occurs during expansion.
@@ -372,6 +376,7 @@ impl Process {
             arg0: "lash".into(),
             args: Vec::new(),
             opt_errexit: false,
+            errexit_tested: 0,
             opt_nounset: false,
             opt_xtrace: false,
             nounset_error: false,
@@ -415,6 +420,7 @@ impl Process {
             arg0: String::new(),
             args: Vec::new(),
             opt_errexit: false,
+            errexit_tested: 0,
             opt_nounset: false,
             opt_xtrace: false,
             nounset_error: false,
@@ -468,6 +474,7 @@ impl Process {
             arg0: self.arg0.clone(),
             args: self.args.clone(),
             opt_errexit: self.opt_errexit,
+            errexit_tested: self.errexit_tested,
             opt_nounset: self.opt_nounset,
             opt_xtrace: self.opt_xtrace,
             nounset_error: false,
@@ -508,8 +515,29 @@ impl Process {
             FdKind::ChannelReader {
                 rx,
                 buf: Vec::new(),
+                outside: false,
             },
         );
+    }
+
+    /// [`Self::set_channel_reader`] for input fed from outside the Shell.
+    pub fn set_outside_reader(&mut self, fd: Fd, rx: mpsc::Receiver<Bytes>) {
+        self.fds.insert(
+            fd,
+            FdKind::ChannelReader {
+                rx,
+                buf: Vec::new(),
+                outside: true,
+            },
+        );
+    }
+
+    /// Whether `fd` reads the input fed from outside the Shell.
+    pub fn reads_outside_input(&self, fd: Fd) -> bool {
+        matches!(
+            self.fds.get(&fd),
+            Some(FdKind::ChannelReader { outside: true, .. })
+        )
     }
 
     pub fn set_channel_writer(&mut self, fd: Fd, tx: mpsc::Sender<Bytes>) {
@@ -992,6 +1020,7 @@ impl FdReader {
             kind: FdKind::ChannelReader {
                 rx,
                 buf: Vec::new(),
+                outside: false,
             },
             done: false,
         }
@@ -1014,7 +1043,9 @@ impl AsyncRead for FdReader {
             return Poll::Ready(Ok(()));
         }
         match &mut this.kind {
-            FdKind::ChannelReader { rx, buf: remainder } => {
+            FdKind::ChannelReader {
+                rx, buf: remainder, ..
+            } => {
                 if !remainder.is_empty() {
                     let n = remainder.len().min(buf.remaining());
                     buf.put_slice(&remainder[..n]);
@@ -1192,6 +1223,9 @@ pub type HostSpawner = std::sync::Arc<dyn Fn(HostSpawn) -> HostSpawnFuture + Sen
 /// The future a [`HostSpawner`] hook returns: the pending [`HostSpawnOutcome`].
 pub type HostSpawnFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<HostSpawnOutcome>> + Send>>;
+
+/// The absolute file each bare name runs, looked up after the Shell's own programs and before `PATH`.
+pub type HostPrograms = std::sync::Arc<std::collections::BTreeMap<String, std::path::PathBuf>>;
 
 /// One resolved host-binary spawn request handed to a [`HostSpawner`].
 pub struct HostSpawn {
@@ -1479,6 +1513,11 @@ pub trait Kernel: Send + Sync {
             io::ErrorKind::Unsupported,
             "host-binary spawner not available",
         ))
+    }
+
+    /// The declared file a bare `name` runs, which is not found when it is gone, or `None` for `PATH`.
+    fn host_program(&self, _name: &str) -> Option<std::path::PathBuf> {
+        None
     }
 }
 

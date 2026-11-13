@@ -20,9 +20,45 @@ command to the Shell. Each accepts one of these forms:
 Any other form is refused with `Shell alias accepts only -c COMMAND, -lc COMMAND, -c -l COMMAND, or
 SCRIPT`.
 
+### Standard input
+
+When the alias's standard input is a pipe, a file, or a socket, the command reads it as its
+standard input while it runs. Bytes arrive unchanged. A terminal or `/dev/null` gives the command
+no input. A command that does not read its input is not held by it: the alias returns when the
+command exits, even when the writer keeps the pipe open. A command that does read such an input
+waits for it until the Shell's timeout, or, with `shell.timeout = false`, until its caller stops
+it.
+
+A command receives at most `[limits.shell] max_stdin` bytes of this input, 64 KiB by default. Past
+that, the box discards the rest, so the limit never blocks the writer. Forwarding ends when the
+command exits, so a writer that is still writing then can get a broken pipe. A command that does not
+read its input is not affected. A command that reads past the limit gets no end of input: it waits
+until the Shell's timeout and then fails, and it prints on standard error that its input was cut. A
+command that waits for the end of its input before it acts, such as `x=$(cat)` or `jq`, never acts
+on part of it. A command that acts as its input arrives, such as `while read -r line` or `cat >
+file`, has already acted on the first part when it fails. With `shell.timeout = false`, a command
+that reads past the limit waits until its caller stops it, like any blocked read. If reading the
+input fails, the alias stops the command and exits with status `125`.
+
+This limit applies only to input piped into the alias from outside the Shell, such as a hook's
+event or a program that starts `bash` with input. A pipe inside a command, such as
+`cat big.json | jq .`, is not affected.
+
+Only commands that the Shell runs itself, such as `cat`, `read`, or `jq`, receive the input. A
+program that the Shell starts in its own sandbox gets no input. Text that a command reads from its
+input is still data: when a command runs it, as in `eval "$(cat)"`, or opens a file it names,
+policy decides that command or file.
+
+A Lua script that the Shell runs does not read the input piped into the alias: it reads it as empty
+and never waits for it. A pipe inside one command, such as `echo x | lua -e 'print(io.read())'`,
+still reaches the script.
+
 Each invocation is one command. A variable exported in one invocation is unset in the next. The
 Shell starts each command with `HOME` set to the agent's `HOME`, and with the workspace as its
-working directory.
+working directory. It also gets the placeholder of each [credential route](./egress.md), in the
+same variable as the agent. So `curl -H "Authorization: Bearer $GITHUB_TOKEN" ...` sends the
+placeholder. On a request to the route's destination that policy permits, the gateway puts the real
+token in its place.
 
 ## What runs where
 
@@ -35,7 +71,7 @@ Once the alias hands a command to the Shell, each command in it runs as follows:
 | Inside a command, the agent runs | Action | Where it runs | What bounds its reach |
 |---|---|---|---|
 | A builtin or a command the Shell implements | `shell:exec`, then one `fs:*` action for each file operation | In the Shell | Policy, then the reachable paths check |
-| A program on the `PATH` of `box run`, such as `git` | `shell:spawn` on the program's resolved path, or the grammar action when a tool grammar binds the program | Its own sandbox | Its `[tool.<name>]` table or `exec` entry. See [Configuration](#configuration). |
+| A program named without a path, such as `git`, which runs a `[tool]`'s file or the first match on the `PATH` of `box run` (see [`PATH`](#path)) | `shell:spawn` on the program's resolved path, or the grammar action when a tool grammar binds the program | Its own sandbox | Its `[tool.<name>]` table or `exec` entry. See [Configuration](#configuration). |
 | A program named by a path, such as `./target/debug/app` | `shell:spawn` on the program's resolved path, or the grammar action when a tool grammar binds the program | Its own sandbox | Its `[tool.<name>]` table or `exec` entry |
 
 The Shell implements these, each in place of a program of the same name on the `PATH`:
@@ -61,7 +97,7 @@ command substitution, `eval`, `source`, `find -exec`, `xargs`, or Lua's `io.pope
 | `context.input.program` | String | Always | The first word after expansion, such as `grep`. |
 | `context.input.arg1`, `arg2` | String | When the command has that many arguments | The first and second arguments. Test each with `has` first. |
 | `context.input.arg_count` | Long | Always | The number of arguments. |
-| `context.input.cwd` | String | Always | The Shell's working directory. |
+| `context.input.cwd` | String | Always | The Shell's working directory: `~` for the operator's home, `~/…` below it, and an absolute path elsewhere. |
 | `context.output.status` | Long | On a `::response` event | The command's exit status. A program that a signal ends records 128 plus the signal number. |
 
 ```cedar
@@ -81,6 +117,17 @@ of `shell:exec`, with these differences:
 | `context.input.program` | String | Always | The first word after expansion, such as `git` or `./target/debug/app`. |
 | `context.input.program_path` | String | Always | The file that runs, with every link resolved. A path under the operator's home starts with `~/`. |
 | `context.input.credential_reads` | Set of String | When the matching `[tool.<name>]` lists name a credential store | Each credential store those lists name, such as `~/.aws`. Test it with `has` first. |
+| `context.input.cwd` | String | Always | The program's launch directory, with the same home-relative spelling as `shell:exec`. |
+
+Box selects this directory before policy decides, following the `workspace` rule in
+[Configuration](#configuration). The decision, request, and outcome use the same `cwd` spelling.
+The program starts in the corresponding absolute directory. If Box cannot select or resolve a
+launch directory, `cwd` names the Shell's original directory. A program starts only when its
+resolved launch directory matches the directory policy checked.
+
+A tool grammar maps a command line to a policy action for that tool. A program with a tool grammar
+uses that action. Its `cwd` names the same selected launch directory and stays absolute in decisions
+and history.
 
 ```cedar
 @id("built_programs")
@@ -109,7 +156,7 @@ cases:
   otherwise make the same `shell:spawn` request.
 - The file at a bound path is no longer the file that the run bound.
 - The agent called a bound name with no path, and the file bound under that name is gone or
-  replaced, so `PATH` would find another file.
+  replaced, so another file would run.
 
 A refused spawn enters history as a `shell:spawn` request. After a bound file is replaced or
 removed, its bound names stay refused until the box restarts.
@@ -155,6 +202,11 @@ a `shell:spawn` permit, the program runs under the first of these that covers it
 2. An [`[agent.filesystem] exec`](#agentfilesystem-exec) entry.
 3. Neither: the program is refused with status `126`.
 
+`limits.shell.max_input` bounds submitted command text, and `limits.shell.max_output` bounds
+output buffers and script files loaded with `source`. Set either size to `0` to disable that Shell
+limit. The [limits reference](config.md#limits)
+gives their defaults, byte units, and the separate limits on transport and positional script invocation.
+
 ### `limits.shell.timeout`
 
 Each submitted Shell call has a 30-second timeout by default. Set `shell.timeout = 600` under
@@ -177,8 +229,8 @@ execution can delay timeout reporting. The direct `python` and `python3` aliases
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `command` | string array | required | Element 0 is the program, and the rest are fixed leading arguments. A bare name resolves on the table's `env.PATH`, else on the `PATH` of `box run`. |
-| `workspace` | path | the Shell's working directory when it is inside the agent's workspace or a path the tool's lists name, else the agent's workspace | The program's initial working directory. |
+| `command` | string array | required | Element 0 is the program, and the rest are fixed leading arguments. A bare name resolves on the table's `env.PATH`, else on the `PATH` of `box run`. The last part of element 0 is the name the agent types to run it in the Shell, as [`PATH`](#path) states. |
+| `workspace` | path | the Shell's resolved working directory inside the agent's workspace or the tool's `read`, `write`, `list`, or `metadata` trees, else the agent's workspace | The program's initial working directory. An explicit value takes precedence. |
 | `env` | table | empty | Variables the program receives. |
 | `filesystem` | table | empty | `read`, `write`, `read_file`, `write_file`, `list`, and `deny`: the paths the program's own system calls reach. |
 | `network.contain_egress` | bool | `true` | How the program reaches the network. See [`[tool.<name>.network]`](#toolnamenetwork). |
@@ -230,6 +282,9 @@ A program that no `[tool.<name>]` table names runs with the agent's own filesyst
 `exec` entry covers it and no `deny` entry covers it. An entry is a file, or a directory that
 covers every file under it.
 
+The agent's explicit `workspace` selects the program's launch directory. Otherwise, Box applies
+the tool `workspace` default with the agent's filesystem lists.
+
 ```toml
 [agent.filesystem]
 exec = ["~/src/project/target/debug"]
@@ -237,8 +292,37 @@ exec = ["~/src/project/target/debug"]
 
 ## `PATH`
 
-A bare program name in a command resolves on the `PATH` of the host OS's shell that runs `box run`, else on
-`/usr/bin:/bin`.
+A program name with no `/` in a command runs the file of the `[tool.<name>]` that answers to that
+name. A `[tool]` answers to the last part of its `command` element 0, whatever its label, so
+`[tool.git]` with `command = ["/Applications/Xcode.app/Contents/Developer/usr/bin/git"]` makes `git`
+run that file, even when `/usr/bin/git` comes first on `PATH`. A `[tool]` with a grammar answers only
+when the grammar's `program` is that same name. The Shell's own builtins, commands, and functions
+come first, so a `[tool.cat]` doesn't replace the Shell's `cat`, and Box prints no line for it.
+The same holds for `sh`, which the Shell runs as a script.
+
+A `[tool]` claims its name even when its `command` has fixed leading arguments. With
+`[tool.cargo_fmt] command = ["/usr/bin/cargo", "fmt"]`, a bare `cargo build` runs `/usr/bin/cargo`,
+where no table matches `build`, so it is refused. It no longer reaches a `cargo` that `PATH` finds
+under an `[agent.filesystem] exec` entry. Give that program its own `[tool]`, or call it by its path.
+
+When `[tool]` tables whose commands resolve to different paths answer to one name, `PATH` decides
+if it finds one of those paths. Two hard links to one file at two paths count as two paths, because
+Box selects a tool by the path that runs. If `PATH` finds none, such as the `/usr/bin/git` stub with
+`[tool.git]` and `[tool.brew_git]`, the table whose label is the name runs.
+
+Any other name resolves on the `PATH` of the host OS's shell that runs `box run`, else on
+`/usr/bin:/bin`. When
+the file of a `[tool]` is gone, its name is not found, and the Shell doesn't look for another file on
+`PATH`. `run` prints the file each name runs:
+
+```text
+strands-box: [tool.git]: a bare `git` in the Shell runs /Applications/Xcode.app/Contents/Developer/usr/bin/git
+strands-box: [tool.brew_git]: runs another program path, so a bare `git` in the Shell runs the file of `[tool.git]`, whose label is that name
+strands-box: [tool.brew_node], [tool.node]: these tables run different program paths, so a bare `node` in the Shell runs the file that `PATH` finds
+```
+
+A name changes only which file runs. The spawn still needs a `shell:spawn` permit, or a grammar
+action permit when a tool grammar binds the file, and `program` is still the name the agent typed.
 
 ## `curl`
 
@@ -250,6 +334,7 @@ refuses makes `curl` exit non-zero.
 
 | Status | Meaning | stderr |
 |---|---|---|
+| `1` | Submitted command text exceeds 256 KiB, including text with line breaks. Split the text across several calls, for example by appending to a file. | `strands-shell: input too large` |
 | `1` | The Shell call exceeded its execution allowance. | `strands-shell: execution timeout exceeded` |
 | `125` | Box failed to serve the command. | The failure |
 | `125` | The call exceeded the broker's backup deadline, five seconds after its finite Shell allowance. | `strands-box: the call exceeded its deadline` |
@@ -257,6 +342,7 @@ refuses makes `curl` exit non-zero.
 | `126` | Policy refused the command. | `strands-shell: effect denied: policy denied this operation on '<program>'`, then `[policy: <id>]` or `[default-deny]`. A tool grammar action reads the same way. |
 | `126` | A tool grammar binds the program file, and Box refused the spawn before any rule decided it. | `strands-shell: effect denied: policy denied this operation on '<program>' [tool-grammar]: <reason>. No policy can permit it.` |
 | `126` | Policy permitted a program, and nothing in [Configuration](#configuration) covers it. | ``strands-shell: <program>: no tool runs <path>: no `[tool.<name>] command` matches this program and its leading arguments`` |
+| `126` | The launch directory differs from the directory policy checked. Run the command again. | `strands-shell: <program>: the tool working directory does not match the policy-approved directory` |
 | `127` | The program is not in the Shell, and not on the `PATH`. | `strands-shell: <program>: command not found` |
 | Any other | The command's own status. A refused file operation fails the command that made it, for example `cat` with `1`. | `policy denied this operation on '<path>'`, then `[policy: <id>]` or `[default-deny]` |
 | Any other | The path changed between the check and the operation, for example a directory was swapped for a symlink. The Shell refuses rather than act on a file policy didn't judge. Run the command again. | `strands-shell: <command>: filesystem identity changed during effect admission` |

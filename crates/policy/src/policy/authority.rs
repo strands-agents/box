@@ -20,7 +20,10 @@ use crate::schema::{
     ActionIdentity, GovernedBox, composed_action_schema, mcp_action_namespace, mcp_tool_action,
 };
 use crate::spelling::{Operator, PolicyWarning};
-use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal, Request, RequestId};
+use crate::{
+    Decision, Outcome, PendingToolResponse, PolicyError, PolicyStagingError, Principal, Request,
+    RequestId,
+};
 
 #[derive(Debug, Clone)]
 struct CandidatePolicy {
@@ -538,30 +541,38 @@ impl Authority {
         principal: &Principal,
         request: &Request<'_>,
         identity: &ActionIdentity,
-    ) -> Decision {
+    ) -> (Decision, Option<PendingToolResponse>) {
         let Ok(live) = self.live.lock() else {
-            return Decision::internal_fault();
+            return (Decision::internal_fault(), None);
         };
         if let ActionIdentity::McpTool { namespace, tool } = identity {
             let key = (namespace.clone(), tool.clone());
             if live.degraded_tools.contains(&key) {
-                return Decision::no_match();
+                return (Decision::no_match(), None);
             }
             if live.readiness == Readiness::Discovering && live.pending_tools.contains(&key) {
-                return Decision::policy_pending();
+                return (Decision::policy_pending(), None);
             }
         }
         let Ok(action) = identity.cedar_uid() else {
-            return Decision::internal_fault();
+            return (Decision::internal_fault(), None);
         };
-        let decision = if live.engine.declares_tool_action(&action) {
-            live.engine
-                .decide(governed, principal, ActionRequest::Request(request))
-                .0
+        let (decision, pending) = if live.engine.declares_tool_action(&action) {
+            let (decision, request_id, input) =
+                live.engine
+                    .decide_recording(governed, principal, ActionRequest::Request(request));
+            let pending = request_id
+                .zip(input)
+                .map(|(request_id, input)| PendingToolResponse {
+                    request_id,
+                    identity: identity.clone(),
+                    input,
+                });
+            (decision, pending)
         } else {
-            Decision::no_match()
+            (Decision::no_match(), None)
         };
-        match decision {
+        let decision = match decision {
             // No per-tool rule matched: ride the coarse `mcp:call` allow rather than default-denying.
             Decision::Deny {
                 reason: crate::DenyReason::NoMatch,
@@ -573,7 +584,25 @@ impl Authority {
             },
             // An explicit `forbid`, an internal fault, or an allow — enforce as decided.
             other => other,
-        }
+        };
+        // Only a call that goes on to the server owes a response.
+        let pending = pending.filter(|_| decision.is_allow());
+        (decision, pending)
+    }
+
+    /// Records the `::response` that one allowed per-tool `tools/call` owes.
+    pub(super) fn record_tool_response(
+        &self,
+        response: PendingToolResponse,
+        reply: crate::McpReply,
+        structured: Option<&serde_json::Value>,
+    ) -> Result<(), PolicyError> {
+        let live = self
+            .live
+            .lock()
+            .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?;
+        live.engine
+            .observe_tool_response(response, reply, structured)
     }
 
     #[cfg(test)]

@@ -122,10 +122,10 @@ If the table instead uses `command = ["/opt/node/bin/npx", "-y", "@playwright/mc
 configuration stays the same. Box launches that absolute executable path when the harness calls
 the `npx` alias.
 
-A harness entry that sets only the program, `"command": "npx"` with no `args`, is refused for this
-server with `no MCP server declares "npx"; servers on npx: playwright`. Add the
-arguments to the harness entry. The same applies to every `stdio` server whose `command` has
-arguments.
+A harness entry that sets only the program, `"command": "npx"` with no `args`, does not select this
+server. It attempts to run ordinary `npx` inside the agent's sandbox. Add the declared arguments
+to the harness entry to select the MCP server. The same applies to every `stdio` server whose
+`command` has arguments.
 
 For an `http` server, use a URL whose hostname or IP address appears in that server's `destinations`
 in `box.toml`. An unmatched host does not select that server's MCP rules, even if it reaches the
@@ -217,6 +217,62 @@ when temporal {
 `::request` counts every attempt, including a refused one. `::response` counts calls that reached
 the server.
 
+A rule can also require that another tool call finished first, for the same argument, with a
+given answer. When `verify_identity` declares an `outputSchema` with a `verified` field, this rule
+refuses a password reset unless a `verify_identity` of the same user answered `verified: true` in
+the last hour:
+
+```cedar
+@id("reset_after_verify")
+forbid (principal, action == servicenow::Action::"reset_password", resource)
+unless temporal {
+  formerly within 1h (
+    servicenow::Action::"verify_identity"::response{
+      input.user_name: context.input.user_name,
+      output.reply: "result",
+      output.structured.verified: true }
+  )
+};
+```
+
+Key it on `::response`, and require `output.reply` to be `result`:
+
+- A refused `verify_identity` still records `::request`, so a rule on `::request` is met by asking.
+- Every call that ends records `::response`, so a budget counts it. `output.reply` says how it
+  ended: `result`, `tool_error` when the result sets `isError`, `protocol_error` for a JSON-RPC
+  error, `cancelled`, or `indeterminate` when its connection ended or Box didn't read the reply.
+  A reply that only accepts a background task (an MCP task), or that asks the client for input
+  first (`resultType: "input_required"`), is also `indeterminate`, because it isn't the call's
+  answer and Box doesn't record the later one. Requiring `result` means this rule isn't met by a call
+  that failed, that the agent started and abandoned, or that is still running as a task.
+- A `result` shows that the server answered without an error, not that the verification passed.
+  `output.structured` is what the tool answered. It holds the reply's `structuredContent`, keeping
+  only the fields the tool's `outputSchema` declares, so a misspelled field fails at load. An
+  `outputSchema` that Box can't turn into a policy type, such as one with a field named `if` or a
+  `$ref` it can't resolve, declares no `output.structured`, so a rule that reads it fails at load.
+  The server's other tools keep their outputs, unless the problem only appears when the outputs
+  are read together; then no tool on that server declares one.
+- Box records no `output.structured` when the tool declares no `outputSchema`, when the reply isn't
+  a `result`, or when a required field doesn't match its declared type. An optional field that
+  doesn't match is left out, like an undeclared one. A JSON
+  `number` field is read as a whole number, so a fractional value such as `22.5` doesn't match. A
+  rule that reads a field Box left out isn't met; a rule on another field still is.
+- Box reads the reply on stdio and http servers alike, including a streamed (Server-Sent Events)
+  http reply. Box asks an http server for an uncompressed reply. An http reply over the gateway's
+  16 MiB response limit, compressed anyway, or cut off records `indeterminate`, and so does a reply
+  Box can't copy because many tool calls' replies are being read at once. A server that
+  always compresses its replies therefore never meets a precondition, so every call that needs one
+  is refused.
+- The agent can make its own reply unreadable, for example by asking for an output over 16 MiB.
+  So write a rule on a tool's output as a precondition (`unless temporal`, as above), which an
+  unreadable reply fails. A `forbid` that fires when an earlier output said something can be
+  avoided that way.
+- Tool outputs are stored in local history in `box_dir`, next to the inputs Box already stores.
+  They never go to telemetry.
+
+Box doesn't record `::error` for an MCP call, and the load refuses a rule that reads one, or that
+compares `output.reply` with a value other than the five above.
+
 The count carries over when the box restarts. That's also true of a rule written on a tool's own
 action, such as `github::Action::"create_issue"`, as long as the rule only decides tool calls and
 you didn't edit it. Box keeps that rule while the server lists its tools again. It starts with an
@@ -236,7 +292,9 @@ that `forbid` and the per-tool action. The agent gets each refusal as an MCP err
 | Error message (excerpt) or symptom | What to do |
 |---|---|
 | `MCP server "<name>" may not start` | No `shell:spawn` permit for the program. |
-| `no MCP server declares "<command>"` | The harness command or arguments do not match a declared server. Copy its `command` from `box.toml`, as in [step 2](#step-2-connect-the-harness). With `argument_wildcards = true`, supply a value for each `*` argument. |
+| The harness starts an ordinary program instead of its MCP server | Its command does not match a declared server. Set the executable's filename and every declared argument, as in [step 2](#step-2-connect-the-harness). With `argument_wildcards = true`, supply a value for each `*` argument. |
+| `strands.box.mcp.unmatched` in the telemetry records | No declared MCP command matched. Compare the harness command with the declared command. The diagnostic carries the program and redacted arguments, with no policy verdict or execution outcome. See [an unmatched MCP route](telemetry.md#an-unmatched-mcp-route). |
+| `no MCP server declares "<command>"` | The program is undeclared, or a command on that program cannot expand. Check that the harness uses a declared program, and correct any command expansion named in the error. |
 | Two MCP tables `declare overlapping wildcard commands` | The wildcard entries can match the same request, so Box refuses to start. Give them fixed arguments that distinguish them. An exact entry may overlap a wildcard entry; the exact entry takes priority. |
 | `MCP command matches multiple servers` | No exact entry matched, and more than one wildcard entry matched the received command. The launch is refused. |
 | The harness shows the server with zero tools | A rule refuses `tools/list` for the server. |

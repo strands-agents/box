@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries eleven keys. `name` and `box_dir` are required.
+The file carries twelve keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -81,10 +81,11 @@ The file carries eleven keys. `name` and `box_dir` are required.
 | `[mcp.<name>]` | tables | The MCP servers this box declares. |
 | `[telemetry.<label>]` | tables | Where this box's decision records and agent spans go. |
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
-| `[experimental-features]` | table | Optional experimental features: native filesystem policy checks and tool grammars. Each is disabled by default. |
+| `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, and ingress. Each is disabled by default. |
 | `[limits]` | table | Execution limits for Strands Shell. |
+| `[gateway]` | table | Settings for every request through the egress gateway: `upgrade_http`, the hosts whose plain `http://` on port 80 the gateway sends as `https://` on port 443. See [`[gateway]`](#gateway). |
 
-The example uses five of the eleven: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the twelve: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -182,6 +183,9 @@ group, the owner, and access control lists on files in its writable grants`. Lin
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `shell.timeout` | positive integer or `false` | `30` | Seconds allowed for one submitted Strands Shell call, including its commands and pipelines. `false` disables the Shell and broker execution deadlines. |
+| `shell.max_input` | nonnegative integer | `262144` | Bytes of command text submitted to Strands Shell. `0` disables this limit. |
+| `shell.max_output` | nonnegative integer | `65536` | Bytes in each Shell output buffer, including command substitution. Shell also applies this limit when loading script files with `source`. `0` disables this limit. |
+| `shell.max_stdin` | positive integer | `65536` | Bytes of standard input that one command run through the `zsh`, `bash`, or `sh` alias receives from outside the Shell. Past it, the rest is discarded and the command gets no end of input, so a command that reads past it fails at the Shell timeout; a command that acts as its input arrives has acted on the first part by then. `0` is a load error. |
 
 To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent nested table is
 `[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
@@ -189,14 +193,56 @@ Set `shell.timeout = false` to disable this limit, or omit the key for the 30-se
 Connection and write operations retain their transport timeouts.
 Configured-command [hard-link scans](#configured-command-integrity) retain their separate
 30-second budget per tree, including when `shell.timeout` is `false`.
-Zero, negative numbers, fractions, strings, `true`, and values too large for the platform's clock
+Timeout values of zero, negative numbers, fractions, strings, `true`, or values too large for the platform's clock
 are load errors.
 
-This setting applies to the calls forwarded by `zsh`, `bash`, and `sh`, including Python called
+Size limits accept a positive integer byte count or `0` to disable that limit. Negative numbers,
+booleans (including `false`), strings, fractions, and values the platform cannot represent are load
+errors. Omission preserves each default independently.
+For a larger source file, set `[limits.shell] max_output = 262144` to allow up to 256 KiB.
+This also enlarges Shell's output buffers. A larger `max_input` alone does not enlarge source-file reads.
+Stdout and stderr captures have separate buffers; `max_output` is not a combined output or
+total memory budget. Oversized command text is refused with `input too large`, but the current
+Shell implementation bypasses this check for submissions that contain a newline. An oversized
+capture can produce incomplete or empty output. An oversized source file fails before execution
+with `output size limit exceeded`.
+Raising or disabling a size limit allows Shell to hold more data in the box's trusted process;
+these settings do not bound the process's total memory use.
+
+`shell.max_stdin` cannot be disabled, because it bounds the standard input that the box's trusted
+process holds for a command. Values of zero, negative numbers, fractions, strings, and booleans are
+load errors. One connection's commands receive at most `shell.max_stdin` times the most programs a
+connection opens. A command that reads its input still holds at most `shell.max_output` bytes of
+it in one buffer, so raise `shell.max_output` too when a command such as `x=$(cat)` must keep a
+larger input.
+
+Broker messages remain capped at 1 MiB, including encoding. Streamed stdout and stderr share
+an 8 MiB budget for the lifetime of one opened Shell program. These limits still apply when either
+Shell setting is increased or set to `0`.
+Positional script invocations such as `bash script.sh` retain the alias's separate 64 KiB script limit.
+
+The timeout setting applies to the calls forwarded by `zsh`, `bash`, and `sh`, including Python called
 inside the Shell. Python's [own limits](monty.md#limits-and-exit-statuses) also apply, including
 with `shell.timeout = false`. Synchronous Python execution can delay timeout reporting.
 See [Shell timeouts](shell.md#limitsshelltimeout) for the call scope and
 [stored configuration](native-filesystem-policy.md#stored-configuration-and-rollback) for rollback.
+
+## `[gateway]`
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `upgrade_http` | string array | empty | Host names whose plain `http://` request to port 80 the gateway decides and sends as `https://` on port 443. A host name alone: no scheme, port, path, `*` wildcard, or IP address. |
+
+```toml
+[gateway]
+upgrade_http = ["static.rust-lang.org"]
+```
+
+The list is for a tool that can't trust the box's CA, such as rustup on macOS. Policy decides an
+upgraded request on port 443, as it decides HTTPS to that host, and a credential is never added to
+it. A box that sets the list stores its record at version 32, and an older build refuses it.
+[Upgrade plain HTTP to HTTPS](egress.md#upgrade-plain-http-to-https) describes the behaviour and
+its limits.
 
 ## `[experimental-features]`
 
@@ -215,6 +261,9 @@ See [native filesystem policy](native-filesystem-policy.md) for build requiremen
 `tool-grammars = true` turns on [tool grammars](#toolnamegrammar), which are experimental and off
 by default.
 
+`ingress = true` turns on [`[[agent.ingress]]`](#agentingress), which is experimental and off by
+default.
+
 ## `[agent]` and `[tool.<name>]`
 
 Both tables hold one process, in one shape:
@@ -227,12 +276,16 @@ Both tables hold one process, in one shape:
 | `[<table>.filesystem]` | table | The path lists the process's own system calls reach. Eight for `[agent]`; six for a `[tool.<name>]`, which has no `metadata` or `exec` list. |
 | `native-filesystem-policy` | boolean | Optional override of the global experimental setting for this process and its descendants. See [workload selection](native-filesystem-policy.md#select-workloads). |
 | `[tool.<name>.grammar]` | table | Experimental, and `[tool.<name>]` only. The tool grammar for the program this tool runs. See [`[tool.<name>.grammar]`](#toolnamegrammar). |
+| `[[agent.ingress]]` | list of tables | `[agent]` only. Where callers reach the agent's servers, one entry per port. See [`[[agent.ingress]]`](#agentingress). |
 
 The box adds the runtime minimum to every process; see
 [the runtime minimum](../design/containment.md#the-runtime-minimum).
 
 The program is a full path or a bare name. A bare name uses `env.PATH` when set.
-Otherwise, Box uses the operator's `PATH`, or `/usr/bin:/bin` if it is absent. A relative path with more than one
+Otherwise, Box uses the operator's `PATH`, or `/usr/bin:/bin` if it is absent. In the Shell, the last
+part of a `[tool]`'s program is the name that runs it, before the operator's `PATH`, and `run` prints
+``strands-box: [tool.git]: a bare `git` in the Shell runs <file>`` for each. See
+[`PATH` in the Shell reference](shell.md#path). A relative path with more than one
 component is refused: ``` `command` element 0 "<program>" is a relative path; write an absolute
 path, or a bare name that `env.PATH` resolves```. Scripts on Linux require
 [interpreter grants](#script-commands-on-linux). The example's `command` runs
@@ -350,6 +403,65 @@ Box checks the original grants before preserving any additional path spelling ne
 Preserving a spelling adds no authority over a different file.
 On macOS, Box grants a declared command's interpreter chain automatically.
 A workload-selected program without a tool table requires its interpreter chain to have existing `exec` coverage on either platform.
+
+## `[[agent.ingress]]`
+
+Each entry is one listener: the box listens on `listen` and relays each caller's TCP connection to
+the port the agent's server listens on. Add an entry for each port the agent serves, such as one for
+HTTP and one for MCP. An agent may declare up to five entries. The agent's code does not change,
+and the agent gains no reach. Ingress is experimental, so `[experimental-features]` must set
+`ingress = true`.
+
+```toml
+[experimental-features]
+ingress = true
+
+[[agent.ingress]]
+listen        = "0.0.0.0:8080"
+workload_port = 8081
+
+[[agent.ingress]]
+listen        = "0.0.0.0:8000"
+workload_port = 8001
+```
+
+| Key | Type | Meaning |
+|---|---|---|
+| `listen` | string | The IP address and port the box binds for callers, such as `"0.0.0.0:8080"`. Required in each entry. |
+| `workload_port` | integer | The port the agent's server listens on in its sandbox. Required in each entry. |
+
+The agent listens on `workload_port` on `127.0.0.1` or `0.0.0.0`, because the relay connects to
+`127.0.0.1` only. An agent that listens on `::1` alone gets no callers, and the box logs that nothing
+accepts on its port. On Linux the agent's sandbox creates no IPv6 socket, so an agent that binds
+`::1` fails to start.
+
+- The box binds every `listen` before the agent starts, so a port in use refuses the run.
+- Each entry needs its own `listen` port and its own `workload_port`.
+- On macOS, no `listen` port may equal any entry's `workload_port`, and the box refuses to start
+  when another process already listens on a `workload_port`.
+- On macOS, the agent may listen only on its `workload_port`s, on any address of the Mac. A local
+  process can also connect to those ports directly, and the network can when the agent listens on
+  `0.0.0.0`.
+- No policy decision covers a caller. `listen` decides who can reach the agent.
+- `ingress` is refused on a `[tool.<name>]` and on an `[mcp.<name>]`.
+- Without `ingress = true`, `[[agent.ingress]]` is refused: ``invalid `[agent]` table: `ingress` is
+  experimental: set `ingress = true` in `[experimental-features]` to load it``.
+
+At startup the box prints each listener:
+
+```text
+strands-box: [ingress] 0.0.0.0:8080 is relayed to the agent's port 8081, at most 640 callers at once
+strands-box: [ingress] 0.0.0.0:8000 is relayed to the agent's port 8001, at most 640 callers at once
+```
+
+On Linux, the box starts no listener's relay until the agent's sandbox reports that it is ready, and
+a caller that arrives earlier waits in the listen queue. A sandbox that does not report ready within
+60 seconds refuses the run.
+
+The box raises its own open-file limit as far as the system allows, and holds at most an eighth of
+it in callers at once, split evenly across the listeners; a further caller waits until one closes. The agent and every tool start with
+the open-file limit the box started with. When nothing accepts on `workload_port`, the box closes each caller and prints
+one line until a caller is served again.
 
 ## `[agent.filesystem]` and `[tool.<name>.filesystem]`
 
@@ -692,8 +804,9 @@ An older build refuses a box that uses a grammar, so before you go back to one, 
 
 Each table binds one secret to a set of destinations, and its name is the operator's own label.
 The example's `[egress.model]` binds `AWS_BEARER_TOKEN_BEDROCK` to the Bedrock endpoint, and `run`
-reads the key from its own environment. The agent, and every tool or MCP server in the box, gets a
-placeholder in that variable, and the gateway swaps the key in on each request to the destination.
+reads the key from its own environment. The agent, every tool or MCP server in the box, and the
+Shell get a placeholder in that variable, and the gateway swaps the key in on each request to the
+destination.
 A binding attaches a credential to a request the policy already permitted, and grants no network
 reach of its own: the example policy's `net:connect` and `http:request` rules are what let the
 requests out. The current reference for this table is
@@ -703,7 +816,7 @@ requests out. The current reference for this table is
 |---|---|---|
 | `destinations` | string array | A host, `host:port`, a path prefix or `/*` suffix, or a `*.` wildcard. A pattern that matches every host is refused, and two entries may not overlap. |
 | `protocol` | string | `http`, the default and the only accepted value. |
-| `secret.ref` | string | `env://NAME` for a variable on the operator's side, or `aws://PROFILE` for SigV4 signing. Required. A literal value is refused. |
+| `secret.ref` | string | `env://NAME` for a variable on the operator's side, `aws://PROFILE` for SigV4 signing with a named profile's static keys, or a bare `aws://` to sign with the AWS SDK default credential provider chain (the host's ambient identity). Required. A literal value, or any other scheme, is refused. |
 | `secret.placement` | string | `header` (default), `basic_auth`, or `query_param`. |
 | `secret.header` | string | The header the secret lands in. Defaults to `Authorization`. |
 | `secret.prefix` | string | Text before the secret in the header value. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |
@@ -714,13 +827,33 @@ requests out. The current reference for this table is
 The example takes every default: the key lands in the `Authorization` header with a `Bearer `
 prefix, and only a request that carries the placeholder gets it.
 
-An entry needs a `secret`. One without is refused: `an entry with no secret declares only a
-destination, which policy already decides; give it a secret, or set protocol = "mcp" for a remote
-MCP server`. `protocol` on this table takes `http` alone; declare a remote MCP server as
-`[mcp.<name>]` with `type = "http"`, which the next section describes.
+An entry needs a `secret` or a backend. One with neither is refused: `an entry with no secret
+declares only a destination, which policy already decides; give it a secret, add a backend, or set
+protocol = "mcp" for a remote MCP server`. `protocol` on this table takes `http` alone; declare a
+remote MCP server as `[mcp.<name>]` with `type = "http"`, which the next section describes.
 
 An `aws://` route signs inside the box, so it takes no `header`, `prefix`, `placement`, `param`,
-`inject`, or `phantom_prefix`. Setting one is refused when the configuration loads.
+`inject`, or `phantom_prefix`. Setting one is refused when the configuration loads. A bare `aws://`
+(no profile) signs with the host's ambient identity and prints a warning on every signed request;
+[Credential sources](egress.md#credential-sources) describes the default chain, the profiles it does
+not resolve (AWS SSO), the warning, and the writable-`~/.aws` rule.
+
+An entry re-routes to a backend with one `[[egress.<name>.backends]]` table, holding a `url`
+(`scheme://host[:port][/prefix]`, `https` or `http`) and an optional `auth` — the backend's own
+credential, an `env://` token or an `aws://` profile SigV4-signed over the backend host (with an
+explicit `auth.aws.service` and `auth.aws.region`, since a gateway host carries no derivable scope).
+The backend `url`'s path prefix joins in front of the agent's request path. An entry may keep its own
+`env://` `secret` beside a backend, phantom-only: the box provisions the placeholder and strips it,
+never injecting the real destination credential, so the named variable need not be set. The loader
+refuses more than one backend, a destination that is not one exact host, a host with a backend that
+another entry also names (on any port), a `url` with a query,
+fragment, or a non-`http(s)` scheme, a `credsd://` `auth`, an `aws://` `auth` without a valid
+`auth.aws.service`/`auth.aws.region` (each non-empty and only lowercase `[a-z0-9-]`, or those keys on
+a non-`aws://` auth), a signed (`aws://` or `credsd://`) destination `secret`, a destination `secret`
+beside an `http` backend, a destination `secret.inject` beside a backend (the re-routed secret is
+phantom-only, so `inject` has no effect), and an `auth` on an `http` backend.
+[The egress table](egress.md#backends) describes the backend, and
+[egress design](../design/egress.md) describes how the box dials it.
 
 ## `[mcp.<name>]`
 
@@ -779,7 +912,7 @@ started reads with `jq`.
 |---|---|---|
 | `kind` | string | `file` or `otlp`. |
 | `destination` | string | For `file`, an absolute or `~/`-relative path. Inside this box's `box_dir` it must lie under `private/`; outside the box any path is accepted. For `otlp`, the collector endpoint. |
-| `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, or `metrics`. `trace` names the agent's own spans **and** the box's own records together. **Absent means every one of them**, so write `include` only to narrow the target. An empty list is refused, and so is a repeated word. |
+| `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, or `metrics`. `trace` names the agent's own spans and the box's control-plane records. `logs` includes unmatched MCP routing diagnostics. **Absent means every signal**, so write `include` only to narrow the target. An empty list is refused, and so is a repeated word. |
 | `secret.ref` | string | `env://NAME` or `secret://NAME`, attached on the way out. |
 | `secret.header` | string | Defaults to `Authorization` with a `Bearer ` prefix. |
 
@@ -789,14 +922,15 @@ destination under `private/`, or outside the box, or declare no target and take 
 empty `include` is refused with `the target names no signal, so nothing would reach it; write one or
 more of: deny, permit, trace, logs, metrics`, and a repeated word with `the target names deny twice`.
 
-### `logs` and `metrics` are unconditional
+<a id="logs-and-metrics-are-unconditional"></a>
 
-`logs` and `metrics` are accepted in `include` and change nothing: every target receives the agent's
-log records and metrics. `include = ["deny"]` delivers the refusals, the log records, and the
-metrics.
+### Agent logs and metrics are unconditional
 
-`include` narrows `deny`, `permit`, and `trace`, where `trace` covers the agent's spans and the
-box's own records.
+Every target receives the agent's log records and metrics. `include = ["deny"]` delivers the
+refusals, the agent's log records, and the agent's metrics.
+
+`logs` also selects the box's unmatched MCP routing diagnostics. A target with an explicit
+`include` list receives these diagnostics only when the list names `logs`.
 
 ### Agent spans, logs, and metrics need the agent's exporter
 
@@ -867,14 +1001,20 @@ absent or invalid `name`, an absent or relative `box_dir`, an empty or relative 
 relative `workspace`, an `env` name the box owns, a relative `env.HOME` or `env.TMPDIR`, a patterned
 or relative `filesystem` path, a `filesystem` path carrying `..`, a duplicated `filesystem` path, an
 overlapping or all-hosts egress destination, a secretless egress entry, a literal egress secret,
-and each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal.
-An invalid `limits.shell.timeout` is also a parse error.
+each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal, an `ingress` outside `[agent]`, an
+`[[agent.ingress]]` while `ingress` is off in `[experimental-features]`, more than
+five `[[agent.ingress]]` entries, an `[[agent.ingress]] listen` that is not an IP address and port, a
+port of 0, two entries with one `listen` port or one `workload_port`, and on macOS a `listen` port
+equal to any entry's `workload_port`.
+An invalid `limits.shell.timeout`, `limits.shell.max_input`, `limits.shell.max_output`, or `limits.shell.max_stdin` is also a parse error.
 
 A `box_dir` whose parent does not exist is refused before anything is created. Every other refusal
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload
 starts: a `workspace` that does not exist, an `env.HOME` inside or enclosing `box_dir`, a telemetry
 file destination inside the box directory and outside `private/`, a `filesystem` entry whose path
-does not exist or is a symbolic link, and a `[tool.<name>] command` that names a missing file. The
+does not exist or is a symbolic link, a `[tool.<name>] command` that names a missing file, an
+`[[agent.ingress]] listen` address that cannot be bound, and on macOS a `workload_port` that another
+process already listens on. The
 box directory stays behind. It is empty when the refusal came before the record was written, and it
 holds the record when the refusal came after. The next `run` against it judges the file again and
 reports the same refusal until the file is fixed.

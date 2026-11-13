@@ -14,7 +14,9 @@
 //! | [`process`] | `[agent]` and `[tool.<name>]`: one `ProcessSpec` each |
 //! | [`egress`] | `[egress.a]`: which secret attaches to which request |
 //! | [`filesystem`] | the translation of a `ProcessSpec`'s eight lists into containment cells |
+//! | [`gateway`] | `[gateway]`: the hosts whose plain HTTP the egress gateway upgrades to HTTPS |
 //! | [`grammar`] | `[tool.<name>.grammar]`: the tool grammars a box installs |
+//! | [`ingress`] | `[[agent.ingress]]`: where callers reach the agent |
 //! | [`limits`] | `[limits.shell]`: the execution timeout of one Shell submission |
 //! | `env` | which environment names a process may set, and which Core owns |
 //! | [`mcp`] | `[mcp.<name>]`: which local MCP servers exist, and how each starts |
@@ -26,7 +28,9 @@
 pub(crate) mod egress;
 pub(crate) mod env;
 pub(crate) mod filesystem;
+pub(crate) mod gateway;
 pub(crate) mod grammar;
+pub(crate) mod ingress;
 pub(crate) mod limits;
 pub(crate) mod mcp;
 pub(crate) mod process;
@@ -46,15 +50,17 @@ use crate::error::{BoxError, ConfigError};
 #[cfg(test)]
 use self::egress::routes_for;
 use self::egress::{
-    EgressEntry, EgressRoute, Protocol, host_of, routes_for_and_remote, validate_egress,
-    validate_egress_and_remote,
+    BackendTarget, EgressEntry, EgressRoute, Protocol, host_of, routes_for_and_remote,
+    validate_egress, validate_egress_and_remote,
 };
 #[cfg(test)]
 use self::env::{LOADER_HOOK_PREFIXES, LOADER_HOOKS};
 #[cfg(test)]
 use self::env::{reserved_workload_environment, valid_environment_name};
+use self::gateway::Gateway;
 use self::limits::Limits;
 use self::process::{ContainedMcp, ProcessSpec};
+use credentials::DestinationPattern;
 
 /// The default credential header, and the one whose convention carries a prefix.
 pub(super) const DEFAULT_HEADER: &str = "Authorization";
@@ -463,6 +469,8 @@ impl RunContract {
                         destinations: remote.destinations,
                         protocol: Protocol::Mcp,
                         secret: remote.secret,
+                        // A remote MCP server is never a re-route target; it declares no backend.
+                        backends: Vec::new(),
                     },
                 )
             })
@@ -485,9 +493,16 @@ impl RunContract {
                         .chain(self.file.tool.values())
                         .chain(contained_mcp.values().map(|m| &m.spec)),
                     &mcp_servers,
+                    self.file
+                        .agent
+                        .as_ref()
+                        .is_some_and(|agent| !agent.ingress.is_empty()),
+                    has_backend(&egress, &remote_mcp),
+                    &self.file.gateway,
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 file_attributes: self.file.file_attributes,
+                gateway: self.file.gateway.clone(),
                 limits: self.file.limits.clone(),
                 box_id: root.box_id().to_string(),
                 box_dir: root.root().to_path_buf(),
@@ -554,6 +569,9 @@ pub(crate) struct Record {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub(crate) file_attributes: bool,
+    /// The box-wide egress gateway settings.
+    #[serde(default, skip_serializing_if = "Gateway::is_default")]
+    pub(crate) gateway: Gateway,
     /// The operator-selected execution limits.
     #[serde(default, skip_serializing_if = "Limits::is_default")]
     pub(crate) limits: Limits,
@@ -609,7 +627,12 @@ pub(crate) struct Record {
     pub(crate) telemetry: BTreeMap<String, telemetry::TelemetryEntry>,
 }
 
-/// The ordinary record format; native enforcement uses version 22. Version 21 adds `network` to each
+/// The ordinary record format; native enforcement uses version 22. Version 28 adds `backends` to an
+/// `[egress.<name>]` entry (a destination re-routes to one backend), so a build that predates the
+/// re-route is refused with a version mismatch rather than failing on the unknown `backends` field.
+/// Versions 25 through 27 cover `file-attributes`, whole-argument MCP wildcards, and configured
+/// execution limits, each documented on its constant below.
+/// Version 21 adds `network` to each
 /// `[tool.<name>]`, and stores a stdio MCP server's network in its spec's `network`, where version
 /// 20 kept a separate `native_egress` flag on `ContainedMcp`. Version 20 names a secret's injection mode
 /// `secret.inject`, taking `phantom` or `always`, where version 19 took `secret.phantom` with
@@ -633,6 +656,17 @@ const MCP_ARGUMENT_WILDCARDS_RECORD_VERSION: u32 = 26;
 /// The record version that preserves configured execution limits.
 const LIMITS_RECORD_VERSION: u32 = 27;
 const MCP_ABSOLUTE_COMMAND_RECORD_VERSION: u32 = 28;
+/// The record version of a record whose agent declares an ingress.
+const INGRESS_RECORD_VERSION: u32 = 29;
+/// The record version of a record whose egress re-routes a destination to a backend.
+const BACKEND_RECORD_VERSION: u32 = 30;
+const SHELL_SIZE_LIMITS_RECORD_VERSION: u32 = 31;
+/// The record version of a record whose `[gateway]` upgrades a host's plain HTTP, so an older build
+/// refuses the box rather than resuming it with those requests refused on port 80.
+const UPGRADE_HTTP_RECORD_VERSION: u32 = 32;
+/// The record version of a record that sets `limits.shell.max_stdin`, so an older build refuses the
+/// box rather than resuming it with the default stdin limit.
+const SHELL_STDIN_LIMIT_RECORD_VERSION: u32 = 33;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -642,11 +676,13 @@ pub(crate) struct ExperimentalFeatures {
     pub(crate) native_filesystem_policy: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) tool_grammars: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) ingress: bool,
 }
 
 impl ExperimentalFeatures {
     fn is_disabled(&self) -> bool {
-        !self.native_filesystem_policy && !self.tool_grammars
+        !self.native_filesystem_policy && !self.tool_grammars && !self.ingress
     }
 
     fn record_version(&self) -> u32 {
@@ -672,15 +708,29 @@ impl ExperimentalFeatures {
     }
 }
 
-/// The record version for what a record holds.
+/// The highest record version required by the features a record holds.
+#[allow(clippy::too_many_arguments)]
 fn record_version<'a>(
     file_attributes: bool,
     features: &ExperimentalFeatures,
     limits: &Limits,
     specs: impl Iterator<Item = &'a ProcessSpec>,
     mcp: &[crate::record::config::mcp::McpServer],
+    ingress: bool,
+    has_backend: bool,
+    gateway: &Gateway,
 ) -> u32 {
-    if mcp
+    if limits.shell.has_stdin_limit() {
+        SHELL_STDIN_LIMIT_RECORD_VERSION
+    } else if !gateway.is_default() {
+        UPGRADE_HTTP_RECORD_VERSION
+    } else if limits.shell.has_size_limits() {
+        SHELL_SIZE_LIMITS_RECORD_VERSION
+    } else if has_backend {
+        BACKEND_RECORD_VERSION
+    } else if ingress {
+        INGRESS_RECORD_VERSION
+    } else if mcp
         .iter()
         .any(|server| Path::new(server.executable()).is_absolute())
     {
@@ -696,6 +746,17 @@ fn record_version<'a>(
     } else {
         process_record_version(features, specs)
     }
+}
+
+/// Whether any egress or remote-MCP entry re-routes its destination to a backend.
+fn has_backend(
+    egress: &BTreeMap<String, EgressEntry>,
+    remote_mcp: &BTreeMap<String, EgressEntry>,
+) -> bool {
+    egress
+        .values()
+        .chain(remote_mcp.values())
+        .any(|entry| !entry.backends.is_empty())
 }
 
 fn process_record_version<'a>(
@@ -943,6 +1004,11 @@ impl Record {
             MCP_ARGUMENT_WILDCARDS_RECORD_VERSION,
             LIMITS_RECORD_VERSION,
             MCP_ABSOLUTE_COMMAND_RECORD_VERSION,
+            INGRESS_RECORD_VERSION,
+            BACKEND_RECORD_VERSION,
+            SHELL_SIZE_LIMITS_RECORD_VERSION,
+            UPGRADE_HTTP_RECORD_VERSION,
+            SHELL_STDIN_LIMIT_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -966,6 +1032,12 @@ impl Record {
                 .chain(record.tool.values())
                 .chain(record.contained_mcp.values().map(|m| &m.spec)),
             &record.mcp,
+            record
+                .agent
+                .as_ref()
+                .is_some_and(|agent| !agent.ingress.is_empty()),
+            has_backend(&record.egress, &record.remote_mcp),
+            &record.gateway,
         );
         if record.version != expected {
             return Err(ConfigError::RecordVersion {
@@ -979,6 +1051,7 @@ impl Record {
             });
         }
         BoxName::parse(&record.name)?;
+        record.gateway.validate()?;
         record.validate_processes()?;
         Ok(record)
     }
@@ -991,6 +1064,7 @@ impl Record {
                 "[agent]",
                 self.experimental_features.native_filesystem_policy,
             )?;
+            agent.validate_ingress_selection("[agent]", self.experimental_features.ingress)?;
         }
         for (label, tool) in &self.tool {
             tool.validate(&format!("[tool.{label}]"))?;
@@ -1017,6 +1091,42 @@ impl Record {
     /// destination, so the gateway learns every plain-HTTP credential and every remote MCP host.
     pub(crate) fn egress_routes(&self) -> Result<Vec<EgressRoute>, BoxError> {
         routes_for_and_remote(&self.egress, &self.remote_mcp)
+    }
+
+    /// The credential routes for each backend entry, grouped per entry so each opens in one vault
+    /// (one credential authority on one destination): the entry's strip-phantom destination secret
+    /// and its box-owned backend token together. An entry with no credentials contributes no group.
+    pub(crate) fn backend_credentials(
+        &self,
+    ) -> Result<Vec<(DestinationPattern, Vec<EgressRoute>)>, BoxError> {
+        let mut groups = Vec::new();
+        for entry in self.egress.values() {
+            let routes = entry.backend_credential_routes()?;
+            if routes.is_empty() {
+                continue;
+            }
+            // The vault registers under the ORIGINAL destination, so the gateway finds it both for
+            // the pre-rewrite strip (keyed on the original) and the post-rewrite backend signature
+            // (whose signed route is keyed on the backend host). A backend entry has exactly one
+            // destination, so `primary_destination` is `Some`.
+            let Some(original) = entry.primary_destination()? else {
+                continue;
+            };
+            groups.push((original, routes));
+        }
+        Ok(groups)
+    }
+
+    /// The backend dial target for every re-routed destination, keyed by the original destination
+    /// pattern. The gateway dials these instead of the original destination.
+    pub(crate) fn backend_dials(
+        &self,
+    ) -> Result<Vec<(DestinationPattern, BackendTarget)>, BoxError> {
+        let mut dials = Vec::new();
+        for entry in self.egress.values() {
+            dials.extend(entry.backend_dials()?);
+        }
+        Ok(dials)
     }
 
     /// The remote MCP servers this box declares, as `(host, name)` pairs — one per destination of
@@ -1207,6 +1317,9 @@ struct ConfigFile {
     /// and ACLs. Linux accepts the key and renders nothing for it.
     #[serde(default, rename = "file-attributes")]
     file_attributes: bool,
+    /// The box-wide egress gateway settings.
+    #[serde(default)]
+    gateway: Gateway,
     /// The execution limits for hosted interpreters.
     #[serde(default)]
     limits: Limits,
@@ -1285,12 +1398,14 @@ impl ConfigFile {
     fn validate(&self) -> Result<(), ConfigError> {
         self.experimental_features.validate()?;
         BoxName::parse(&self.name)?;
+        self.gateway.validate()?;
         if let Some(agent) = &self.agent {
             agent.validate("[agent]")?;
             agent.validate_native_policy(
                 "[agent]",
                 self.experimental_features.native_filesystem_policy,
             )?;
+            agent.validate_ingress_selection("[agent]", self.experimental_features.ingress)?;
         }
         for (label, tool) in &self.tool {
             validate_tool_label(label)?;
@@ -1372,9 +1487,14 @@ mod tests {
         stored.contained_mcp = mcp::contained_specs(&config.mcp);
         for file_attributes in [false, true] {
             for wildcard in [false, true] {
-                for limits in [
-                    Limits::default(),
-                    toml::from_str("[shell]\ntimeout = 600").unwrap(),
+                for (limits, expected_version) in [
+                    (Limits::default(), 28),
+                    (toml::from_str("[shell]\ntimeout = 600").unwrap(), 28),
+                    (toml::from_str("[shell]\nmax_input = 262144").unwrap(), 31),
+                    (
+                        toml::from_str("[shell]\nmax_output = 65536\ntimeout = false").unwrap(),
+                        31,
+                    ),
                 ] {
                     stored.mcp[0].argument_wildcards = wildcard;
                     stored.file_attributes = file_attributes;
@@ -1385,18 +1505,21 @@ mod tests {
                             &stored.experimental_features,
                             &stored.limits,
                             std::iter::empty(),
-                            &stored.mcp
+                            &stored.mcp,
+                            false,
+                            false,
+                            &Gateway::default(),
                         ),
-                        28
+                        expected_version
                     );
-                    for old in RECORD_VERSION..=27 {
+                    for old in RECORD_VERSION..expected_version {
                         stored.version = old;
                         assert!(matches!(
                             Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
-                            Err(ConfigError::RecordVersion { found, expected: 28 }) if found == old
+                            Err(ConfigError::RecordVersion { found, expected }) if found == old && expected == expected_version
                         ));
                     }
-                    stored.version = 28;
+                    stored.version = expected_version;
                     assert_eq!(
                         Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml"))
                             .unwrap(),
@@ -1434,7 +1557,10 @@ mod tests {
                 &stored.experimental_features,
                 &stored.limits,
                 std::iter::empty(),
-                &stored.mcp
+                &stored.mcp,
+                false,
+                has_backend(&stored.egress, &stored.remote_mcp),
+                &Gateway::default(),
             ),
             MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
         );
@@ -1547,6 +1673,7 @@ mod tests {
             filesystem: Default::default(),
             network: None,
             grammar: None,
+            ingress: Vec::new(),
         }
     }
 
@@ -1556,6 +1683,7 @@ mod tests {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            gateway: Default::default(),
             limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/codex"),
@@ -1568,6 +1696,36 @@ mod tests {
             mcp: Vec::new(),
             contained_mcp: BTreeMap::new(),
             telemetry: std::collections::BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn explicit_shell_sizes_require_their_record_version() {
+        for limits in [
+            "[limits]\nshell.max_input = 262144\n",
+            "[limits.shell]\nmax_output = 65536\n",
+            "[limits.shell]\nmax_input = 524288\nmax_output = 262144\ntimeout = false\n",
+            "[limits.shell]\nmax_input = 0\n",
+            "[limits.shell]\nmax_output = 0\n",
+            "[limits.shell]\nmax_input = 0\nmax_output = 0\ntimeout = false\n",
+        ] {
+            let mut stored = pinned_record(limits);
+            assert_eq!(stored.version, 31, "{limits}");
+            let text = stored.to_toml().unwrap();
+            assert_eq!(
+                Record::parse(&text, Path::new("record.toml")).unwrap(),
+                stored
+            );
+            for version in 21..=30 {
+                stored.version = version;
+                assert!(
+                    matches!(
+                        Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                        Err(ConfigError::RecordVersion { found, expected: 31 }) if found == version
+                    ),
+                    "{limits}: version {version}"
+                );
+            }
         }
     }
 
@@ -1649,6 +1807,7 @@ mod tests {
                     let features = ExperimentalFeatures {
                         native_filesystem_policy,
                         tool_grammars: true,
+                        ingress: false,
                     };
                     for override_value in [None, Some(false)] {
                         spec.native_filesystem_policy = override_value;
@@ -1660,6 +1819,9 @@ mod tests {
                                     &limits,
                                     std::iter::once(&spec),
                                     servers,
+                                    false,
+                                    false,
+                                    &Gateway::default(),
                                 ),
                                 27
                             );
@@ -1852,6 +2014,89 @@ native-filesystem-policy = false
         );
         let ordinary = toml::to_string(&record(None, BTreeMap::new())).unwrap();
         assert!(!ordinary.contains("file-attributes"), "{ordinary}");
+    }
+
+    #[test]
+    fn the_gateway_upgrade_list_parses_and_is_empty_by_default() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        let absent = ConfigFile::parse(required, Path::new("box.toml")).unwrap();
+        assert!(absent.gateway.is_default());
+        let listed = ConfigFile::parse(
+            &format!("{required}[gateway]\nupgrade_http = [\"static.rust-lang.org\"]\n"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        assert_eq!(listed.gateway.upgrade_http, ["static.rust-lang.org"]);
+        let stored = record_from_config("[gateway]\nupgrade_http = [\"static.rust-lang.org\"]\n")
+            .expect("the configuration loads");
+        assert_eq!(stored.version, UPGRADE_HTTP_RECORD_VERSION);
+        assert_eq!(stored.gateway.upgrade_http, ["static.rust-lang.org"]);
+    }
+
+    #[test]
+    fn a_gateway_upgrade_entry_that_is_not_a_host_name_is_refused_at_load() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        for (entry, reason) in [
+            ("http://static.rust-lang.org", "it names a scheme"),
+            ("static.rust-lang.org:80", "it names a port"),
+            ("*.rust-lang.org", "it is a wildcard"),
+            ("151.101.2.137", "it is an IP address"),
+        ] {
+            let text = format!("{required}[gateway]\nupgrade_http = [\"{entry}\"]\n");
+            let error = ConfigFile::parse(&text, Path::new("box.toml"))
+                .expect_err(entry)
+                .to_string();
+            assert!(error.contains(reason), "{entry}: {error}");
+        }
+        for text in [
+            format!("{required}[gateway]\nupgrade-http = [\"static.rust-lang.org\"]\n"),
+            format!("{required}[gateway]\nupgrade_http = \"static.rust-lang.org\"\n"),
+            format!("{required}[gateway]\nupgrade_https = [\"static.rust-lang.org\"]\n"),
+            format!("upgrade_http = [\"static.rust-lang.org\"]\n{required}"),
+        ] {
+            assert!(
+                ConfigFile::parse(&text, Path::new("box.toml")).is_err(),
+                "{text} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_gateway_upgrade_list_cannot_hide_in_a_legacy_record() {
+        let mut stored = record(None, BTreeMap::new());
+        stored.gateway.upgrade_http = vec!["static.rust-lang.org".to_string()];
+        let forged = toml::to_string(&stored).unwrap();
+        assert!(forged.contains("[gateway]"), "{forged}");
+        for found in [
+            RECORD_VERSION,
+            FILE_ATTRIBUTES_RECORD_VERSION,
+            BACKEND_RECORD_VERSION,
+        ] {
+            stored.version = found;
+            assert!(
+                matches!(
+                    Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion {
+                        found: refused,
+                        expected: UPGRADE_HTTP_RECORD_VERSION
+                    }) if refused == found
+                ),
+                "version {found}"
+            );
+        }
+        stored.version = UPGRADE_HTTP_RECORD_VERSION;
+        let encoded = toml::to_string(&stored).unwrap();
+        assert_eq!(
+            Record::parse(&encoded, Path::new("record.toml")).unwrap(),
+            stored
+        );
+        stored.gateway.upgrade_http = vec!["static.rust-lang.org:80".to_string()];
+        assert!(
+            Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")).is_err(),
+            "a stored entry is checked again when the record is read"
+        );
+        let ordinary = toml::to_string(&record(None, BTreeMap::new())).unwrap();
+        assert!(!ordinary.contains("gateway"), "{ordinary}");
     }
 
     #[test]
@@ -2101,6 +2346,9 @@ native-filesystem-policy = false
             format!("{required}[agent]\ncommand = [\"codex\"]"),
             format!("{required}policy = \"policy.dw\""),
             format!("{required}[tool.git]\ncommand = [\"git\"]"),
+            format!(
+                "{required}[agent]\ncommand = [\"codex\"]\n[[agent.ingress]]\nlisten = \"0.0.0.0:8080\"\nworkload_port = 8081"
+            ),
         ] {
             assert!(
                 toml::from_str::<ConfigFile>(&known).is_ok(),
@@ -2111,6 +2359,13 @@ native-filesystem-policy = false
             format!("{required}workload = [\"codex\"]"),
             format!("{required}command = [\"codex\"]"),
             format!("{required}wat = 1"),
+            format!("{required}[ingress]\nlisten = \"0.0.0.0:8080\"\nworkload_port = 8081"),
+            format!(
+                "{required}[agent]\ncommand = [\"codex\"]\n[[agent.ingress]]\nhost = \"0.0.0.0\"\nport = 8080"
+            ),
+            format!(
+                "{required}[agent]\ncommand = [\"codex\"]\n[agent.ingress]\nlisten = \"0.0.0.0:8080\"\nworkload_port = 8081"
+            ),
             "[agent]\ncommand = [\"codex\"]".to_string(),
             "name = \"codex\"\n".to_string(),
             "box_dir = \"/var/lib/box\"\n".to_string(),
@@ -2120,6 +2375,88 @@ native-filesystem-policy = false
                 "a config carrying {unknown:?} must fail loudly, not be ignored"
             );
         }
+    }
+
+    /// The switch that turns on `[[agent.ingress]]`.
+    const INGRESS_ON: &str = "[experimental-features]\ningress = true\n";
+
+    /// **`[[agent.ingress]]` needs the `ingress` switch**: it is refused while the switch is omitted
+    /// or `false`, and loads once it is `true`.
+    #[test]
+    fn an_agent_ingress_needs_the_ingress_switch() {
+        let agent = "[agent]\ncommand = [\"x\"]\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n";
+        let refusal = "invalid `[agent]` table: `ingress` is experimental: set `ingress = true` in \
+             `[experimental-features]` to load it";
+        for switch in ["", "[experimental-features]\ningress = false\n"] {
+            let error = load(&format!("{agent}{switch}")).expect_err("the switch is off");
+            assert_eq!(error.to_string(), refusal, "{switch:?}");
+        }
+        let file = load(&format!("{agent}{INGRESS_ON}")).expect("the switch is on");
+        assert_eq!(file.agent.expect("the agent").ingress.len(), 1);
+        assert!(
+            load(&format!("[agent]\ncommand = [\"x\"]\n{INGRESS_ON}")).is_ok(),
+            "the switch alone declares no listener"
+        );
+    }
+
+    /// A stored ingress needs the stored switch, so a record cannot carry a listener the operator
+    /// did not turn on.
+    #[test]
+    fn a_stored_ingress_needs_the_stored_switch() {
+        let mut stored = record_from_config(&format!(
+            "[agent]\ncommand = [\"/bin/sh\"]\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n{INGRESS_ON}"
+        ))
+        .expect("an agent ingress loads");
+        assert!(stored.experimental_features.ingress);
+        stored.experimental_features.ingress = false;
+        assert!(
+            Record::parse(
+                &toml::to_string(&stored).expect("the record serializes"),
+                Path::new("record.toml")
+            )
+            .is_err(),
+            "a stored ingress needs the switch"
+        );
+    }
+
+    /// **`ingress` belongs to `[agent]`**: it fills the record's agent ingress in order, and a tool
+    /// or a stdio MCP server refuses one.
+    #[test]
+    fn an_ingress_is_declared_on_the_agent() {
+        let ingress = "listen = \"127.0.0.1:8080\"\nworkload_port = 8081";
+        let file = load(&format!(
+            "[agent]\ncommand = [\"x\"]\n[[agent.ingress]]\n{ingress}\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8000\"\nworkload_port = 8001\n{INGRESS_ON}"
+        ))
+        .expect("an agent ingress list is accepted");
+        let entries: Vec<_> = file
+            .agent
+            .as_ref()
+            .expect("the agent is declared")
+            .ingress
+            .iter()
+            .map(|entry| (entry.listen.as_str(), entry.workload_port))
+            .collect();
+        assert_eq!(
+            entries,
+            [("127.0.0.1:8080", 8081), ("127.0.0.1:8000", 8001)]
+        );
+
+        let tool = load(&format!(
+            "[tool.dev]\ncommand = [\"y\"]\n[[tool.dev.ingress]]\n{ingress}"
+        ))
+        .expect_err("a tool's ingress is not built yet");
+        assert!(
+            tool.to_string().contains("supported on `[agent]` only"),
+            "{tool}"
+        );
+        let mcp = toml::from_str::<ConfigFile>(&format!(
+            "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n[mcp.dev]\ntype = \"stdio\"\n\
+             command = [\"y\"]\n[[mcp.dev.ingress]]\n{ingress}"
+        ));
+        assert!(mcp.is_err(), "a stdio MCP server has no `ingress` field");
     }
 
     #[test]
@@ -2323,6 +2660,7 @@ native-filesystem-policy = false
             BTreeMap::from([(
                 "a".to_string(),
                 EgressEntry {
+                    backends: Vec::new(),
                     destinations: vec!["api.stripe.com".to_string()],
                     protocol: Protocol::Http,
                     secret: Some(EgressSecret {
@@ -2333,6 +2671,7 @@ native-filesystem-policy = false
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        aws: None,
                     }),
                 },
             )]),
@@ -2536,7 +2875,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, MCP_ABSOLUTE_COMMAND_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, SHELL_STDIN_LIMIT_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -2762,6 +3101,7 @@ env = {}
                 (
                     "wildcard".to_string(),
                     EgressEntry {
+                        backends: Vec::new(),
                         destinations: vec!["*.stripe.com".to_string()],
                         protocol: Protocol::Http,
                         secret: Some(EgressSecret {
@@ -2772,12 +3112,14 @@ env = {}
                             param: None,
                             inject: None,
                             phantom_prefix: None,
+                            aws: None,
                         }),
                     },
                 ),
                 (
                     "exact".to_string(),
                     EgressEntry {
+                        backends: Vec::new(),
                         destinations: vec!["api.stripe.com".to_string()],
                         protocol: Protocol::Http,
                         secret: Some(EgressSecret {
@@ -2788,6 +3130,7 @@ env = {}
                             param: None,
                             inject: None,
                             phantom_prefix: None,
+                            aws: None,
                         }),
                     },
                 ),
@@ -2809,6 +3152,7 @@ env = {}
             BTreeMap::from([(
                 "a".to_string(),
                 EgressEntry {
+                    backends: Vec::new(),
                     destinations: vec!["*:443".to_string()],
                     protocol: Protocol::Http,
                     secret: Some(EgressSecret {
@@ -2819,6 +3163,7 @@ env = {}
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        aws: None,
                     }),
                 },
             )]),
@@ -2863,6 +3208,7 @@ env = {}
         stored.egress.insert(
             "model".to_string(),
             EgressEntry {
+                backends: Vec::new(),
                 destinations: vec!["api.stripe.com".to_string()],
                 protocol: Protocol::Http,
                 secret: Some(EgressSecret {
@@ -2873,6 +3219,7 @@ env = {}
                     param: None,
                     inject: None,
                     phantom_prefix: None,
+                    aws: None,
                 }),
             },
         );
@@ -3392,6 +3739,180 @@ command = ["mcp-server-fetch"]
             Record::parse(&distinct.to_toml().unwrap(), Path::new("record.toml")),
             Err(ConfigError::RecordVersion {
                 found: SHARED_PROGRAM_RECORD_VERSION,
+                expected: RECORD_VERSION
+            })
+        ));
+    }
+
+    /// An agent ingress determines the version beside servers that share a program.
+    #[test]
+    fn an_agent_ingress_beside_a_shared_program_stores_the_ingress_version() {
+        let ingress = "[agent]\ncommand = [\"/bin/sh\"]\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n";
+        let stored = pinned_record(&format!("{SHARED_PROGRAM}{ingress}{INGRESS_ON}"));
+        assert_eq!(stored.version, INGRESS_RECORD_VERSION);
+        assert_eq!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+    }
+
+    /// An agent ingress determines the version beside an absolute MCP command.
+    #[test]
+    fn an_agent_ingress_beside_an_absolute_mcp_command_stores_the_ingress_version() {
+        let body = "[mcp.local]\ntype = \"stdio\"\ncommand = [\"/usr/bin/true\", \"--stdio\"]\n\
+             [agent]\ncommand = [\"/bin/sh\"]\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n";
+        let stored = pinned_record(&format!("{body}{INGRESS_ON}"));
+        assert_eq!(stored.version, INGRESS_RECORD_VERSION);
+        assert_eq!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+    }
+
+    /// A stdin limit stores its own record version, so an earlier build refuses the box.
+    #[test]
+    fn a_stdin_limit_stores_a_version_no_earlier_build_reads() {
+        let mut stored = record_from_config("[limits.shell]\nmax_stdin = 1048576\n")
+            .expect("a stdin limit loads");
+        assert_eq!(stored.version, SHELL_STDIN_LIMIT_RECORD_VERSION);
+        assert_eq!(stored.limits.shell.max_stdin(), 1048576);
+        assert_eq!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+            stored
+        );
+        stored.version = UPGRADE_HTTP_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: UPGRADE_HTTP_RECORD_VERSION,
+                expected: SHELL_STDIN_LIMIT_RECORD_VERSION
+            })
+        ));
+    }
+
+    #[test]
+    fn shell_sizes_beside_an_agent_ingress_store_the_shell_size_version() {
+        let body = "[agent]\ncommand = [\"/bin/sh\"]\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n\
+             [limits.shell]\nmax_output = 262144\n";
+        let mut stored = pinned_record(&format!("{body}{INGRESS_ON}"));
+        assert_eq!(stored.version, SHELL_SIZE_LIMITS_RECORD_VERSION);
+        assert_eq!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+            stored
+        );
+        stored.version = INGRESS_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: INGRESS_RECORD_VERSION,
+                expected: SHELL_SIZE_LIMITS_RECORD_VERSION
+            })
+        ));
+    }
+
+    /// An agent ingress stores its own record version, so an earlier build refuses the box, and a
+    /// record without one keeps the version it had.
+    #[test]
+    fn an_agent_ingress_stores_a_version_no_earlier_build_reads() {
+        let agent = "[agent]\ncommand = [\"/bin/sh\"]\n";
+        let ingress = "[[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n";
+        let plain = record_from_config(agent).expect("an agent without ingress loads");
+        assert_eq!(plain.version, RECORD_VERSION);
+        let reached = record_from_config(&format!("{agent}{ingress}{INGRESS_ON}"))
+            .expect("an agent ingress loads");
+        assert_eq!(reached.version, INGRESS_RECORD_VERSION);
+        let text = toml::to_string(&reached).expect("the record serializes");
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            reached
+        );
+        let mut hidden = reached;
+        hidden.version = RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(
+                &toml::to_string(&hidden).expect("the record serializes"),
+                Path::new("record.toml")
+            ),
+            Err(ConfigError::RecordVersion {
+                found: RECORD_VERSION,
+                expected: INGRESS_RECORD_VERSION
+            })
+        ));
+    }
+
+    /// A `box.toml` whose egress re-routes a destination to a backend.
+    const BACKEND_EGRESS: &str = "[egress.github]\ndestinations = [\"api.github.com\"]\n\
+         [[egress.github.backends]]\nurl = \"https://gateway-1.example.com/github\"\n";
+
+    /// A re-route stores the backend record version, which no earlier build reads.
+    #[test]
+    fn a_backend_reroute_stores_a_version_no_earlier_build_reads() {
+        let stored = pinned_record(BACKEND_EGRESS);
+        assert_eq!(stored.version, BACKEND_RECORD_VERSION);
+        let text = stored.to_toml().unwrap();
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+    }
+
+    #[test]
+    fn shell_sizes_beside_a_backend_store_the_shell_size_version() {
+        for limits in [
+            "[limits.shell]\nmax_input = 262144\n",
+            "[limits.shell]\nmax_output = 65536\n",
+            "[limits.shell]\nmax_input = 0\nmax_output = 0\n",
+        ] {
+            let mut stored = pinned_record(&format!("{BACKEND_EGRESS}{limits}"));
+            assert_eq!(stored.version, 31, "{limits}");
+            assert_eq!(
+                Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+                stored
+            );
+            stored.version = BACKEND_RECORD_VERSION;
+            assert!(matches!(
+                Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                Err(ConfigError::RecordVersion {
+                    found: BACKEND_RECORD_VERSION,
+                    expected: SHELL_SIZE_LIMITS_RECORD_VERSION
+                })
+            ));
+        }
+    }
+
+    /// A re-routing record may not hide under an earlier version.
+    #[test]
+    fn the_backend_version_states_what_the_record_holds() {
+        let mut reroute = pinned_record(BACKEND_EGRESS);
+        for version in [
+            RECORD_VERSION,
+            EXPERIMENTAL_RECORD_VERSION,
+            PROCESS_POLICY_RECORD_VERSION,
+            SHARED_PROGRAM_RECORD_VERSION,
+        ] {
+            reroute.version = version;
+            assert!(
+                matches!(
+                    Record::parse(&reroute.to_toml().unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion { found, expected: BACKEND_RECORD_VERSION })
+                        if found == version
+                ),
+                "a re-route may not hide under version {version}"
+            );
+        }
+        let mut plain = pinned_record(DISTINCT_PROGRAMS);
+        plain.version = BACKEND_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&plain.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: BACKEND_RECORD_VERSION,
                 expected: RECORD_VERSION
             })
         ));

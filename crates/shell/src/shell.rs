@@ -358,6 +358,8 @@ impl Shell {
     /// # }
     /// ```
     pub async fn run(&mut self, input: &str) -> Output {
+        // A cancelled earlier call can leave a tested context counted; each call starts with none.
+        self.proc.errexit_tested = 0;
         // Admission is NOT here. `exec::execute` — which `execute_capture`
         // delegates to — is the one function every command-text route reaches, so judging
         // there covers Lua's `io.popen`/`os.execute`, `find -exec`, and `xargs`, which
@@ -397,6 +399,8 @@ impl Shell {
     /// # }
     /// ```
     pub async fn execute(&mut self, input: &str) -> i32 {
+        // A cancelled earlier call can leave a tested context counted; each call starts with none.
+        self.proc.errexit_tested = 0;
         // Admission is in `exec::execute` — see the note on `run`.
         self.refresh_deadline();
         #[cfg(not(target_arch = "wasm32"))]
@@ -694,6 +698,7 @@ pub struct ShellBuilder {
     egress_proxy: Option<EgressProxy>,
     script_interpreter: Option<crate::os::ScriptInterpreter>,
     host_spawner: Option<crate::os::HostSpawner>,
+    host_programs: crate::os::HostPrograms,
     egress_refusal_header: Option<String>,
     effect_interceptor: Option<Arc<dyn EffectInterceptor>>,
     kernel: Option<Arc<dyn Kernel>>,
@@ -719,6 +724,7 @@ impl Default for ShellBuilder {
             egress_proxy: None,
             script_interpreter: None,
             host_spawner: None,
+            host_programs: crate::os::HostPrograms::default(),
             egress_refusal_header: None,
             effect_interceptor: None,
             kernel: None,
@@ -1076,6 +1082,12 @@ impl ShellBuilder {
         self
     }
 
+    /// Declare the file each bare name in `programs` runs, for the bundled kernel only.
+    pub fn host_programs(mut self, programs: crate::os::HostPrograms) -> Self {
+        self.host_programs = programs;
+        self
+    }
+
     /// Name the response header the egress proxy sets on a refusal it originates itself.
     ///
     /// State it before [`egress_proxy`](Self::egress_proxy), which reads it. Without it a refusal the
@@ -1223,6 +1235,7 @@ impl ShellBuilder {
                 kernel.egress_proxy = self.egress_proxy;
                 kernel.script_interpreter = self.script_interpreter;
                 kernel.host_spawner = self.host_spawner;
+                kernel.host_programs = self.host_programs;
                 Arc::new(kernel)
             }
         };

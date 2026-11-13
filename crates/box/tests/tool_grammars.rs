@@ -670,3 +670,116 @@ fn a_grammar_whose_program_finds_nothing_on_path_is_refused_at_startup() {
         stderr(&output)
     );
 }
+
+/// A search path whose first `git` is a decoy that exits 3, ahead of the test's own tools.
+fn decoy_first(home: &Path) -> String {
+    let decoy = home.join("decoy");
+    std::fs::create_dir_all(&decoy).expect("the decoy directory");
+    compile_tool(&decoy.join("git"), 3);
+    format!(
+        "{}:{}:/usr/bin:/bin",
+        decoy.display(),
+        tools_directory(home).display()
+    )
+}
+
+#[test]
+fn a_bare_name_runs_the_tool_that_declares_it_when_another_file_is_first_on_path() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let home = support::fixture::short_temporary_home();
+    let git = git_program(home.path()).display().to_string();
+    let (box_, started) = Request::with_config(
+        "bare-name-grammar",
+        GIT_WITHOUT_PUSH,
+        &format!("{}{GRAMMAR}{SWITCH_ON}", git_tool(home.path())),
+    )
+    .env("PATH", &decoy_first(home.path()))
+    .attempt();
+    assert!(started.status.success(), "{}", stderr(&started));
+    assert!(
+        stderr(&started).contains(&format!(
+            "strands-box: [tool.git]: a bare `git` in the Shell runs {git}\n"
+        )),
+        "startup names the file a bare `git` runs: {}",
+        stderr(&started)
+    );
+
+    let status = in_the_shell(&box_, "git status");
+    let push = in_the_shell(&box_, "git push origin");
+
+    assert!(stdout(&status).contains("|status=0"), "{status:?}");
+    assert!(stdout(&push).contains("|status=126"), "{push:?}");
+    assert!(
+        stderr(&push).contains(&format!("policy denied this operation on '{git}'"))
+            && stderr(&push).contains("[policy: no_push]: Pushes are not allowed."),
+        "the grammar decides the tool's file, not the decoy: {push:?}"
+    );
+    assert_grammar_decision(&box_, "push");
+}
+
+#[test]
+fn without_a_grammar_a_bare_name_runs_its_tool_under_shell_spawn() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let home = support::fixture::short_temporary_home();
+    let git = git_program(home.path()).display().to_string();
+    let box_ = Request::with_config(
+        "bare-name-spawn",
+        &format!(
+            r#"permit (principal, action == Box::Action::"shell:exec", resource);
+               permit (principal, action == Box::Action::"fs:read", resource);
+               permit (principal, action == Box::Action::"shell:spawn", resource)
+               when {{ context.input.program == "git" && context.input.program_path == "{git}" }};"#
+        ),
+        &git_tool(home.path()),
+    )
+    .env("PATH", &decoy_first(home.path()))
+    .expect();
+
+    let output = in_the_shell(&box_, "git status");
+
+    assert!(
+        stdout(&output).contains("|status=0"),
+        "a permit pinned on the typed name and the tool's file admits it: {output:?}"
+    );
+}
+
+#[test]
+fn a_tool_with_fixed_arguments_claims_its_bare_name_and_refuses_other_arguments() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let home = support::fixture::short_temporary_home();
+    let cargo = install_cargo(home.path(), 0);
+    let decoy = home.path().join("decoy");
+    std::fs::create_dir_all(&decoy).expect("the decoy directory");
+    compile_tool(&decoy.join("cargo"), 0);
+    let box_ = Request::with_config(
+        "bare-name-fixed",
+        r#"permit (principal, action == Box::Action::"shell:exec", resource);
+           permit (principal, action == Box::Action::"fs:read", resource);
+           permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        &format!(
+            "[tool.cargo_fmt]\ncommand = [{cargo:?}, \"fmt\"]\n[tool.cargo_fmt.filesystem]\nread = [{:?}]\n",
+            tools_directory(home.path()).display().to_string()
+        ),
+    )
+    .env("PATH", &format!("{}:/usr/bin:/bin", decoy.display()))
+    .expect();
+
+    let fmt = in_the_shell(&box_, "cargo fmt");
+    let build = in_the_shell(&box_, "cargo build");
+
+    assert!(stdout(&fmt).contains("|status=0"), "{fmt:?}");
+    assert!(stdout(&build).contains("|status=126"), "{build:?}");
+    assert!(
+        stderr(&build).contains("no `[tool.<name>] command` matches this program"),
+        "the tool's file is selected, and its fixed arguments do not match: {build:?}"
+    );
+}

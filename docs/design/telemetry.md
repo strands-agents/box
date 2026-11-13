@@ -1,8 +1,8 @@
 # Telemetry
 
-Telemetry records what a box decided. It is on by default, even when the operator supplies no
-telemetry configuration. Each decision record names the request and whether Box allowed or refused
-it.
+Telemetry records what a box decided and which MCP alias invocations matched no declared command.
+It is on by default, even when the operator supplies no telemetry configuration. Each decision record
+names the request and whether Box allowed or refused it.
 
 Box also accepts the workload's OpenTelemetry data so the operator can read both kinds of record in
 one place. The workload is untrusted. This page explains how Box separates its own records from that
@@ -33,10 +33,11 @@ refuses access to the box directory even when a broad read permit matches. Recor
 engine's verdict would describe a permitted operation that did not happen. These checks run on Box's
 own request path. Operating system enforcement separately limits the workload's own system calls.
 
-A box writes two kinds of record. Each has a scope that readers can select:
+A box writes three kinds of record. Each has a scope that readers can select:
 
 - `strands-box.policy` contains one record for each effective decision.
 - `strands-box.control` contains records of changes to the box's authority.
+- `strands-box.mcp` contains diagnostics for alias invocations that match no declared MCP command.
 
 A decision names the action, resource, verdict, cause, and every policy that determined it. Standard
 OpenTelemetry keys describe the request, including the server address and port, request method, file
@@ -58,11 +59,16 @@ Six control-plane records describe policy installation or refusal, tool vocabula
 completed discovery, and box startup or shutdown. They show which authority was in force at a given
 moment, so they share a file with the decisions.
 
-Each Box record is both a span and a log record, with one shared trace identifier and span
-identifier. See [every box record is
-both](decisions.md#every-box-record-is-both-a-span-and-a-log-record). The log record provides audit
+Each decision and control-plane record is both a span and a log record, with one shared trace
+identifier and span identifier. See [decision and control records produce both
+forms](decisions.md#every-box-record-is-both-a-span-and-a-log-record). The log record provides audit
 evidence. The span places the decision on a timeline beside the workload's work. Its start and end
 are equal because it marks the instant of submission.
+
+An unmatched MCP route produces only an informational log record. It carries the received program,
+redacted arguments, and available request context. The broker records the non-match before replying
+to the alias. It observes no ordinary execution outcome, so the diagnostic carries no verdict or
+execution status. See [the unmatched-route record](../user/telemetry.md#an-unmatched-mcp-route).
 
 OpenTelemetry lets a caller mark a trace as not sampled to reduce performance data volume. Box
 ignores that mark for its own decisions and always writes them. The workload supplies the trace
@@ -106,10 +112,11 @@ destination inside the box directory but outside its private tree. It also refus
 `..`. It does not compare the destination with the workload's grants. If the operator puts the file
 in a directory the workload can write, the workload can truncate it.
 
-A target can select Box denials, Box permits, or the value that selects relayed workload spans. See
-[a target names a set](decisions.md#a-target-names-a-set-of-signals). The span selector also
-includes control-plane records. Omitting it loses Box's record of authority changes. Relayed
-workload log records and metrics arrive regardless of this selection.
+A target can select Box denials, Box permits, relayed workload spans, and MCP routing diagnostics. See
+[a target names a set](decisions.md#a-target-names-a-set-of-signals). The `trace` selector also
+includes control-plane records. Omitting it loses Box's record of authority changes. The `logs`
+selector includes unmatched MCP routes. Relayed workload log records and metrics arrive regardless
+of this selection.
 
 ## What the workload cannot do
 
@@ -140,8 +147,12 @@ two-byte JSON body. A dropped payload still gets `200`.
 
 ## Limits
 
-- Delivery is best effort. A failed target write loses the record without a retry, a report of the
-  loss, or a disk copy for later delivery. See [a record can be
+- Delivery is best effort. A failed target write loses the record without a retry or a disk copy for
+  later delivery. The drain prints one stderr line when the run ends if an export to a configured
+  target failed or the final export did not finish in time. A record the SDK queue refuses, an agent
+  payload the receiver refuses, a batch the SDK cuts at its export deadline before shutdown, and a
+  relay in flight at shutdown are not counted, so the absence of
+  that line does not prove that nothing was lost. See [a record can be
   lost](decisions.md#delivery-is-best-effort). The shutdown drain runs on every exit path, even when
   startup fails before the workload starts, so Box still records that it stopped. Relayed payloads
   do not join that drain and can be lost in flight. A decision cannot be lost through that shutdown
@@ -168,7 +179,7 @@ two-byte JSON body. A dropped payload still gets `200`.
 
 | Part | Takes | Gives |
 |---|---|---|
-| Collector | Each effective decision and control-plane operation | One span and one log record per decision, queued per target |
+| Collector | Each effective decision, control-plane operation, and unmatched MCP route | Decision and control records as spans and logs; routing diagnostics as logs, queued per target |
 | Receiver | Workload OTLP over HTTP on a loopback port | The payload with reserved attributes removed and its source marked, relayed inline |
 | Target | Collector records and receiver payloads | One file line per request in the JSON form of OTLP |
 

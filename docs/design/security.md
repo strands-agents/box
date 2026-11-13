@@ -54,7 +54,7 @@ The [egress guide](egress.md#cloud-instance-metadata) describes the required res
 
 For a remote Model Context Protocol (MCP) server, Box applies MCP policy to requests whose
 host matches a declared hostname or IP address in `box.toml`. The server's `[mcp.<name>]` table supplies its
-policy name. This [destination matching](mcp.md#remote-server-destination-matching) does not
+policy name. This [destination matching](../user/mcp.md#remote-destination-matching) does not
 identify every address that can reach the same application.
 
 A request to an unmatched hostname or IP address still needs network and HTTP permission.
@@ -68,6 +68,17 @@ to use its MCP tool restrictions. Declare each intended hostname or IP address u
 network and HTTP access to those destinations. The [MCP policy guide](../user/mcp-policy.md#scope-of-remote-server-rules)
 explains this configuration. Box still owns enforcement of the applicable network, HTTP, and MCP
 rules. A matching request that bypasses an applicable MCP rule indicates an enforcement defect.
+
+*Figure: Both addresses reach the same example server, and network and HTTP policy permit both.
+Only `localhost` is declared for MCP policy, so its tool restriction does not apply to requests
+sent to `127.0.0.1`.*
+
+![An agent sends a delete_repo tool call through Box's network and HTTP checks, which permit it.
+Box then matches the destination. The declared localhost route receives a tool-policy denial.
+The undeclared 127.0.0.1 route receives no MCP tool check and reaches the same example server,
+where the tool executes.](images/mcp-destination-matching.png)
+
+The [editable diagram](images/mcp-destination-matching.drawio) shows the same request paths.
 
 ### Credential values and credential use
 

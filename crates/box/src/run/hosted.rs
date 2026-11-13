@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use egress_gateway::{
-    CapabilitySet, CredentialCapability, MitmConfig, MitmHandle, MitmInterceptor,
+    BackendDial, CapabilitySet, CredentialCapability, MitmConfig, MitmHandle, MitmInterceptor,
 };
 use policy::{
     EgressPolicyInterceptor, GovernedBox, McpServerKind, PolicyEngine, Principal, ToolCatalogs,
@@ -266,6 +266,79 @@ fn caller_exec_covers(caller: &ProcessSpec, program: &Path) -> bool {
     true
 }
 
+#[derive(Clone)]
+pub(crate) struct ToolSpawner {
+    spawn: strands_shell::os::HostSpawner,
+    selection: Arc<ToolSelection>,
+}
+
+struct ToolSelection {
+    attachment: Attachment,
+    record: Record,
+    workspace: PathBuf,
+    commands: Arc<crate::run::commands::ConfiguredCommands>,
+}
+
+impl ToolSelection {
+    fn select(
+        &self,
+        program: &Path,
+        called: &Path,
+        args: &[String],
+    ) -> Result<SelectedTool, BoxError> {
+        select_tool_with_commands(
+            &self.record,
+            &self.attachment,
+            program,
+            called,
+            args,
+            &self.commands,
+        )
+    }
+
+    fn working_directory(
+        &self,
+        program: &Path,
+        called: &Path,
+        args: &[String],
+        requested: &Path,
+    ) -> std::io::Result<PathBuf> {
+        let selected = self
+            .select(program, called, args)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let directory = selected
+            .spec
+            .workspace
+            .clone()
+            .unwrap_or_else(|| caller_directory(requested, &selected.spec, &self.workspace));
+        let directory = directory.canonicalize()?;
+        if !directory.is_absolute() || !directory.is_dir() || directory.to_str().is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the tool working directory must be an absolute UTF-8 directory",
+            ));
+        }
+        Ok(directory)
+    }
+}
+
+impl ToolSpawner {
+    pub(crate) fn spawn(&self) -> strands_shell::os::HostSpawner {
+        Arc::clone(&self.spawn)
+    }
+
+    pub(crate) fn working_directory(
+        &self,
+        program: &Path,
+        called: &Path,
+        args: &[String],
+        requested: &Path,
+    ) -> std::io::Result<PathBuf> {
+        self.selection
+            .working_directory(program, called, args, requested)
+    }
+}
+
 /// Build the hook that runs a host binary in its own boundary
 /// (docs/design/decisions.md#the-box-runs-a-host-binary-through-the-spawn-host-seam).
 ///
@@ -281,91 +354,98 @@ fn tool_spawner(
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
         super::macos_enforcement::Registration,
     >,
-) -> strands_shell::os::HostSpawner {
+) -> ToolSpawner {
     let attachment = site.attachment.clone();
     let layout = site.layout.clone();
     let record = site.stored.clone();
     let protected_sources = site.protected_sources.to_vec();
-    Arc::new(move |spawn: strands_shell::os::HostSpawn| {
-        let recorder = Arc::clone(&recorder);
-        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-        let registration = registration.clone();
-        let attachment = attachment.clone();
-        let layout = layout.clone();
-        let record = record.clone();
-        let approved = Arc::clone(&approved);
-        let workspace = workspace.clone();
-        let protected_sources = protected_sources.clone();
-        Box::pin(async move {
-            let mut selected = select_tool_with_commands(
-                &record,
-                &attachment,
-                &spawn.program,
-                &spawn.invoked,
-                &spawn.args,
-                approved.commands(),
-            )
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-            let cwd = caller_directory(&spawn.cwd, &selected.spec, &workspace);
-            let table = selected.table.clone();
-            // The reach this run judged for the table; every declared table was judged, so a miss
-            // is refused.
-            let reach = approved.table(&table).ok_or_else(|| {
-                std::io::Error::other(format!("{table} has no reach judged for this run"))
-            })?;
-            if let Some(command) = reach.command.as_ref() {
-                selected.spec.command[0] = command.invoked().display().to_string();
-            }
-            let site = Site {
-                attachment: &attachment,
-                layout: &layout,
-                stored: &record,
-                protected_sources: &protected_sources,
-            };
-            let boundary = Boundary::translate(
-                &selected.spec,
-                Launch {
-                    table: &table,
-                    trailing: &selected.trailing,
-                    fallback_workspace: &cwd,
-                    shebang_interpreters: selected.shebang_interpreters,
-                    // A spawned host binary is the toolchain case: it loads frameworks and
-                    // libraries the agent's own program never touches.
-                    runtime_reach: RuntimeReach::Leaf,
-                    argument_zero: Some(&spawn.invoked),
-                    egress: EgressMode::for_spec(&selected.spec),
-                    approved: Some(reach),
-                },
-                &site,
-            )
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-            // Recorded before the run, so a call the agent cancels or outlasts still leaves it.
-            if selected.spec.native_egress() {
-                let label = table
-                    .strip_prefix("[tool.")
-                    .and_then(|rest| rest.strip_suffix(']'))
-                    .unwrap_or(&table);
-                recorder.record(telemetry::EffectiveDecision::enforcement_permit(
-                    "egress:native",
-                    label.to_string(),
-                    "native-egress",
-                ));
-            }
-            let captured = crate::run::contain::supervise::LeafBox::run(
-                boundary,
-                &layout,
-                #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-                registration,
-            )
-            .await
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-            Ok(strands_shell::os::HostSpawnOutcome {
-                status: captured.status,
-                stdout: captured.stdout,
-                stderr: captured.stderr,
+    let selection = Arc::new(ToolSelection {
+        attachment,
+        record,
+        workspace,
+        commands: Arc::clone(approved.commands()),
+    });
+    let spawn_selection = Arc::clone(&selection);
+    let spawn: strands_shell::os::HostSpawner =
+        Arc::new(move |spawn: strands_shell::os::HostSpawn| {
+            let recorder = Arc::clone(&recorder);
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            let registration = registration.clone();
+            let selection = Arc::clone(&spawn_selection);
+            let layout = layout.clone();
+            let approved = Arc::clone(&approved);
+            let protected_sources = protected_sources.clone();
+            Box::pin(async move {
+                let mut selected = selection
+                    .select(&spawn.program, &spawn.invoked, &spawn.args)
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                let cwd = caller_directory(&spawn.cwd, &selected.spec, &selection.workspace);
+                let table = selected.table.clone();
+                // The reach this run judged for the table; every declared table was judged, so a miss
+                // is refused.
+                let reach = approved.table(&table).ok_or_else(|| {
+                    std::io::Error::other(format!("{table} has no reach judged for this run"))
+                })?;
+                if let Some(command) = reach.command.as_ref() {
+                    selected.spec.command[0] = command.invoked().display().to_string();
+                }
+                let site = Site {
+                    attachment: &selection.attachment,
+                    layout: &layout,
+                    stored: &selection.record,
+                    protected_sources: &protected_sources,
+                };
+                let boundary = Boundary::translate(
+                    &selected.spec,
+                    Launch {
+                        table: &table,
+                        trailing: &selected.trailing,
+                        fallback_workspace: &cwd,
+                        shebang_interpreters: selected.shebang_interpreters,
+                        // A spawned host binary is the toolchain case: it loads frameworks and
+                        // libraries the agent's own program never touches.
+                        runtime_reach: RuntimeReach::Leaf,
+                        argument_zero: Some(&spawn.invoked),
+                        egress: EgressMode::for_spec(&selected.spec),
+                        approved: Some(reach),
+                    },
+                    &site,
+                )
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+                if boundary.working_directory() != spawn.cwd.as_path() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "the tool working directory does not match the policy-approved directory",
+                    ));
+                }
+                // Recorded before the run, so a call the agent cancels or outlasts still leaves it.
+                if selected.spec.native_egress() {
+                    let label = table
+                        .strip_prefix("[tool.")
+                        .and_then(|rest| rest.strip_suffix(']'))
+                        .unwrap_or(&table);
+                    recorder.record(telemetry::EffectiveDecision::enforcement_permit(
+                        "egress:native",
+                        label.to_string(),
+                        "native-egress",
+                    ));
+                }
+                let captured = crate::run::contain::supervise::LeafBox::run(
+                    boundary,
+                    &layout,
+                    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+                    registration,
+                )
+                .await
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+                Ok(strands_shell::os::HostSpawnOutcome {
+                    status: captured.status,
+                    stdout: captured.stdout,
+                    stderr: captured.stderr,
+                })
             })
-        })
-    })
+        });
+    ToolSpawner { spawn, selection }
 }
 
 /// Builds and spawns the contained leaf for a stdio MCP server. Every stdio server is contained;
@@ -727,13 +807,45 @@ impl HostedBox {
         let telemetry_port = collector.port();
         let recorder = telemetry::DecisionRecorder::over(Arc::clone(&collector));
         let projection = credential::workspace(&record.egress_routes()?)?;
+        // A backend entry opens one vault holding its strip-phantom destination secret (a phantom is
+        // provisioned to the workload and stripped at the gateway) and its box-owned backend token
+        // (attached at the gateway, never placed in the workload environment). One control per
+        // destination.
+        let credential::BackendProjection {
+            capabilities: backend_capabilities,
+            workload_environment: backend_environment,
+        } = credential::backend_capabilities(&record.backend_credentials()?)?;
         let capabilities = CapabilitySet::new(
             projection
                 .capabilities
                 .into_iter()
+                .chain(backend_capabilities)
                 .map(|(destination, store)| CredentialCapability::new(destination, store))
                 .collect(),
         );
+        // Every phantom the workload receives: the destination-secret phantoms from the ordinary
+        // routes, plus the strip-phantom placeholders from the backend entries, sharing one
+        // placeholder for a variable named by both.
+        let workload_environment = credential::merge_workload_environment(
+            projection.workload_environment,
+            backend_environment,
+        );
+        // The backend dial targets the gateway re-routes to, keyed by the original destination
+        // pattern. The host decision still runs on the original; the address decision runs on the
+        // backend address.
+        let backend_dials: Vec<(credentials::DestinationPattern, BackendDial)> = record
+            .backend_dials()?
+            .into_iter()
+            .map(|(pattern, target)| {
+                let dial = BackendDial {
+                    tls: target.is_tls(),
+                    host: target.host,
+                    port: target.port,
+                    path_prefix: target.path_prefix,
+                };
+                (pattern, dial)
+            })
+            .collect();
 
         // The two-door discovery completion coordinator. It hears from the
         // stdio broker always, and from the egress gateway when the record declares a remote MCP
@@ -782,6 +894,10 @@ impl HostedBox {
                 intercept_ca_dir: Some(trust.clone()),
                 // The servers the gateway frames are the servers the policy door tracks.
                 mcp_servers: remote_mcp_servers,
+                // The destinations that re-route to a backend.
+                backends: backend_dials,
+                // The hosts whose plain HTTP on port 80 is decided and sent as HTTPS on 443.
+                upgrade_http: record.gateway.upgrade_http.clone(),
                 ..MitmConfig::default()
             },
             capabilities,
@@ -836,7 +952,7 @@ impl HostedBox {
             proxy_port,
             telemetry_port,
             trust_bundle,
-            phantoms: projection.workload_environment,
+            phantoms: workload_environment,
         };
         let launched = |server: &crate::record::config::mcp::McpServer| match record
             .contained_mcp
@@ -909,6 +1025,7 @@ impl HostedBox {
             Arc::clone(&policy),
             discovery.registry(),
             egress,
+            &attachment.phantoms,
             Arc::clone(&recorder),
             host_spawner,
             mcp_leaf_launcher,
@@ -1101,6 +1218,7 @@ mod tests {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            gateway: Default::default(),
             limits: Default::default(),
             box_id: root.name().to_string(),
             box_dir: root.root().to_path_buf(),
@@ -1114,6 +1232,7 @@ mod tests {
                 filesystem: Default::default(),
                 network: None,
                 grammar: None,
+                ingress: Vec::new(),
             }),
             tool: Default::default(),
             egress: Default::default(),
@@ -1613,6 +1732,231 @@ mod tests {
             .expect("the program is executable");
     }
 
+    mod missing_server_checks {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        const PERMITS: &str = r#"
+            permit (principal, action == Box::Action::"shell:spawn", resource);
+            permit (principal, action == Tool::git::Action::"status", resource);
+        "#;
+
+        fn fixture() -> (tempfile::TempDir, BoxRoot, Record, PathBuf) {
+            let home = tempfile::tempdir().expect("operator home");
+            let root = crate::record::layout::testing::box_root(home.path(), "missing-server");
+            let trusted = home.path().join("trusted");
+            let writable = home.path().join("writable");
+            std::fs::create_dir(&trusted).expect("trusted directory");
+            std::fs::create_dir(&writable).expect("writable directory");
+            let program = trusted.join("git");
+            install_program(&program);
+            let mut record = grammar_record(&root, &program);
+            record.contained_mcp.insert(
+                "repo".to_string(),
+                crate::record::config::process::ContainedMcp {
+                    spec: toml::from_str(&format!(
+                        "command = [\"git\"]\n[env]\nPATH = {:?}\n",
+                        writable.display().to_string()
+                    ))
+                    .expect("server with a declared search directory"),
+                },
+            );
+            (home, root, record, writable.join("git"))
+        }
+
+        fn bind(root: &BoxRoot, record: &Record, text: &str) -> Arc<PolicyEngine> {
+            let commands = ConfiguredCommands::load(record).expect("tool command loads");
+            bound_engine(root, record, &commands, text)
+        }
+
+        async fn start(
+            engine: &Arc<PolicyEngine>,
+            spec: &ProcessSpec,
+            argument: &str,
+        ) -> Result<(), String> {
+            let program =
+                crate::run::contain::executable::resolve(spec.program(), &spec.search_path())
+                    .expect("the requested server resolves");
+            let args = vec![argument.to_string()];
+            policy::ShellPolicyInterceptor::into_server_start_handle(
+                Arc::clone(engine),
+                Principal::agent(),
+                GovernedBox::assigned("codex"),
+                None,
+                Default::default(),
+            )
+            .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+                command: spec.program(),
+                program: spec.program(),
+                program_path: &program.granted_path().display().to_string(),
+                args: &args,
+                literal: &[],
+                cwd: "/",
+            })
+            .await
+            .map(drop)
+            .map_err(|error| error.to_string())
+        }
+
+        #[test]
+        fn a_missing_matched_server_keeps_startup_lazy() {
+            let (_home, root, record, server) = fixture();
+            assert!(!server.exists(), "the server is absent at startup");
+            bind(&root, &record, PERMITS);
+        }
+
+        #[tokio::test]
+        async fn an_unreadable_server_cannot_later_claim_a_grammar_permit() {
+            let (_home, root, record, server) = fixture();
+            install_program(&server);
+            std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o111))
+                .expect("execute-only server");
+            let spec = &record.contained_mcp["repo"].spec;
+            assert!(
+                crate::run::contain::executable::resolve(spec.program(), &spec.search_path())
+                    .is_ok(),
+                "the unreadable server remains executable"
+            );
+            assert!(
+                crate::record::layout::open_without_following(&server).is_err(),
+                "this control requires a server file the test user cannot read"
+            );
+            let engine = bind(&root, &record, PERMITS);
+            std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755))
+                .expect("the server becomes readable after binding");
+
+            let refused = start(&engine, spec, "status")
+                .await
+                .expect_err("the server file was never approved");
+            assert!(
+                refused.contains("tool grammar requires an approved program file"),
+                "{refused}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_new_server_cannot_claim_spawn_or_grammar_permits() {
+            let (_home, root, record, server) = fixture();
+            assert!(!server.exists(), "the server is absent at startup");
+            let engine = bind(&root, &record, PERMITS);
+            install_program(&server);
+
+            for argument in ["push", "status"] {
+                let refused = start(&engine, &record.contained_mcp["repo"].spec, argument)
+                    .await
+                    .expect_err("a later file cannot claim either permit");
+                assert!(
+                    refused.contains("tool grammar requires an approved program file"),
+                    "{argument}: {refused}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn an_existing_server_keeps_its_grammar_denial() {
+            let (_home, root, record, server) = fixture();
+            install_program(&server);
+            let engine = bind(&root, &record, PERMITS);
+            let capture = telemetry::ObservationCapture::begin();
+
+            let refused = start(&engine, &record.contained_mcp["repo"].spec, "push")
+                .await
+                .expect_err("the general spawn permit does not admit a grammar-denied command");
+            assert!(refused.contains("[default-deny]"), "{refused}");
+            assert_eq!(
+                capture.last().expect("the start was decided").action(),
+                r#"Tool::git::Action::"push""#
+            );
+        }
+
+        #[tokio::test]
+        async fn an_existing_server_keeps_its_grammar_permit() {
+            let (_home, root, record, server) = fixture();
+            install_program(&server);
+            let engine = bind(
+                &root,
+                &record,
+                r#"permit (principal, action == Tool::git::Action::"status", resource);"#,
+            );
+            let capture = telemetry::ObservationCapture::begin();
+
+            start(&engine, &record.contained_mcp["repo"].spec, "status")
+                .await
+                .expect("the grammar permits status without a general spawn permit");
+            assert_eq!(
+                capture.last().expect("the start was decided").action(),
+                r#"Tool::git::Action::"status""#
+            );
+        }
+
+        #[tokio::test]
+        async fn a_replaced_server_cannot_claim_the_grammar_permit() {
+            let (_home, root, record, server) = fixture();
+            install_program(&server);
+            let engine = bind(&root, &record, PERMITS);
+            let replacement = server.with_extension("replacement");
+            install_program(&replacement);
+            std::fs::rename(&replacement, &server).expect("replace with a different file");
+
+            let refused = start(&engine, &record.contained_mcp["repo"].spec, "status")
+                .await
+                .expect_err("the replacement cannot claim the approved file's permit");
+            assert!(refused.contains("[tool-grammar]"), "{refused}");
+        }
+
+        #[tokio::test]
+        async fn an_unrelated_missing_server_keeps_lazy_start_and_spawn_permission() {
+            let (_home, root, mut record, server) = fixture();
+            let server = server.with_file_name("unrelated-server");
+            record.contained_mcp.get_mut("repo").unwrap().spec.command[0] =
+                "unrelated-server".to_string();
+            assert!(
+                !server.exists(),
+                "the unrelated server is absent at startup"
+            );
+            let engine = bind(&root, &record, PERMITS);
+            install_program(&server);
+            let capture = telemetry::ObservationCapture::begin();
+
+            start(&engine, &record.contained_mcp["repo"].spec, "status")
+                .await
+                .expect("the general spawn permit admits the unrelated server");
+            assert_eq!(
+                capture.last().expect("the start was decided").action(),
+                r#"Box::Action::"shell:spawn""#
+            );
+        }
+
+        #[tokio::test]
+        async fn a_refused_late_server_can_retry_with_an_already_bound_program() {
+            let (_home, root, record, server) = fixture();
+            let engine = bind(&root, &record, PERMITS);
+            install_program(&server);
+            let spec = &record.contained_mcp["repo"].spec;
+            let refused = start(&engine, spec, "status")
+                .await
+                .expect_err("the new file has no approved identity");
+            assert!(
+                refused.contains("tool grammar requires an approved program file"),
+                "{refused}"
+            );
+            let approved = Path::new(record.tool["git"].program());
+            let replacement = server.with_extension("approved");
+            std::os::unix::fs::symlink(approved, &replacement)
+                .expect("the replacement names the approved git file");
+            std::fs::rename(&replacement, &server).expect("the server now names the approved file");
+            let capture = telemetry::ObservationCapture::begin();
+
+            start(&engine, spec, "status")
+                .await
+                .expect("the same engine admits a retry with the approved file and called name");
+            assert_eq!(
+                capture.last().expect("the retry was decided").action(),
+                r#"Tool::git::Action::"status""#
+            );
+        }
+    }
+
     /// The operator home a test root sits under, which is also the agent's workspace here.
     fn workspace_of(root: &BoxRoot) -> PathBuf {
         root.operator_home()
@@ -1709,6 +2053,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             },
             network: None,
             grammar: None,
+            ingress: Vec::new(),
         };
         let mut record = record(&root);
         record.tool.insert("t".to_string(), tool(vendor.clone()));
@@ -1846,6 +2191,20 @@ permit (principal, action == alpha::Action::"read", resource);"#
             },
         )
         .await;
+        let ready = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::run::broker::protocol::read_frame::<crate::run::broker::protocol::Frame, _>(
+                &mut reader,
+            ),
+        )
+        .await
+        .expect("the MCP readiness response arrives")
+        .expect("the MCP readiness response reads")
+        .expect("the MCP readiness response is present");
+        assert!(matches!(
+            ready.body,
+            crate::run::broker::protocol::Body::McpReady
+        ));
         send_mcp_json(
             &mut writer,
             serde_json::json!({
@@ -2582,6 +2941,78 @@ while :; do :; done"#
         });
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_refuses_a_workspace_retargeted_after_directory_admission() {
+        let home = tempfile::tempdir().expect("operator home");
+        let operator = home.path().canonicalize().expect("canonical operator home");
+        let root = crate::record::layout::testing::box_root(&operator, "cwd-retarget");
+        crate::test_support::with_operator_home(&operator, || {
+            let projects = operator.join("projects");
+            let admitted = projects.join("admitted");
+            let replacement = projects.join("replacement");
+            std::fs::create_dir_all(&admitted).expect("admitted workspace");
+            std::fs::create_dir(&replacement).expect("replacement workspace");
+            let workspace_alias = projects.join("workspace");
+            std::os::unix::fs::symlink(&admitted, &workspace_alias).expect("workspace alias");
+            let mut record = record_with_mcp(&root, Vec::new());
+            let mut spec = record.agent.clone().expect("agent specification");
+            spec.workspace = Some(workspace_alias.clone());
+            spec.filesystem.read = vec![projects.clone()];
+            spec.filesystem.write = vec![projects.clone()];
+            record.tool.insert("probe".to_string(), spec);
+            let approved = Arc::new(ApprovedReach::judge(&record, &[]).expect("startup approval"));
+            let attachment = selection_attachment();
+            let spawner = tool_spawner(
+                Site {
+                    attachment: &attachment,
+                    layout: &root,
+                    stored: &record,
+                    protected_sources: &[],
+                },
+                approved,
+                admitted.clone(),
+                telemetry::DecisionRecorder::discarding(),
+                #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+                None,
+            );
+            let program = Path::new("/bin/sh").canonicalize().expect("host shell");
+            let args = vec![
+                "-c".to_string(),
+                "printf launched > launch-marker".to_string(),
+            ];
+            let checked = spawner
+                .working_directory(&program, Path::new("sh"), &args, &admitted)
+                .expect("the original directory passes preselection");
+            assert_eq!(checked, admitted);
+            let changed_alias = projects.join("workspace-next");
+            std::os::unix::fs::symlink(&replacement, &changed_alias)
+                .expect("changed workspace alias");
+            std::fs::rename(&changed_alias, &workspace_alias).expect("retarget workspace alias");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tool runtime");
+            let refusal = runtime
+                .block_on((spawner.spawn())(strands_shell::os::HostSpawn {
+                    program,
+                    invoked: PathBuf::from("/bin/sh"),
+                    args,
+                    cwd: checked,
+                    env: Vec::new(),
+                }))
+                .err()
+                .expect("the changed directory must refuse the launch");
+            assert_eq!(refusal.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(
+                refusal.to_string(),
+                "the tool working directory does not match the policy-approved directory",
+            );
+            assert!(!admitted.join("launch-marker").exists());
+            assert!(!replacement.join("launch-marker").exists());
+        });
+    }
+
     fn selection_record(tools: &[(&str, &[&str])]) -> Record {
         let spec = |command: &[&str]| ProcessSpec {
             native_filesystem_policy: None,
@@ -2591,12 +3022,14 @@ while :; do :; done"#
             filesystem: Default::default(),
             network: None,
             grammar: None,
+            ingress: Vec::new(),
         };
         let agent = spec(&["/bin/sh"]);
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            gateway: Default::default(),
             limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/probe"),
@@ -2613,6 +3046,147 @@ while :; do :; done"#
             contained_mcp: Default::default(),
             telemetry: Default::default(),
         }
+    }
+
+    fn directory_selection(record: Record, workspace: PathBuf) -> ToolSelection {
+        ToolSelection {
+            commands: Arc::new(
+                crate::run::commands::ConfiguredCommands::load(&record)
+                    .expect("configured commands"),
+            ),
+            attachment: selection_attachment(),
+            record,
+            workspace,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_directory_selection_uses_the_invoked_alias_and_longest_prefix() {
+        let (_root, bin, mut record) = rustup_links();
+        let mut longer = record.tool["cargo"].clone();
+        longer.command.push("-c".to_string());
+        record.tool.insert("cargo-c".to_string(), longer);
+        for (label, spec) in &mut record.tool {
+            let workspace = bin.join(format!("{label}-workspace"));
+            std::fs::create_dir(&workspace).expect("a tool workspace");
+            spec.workspace = Some(workspace);
+        }
+        let selection = directory_selection(record, bin.clone());
+        for (called, args, label) in [
+            ("cargo", Vec::new(), "cargo"),
+            ("rustc", Vec::new(), "rustc"),
+            (
+                "rustc",
+                vec!["-c".to_string(), "printf x".to_string()],
+                "cargo-c",
+            ),
+        ] {
+            assert_eq!(
+                selection
+                    .working_directory(&bin.join("rustup"), Path::new(called), &args, &bin)
+                    .expect("the matching workspace"),
+                bin.join(format!("{label}-workspace")),
+                "called as {called} with {args:?}",
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_directory_selection_canonicalizes_the_declared_workspace() {
+        let (_root, bin, mut record) = rustup_links();
+        let workspace = bin.join("project");
+        std::fs::create_dir(&workspace).expect("a workspace");
+        let alias = bin.join("project-link");
+        std::os::unix::fs::symlink(&workspace, &alias).expect("a workspace alias");
+        record.tool.get_mut("cargo").expect("cargo").workspace = Some(alias);
+        let selection = directory_selection(record, bin.clone());
+        assert_eq!(
+            selection
+                .working_directory(&bin.join("rustup"), Path::new("cargo"), &[], &bin)
+                .expect("the declared workspace"),
+            workspace,
+        );
+    }
+
+    #[test]
+    fn spawn_directory_selection_applies_the_caller_workspace_rules() {
+        let root = tempfile::tempdir().expect("a directory");
+        let root = root.path().canonicalize().expect("canonical root");
+        let workspace = root.join("project");
+        let permitted = root.join("vendor");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(workspace.join("src")).expect("a caller directory");
+        std::fs::create_dir_all(permitted.join("src")).expect("a granted directory");
+        std::fs::create_dir(&outside).expect("an outside directory");
+        let mut record = selection_record(&[("sh", &["/bin/sh"])]);
+        record.tool.get_mut("sh").expect("sh").filesystem.read = vec![permitted.clone()];
+        let selection = directory_selection(record, workspace.clone());
+        let program = Path::new("/bin/sh").canonicalize().expect("sh");
+        for (requested, expected) in [
+            (workspace.join("src"), workspace.join("src")),
+            (permitted.join("src"), permitted.join("src")),
+            (outside, workspace.clone()),
+            (root.join("absent"), workspace.clone()),
+        ] {
+            assert_eq!(
+                selection
+                    .working_directory(&program, Path::new("sh"), &[], &requested)
+                    .expect("the caller workspace selection"),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_directory_selection_honors_the_agent_spec_fallback() {
+        let root = tempfile::tempdir().expect("a directory");
+        let workspace = root.path().canonicalize().expect("canonical root");
+        let requested = workspace.join("src");
+        std::fs::create_dir(&requested).expect("a caller directory");
+        let program = Path::new("/bin/sh").canonicalize().expect("sh");
+        let mut record = selection_record(&[]);
+        let agent = record.agent.as_mut().expect("agent");
+        agent.workspace = Some(workspace.clone());
+        agent.filesystem.exec = vec![program.clone()];
+        let selection = directory_selection(record, workspace.clone());
+        assert_eq!(
+            selection
+                .working_directory(&program, Path::new("sh"), &[], &requested)
+                .expect("the agent specification supplies its declared workspace"),
+            workspace,
+        );
+    }
+
+    #[test]
+    fn spawn_directory_preselection_reports_unavailable_commands_and_workspaces() {
+        let root = tempfile::tempdir().expect("a directory");
+        let workspace = root.path().canonicalize().expect("canonical root");
+        let program = Path::new("/bin/sh").canonicalize().expect("sh");
+        let mut record = selection_record(&[("sh", &["/bin/sh", "-c"])]);
+        record.tool.get_mut("sh").expect("sh").workspace = Some(workspace.join("absent"));
+        let selection = directory_selection(record, workspace.clone());
+        assert!(
+            selection
+                .working_directory(&program, Path::new("sh"), &[], &workspace)
+                .is_err()
+        );
+        assert!(
+            selection
+                .working_directory(&program, Path::new("sh"), &["-c".to_string()], &workspace)
+                .is_err()
+        );
+        assert!(
+            selection
+                .working_directory(
+                    &workspace.join("missing"),
+                    Path::new("./missing"),
+                    &[],
+                    &workspace
+                )
+                .is_err()
+        );
     }
 
     /// **The longest `command` prefix the invocation matches selects the tool**, and the arguments
@@ -3073,6 +3647,7 @@ while :; do :; done"#
             filesystem: Default::default(),
             network: None,
             grammar: None,
+            ingress: Vec::new(),
         };
         tool.filesystem.read = vec![root_path.join("vendor")];
 

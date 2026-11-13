@@ -4,19 +4,22 @@ use std::collections::BTreeSet;
 use std::io;
 use std::io::Write as _;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use egress_gateway::{
     EffectAttempt as EgressEffectAttempt, EffectInterceptor as EgressEffectInterceptor,
     EffectOutcome as EgressEffectOutcome, EffectPermit as EgressEffectPermit, McpFrame,
-    McpListReply,
+    McpListReply, ReplyObserver as EgressReplyObserver,
 };
 
 use crate::GovernedBox;
 use crate::{
     CatalogRefusal, CatalogStage, DiscoveryFailure, ListPage, McpServerKind, ToolCatalogs,
 };
-use crate::{Decision, Delivery, DenyReason, Outcome, PolicyEngine, Principal, Request, RequestId};
+use crate::{
+    Decision, Delivery, DenyReason, McpReply, Outcome, PendingToolResponse, PolicyEngine,
+    PolicyError, Principal, Request, RequestId,
+};
 
 /// Binds one policy and egress principal to outbound effect interception.
 pub struct EgressPolicyInterceptor {
@@ -102,8 +105,10 @@ impl EgressPolicyInterceptor {
 
     /// The two MCP gates on an allowed `http:request`: `mcp:call` identity, then the per-tool typed
     /// refinement. A non-MCP request carries no frame and passes.
-    fn mcp_gates(&self, mcp: &Option<McpFrame<'_>>) -> Result<Option<RequestId>, String> {
-        let Some(frame) = mcp else { return Ok(None) };
+    fn mcp_gates(&self, mcp: &Option<McpFrame<'_>>) -> Result<McpGrant, String> {
+        let Some(frame) = mcp else {
+            return Ok((None, None));
+        };
         // Gate one: `mcp:call` (identity). `{:?}` quotes the server and method, so a hostile
         // identity cannot forge a log line; identity and args are omitted from it.
         let request = mcp_request(frame);
@@ -147,20 +152,22 @@ impl EgressPolicyInterceptor {
                         diagnostic_context(&action)
                     )
                 })?;
-            if let decision @ Decision::Deny { .. } = self.policy.refine_tool_call(
+            let (decision, tool_response) = self.policy.refine_tool_call(
                 &self.governed,
                 &self.principal,
                 server,
                 tool,
                 &arguments,
-            ) {
+            );
+            if let decision @ Decision::Deny { .. } = decision {
                 return Err(format!(
                     "per-tool gate ({}): {decision}",
                     diagnostic_context(&action)
                 ));
             }
+            return Ok((Some(request_id), tool_response));
         }
-        Ok(Some(request_id))
+        Ok((Some(request_id), None))
     }
 }
 
@@ -180,11 +187,11 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     port: *port,
                 },
             ) {
-                Ok(request_id) => Ok((Some(request_id), None)),
+                Ok(request_id) => Ok((Some(request_id), (None, None))),
                 Err(Decision::Deny {
                     reason: DenyReason::PolicyPending,
                     ..
-                }) if self.mcp_hosts.contains(*host) => Ok((None, None)),
+                }) if self.mcp_hosts.contains(*host) => Ok((None, (None, None))),
                 Err(decision) => Err(decision.to_string()),
             },
             EgressEffectAttempt::Connect {
@@ -202,7 +209,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     port: *port,
                 },
             )
-            .map(|request_id| (Some(request_id), None)),
+            .map(|request_id| (Some(request_id), (None, None))),
             EgressEffectAttempt::HttpRequest {
                 host,
                 port,
@@ -229,16 +236,16 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                 .map_err(|reason| format!("http:request gate: {reason}"))
                 .and_then(|request_id| {
                     self.mcp_gates(mcp)
-                        .map(|mcp_request_id| (Some(request_id), mcp_request_id))
+                        .map(|mcp_grant| (Some(request_id), mcp_grant))
                 })
             }
             // Response release records nothing: the HTTP permit already records the reply.
-            EgressEffectAttempt::ResponseRelease { .. } => Ok((None, None)),
+            EgressEffectAttempt::ResponseRelease { .. } => Ok((None, (None, None))),
             _ => Err("policy does not support this egress effect".to_string()),
         };
 
         decision
-            .map(|(request_id, mcp_request_id)| {
+            .map(|(request_id, (mcp_request_id, tool_response))| {
                 Box::new(LocalPolicyEffectPermit {
                     policy: Arc::clone(&self.policy),
                     principal: self.principal.clone(),
@@ -246,6 +253,8 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                     attempt: AttemptIdentity::capture(effect),
                     request_id,
                     mcp_request_id,
+                    tool_response,
+                    tool_leg: None,
                 }) as Box<dyn EgressEffectPermit>
             })
             .map_err(permission_denied)
@@ -437,14 +446,249 @@ struct LocalPolicyEffectPermit {
     attempt: AttemptIdentity,
     request_id: Option<RequestId>,
     mcp_request_id: Option<RequestId>,
+    /// The per-tool `::response` an allowed `tools/call` owes, recorded beside `mcp:call::response`.
+    tool_response: Option<PendingToolResponse>,
+    /// The tool's leg, shared with the reply observer that took `tool_response`.
+    tool_leg: Option<Arc<Mutex<ToolLeg>>>,
 }
+
+/// What the request's outcome did with the coarse `mcp:call::response`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CoarseLeg {
+    Pending,
+    Recorded,
+    Skipped,
+}
+
+/// The tool's pending `::response`, which the request permit or its reply observer records,
+/// whichever ends second.
+struct ToolLeg {
+    policy: Arc<PolicyEngine>,
+    coarse: CoarseLeg,
+    reply: Option<ReplyEnd>,
+    response: Option<PendingToolResponse>,
+}
+
+/// How the reply observer saw a tool call end.
+enum ReplyEnd {
+    /// The server's JSON-RPC reply.
+    Reply(serde_json::Value),
+    /// No reply was read: the stream ended without one, was cut off, or was over the limit.
+    Indeterminate,
+}
+
+impl ToolLeg {
+    fn settle(&mut self) {
+        let recorded = match (self.coarse, &self.reply) {
+            (CoarseLeg::Skipped, _) => {
+                self.response = None;
+                return;
+            }
+            (CoarseLeg::Recorded, Some(end)) => {
+                let Some(response) = self.response.take() else {
+                    return;
+                };
+                match end {
+                    ReplyEnd::Reply(reply) => self.policy.record_tool_reply(response, reply),
+                    ReplyEnd::Indeterminate => self
+                        .policy
+                        .record_tool_response(response, McpReply::Indeterminate),
+                }
+            }
+            _ => return,
+        };
+        if recorded.is_err() {
+            unconfirmed();
+        }
+    }
+
+    fn set_coarse(leg: &Mutex<Self>, coarse: CoarseLeg) {
+        let Ok(mut leg) = leg.lock() else {
+            return unconfirmed();
+        };
+        leg.coarse = coarse;
+        leg.settle();
+    }
+
+    fn set_reply(leg: &Mutex<Self>, reply: ReplyEnd) {
+        let Ok(mut leg) = leg.lock() else {
+            return unconfirmed();
+        };
+        if leg.reply.is_none() {
+            leg.reply = Some(reply);
+        }
+        leg.settle();
+    }
+}
+
+/// Warn that a tool call's response was not recorded.
+fn unconfirmed() {
+    let _ = writeln!(
+        io::stderr().lock(),
+        "strands-box: warning: policy outcome recording was not confirmed"
+    );
+}
+
+/// Hands a remote tool call's reply to its shared [`ToolLeg`].
+struct ToolReplyObserver {
+    leg: Arc<Mutex<ToolLeg>>,
+    /// The JSON text of the request's JSON-RPC `id`, which the reply must carry.
+    request_id: Option<String>,
+    /// How many bytes of the reply have been read as Server-Sent Event lines.
+    scanned: usize,
+    /// How far the search for the end of the current line has reached.
+    searched: usize,
+    /// The `data` of the Server-Sent Event being read.
+    data: String,
+    /// The reply to the request, once an event carried it.
+    reply: Option<serde_json::Value>,
+}
+
+impl ToolReplyObserver {
+    fn new(leg: Arc<Mutex<ToolLeg>>, request_id: Option<&str>) -> Self {
+        Self {
+            leg,
+            request_id: request_id.map(str::to_string),
+            scanned: 0,
+            searched: 0,
+            data: String::new(),
+            reply: None,
+        }
+    }
+
+    /// Read the reply's whole lines that were not read yet, until one event carries the reply.
+    fn scan_events(&mut self, body: &[u8]) {
+        while self.reply.is_none() {
+            let from = self.searched.max(self.scanned);
+            let Some(offset) = body[from..].iter().position(|&byte| byte == b'\n') else {
+                self.searched = body.len();
+                return;
+            };
+            let end = from + offset;
+            let line = &body[self.scanned..end];
+            self.scanned = end + 1;
+            self.searched = self.scanned;
+            self.event_line(line);
+        }
+    }
+
+    /// Read one Server-Sent Event line; a blank line ends the event.
+    fn event_line(&mut self, line: &[u8]) {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if let Some(rest) = line.strip_prefix(b"data:") {
+            let rest = rest.strip_prefix(b" ").unwrap_or(rest);
+            if !self.data.is_empty() {
+                self.data.push('\n');
+            }
+            self.data.push_str(&String::from_utf8_lossy(rest));
+        } else if line.iter().all(u8::is_ascii_whitespace) {
+            self.reply = matching_reply(&self.data, self.request_id.as_deref());
+            self.data.clear();
+        }
+    }
+}
+
+/// Whether a reply body is one JSON document rather than a stream of Server-Sent Events.
+fn is_plain_json(body: &[u8]) -> bool {
+    body.iter().find(|byte| !byte.is_ascii_whitespace()) == Some(&b'{')
+}
+
+impl EgressReplyObserver for ToolReplyObserver {
+    fn complete(&mut self, reply: &[u8]) -> bool {
+        // A plain JSON reply is read once, when it ends.
+        if !is_plain_json(reply) {
+            self.scan_events(reply);
+        }
+        self.reply.is_some()
+    }
+
+    fn finished(mut self: Box<Self>, reply: &[u8]) {
+        let found = if is_plain_json(reply) {
+            std::str::from_utf8(reply)
+                .ok()
+                .and_then(|text| matching_reply(text, self.request_id.as_deref()))
+        } else {
+            self.scan_events(reply);
+            if self.reply.is_none() && self.scanned < reply.len() {
+                let rest = reply[self.scanned..].to_vec();
+                self.event_line(&rest);
+            }
+            if self.reply.is_none() {
+                // A stream may end without the blank line after its last event.
+                self.event_line(b"");
+            }
+            self.reply.take()
+        };
+        ToolLeg::set_reply(
+            &self.leg,
+            found.map_or(ReplyEnd::Indeterminate, ReplyEnd::Reply),
+        );
+    }
+
+    fn abandoned(self: Box<Self>) {
+        ToolLeg::set_reply(&self.leg, ReplyEnd::Indeterminate);
+    }
+}
+
+impl Drop for ToolReplyObserver {
+    fn drop(&mut self) {
+        ToolLeg::set_reply(&self.leg, ReplyEnd::Indeterminate);
+    }
+}
+
+/// The JSON-RPC reply to `request_id` in one JSON document. Without an id, any reply.
+fn matching_reply(data: &str, request_id: Option<&str>) -> Option<serde_json::Value> {
+    let request_id = request_id.map(serde_json::from_str::<serde_json::Value>);
+    serde_json::from_str::<serde_json::Value>(data)
+        .ok()
+        .filter(|value| {
+            (value.get("result").is_some() || value.get("error").is_some())
+                && match &request_id {
+                    None => true,
+                    Some(Ok(id)) => value.get("id").is_some_and(|reply| same_id(reply, id)),
+                    Some(Err(_)) => false,
+                }
+        })
+}
+
+/// Whether a reply's JSON-RPC `id` names the request's, so `1` and `1.0` are one id.
+fn same_id(reply: &serde_json::Value, request: &serde_json::Value) -> bool {
+    if let (Some(reply), Some(request)) = (reply.as_i64(), request.as_i64()) {
+        return reply == request;
+    }
+    if let (Some(reply), Some(request)) = (reply.as_u64(), request.as_u64()) {
+        return reply == request;
+    }
+    // An integer outside f64's exact range only matches itself, which the integer arms covered.
+    let exact = |id: &serde_json::Value| {
+        id.is_f64()
+            || id
+                .as_f64()
+                .is_some_and(|n| n.abs() <= 9_007_199_254_740_992.0)
+    };
+    match (reply.as_f64(), request.as_f64()) {
+        (Some(left), Some(right)) if exact(reply) && exact(request) => left == right,
+        _ => reply == request,
+    }
+}
+
+/// The `mcp:call` request an allowed MCP frame recorded, and the per-tool response it owes.
+type McpGrant = (Option<RequestId>, Option<PendingToolResponse>);
 
 impl LocalPolicyEffectPermit {
     /// Submit this effect's history, translating the proxy's outcome into the policy
     /// vocabulary.
-    fn submit(&self, outcome: EgressEffectOutcome) -> io::Result<()> {
+    fn submit(mut self, outcome: EgressEffectOutcome) -> io::Result<()> {
+        let tool_response = self.tool_response.take();
+        let tool_leg = self.tool_leg.take();
+        // The tool's leg records only after `mcp:call::response` did, so the tool never counts a
+        // call `mcp:call` missed.
+        let mut coarse_recorded = false;
         let Some(request_id) = self.request_id.as_ref() else {
             // Response release and bootstrap resolution have no outcome event.
+            if let Some(leg) = tool_leg {
+                ToolLeg::set_coarse(&leg, CoarseLeg::Skipped);
+            }
             return Ok(());
         };
         let delivery = delivery_of(outcome);
@@ -507,8 +751,8 @@ impl LocalPolicyEffectPermit {
                 // `::response`, like a delivered `Http` request with a 500); only a definite `Failed`
                 // — the effect provably did not occur — records nothing.
                 match mcp.as_ref().zip(self.mcp_request_id.as_ref()) {
-                    Some((mcp, mcp_request_id)) if !matches!(delivery, Delivery::Failed) => http
-                        .and(self.policy.record(
+                    Some((mcp, mcp_request_id)) if !matches!(delivery, Delivery::Failed) => {
+                        let coarse = self.policy.record(
                             &self.governed,
                             &self.principal,
                             mcp_request_id,
@@ -519,7 +763,20 @@ impl LocalPolicyEffectPermit {
                                 prompt: mcp.prompt.as_deref(),
                                 uri: mcp.uri.as_deref(),
                             },
-                        )),
+                        );
+                        // A kept coarse event appends later, and the tool's leg queues behind it.
+                        coarse_recorded =
+                            matches!(coarse, Ok(()) | Err(PolicyError::OutcomeKept(_)));
+                        let tool = match tool_response {
+                            // No reply observer took this call's response, so how it ended is
+                            // not known.
+                            Some(response) if coarse_recorded => self
+                                .policy
+                                .record_tool_response(response, McpReply::Indeterminate),
+                            _ => Ok(()),
+                        };
+                        http.and(coarse).and(tool)
+                    }
                     _ => http,
                 }
             }
@@ -527,6 +784,16 @@ impl LocalPolicyEffectPermit {
             // attempt: nothing truthful to record.
             _ => Ok(()),
         };
+        if let Some(leg) = tool_leg {
+            ToolLeg::set_coarse(
+                &leg,
+                if coarse_recorded {
+                    CoarseLeg::Recorded
+                } else {
+                    CoarseLeg::Skipped
+                },
+            );
+        }
 
         if recorded.is_err() {
             let _ = writeln!(
@@ -539,15 +806,27 @@ impl LocalPolicyEffectPermit {
 }
 
 impl EgressEffectPermit for LocalPolicyEffectPermit {
+    fn reply_observer(&mut self, request_id: Option<&str>) -> Option<Box<dyn EgressReplyObserver>> {
+        let response = self.tool_response.take()?;
+        let leg = Arc::new(Mutex::new(ToolLeg {
+            policy: Arc::clone(&self.policy),
+            coarse: CoarseLeg::Pending,
+            reply: None,
+            response: Some(response),
+        }));
+        self.tool_leg = Some(Arc::clone(&leg));
+        Some(Box::new(ToolReplyObserver::new(leg, request_id)))
+    }
+
     fn record_outcome(self: Box<Self>, outcome: EgressEffectOutcome) -> io::Result<()> {
-        self.submit(outcome)
+        (*self).submit(outcome)
     }
 
     fn mark_indeterminate(self: Box<Self>) {
         // An admitted effect that ended with no terminal outcome. Record it as an
         // indeterminate delivery of zero known bytes rather than silently dropping it:
         // a rule that counts attempts must still see that one happened.
-        let _ = self.submit(EgressEffectOutcome::Indeterminate { accepted_bytes: 0 });
+        let _ = (*self).submit(EgressEffectOutcome::Indeterminate { accepted_bytes: 0 });
     }
 }
 
@@ -1050,13 +1329,15 @@ mod tests {
 
     /// The per-tool refinement of one `demo` `add`, without the catalog gate in front of it.
     fn refine_add(policy: &PolicyEngine, a: i64) -> Decision {
-        policy.refine_tool_call(
-            &GovernedBox::assigned("test-box"),
-            &Principal::agent(),
-            "demo",
-            "add",
-            &serde_json::json!({"a": a, "b": 2}),
-        )
+        policy
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "demo",
+                "add",
+                &serde_json::json!({"a": a, "b": 2}),
+            )
+            .0
     }
 
     /// The forbid that a staged demo schema arms.
@@ -1311,6 +1592,471 @@ mod tests {
         permit(principal, action == Box::Action::"mcp:call", resource)
         when { context.input.server == "demo" };
     "#;
+
+    /// The demo permits, plus a cap of two `demo::Action::"add"::response` events with `a` of 1.
+    fn per_tool_capped_interceptor() -> InterceptorFixture {
+        let fixture = tracked_interceptor(&format!(
+            r#"{DEMO_PERMITS}
+            forbid(principal, action == demo::Action::"add", resource)
+            when temporal {{
+              exists (n: Long). (
+                (count for (t: Timepoint). where (
+                  formerly within 3600s (demo::Action::"add"::response{{ input.a: 1 }} && tp(t))
+                )) == n
+                && n >= 2
+              )
+            }};"#
+        ));
+        fixture
+            .stage_mcp_catalog("demo", root_reply(DEMO_TOOLS.as_bytes()))
+            .expect("the demo catalog stages");
+        fixture
+    }
+
+    /// A delivered remote tool call records the tool's own `::response` with its input, so a cap on
+    /// the tool counts http calls exactly as the same cap on `mcp:call::response` does.
+    #[test]
+    fn a_remote_tool_call_records_its_own_response_a_per_tool_cap_counts() {
+        let fixture = per_tool_capped_interceptor();
+        // A call with another `a` records a response the cap's input filter does not match.
+        fixture
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":2,"b":1}"#))
+            .expect("a call under the cap is admitted")
+            .record_outcome(EgressEffectOutcome::Completed(4))
+            .expect("the delivered call records");
+        for _ in 0..2 {
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .expect("a call under the cap is admitted")
+                .record_outcome(EgressEffectOutcome::Completed(4))
+                .expect("the delivered call records");
+        }
+        assert!(
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .is_err(),
+            "two recorded demo::Action::\"add\"::response events with a = 1 fire the cap"
+        );
+    }
+
+    /// A definite `Failed` delivery records no per-tool `::response`, as it records no
+    /// `mcp:call::response`; an indeterminate one records both.
+    #[test]
+    fn a_remote_tool_call_records_its_own_response_exactly_when_mcp_call_does() {
+        let fixture = per_tool_capped_interceptor();
+        for _ in 0..2 {
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .expect("a call under the cap is admitted")
+                .record_outcome(EgressEffectOutcome::Failed {
+                    accepted_bytes: 0,
+                    error_kind: std::io::ErrorKind::ConnectionReset,
+                })
+                .expect("a failed delivery records no response");
+        }
+        for _ in 0..2 {
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .expect("failed deliveries never counted toward the cap")
+                .mark_indeterminate();
+        }
+        assert!(
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .is_err(),
+            "two indeterminate deliveries record the per-tool ::response and fire the cap"
+        );
+    }
+
+    /// Without a reply observer, a remote tool call records `output.reply` as `indeterminate`,
+    /// so a precondition that requires `result` stays unmet.
+    #[test]
+    fn a_remote_tool_call_never_satisfies_a_result_precondition() {
+        let fixture = tracked_interceptor(&format!(
+            r#"{DEMO_PERMITS}
+            forbid(principal, action == demo::Action::"add", resource)
+            when {{ context.input.a == 9 }}
+            unless temporal {{
+              formerly within 3600s (demo::Action::"add"::response{{ output.reply: "result" }})
+            }};"#
+        ));
+        fixture
+            .stage_mcp_catalog("demo", root_reply(DEMO_TOOLS.as_bytes()))
+            .expect("the demo catalog stages");
+        fixture
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+            .expect("an ordinary call is admitted")
+            .record_outcome(EgressEffectOutcome::Replied {
+                accepted_bytes: 4,
+                status: 200,
+            })
+            .expect("the answered call records");
+        assert!(
+            fixture
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":9,"b":1}"#))
+                .is_err(),
+            "a 200 status does not show that the tool's result arrived"
+        );
+    }
+
+    /// The demo permits, plus a rule that refuses `add` with `a` of 9 unless an earlier `add`
+    /// ended with a `result`.
+    fn result_precondition_interceptor() -> InterceptorFixture {
+        let fixture = tracked_interceptor(&format!(
+            r#"{DEMO_PERMITS}
+            forbid(principal, action == demo::Action::"add", resource)
+            when {{ context.input.a == 9 }}
+            unless temporal {{
+              formerly within 3600s (demo::Action::"add"::response{{ output.reply: "result" }})
+            }};"#
+        ));
+        fixture
+            .stage_mcp_catalog("demo", root_reply(DEMO_TOOLS.as_bytes()))
+            .expect("the demo catalog stages");
+        fixture
+    }
+
+    /// One remote `add` the way the gateway runs it: the permit hands over its reply observer, the
+    /// request outcome records, and the reply reaches the observer once it has streamed.
+    fn remote_add(
+        fixture: &InterceptorFixture,
+        outcome: EgressEffectOutcome,
+        reply: Option<&[u8]>,
+    ) {
+        let mut permit = fixture
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+            .expect("an ordinary call is admitted");
+        let observer = permit
+            .reply_observer(Some("1"))
+            .expect("a tool call offers an observer");
+        permit
+            .record_outcome(outcome)
+            .expect("the request outcome records");
+        match reply {
+            Some(reply) => observer.finished(reply),
+            None => observer.abandoned(),
+        }
+    }
+
+    fn the_guarded_add_is_admitted(fixture: &InterceptorFixture) -> bool {
+        fixture
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":9,"b":1}"#))
+            .is_ok()
+    }
+
+    const REPLIED: EgressEffectOutcome = EgressEffectOutcome::Replied {
+        accepted_bytes: 4,
+        status: 200,
+    };
+
+    #[test]
+    fn a_remote_reply_records_how_the_tool_call_ended() {
+        for (reply, satisfied) in [
+            (&br#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#[..], true),
+            (
+                b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[]}}\n\n",
+                true,
+            ),
+            (br#"{"jsonrpc":"2.0","id":1,"result":{"content":[],"isError":true}}"#, false),
+            (br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"no"}}"#, false),
+            (
+                b"event: message\ndata: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n",
+                false,
+            ),
+            // A server asking the client for input has not answered the call.
+            (
+                br#"{"jsonrpc":"2.0","id":1,"result":{"resultType":"input_required","inputRequests":{"r":{"method":"elicitation/create","params":{}}},"requestState":"s"}}"#,
+                false,
+            ),
+            // A server that compresses its reply anyway: the bytes are not JSON.
+            (b"\x1f\x8b\x08\x00\x00\x00\x00\x00\x00\x03not json", false),
+        ] {
+            let fixture = result_precondition_interceptor();
+            remote_add(&fixture, REPLIED, Some(reply));
+            assert_eq!(
+                the_guarded_add_is_admitted(&fixture),
+                satisfied,
+                "{}",
+                String::from_utf8_lossy(reply)
+            );
+        }
+    }
+
+    #[test]
+    fn an_abandoned_remote_reply_records_indeterminate_and_still_counts() {
+        let fixture = result_precondition_interceptor();
+        remote_add(&fixture, REPLIED, None);
+        assert!(
+            !the_guarded_add_is_admitted(&fixture),
+            "abandoned is not a result"
+        );
+
+        let capped = per_tool_capped_interceptor();
+        for _ in 0..2 {
+            let mut permit = capped
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .expect("a call under the cap is admitted");
+            let observer = permit.reply_observer(Some("1")).expect("an observer");
+            permit.record_outcome(REPLIED).expect("the outcome records");
+            observer.abandoned();
+        }
+        assert!(
+            capped
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .is_err(),
+            "two abandoned replies still count toward the cap"
+        );
+    }
+
+    #[test]
+    fn a_failed_remote_delivery_records_no_tool_response_even_with_an_observer() {
+        let capped = per_tool_capped_interceptor();
+        for _ in 0..2 {
+            let mut permit = capped
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .expect("a call under the cap is admitted");
+            let observer = permit.reply_observer(Some("1")).expect("an observer");
+            permit
+                .record_outcome(EgressEffectOutcome::Failed {
+                    accepted_bytes: 0,
+                    error_kind: std::io::ErrorKind::ConnectionReset,
+                })
+                .expect("a failed delivery records nothing");
+            drop(observer);
+        }
+        assert!(
+            capped
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .is_ok(),
+            "failed deliveries are not responses on either leg"
+        );
+    }
+
+    #[test]
+    fn a_reply_observer_dropped_before_a_failed_delivery_records_nothing() {
+        let capped = per_tool_capped_interceptor();
+        for _ in 0..2 {
+            let mut permit = capped
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .expect("a call under the cap is admitted");
+            drop(permit.reply_observer(Some("1")).expect("an observer"));
+            permit
+                .record_outcome(EgressEffectOutcome::Failed {
+                    accepted_bytes: 0,
+                    error_kind: std::io::ErrorKind::ConnectionReset,
+                })
+                .expect("a failed delivery records nothing");
+        }
+        assert!(
+            capped
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .is_ok(),
+            "the tool counts no call that mcp:call did not record"
+        );
+    }
+
+    #[test]
+    fn a_reply_that_ends_before_the_request_outcome_records_once_the_outcome_is_known() {
+        let fixture = result_precondition_interceptor();
+        let mut permit = fixture
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+            .expect("an ordinary call is admitted");
+        let observer = permit.reply_observer(Some("1")).expect("an observer");
+        observer.finished(br#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#);
+        assert!(
+            !the_guarded_add_is_admitted(&fixture),
+            "nothing records before the outcome"
+        );
+        permit.record_outcome(REPLIED).expect("the outcome records");
+        assert!(
+            the_guarded_add_is_admitted(&fixture),
+            "the result records with the outcome"
+        );
+    }
+
+    #[test]
+    fn a_long_progress_stream_is_read_once_and_its_reply_ends_the_observer() {
+        let progress = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progress\":1}}\r\n\r\n";
+        let reply = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[]}}\r\n\r\n";
+        let mut body = progress
+            .repeat(16 * 1024 * 1024 / progress.len())
+            .into_bytes();
+        let replied_at = body.len() + reply.len();
+        body.extend_from_slice(reply.as_bytes());
+        body.extend_from_slice(progress.as_bytes());
+
+        let fixture = result_precondition_interceptor();
+        let mut permit = fixture
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+            .expect("an ordinary call is admitted");
+        let mut observer = permit
+            .reply_observer(Some("1"))
+            .expect("a tool call offers an observer");
+        let started = std::time::Instant::now();
+        let mut seen = 0;
+        let mut completed_at = None;
+        while seen < body.len() {
+            seen = (seen + 8 * 1024).min(body.len());
+            if observer.complete(&body[..seen]) {
+                completed_at = Some(seen);
+                break;
+            }
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(
+            completed_at.is_some_and(|at| at >= replied_at),
+            "the observer finishes at the reply, not before it ({completed_at:?})"
+        );
+        permit.record_outcome(REPLIED).expect("the outcome records");
+        observer.finished(&body[..completed_at.unwrap_or(body.len())]);
+        assert!(the_guarded_add_is_admitted(&fixture));
+    }
+
+    #[test]
+    fn a_long_reply_on_one_line_is_searched_once() {
+        let text = "x".repeat(16 * 1024 * 1024 - 1024);
+        let body = format!(
+            "data: {{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"{text}\"}}]}}}}\n\n"
+        )
+        .into_bytes();
+        let fixture = result_precondition_interceptor();
+        let mut permit = fixture
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+            .expect("an ordinary call is admitted");
+        let mut observer = permit
+            .reply_observer(Some("1"))
+            .expect("a tool call offers an observer");
+        let started = std::time::Instant::now();
+        let mut seen = 0;
+        let mut completed = false;
+        while seen < body.len() && !completed {
+            seen = (seen + 8 * 1024).min(body.len());
+            completed = observer.complete(&body[..seen]);
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(20),
+            "{:?}",
+            started.elapsed()
+        );
+        assert!(completed, "the reply ends the observer");
+        permit.record_outcome(REPLIED).expect("the outcome records");
+        observer.finished(&body);
+        assert!(the_guarded_add_is_admitted(&fixture));
+    }
+
+    #[test]
+    fn a_reply_that_spells_the_request_id_another_way_is_still_its_reply() {
+        let fixture = result_precondition_interceptor();
+        let mut permit = fixture
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+            .expect("an ordinary call is admitted");
+        let observer = permit
+            .reply_observer(Some("1.0"))
+            .expect("a tool call offers an observer");
+        permit.record_outcome(REPLIED).expect("the outcome records");
+        observer.finished(br#"{"jsonrpc":"2.0","id":1,"result":{"content":[]}}"#);
+        assert!(the_guarded_add_is_admitted(&fixture));
+    }
+
+    #[test]
+    fn distinct_large_integer_ids_stay_distinct() {
+        let id = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+        assert!(!same_id(&id("9007199254740993"), &id("9007199254740992")));
+        assert!(!same_id(
+            &id("18446744073709551615"),
+            &id("18446744073709551614")
+        ));
+        assert!(same_id(&id("9007199254740993"), &id("9007199254740993")));
+        assert!(same_id(&id("1"), &id("1.0")));
+        assert!(same_id(&id("\"a\""), &id("\"a\"")));
+        assert!(!same_id(&id("1"), &id("\"1\"")));
+    }
+
+    #[test]
+    fn a_stream_that_ends_without_a_blank_line_still_reads_its_last_event() {
+        let fixture = result_precondition_interceptor();
+        remote_add(
+            &fixture,
+            REPLIED,
+            Some(b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[]}}"),
+        );
+        assert!(the_guarded_add_is_admitted(&fixture));
+    }
+
+    #[test]
+    fn a_remote_reply_is_matched_to_its_request_by_id() {
+        for (body, satisfied) in [
+            (
+                &b"data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[]}}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[],\"isError\":true}}\n\n"[..],
+                false,
+            ),
+            (
+                b"data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[],\"isError\":true}}\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[]}}\n\n",
+                true,
+            ),
+        ] {
+            let fixture = result_precondition_interceptor();
+            remote_add(&fixture, REPLIED, Some(body));
+            assert_eq!(
+                the_guarded_add_is_admitted(&fixture),
+                satisfied,
+                "{}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    #[test]
+    fn an_observer_is_complete_only_once_its_own_reply_arrives() {
+        let fixture = result_precondition_interceptor();
+        let mut permit = fixture
+            .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+            .expect("an ordinary call is admitted");
+        let mut observer = permit.reply_observer(Some("1")).expect("an observer");
+        let other = b"data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"content\":[]}}\n\n";
+        assert!(
+            !observer.complete(other),
+            "another call's reply is not this one"
+        );
+        let mine = [
+            &other[..],
+            b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n",
+        ]
+        .concat();
+        assert!(observer.complete(&mine));
+        drop(observer);
+        permit.record_outcome(REPLIED).expect("the outcome records");
+    }
+
+    #[test]
+    fn a_compressed_remote_reply_records_indeterminate_and_still_counts() {
+        let gzip = [0x1f, 0x8b, 0x08, 0x00, 0xde, 0xad, 0xbe, 0xef, 0xff, 0x00];
+        let fixture = result_precondition_interceptor();
+        remote_add(&fixture, REPLIED, Some(&gzip));
+        assert!(
+            !the_guarded_add_is_admitted(&fixture),
+            "a reply Box cannot read is not a result"
+        );
+        let capped = per_tool_capped_interceptor();
+        for _ in 0..2 {
+            let mut permit = capped
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .expect("a call under the cap is admitted");
+            let observer = permit.reply_observer(Some("1")).expect("an observer");
+            permit.record_outcome(REPLIED).expect("the outcome records");
+            observer.finished(&gzip);
+        }
+        assert!(
+            capped
+                .intercept(&mcp_call_attempt("demo", "add", r#"{"a":1,"b":1}"#))
+                .is_err(),
+            "unreadable replies still count toward the cap"
+        );
+    }
 
     fn refusal(fixture: &InterceptorFixture, attempt: &EgressEffectAttempt<'_>) -> String {
         match fixture.intercept(attempt) {

@@ -63,6 +63,8 @@ pub struct VfsKernel {
     pub script_interpreter: Option<crate::os::ScriptInterpreter>,
     /// When set, `spawn_host` forwards the binary to this hook.
     pub host_spawner: Option<crate::os::HostSpawner>,
+    /// The file each declared bare name runs, which `host_program` answers.
+    pub host_programs: crate::os::HostPrograms,
     resolution_generation: Arc<Mutex<u64>>,
     pending_writes: std::sync::Mutex<Vec<PendingWrite>>,
 }
@@ -85,6 +87,7 @@ impl VfsKernel {
             egress_proxy: None,
             script_interpreter: None,
             host_spawner: None,
+            host_programs: crate::os::HostPrograms::default(),
             resolution_generation: Arc::new(Mutex::new(0)),
             pending_writes: std::sync::Mutex::new(Vec::new()),
         }
@@ -659,6 +662,7 @@ impl VfsKernel {
             proc.alloc_fd(FdKind::ChannelReader {
                 rx,
                 buf: Vec::new(),
+                outside: false,
             })
         } else if flags.write {
             let (tx, rx) = crate::os::pipe(HOST_WRITER_DEPTH);
@@ -919,6 +923,7 @@ impl VfsKernel {
             proc.alloc_fd(FdKind::ChannelReader {
                 rx,
                 buf: Vec::new(),
+                outside: false,
             })
         } else if flags.write {
             let (tx, rx) = crate::os::pipe(HOST_WRITER_DEPTH);
@@ -1070,6 +1075,7 @@ impl VfsKernel {
             proc.alloc_fd(FdKind::ChannelReader {
                 rx,
                 buf: Vec::new(),
+                outside: false,
             })
         } else if flags.read && flags.write {
             // Read-write (<>): provide existing data as a reader.
@@ -1081,6 +1087,7 @@ impl VfsKernel {
             proc.alloc_fd(FdKind::ChannelReader {
                 rx,
                 buf: Vec::new(),
+                outside: false,
             })
         } else if flags.write {
             // For writes, we use a channel that collects data and flushes to VFS
@@ -2242,6 +2249,10 @@ impl Kernel for VfsKernel {
             )),
         }
     }
+
+    fn host_program(&self, name: &str) -> Option<std::path::PathBuf> {
+        self.host_programs.get(name).cloned()
+    }
 }
 
 // --- host stat helper ---
@@ -2319,6 +2330,7 @@ fn make_dev_null_fd(proc: &mut Process, flags: &OpenFlags) -> io::Result<Fd> {
         proc.alloc_fd(FdKind::ChannelReader {
             rx,
             buf: Vec::new(),
+            outside: false,
         })
     } else {
         let (tx, _rx) = crate::os::pipe(8192);
@@ -2344,6 +2356,7 @@ fn make_dev_zero_fd(proc: &mut Process, flags: &OpenFlags) -> io::Result<Fd> {
     proc.alloc_fd(FdKind::ChannelReader {
         rx,
         buf: Vec::new(),
+        outside: false,
     })
 }
 
@@ -2397,6 +2410,7 @@ fn make_dev_urandom_fd(proc: &mut Process, flags: &OpenFlags) -> io::Result<Fd> 
     proc.alloc_fd(FdKind::ChannelReader {
         rx,
         buf: Vec::new(),
+        outside: false,
     })
 }
 
@@ -2477,6 +2491,11 @@ fn is_ip_blocked(ip: std::net::IpAddr) -> bool {
                 || v4.is_link_local()
                 || v4.is_unspecified()
                 || v4.octets()[..2] == [169, 254]
+                // 0.0.0.0/8 ("this network") is reserved and not globally reachable.
+                || v4.octets()[0] == 0
+                // Platform metadata endpoints outside the ranges above.
+                || v4 == std::net::Ipv4Addr::new(168, 63, 129, 16) // Azure WireServer
+                || v4 == std::net::Ipv4Addr::new(100, 100, 100, 200) // Alibaba Cloud metadata
         }
         std::net::IpAddr::V6(v6) => {
             // Loopback (::1)
@@ -2504,6 +2523,23 @@ fn is_ip_blocked(ip: std::net::IpAddr) -> bool {
             }
             // Link-local (fe80::/10)
             if segs[0] & 0xffc0 == 0xfe80 {
+                return true;
+            }
+            // IPv4-translated / SIIT (::ffff:0:0:0/96) — check embedded IPv4
+            if segs[..6] == [0, 0, 0, 0, 0xffff, 0] {
+                let o = v6.octets();
+                let v4 = std::net::Ipv4Addr::new(o[12], o[13], o[14], o[15]);
+                return is_ip_blocked(std::net::IpAddr::V4(v4));
+            }
+            // NAT64 well-known prefix (64:ff9b::/96, RFC 6052) — check embedded IPv4
+            if segs[..6] == [0x0064, 0xff9b, 0, 0, 0, 0] {
+                let o = v6.octets();
+                let v4 = std::net::Ipv4Addr::new(o[12], o[13], o[14], o[15]);
+                return is_ip_blocked(std::net::IpAddr::V4(v4));
+            }
+            // NAT64 local-use prefix (64:ff9b:1::/48, RFC 8215) — never globally
+            // routed and its embedding offset is operator-chosen, so block it all.
+            if segs[0] == 0x0064 && segs[1] == 0xff9b && segs[2] == 0x0001 {
                 return true;
             }
             // 6to4 (2002::/16) — check embedded IPv4
@@ -2667,6 +2703,34 @@ mod url_safety_tests {
                 check_url_safe(u).is_err(),
                 "{u} names a blocked real host and must be refused"
             );
+        }
+    }
+
+    #[test]
+    fn check_url_safe_blocks_translated_and_platform_metadata_addresses() {
+        for u in [
+            "http://[64:ff9b::a9fe:a9fe]/", // NAT64 -> 169.254.169.254
+            "http://[64:ff9b::169.254.169.254]/",
+            "http://[64:ff9b::7f00:1]/",      // NAT64 -> 127.0.0.1
+            "http://[64:ff9b::a00:1]/",       // NAT64 -> 10.0.0.1
+            "http://[64:ff9b:1::a9fe:a9fe]/", // RFC 8215 local-use NAT64
+            "http://[::ffff:0:a9fe:a9fe]/",   // SIIT IPv4-translated
+            "http://168.63.129.16/",          // Azure WireServer
+            "http://100.100.100.200/",        // Alibaba Cloud metadata
+            "http://0.1.2.3/",                // 0.0.0.0/8
+        ] {
+            assert!(check_url_safe(u).is_err(), "{u} should be blocked");
+        }
+    }
+
+    #[test]
+    fn check_url_safe_allows_public_destinations_behind_nat64_and_shared_space() {
+        for u in [
+            "http://[64:ff9b::808:808]/", // NAT64 -> 8.8.8.8 stays reachable
+            "http://100.64.0.1/",         // RFC 6598 shared space is not metadata
+            "http://100.100.100.201/",    // neighbour of the Alibaba endpoint
+        ] {
+            assert!(check_url_safe(u).is_ok(), "{u} should be allowed");
         }
     }
 

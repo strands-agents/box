@@ -6,7 +6,7 @@ Read the **"`strands-box` is interface-frozen"** section of the
 [repository guidance](../../AGENTS.md) before changing anything here. A change to an
 observable surface — the CLI verbs and flags, `box.toml`'s keys, the four box inputs, the
 on-disk records (`Record` at `RECORD_VERSION` and each later record version through
-`SHARED_PROGRAM_RECORD_VERSION`, `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
+`SHELL_SIZE_LIMITS_RECORD_VERSION`, `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
 `PROTOCOL_VERSION`, the alias names and their socket derivation, the
 policy action vocabulary, the composed workload environment — or to a foundational premise,
 needs the user's explicit approval **before** the code is written. Fixing a defect behind the
@@ -90,6 +90,15 @@ now, because `run` takes one `--config` path and searches nowhere. **That direct
   and hands off to `dispatch`, which takes one verb per arm. A fifth step, or an inline
   `insert`/`join`/`if let`, belongs in a phase. If either file grows, the phase boundary is
   wrong.
+- **Linux x86 command execution requires explicit operator consent.** `command::execute` calls
+  `platform::preflight` before hardening, runtime creation, host callbacks, or configuration reads.
+  The operator must set `EXPERIMENTAL_X86_SUPPORT` to the exact value `TRUE`. This check covers
+  the CLI and the library's `run` and `generate_policy_schema` calls. Help and version output
+  finish during argument parsing, before this check. ARM and other targets retain their startup
+  behavior. `EXPERIMENTAL_LINUX_SUPPORT` remains unused. The opt-in changes no containment
+  control and is not inherited into the workload environment.
+  `linux_startup::linux_commands_require_exact_x86_opt_in_only_on_x86` and
+  `box_library::x86_startup_matrix` cover admission and refusal through both entry paths.
 - **No stringly-typed catch-all error.** A new failure gets a variant on the owning phase's
   enum, never a `format!` into a general one.
 
@@ -157,8 +166,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   caller wanting determinism passes an absolute program path).
 
   **`tests/four_inputs.rs` is the guard.** It asserts both halves: no withheld flag is a box
-  argument, and `ConfigFile` carries exactly **ten** keys — `agent`, `box_dir`, `egress`, `mcp`,
-  `name`, `policy`, `telemetry`, `tool`, `experimental-features`, and `file-attributes`. That is the `box.toml` key set, and it is
+  argument, and `ConfigFile` carries exactly **twelve** keys — `agent`, `box_dir`, `egress`, `mcp`,
+  `name`, `policy`, `telemetry`, `tool`, `experimental-features`, `file-attributes`, `limits`, and
+  `gateway`. That is the `box.toml` key set, and it is
   **not** the stored `Record`'s key set: `Record` adds `version` and `box_id`, which no operator
   authors. Read
   which one a passage means before you change a count. The withheld-flag guard is split in two —
@@ -243,12 +253,13 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   about one box. **Do not reintroduce `--name`**; reconciling a flag against the file is the shape in
   which the file's key became silently dead once already.
 
-  **`box.toml` carries ten top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
+  **`box.toml` carries twelve top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
   `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
-  `[experimental-features]`, and `file-attributes`.** The experimental settings select native file
+  `[experimental-features]`, `file-attributes`, `[limits]`, and `[gateway]`.** The experimental settings select native file
   checks and tool grammars. They add no authority beyond the authored policy. `file-attributes` adds
   no grant: it widens what the workload's own `write` lists allow on macOS, so it is part of the
-  workload input, and each process discloses it. `[agent]` and each
+  workload input, and each process discloses it. `[gateway] upgrade_http` adds no grant either:
+  policy decides each upgraded request on port 443, as it decides a `CONNECT` to that host. `[agent]` and each
   `[tool.<label>]` hold one `ProcessSpec`, which is six fields — `command`, `workspace`, `env`,
   `filesystem`, `native-filesystem-policy`, and `grammar`. Only a `[tool.<label>]` takes
   `grammar`, behind `[experimental-features] tool-grammars`, and `[agent]` refuses it. `filesystem` holds the path lists: eight for `[agent]`, six
@@ -677,8 +688,32 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   handler's own tree was granted. The floor names neither tree, because an operator makes a
   virtualenv or a `node_modules` wherever they like. An entry on a path that does not exist is
   refused, never skipped, and `record/config/filesystem.rs` states every other refusal class.
-- **The alias must send `StdinEof`.** `forward` sends `Open`, `Call`, **`StdinEof`**, and the third
-  frame is not optional. A harness invoking `zsh -c` supplies nothing on stdin, so without the EOF
+- **A Shell alias streams finite stdin after the Call.** It classifies fd 0 with `fstat`: a pipe,
+  a regular file, or a socket is read; a terminal, another device, or a closed fd is not. A thread
+  reads it and `pump_input` sends `Input` frames, coalesced for `INPUT_COALESCE_WAIT` and up to
+  `MAX_CHUNK_BYTES`, then `InputEof`. The broker merges a Program's unread stdin into one buffer, at most `max_stdin` bytes, behind a two-frame channel, so a writer's
+  small writes do not trip flow control while the command is not reading. The alias reads stdin
+  whether or not the command reads it, so it consumes bytes a POSIX shell would leave, such as the
+  rest of an inherited file. The alias returns on `Exit`, so a writer that keeps the pipe open holds nothing:
+  Claude Code 2.1.292 gives its Bash tool such a stdin, and collecting to EOF before the Call made
+  every agent command wait 10 s and fail. A command that reads such a stdin waits until the Shell
+  deadline. The alias forwards every byte, and the broker applies `[limits.shell] max_stdin`
+  (`ShellLimits::max_stdin`, 64 KiB by default, never 0): it feeds exactly the first `max_stdin`
+  bytes, discards the rest, sends no Denied, and ignores `InputEof`, so the writer never blocks or
+  gets EPIPE, a command that does not read is unaffected, and one that reads past the cap waits for
+  the Shell deadline and fails; a failed Call then gets a stderr note that its input was cut. On a
+  read error the alias sends `Signal` and no `InputEof`, the broker drops the Call so
+  `ProcessGroup::drop` kills and reaps each process it started, and the alias exits 125. The broker
+  cuts the same way at `max_stdin` times `MAX_PROGRAMS_PER_CONNECTION` per connection, and
+  input waits in the same per-Program buffer; the pump sends it in frames of at most `MAX_CHUNK_BYTES`,
+  because the Shell's `ChannelReader` shifts a frame's remainder on each read. It refuses an `Input` longer than `MAX_ENCODED_CHUNK_BYTES`
+  before it decodes it, and after a refused `Input` signals the running `Call`, leaves stdin open (`Close` also signals
+  and leaves stdin open)
+  so the Call never reads end-of-file on part of its input, drops every later `Input`, and refuses each later `Call` on that
+  Program. Input for a Program whose Shell no longer reads stdin is dropped. Python and MCP aliases read no stdin here, and a tool leaf still gets
+  `Stdio::null()`.
+- **The alias must send `StdinEof`.** A Shell alias's `forward` sends `Open`, `Call`, each `Input`,
+  and **`StdinEof`**. The EOF frame is not optional. A harness invoking `zsh -c` often supplies nothing on stdin, so without the EOF
   the Program's stdin channel stays open and any command that pre-reads stdin blocks to its
   deadline — the `lua` builtin does exactly that, so **every** `lua` call took 34–36s and came back
   as `the call exceeded its deadline`. Two things worth not repeating:

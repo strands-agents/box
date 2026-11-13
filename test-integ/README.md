@@ -40,7 +40,7 @@ approval gate is required for safety.
 ### Both platforms block
 
 The Ubuntu ARM64 and macOS jobs both affect `CI Gate`. The repository requires that status
-before merging. Linux uses ARM64 because the namespace backend refuses other architectures.
+before merging. The Linux job runs on ARM64.
 The Linux job enables unprivileged user namespaces before the suite starts.
 
 Each job writes the per-case table to its summary and uploads the verdict and logs.

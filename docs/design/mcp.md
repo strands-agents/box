@@ -13,17 +13,25 @@ It also explains which parts of a request policy can restrict.
 | Declared as | `[mcp.<name>]` with `type = "stdio"` | `[mcp.<name>]` with `type = "http"` |
 | Runs in | Its own sandbox, which Box starts | Somewhere else. Box checks its requests, not the server. |
 | Reached through | The alias for the server's program, then the MCP broker, then the server's stdin | The egress gateway |
-| Starting or connecting | `shell:spawn` | `net:connect` and `http:request` |
+| Starting or connecting | `shell:spawn` or the required tool grammar action | `net:connect` and `http:request` |
 | Each MCP request, except the protocol methods described below | `mcp:call` | `mcp:call` after the destination matches a configured server |
 
 Box starts each stdio server in a sandbox of its own, separate from the agent's. See [local MCP servers](./containment.md#local-mcp-servers). The MCP broker is the part of Box that
 receives the agent's requests over a local socket, and the egress gateway checks and forwards every
 outbound network request.
 
-A server needs both transport access and MCP authorization. A server needs `shell:spawn`, or `net:connect` and
-`http:request`, plus `mcp:call`. Together they allow every tool on the server. See [an MCP tool call
-takes two decisions](decisions.md#mcp-authorization-is-two-gates). Every other MCP rule narrows
-that.
+A local server needs permission to start and `mcp:call` permission for its requests. Its start uses
+`shell:spawn` unless its configured program name requires a tool grammar. A remote server needs
+`net:connect`, `http:request`, and `mcp:call`. See [an MCP tool call takes two
+decisions](decisions.md#mcp-authorization-is-two-gates).
+
+Local servers start on demand. Box records available program files for tool grammars before the
+workload starts, but an unavailable server program does not stop Box. On each server-start request,
+Box requires any applicable grammar to match the executable's recorded file identity and called
+name. If no binding matches, Box refuses that start before policy can grant general process-start
+permission. A retry can use a link to an already-bound file under the same called name; a new
+executable needs a new Box run. This preserves [delayed server startup](decisions.md#a-stdio-mcp-server-runs-contained)
+and [file-and-name binding](decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name).
 
 The server's name comes from `box.toml`. A rule reads the `[mcp.<name>]` table's name, never a
 value from the request. See [every MCP server is one configuration
@@ -38,34 +46,8 @@ executable in the server's sandbox. The alias name also supplies policy's `progr
 
 ## Remote-server destination matching
 
-The egress gateway selects a remote MCP server by comparing the request's host with the explicit
-hosts in that server's `destinations` list in `box.toml`. It ignores hostname letter case and
-trailing dots, and compares IP literals by their parsed address. It does not group hosts by DNS
-results. A different hostname or a direct IP address therefore does not select a server declared
-under another hostname, even when both reach the same application.
-
-This selection uses the host alone. Ports and paths in a destination do not narrow MCP inspection.
-Wildcard entries select neither the parent domain nor concrete subdomains for MCP checks. A
-configured credential can still attach to matching subdomain requests under the separate credential
-[destination matching rules](../user/egress.md#destinations). See the
-[configuration reference](../user/mcp.md#remote-destination-matching) for the consequence of
-listing only wildcard destinations.
-
-After a host matches, Box parses the MCP request and applies the server's MCP checks. Without a
-match, network and HTTP policy still apply, without MCP checks. Its body does not select an MCP server,
-even if it contains an MCP tool call. The [security model](security.md#remote-mcp-tool-restrictions)
-states the resulting protection limit and the operator's responsibility for alternative routes.
-
-*Figure: Both addresses reach the same example server, and network and HTTP policy permit both.
-Only `localhost` is declared for MCP policy, so its tool restriction does not apply to requests
-sent to `127.0.0.1`.*
-
-![An agent sends a delete_repo tool call through Box's network and HTTP checks, which permit it.
-Box then matches the destination. The declared localhost route receives a tool-policy denial.
-The undeclared 127.0.0.1 route receives no MCP tool check and reaches the same example server,
-where the tool executes.](images/mcp-destination-matching.png)
-
-The [editable diagram](images/mcp-destination-matching.drawio) shows the same request paths.
+Remote MCP checks require a matching configured host; see the
+[security model](security.md#remote-mcp-tool-restrictions) for their scope and the operator's responsibility for other routes.
 
 ## Policy levels
 
@@ -94,7 +76,13 @@ Normalization applies these changes:
   in the path.
 - Resolve `.`, `..`, and empty path segments, and remove a default port.
 - Convert `file:/x` and `file://localhost/x` to `file:///x`.
-- Remove a fragment, which never reaches the server, and remove an empty query.
+- Remove a fragment, which never reaches the server.
+- Remove an empty query only for a `file:` URI.
+
+HTTP and HTTPS resource URIs retain an empty query. For example, `https://notes/report?` and
+`https://notes/report` remain distinct addresses for an exact `uri` rule. If the MCP server fetches
+that address through the Box HTTP gateway, the gateway also preserves the empty `?` in the request
+it forwards to the origin. Each request still requires its applicable policy checks.
 
 Box leaves URIs with other schemes exactly as the workload wrote them. Write each `uri` literal
 in the normalized form. Rules compare text exactly, so another spelling never matches.
@@ -271,11 +259,20 @@ the program, so servers that share a program, such as `npx`, share one alias. Th
 `command` in `box.toml` matches those words in order. Arguments must either all match the authored
 form or all match the form the server receives after `${OTEL_EXPORTER_OTLP_*}` tokens expand.
 A harness with a fixed configuration relies on the written form, because an endpoint token expands to
-a port that changes on each run. If no `command` matches, the broker refuses the launch and starts
-no server. The launch cannot reach a server it did not name. The refusal names the servers on that program and never their commands,
-because the agent cannot read `box.toml`. The broker also records the refusal as a `shell:spawn`
-denial with the rule `enforcement:mcp-command`, so an operator finds a mistyped command in the run's
-records. By default, the arguments only select among the servers the operator declared.
+a port that changes on each run. If no command matches a declared program, the broker sends an
+explicit non-match response. It starts no server and records a `strands.box.mcp.unmatched` diagnostic.
+The record names the program and carries redacted received arguments, with no policy verdict or
+execution outcome. The alias then executes the ordinary program inside the agent's sandbox, using
+that sandbox's existing grants.
+An undeclared program, an ambiguous match, or an unavailable command expansion remains a refusal.
+MCP commands use literal argument matching by default.
+
+The alias waits for the routing response before reading standard input. After a matched server
+starts, the broker sends readiness before relaying server output. The alias then starts its input
+relay. A server that waits for input therefore does not block the routing response.
+A denied start or failed broker connection cannot select ordinary fallback.
+The [shared-launcher decision](decisions.md#mcp-nonmatches-retain-ordinary-agent-execution)
+states why a command mismatch can select this route and what it costs.
 
 With `argument_wildcards = true` on a stdio MCP entry, a configured argument equal
 to `*` skips that position's comparison. The executable, argument count, and other arguments must still match. Each entry defaults to literal argument matching. Exact commands, including literal
