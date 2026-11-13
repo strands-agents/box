@@ -249,3 +249,21 @@ async fn touch_r_copies_the_reference_times_of_an_in_memory_file() {
         })
         .await;
 }
+
+#[tokio::test]
+async fn touch_creates_a_missing_in_memory_file_at_the_date() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut sh = Shell::builder()
+                .disable_network()
+                .build()
+                .expect("shell builds");
+            let out = sh.run("touch -d @981173106 /tmp/new").await;
+            assert_eq!(out.status, 0, "touch must succeed: {}", out.stderr);
+            assert_eq!(
+                memory_times(&sh, "/tmp/new").await,
+                (Some(at(STAMP)), Some(at(STAMP)))
+            );
+        })
+        .await;
+}

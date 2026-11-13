@@ -121,6 +121,11 @@ async fn touch_one(
         if !explicit {
             return Ok(());
         }
+        // A new file's content is written once its writer closes, which also sets its modification
+        // time, so wait for that write before setting the times.
+        if let Some(failure) = os.settle_writes().await.into_iter().next() {
+            return Err(failure.error);
+        }
     }
     io::set_times(os, path, times).await
 }

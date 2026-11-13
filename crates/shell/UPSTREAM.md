@@ -2056,14 +2056,16 @@ This copy adds a time operation along the same path as `chmod`:
   change sets. A read does not update it, as on a `noatime` mount.
 
 `touch` now accepts `-a`, `-m`, `-c`/`--no-create`, `-d`/`--date`, `-r`/`--reference`, and `-t`.
-`-d` accepts ISO 8601 and `@SECONDS` only, because the crate has no date parser, and it refuses
-a non-ASCII date before it slices one. A time with no
-zone is UTC, as `date` assumes. A missing file is created in append mode, so a file that another
-writer creates after the check is not truncated. A failure on one file is reported with its name,
-and `touch` continues with the next file and exits 1.
+`-d` accepts ISO 8601 and `@SECONDS` only, because the crate has no date parser, and it refuses a
+non-ASCII date before it slices one. A time with no zone is UTC, as `date` assumes. A missing file
+is created in append mode, so a file that another writer creates after the check is not truncated.
+When the times are explicit, `touch` waits for that write with `settle_writes` first, because the
+write also sets the modification time. A failure on one file is reported with its name, and `touch`
+continues with the next file and exits 1.
 
 Box maps `SetTimes` to its existing `fs:write` operation `write_content` in
 `crates/policy/src/adapters/shell.rs`, so the policy vocabulary does not change.
-`tests/touch_times.rs` pins the host and in-memory behavior (11 cases). Seven of them fail when the
+`tests/touch_times.rs` pins the host and in-memory behavior (12 cases). Seven of them fail when the
 host branch does nothing, and the two in-memory `-a` and `-r` cases fail when the in-memory branch
-keeps the access time.
+keeps the access time. `touch_creates_a_missing_in_memory_file_at_the_date` fails without the
+`settle_writes` call.
