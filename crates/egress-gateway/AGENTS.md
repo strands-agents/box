@@ -148,6 +148,13 @@ Conventions: `docs/conventions.md`.
   the daemon's lifetime, so a wildcard-host policy otherwise leaks without bound.
 - Refuse an unframed message on a reusable connection when keep-alive lands. hyper's client reads an
   unframed reply to EOF, correct only while the close delimits.
+- Keep `TCP_NODELAY` on the socket that `open_upstream` returns. A request is up to three small
+  writes: the TLS `Finished`, the head, and the body. Nagle's algorithm holds a small write until
+  the origin acknowledges the write before it. Without the option, a one-segment HTTPS request took
+  about 50 ms longer on four origins behind Cloudflare, and 17 ms longer on Bedrock. Each number is
+  the median of 4 alternated pairs (macOS, release build). For an 8 KiB `POST`, which is several
+  segments on those paths, the measurement resolved no change. The call is best-effort: after a
+  failure, the next read or write reports the dead socket.
 
 ## Change Checklist
 
