@@ -270,7 +270,9 @@ interpreters are part of the code the operator must trust.
    canonical path and filesystem identity of each source file it opens.
    [Later steps use the validated identities](decisions.md#a-run-validates-once-then-acts-on-the-identity-it-approved),
    so replacing a source file cannot substitute a new configuration.
-3. It opens the collector to record the steps that follow.
+3. It opens the collector to record the steps that follow. A telemetry secret read from AWS
+   Secrets Manager prints one line on stderr, which says the read was signed with the host's
+   ambient AWS identity.
 4. It installs the policy. Parsing or validation errors stop startup. Box also
    [rejects rules it can prove will never match](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns).
    It warns when it finds a rule that may never match but cannot prove it.

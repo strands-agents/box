@@ -43,7 +43,9 @@ the same route, and everything on this page applies to it as described in [the `
 table](../user/mcp.md).
 
 Box accepts only the `env://` and `aws://` schemes. A route that names any other scheme is refused
-when the configuration loads. See [a credential the box can't deliver is refused at
+when the configuration loads. A telemetry target also reads `aws-secretsmanager://SECRET[#FIELD]`,
+once at startup, signed by the default chain; see [a Secrets Manager secret is read on the default
+chain's worker](./decisions.md#a-secrets-manager-secret-is-read-on-the-default-chains-worker). See [a credential the box can't deliver is refused at
 load](./decisions.md#an-undeliverable-credential-is-refused-at-load).
 
 ## The parts
