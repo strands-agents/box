@@ -944,6 +944,18 @@ and its `P_PIDFD` form takes a descriptor from the permitted `pidfd_open`.
 `a_child_is_awaited_with_waitid_under_the_filters` checks `P_ALL` with `WNOHANG`, `P_PIDFD`, and
 `P_PID` under the filters.
 
+### Select waits
+
+On November 13, 2026, on Amazon Linux 2023 ARM64, `strace -f` of a contained `cargo add serde`
+showed one refused wait call: `pselect6` on the registry socket returned `EPERM`. The libcurl that
+cargo vendors waits with `select()`, which glibc issues as `pselect6` on ARM64, and curl treats any
+error other than `EINTR` as fatal: cargo printed `Unrecoverable error in select/poll`. With
+`pselect6` permitted, the same command downloaded its crates. Permit `pselect6` on every
+architecture and `select` on x86-64, where older glibc and raw callers issue it. Both only wait on
+descriptors the process already holds, like the permitted `ppoll` and `epoll_pwait`.
+`select_waits_on_held_descriptors_under_the_filters` runs glibc's `select()` and each raw call on a
+readable pipe under the filters, so x86 CI measures the x86 spelling.
+
 ### W^X
 
 W^X closes three routes. Every writable mount, including `/tmp`, uses `MS_NOEXEC`. The permit filter

@@ -1571,6 +1571,106 @@ mod tests {
     }
 
     #[test]
+    fn select_waits_on_held_descriptors_under_the_filters() {
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        let outcome = in_filtered_child(&filters, || {
+            let mut pipe = [0; 2];
+            // SAFETY: the kernel writes two descriptors into the live array.
+            if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+                return 13;
+            }
+            // SAFETY: writing one byte from a live buffer into this child's own pipe.
+            if unsafe { libc::write(pipe[1], b"x".as_ptr().cast(), 1) } != 1 {
+                return 14;
+            }
+            let ready = |result: libc::c_long, set: &libc::fd_set| -> Option<i32> {
+                if result == -1 {
+                    return Some(
+                        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
+                            10
+                        } else {
+                            11
+                        },
+                    );
+                }
+                // SAFETY: reading a bit of a live, initialized set.
+                (result != 1 || !unsafe { libc::FD_ISSET(pipe[0], set) }).then_some(12)
+            };
+            let readable = || {
+                // SAFETY: an all-zero fd_set is an empty set.
+                let mut set: libc::fd_set = unsafe { std::mem::zeroed() };
+                // SAFETY: the pipe's read end is far below FD_SETSIZE.
+                unsafe { libc::FD_SET(pipe[0], &mut set) };
+                set
+            };
+            // glibc's select(), which issues pselect6 on ARM64 and whichever call it picks on x86.
+            let mut set = readable();
+            let mut timeout = libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            };
+            let null = std::ptr::null_mut::<libc::fd_set>();
+            // SAFETY: every pointer is live or null for the duration of the call.
+            let result = unsafe { libc::select(pipe[0] + 1, &mut set, null, null, &mut timeout) };
+            if let Some(code) = ready(result.into(), &set) {
+                return code;
+            }
+            let mut set = readable();
+            let timeout = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: every pointer is live or null; a null sigmask argument leaves the mask alone.
+            let result = unsafe {
+                libc::syscall(
+                    libc::SYS_pselect6,
+                    pipe[0] + 1,
+                    &mut set,
+                    null,
+                    null,
+                    &timeout,
+                    std::ptr::null::<libc::c_void>(),
+                )
+            };
+            if let Some(code) = ready(result, &set) {
+                return code + 10;
+            }
+            #[cfg(target_arch = "x86_64")]
+            {
+                let mut set = readable();
+                let mut timeout = libc::timeval {
+                    tv_sec: 0,
+                    tv_usec: 0,
+                };
+                // SAFETY: every pointer is live or null for the duration of the call.
+                let result = unsafe {
+                    libc::syscall(
+                        libc::SYS_select,
+                        pipe[0] + 1,
+                        &mut set,
+                        null,
+                        null,
+                        &mut timeout,
+                    )
+                };
+                if let Some(code) = ready(result, &set) {
+                    return code + 20;
+                }
+            }
+            0
+        });
+        assert_eq!(
+            outcome, 0,
+            "10/20/30 = glibc select / raw pselect6 / raw x86 select WAS REFUSED WITH EPERM, so \
+             cargo's vendored libcurl fails every download with 'Unrecoverable error in \
+             select/poll'; 11/21/31 = refused with another errno; 12/22/32 = the readable pipe \
+             was not reported; 13/14 = pipe setup failed; 40 = installing the filters failed"
+        );
+    }
+
+    #[test]
     fn permit_and_restriction_filters_refuse_unapproved_calls() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()
