@@ -99,6 +99,11 @@ create it, because Box creates no directory above the one `box_dir` names``. Eve
 for a box is under `box_dir`, or under a path the file names. The example's
 `box_dir` is `my-box/state`, under the `my-box` directory the operator made for the two files.
 
+Box refuses a `box_dir` that leaves no room for the longest path it needs inside it, which is
+`<box_dir>/run/box.sock`. The system allows 103 bytes for that path. The refusal reads ``unsafe box
+directory <path>: the longest path inside it would be <n> bytes, and the system allows 103; use a
+shorter box directory``, and nothing is created.
+
 `box_dir` may not be the agent's workspace or lie below it, and neither `box.toml` nor `policy.dw`
 may lie inside it. Each is refused by name: ``` `box_dir` <path> is equal to or below the agent's
 workspace <path>```, ``configuration source <path> is inside `box_dir` <path>``, and ``policy source

@@ -375,10 +375,14 @@ impl BoxRoot {
             configured,
             committed_before_open: configured,
         };
-        if layout.broker_socket().as_os_str().as_encoded_bytes().len() > BROKER_SOCKET_PATH_LIMIT {
+        let longest = layout.broker_socket().as_os_str().as_encoded_bytes().len();
+        if longest > BROKER_SOCKET_PATH_LIMIT {
             return Err(LayoutError::UnsafeDirectory {
                 path: path.to_path_buf(),
-                reason: "its broker socket path exceeds the platform limit".to_string(),
+                reason: format!(
+                    "the longest path inside it would be {longest} bytes, and the system allows \
+                     {BROKER_SOCKET_PATH_LIMIT}; use a shorter box directory"
+                ),
             }
             .into());
         }
@@ -4943,8 +4947,12 @@ mod tests {
             Ok(_) => panic!("a box whose socket does not fit must be refused"),
         };
         assert!(
-            error.to_string().contains("exceeds the platform limit"),
-            "the refusal must name the limit: {error}"
+            error.to_string().contains(&format!(
+                "the longest path inside it would be {} bytes, and the system allows \
+                 {BROKER_SOCKET_PATH_LIMIT}; use a shorter box directory",
+                BROKER_SOCKET_PATH_LIMIT + 1
+            )),
+            "the refusal must give the length, the limit and the fix: {error}"
         );
 
         // The paired positive, one byte shorter: without it this passes on a check that refuses
