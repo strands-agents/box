@@ -131,6 +131,7 @@ struct AgentTable {
     metadata: Vec<String>,
     exec: Vec<String>,
     deny: Vec<String>,
+    deny_write: Vec<String>,
     env: Vec<(String, String)>,
 }
 
@@ -294,6 +295,7 @@ impl Request {
             "metadata" => self.agent.metadata.extend(entries),
             "exec" => self.agent.exec.extend(entries),
             "deny" => self.agent.deny.extend(entries),
+            "deny_write" => self.agent.deny_write.extend(entries),
             other => panic!("{other} is not a filesystem list"),
         }
         self
@@ -357,7 +359,7 @@ impl Request {
                 .collect();
             toml.push_str(&format!("env = {{ {} }}\n", pairs.join(", ")));
         }
-        let lists: [(&str, &[String]); 8] = [
+        let lists: [(&str, &[String]); 9] = [
             ("read", &table.read),
             ("write", &table.write),
             ("read_file", &table.read_file),
@@ -366,6 +368,7 @@ impl Request {
             ("metadata", &table.metadata),
             ("exec", &table.exec),
             ("deny", &table.deny),
+            ("deny_write", &table.deny_write),
         ];
         if lists.iter().any(|(_, entries)| !entries.is_empty()) {
             toml.push_str("\n[agent.filesystem]\n");

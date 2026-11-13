@@ -494,10 +494,7 @@ impl RunContract {
                         .chain(self.file.tool.values())
                         .chain(contained_mcp.values().map(|m| &m.spec)),
                     &mcp_servers,
-                    self.file
-                        .agent
-                        .as_ref()
-                        .is_some_and(|agent| !agent.ingress.is_empty()),
+                    self.file.agent.as_ref(),
                     has_backend(&egress, &remote_mcp),
                     &self.file.gateway,
                 ),
@@ -671,6 +668,8 @@ const SHELL_STDIN_LIMIT_RECORD_VERSION: u32 = 33;
 /// The record version of a record whose box identity a caller supplied, so an older build refuses
 /// the box by its version rather than by its identity.
 pub(crate) const SUPPLIED_IDENTITY_RECORD_VERSION: u32 = 34;
+/// The record version of a record whose agent declares a `filesystem.deny_write` list.
+const DENY_WRITE_RECORD_VERSION: u32 = 35;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -682,11 +681,13 @@ pub(crate) struct ExperimentalFeatures {
     pub(crate) tool_grammars: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub(crate) ingress: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) deny_write: bool,
 }
 
 impl ExperimentalFeatures {
     fn is_disabled(&self) -> bool {
-        !self.native_filesystem_policy && !self.tool_grammars && !self.ingress
+        !self.native_filesystem_policy && !self.tool_grammars && !self.ingress && !self.deny_write
     }
 
     fn record_version(&self) -> u32 {
@@ -721,11 +722,14 @@ fn record_version<'a>(
     limits: &Limits,
     specs: impl Iterator<Item = &'a ProcessSpec>,
     mcp: &[crate::record::config::mcp::McpServer],
-    ingress: bool,
+    agent: Option<&ProcessSpec>,
     has_backend: bool,
     gateway: &Gateway,
 ) -> u32 {
-    if !generated_box_identity(box_id) {
+    let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
+    if agent.is_some_and(|agent| !agent.filesystem.deny_write.is_empty()) {
+        DENY_WRITE_RECORD_VERSION
+    } else if !generated_box_identity(box_id) {
         SUPPLIED_IDENTITY_RECORD_VERSION
     } else if limits.shell.has_stdin_limit() {
         SHELL_STDIN_LIMIT_RECORD_VERSION
@@ -1017,6 +1021,7 @@ impl Record {
             UPGRADE_HTTP_RECORD_VERSION,
             SHELL_STDIN_LIMIT_RECORD_VERSION,
             SUPPLIED_IDENTITY_RECORD_VERSION,
+            DENY_WRITE_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1046,10 +1051,7 @@ impl Record {
                 .chain(record.tool.values())
                 .chain(record.contained_mcp.values().map(|m| &m.spec)),
             &record.mcp,
-            record
-                .agent
-                .as_ref()
-                .is_some_and(|agent| !agent.ingress.is_empty()),
+            record.agent.as_ref(),
             has_backend(&record.egress, &record.remote_mcp),
             &record.gateway,
         );
@@ -1074,6 +1076,8 @@ impl Record {
                 self.experimental_features.native_filesystem_policy,
             )?;
             agent.validate_ingress_selection("[agent]", self.experimental_features.ingress)?;
+            agent
+                .validate_deny_write_selection("[agent]", self.experimental_features.deny_write)?;
         }
         for (label, tool) in &self.tool {
             tool.validate(&format!("[tool.{label}]"))?;
@@ -1435,6 +1439,8 @@ impl ConfigFile {
                 self.experimental_features.native_filesystem_policy,
             )?;
             agent.validate_ingress_selection("[agent]", self.experimental_features.ingress)?;
+            agent
+                .validate_deny_write_selection("[agent]", self.experimental_features.deny_write)?;
         }
         for (label, tool) in &self.tool {
             validate_tool_label(label)?;
@@ -1536,7 +1542,7 @@ mod tests {
                             &stored.limits,
                             std::iter::empty(),
                             &stored.mcp,
-                            false,
+                            None,
                             false,
                             &Gateway::default(),
                         ),
@@ -1589,7 +1595,7 @@ mod tests {
                 &stored.limits,
                 std::iter::empty(),
                 &stored.mcp,
-                false,
+                None,
                 has_backend(&stored.egress, &stored.remote_mcp),
                 &Gateway::default(),
             ),
@@ -1839,6 +1845,7 @@ mod tests {
                         native_filesystem_policy,
                         tool_grammars: true,
                         ingress: false,
+                        deny_write: false,
                     };
                     for override_value in [None, Some(false)] {
                         spec.native_filesystem_policy = override_value;
@@ -1851,7 +1858,7 @@ mod tests {
                                     &limits,
                                     std::iter::once(&spec),
                                     servers,
-                                    false,
+                                    None,
                                     false,
                                     &Gateway::default(),
                                 ),
@@ -2432,6 +2439,65 @@ native-filesystem-policy = false
         );
     }
 
+    const DENY_WRITE_ON: &str = "[experimental-features]\ndeny-write = true\n";
+
+    /// **`filesystem.deny_write` needs the `deny-write` switch**, and only `[agent]` takes one.
+    #[test]
+    fn a_deny_write_list_needs_the_switch_and_the_agent() {
+        let agent = "[agent]\ncommand = [\"x\"]\n[agent.filesystem]\n\
+             write = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n";
+        let refusal = "invalid `[agent]` table: `filesystem.deny_write` is experimental: set \
+             `deny-write = true` in `[experimental-features]` to load it";
+        for switch in ["", "[experimental-features]\ndeny-write = false\n"] {
+            let error = load(&format!("{agent}{switch}")).expect_err("the switch is off");
+            assert_eq!(error.to_string(), refusal, "{switch:?}");
+        }
+        let file = load(&format!("{agent}{DENY_WRITE_ON}")).expect("the switch is on");
+        assert_eq!(
+            file.agent.expect("the agent").filesystem.deny_write,
+            [PathBuf::from("/work/.venv")]
+        );
+        let error = load(&format!(
+            "{GIT_TOOL}[tool.git.filesystem]\nwrite = [\"/work\"]\n\
+             deny_write = [\"/work/.venv\"]\n{DENY_WRITE_ON}"
+        ))
+        .expect_err("a tool refuses the list");
+        assert!(
+            error
+                .to_string()
+                .contains("`filesystem.deny_write` is refused on `[tool.git]`"),
+            "{error}"
+        );
+    }
+
+    /// A stored `deny_write` list takes record version 32 and needs the stored switch.
+    #[test]
+    fn a_stored_deny_write_needs_its_version_and_the_stored_switch() {
+        let mut stored = record_from_config(&format!(
+            "[agent]\ncommand = [\"/bin/sh\"]\n[agent.filesystem]\n\
+             write = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n{DENY_WRITE_ON}"
+        ))
+        .expect("an agent deny_write loads");
+        assert_eq!(stored.version, DENY_WRITE_RECORD_VERSION);
+        assert!(
+            Record::parse(
+                &toml::to_string(&stored).expect("the record serializes"),
+                Path::new("record.toml")
+            )
+            .is_ok(),
+            "the record round-trips"
+        );
+        stored.experimental_features.deny_write = false;
+        assert!(
+            Record::parse(
+                &toml::to_string(&stored).expect("the record serializes"),
+                Path::new("record.toml")
+            )
+            .is_err(),
+            "a stored deny_write needs the switch"
+        );
+    }
+
     /// A stored ingress needs the stored switch, so a record cannot carry a listener the operator
     /// did not turn on.
     #[test]
@@ -2907,7 +2973,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, SUPPLIED_IDENTITY_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, DENY_WRITE_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

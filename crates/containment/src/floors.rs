@@ -94,8 +94,19 @@ pub(crate) fn warnings(config: &ContainmentConfig) -> Vec<ContainmentWarning> {
         .into_iter()
         .flat_map(|scope| config.grants_in(Operation::Write, scope))
         .collect();
+    let protected = |path: &Path| {
+        config.write_protected_trees().any(|tree| {
+            path.starts_with(tree)
+                && !writables
+                    .iter()
+                    .any(|writable| writable.resolved.starts_with(tree))
+        })
+    };
     let mut warnings = Vec::new();
-    for executable in &executables {
+    for executable in executables
+        .iter()
+        .filter(|grant| !protected(&grant.resolved))
+    {
         for writable in &writables {
             let reaches = |path: &Path, spelling: &Path| match writable.scope {
                 Scope::Root => path.starts_with(spelling),
@@ -115,7 +126,7 @@ pub(crate) fn warnings(config: &ContainmentConfig) -> Vec<ContainmentWarning> {
             } else {
                 None
             };
-            if let Some((executable, writable)) = spelling {
+            if let Some((executable, writable)) = spelling.filter(|(path, _)| !protected(path)) {
                 warnings.push(ContainmentWarning::WritableAndExecutable {
                     executable: executable.clone(),
                     writable: writable.clone(),
@@ -981,6 +992,42 @@ mod tests {
                 "{label}: one pair, one warning"
             );
         }
+
+        let venv = root.join("venv");
+        std::fs::create_dir(&venv).expect("a protected tree");
+        let protected = crate::config::ContainmentConfig::new()
+            .allow(&venv, Operation::Exec, Scope::Root)
+            .expect("an exec tree")
+            .allow(&root, Operation::Write, Scope::Root)
+            .expect("a write root enclosing it")
+            .protect_write_tree(&venv)
+            .expect("the tree is write-protected");
+        assert_eq!(
+            super::warnings(&protected),
+            Vec::new(),
+            "an exec tree the write root cannot write is not a pair"
+        );
+
+        let outside = tempfile::tempdir().expect("an interpreter outside the root");
+        let interpreter = outside
+            .path()
+            .canonicalize()
+            .expect("canonical")
+            .join("python");
+        std::fs::write(&interpreter, "#!/bin/sh\n").expect("an interpreter");
+        std::os::unix::fs::symlink(&interpreter, venv.join("python")).expect("a venv link");
+        let linked = crate::config::ContainmentConfig::new()
+            .allow(venv.join("python"), Operation::Exec, Scope::File)
+            .expect("the venv's interpreter")
+            .allow(&root, Operation::Write, Scope::Root)
+            .expect("a write root enclosing the link")
+            .protect_write_tree(&venv)
+            .expect("the tree is write-protected");
+        assert_eq!(
+            super::warnings(&linked),
+            Vec::new(),
+            "a link in a protected tree cannot be replaced"
+        );
 
         // The control: a program beside a write root is neither refused nor warned about.
         let disjoint = crate::config::ContainmentConfig::new()

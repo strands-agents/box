@@ -25,6 +25,9 @@ pub struct ContainmentConfig {
     paths: Vec<PathGrant>,
     identity_requirements: Vec<WriteProtection>,
     write_protections: Vec<WriteProtection>,
+    /// Directories inside a write grant whose whole tree the workload may read but not write.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    write_protected_trees: Vec<WriteProtectedTree>,
     /// Program files that keep the link count they had when opened.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     command_identities: Vec<CommandIdentity>,
@@ -89,6 +92,7 @@ impl ContainmentConfig {
             paths: Vec::new(),
             identity_requirements: Vec::new(),
             write_protections: Vec::new(),
+            write_protected_trees: Vec::new(),
             command_identities: Vec::new(),
             network: Network::Blocked,
             process: Process::default(),
@@ -276,6 +280,50 @@ impl ContainmentConfig {
         Ok(self)
     }
 
+    /// Deny writes to one existing directory and everything under it, inside a write grant. Read
+    /// and exec grants over it still apply.
+    pub fn protect_write_tree(mut self, path: impl AsRef<Path>) -> Result<Self> {
+        let tree = WriteProtectedTree::new(path.as_ref())?;
+        if self
+            .write_protected_trees
+            .iter()
+            .any(|existing| existing.path == tree.path)
+        {
+            return Err(ContainmentError::ConflictingGrants {
+                reason: format!("{} is write-protected twice", tree.path.display()),
+            });
+        }
+        self.require_protectable(&tree.path)?;
+        self.write_protected_trees.push(tree);
+        Ok(self)
+    }
+
+    /// Refuse a write-protected tree that no write grant reaches, or that a refusal already removes.
+    fn require_protectable(&self, tree: &Path) -> Result<()> {
+        if !self
+            .grants_in(Operation::Write, Scope::Root)
+            .iter()
+            .any(|root| tree.starts_with(&root.resolved))
+        {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "{} is write-protected, but no write grant reaches it, so the protection enforces \
+                 nothing",
+                tree.display()
+            )));
+        }
+        if self
+            .refusals()
+            .iter()
+            .any(|refused| tree.starts_with(&refused.resolved))
+        {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "{} is write-protected inside a refusal, which already removes every access",
+                tree.display()
+            )));
+        }
+        Ok(())
+    }
+
     /// Require one opened regular file to keep its path and identity; a backend can allow metadata and existence checks.
     pub fn require_file_identity(
         mut self,
@@ -388,6 +436,9 @@ impl ContainmentConfig {
         })?;
         config.validate_credential_store_grants()?;
         config.validate_discovery()?;
+        for tree in &config.write_protected_trees {
+            config.require_protectable(&tree.path)?;
+        }
         Ok(config)
     }
 
@@ -463,6 +514,23 @@ impl ContainmentConfig {
 
     pub(crate) fn write_protections(&self) -> &[WriteProtection] {
         &self.write_protections
+    }
+
+    /// Every write-protected directory, as its resolved path.
+    pub(crate) fn write_protected_trees(&self) -> impl Iterator<Item = &Path> {
+        self.write_protected_trees
+            .iter()
+            .map(|tree| tree.path.as_path())
+    }
+
+    /// Every write-protected directory with the device and inode recorded when it was protected.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn write_protected_tree_identities(
+        &self,
+    ) -> impl Iterator<Item = (&Path, u64, u64)> {
+        self.write_protected_trees
+            .iter()
+            .map(|tree| (tree.path.as_path(), tree.device, tree.inode))
     }
 
     pub(crate) fn identity_requirements(&self) -> &[WriteProtection] {
@@ -553,6 +621,9 @@ impl ContainmentConfig {
         }
         for protected in &self.write_protections {
             protected.validate_live_identity()?;
+        }
+        for tree in &self.write_protected_trees {
+            tree.validate_live_identity()?;
         }
         Ok(())
     }
@@ -734,6 +805,57 @@ where
             Ok(path.canonicalize().unwrap_or(path))
         })
         .collect()
+}
+
+/// One directory whose tree is write-protected, with the identity it had when it was named.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteProtectedTree {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl WriteProtectedTree {
+    fn new(path: &Path) -> Result<Self> {
+        use std::os::unix::fs::MetadataExt as _;
+        let unusable = |reason: String| {
+            ContainmentError::ConfigValidation(format!(
+                "cannot write-protect {}: {reason}",
+                path.display()
+            ))
+        };
+        let link = std::fs::symlink_metadata(path).map_err(|error| unusable(error.to_string()))?;
+        if link.file_type().is_symlink() {
+            return Err(unusable("it is a symbolic link".to_string()));
+        }
+        if !link.is_dir() {
+            return Err(unusable("it is not a directory".to_string()));
+        }
+        let resolved = std::fs::canonicalize(path).map_err(|error| unusable(error.to_string()))?;
+        Ok(Self {
+            path: resolved,
+            device: link.dev(),
+            inode: link.ino(),
+        })
+    }
+
+    fn validate_live_identity(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+        let live = std::fs::symlink_metadata(&self.path).map_err(|error| {
+            ContainmentError::ConfigValidation(format!(
+                "write-protected {} is gone: {error}",
+                self.path.display()
+            ))
+        })?;
+        if !live.is_dir() || live.dev() != self.device || live.ino() != self.inode {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "write-protected {} was replaced after it was named",
+                self.path.display()
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Refuse `Operation::Deny` from an authorizing verb, so a denial has one constructor.

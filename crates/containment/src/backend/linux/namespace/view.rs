@@ -51,6 +51,12 @@ pub(crate) enum MountOrigin {
     Refusal,
     /// An exact write-protected object, with the identity the caller opened.
     Protection { device: u64, inode: u64 },
+    /// A write-protected directory tree, read-only, and executable when an exec grant covers it.
+    TreeProtection {
+        device: u64,
+        inode: u64,
+        executable: bool,
+    },
 }
 
 /// One planned mount.
@@ -405,6 +411,66 @@ impl MountView {
                 });
             }
         }
+        let exec_trees = config.grants_in(Operation::Exec, Scope::Root);
+        let mut tree_targets: Vec<PathBuf> = Vec::new();
+        let mut tree_protections = Vec::new();
+        for (tree, device, inode) in config.write_protected_tree_identities() {
+            let executable = config.broad_exec()
+                || exec_trees
+                    .iter()
+                    .any(|grant| tree.starts_with(&grant.resolved));
+            let mut targets = BTreeSet::from([tree.to_path_buf()]);
+            for entry in &entries {
+                if !entry.writable || entry.kind != MountKind::Bind {
+                    continue;
+                }
+                let Some(source) = &entry.source else {
+                    continue;
+                };
+                let Ok(relative) = tree.strip_prefix(source) else {
+                    continue;
+                };
+                let target = entry.target.join(relative);
+                for parent in target.ancestors().skip(1).take_while(|parent| {
+                    *parent != entry.target && parent.starts_with(&entry.target)
+                }) {
+                    protected_parents.insert(parent.to_path_buf());
+                }
+                targets.insert(target);
+            }
+            for target in targets {
+                tree_targets.push(target.clone());
+                tree_protections.push(MountEntry {
+                    source: Some(tree.to_path_buf()),
+                    target,
+                    kind: MountKind::Bind,
+                    writable: false,
+                    executable,
+                    origin: MountOrigin::TreeProtection {
+                        device,
+                        inode,
+                        executable,
+                    },
+                });
+            }
+        }
+        // An executable bind inside a protected tree moves above the tree's bind, read-only, so the
+        // tree's bind does not hide it.
+        let (above, kept): (Vec<MountEntry>, Vec<MountEntry>) =
+            std::mem::take(&mut entries).into_iter().partition(|entry| {
+                entry.executable
+                    && entry.kind == MountKind::Bind
+                    && tree_targets
+                        .iter()
+                        .any(|tree| entry.target != *tree && entry.target.starts_with(tree))
+            });
+        entries = kept;
+        entries.extend(tree_protections);
+        entries.extend(above.into_iter().map(|entry| MountEntry {
+            writable: false,
+            ..entry
+        }));
+        // An exact file protection goes last, so no moved bind covers the file it pinned.
         entries.extend(protections);
 
         // **Every refusal, planned last, so it overmounts the grant that bound its parent.**
@@ -505,7 +571,9 @@ impl MountView {
         entries.retain(|entry| {
             !matches!(
                 entry.origin,
-                MountOrigin::Refusal | MountOrigin::Protection { .. }
+                MountOrigin::Refusal
+                    | MountOrigin::Protection { .. }
+                    | MountOrigin::TreeProtection { .. }
             ) || !empty_roots
                 .iter()
                 .any(|root| entry.target != *root && entry.target.starts_with(root))
@@ -773,7 +841,10 @@ impl MountView {
                 let directory = mount_source.is_dir();
                 let target_pin = targets::MountTarget::prepare_bind(self, entry, root, directory)
                     .map_err(|error| {
-                    if matches!(entry.origin, MountOrigin::Protection { .. }) {
+                    if matches!(
+                        entry.origin,
+                        MountOrigin::Protection { .. } | MountOrigin::TreeProtection { .. }
+                    ) {
                         refusal(format!(
                             "opening write-protected mountpoint '{}': {error}",
                             target.display()
@@ -846,6 +917,18 @@ impl MountView {
                     require_mounted_identity(&mounted_path, device, inode)?;
                     remount_protected(&mounted_path)?;
                     require_mount_flags(&mounted, false, false, false)?;
+                    target_pin.require_same_mount(&target, &previous, &mounted)?;
+                    return Ok(());
+                }
+                if let MountOrigin::TreeProtection {
+                    device,
+                    inode,
+                    executable,
+                } = entry.origin
+                {
+                    require_mounted_tree_identity(&mounted_path, device, inode)?;
+                    remount_protected_tree(&mounted_path, executable)?;
+                    require_mount_flags(&mounted, false, executable, false)?;
                     target_pin.require_same_mount(&target, &previous, &mounted)?;
                     return Ok(());
                 }
@@ -1075,6 +1158,39 @@ fn remount_protected(target: &Path) -> Result<(), ContainmentError> {
         | libc::MS_NOSUID
         | libc::MS_NODEV;
     remount_recursive(target, target, FLAGS, "protected")
+}
+
+/// Remount a write-protected tree read-only, keeping execution when an exec grant covers it.
+fn remount_protected_tree(target: &Path, executable: bool) -> Result<(), ContainmentError> {
+    let flags = libc::MS_REMOUNT
+        | libc::MS_BIND
+        | libc::MS_RDONLY
+        | libc::MS_NOSUID
+        | libc::MS_NODEV
+        | if executable { 0 } else { libc::MS_NOEXEC };
+    remount_recursive(target, target, flags, "write-protected tree")
+}
+
+fn require_mounted_tree_identity(
+    target: &Path,
+    device: u64,
+    inode: u64,
+) -> Result<(), ContainmentError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = std::fs::metadata(target).map_err(|error| {
+        refusal(format!(
+            "inspecting mounted write-protected tree '{}': {error}",
+            target.display()
+        ))
+    })?;
+    if !metadata.is_dir() || metadata.dev() != device || metadata.ino() != inode {
+        return Err(refusal(format!(
+            "mounted write-protected tree has a different identity: {}",
+            target.display()
+        )));
+    }
+    Ok(())
 }
 
 fn require_mounted_identity(
@@ -2687,6 +2803,133 @@ mod tests {
 
         let entries = planned(&config);
         assert!(entry_for(&entries, directory.path()).writable);
+    }
+
+    #[test]
+    fn a_file_protection_inside_a_moved_exec_bind_stays_on_top() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical root");
+        let tree = root.join("venv");
+        let bin = tree.join("bin");
+        std::fs::create_dir_all(&bin).expect("an exec folder in the tree");
+        let served = bin.join("served.py");
+        std::fs::write(&served, "x = 1").expect("a protected file");
+        let opened = std::fs::File::open(&served).expect("open the file");
+        let entries = planned(
+            &ContainmentConfig::new()
+                .allow(&root, Operation::Write, Scope::Root)
+                .expect("write root")
+                .allow(&bin, Operation::Exec, Scope::Root)
+                .expect("exec on a folder inside the tree")
+                .protect_write(&served, &opened)
+                .expect("file protection")
+                .protect_write_tree(&tree)
+                .expect("tree protection"),
+        );
+        let position = |found: &dyn Fn(&MountEntry) -> bool| {
+            entries
+                .iter()
+                .position(found)
+                .unwrap_or_else(|| panic!("planned: {entries:#?}"))
+        };
+        let tree_index =
+            position(&|entry| matches!(entry.origin, MountOrigin::TreeProtection { .. }));
+        let exec_index = position(&|entry| entry.target == bin && entry.executable);
+        let file_index = position(&|entry| {
+            entry.target == served && matches!(entry.origin, MountOrigin::Protection { .. })
+        });
+        assert!(
+            tree_index < exec_index && exec_index < file_index,
+            "the tree, then the moved exec bind, then the file protection: {entries:#?}"
+        );
+    }
+
+    #[test]
+    fn a_write_protected_tree_overlays_its_writable_ancestor_and_keeps_its_exec() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical root");
+        let tree = root.join("venv");
+        std::fs::create_dir(&tree).expect("tree fixture");
+        let identity = std::fs::metadata(&tree).expect("tree metadata");
+        let base = || {
+            ContainmentConfig::new()
+                .allow(&root, Operation::Write, Scope::Root)
+                .expect("write root")
+        };
+        let protected = |config: ContainmentConfig| {
+            let entries = planned(&config.protect_write_tree(&tree).expect("tree protection"));
+            let writable_index = entries
+                .iter()
+                .position(|entry| entry.target == root && entry.writable)
+                .expect("writable ancestor");
+            let (index, executable) = entries
+                .iter()
+                .enumerate()
+                .find_map(|(index, entry)| match entry.origin {
+                    MountOrigin::TreeProtection {
+                        device,
+                        inode,
+                        executable,
+                    } if entry.target == tree
+                        && device == identity.dev()
+                        && inode == identity.ino() =>
+                    {
+                        Some((index, executable))
+                    }
+                    _ => None,
+                })
+                .expect("tree protection");
+            assert!(
+                index > writable_index,
+                "the read-only bind must overlay the root"
+            );
+            assert!(!entries[index].writable);
+            executable
+        };
+
+        assert!(
+            !protected(base()),
+            "a tree without an exec grant mounts no-exec"
+        );
+        let program = tree.join("tool");
+        std::fs::write(&program, "").expect("a program in the tree");
+        let entries = planned(
+            &base()
+                .allow(&program, Operation::Exec, Scope::File)
+                .expect("exec on a file inside the tree")
+                .protect_write_tree(&tree)
+                .expect("tree protection"),
+        );
+        let tree_index = entries
+            .iter()
+            .position(|entry| matches!(entry.origin, MountOrigin::TreeProtection { .. }))
+            .expect("tree protection");
+        let program_mounts: Vec<usize> = entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.target == program)
+            .map(|(index, _)| index)
+            .collect();
+        assert_eq!(
+            program_mounts.len(),
+            1,
+            "the exec grant is mounted once: {entries:#?}"
+        );
+        let exposed = program_mounts[0];
+        assert!(
+            exposed > tree_index && entries[exposed].executable && !entries[exposed].writable,
+            "an exec grant inside the tree is planned above it, read-only"
+        );
+        assert!(
+            protected(
+                base()
+                    .allow(&tree, Operation::Exec, Scope::Root)
+                    .expect("exec")
+            ),
+            "an exec grant over the tree keeps it executable"
+        );
     }
 
     #[test]

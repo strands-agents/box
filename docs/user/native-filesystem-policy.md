@@ -105,6 +105,7 @@ including values equal to the defaults.
 A non-empty [`[gateway] upgrade_http`](config.md#gateway) requires record version 32.
 A box ID that a library caller supplied, other than `box-` and 16 hexadecimal digits, requires record
 version 34.
+A box whose agent declares a [`deny_write`](config.md#agentfilesystem-and-toolnamefilesystem) list requires record version 35.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 

@@ -98,6 +98,8 @@ pub(crate) struct DirectReach {
     /// What stays unreachable inside those grants: `deny` entries, and the directory holding each
     /// authority source this run loaded.
     pub(crate) refusals: Vec<Refusal>,
+    /// The `deny_write` directories, canonical, each inside a `write` tree.
+    pub(crate) write_protections: Vec<PathBuf>,
 }
 
 /// What the paths in one spec are judged against.
@@ -128,9 +130,11 @@ pub(crate) fn direct_grants(
 ) -> Result<DirectReach, ConfigError> {
     let mut grants: Vec<DirectGrant> = Vec::new();
     let mut refusals: Vec<Refusal> = Vec::new();
+    let mut write_protections: Vec<PathBuf> = Vec::new();
     for (kind, entry) in lists.entries() {
         match kind {
             Grant::Deny => refusals.push(denial(entry, context)?),
+            Grant::DenyWrite => write_protections.push(write_protection(entry, context)?),
             _ => grants.push(entry_grant(kind, entry, context).map_err(|(_, error)| error)?),
         }
     }
@@ -181,9 +185,26 @@ pub(crate) fn direct_grants(
     for (grant, access) in grants.iter_mut().zip(access) {
         grant.access = access;
     }
+    for (entry, tree) in lists.deny_write.iter().zip(&write_protections) {
+        if !grants.iter().any(|grant| {
+            grant.operation == Operation::Write
+                && grant.scope == Scope::Root
+                && tree.starts_with(&grant.resolved)
+        }) {
+            return Err(refuse(
+                context,
+                &entry.display().to_string(),
+                &format!(
+                    "{} lies inside no `write` directory, so `deny_write` protects nothing there",
+                    tree.display()
+                ),
+            ));
+        }
+    }
     Ok(DirectReach {
         grants,
         refusals,
+        write_protections,
         command: None,
         installation: None,
     })
@@ -344,6 +365,37 @@ fn denial(entry: &Path, context: &FilesystemContext<'_>) -> Result<Refusal, Conf
     })
 }
 
+/// A `deny_write` entry, which names an existing directory.
+fn write_protection(entry: &Path, context: &FilesystemContext<'_>) -> Result<PathBuf, ConfigError> {
+    let authored = entry.display().to_string();
+    let lexical = expand_home(entry, &authored, context)?;
+    match std::fs::metadata(&lexical) {
+        Ok(metadata) if metadata.is_dir() => lexical.canonicalize().map_err(|error| {
+            refuse(
+                context,
+                &authored,
+                &format!("cannot resolve {}: {error}", lexical.display()),
+            )
+        }),
+        Ok(_) => Err(refuse(
+            context,
+            &authored,
+            &format!(
+                "{} is not a directory; `deny_write` names a directory",
+                lexical.display()
+            ),
+        )),
+        Err(error) => Err(refuse(
+            context,
+            &authored,
+            &format!(
+                "{} cannot be read: {error}; create the directory before the box starts",
+                lexical.display()
+            ),
+        )),
+    }
+}
+
 /// Judge a read grant on `path` as a box judges a `read` entry, and return whether it lies in a
 /// credential store.
 pub(crate) fn judge_read_grant(path: &Path) -> Result<bool, (GrantRefusal, BoxError)> {
@@ -486,6 +538,7 @@ fn entry_grant(
             (Operation::Exec, Scope::File)
         }
         (Grant::Deny, _) => unreachable!("a denial is built by `denial`"),
+        (Grant::DenyWrite, _) => unreachable!("a write protection is built by `write_protection`"),
     };
 
     // A writable search directory is the same defect one step earlier: the box execs a bare name
@@ -776,6 +829,48 @@ mod tests {
 
     fn text(path: &Path) -> String {
         path.display().to_string()
+    }
+
+    /// **A `deny_write` entry names an existing directory inside a `write` tree**, and is carried
+    /// canonical beside the grants rather than as one.
+    #[test]
+    fn a_deny_write_entry_is_a_directory_inside_a_write_tree() {
+        let fixture = Fixture::new();
+        let context = fixture.context();
+        let reach = fixture.reach(
+            &context,
+            "read = ['~/project']\nwrite = ['~/project']\ndeny_write = ['~/project/src']",
+        );
+        assert_eq!(reach.write_protections, [fixture.home.join("project/src")]);
+        assert!(reach.refusals.is_empty());
+        assert!(
+            reach
+                .grants
+                .iter()
+                .all(|grant| grant.kind != Grant::DenyWrite)
+        );
+
+        for (body, reason) in [
+            (
+                "read = ['~/scratch']\nwrite = ['~/scratch']\ndeny_write = ['~/project/src']",
+                "lies inside no `write`",
+            ),
+            (
+                "read = ['~/project']\ndeny_write = ['~/project/src']",
+                "lies inside no `write`",
+            ),
+            (
+                "read = ['~/notes']\nwrite = ['~/notes']\ndeny_write = ['~/notes/api.md']",
+                "is not a directory",
+            ),
+            (
+                "read = ['~/project']\nwrite = ['~/project']\ndeny_write = ['~/project/absent']",
+                "cannot be read",
+            ),
+        ] {
+            let refusal = fixture.refusal(&context, body);
+            assert!(refusal.contains(reason), "{body:?}: {refusal}");
+        }
     }
 
     fn identity(path: &Path) -> FileIdentity {
