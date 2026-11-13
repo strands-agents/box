@@ -1,0 +1,64 @@
+# command-words grammar corpus
+#
+# Each case is one argv, and what the shell grammar of `command-words.grammar.toml` reads
+# it as. `fields` lists each field that does not hold its default: a Bool `false`, an
+# empty set, or an absent string. An `unmodeled` case has no fields and no effects.
+
+# A command word with `_`
+[[case]]
+argv = ["tool", "payment_intents", "list", "--limit", "3"]
+action = "list_payment_intents"
+fields = { limit = "3" }
+
+# The same word with `-` in place of `_` is another word
+[[case]]
+argv = ["tool", "payment-intents", "list"]
+action = "unmodeled"
+
+# A command word with uppercase letters
+[[case]]
+argv = ["tool", "drive", "files", "emptyTrash"]
+action = "empty_trash"
+
+# A command word matches only its exact case
+[[case]]
+argv = ["tool", "drive", "files", "emptytrash"]
+action = "unmodeled"
+
+[[case]]
+argv = ["tool", "drive", "files", "EMPTYTRASH"]
+action = "unmodeled"
+
+# An alias with uppercase letters, `_`, and `-`
+[[case]]
+argv = ["tool", "drive", "files", "Empty_Trash-2"]
+action = "empty_trash"
+
+# A command word with a leading `+`
+[[case]]
+argv = ["tool", "gmail", "+send", "--to", "a@example.com"]
+action = "send"
+fields = { to = "a@example.com" }
+effects = ["send"]
+
+# The word without its `+` is another word
+[[case]]
+argv = ["tool", "gmail", "send"]
+action = "unmodeled"
+
+[[case]]
+argv = ["tool", "gmail", "++send"]
+action = "unmodeled"
+
+# A first command word with a leading `+`, and its alias
+[[case]]
+argv = ["tool", "+helper"]
+action = "helper"
+
+[[case]]
+argv = ["tool", "+h"]
+action = "helper"
+
+[[case]]
+argv = ["tool", "+"]
+action = "unmodeled"

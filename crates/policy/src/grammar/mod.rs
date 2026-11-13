@@ -79,10 +79,20 @@ pub(crate) enum GrammarRefusal {
         flag: String,
         other: Box<Place>,
     },
-    #[error("{place}: {alias:?} must be command words (lowercase ASCII letters, digits, and `-`)")]
+    #[error(
+        "{place}: {alias:?} must be command words (an optional `+`, then ASCII letters, digits, `-`, and `_`, not first a `-` or a `_`, and not all uppercase)"
+    )]
     BadAlias { place: Place, alias: String },
     #[error("{place}: spells `{spelling}`, and {other} spells it too")]
     SpellingTaken {
+        place: Place,
+        spelling: String,
+        other: Box<Place>,
+    },
+    #[error(
+        "{place}: spells `{spelling}`, whose first word starts with `+`, and the `[+<toolchain>]` of {other} reads that word as a toolchain"
+    )]
+    PlusBesideToolchain {
         place: Place,
         spelling: String,
         other: Box<Place>,
@@ -209,7 +219,9 @@ impl GrammarRefusal {
     /// This refusal with each place it names put under the table `table`.
     fn under(mut self, table: &str) -> Self {
         match &mut self {
-            Self::FlagTaken { place, other, .. } | Self::SpellingTaken { place, other, .. } => {
+            Self::FlagTaken { place, other, .. }
+            | Self::SpellingTaken { place, other, .. }
+            | Self::PlusBesideToolchain { place, other, .. } => {
                 place.under(table);
                 other.under(table);
             }

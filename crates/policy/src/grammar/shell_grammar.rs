@@ -136,6 +136,24 @@ impl ShellGrammar {
                 &mut spellings,
             )?);
         }
+        if let Some(selector) = compiled.iter().find(|action| action.toolchain.is_some()) {
+            for action in &compiled {
+                for (index, spelling) in action.spellings.iter().enumerate() {
+                    if spelling.first().is_some_and(|word| word.starts_with('+')) {
+                        let name = action.name.as_str().to_string();
+                        return Err(GrammarRefusal::PlusBesideToolchain {
+                            place: if index == 0 {
+                                Place::ActionUsage(name)
+                            } else {
+                                Place::ActionAliases(name)
+                            },
+                            spelling: spelling.join(" "),
+                            other: Box::new(Place::ActionUsage(selector.name.as_str().to_string())),
+                        });
+                    }
+                }
+            }
+        }
         Ok(Self {
             globals: OptionTable::of(global_options, |_| true),
             toolchain: compiled.iter().any(|action| action.toolchain.is_some()),

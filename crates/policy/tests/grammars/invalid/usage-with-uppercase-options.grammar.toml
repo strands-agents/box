@@ -1,0 +1,10 @@
+# expect: `<grammar>.shell.add.usage` has `[OPTIONS]`; write `[options]`
+# A tool grammar whose usage copies a spelling from clap help text.
+
+name    = "cargo"
+program = "cargo"
+format  = 1
+version = 1
+
+[shell.add]
+usage = "cargo add [OPTIONS] <dep>"
