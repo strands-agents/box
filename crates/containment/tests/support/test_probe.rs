@@ -172,7 +172,10 @@
 
 use std::process::ExitCode;
 
-#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "aarch64", target_arch = "x86_64")
+))]
 mod user_namespace;
 
 #[cfg(target_os = "linux")]
@@ -761,7 +764,7 @@ fn attempt_terminal_injection(byte: u8) -> ExitCode {
 #[cfg(target_os = "linux")]
 fn linux_main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
     if args.get(1).is_some_and(|value| value == "--user-namespace") {
         return user_namespace::run(&args);
     }

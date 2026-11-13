@@ -1,5 +1,8 @@
 //! Native hard links stay within the Linux mount view's writable targets.
-#![cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#![cfg(all(
+    target_os = "linux",
+    any(target_arch = "aarch64", target_arch = "x86_64")
+))]
 
 use std::collections::BTreeMap;
 use std::ffi::{CStr, CString};

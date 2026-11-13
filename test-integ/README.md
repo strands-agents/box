@@ -33,15 +33,18 @@ containment regression and is a missing binary.
 
 In CI this is `.github/workflows/containment-deterministic.yml`, called from
 `ci.yml` so it reports under the single `CI Gate` status. It runs on
-`ubuntu-24.04-arm` and `macos-latest` on the plain `pull_request` trigger: the
+`ubuntu-24.04-arm`, `ubuntu-24.04` (x86-64), and `macos-latest` on the plain `pull_request` trigger: the
 suite needs no secrets, so a fork PR runs it with a read-only token and no
 approval gate is required for safety.
 
-### Both platforms block
+### All three runners block
 
-The Ubuntu ARM64 and macOS jobs both affect `CI Gate`. The repository requires that status
-before merging. The Linux job runs on ARM64.
-The Linux job enables unprivileged user namespaces before the suite starts.
+The Ubuntu ARM64, Ubuntu x86-64, and macOS jobs each affect `CI Gate`.
+The repository requires that status before merging.
+Both Linux jobs enable unprivileged user namespaces before the suite starts.
+The x86-64 job sets `EXPERIMENTAL_X86_SUPPORT=TRUE` for all Box processes.
+Set the same environment variable when running the suite locally on x86-64.
+This opt-in does not change the default startup behavior or qualify a release package.
 
 Each job writes the per-case table to its summary and uploads the verdict and logs.
 A recorded platform exclusion remains a skip, not evidence that its assertions ran.

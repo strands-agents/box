@@ -2,6 +2,7 @@
 
 import contextlib
 import io
+import json
 from pathlib import Path
 import signal
 import subprocess
@@ -24,6 +25,50 @@ class TargetEvidenceTests(unittest.TestCase):
         binary.write_text(f"#!{sys.executable}\n" + source)
         binary.chmod(0o700)
         return target.Target(self.root, binary, binary)
+
+    def test_linux_arm64_and_x86_64_can_run_validation(self):
+        binary = self.shim("raise SystemExit(0)\n").binary
+        for name in ("strands-box-contain-trampoline", "strands-box-sock-alias"):
+            helper = self.root / name
+            helper.write_text("#!/bin/sh\nexit 0\n")
+            helper.chmod(0o700)
+        rows = [{"name": "admission-check", "pass": True}]
+        for architecture in ("aarch64", "x86_64"):
+            with self.subTest(architecture=architecture):
+                root = self.root / architecture
+                argv = ["target_validation.py", "run", "--box", str(binary),
+                        "--probe", str(binary), "--revision", "test-revision", "--root", str(root)]
+                with patch.object(sys, "argv", argv), \
+                     patch.object(target.platform, "system", return_value="Linux"), \
+                     patch.object(target.platform, "machine", return_value=architecture), \
+                     patch.object(target, "prerequisites", return_value={}), \
+                     patch.object(target, "run_cases", return_value=rows) as run_cases, \
+                     contextlib.redirect_stdout(io.StringIO()):
+                    self.assertEqual(target.main(), 0)
+                run_cases.assert_called_once()
+                self.assertEqual(run_cases.call_args.args[0].root, root)
+                self.assertFalse(run_cases.call_args.args[1])
+                report = json.loads((root / "report.json").read_text())
+                self.assertEqual(report["architecture"], architecture)
+                self.assertEqual(report["cases"], rows)
+
+    def test_unsupported_hosts_are_refused_before_validation(self):
+        for system, architecture in (("Linux", "i686"), ("Linux", "riscv64"),
+                                     ("Darwin", "arm64"), ("Darwin", "x86_64")):
+            with self.subTest(system=system, architecture=architecture):
+                argv = ["target_validation.py", "run", "--box", str(self.root / "missing-box"),
+                        "--probe", str(self.root / "missing-probe"), "--revision", "test-revision"]
+                error = io.StringIO()
+                with patch.object(sys, "argv", argv), \
+                     patch.object(target.platform, "system", return_value=system), \
+                     patch.object(target.platform, "machine", return_value=architecture), \
+                     patch.object(target, "run_cases") as run_cases, \
+                     contextlib.redirect_stderr(error):
+                    with self.assertRaises(SystemExit) as caught:
+                        target.main()
+                self.assertEqual(caught.exception.code, 2)
+                self.assertIn("requires Linux", error.getvalue())
+                run_cases.assert_not_called()
 
     def test_non_launching_box_cannot_pass_any_case(self):
         runner = self.shim("raise SystemExit(0)\n")

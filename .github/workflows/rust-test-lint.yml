@@ -24,10 +24,10 @@ on:
         type: string
         default: ""
       os:
-        description: 'JSON array of runner OSes for the test matrix. Default runs both; a dispatch narrows it, e.g. ["macos-latest"].'
+        description: 'JSON array of runner OSes for the test matrix. Default runs all three runners; a dispatch narrows it, e.g. ["macos-latest"].'
         required: false
         type: string
-        default: '["ubuntu-24.04-arm", "macos-latest"]'
+        default: '["ubuntu-24.04-arm", "ubuntu-24.04", "macos-latest"]'
       run_lint:
         description: "Run the lint job. Default true (normal CI); a scoped dispatch sets it false to skip fmt/clippy and save minutes."
         required: false
@@ -70,13 +70,20 @@ jobs:
 
       - name: Free disk (Linux only)
         if: runner.os == 'Linux'
-        # Free space for the all-targets build on the disposable Ubuntu ARM64 runner.
+        # Free space for the all-targets build on the disposable Ubuntu runner.
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+
+      - name: Enable experimental x86 runtime tests
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: echo "EXPERIMENTAL_X86_SUPPORT=TRUE" >> "$GITHUB_ENV"
 
       - name: Require Linux namespace support
         if: runner.os == 'Linux'
         run: |
-          test "$(uname -m)" = aarch64
+          case "$(uname -m)" in
+            aarch64|x86_64) ;;
+            *) echo "Unsupported Linux test architecture" >&2; exit 1 ;;
+          esac
           knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
           if [ -e "$knob" ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
@@ -85,8 +92,8 @@ jobs:
 
       - name: Cache cargo
         # Wraps actions/cache with keys tuned for cargo (registry, git, target).
-        # rust-cache keys include the runner OS, so each matrix leg gets its
-        # own cache line rather than fighting over one entry. Only a push to the
+        # rust-cache keys include the runner OS and architecture, so each
+        # matrix leg gets its own cache entry. Only a push to the
         # default branch writes the cache; same guard as verdict-hermetic.yml.
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
