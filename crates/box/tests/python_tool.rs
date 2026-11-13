@@ -231,20 +231,20 @@ fn with_monty_on_a_python_tool_is_unused_and_python3_is_monty() {
 }
 
 /// The host's Homebrew `python3`, if there is one. Homebrew names every library its extension
-/// modules load through `<prefix>/opt/<formula>` links, which is the case this test needs.
+/// modules load through `<prefix>/opt/<formula>` links, which is the case this test needs. The
+/// macOS runner has one; the Linux runner has no Homebrew, and Linux CI fails on a skip it doesn't
+/// expect, so the test is macOS-only.
+#[cfg(target_os = "macos")]
 fn homebrew_python() -> Option<std::path::PathBuf> {
-    [
-        "/opt/homebrew/bin/python3",
-        "/home/linuxbrew/.linuxbrew/bin/python3",
-    ]
-    .into_iter()
-    .map(Path::new)
-    .find(|candidate| {
-        candidate
-            .canonicalize()
-            .is_ok_and(|real| real.components().any(|part| part.as_os_str() == "Cellar"))
-    })
-    .map(Path::to_path_buf)
+    ["/opt/homebrew/bin/python3", "/usr/local/bin/python3"]
+        .into_iter()
+        .map(Path::new)
+        .find(|candidate| {
+            candidate
+                .canonicalize()
+                .is_ok_and(|real| real.components().any(|part| part.as_os_str() == "Cellar"))
+        })
+        .map(Path::to_path_buf)
 }
 
 /// With no `[tool.python3.filesystem]`, Box grants a real Homebrew Python the libraries its
@@ -252,6 +252,7 @@ fn homebrew_python() -> Option<std::path::PathBuf> {
 /// `/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib`, and Box's own lists refuse a link, so the
 /// grant names the real file and containment also grants the name the load requests. Before that,
 /// the box refused to start.
+#[cfg(target_os = "macos")]
 #[test]
 fn with_monty_off_a_homebrew_python_loads_the_libraries_its_modules_name_through_links() {
     if !namespace_launcher_is_usable() {
