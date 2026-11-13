@@ -48,9 +48,13 @@ pub(crate) const CREDSD_SCHEME: &str = "credsd";
 /// The material tag an AWS credential carries.
 pub(crate) const SESSION_CREDENTIALS_TYPE: &str = "session_credentials";
 
-/// The per-user tail beneath `HOME` for the default socket on macOS, where `credsd` runs per user.
+/// The per-user tail beneath `HOME` for the macOS user-scoped install's socket (signed `.pkg` or
+/// `credsd install --user`).
 #[cfg(target_os = "macos")]
-const MACOS_DEFAULT_SOCKET_TAIL: &str = "Library/Application Support/credsd/credsd.sock";
+const MACOS_USER_SOCKET_TAIL: &str = "Library/Application Support/credsd/credsd.sock";
+/// The macOS system install's socket (`sudo credsd install`, a LaunchDaemon), shared across users.
+#[cfg(target_os = "macos")]
+const MACOS_SYSTEM_SOCKET: &str = "/var/run/credsd/credsd.sock";
 /// The default socket path when neither the caller nor `CREDSD_SOCKET` names one.
 #[cfg(not(target_os = "macos"))]
 const DEFAULT_SOCKET: &str = "/run/credsd/credsd.sock";
@@ -58,23 +62,39 @@ const DEFAULT_SOCKET: &str = "/run/credsd/credsd.sock";
 /// The environment variable naming the socket, read once at open.
 const SOCKET_VARIABLE: &str = "CREDSD_SOCKET";
 
-/// The platform default socket path: `$HOME/Library/Application Support/credsd/credsd.sock` on
-/// macOS, refusing when `HOME` is unset; a fixed absolute path elsewhere.
+/// The macOS platform default, mirroring the daemon's own client dial order: the per-user socket
+/// when it exists, else the shared system socket. Probes the user socket, then defers the choice to
+/// the pure [`default_socket_from_home`].
 #[cfg(target_os = "macos")]
 fn default_socket() -> Result<PathBuf> {
-    default_socket_from_home(std::env::var_os("HOME").as_deref())
+    let home = std::env::var_os("HOME");
+    let home = home.as_deref().filter(|value| !value.is_empty());
+    let user_present = home
+        .map(|home| PathBuf::from(home).join(MACOS_USER_SOCKET_TAIL))
+        .as_deref()
+        .map(path_is_socket)
+        .unwrap_or(false);
+    Ok(default_socket_from_home(home, user_present))
 }
 
-/// The macOS default socket beneath `home`, refusing an absent or empty home with a configuration
-/// error. Split from the environment read so the resolution and the refusal pin without host state.
+/// The macOS default socket for a given `home` and user-socket presence: the per-user socket beneath
+/// `home` when `user_present`, else the shared system socket. An absent or empty `home` falls back
+/// to the system socket, which does not depend on `HOME`. Pure, so every row pins without host state.
 #[cfg(target_os = "macos")]
-fn default_socket_from_home(home: Option<&std::ffi::OsStr>) -> Result<PathBuf> {
-    let home = home.filter(|value| !value.is_empty()).ok_or_else(|| {
-        CredentialError::Credential(format!(
-            "cannot locate the default credsd socket: HOME is unset and {SOCKET_VARIABLE} is not set"
-        ))
-    })?;
-    Ok(PathBuf::from(home).join(MACOS_DEFAULT_SOCKET_TAIL))
+fn default_socket_from_home(home: Option<&std::ffi::OsStr>, user_present: bool) -> PathBuf {
+    match home.filter(|value| !value.is_empty()) {
+        Some(home) if user_present => PathBuf::from(home).join(MACOS_USER_SOCKET_TAIL),
+        _ => PathBuf::from(MACOS_SYSTEM_SOCKET),
+    }
+}
+
+/// Whether `path` names an existing Unix domain socket, following symlinks.
+#[cfg(target_os = "macos")]
+fn path_is_socket(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(path)
+        .map(|meta| meta.file_type().is_socket())
+        .unwrap_or(false)
 }
 
 /// The platform default socket path when neither the caller nor `CREDSD_SOCKET` names one.
@@ -643,34 +663,34 @@ mod tests {
         assert!(path.is_absolute(), "the platform default must be absolute");
     }
 
-    /// On macOS the default socket sits beneath the operator's `HOME`, so an absolute `HOME`
-    /// yields `$HOME/Library/Application Support/credsd/credsd.sock`.
+    /// On macOS a present per-user socket wins, resolving beneath `HOME`.
     #[cfg(target_os = "macos")]
     #[test]
-    fn the_macos_default_socket_is_under_home() {
-        let path = default_socket_from_home(Some(std::ffi::OsStr::new("/Users/example")))
-            .expect("an absolute HOME resolves");
+    fn the_macos_default_prefers_a_present_user_socket() {
+        let path = default_socket_from_home(Some(std::ffi::OsStr::new("/Users/example")), true);
         assert_eq!(
             path,
             PathBuf::from("/Users/example/Library/Application Support/credsd/credsd.sock"),
         );
-        assert!(
-            path.is_absolute(),
-            "an absolute HOME yields an absolute default"
-        );
+        assert!(path.is_absolute(), "the user socket is an absolute path");
     }
 
-    /// On macOS an absent or empty `HOME` refuses rather than resolving a relative or bare path.
+    /// On macOS an absent per-user socket falls back to the shared system socket.
     #[cfg(target_os = "macos")]
     #[test]
-    fn the_macos_default_socket_refuses_an_absent_home() {
+    fn the_macos_default_falls_back_to_the_system_socket() {
+        let path = default_socket_from_home(Some(std::ffi::OsStr::new("/Users/example")), false);
+        assert_eq!(path, PathBuf::from("/var/run/credsd/credsd.sock"));
+    }
+
+    /// On macOS an absent or empty `HOME` falls back to the system socket, which needs no `HOME`,
+    /// even when a user socket is claimed present.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_default_without_home_uses_the_system_socket() {
         for home in [None, Some(std::ffi::OsStr::new(""))] {
-            let error =
-                default_socket_from_home(home).expect_err("an absent or empty HOME refuses");
-            assert!(
-                matches!(error, CredentialError::Credential(ref message) if message.contains("HOME is unset")),
-                "the refusal names the unset HOME: {error}"
-            );
+            let path = default_socket_from_home(home, true);
+            assert_eq!(path, PathBuf::from("/var/run/credsd/credsd.sock"));
         }
     }
 
