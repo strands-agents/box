@@ -282,6 +282,8 @@ fn open_upstream(
                 continue;
             }
         };
+        // Best-effort: Nagle's algorithm off. The crate's `AGENTS.md` records the measurement.
+        let _ = upstream.set_nodelay(true);
 
         let peer = upstream
             .peer_addr()
@@ -613,6 +615,26 @@ mod tests {
         assert_eq!(permitted.accepted(), permitted_before + 1);
         assert_eq!(refused.accepted(), refused_before);
         drop(upstream);
+    }
+
+    #[test]
+    fn an_opened_upstream_socket_has_tcp_nodelay_set() {
+        let origin = Recorder::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0)).unwrap();
+        let port = origin.addr.port();
+        let shared = state(AddressPolicy::permit_all());
+        let pinned = PinnedDestination::from_ips(port, vec![origin.addr.ip()]);
+        let upstream = open_upstream(
+            &shared,
+            &connect_to("origin.test", port),
+            &pinned,
+            &RequestId::new("test"),
+        )
+        .ok()
+        .expect("the origin connects");
+        assert!(
+            upstream.nodelay().unwrap(),
+            "Nagle's algorithm is off on the upstream socket"
+        );
     }
 
     /// A dead endpoint plus a live refused recorder that share one port, on two loopback addresses
