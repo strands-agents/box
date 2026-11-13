@@ -183,14 +183,14 @@ happens at load when a budget is written as a `permit`.
 
 ### A rate limit on one host
 
-At most sixty completed requests to one host in ten minutes. The sixty-first is refused until the
-oldest counted request is more than ten minutes old. Write it beside a `permit` for `api.github.com`
-on `http:request`, such as the `github_request` rule in
+This rule refuses new requests to `api.github.com` when Box has recorded at least sixty response
+outcomes for that host in the last ten minutes. Pending exchanges do not count yet. Write it
+beside a `permit` for `api.github.com` on `http:request`, such as the `github_request` rule in
 [the `[egress.<name>]` table](egress.md#example).
 
 ```text
 @id("github_rate_limit")
-@description("At most 60 requests to api.github.com completed in 10 minutes.")
+@description("Refuse requests when at least 60 response outcomes for api.github.com were recorded in the last 10 minutes.")
 forbid (principal, action == Box::Action::"http:request", resource)
 when { context.input.host == "api.github.com" }
 when temporal {
