@@ -310,7 +310,10 @@ Changing `env.PATH` in `box.toml` does not change this protection.
 - **Names Box sets itself, which a table cannot claim:** `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`,
   `https_proxy`, `NO_PROXY`, `no_proxy`, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`,
   `NODE_USE_ENV_PROXY`, `CODEX_CA_CERTIFICATE`, `AWS_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`,
-  `GIT_SSL_CAINFO`, `PWD`, `USER`, and every name that starts with `OTEL_EXPORTER_OTLP_`.
+  `GIT_SSL_CAINFO`, `PWD`, `USER`, and every name that starts with `OTEL_EXPORTER_OTLP_`. A
+  `[tool.<name>]` or stdio `[mcp.<name>]` table with `contain_egress = false` may set the first
+  thirteen, because Box sets none of them there; see
+  [a native-egress process keeps its own proxy and trust settings](../design/decisions.md#a-native-egress-process-keeps-its-own-proxy-and-trust-settings).
 - **Names the dynamic loader reads, refused:** every name that starts with `LD_` or `DYLD_`. Box's
   own aliases run in the box, so their loader would read the value too. A runtime's own option
   variables, such as `NODE_OPTIONS`, `BASH_ENV`, `RUBYOPT`, `JAVA_TOOL_OPTIONS`, and `PYTHONPATH`,

@@ -37,7 +37,8 @@ The kernel restricts a contained process to two local ports, the gateway and the
 collector, so a client that ignores the proxy variables can't reach the network at all. See [macOS
 network restrictions](./macos-enforcement.md#network-connections-and-local-services). A stdio MCP
 server or declared tool with `contain_egress = false` connects directly. Its traffic bypasses the
-gateway. See [local MCP servers](./containment.md#local-mcp-servers).
+gateway, and it gets none of the proxy variables or CA names above; its own table may set them.
+See [local MCP servers](./containment.md#local-mcp-servers) and [a native-egress process keeps its own proxy and trust settings](./decisions.md#a-native-egress-process-keeps-its-own-proxy-and-trust-settings).
 
 Strands Shell's `curl` and Monty's `fetch()` run in the box's trusted process, and both send their
 requests through the same gateway, trusting only its certificate authority. Before they do, each

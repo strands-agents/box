@@ -518,16 +518,18 @@ input inside its parent's boundary because native descendants raise no new decis
 <a id="ca-trust-is-a-per-process-environment-value"></a>
 ### CA trust is a per-process environment value, not a system trust store
 
-Box composes six CA environment names for each process and sets each one to the gateway's CA:
+Box composes six CA environment names for each gateway-routed process and sets each one to the
+gateway's CA:
 `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `CODEX_CA_CERTIFICATE`, `AWS_CA_BUNDLE`,
 `REQUESTS_CA_BUNDLE`, and `GIT_SSL_CAINFO`. The general alternative is one system trust store, which
 on macOS is the keychain, and a contained process can neither reach nor change it. Most runtimes
 honour `SSL_CERT_FILE`. `botocore` instead reads `AWS_CA_BUNDLE`, and the libcurl in Apple git reads
 only `GIT_SSL_CAINFO`. Setting a name a runtime ignores costs nothing, so the rule is "every name a
 supported runtime reads", and the list grows when a runtime is added. Box reserves each name and
-refuses a table that states one at startup. Letting the workload choose a CA bundle would let it
+refuses a gateway table that states one at startup. Letting the workload choose a CA bundle would let it
 choose a trust root. A CA name is trust and never authorization, and the gateway stays the one
-outbound boundary.
+outbound boundary. A native-egress process gets none of these names, and its table may set them; see
+[a native-egress process keeps its own proxy and trust settings](#a-native-egress-process-keeps-its-own-proxy-and-trust-settings).
 
 <a id="an-mcp-server-is-one-configuration-table"></a>
 ### Every MCP server is one `[mcp.<name>]` table, and its start is a policy decision
@@ -1676,6 +1678,46 @@ reach. The platforms grant different reach. On Linux, the program's sandbox join
 network namespace. It reaches the public and private networks, the machine's loopback services, and
 the instance metadata endpoint. Treat this flag as a host-network trust grant for one named tool or
 server, never a default.
+
+<a id="a-native-egress-process-keeps-its-own-proxy-and-trust-settings"></a>
+#### A native-egress process keeps its own proxy and trust settings
+
+A program with `contain_egress = false` connects as it would on the host. Box adds no proxy or CA
+setting of its own for it, and refuses none. Before this rule, Box set the gateway's proxy
+variables and CA on every process. A client that reads `HTTPS_PROXY`, such as Go, `gh`, `reqwest`
+or `curl`, then sent its traffic through the gateway anyway, and the escape did nothing. Box now
+sets none of `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy`, `NODE_USE_ENV_PROXY`,
+`NO_PROXY`, `no_proxy`, and the six CA names for that program, and grants no read of the gateway's
+CA. That table's `env` may set any of those thirteen names, for a company proxy or a company CA
+bundle. A table that names a file still needs a `read_file` entry for it. A gateway table and the
+agent still refuse them, because the gateway's CA must win for the gateway to read the traffic.
+
+Box sets no default CA file, on either platform. A fixed file changes which roots a client trusts.
+On macOS, `/private/etc/ssl/cert.pem` holds only Apple's shipped roots, and a client such as
+`rustls-native-certs` reads only that file when `SSL_CERT_FILE` is set. It then misses roots that an
+administrator added to the keychain, such as a TLS-inspection root, and fails inside the box where it
+works on the host. On Linux, each distribution keeps its bundle in a different place, so one fixed
+path would be wrong on some. A tool pack that knows a client reads only a file sets that file in
+the table's `env`. A distribution whose bundle under `/etc/ssl` is a link into another tree, such as
+`/etc/pki` on Amazon Linux and Fedora, needs a `read` entry for that tree.
+
+On macOS, many clients verify a certificate through Apple's trust check, which asks the
+`com.apple.trustd.agent` and `com.apple.SecurityServer` services. The sandbox denied both, so Go
+1.26, Go 1.27 with an older `go.mod`, Rust's `rustls-platform-verifier` and `native-tls`, and very
+likely Swift failed every check. A native-egress profile now allows a lookup of these two services,
+as the program has on the host. `native-tls` needs `SecurityServer`; the others need only trustd.
+A gateway profile and the agent get neither service: the gateway's per-run CA is not in the keychain,
+so they would gain nothing.
+
+The cost is service reach on macOS. `SecurityServer` also serves the keychain and authorization.
+On a Mac, a throwaway generic password in the login keychain stayed unreadable with both services
+allowed, because Box still refuses reads of the keychain files. So the program reaches the host's
+services, but not the host's keychain files. Data-protection and iCloud keychain items were not
+tested. Their service, `secd`, stays denied. The startup disclosure states the rule on a
+`native trust:` line under the `native egress:` line.
+`a_native_egress_leaf_gets_no_proxy_or_ca_from_core_and_keeps_its_own`,
+`only_a_native_egress_table_may_set_the_proxy_and_ca_names`, and
+`only_a_native_egress_leaf_renders_the_trust_services` hold the rule.
 
 <a id="a-leaf-reaches-the-host-startup-runtime-services"></a>
 #### Agents get account lookup; tool and MCP server sandboxes can also request network startup services
