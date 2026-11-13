@@ -167,7 +167,9 @@ pub enum GrantRefusal {
     NotAbsolute,
     /// The path, or a directory on the way to it, does not exist.
     Absent,
-    /// The path is a symbolic link.
+    /// The path is a symbolic link that a grant cannot name: a link to a directory, a link outside
+    /// its real folder or inside a credential store, or a link in any list but `read` and
+    /// `read_file`.
     Link,
     /// The path is not the canonical spelling, such as `/etc/hosts` for `/private/etc/hosts` on
     /// macOS, or a spelling with `.` or `..`.

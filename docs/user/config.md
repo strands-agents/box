@@ -560,6 +560,10 @@ A `read` or `read_file` entry is the one exception: it may name a symbolic link 
 - The grant is the file the link resolves to, checked like any other entry.
 - The box shows that file at the link's name as well, read-only.
 - The link must sit in its own real folder. A link reached through a linked folder is refused.
+- Two links to one file, such as `/usr/bin/cc` and `/usr/bin/gcc` on Ubuntu, are two entries. A
+  link beside a `read` folder that holds its file is kept too, because the link's name is outside
+  that folder. A link listed next to its own file is refused as granted twice.
+- A link inside a credential store, such as `~/.ssh/config`, is refused. Name the file itself.
 - The links in between, such as `/etc/alternatives/cc`, and the folders that hold them are not
   granted.
 - A link to a directory, and a link in `write`, `write_file`, `exec`, `list` or `metadata`, is still

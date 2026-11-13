@@ -243,16 +243,23 @@ fn a_read_entry_naming_a_link_to_a_file_reads_by_both_names() {
     std::fs::write(tools.join("sibling"), "sibling only\n").expect("a sibling");
     let link = tools.join("cc");
     std::os::unix::fs::symlink("gcc", &link).expect("a link to the file");
-    let box_ = request.agent_read(&[link.as_path()]).expect();
+    // A second name for the same file is a second grant, as `cc` and `gcc` are on Ubuntu.
+    let second = tools.join("c99");
+    std::os::unix::fs::symlink("gcc", &second).expect("a second link");
+    let box_ = request
+        .agent_read(&[link.as_path(), second.as_path()])
+        .expect();
 
     let output = probe(
         &box_,
         &format!(
             "read -r v < {} && printf 'LINK=%s\\n' \"$v\"; \
              read -r v < {} && printf 'FILE=%s\\n' \"$v\"; \
+             read -r v < {} && printf 'SECOND=%s\\n' \"$v\"; \
              read -r v < {} 2>/dev/null && printf 'SIBLING=%s\\n' \"$v\"; printf done",
             shell_quote(&link),
             shell_quote(&file),
+            shell_quote(&second),
             shell_quote(&tools.join("sibling"))
         ),
     );
@@ -261,6 +268,7 @@ fn a_read_entry_naming_a_link_to_a_file_reads_by_both_names() {
     let seen = stdout(&output);
     assert!(seen.contains("LINK=linked contents"), "{output:?}");
     assert!(seen.contains("FILE=linked contents"), "{output:?}");
+    assert!(seen.contains("SECOND=linked contents"), "{output:?}");
     assert!(!seen.contains("SIBLING="), "{output:?}");
     assert!(seen.contains("done"), "{output:?}");
     assert!(

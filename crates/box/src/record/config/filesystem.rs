@@ -64,7 +64,16 @@ impl DirectGrant {
 
     /// Whether the entry names a link to the file it grants.
     pub(crate) fn is_link(&self) -> bool {
-        !self.credential_store && self.lexical != self.resolved
+        self.lexical != self.resolved
+    }
+
+    /// Each path the box shows this grant at: its file, and a link's own name.
+    fn names(&self) -> Vec<&Path> {
+        if self.is_link() {
+            vec![self.resolved.as_path(), self.lexical.as_path()]
+        } else {
+            vec![self.resolved.as_path()]
+        }
     }
 }
 
@@ -559,6 +568,19 @@ fn entry_grant(
                 (kind, refused)
             },
         )?;
+    // **A link inside a credential store stays refused.** The store exception re-resolves the
+    // entry at each spawn, so a link there could be pointed at another file of the store during a
+    // run, such as `~/.ssh/config` at `~/.ssh/id_ed25519`.
+    if link && credential_store {
+        return Err(refused(
+            GrantRefusal::Link,
+            &format!(
+                "{} is a symbolic link in a credential store. A store entry must name the file                  itself, so name {} instead",
+                lexical.display(),
+                resolved.display()
+            ),
+        ));
+    }
 
     Ok(DirectGrant {
         kind,
@@ -683,7 +705,12 @@ fn require_no_overlap(
             if grant.operation != other.operation {
                 continue;
             }
-            if grant.resolved == other.resolved {
+            // A link adds its own name, so two names for one file are two grants. A grant whose
+            // every name the other already has adds nothing, such as a link listed beside its file.
+            let adds = |one: &DirectGrant, two: &DirectGrant| {
+                one.names().iter().any(|name| !two.names().contains(name))
+            };
+            if grant.resolved == other.resolved && !(adds(grant, other) && adds(other, grant)) {
                 return Err(refuse(
                     context,
                     &other.authored,
@@ -704,6 +731,11 @@ fn require_no_overlap(
                 continue;
             };
             if outer.scope != Scope::Root {
+                continue;
+            }
+            // A link whose own name lies outside the tree reaches the file at a name the tree
+            // does not, such as `/usr/bin/java` beside the JDK folder it points into.
+            if inner.is_link() && !inner.lexical.starts_with(&outer.resolved) {
                 continue;
             }
             return Err(refuse(
@@ -1073,11 +1105,23 @@ mod tests {
         let file_link = home.join("api-link.md");
         let file = home.join("notes/api.md");
         std::os::unix::fs::symlink(&file, &file_link).expect("a link to a file");
-        for list in ["read", "read_file"] {
+        for (list, kind) in [("read", Grant::Read), ("read_file", Grant::ReadFile)] {
             let reach = fixture.reach(&context, &format!("{list} = [{:?}]", text(&file_link)));
             let grant = &reach.grants[0];
-            assert_eq!(grant.resolved, file, "{list}");
-            assert_eq!(grant.lexical, file_link, "{list}");
+            assert_eq!(
+                grant,
+                &DirectGrant {
+                    kind,
+                    authored: text(&file_link),
+                    lexical: file_link.clone(),
+                    resolved: file.clone(),
+                    operation: Operation::Read,
+                    scope: Scope::File,
+                    credential_store: false,
+                    access: "read-only",
+                },
+                "{list}"
+            );
             assert!(grant.is_link(), "{list}");
             assert!(
                 grant
@@ -1087,6 +1131,33 @@ mod tests {
                 grant.disclosure()
             );
         }
+
+        // Two links to one file are two names, and a link beside the tree its file is in reaches a
+        // name the tree does not: both are granted.
+        let second_link = home.join("api-other.md");
+        std::os::unix::fs::symlink(&file, &second_link).expect("a second link");
+        let reach = fixture.reach(
+            &context,
+            &format!(
+                "read_file = [{:?}, {:?}]",
+                text(&file_link),
+                text(&second_link)
+            ),
+        );
+        assert_eq!(reach.grants.len(), 2);
+        let reach = fixture.reach(
+            &context,
+            &format!("read = ['~/notes']\nread_file = [{:?}]", text(&file_link)),
+        );
+        assert_eq!(reach.grants.len(), 2);
+        // A link inside the tree it points into adds no name the tree lacks.
+        let inner_link = home.join("notes/api-alias.md");
+        std::os::unix::fs::symlink(&file, &inner_link).expect("a link inside the tree");
+        let refusal = fixture.refusal(
+            &context,
+            &format!("read = ['~/notes']\nread_file = [{:?}]", text(&inner_link)),
+        );
+        assert!(refusal.contains("lies inside"), "{refusal}");
 
         // Only a read: a write, an exec or a metadata entry naming a link stays refused.
         for list in ["write_file", "metadata"] {
@@ -1117,6 +1188,21 @@ mod tests {
             &format!("read = [{:?}]", text(&linked_folder.join("api-link.md"))),
         );
         assert!(refusal.contains("symbolic link"), "{refusal}");
+
+        // A link inside a credential store is refused: the store exception would follow it again
+        // at each spawn.
+        std::fs::create_dir_all(home.join(".ssh")).expect("an SSH directory");
+        std::fs::write(home.join(".ssh/config.real"), "").expect("a real config");
+        std::os::unix::fs::symlink(home.join(".ssh/config.real"), home.join(".ssh/config"))
+            .expect("a link in the store");
+        let refusal = fixture.refusal(&context, "read_file = ['~/.ssh/config']");
+        assert!(
+            refusal.contains("symbolic link in a credential store"),
+            "{refusal}"
+        );
+        let refused = entry_grant(Grant::ReadFile, Path::new("~/.ssh/config"), &context)
+            .expect_err("a store link");
+        assert_eq!(refused.0, GrantRefusal::Link);
 
         // A link into a credential store is judged by the store it reaches.
         std::fs::create_dir_all(home.join(".ssh")).expect("an SSH directory");
