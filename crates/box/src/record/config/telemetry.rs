@@ -80,6 +80,9 @@ fn expanded_home_path(destination: &str, operator_home: Option<&Path>) -> Option
 /// The spelling an operator may use beside the credential vocabulary's own.
 const TELEMETRY_ALIAS_SCHEME: &str = "secret://";
 
+/// A secret read from AWS Secrets Manager, or one field of a JSON secret.
+const SECRETS_MANAGER_SCHEME: &str = "aws-secretsmanager://";
+
 /// One word an operator writes in `include`, and the signals it names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -184,12 +187,13 @@ fn telemetry_secret_uri(reference: &str) -> Result<String, String> {
         }
         return Ok(format!("{ENV_SCHEME}{name}"));
     }
-    if reference.starts_with(ENV_SCHEME) {
+    if reference.starts_with(ENV_SCHEME) || reference.starts_with(SECRETS_MANAGER_SCHEME) {
         return Ok(reference.to_string());
     }
     Err(format!(
-        "`secret.ref` names no scheme this box reads; write `{ENV_SCHEME}NAME` or \
-         `{TELEMETRY_ALIAS_SCHEME}NAME`, never the value itself. The value is deliberately not \
+        "`secret.ref` names no scheme this box reads; write `{ENV_SCHEME}NAME`, \
+         `{TELEMETRY_ALIAS_SCHEME}NAME` or `{SECRETS_MANAGER_SCHEME}SECRET#FIELD`, never the value \
+         itself. The value is deliberately not \
          echoed here, in case it is one"
     ))
 }
@@ -464,6 +468,11 @@ mod tests {
         assert_eq!(
             telemetry_secret_uri("env://HONEYCOMB_KEY").expect("the canonical form is accepted"),
             "env://HONEYCOMB_KEY"
+        );
+        assert_eq!(
+            telemetry_secret_uri("aws-secretsmanager://box/telemetry#HONEYCOMB_KEY")
+                .expect("a Secrets Manager reference is accepted"),
+            "aws-secretsmanager://box/telemetry#HONEYCOMB_KEY"
         );
         assert!(
             telemetry_secret_uri("secret://").is_err(),

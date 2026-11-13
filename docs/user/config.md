@@ -913,8 +913,25 @@ started reads with `jq`.
 | `kind` | string | `file` or `otlp`. |
 | `destination` | string | For `file`, an absolute or `~/`-relative path. Inside this box's `box_dir` it must lie under `private/`; outside the box any path is accepted. For `otlp`, the collector endpoint. |
 | `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, or `metrics`. `trace` names the agent's own spans and the box's control-plane records. `logs` includes unmatched MCP routing diagnostics. **Absent means every signal**, so write `include` only to narrow the target. An empty list is refused, and so is a repeated word. |
-| `secret.ref` | string | `env://NAME` or `secret://NAME`, attached on the way out. |
+| `secret.ref` | string | `env://NAME` or `secret://NAME`, or `aws-secretsmanager://SECRET[#FIELD]` for a secret in AWS Secrets Manager, attached on the way out. |
 | `secret.header` | string | Defaults to `Authorization` with a `Bearer ` prefix. |
+
+`aws-secretsmanager://SECRET` reads the secret string of `SECRET`, a name or an ARN.
+`aws-secretsmanager://SECRET#FIELD` reads one string field of a JSON secret, so one secret can
+hold the key for each target. A secret that is a JSON object needs `#FIELD`, so one target is never
+sent every key in it. Box reads the secret once, when the run starts. A name without an ARN takes
+its region from `AWS_REGION` or `AWS_DEFAULT_REGION`. The call is signed by the AWS SDK default
+credential provider chain, the same identity a bare `aws://` signs with, and that identity needs
+`secretsmanager:GetSecretValue` on the secret. Box prints one line on stderr:
+
+```text
+strands-box credentials: aws-secretsmanager://[REDACTED] read from Secrets Manager, signed with the host's ambient AWS identity from the default credential provider chain. Grant the workload no write access to ~/.aws
+```
+
+A missing secret, a missing field, or a chain that finds no identity stops the run. No message
+shows the secret value. Box redacts the secret's name, also where an AWS refusal such as
+`AccessDeniedException` quotes it, and the AWS message can still name the signing role. An
+`[mcp.<name>]` `secret.ref` refuses the scheme.
 
 A file destination inside the box directory and outside `private/` is refused: `"<path>" is inside
 the box directory <path> but outside its private tree, where a process could truncate it; name a

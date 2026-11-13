@@ -2353,6 +2353,22 @@ trusted process runs outside the sandbox, which is remote code execution
 shipped box exposes no setting that refuses a bare `aws://`, so the mitigation is a named profile or
 keeping `~/.aws` unwritable.
 
+<a id="a-secrets-manager-secret-is-read-on-the-default-chains-worker"></a>
+### A Secrets Manager secret is read once, on the default chain's worker, as the chain's identity
+
+`aws-secretsmanager://SECRET[#FIELD]` reads a secret string, or one string field of a JSON secret,
+with one `GetSecretValue` call when Box resolves the reference at startup. A telemetry `secret.ref`
+takes it; an egress or `[mcp.<name>]` `secret.ref` refuses it. The call runs through
+`SdkChainProvider::call` on the worker a bare `aws://` resolves on, with that worker's runtime,
+`ring` HTTPS client, and cached credentials, so the process holds one ambient AWS identity and one
+TLS stack. The worker drops a call at its deadline, so a stuck call cannot hold back a bare `aws://`
+signer for longer (`a_stuck_call_releases_the_worker_at_its_deadline`). A second
+worker and credential chain in the source was rejected, because two copies of the chain could sign
+as two identities in one box. The cost: the call signs with the ambient identity, so it carries the
+`credential_process` risk of a bare `aws://`, and a vault that requires a scoped profile refuses the
+scheme. The source adds only `aws-sdk-secretsmanager`, with its default features off so that
+`aws-lc` never links beside `ring` (`no_second_crypto_provider_is_linked`).
+
 <a id="a-route-may-set-the-phantom-check-to-advisory"></a>
 ### A route may attach its secret always, not only against the phantom
 

@@ -312,6 +312,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-secretsmanager"
+version = "1.125.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ea7f719fbeab11b0215659f9b633649e2ebf94469d218304235368024174f7fc"
+dependencies = [
+ "arc-swap",
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-schema",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-sts"
 version = "1.124.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -516,6 +541,7 @@ dependencies = [
  "base64-simd",
  "bytes",
  "bytes-utils",
+ "futures-core",
  "http",
  "http-body",
  "http-body-util",
@@ -525,6 +551,8 @@ dependencies = [
  "ryu",
  "serde",
  "time",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4514,7 +4542,9 @@ version = "0.1.0"
 dependencies = [
  "aws-config",
  "aws-credential-types",
+ "aws-sdk-secretsmanager",
  "aws-smithy-http-client",
+ "aws-smithy-runtime-api",
  "base64 0.23.1",
  "getrandom 0.4.3",
  "hmac",

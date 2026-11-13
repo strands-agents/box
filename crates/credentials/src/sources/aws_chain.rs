@@ -4,8 +4,8 @@
 //! (docs/design/decisions.md#a-bare-aws-resolves-the-default-credential-chain). See the crate
 //! AGENTS.md for the worker, cache, and region design.
 
-use std::sync::OnceLock;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -107,9 +107,39 @@ struct Request {
     deadline: Instant,
 }
 
+/// One SDK call to run on the worker, and the instant the caller stops waiting.
+struct Call {
+    work: CallFn,
+    deadline: Instant,
+}
+
+/// What the worker serves: a resolve of the chain, or an SDK call signed by it.
+enum Job {
+    Resolve(Request),
+    Call(Call),
+}
+
+/// What an SDK call runs with on the worker: its one `ring` HTTPS client, and the chain's credentials.
+pub(in crate::sources) struct CallContext {
+    pub(in crate::sources) http_client: aws_smithy_runtime_api::client::http::SharedHttpClient,
+    pub(in crate::sources) credentials: Zeroizing<AwsSessionCredentials>,
+}
+
+/// An SDK call, given the worker's runtime and context, or the reason there is none.
+type CallFn = Box<dyn FnOnce(Result<(&tokio::runtime::Runtime, CallContext)>) + Send>;
+
+/// How long a caller waits past its deadline, so the worker's own timeout answer arrives first.
+const CALL_GRACE: Duration = Duration::from_secs(1);
+
+/// The runtime and HTTPS client an SDK call runs with. A worker built over a test resolver has none.
+struct Io {
+    runtime: Arc<tokio::runtime::Runtime>,
+    http_client: aws_smithy_runtime_api::client::http::SharedHttpClient,
+}
+
 /// Resolves the AWS SDK default credential provider chain on a dedicated worker thread.
 pub(in crate::sources) struct SdkChainProvider {
-    sender: Sender<Request>,
+    sender: Sender<Job>,
 }
 
 impl SdkChainProvider {
@@ -124,12 +154,59 @@ impl SdkChainProvider {
         self.provide_within(CALLER_DEADLINE)
     }
 
+    /// Drive the future `work` builds on the worker, with its runtime, its HTTPS client and the
+    /// chain's credentials. The worker drops the future at `deadline`, so a call holds the worker,
+    /// and every bare `aws://` signer behind it, no longer than that. A chain that resolves no
+    /// credentials, or a worker that has no runtime, is the answer's error and `work` does not run.
+    pub(in crate::sources) fn call<T, F, Fut>(&self, deadline: Duration, work: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(CallContext) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let (reply, reply_rx) = mpsc::channel();
+        let until = Instant::now() + deadline;
+        let late = move || {
+            CredentialError::Credential(format!(
+                "the AWS call did not finish within {} s",
+                deadline.as_secs()
+            ))
+        };
+        self.sender
+            .send(Job::Call(Call {
+                work: Box::new(move |ready| {
+                    let answer = ready.and_then(|(runtime, context)| {
+                        let remaining = until.saturating_duration_since(Instant::now());
+                        runtime.block_on(async move {
+                            tokio::time::timeout(remaining, work(context))
+                                .await
+                                .unwrap_or_else(|_| Err(late()))
+                        })
+                    });
+                    let _ = reply.send(answer);
+                }),
+                deadline: until,
+            }))
+            .map_err(|_| {
+                CredentialError::Credential(
+                    "the AWS default-chain worker is not running".to_string(),
+                )
+            })?;
+        match reply_rx.recv_timeout(deadline + CALL_GRACE) {
+            Ok(answer) => answer,
+            Err(RecvTimeoutError::Timeout) => Err(late()),
+            Err(RecvTimeoutError::Disconnected) => Err(CredentialError::Credential(
+                "the AWS call stopped on the worker before it answered".to_string(),
+            )),
+        }
+    }
+
     /// Spawn the worker.
     ///
     /// A thread that cannot start drops the closure with `receiver`, so every send then fails and
     /// `provide` returns a hard error rather than panicking in the trusted process.
     fn spawn(setup: SetupFn) -> Self {
-        let (sender, receiver) = mpsc::channel::<Request>();
+        let (sender, receiver) = mpsc::channel::<Job>();
         let _ = thread::Builder::new()
             .name("aws-default-chain".to_string())
             .spawn(move || worker(receiver, setup));
@@ -140,10 +217,10 @@ impl SdkChainProvider {
     fn provide_within(&self, deadline: Duration) -> Result<AwsSessionCredentials> {
         let (reply, reply_rx) = mpsc::channel();
         self.sender
-            .send(Request {
+            .send(Job::Resolve(Request {
                 reply,
                 deadline: Instant::now() + deadline,
-            })
+            }))
             .map_err(|_| {
                 CredentialError::Credential(
                     "the AWS default-chain worker is not running".to_string(),
@@ -164,46 +241,93 @@ impl SdkChainProvider {
     /// seam that exercises the worker, the runtime bridge, and the cache offline.
     #[cfg(test)]
     fn with_resolver(resolve: impl FnMut() -> Result<Resolved> + Send + 'static) -> Self {
-        Self::spawn(Box::new(move || Ok(Box::new(resolve) as ResolveFn)))
+        Self::spawn(Box::new(move || Ok((Box::new(resolve) as ResolveFn, None))))
+    }
+
+    /// A provider over `resolve` whose worker also holds a real runtime and HTTPS client, so a
+    /// test runs an SDK call against a local stand-in with fixed credentials.
+    #[cfg(test)]
+    pub(in crate::sources) fn with_resolver_and_io(
+        resolve: impl FnMut() -> Result<Resolved> + Send + 'static,
+    ) -> Self {
+        Self::spawn(Box::new(move || {
+            let (runtime, http_client) = runtime_and_client()?;
+            Ok((
+                Box::new(resolve) as ResolveFn,
+                Some(Io {
+                    runtime: Arc::new(runtime),
+                    http_client,
+                }),
+            ))
+        }))
     }
 }
 
 /// The resolve closure the worker drives each request.
 type ResolveFn = Box<dyn FnMut() -> Result<Resolved> + Send>;
 
-/// Runs once on the worker thread to build the resolve closure, or fails if the runtime cannot
-/// start.
-type SetupFn = Box<dyn FnOnce() -> Result<ResolveFn> + Send>;
+/// Runs once on the worker thread to build the resolve closure and the runtime an SDK call runs
+/// with, or fails if the runtime cannot start.
+type SetupFn = Box<dyn FnOnce() -> Result<(ResolveFn, Option<Io>)> + Send>;
 
 /// The worker loop: set up once, then serve each request from the cache. A setup failure replies a
 /// hard error to every request, so the failure surfaces on the first resolve and stays fail-closed.
-fn worker(receiver: Receiver<Request>, setup: SetupFn) {
+fn worker(receiver: Receiver<Job>, setup: SetupFn) {
     match setup() {
         Err(error) => {
             let message = error.to_string();
-            for request in receiver {
-                let _ = request
-                    .reply
-                    .send(Err(CredentialError::Credential(message.clone())));
+            for job in receiver {
+                let refused = CredentialError::Credential(message.clone());
+                match job {
+                    Job::Resolve(request) => {
+                        let _ = request.reply.send(Err(refused));
+                    }
+                    Job::Call(call) => (call.work)(Err(refused)),
+                }
             }
         }
-        Ok(resolve) => {
+        Ok((resolve, io)) => {
             let mut cache = RefreshCache::new(resolve, SystemTime::now);
-            for request in receiver {
-                // Skip a resolve for a caller that already timed out, so a slow or failing chain
-                // does not run work for callers that have left and stack behind them.
-                if Instant::now() >= request.deadline {
-                    continue;
+            for job in receiver {
+                match job {
+                    // Skip work for a caller that already timed out, so a slow or failing chain
+                    // does not run work for callers that have left and stack behind them.
+                    Job::Resolve(request) if Instant::now() < request.deadline => {
+                        let _ = request.reply.send(cache.provide());
+                    }
+                    Job::Call(call) if Instant::now() < call.deadline => {
+                        let ready = match &io {
+                            None => Err(CredentialError::Credential(
+                                "this AWS default-chain worker runs no SDK calls".to_string(),
+                            )),
+                            Some(io) => cache.provide().map(|credentials| {
+                                (
+                                    &*io.runtime,
+                                    CallContext {
+                                        http_client: io.http_client.clone(),
+                                        credentials: Zeroizing::new(credentials),
+                                    },
+                                )
+                            }),
+                        };
+                        // A call that panics drops its reply, so its caller gets an error, and the
+                        // worker stays up for every bare `aws://` signer behind it.
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            (call.work)(ready);
+                        }));
+                    }
+                    Job::Resolve(_) | Job::Call(_) => {}
                 }
-                let _ = request.reply.send(cache.provide());
             }
         }
     }
 }
 
-/// Build the runtime, the shared HTTP client, and the region once, and return a closure that
-/// rebuilds the chain on each resolve. See the crate AGENTS.md for why the chain is rebuilt.
-fn real_setup() -> Result<ResolveFn> {
+/// The current-thread runtime and the `ring` HTTPS client the worker holds.
+fn runtime_and_client() -> Result<(
+    tokio::runtime::Runtime,
+    aws_smithy_runtime_api::client::http::SharedHttpClient,
+)> {
     use aws_smithy_http_client::{Builder, tls};
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -219,6 +343,18 @@ fn real_setup() -> Result<ResolveFn> {
             tls::rustls_provider::CryptoMode::Ring,
         ))
         .build_https();
+    Ok((runtime, http_client))
+}
+
+/// Build the runtime, the shared HTTP client, and the region once, and return a closure that
+/// rebuilds the chain on each resolve. See the crate AGENTS.md for why the chain is rebuilt.
+fn real_setup() -> Result<(ResolveFn, Option<Io>)> {
+    let (runtime, http_client) = runtime_and_client()?;
+    let runtime = Arc::new(runtime);
+    let io = Io {
+        runtime: Arc::clone(&runtime),
+        http_client: http_client.clone(),
+    };
     // The region is read once from the environment, then the profile, then `us-east-1`. Both
     // providers read only variables and files, so the per-resolve rebuild never reaches instance
     // metadata. See the crate AGENTS.md.
@@ -231,7 +367,7 @@ fn real_setup() -> Result<ResolveFn> {
             .region(),
         )
         .unwrap_or_else(|| aws_config::Region::from_static("us-east-1"));
-    Ok(Box::new(move || {
+    let resolve: ResolveFn = Box::new(move || {
         // `without_region` carries the Tokio sleep implementation (rt-tokio). A fresh config
         // re-reads the profile files; `.region` pins the region so the rebuild does not re-run the
         // region chain (which reaches instance metadata).
@@ -247,7 +383,8 @@ fn real_setup() -> Result<ResolveFn> {
                 .await
         });
         resolve_once(&runtime, &chain)
-    }))
+    });
+    Ok((resolve, Some(io)))
 }
 
 /// Resolve the chain once, mapping an unreachable or empty chain to [`CredentialError::KeystoreAccess`].
@@ -519,5 +656,96 @@ mod tests {
             .expect("a current-thread runtime");
         let resolved = runtime.block_on(async { provider.provide() });
         assert_eq!(resolved.unwrap().access_key_id, "AKIA");
+    }
+    /// **A call runs on the worker with the chain's cached credentials**, so an SDK operation signs
+    /// as the identity a bare `aws://` signs with.
+    #[test]
+    fn a_call_runs_with_the_chains_credentials() {
+        let provider = SdkChainProvider::with_resolver_and_io(|| Ok((creds("AKIA-CALL"), None)));
+        let seen = provider
+            .call(Duration::from_secs(5), |context| async move {
+                Ok(context.credentials.access_key_id.clone())
+            })
+            .expect("the call runs");
+        assert_eq!(seen, "AKIA-CALL");
+    }
+
+    /// **A call fails without running when the chain resolves nothing, or the worker has no
+    /// runtime**, so no SDK operation goes out unsigned.
+    #[test]
+    fn a_call_without_credentials_or_a_runtime_does_not_run() {
+        let empty = SdkChainProvider::with_resolver_and_io(|| {
+            Err(CredentialError::KeystoreAccess(
+                "no credentials".to_string(),
+            ))
+        });
+        let error = empty
+            .call(Duration::from_secs(5), |_| async {
+                panic!("the call ran without credentials");
+                #[allow(unreachable_code)]
+                Ok(())
+            })
+            .expect_err("no credentials");
+        assert!(error.to_string().contains("no credentials"), "{error}");
+
+        let no_runtime = SdkChainProvider::with_resolver(|| Ok((creds("AKIA"), None)));
+        let error = no_runtime
+            .call(Duration::from_secs(5), |_| async {
+                panic!("the call ran without a runtime");
+                #[allow(unreachable_code)]
+                Ok(())
+            })
+            .expect_err("no runtime");
+        assert!(error.to_string().contains("runs no SDK calls"), "{error}");
+    }
+
+    /// **A call holds the worker no longer than its deadline**, so a bare `aws://` signer behind a
+    /// stuck call is answered as soon as the deadline passes.
+    #[test]
+    fn a_stuck_call_releases_the_worker_at_its_deadline() {
+        let provider = SdkChainProvider::with_resolver_and_io(|| Ok((creds("AKIA"), None)));
+        let started = Instant::now();
+        let error = provider
+            .call(Duration::from_millis(300), |_| {
+                std::future::pending::<Result<()>>()
+            })
+            .expect_err("the call never finishes");
+        assert!(error.to_string().contains("did not finish"), "{error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+
+        let resolved = Instant::now();
+        provider
+            .provide()
+            .expect("the worker answers after the call");
+        assert!(
+            resolved.elapsed() < Duration::from_secs(1),
+            "{:?}",
+            resolved.elapsed()
+        );
+    }
+
+    /// **A call that panics fails its caller and leaves the worker running.**
+    #[test]
+    fn a_panicking_call_leaves_the_worker_running() {
+        let provider = SdkChainProvider::with_resolver_and_io(|| Ok((creds("AKIA"), None)));
+        let error = provider
+            .call(Duration::from_secs(5), |_| async {
+                panic!("a defect in the call");
+                #[allow(unreachable_code)]
+                Ok(())
+            })
+            .expect_err("the call panicked");
+        assert!(
+            error.to_string().contains("stopped on the worker"),
+            "{error}"
+        );
+        assert_eq!(
+            provider.provide().expect("still running").access_key_id,
+            "AKIA"
+        );
     }
 }

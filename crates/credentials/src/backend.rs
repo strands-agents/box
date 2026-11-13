@@ -3,14 +3,16 @@
 use zeroize::Zeroizing;
 
 use crate::sources::{
-    AWS_SCHEME, EnvSource, FileSource, OnePasswordSource, SecretSource, SourceRegistry,
+    AWS_SCHEME, EnvSource, FileSource, OnePasswordSource, SecretSource, SecretsManagerSource,
+    SourceRegistry,
 };
 use crate::{CredentialError, Locator, Result, Secret};
 
 /// Which compiled source set a [`Backend`] is.
 #[derive(Debug)]
 enum Profile {
-    /// The local source set (`env://` / `file://` / `op://`), plus structured AWS.
+    /// The local source set (`env://` / `file://` / `op://` / `aws-secretsmanager://`), plus
+    /// structured AWS.
     Local {
         /// The opaque-secret sources, routed by [`Locator::scheme`].
         registry: SourceRegistry,
@@ -24,7 +26,7 @@ pub struct Backend {
 }
 
 impl Backend {
-    /// The local source set: `env://`, `file://`, and `op://`.
+    /// The local source set: `env://`, `file://`, `op://`, and `aws-secretsmanager://`.
     #[must_use]
     pub fn local() -> Self {
         let mut registry = SourceRegistry::new();
@@ -32,6 +34,7 @@ impl Backend {
             Box::new(EnvSource::new()) as Box<dyn SecretSource>,
             Box::new(FileSource::new()),
             Box::new(OnePasswordSource::new()),
+            Box::new(SecretsManagerSource::new()),
         ] {
             registry
                 .register(source)
@@ -67,12 +70,17 @@ impl Backend {
         // holding the crate-internal type: `resolve` is `pub` and has an out-of-crate consumer (the
         // ingress front door), so it cannot return one
         // (docs/design/decisions.md#an-unusable-secret-value-is-unrepresentable).
-        self.resolve_secret(locator).map(Secret::into_inner)
+        let (secret, disclosure) = self.resolve_disclosed(locator)?;
+        if let Some(disclosure) = disclosure {
+            eprintln!("strands-box credentials: {disclosure}");
+        }
+        Ok(secret.into_inner())
     }
 
-    /// The same dereference, keeping the [`Secret`] wrapper — the vault's own load path
+    /// The same dereference, keeping the [`Secret`] wrapper, plus the source's note for the
+    /// operator — the vault's own load path
     /// (docs/design/decisions.md#an-unusable-secret-value-is-unrepresentable).
-    pub(crate) fn resolve_secret(&self, locator: &Locator) -> Result<Secret> {
+    pub(crate) fn resolve_disclosed(&self, locator: &Locator) -> Result<(Secret, Option<String>)> {
         if locator.scheme() == AWS_SCHEME {
             return Err(CredentialError::Credential(
                 "an aws:// reference resolves to structured session credentials for SigV4 signing, \
@@ -82,7 +90,7 @@ impl Backend {
         }
 
         match &self.profile {
-            Profile::Local { registry } => registry.fetch(locator),
+            Profile::Local { registry } => registry.fetch_disclosed(locator),
         }
     }
 }

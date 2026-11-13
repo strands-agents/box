@@ -79,6 +79,9 @@ pub(crate) async fn generate_schema(
     Ok(ExitCode::SUCCESS)
 }
 
+/// The scheme a telemetry target reads and a remote MCP server does not.
+const SECRETS_MANAGER_SCHEME: &str = "aws-secretsmanager";
+
 /// Resolve a remote server's credential and build the `(header, value)` to attach to its discovery
 /// requests. `env://` reads the operator's variable through the sanctioned resolver; the value is
 /// zeroized when it drops and never reaches the generated schema. Only header placement is
@@ -98,6 +101,16 @@ fn resolve_auth(server: &str, secret: &EgressSecret) -> Result<(String, String),
             reason: source.to_string(),
         }
     })?;
+    // `run` refuses this scheme on a remote MCP server, so discovery refuses it too, and makes no
+    // AWS call for a credential the box would never send.
+    if locator.scheme() == SECRETS_MANAGER_SCHEME {
+        return Err(McpSchemaError::Credential {
+            server: server.to_string(),
+            reason: "an `[mcp.<name>]` `secret.ref` does not read `aws-secretsmanager://`; write \
+                     `env://NAME` or `aws://PROFILE`"
+                .to_string(),
+        });
+    }
     let token = credentials::Backend::local()
         .resolve(&locator)
         .map_err(|source| McpSchemaError::Credential {
@@ -146,6 +159,21 @@ mod tests {
     use std::os::unix::fs::MetadataExt as _;
 
     use super::*;
+
+    /// **Schema discovery refuses `aws-secretsmanager://`**, as `run` does on a remote MCP server,
+    /// before it makes any AWS call.
+    #[test]
+    fn discovery_refuses_a_secrets_manager_reference() {
+        let secret: EgressSecret =
+            toml::from_str("ref = \"aws-secretsmanager://box/github#TOKEN\"\n").expect("a secret");
+        let refused = resolve_auth("github", &secret).expect_err("refused");
+        let message = refused.to_string();
+        assert!(
+            message.contains("does not read `aws-secretsmanager://`"),
+            "{message}"
+        );
+        assert!(!message.contains("box/github"), "{message}");
+    }
 
     #[test]
     fn writing_a_schema_replaces_its_inode() {

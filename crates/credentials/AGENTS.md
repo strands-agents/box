@@ -198,6 +198,13 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   from the route host, so the chain region only selects the STS endpoint for an assume-role or
   web-identity profile; dropping the profile's `region =` breaks GovCloud, China, and VPC-endpoint
   subnets.
+- **`call` drives one SDK future on the same worker**, with its runtime, its `ring` HTTPS client,
+  and the cached credentials. `aws-secretsmanager://` uses it, so the process holds one AWS runtime
+  and one TLS stack. A call blocks the chain's other callers while it runs, so the worker wraps the
+  future in `tokio::time::timeout` and drops it at the caller's deadline
+  (`a_stuck_call_releases_the_worker_at_its_deadline`). A call that panics fails its caller and
+  leaves the worker running (`a_panicking_call_leaves_the_worker_running`). A worker built over a
+  test resolver has no runtime unless it comes from `with_resolver_and_io`.
 - **SSO and `aws login` are compiled out** (`default-features = false`, no `sso`), so a bare `aws://`
   does not resolve an SSO default profile. `resolve_once` walks the error source chain so the refusal
   names the missing `sso` feature rather than a bare "not properly configured".
@@ -206,6 +213,27 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
 - Derive the signing name with `derive_service_region`. `bedrock-runtime` and
   `bedrock-agent-runtime` sign as `bedrock`; a global host signs `us-east-1`; `execute-api` signs as
   itself; a trailing dot is trimmed; anything else returns `None`, so the caller refuses to sign.
+
+### The Secrets Manager source (`sources/secrets_manager.rs`)
+
+- **It adds the `GetSecretValue` request and nothing else.** The identity, the runtime, and the
+  HTTPS client are the default chain's (`SdkChainProvider::call`). Do not give it a worker, a
+  runtime, or a credential chain of its own.
+- **`aws-sdk-secretsmanager` keeps `default-features = false`.** Its defaults add the default HTTPS
+  client, which compiles `aws-lc` beside `ring` in the shared `rustls`, and the egress gateway's
+  `rustls` builders then panic. `no_second_crypto_provider_is_linked` fails when either `aws-lc`
+  crate or a second `rustls` enters `Cargo.lock`.
+- **A vault built with `require_scoped_aws_profile` refuses the scheme before any fetch**, because
+  the call signs with the ambient chain
+  (`a_secrets_manager_route_is_refused_when_a_scoped_profile_is_required`).
+- **A refusal never echoes the secret value.** Box redacts the reference in its own messages and
+  in the stderr line, and `refusal` replaces the secret's name where an AWS message quotes it
+  (`a_service_message_that_quotes_the_secret_is_redacted`). The AWS message can still name the
+  signing role.
+- **Wipe every value a JSON parse copies** (`json_field`, `is_json_object`). Move the field out of
+  the map rather than cloning it. The SDK's own response buffer cannot be wiped.
+- **A whole-secret read of a JSON object is refused** (`a_whole_json_object_is_refused`), so a
+  vendor is never sent every key the object holds.
 
 ### The shared destination matcher
 

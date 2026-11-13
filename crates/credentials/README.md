@@ -102,6 +102,7 @@ returned secret and its lifetime.
 | `op://vault/item/field` | The authenticated 1Password CLI. | hard: `op read` returns one exit code for missing, locked, and signed-out, so there is no "absent" signal to trust |
 | `aws://profile` | Structured AWS session credentials for SigV4 signing, from the named profile's static keys. Not a single secret, so `Backend::resolve` rejects it. | hard |
 | `aws://` (no profile) | Structured AWS session credentials from the AWS SDK default credential provider chain (the host's ambient identity), driven on a worker thread and cached. Not a single secret, so `Backend::resolve` rejects it. | hard |
+| `aws-secretsmanager://SECRET[#FIELD]` | The secret string of a Secrets Manager secret, or one string field of a JSON secret. `SECRET` is a name or an ARN; a name takes its region from `AWS_REGION` or `AWS_DEFAULT_REGION`. The `GetSecretValue` call runs on the default chain's worker and is signed by the chain's identity. | hard |
 
 A soft outcome means the vault comes up and the route appears in `skipped()`. A hard one aborts
 the open. A present value is always judged on content, so an empty, whitespace-only, non-UTF-8,
