@@ -186,14 +186,14 @@ happens at load when a budget is written as a `permit`.
 
 ### A rate limit on one host
 
-At most sixty completed requests to one host in ten minutes. The sixty-first is refused until the
-oldest counted request is more than ten minutes old. Write it beside a `permit` for `api.github.com`
-on `http:request`, such as the `github_request` rule in
+This rule refuses new requests to `api.github.com` when Box has recorded at least sixty response
+outcomes for that host in the last ten minutes. Pending exchanges do not count yet. Write it
+beside a `permit` for `api.github.com` on `http:request`, such as the `github_request` rule in
 [the `[egress.<name>]` table](egress.md#example).
 
 ```text
 @id("github_rate_limit")
-@description("At most 60 requests to api.github.com completed in 10 minutes.")
+@description("Refuse requests when at least 60 response outcomes for api.github.com were recorded in the last 10 minutes.")
 forbid (principal, action == Box::Action::"http:request", resource)
 when { context.input.host == "api.github.com" }
 when temporal {
@@ -207,8 +207,11 @@ when temporal {
 };
 ```
 
-- The rule counts `http:request::response` events for the host, which the box records when the
-  reply arrives. A refused request does not count, and one still in flight does not count yet.
+- The rule counts `http:request::response` events for the host, using their recording times for
+  the ten-minute window. The gateway records the outcome when the exchange ends, including failure
+  or timeout. A refused request or a request that definitely failed to reach upstream does not
+  count. Pending exchanges do not count yet, so several requests can pass before earlier exchanges
+  end. Those requests can make the total exceed the limit.
 - The `when` clause scopes the `forbid` to the one host, so a request to any other host is
   unaffected. The same shape on `net:connect` limits connections rather than requests.
 - The agent receives a `403` whose body names the rule, as `[policy: github_rate_limit]`, and its
