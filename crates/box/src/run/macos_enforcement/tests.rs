@@ -48,6 +48,23 @@ fn open_flags_use_kernel_access_bits_and_preserve_append() {
 }
 
 #[test]
+fn directory_open_uses_enumeration_and_file_open_uses_content() {
+    for (mode, expected) in [
+        (libc::S_IFDIR, FsOperation::Enumerate),
+        (libc::S_IFREG, FsOperation::ReadContent),
+    ] {
+        let mut raw = event(OPEN, "/file");
+        // SAFETY: the bridge writes only to this live RawEvent and retains no pointer.
+        assert!(unsafe { box_es_test_open(mode as u32 | 0o700, FREAD, &mut raw) });
+        assert_eq!(raw.mode & libc::S_IFMT as u32, mode as u32);
+        let plan = Plan::decode(&raw).unwrap();
+        assert_eq!(plan.checks.len(), 1);
+        assert_eq!(plan.checks[0].operation, expected);
+        assert_eq!(plan.checks[0].action, "fs:read");
+    }
+}
+
+#[test]
 fn permission_changes_check_the_existing_object_and_policy_operation() {
     for mode in [libc::S_IFREG, libc::S_IFDIR] {
         let mut raw = event(SETMODE, "/target");

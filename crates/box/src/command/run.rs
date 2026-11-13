@@ -75,6 +75,41 @@ fn write_credential_stores(
     Ok(())
 }
 
+#[cfg(all(
+    target_os = "linux",
+    feature = "native-filesystem-policy",
+    box_native_adapter_tests
+))]
+pub(crate) struct NativeSetup {
+    contract: Option<RunContract>,
+    guard: std::io::Result<Option<Arc<crate::run::native_enforcement::EntryGuard>>>,
+}
+
+#[cfg(all(
+    target_os = "linux",
+    feature = "native-filesystem-policy",
+    box_native_adapter_tests
+))]
+pub(super) fn prepare_native(config: &Path, has_callback: bool) -> Result<NativeSetup, BoxError> {
+    let contract = if has_callback {
+        None
+    } else {
+        Some(read_contract(config)?)
+    };
+    let enabled = contract
+        .as_ref()
+        .is_none_or(RunContract::uses_native_filesystem);
+    let guard = crate::run::native_enforcement::EntryGuard::prepare(enabled);
+    if guard.is_err() {
+        crate::run::native_enforcement::EntryGuard::prepare(false).map_err(|source| {
+            crate::error::SuperviseError::Control {
+                reason: format!("native filesystem capability removal failed: {source}"),
+            }
+        })?;
+    }
+    Ok(NativeSetup { contract, guard })
+}
+
 /// One line for each `[tool]` and stdio `[mcp]` whose program a tool grammar decides in place of
 /// `shell:spawn`.
 fn write_grammar_disclosures(
@@ -151,7 +186,46 @@ pub(crate) async fn execute(
     argv: &[OsString],
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
+    #[cfg(all(
+        target_os = "linux",
+        feature = "native-filesystem-policy",
+        box_native_adapter_tests
+    ))]
+    native_setup: NativeSetup,
 ) -> Result<ExitCode, BoxError> {
+    #[cfg(all(
+        target_os = "linux",
+        feature = "native-filesystem-policy",
+        box_native_adapter_tests
+    ))]
+    let (locked, entry_guard) = {
+        let NativeSetup { contract, guard } = native_setup;
+        let contract = match contract {
+            Some(contract) => contract,
+            None => read_contract(config)?,
+        };
+        let guard = if contract.uses_native_filesystem() {
+            Some(
+                guard
+                    .map_err(|source| crate::error::SuperviseError::Control {
+                        reason: format!("native filesystem setup failed: {source}"),
+                    })?
+                    .ok_or_else(|| crate::error::SuperviseError::Control {
+                        reason: "native filesystem interception requires CAP_BPF and CAP_PERFMON"
+                            .to_string(),
+                    })?,
+            )
+        } else {
+            drop(guard);
+            None
+        };
+        (prepare_contract(contract, config, argv)?, guard)
+    };
+    #[cfg(not(all(
+        target_os = "linux",
+        feature = "native-filesystem-policy",
+        box_native_adapter_tests
+    )))]
     let locked = prepare(config, argv)?;
     locked.announce_credential_stores()?;
     let collector = telemetry::open(&locked.root, &locked.record)?;
@@ -161,7 +235,19 @@ pub(crate) async fn execute(
         &name,
     ));
 
-    let outcome = hosted(locked, Arc::clone(&collector), terminal, signals).await;
+    let outcome = hosted(
+        locked,
+        Arc::clone(&collector),
+        terminal,
+        signals,
+        #[cfg(all(
+            target_os = "linux",
+            feature = "native-filesystem-policy",
+            box_native_adapter_tests
+        ))]
+        entry_guard,
+    )
+    .await;
 
     // The one teardown point, so every exit above records the stop and every queued record
     // reaches its target. `drained` is the only route out of the collector's queue, and the
@@ -187,6 +273,12 @@ async fn hosted(
     collector: Arc<telemetry::Collector>,
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
+    #[cfg(all(
+        target_os = "linux",
+        feature = "native-filesystem-policy",
+        box_native_adapter_tests
+    ))]
+    entry_guard: Option<std::sync::Arc<crate::run::native_enforcement::EntryGuard>>,
 ) -> Result<ExitCode, BoxError> {
     let sources: Vec<Policy> = locked.policy.into_iter().collect();
     let subject = telemetry::policy_subject(&sources);
@@ -259,6 +351,12 @@ async fn hosted(
         locked.owned,
         &locked.workspace,
         &home,
+        #[cfg(all(
+            target_os = "linux",
+            feature = "native-filesystem-policy",
+            box_native_adapter_tests
+        ))]
+        entry_guard,
     )?;
     let site = Site {
         attachment: hosted.attachment(),
@@ -327,15 +425,39 @@ fn agent_home(agent: &ProcessSpec) -> Result<PathBuf, BoxError> {
     }
 }
 
-fn prepare(config: &Path, argv: &[OsString]) -> Result<LockedRun, BoxError> {
+fn read_contract(config: &Path) -> Result<RunContract, BoxError> {
     let invocation = std::env::current_dir().map_err(|source| ConfigError::Read {
         path: PathBuf::from("."),
         source,
     })?;
-    let contract = RunContract::read(config, &invocation)?;
+    RunContract::read(config, &invocation)
+}
+
+#[cfg(not(all(
+    target_os = "linux",
+    feature = "native-filesystem-policy",
+    box_native_adapter_tests
+)))]
+fn prepare(config: &Path, argv: &[OsString]) -> Result<LockedRun, BoxError> {
+    prepare_contract(read_contract(config)?, config, argv)
+}
+
+fn prepare_contract(
+    contract: RunContract,
+    config: &Path,
+    argv: &[OsString],
+) -> Result<LockedRun, BoxError> {
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     if contract.experimental_features().native_filesystem_policy {
-        crate::run::macos_enforcement::preflight()?;
+        crate::run::native_enforcement::preflight()?;
+    }
+    #[cfg(all(
+        target_os = "linux",
+        feature = "native-filesystem-policy",
+        box_native_adapter_tests
+    ))]
+    if contract.uses_native_filesystem() {
+        crate::run::native_enforcement::preflight()?;
     }
     contract.validate_declared_directory()?;
     let (mut root, root_lock) = BoxRoot::lock_directory(contract.box_directory())?;

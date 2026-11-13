@@ -349,6 +349,15 @@ impl RunContract {
         &self.file.experimental_features
     }
 
+    #[cfg(all(
+        target_os = "linux",
+        feature = "native-filesystem-policy",
+        box_native_adapter_tests
+    ))]
+    pub(crate) fn uses_native_filesystem(&self) -> bool {
+        self.file.uses_native_filesystem()
+    }
+
     pub(crate) fn box_directory(&self) -> &Path {
         &self.box_directory
     }
@@ -695,9 +704,14 @@ impl ExperimentalFeatures {
 
     fn validate(&self) -> Result<(), ConfigError> {
         if self.native_filesystem_policy
-            && !cfg!(all(
-                target_os = "macos",
-                feature = "native-filesystem-policy"
+            && !cfg!(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(
+                    target_os = "linux",
+                    target_arch = "aarch64",
+                    feature = "native-filesystem-policy",
+                    box_native_adapter_tests
+                )
             ))
         {
             return Err(ConfigError::ExperimentalFeatureUnavailable {
@@ -1356,6 +1370,22 @@ struct ConfigFile {
 }
 
 impl ConfigFile {
+    #[cfg(all(
+        target_os = "linux",
+        feature = "native-filesystem-policy",
+        box_native_adapter_tests
+    ))]
+    fn uses_native_filesystem(&self) -> bool {
+        let contained = crate::record::config::mcp::contained_specs(&self.mcp);
+        process::uses_native_filesystem(
+            self.agent
+                .iter()
+                .chain(self.tool.values())
+                .chain(contained.values().map(|server| &server.spec)),
+            self.experimental_features.native_filesystem_policy,
+        )
+    }
+
     fn read(path: &Path) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_path_buf(),
@@ -1699,6 +1729,78 @@ mod tests {
         }
     }
 
+    #[cfg(all(
+        target_os = "linux",
+        feature = "native-filesystem-policy",
+        box_native_adapter_tests
+    ))]
+    #[test]
+    fn native_setup_includes_inherited_stdio_servers_and_respects_every_opt_out() {
+        let base = r#"name = "selection"
+box_dir = "/var/lib/box"
+[experimental-features]
+native-filesystem-policy = true
+[agent]
+command = ["/bin/true"]
+native-filesystem-policy = false
+"#;
+        for (extra, expected) in [
+            ("", false),
+            (
+                r#"[tool.reader]
+command = ["/bin/true"]
+"#,
+                true,
+            ),
+            (
+                r#"[tool.reader]
+command = ["/bin/true"]
+native-filesystem-policy = false
+"#,
+                false,
+            ),
+            (
+                r#"[mcp.reader]
+type = "stdio"
+command = ["/bin/true"]
+"#,
+                true,
+            ),
+            (
+                r#"[mcp.reader]
+type = "stdio"
+command = ["/bin/true"]
+native-filesystem-policy = false
+"#,
+                false,
+            ),
+        ] {
+            let text = format!("{base}{extra}");
+            let parsed = ConfigFile::parse(&text, Path::new("box.toml"));
+            let file = if cfg!(target_arch = "aarch64") {
+                parsed.unwrap()
+            } else {
+                assert!(matches!(
+                    parsed,
+                    Err(ConfigError::ExperimentalFeatureUnavailable { .. })
+                ));
+                // Test selection independently of this platform's activation refusal.
+                toml::from_str::<ConfigFile>(&text).expect("decode the selection fixture")
+            };
+            assert_eq!(file.uses_native_filesystem(), expected, "{extra}");
+            let contained_mcp = crate::record::config::mcp::contained_specs(&file.mcp);
+            let mut normalized = record(file.agent, file.egress);
+            normalized.experimental_features = file.experimental_features;
+            normalized.tool = file.tool;
+            normalized.contained_mcp = contained_mcp;
+            assert_eq!(
+                crate::run::native_enforcement::selected(&normalized),
+                expected,
+                "{extra}"
+            );
+        }
+    }
+
     #[test]
     fn explicit_shell_sizes_require_their_record_version() {
         for limits in [
@@ -1928,9 +2030,14 @@ native-filesystem-policy = false
             &format!("{required}[experimental-features]\nnative-filesystem-policy = true\n"),
             Path::new("box.toml"),
         );
-        if cfg!(all(
-            target_os = "macos",
-            feature = "native-filesystem-policy"
+        if cfg!(any(
+            all(target_os = "macos", feature = "native-filesystem-policy"),
+            all(
+                target_os = "linux",
+                target_arch = "aarch64",
+                feature = "native-filesystem-policy",
+                box_native_adapter_tests
+            )
         )) {
             assert!(
                 enabled

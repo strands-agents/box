@@ -1240,3 +1240,21 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     bit still lands outside it. Unmeasured — read from `syscall.rs` and `view.rs`, and no Linux
     target was exercised. Seccomp **can** scope this, unlike the macOS flag argument, because the
     mode is a scalar.
+
+
+### Native policy and filesystem-information notifications
+
+Kevin approved one receiver in the existing containment supervisor on November 11, 2026,
+including the private forwarding protocol in the native-policy integration work. The selected
+native adapter adds its operations to the existing notification filter. Do not install a second
+listener: Linux rejects a new listener when an ancestor filter already has one, even when their
+system-call sets differ. The standalone kernel control returned `EBUSY` for the second installation.
+
+The supervisor retains its scoped authority for sanitized `statfs` answers. For native operations,
+it forwards a fixed 80-byte, little-endian request on the private startup socket. Box receives a
+copy of the listener for validation, descriptor injection, and replies, but never calls notification
+receive on that copy. Finish the supervisor startup acknowledgment before allowing Box to read the
+forwarding stream. The workload must close its forwarding-socket copy before execution.
+Forwarding uses a bounded, nonblocking send. A full buffer retains one request while the supervisor waits for write readiness and continues checking the reaper.
+A partial write or disconnected peer terminates supervision.
+Keep the existing namespace lifetime chain so supervisor failure terminates the workload.

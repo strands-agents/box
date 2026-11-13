@@ -231,7 +231,14 @@ pub(crate) enum ShebangInterpreters {
 /// The translated boundary for one process.
 pub(crate) struct Boundary {
     installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,
-    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    #[cfg(any(
+        all(target_os = "macos", feature = "native-filesystem-policy"),
+        all(
+            target_os = "linux",
+            feature = "native-filesystem-policy",
+            box_native_adapter_tests
+        )
+    ))]
     native_filesystem_policy: bool,
     /// The executable, canonical and prepared.
     executable: PathBuf,
@@ -789,7 +796,14 @@ impl Boundary {
             .map(|spelled| spelled.display().to_string());
         Ok(Self {
             installation,
-            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            #[cfg(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(
+                    target_os = "linux",
+                    feature = "native-filesystem-policy",
+                    box_native_adapter_tests
+                )
+            ))]
             native_filesystem_policy: spec
                 .native_filesystem_policy
                 .unwrap_or(site.stored.experimental_features.native_filesystem_policy),
@@ -812,7 +826,14 @@ impl Boundary {
         })
     }
 
-    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    #[cfg(any(
+        all(target_os = "macos", feature = "native-filesystem-policy"),
+        all(
+            target_os = "linux",
+            feature = "native-filesystem-policy",
+            box_native_adapter_tests
+        )
+    ))]
     pub(crate) fn native_filesystem_policy(&self) -> bool {
         self.native_filesystem_policy
     }
@@ -1620,11 +1641,37 @@ mod tests {
                 }
                 let result = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                     if streaming {
-                        LeafBox::spawn_streaming(boundary, &fixture.root)
-                            .await
-                            .map(|_| ())
+                        LeafBox::spawn_streaming(
+                            boundary,
+                            &fixture.root,
+                            #[cfg(any(
+                                all(target_os = "macos", feature = "native-filesystem-policy"),
+                                all(
+                                    target_os = "linux",
+                                    feature = "native-filesystem-policy",
+                                    box_native_adapter_tests
+                                )
+                            ))]
+                            None,
+                        )
+                        .await
+                        .map(|_| ())
                     } else {
-                        LeafBox::run(boundary, &fixture.root).await.map(|_| ())
+                        LeafBox::run(
+                            boundary,
+                            &fixture.root,
+                            #[cfg(any(
+                                all(target_os = "macos", feature = "native-filesystem-policy"),
+                                all(
+                                    target_os = "linux",
+                                    feature = "native-filesystem-policy",
+                                    box_native_adapter_tests
+                                )
+                            ))]
+                            None,
+                        )
+                        .await
+                        .map(|_| ())
                     }
                 })
                 .await
@@ -1660,7 +1707,19 @@ mod tests {
             );
             let output = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
-                LeafBox::run(boundary, &fixture.root),
+                LeafBox::run(
+                    boundary,
+                    &fixture.root,
+                    #[cfg(any(
+                        all(target_os = "macos", feature = "native-filesystem-policy"),
+                        all(
+                            target_os = "linux",
+                            feature = "native-filesystem-policy",
+                            box_native_adapter_tests
+                        )
+                    ))]
+                    None,
+                ),
             )
             .await
             .unwrap()
@@ -1676,7 +1735,19 @@ mod tests {
             fixture.translate_full(&spec, "[tool.test]", RuntimeReach::Leaf, EgressMode::Native);
         let leaf = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            LeafBox::spawn_streaming(boundary, &fixture.root),
+            LeafBox::spawn_streaming(
+                boundary,
+                &fixture.root,
+                #[cfg(any(
+                    all(target_os = "macos", feature = "native-filesystem-policy"),
+                    all(
+                        target_os = "linux",
+                        feature = "native-filesystem-policy",
+                        box_native_adapter_tests
+                    )
+                ))]
+                None,
+            ),
         )
         .await
         .unwrap()
@@ -4915,7 +4986,19 @@ write = ["/Users/example/box-demo/aws-tmp"]
         async fn run(fixture: &Fixture, boundary: Boundary) -> Result<CapturedLeaf, BoxError> {
             tokio::time::timeout(
                 std::time::Duration::from_secs(20),
-                LeafBox::run(boundary, &fixture.root),
+                LeafBox::run(
+                    boundary,
+                    &fixture.root,
+                    #[cfg(any(
+                        all(target_os = "macos", feature = "native-filesystem-policy"),
+                        all(
+                            target_os = "linux",
+                            feature = "native-filesystem-policy",
+                            box_native_adapter_tests
+                        )
+                    ))]
+                    None,
+                ),
             )
             .await
             .expect("the contained script finishes")

@@ -1124,3 +1124,14 @@ stable `<a id>` anchor. Cite an entry by that anchor: a **relative link** from M
 `docs/design/decisions.md#<anchor>` in a code comment. Do not cite a decision by a number, because
 a number can land on the wrong target rather than on none, and a link fails visibly. A decision
 that reaches shipped code gets its entry in the same change.
+
+
+### Linux native notification forwarding
+
+The private version-two registration receives three descriptors: the kernel listener, a path-only
+workload-root handle, and the containment supervisor's local forwarding stream. Only the containment
+supervisor receives kernel notifications. The Box worker reads framed requests from the stream and
+uses the listener only to validate or complete those requests. Reject other protocol versions,
+wrong descriptor kinds, incomplete frames, and operations outside the native adapter's set.
+A clean stream closure marks the supervisor's exit; a partial frame is a control failure.
+This protocol is internal and does not change the stored Box configuration or Dogwood event schema.

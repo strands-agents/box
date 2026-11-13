@@ -719,6 +719,15 @@ impl DogwoodEngine {
             .engine
             .lock()
             .map_err(|_| "dogwood durable engine lock poisoned".to_string())?;
+        #[cfg(all(target_os = "linux", box_native_test_faults))]
+        if std::thread::current().name() == Some("linux-native-policy")
+            && std::env::var("BOX_NATIVE_TEST_FAULT").as_deref() == Ok("policy-lock")
+        {
+            eprintln!("NATIVE_TEST_FAULT=policy-lock");
+            loop {
+                std::thread::park();
+            }
+        }
         let offset = engine.log_offset();
         offset
             .checked_add(1)
