@@ -9,8 +9,9 @@ mod fixture;
 
 use std::time::{Duration, Instant};
 
-/// A `/bin/sh` tool that leaves a `sleep` behind, records both pids, and waits.
-const HOLDER: &str = "#!/bin/sh\nsleep 300 &\nprintf %s \"$!\" > \"$1/holder-sleep\"\nprintf %s \"$$\" > \"$1/holder-sh\"\nwait\n";
+/// A `/bin/sh` tool that leaves a child behind, records both pids, and waits. The child is a forked
+/// subshell that loops, so the tool needs no other program, and `/bin/sleep` is outside its grants.
+const HOLDER: &str = "#!/bin/sh\n( while :; do :; done ) &\nprintf %s \"$!\" > \"$1/holder-sleep\"\nprintf %s \"$$\" > \"$1/holder-sh\"\nwait\n";
 
 /// Whether `pid` is gone: `kill(pid, 0)` fails with `ESRCH`.
 fn gone(pid: libc::pid_t) -> bool {
