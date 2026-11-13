@@ -182,6 +182,14 @@ HTTP MCP `tools/list` keeps bounded capture for each page and the existing schem
 ([runtime tool discovery](decisions.md#remote-tool-schemas-are-discovered-at-runtime-in-memory)).
 The default 16 MiB cap still applies to requests and these catalog responses.
 
+For an HTTP MCP `tools/call`, the gateway asks the server for an uncompressed reply, and copies the
+reply as it streams, after redaction, so policy history sees the bytes the workload saw. It hands the copy to the request's reply observer
+once the reply matching the request's JSON-RPC id has passed, or when the stream ends. The copy is
+capped at the same 16 MiB, and all copies held at once share 64 MiB, so concurrent tool calls can't
+make the gateway hold a full copy for each connection. A longer reply, a reply over the shared
+budget, a cut-off stream, or a compressed body is recorded as `indeterminate`
+([how a tool call ended](./policy.md)).
+
 One absolute upstream deadline covers request transmission and response receipt, with a default of
 300 seconds. Chunks do not reset it. A later timeout or framing error closes the unfinished response,
 so the workload can receive a processed prefix followed by an error. Box records the request outcome
@@ -236,11 +244,12 @@ and credential handling for tools and local MCP servers.
 An `[egress.<name>]` route binds a secret to a set of destinations. Policy decides whether to
 forward each request. The route specifies which credential to add and grants no access itself.
 
-> Every process in a box can use every route. The agent, each tool, and each stdio MCP server get
-> every placeholder, and the gateway adds credentials based on the destination. It cannot identify
-> which process opened a connection, so it cannot enforce a per-process credential list. A process
-> that must not use a credential belongs in a separate box. [The box is the credential
-> boundary](./decisions.md#the-box-is-the-credential-boundary) records the decision and its cost.
+> Every process in a box can use every route. The agent, each tool, each stdio MCP server, and the
+> hosted Shell get every placeholder, and the gateway adds credentials based on the destination. It
+> cannot identify which process opened a connection, so it cannot enforce a per-process credential
+> list. A process that must not use a credential belongs in a separate box. [The box is the
+> credential boundary](./decisions.md#the-box-is-the-credential-boundary) records the decision and
+> its cost.
 
 | Source | `secret.ref` | What the gateway does |
 |---|---|---|
@@ -251,8 +260,8 @@ forward each request. The route specifies which credential to add and grants no 
 ### The placeholder swap
 
 An `env://` route keeps the real secret in the box's trusted process and gives every contained
-process a placeholder instead, which `box.toml` calls a phantom. See [the workload holds a phantom,
-and the gateway holds the
+process, and the hosted Shell, a placeholder instead, which `box.toml` calls a phantom. See [the
+workload holds a phantom, and the gateway holds the
 secret](decisions.md#the-workload-holds-a-phantom-and-the-gateway-holds-the-secret).
 
 ```mermaid

@@ -1,6 +1,6 @@
 //! Operator-selected execution limits for hosted interpreters.
 
-use std::num::NonZeroU64;
+use std::num::{NonZeroU64, NonZeroUsize};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
@@ -8,6 +8,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 pub(crate) const DEFAULT_SHELL_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const DEFAULT_SHELL_MAX_INPUT: usize = 256 * 1024;
 pub(crate) const DEFAULT_SHELL_MAX_OUTPUT: usize = 64 * 1024;
+pub(crate) const DEFAULT_SHELL_MAX_STDIN: usize = 64 * 1024;
 
 /// The time the broker leaves for Shell to report a timeout and release its work.
 pub(crate) const SHELL_TIMEOUT_GRACE: Duration = Duration::from_secs(5);
@@ -34,6 +35,12 @@ pub(crate) struct ShellLimits {
     max_input: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_output: Option<usize>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "positive_bytes"
+    )]
+    max_stdin: Option<NonZeroUsize>,
 }
 
 impl ShellLimits {
@@ -45,8 +52,17 @@ impl ShellLimits {
         self.max_output.unwrap_or(DEFAULT_SHELL_MAX_OUTPUT)
     }
 
+    pub(crate) fn max_stdin(&self) -> usize {
+        self.max_stdin
+            .map_or(DEFAULT_SHELL_MAX_STDIN, NonZeroUsize::get)
+    }
+
+    pub(super) fn has_stdin_limit(&self) -> bool {
+        self.max_stdin.is_some()
+    }
+
     pub(super) fn has_size_limits(&self) -> bool {
-        self.max_input.is_some() || self.max_output.is_some()
+        self.max_input.is_some() || self.max_output.is_some() || self.max_stdin.is_some()
     }
 
     pub(crate) fn timeout(&self) -> Option<Duration> {
@@ -60,6 +76,15 @@ impl ShellLimits {
     fn is_default(&self) -> bool {
         self.timeout.is_none() && !self.has_size_limits()
     }
+}
+
+fn positive_bytes<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<NonZeroUsize>, D::Error> {
+    let bytes = usize::deserialize(deserializer)?;
+    NonZeroUsize::new(bytes).map(Some).ok_or_else(|| {
+        D::Error::custom("limits.shell.max_stdin must be a positive integer number of bytes")
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +194,24 @@ mod tests {
                 "{value}"
             );
         }
+    }
+
+    #[test]
+    fn max_stdin_is_a_positive_byte_count() {
+        let limits: Limits = toml::from_str("[shell]\nmax_stdin = 1048576\n").unwrap();
+        assert_eq!(limits.shell.max_stdin(), 1048576);
+        assert_eq!(
+            toml::from_str::<Limits>(&toml::to_string(&limits).unwrap()).unwrap(),
+            limits
+        );
+        for value in ["0", "-1", "\"64k\"", "true", "1.5"] {
+            assert!(
+                toml::from_str::<Limits>(&format!("[shell]\nmax_stdin = {value}\n")).is_err(),
+                "{value}"
+            );
+        }
+        let zero = toml::from_str::<Limits>("[shell]\nmax_stdin = 0\n").unwrap_err();
+        assert!(zero.to_string().contains("positive integer"), "{zero}");
     }
 
     #[test]

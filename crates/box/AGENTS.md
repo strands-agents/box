@@ -688,8 +688,32 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   handler's own tree was granted. The floor names neither tree, because an operator makes a
   virtualenv or a `node_modules` wherever they like. An entry on a path that does not exist is
   refused, never skipped, and `record/config/filesystem.rs` states every other refusal class.
-- **The alias must send `StdinEof`.** `forward` sends `Open`, `Call`, **`StdinEof`**, and the third
-  frame is not optional. A harness invoking `zsh -c` supplies nothing on stdin, so without the EOF
+- **A Shell alias streams finite stdin after the Call.** It classifies fd 0 with `fstat`: a pipe,
+  a regular file, or a socket is read; a terminal, another device, or a closed fd is not. A thread
+  reads it and `pump_input` sends `Input` frames, coalesced for `INPUT_COALESCE_WAIT` and up to
+  `MAX_CHUNK_BYTES`, then `InputEof`. The broker merges a Program's unread stdin into one buffer, at most `max_stdin` bytes, behind a two-frame channel, so a writer's
+  small writes do not trip flow control while the command is not reading. The alias reads stdin
+  whether or not the command reads it, so it consumes bytes a POSIX shell would leave, such as the
+  rest of an inherited file. The alias returns on `Exit`, so a writer that keeps the pipe open holds nothing:
+  Claude Code 2.1.292 gives its Bash tool such a stdin, and collecting to EOF before the Call made
+  every agent command wait 10 s and fail. A command that reads such a stdin waits until the Shell
+  deadline. The alias forwards every byte, and the broker applies `[limits.shell] max_stdin`
+  (`ShellLimits::max_stdin`, 64 KiB by default, never 0): it feeds exactly the first `max_stdin`
+  bytes, discards the rest, sends no Denied, and ignores `InputEof`, so the writer never blocks or
+  gets EPIPE, a command that does not read is unaffected, and one that reads past the cap waits for
+  the Shell deadline and fails; a failed Call then gets a stderr note that its input was cut. On a
+  read error the alias sends `Signal` and no `InputEof`, the broker drops the Call so
+  `ProcessGroup::drop` kills and reaps each process it started, and the alias exits 125. The broker
+  cuts the same way at `max_stdin` times `MAX_PROGRAMS_PER_CONNECTION` per connection, and
+  input waits in the same per-Program buffer; the pump sends it in frames of at most `MAX_CHUNK_BYTES`,
+  because the Shell's `ChannelReader` shifts a frame's remainder on each read. It refuses an `Input` longer than `MAX_ENCODED_CHUNK_BYTES`
+  before it decodes it, and after a refused `Input` signals the running `Call`, leaves stdin open (`Close` also signals
+  and leaves stdin open)
+  so the Call never reads end-of-file on part of its input, drops every later `Input`, and refuses each later `Call` on that
+  Program. Input for a Program whose Shell no longer reads stdin is dropped. Python and MCP aliases read no stdin here, and a tool leaf still gets
+  `Stdio::null()`.
+- **The alias must send `StdinEof`.** A Shell alias's `forward` sends `Open`, `Call`, each `Input`,
+  and **`StdinEof`**. The EOF frame is not optional. A harness invoking `zsh -c` often supplies nothing on stdin, so without the EOF
   the Program's stdin channel stays open and any command that pre-reads stdin blocks to its
   deadline — the `lua` builtin does exactly that, so **every** `lua` call took 34–36s and came back
   as `the call exceeded its deadline`. Two things worth not repeating:

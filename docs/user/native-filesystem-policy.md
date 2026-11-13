@@ -104,7 +104,7 @@ A box whose egress re-routes a destination to a [backend](egress.md) requires re
 An explicit `limits.shell.max_input` or `limits.shell.max_output` requires record version 31,
 including values equal to the defaults.
 A non-empty [`[gateway] upgrade_http`](config.md#gateway) requires record version 32.
-Enabling [`native-file-watching`](config.md#native-file-watching) for any process requires record version 33.
+Enabling [`native-file-watching`](config.md#native-file-watching) for any process requires record version 34.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 

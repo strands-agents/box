@@ -664,7 +664,12 @@ const SHELL_SIZE_LIMITS_RECORD_VERSION: u32 = 31;
 /// The record version of a record whose `[gateway]` upgrades a host's plain HTTP, so an older build
 /// refuses the box rather than resuming it with those requests refused on port 80.
 const UPGRADE_HTTP_RECORD_VERSION: u32 = 32;
-const NATIVE_FILE_WATCHING_RECORD_VERSION: u32 = 33;
+/// The record version of a record that sets `limits.shell.max_stdin`, so an older build refuses the
+/// box rather than resuming it with the default stdin limit.
+const SHELL_STDIN_LIMIT_RECORD_VERSION: u32 = 33;
+/// The record version of a record whose process selects `native-file-watching`, so an older build
+/// refuses the box rather than resuming it with FSEvents refused.
+const NATIVE_FILE_WATCHING_RECORD_VERSION: u32 = 34;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -712,15 +717,16 @@ fn record_version<'a>(
     file_attributes: bool,
     features: &ExperimentalFeatures,
     limits: &Limits,
-    specs: impl Iterator<Item = &'a ProcessSpec>,
+    specs: impl Iterator<Item = &'a ProcessSpec> + Clone,
     mcp: &[crate::record::config::mcp::McpServer],
     ingress: bool,
     has_backend: bool,
     gateway: &Gateway,
 ) -> u32 {
-    let process_version = process_record_version(features, specs);
-    if process_version == NATIVE_FILE_WATCHING_RECORD_VERSION {
-        process_version
+    if specs.clone().any(|spec| spec.native_file_watching) {
+        NATIVE_FILE_WATCHING_RECORD_VERSION
+    } else if limits.shell.has_stdin_limit() {
+        SHELL_STDIN_LIMIT_RECORD_VERSION
     } else if !gateway.is_default() {
         UPGRADE_HTTP_RECORD_VERSION
     } else if limits.shell.has_size_limits() {
@@ -743,7 +749,7 @@ fn record_version<'a>(
     } else if crate::record::config::mcp::shares_a_program(mcp) {
         SHARED_PROGRAM_RECORD_VERSION
     } else {
-        process_version
+        process_record_version(features, specs)
     }
 }
 
@@ -762,15 +768,14 @@ fn process_record_version<'a>(
     features: &ExperimentalFeatures,
     specs: impl Iterator<Item = &'a ProcessSpec>,
 ) -> u32 {
-    specs.fold(features.record_version(), |version, spec| {
-        version.max(if spec.native_file_watching {
-            NATIVE_FILE_WATCHING_RECORD_VERSION
-        } else if spec.native_filesystem_policy.is_some() {
-            PROCESS_POLICY_RECORD_VERSION
-        } else {
-            RECORD_VERSION
-        })
-    })
+    if specs
+        .into_iter()
+        .any(|spec| spec.native_filesystem_policy.is_some())
+    {
+        PROCESS_POLICY_RECORD_VERSION
+    } else {
+        features.record_version()
+    }
 }
 
 /// A key an earlier build read, and what replaced it.
@@ -1008,6 +1013,7 @@ impl Record {
             BACKEND_RECORD_VERSION,
             SHELL_SIZE_LIMITS_RECORD_VERSION,
             UPGRADE_HTTP_RECORD_VERSION,
+            SHELL_STDIN_LIMIT_RECORD_VERSION,
             NATIVE_FILE_WATCHING_RECORD_VERSION,
         ]
         .contains(&stamped.version)
@@ -1722,7 +1728,7 @@ mod tests {
                 };
                 assert_eq!(selected.native_file_watching, enabled, "{table}");
                 assert!(!stored.tool["other"].native_file_watching);
-                let expected = if enabled { 33 } else { 21 };
+                let expected = if enabled { 34 } else { 21 };
                 assert_eq!(stored.version, expected, "{body}");
                 let text = stored.to_toml().unwrap();
                 assert_eq!(text.contains("native-file-watching"), enabled);
@@ -1730,7 +1736,7 @@ mod tests {
                     Record::parse(&text, Path::new("record.toml")).unwrap(),
                     stored
                 );
-                stored.version = if enabled { 32 } else { 33 };
+                stored.version = if enabled { 33 } else { 34 };
                 assert!(matches!(
                     Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
                     Err(ConfigError::RecordVersion { expected: version, .. }) if version == expected
@@ -1756,19 +1762,19 @@ mod tests {
         let mut stored = pinned_record(
             "file-attributes = true\n\
              [gateway]\nupgrade_http = [\"example.com\"]\n\
-             [limits.shell]\nmax_output = 65536\n\
+             [limits.shell]\nmax_output = 65536\nmax_stdin = 1048576\n\
              [agent]\ncommand = [\"watcher\"]\nnative-filesystem-policy = false\n\
              [tool.watcher]\ncommand = [\"watcher\"]\nnative-file-watching = true\n",
         );
-        assert_eq!(stored.version, 33);
+        assert_eq!(stored.version, 34);
         assert_eq!(
             Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
             stored
         );
-        stored.version = 32;
+        stored.version = 33;
         assert!(matches!(
             Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
-            Err(ConfigError::RecordVersion { expected: 33, .. })
+            Err(ConfigError::RecordVersion { expected: 34, .. })
         ));
     }
 
@@ -3844,6 +3850,27 @@ command = ["mcp-server-fetch"]
                 .expect("this build reads its own record"),
             stored
         );
+    }
+
+    /// A stdin limit stores its own record version, so an earlier build refuses the box.
+    #[test]
+    fn a_stdin_limit_stores_a_version_no_earlier_build_reads() {
+        let mut stored = record_from_config("[limits.shell]\nmax_stdin = 1048576\n")
+            .expect("a stdin limit loads");
+        assert_eq!(stored.version, SHELL_STDIN_LIMIT_RECORD_VERSION);
+        assert_eq!(stored.limits.shell.max_stdin(), 1048576);
+        assert_eq!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+            stored
+        );
+        stored.version = UPGRADE_HTTP_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: UPGRADE_HTTP_RECORD_VERSION,
+                expected: SHELL_STDIN_LIMIT_RECORD_VERSION
+            })
+        ));
     }
 
     #[test]

@@ -98,6 +98,8 @@ The nested table `[limits.shell]` accepts the same values under `timeout`.
 `shell.max_input` and `shell.max_output` accept nonnegative integer byte counts, with defaults
 of 262144 and 65536. Shell applies the output limit to both output buffers and source-file reads.
 Set either size to `0` to disable that Shell limit, or omit it to keep its default.
+`shell.max_stdin` is a positive byte count, 65536 by default, of the standard input one command
+receives through a Shell alias; it cannot be disabled.
 Invalid or unrepresentable durations and sizes are load errors. Python retains its existing limits.
 See [execution limits](../../docs/user/config.md#limits).
 
