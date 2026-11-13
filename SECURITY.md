@@ -30,6 +30,11 @@ treated as a security issue, including:
   crate to panic, hang, or consume unbounded resources
 
 
+For root-owned files and symbolic links, and their later use by programs outside Box,
+see [Linux root sandbox launches](docs/design/containment.md#linux-root-sandbox-launches).
+Bypasses of Box's filesystem restrictions or policy remain security issues.
+
+
 ## Out of Scope
 
 The following are explicitly **not** part of the security boundary and will not
