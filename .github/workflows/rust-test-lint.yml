@@ -152,12 +152,25 @@ jobs:
           python3 scripts/check-linux-test-output.py linux-workspace-tests.log | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$test_status"
 
-      - name: Upload Linux workspace test output
+      - name: Test Linux native filesystem forwarding
+        if: ${{ !cancelled() && runner.os == 'Linux' && inputs.filter == '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--cfg box_native_adapter_tests" \
+            cargo test --locked -p strands-box-containment --lib --all-features \
+            backend::linux::namespace::filesystem_queries::forwarding_tests:: \
+            -- --test-threads=1 2>&1 | tee linux-native-forwarding-tests.log
+          grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' linux-native-forwarding-tests.log
+
+      - name: Upload Linux test output
         if: ${{ always() && runner.os == 'Linux' }}
         uses: actions/upload-artifact@v7
         with:
           name: workspace-tests-${{ matrix.os }}
-          path: linux-workspace-tests.log
+          path: |
+            linux-workspace-tests.log
+            linux-native-forwarding-tests.log
           if-no-files-found: warn
 
       - name: Run tests (macos)

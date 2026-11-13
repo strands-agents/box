@@ -27,6 +27,20 @@ RUSTFLAGS="--cfg box_native_kernel_tests --cfg box_native_adapter_tests --cfg bo
 
 Keep test binaries separate from release artifacts. Without `box_native_adapter_tests`, the Linux product adapter remains unavailable, including with all Cargo features enabled.
 
+## Forwarding buffer tests
+
+Run the three containment supervisor tests on Linux:
+
+```sh
+RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--cfg box_native_adapter_tests" cargo test --locked -p strands-box-containment --lib --all-features backend::linux::namespace::filesystem_queries::forwarding_tests:: -- --test-threads=1
+```
+
+These tests create their own kernel notification listener. They do not need the kernel loader
+capabilities required by the operation suites. The tests check that a full forwarding buffer pauses
+request delivery, preserves the pending request, and still lets the supervisor detect workload exit.
+Linux CI runs this command separately from the workspace tests and requires all three tests to pass.
+The ordinary workspace command does not enable the private `box_native_adapter_tests` switch.
+
 ## Shared filesystem listener
 
 Selected native workloads use one kernel notification listener for both file-policy operations and
@@ -45,5 +59,7 @@ The `filesystem_queries_remain_sanitized_beside_an_allowed_native_read` and
 `filesystem_queries_remain_sanitized_beside_a_denied_native_read` tests query filesystem information
 before and after a native read. They require the expected file-policy result and zero host counters.
 The component tests cover malformed registration, wrong descriptor kinds, truncated requests,
-connection closure, and a forwarding buffer whose reader has stopped. A failed forwarding operation
-terminates supervision; it never allows the intercepted system call to continue unchecked.
+connection closure, and a forwarding buffer whose reader has stopped. When the buffer is full,
+the supervisor retains the pending request and waits for space while checking for workload exit.
+A closed connection, invalid forwarding descriptor, or partial send terminates supervision.
+These conditions never allow the intercepted system call to continue unchecked.
