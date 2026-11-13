@@ -2032,3 +2032,21 @@ the left of `&&` or `||` still applies `set -e` inside it, as at the pinned revi
 A substitution or subshell that a cancelled Call drops takes the borrowed stdin with it, so a later
 Call on the same Program reads no stdin. A Shell alias opens one Program for one Call, so it is not
 affected.
+
+## 2026-11-13 — stdin: `head -c`, `exec < file`, and `read -d ''`
+
+Three stdin behaviours differed from bash once input reached the Shell (#440):
+
+1. `x=$(head -c 1); cat` discarded the rest of stdin. `head` takes fd 0 out of
+   the process and did not put the remaining reader back, so the leftover bytes
+   were dropped with it. This copy restores fd 0 after a `head` that read stdin.
+2. `exec < /dev/null` with no command returned 0 and left stdin unchanged
+   (`TODO: apply redirects to the shell process`). This copy expands those
+   redirects and applies them to the current shell, so later commands see them.
+3. `read -d ''` did not parse `-d`. An empty delimiter is NUL, as in bash: the
+   builtin reads until that byte or EOF, assigns what it read, trims trailing
+   IFS, and returns 1 when EOF arrives before the delimiter.
+
+`tests/shell_integration.rs::head_bytes_in_a_substitution_leaves_the_rest_of_stdin`,
+`exec_without_a_command_replaces_stdin`, and
+`read_empty_delimiter_takes_all_input_until_eof` fail without the change.

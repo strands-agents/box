@@ -33,14 +33,28 @@ async fn cmd_head(os: &Mediated, args: &[String]) -> CommandResult {
         }
     }
     let mut w = io::stdout()?;
-    let reader: Box<dyn tokio::io::AsyncRead + Unpin + Send> = if let Some(path) = &file {
+    if let Some(path) = &file {
         let fd = io::open(os, path, OpenFlags::read()).await?;
-        Box::new(io::take_reader(fd)?)
-    } else {
-        Box::new(io::stdin()?)
-    };
+        let reader = io::take_reader(fd)?;
+        return write_head(&mut w, reader, n, bytes).await;
+    }
+
+    // `io::stdin` takes fd 0 out of the process. Put the remaining input back so a later
+    // command (or the rest of a substitution's caller) can still read it. `take(c)` requests
+    // only `c` bytes; leftover channel data stays in the reader and is restored with it.
+    let mut reader = io::stdin()?;
+    let status = write_head(&mut w, &mut reader, n, bytes).await;
+    io::with_process(|p| p.restore_fd(0, reader.into_fd_kind()));
+    status
+}
+
+async fn write_head<R, W>(w: &mut W, reader: R, n: usize, bytes: Option<u64>) -> CommandResult
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
     if let Some(c) = bytes {
-        tokio::io::copy(&mut reader.take(c), &mut w).await?;
+        tokio::io::copy(&mut reader.take(c), &mut *w).await?;
         return Ok(0);
     }
     let mut reader = BufReader::new(reader);
