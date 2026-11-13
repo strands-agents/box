@@ -6,7 +6,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   names, readable attributes, and what `when temporal { … }` observes. An operator's policy file is
   their source code.
 - Fix the Box integration, the schema, and the event mapping behind the façade without approval.
-- `dogwood-language` and `dogwood-local-engine` are published crates, pinned at `=1.0.0`.
+- `dogwood-language` and `dogwood-local-engine` are published crates, both pinned at
+  `=1.1.1`.
 - Close a gap listed here; never widen one. Never delete or `#[ignore]` a test that pins one.
 
 ## Read This First: Durable Dogwood History
@@ -244,6 +245,14 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   credential phantoms into the environment. Pinned by
   `an_environment_read_is_refused_while_the_schema_cannot_name_it`.
 - Refuse `Mkdir` with `parents == true`, because `ScriptPermit` cannot bound the ancestors.
+- Refuse `Scan`, because one decision on its root cannot bound every entry below it. Pinned by
+  `a_subtree_scan_is_refused_even_when_every_filesystem_effect_is_permitted`.
+- Refuse `Import` and `ImportStubs`, because the box gives a script no host modules. An unknown
+  import raises `ModuleNotFoundError`, as it did before Monty asked the host. Pinned by
+  `an_unknown_import_raises_module_not_found_error`.
+- Refuse `CreateExclusive`, which no script call produces yet, until someone states its effect.
+- Refuse `GetTypeHints`, because the box evaluates nothing for a script. `typing.get_type_hints`
+  raises `RuntimeError`. Pinned by `a_type_hints_request_is_refused_with_runtime_error`.
 - Keep `classify` exhaustive. If upstream marks `OsFunctionCall` `non_exhaustive`, add `_ => None`,
   denied.
 - Keep `Admitted::Clock` bounded to `date.today()` and `datetime.now()`, decided by nobody and

@@ -210,6 +210,7 @@ fn mutates_authority(call: &OsFunctionCall) -> bool {
         | OsFunctionCall::IsDir(_)
         | OsFunctionCall::IsSymlink(_)
         | OsFunctionCall::Iterdir(_)
+        | OsFunctionCall::Scan(_)
         | OsFunctionCall::Resolve(_)
         | OsFunctionCall::Absolute(_) => false,
         OsFunctionCall::Open(args) => !matches!(args.mode, monty_types::FileMode::Read(_)),
@@ -220,7 +221,8 @@ fn mutates_authority(call: &OsFunctionCall) -> bool {
         | OsFunctionCall::Mkdir(_)
         | OsFunctionCall::Unlink(_)
         | OsFunctionCall::Rmdir(_)
-        | OsFunctionCall::Rename(_) => true,
+        | OsFunctionCall::Rename(_)
+        | OsFunctionCall::CreateExclusive(_) => true,
         OsFunctionCall::Getenv(_)
         | OsFunctionCall::GetEnviron
         | OsFunctionCall::DateToday
@@ -230,7 +232,10 @@ fn mutates_authority(call: &OsFunctionCall) -> bool {
         | OsFunctionCall::Sleep(_)
         | OsFunctionCall::SystemSleep(_)
         | OsFunctionCall::AsyncSleep(_)
-        | OsFunctionCall::AsyncSystemSleep(_) => false,
+        | OsFunctionCall::AsyncSystemSleep(_)
+        | OsFunctionCall::Import(_)
+        | OsFunctionCall::ImportStubs(_)
+        | OsFunctionCall::GetTypeHints(_) => false,
     }
 }
 
@@ -281,6 +286,11 @@ fn monty_decision_subject(
         }
         OsFunctionCall::Rename(args) => subject(&args.dst, r#"Box::Action::"fs:move""#),
         OsFunctionCall::Mkdir(_)
+        | OsFunctionCall::Scan(_)
+        | OsFunctionCall::CreateExclusive(_)
+        | OsFunctionCall::Import(_)
+        | OsFunctionCall::ImportStubs(_)
+        | OsFunctionCall::GetTypeHints(_)
         | OsFunctionCall::Getenv(_)
         | OsFunctionCall::GetEnviron
         | OsFunctionCall::DateToday
@@ -346,14 +356,19 @@ fn root_paths(call: &mut OsFunctionCall, reach: &Reach) {
         }
         OsFunctionCall::Open(args) => args.path = rooted(&args.path),
         OsFunctionCall::Mkdir(args) => args.path = rooted(&args.path),
+        OsFunctionCall::Scan(args) => args.path = rooted(&args.path),
+        OsFunctionCall::CreateExclusive(args) => args.path = rooted(&args.path),
         // Both endpoints, because both are judged and both are acted on.
         OsFunctionCall::Rename(args) => {
             args.src = rooted(&args.src);
             args.dst = rooted(&args.dst);
         }
-        // No path to root. An environment read is refused at admission, and a clock read, entropy,
-        // and a sleep touch no file.
+        // No path to root. An environment read, an import and a type-hints request are refused
+        // at admission, and a clock read, entropy, and a sleep touch no file.
         OsFunctionCall::Getenv(_)
+        | OsFunctionCall::Import(_)
+        | OsFunctionCall::ImportStubs(_)
+        | OsFunctionCall::GetTypeHints(_)
         | OsFunctionCall::GetEnviron
         | OsFunctionCall::DateToday
         | OsFunctionCall::DateTimeNow(_)
