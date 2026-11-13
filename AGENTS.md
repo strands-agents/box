@@ -46,7 +46,7 @@ test to make a suite pass.
 - **Compose the environment; never inherit it.** Harden the box's trusted process. It holds only
   its own box's plaintext secrets.
 - **One `run` owns one box directory and one policy engine.** Shell, Python, and egress share that
-  engine and its temporal history. Box is a binary with no library target or daemon. See
+  engine and its temporal history. Box ships a binary and a library, and has no daemon. See
   [one trusted process](docs/design/decisions.md#one-trusted-process-per-box),
   [one directory owner](docs/design/decisions.md#one-run-owns-one-box-directory), and
   [one policy engine](docs/design/decisions.md#one-policy-engine-per-box).

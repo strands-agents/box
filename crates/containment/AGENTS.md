@@ -45,9 +45,9 @@ by reading `src/` belongs in `src/` — the README describes the shape.
     Octal is the only spelling with zero owned warnings on both, and both values are POSIX-fixed.
   - **The refusal is a `ConfigValidation`, not a `GrantTooBroad`.** That variant reads "grant is too
     broad to be authorized", which names the wrong defect on a path that is one file.
-  - **On Linux this refuses a configuration that used to run.** `MS_NOSUID` on every bind neutered
-    the bit, so a set-user-ID workload program started and ran unprivileged; it is now a launch
-    refusal. On macOS the same configuration was already dead, in the kernel, at exec.
+  - **On Linux this is a launch refusal.** `MS_NOSUID` on every bind neuters the bit, so without
+    the floor a set-user-ID workload program would start and run unprivileged. On macOS the kernel
+    refuses the same configuration at exec.
   - Guard: `an_execute_grant_that_changes_identity_is_refused`, which sets each bit in turn and
     **asserts the bit survived the `chmod`** — a host that drops it would otherwise leave the test
     passing while it proved nothing. It fails rather than skips, because a floor's own pin must not
@@ -418,8 +418,8 @@ by reading `src/` belongs in `src/` — the README describes the shape.
     write rule of any kind lands on a non-writable path. Both are absence assertions now, which is
     weaker as string checks — the kernel-level pins in `contains_exec_target.rs` are what measure the
     refusal, and they are the ones that caught the `protect_write` near-miss.
-  - **`file-write-mode` and `file-write-xattr` stay granted, and the reason is no longer `git`.** `git`
-    runs in a leaf now, so the executable-bit argument moved there with it. What keeps the mode on the
+  - **`file-write-mode` and `file-write-xattr` stay granted, and the reason is not `git`.** `git`
+    runs in a leaf, so the executable-bit argument belongs to the leaf. What keeps the mode on the
     agent's own write root is measured: Claude Code creates `.claude.json` at 644, `chmod`s it to 600,
     and **swallows the failure**, so withholding the leaf leaves a config holding `mcpServers` group-
     and world-readable. Nothing ordinary sets a file flag. The two cases are not symmetric.
@@ -439,7 +439,7 @@ by reading `src/` belongs in `src/` — the README describes the shape.
     code alone would count permitted-but-not-kept as a refusal. The restore puts back the flag set
     the target arrived with rather than zero, because a target may carry an unrelated flag the probe
     did not set.
-  - **`cp -p` inside a box now exits 1 where it used to exit 0.** `copyfile(COPYFILE_ALL)` copies
+  - **`cp -p` inside a box exits 1.** `copyfile(COPYFILE_ALL)` copies
     data and mode and then calls `chflags`, which is refused. The data and the mode still land. This
     is the one ordinary tool the deny changes.
   - **`clonefile` is STILL OPEN, and the earlier reachability argument was wrong.** The blanket
@@ -1167,17 +1167,15 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
   - **`file-write*` carried `file-write-owner`, and the leaf allowlist is what took it back. CLOSED
     2026-09-18, measured at `euid` 0 with a control.** The old record read: `chown` to a foreign uid
     **succeeds** at `euid` 0 inside a write cell, invisible non-root because DAC refuses first.
-    `/dev/null` is a `Write`+`File` grant in `base.toml`, so a root-mode box reached a system device
-    node's mode and owner. Under the narrow cell — `(allow file-write-data (literal …))` alone — all
-    five routes are refused at `euid` 0 on a root-owned fixture: `chmod`, `setattrlist ACCESSMASK`,
+    `/dev/null` is a `Write`+`File` grant in `os-paths.macos.json`, so a root-mode box reached a
+    system device node's mode and owner. Under the narrow cell —
+    `(allow file-write-data (literal …))` alone — all five routes are refused at `euid` 0 on a
+    root-owned fixture: `chmod`, `setattrlist ACCESSMASK`,
     `chown`, `setattrlist OWNERID`, `setattrlist EXTENDED_SECURITY`. The control renders today's old
     shape on the same fixture and reaches three of them, which is what attributes the refusal to the
     cell. Never `/dev/null` in the measurement: `tests/support/` holds the script and it builds a
     root-owned file in its own `mktemp` directory, because `chmod 000 /dev/null` breaks the host until
     reboot.
-    - **The old matrix row saying `chown` succeeds is stale twice over.** An owner deny added on
-      2026-08-30 closed the `chown(2)` route, leaving only `setattrlist`; the leaf allowlist then
-      closed that too. A reader who takes the row at face value re-derives a threat that is now shut.
   - **`file-write-setugid` is a separate operation outside the `file-write*` wildcard**, so
     `(deny default)` refuses it and no write cell renders a rule for it. Proven both ways:
     `(allow file-write-setugid …)` parses and makes the bit stick, and
