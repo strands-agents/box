@@ -71,7 +71,7 @@ refuse to read or change a path in one, and refuse to change a directory that ho
 a policy permits every path under the home. To let the interpreters use a store, name the store, or
 a path inside it, in an `[agent.filesystem]` `read` or `write` entry, and permit the access in your
 policy. A `read` entry lifts the refusal for reads, and a `write` entry lifts it for changes, but not
-for a move of the store's content to a path outside that entry. A `deny` entry inside
+for a move of the store's content to a path outside that entry, which includes renaming a directory that holds the store. A `deny` entry inside
 the store keeps that path closed. The entry also lets the agent itself reach the store, and
 `box run` prints it at startup. When `[agent] env.HOME` names its own directory, its stores follow the agent's grant on that home: a `read` or `write` entry on the home lifts the refusal for its stores too, because the agent's own system calls already reach them. A `write` entry also lets the agent's own system calls move the
 store's files to any other path the agent can write, and Strands Shell and Monty can read a file

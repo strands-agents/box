@@ -354,7 +354,7 @@ refuses makes `curl` exit non-zero.
 | Any other | The operation would change an installed Box program or an enclosing path. [Update the installation between runs](config.md#installation-integrity). | `<path>: cannot change a trusted Box executable or its path` |
 | Any other | The path is in a credential store that no `[agent.filesystem]` `read` or `write` entry names. [Name the store](security.md#what-box-always-enforces) or select another path. | ``<path>: resolves into a credential store, which no policy may open unless an `[agent.filesystem]` `read` or `write` entry names that store`` |
 | Any other | The operation would change a directory that holds a credential store. Change a path inside the directory instead. | `<path>: contains a credential store, so no policy may change this directory` |
-| Any other | A rename would move a credential store's content outside the `write` entry that names the store. Select a destination inside that entry. | ``<path>: would move credential-store content outside the `[agent.filesystem]` `write` entry that names it`` |
+| Any other | A rename would move a credential store's content outside the `write` entry that names the store, including a rename of a directory that holds the store. Select a destination inside that entry. | ``<path>: would move credential-store content outside the `[agent.filesystem]` `write` entry that names it`` |
 
 ## See also
 

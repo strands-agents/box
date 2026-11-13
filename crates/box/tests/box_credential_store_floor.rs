@@ -329,3 +329,58 @@ fn a_declared_home_granted_to_the_agent_lifts_the_floor_for_its_own_stores() {
         "the refusal must name the floor: {key}"
     );
 }
+
+#[test]
+fn a_parent_of_a_granted_store_cannot_be_moved_out_through_either_interpreter() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let request =
+        Request::with_policy("credential-parent", HOME_WIDE_MOVE_POLICY).without_agent_home();
+    let home = request.operator_home().to_path_buf();
+    let store = "~/Library/Application Support/Google/Chrome";
+    for copy in ["shell", "python"] {
+        let profile = home.join(format!("Library/Application Support/Google-{copy}/Chrome"));
+        std::fs::create_dir_all(&profile).expect("a granted store with a parent");
+        std::fs::write(profile.join("Cookies"), "cookies").expect("a profile file");
+        std::fs::create_dir_all(home.join(format!("project-{copy}"))).expect("a destination");
+    }
+    // The grant names `Google/Chrome`, so the parent `Google` holds only that granted store.
+    let granted = home.join("Library/Application Support/Google/Chrome");
+    std::fs::create_dir_all(&granted).expect("the granted store");
+    std::fs::write(granted.join("Cookies"), "cookies").expect("a profile file");
+    let box_ = request
+        .agent_list("read", &[store])
+        .agent_list("write", &[store])
+        .expect();
+    let parent = home.join("Library/Application Support/Google");
+
+    let shell = text(&box_.bash(&format!(
+        "zsh -c 'mv \"{}\" \"{}/Google\" && echo MOVED' 2>&1",
+        parent.display(),
+        home.join("project-shell").display()
+    )));
+    let python = text(&box_.bash(&format!(
+        "python3 -c 'from pathlib import Path; Path(\"{}\").rename(\"{}/Google\"); print(\"MOVED\")' 2>&1",
+        parent.display(),
+        home.join("project-python").display()
+    )));
+    for (seen, copy) in [(&shell, "project-shell"), (&python, "project-python")] {
+        assert!(
+            !seen.contains("MOVED"),
+            "the parent moved with the store inside: {seen}"
+        );
+        assert!(
+            seen.contains("credential-store content"),
+            "the refusal must name the floor: {seen}"
+        );
+        assert!(
+            !home.join(copy).join("Google").exists(),
+            "{copy} received the profile"
+        );
+    }
+    assert!(
+        granted.join("Cookies").exists(),
+        "the profile must stay in place"
+    );
+}

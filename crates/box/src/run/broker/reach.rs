@@ -522,24 +522,14 @@ impl Reach {
         if in_store && self.store_grant(approved, mutates).is_none() {
             return Err(Refused::new(reported_as, CREDENTIAL_STORE));
         }
-        if mutates && !in_store {
-            let spelled = folded(approved);
-            // A store that exists now is found where it resolves, whatever spelling made it. Only a
-            // directory can hold one, so a change to anything else skips those lookups.
-            let encloses = self.credential_stores.iter().any(|store| {
-                store.starts_with(&spelled) && self.store_grant(store, true).is_none()
-            }) || std::fs::symlink_metadata(approved)
-                .is_ok_and(|metadata| metadata.is_dir())
-                && self.credential_store_paths.iter().any(|store| {
-                    store.canonicalize().is_ok_and(|resolved| {
-                        resolved != approved
-                            && resolved.starts_with(approved)
-                            && self.store_grant(&resolved, true).is_none()
-                    })
-                });
-            if encloses {
-                return Err(Refused::new(reported_as, ENCLOSES_CREDENTIAL_STORE));
-            }
+        if mutates
+            && !in_store
+            && self
+                .stores_inside(approved)
+                .iter()
+                .any(|store| self.store_grant(store, true).is_none())
+        {
+            return Err(Refused::new(reported_as, ENCLOSES_CREDENTIAL_STORE));
         }
         Ok(())
     }
@@ -554,7 +544,13 @@ impl Reach {
         reported_as: &str,
     ) -> Result<(), Refused> {
         if !self.is_in_a_credential_store(source) {
-            return Ok(());
+            // A directory that holds a lifted store carries it along, and the store's own entry
+            // does not cover the directory, so moving it takes the store out of that entry.
+            return if self.stores_inside(source).is_empty() {
+                Ok(())
+            } else {
+                Err(Refused::new(reported_as, CREDENTIAL_STORE_RELOCATION))
+            };
         }
         let same_grant = match (self.store_grant(source, true), destination) {
             (Some(grant), Some(destination)) => self
@@ -567,6 +563,27 @@ impl Reach {
         } else {
             Err(Refused::new(reported_as, CREDENTIAL_STORE_RELOCATION))
         }
+    }
+
+    /// Every credential store inside `approved`, by folded spelling and, for a directory, by where
+    /// each existing store resolves now, whatever spelling made it.
+    fn stores_inside(&self, approved: &Path) -> Vec<PathBuf> {
+        let spelled = folded(approved);
+        let mut inside: Vec<PathBuf> = self
+            .credential_stores
+            .iter()
+            .filter(|store| store.starts_with(&spelled))
+            .cloned()
+            .collect();
+        if std::fs::symlink_metadata(approved).is_ok_and(|metadata| metadata.is_dir()) {
+            inside.extend(self.credential_store_paths.iter().filter_map(|store| {
+                store
+                    .canonicalize()
+                    .ok()
+                    .filter(|resolved| resolved != approved && resolved.starts_with(approved))
+            }));
+        }
+        inside
     }
 
     /// The entry that opens `approved` for this kind of operation, unless a `deny` entry covers it.
@@ -1919,6 +1936,35 @@ mod credential_store_tests {
     }
 
     #[test]
+    fn a_parent_of_a_granted_store_cannot_be_moved_out_of_its_entry() {
+        let fixture = fixture();
+        let parent = fixture.home.join("Library/Application Support/Google");
+        std::fs::create_dir_all(parent.join("Chrome")).expect("a store with a parent");
+        std::fs::write(parent.join("Chrome/Cookies"), "cookies").expect("a profile file");
+        let reach = fixture.reach(&[
+            (Grant::Read, "~/Library/Application Support/Google/Chrome"),
+            (Grant::Write, "~/Library/Application Support/Google/Chrome"),
+        ]);
+        std::fs::create_dir_all(fixture.home.join("project")).expect("a destination parent");
+        let google = fixture
+            .change(&reach, "Library/Application Support/Google")
+            .expect("a parent that holds only a granted store passes the enclosure check");
+        let elsewhere = fixture.change(&reach, "project").expect("a destination");
+        reach
+            .refuse_store_relocation(&google, Some(&elsewhere), "project")
+            .expect_err("moving the parent would carry the Chrome profile out of its entry");
+        reach
+            .refuse_store_relocation(&google, None, "/tmp/g")
+            .expect_err("a destination the host does not back is refused too");
+        let notes = fixture
+            .change(&reach, "notes.txt")
+            .expect("an ordinary file");
+        reach
+            .refuse_store_relocation(&notes, Some(&elsewhere), "project")
+            .expect("a rename with no store inside it is not judged");
+    }
+
+    #[test]
     fn a_write_entry_cannot_move_its_contents_out() {
         let fixture = fixture();
         let cache = fixture.home.join(".aws/sso/cache");
@@ -2028,9 +2074,15 @@ mod credential_store_tests {
         fixture
             .change(&reach, "agent-home/.config/settings.json")
             .expect("a file beside a lifted store changes");
-        fixture
+        let held = fixture
             .change(&reach, "agent-home/.config")
             .expect("a directory holding only lifted stores changes");
+        let outside = fixture
+            .change(&reach, "project-copy")
+            .expect("a destination outside the home's stores");
+        reach
+            .refuse_store_relocation(&held, Some(&outside), "project-copy")
+            .expect_err("moving that directory carries its lifted stores out of their entry");
         refused_as(
             fixture.read(&reach, ".ssh/id_rsa"),
             CREDENTIAL_STORE,
