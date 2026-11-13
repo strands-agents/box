@@ -229,3 +229,76 @@ fn with_monty_on_a_python_tool_is_unused_and_python3_is_monty() {
         "the unused table does not run: {version:?}"
     );
 }
+
+/// The host's Homebrew `python3`, if there is one. Homebrew names every library its extension
+/// modules load through `<prefix>/opt/<formula>` links, which is the case this test needs.
+fn homebrew_python() -> Option<std::path::PathBuf> {
+    [
+        "/opt/homebrew/bin/python3",
+        "/home/linuxbrew/.linuxbrew/bin/python3",
+    ]
+    .into_iter()
+    .map(Path::new)
+    .find(|candidate| {
+        candidate
+            .canonicalize()
+            .is_ok_and(|real| real.components().any(|part| part.as_os_str() == "Cellar"))
+    })
+    .map(Path::to_path_buf)
+}
+
+/// With no `[tool.python3.filesystem]`, Box grants a real Homebrew Python the libraries its
+/// extension modules load. Homebrew names each one through links, such as
+/// `/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib`, and Box's own lists refuse a link, so the
+/// grant names the real file and containment also grants the name the load requests. Before that,
+/// the box refused to start.
+#[test]
+fn with_monty_off_a_homebrew_python_loads_the_libraries_its_modules_name_through_links() {
+    if !namespace_launcher_is_usable() {
+        eprintln!("skipping: the namespace launcher is not usable on this host");
+        return;
+    }
+    let Some(python) = homebrew_python() else {
+        eprintln!("skipping: no Homebrew python3 on this host");
+        return;
+    };
+    let home = support::fixture::short_temporary_home();
+    let venv = home.path().join("venv");
+    let made = std::process::Command::new(&python)
+        .args(["-m", "venv", "--without-pip"])
+        .arg(&venv)
+        .output()
+        .expect("run python3 -m venv");
+    assert!(made.status.success(), "make the venv: {made:?}");
+    let command = venv.join("bin/python3");
+    let program = command.canonicalize().expect("the venv's python3 resolves");
+    let (box_, started) = Request::with_config(
+        "monty-off-homebrew",
+        &spawn_permit(&program),
+        &format!(
+            "[tool.python3]\ncommand = [{:?}]\n",
+            command.display().to_string()
+        ),
+    )
+    .top_level("monty = false")
+    .attempt();
+    assert!(
+        started.status.success(),
+        "the box starts: {}",
+        stderr(&started)
+    );
+    assert!(
+        stderr(&started).contains("(added for [tool.python3]: libraries)  (loaded as "),
+        "startup lists a library with the name its load requests: {}",
+        stderr(&started)
+    );
+
+    let output = in_the_shell(
+        &box_,
+        r#"python3 -c "import ssl, lzma, sqlite3, decimal; print(ssl.OPENSSL_VERSION.split()[0], decimal.Decimal(1) / 4)""#,
+    );
+    assert!(
+        stdout(&output).contains("OpenSSL 0.25\n|status=0"),
+        "the modules load their libraries: {output:?}"
+    );
+}

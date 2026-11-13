@@ -1880,6 +1880,11 @@ added grant with `(added for [tool.python3]: install)`, `libraries`, `certificat
 Box finds the libraries with containment's own dependency walk, seeded with every `.so` (and
 `.dylib` on macOS) under the install's code folders and the tool's write grants, so
 [a writable chain derives no read](#box-bounds-derived-reads-from-writable-dependency-chains).
+Box's lists name the file the kernel checks and refuse a link, but a load usually names its library
+through links, such as Homebrew's `/opt/homebrew/opt/<formula>` folders or a Linux `libz.so.1`. So
+each added library is a `read_file` on the real file that carries the name the load requests, and
+containment grants the file once, under that name: on macOS with metadata on every link on the way,
+on Linux with the file bound under both names, the same rules a program's own libraries get.
 
 Why: Box already knows these folders from the install's files, and an operator who lists them by
 hand gets one wrong (a Homebrew `site-packages` that is a link, a stdlib that encloses another

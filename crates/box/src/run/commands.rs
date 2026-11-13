@@ -797,7 +797,12 @@ impl PythonTool {
                     }
                 }
             }
-            added.push(AddedEntry { kind, path, reason });
+            added.push(AddedEntry {
+                kind,
+                path,
+                reason,
+                loaded_as: None,
+            });
         }
         for entry in &added {
             let list = match entry.kind {
@@ -808,13 +813,9 @@ impl PythonTool {
             };
             list.push(entry.path.clone());
         }
-        for library in self.libraries(&spec) {
-            spec.filesystem.read_file.push(library.clone());
-            added.push(AddedEntry {
-                kind: Grant::ReadFile,
-                path: library,
-                reason: "libraries",
-            });
+        for entry in library_entries(self.libraries(&spec)) {
+            spec.filesystem.read_file.push(entry.path.clone());
+            added.push(entry);
         }
         (spec, added)
     }
@@ -954,6 +955,55 @@ fn extension_images(folders: &[PathBuf], cap: usize) -> Vec<PathBuf> {
 /// `path` with every link resolved, or as given when it can't be.
 fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// One `read_file` entry per library file, on the real file, with the name the loads request for
+/// it.
+///
+/// Box's lists name the file the kernel checks and refuse a link. A load usually names its library
+/// through links, such as Homebrew's `/opt/homebrew/opt/<formula>/lib/…` or a Linux
+/// `libz.so.1 -> libz.so.1.3.1`, and a lookup through a link needs each link reachable too. So the
+/// requested name rides along on the entry, and containment grants the file under that name,
+/// rendering every link on the way as it does for a program's own libraries. Containment takes one
+/// read grant per file, so the first name kept wins; a later load naming the file by the real path
+/// or through the first name's own links needs nothing more. A name with `..` is spelled from its
+/// folder's real path, because containment grants a name as written. A name that no longer
+/// resolves adds nothing.
+fn library_entries(requested: Vec<PathBuf>) -> Vec<AddedEntry> {
+    let mut entries: Vec<AddedEntry> = Vec::new();
+    for name in requested {
+        let Ok(resolved) = name.canonicalize() else {
+            continue;
+        };
+        let name = if name
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+        {
+            match (name.parent().map(Path::canonicalize), name.file_name()) {
+                (Some(Ok(folder)), Some(file)) => folder.join(file),
+                _ => continue,
+            }
+        } else {
+            name
+        };
+        let index = match entries.iter().position(|entry| entry.path == resolved) {
+            Some(index) => index,
+            None => {
+                entries.push(AddedEntry {
+                    kind: Grant::ReadFile,
+                    path: resolved.clone(),
+                    reason: "libraries",
+                    loaded_as: None,
+                });
+                entries.len() - 1
+            }
+        };
+        let entry = &mut entries[index];
+        if name != resolved && entry.loaded_as.is_none() {
+            entry.loaded_as = Some(name);
+        }
+    }
+    entries
 }
 
 /// Whether `path` is `folder`, inside it, or above it.
@@ -2801,6 +2851,48 @@ mod tests {
             vec![dynload.join("_lzma.so"), dynload.join("_ssl.so")]
         );
         assert_eq!(extension_images(&folders, 1).len(), 1);
+    }
+
+    /// Homebrew names a library `opt/<formula>/lib/libx.4.dylib`: a folder link to the keg, then a
+    /// file link to the versioned file. Box's entry is the real file, and the names ride along.
+    #[test]
+    fn a_library_named_through_links_is_granted_on_its_file_with_the_names_alongside() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical");
+        let keg = root.join("Cellar/x/4.0.1/lib");
+        std::fs::create_dir_all(&keg).expect("keg");
+        std::fs::create_dir_all(root.join("opt")).expect("opt");
+        let file = keg.join("libx.4.0.1.dylib");
+        std::fs::write(&file, "").expect("library");
+        std::os::unix::fs::symlink("libx.4.0.1.dylib", keg.join("libx.4.dylib"))
+            .expect("file link");
+        std::os::unix::fs::symlink("../Cellar/x/4.0.1", root.join("opt/x")).expect("folder link");
+        let through_opt = root.join("opt/x/lib/libx.4.dylib");
+        let through_keg = keg.join("libx.4.dylib");
+        let climbing = root.join("Cellar/x/4.0.1/bin/../lib/libx.4.dylib");
+        std::fs::create_dir_all(root.join("Cellar/x/4.0.1/bin")).expect("bin");
+
+        let entries = library_entries(vec![
+            through_opt.clone(),
+            file.clone(),
+            through_keg.clone(),
+            through_opt.clone(),
+            climbing,
+            root.join("opt/x/lib/libgone.dylib"),
+        ]);
+
+        assert_eq!(
+            entries,
+            vec![AddedEntry {
+                kind: Grant::ReadFile,
+                path: file,
+                reason: "libraries",
+                // The first name wins. The keg's link is a node of that name's own lookup, and the
+                // `..` name is spelled from its folder's real path, which is that same link.
+                loaded_as: Some(through_opt),
+            }],
+            "one entry per file, named once, and nothing for a name that's gone"
+        );
     }
 
     #[test]

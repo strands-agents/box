@@ -37,6 +37,11 @@ pub(crate) struct DirectGrant {
     access: &'static str,
     /// Why Box added this grant itself, or `None` for an entry the operator wrote.
     pub(crate) added: Option<String>,
+    /// For a library Box added, the name its load requests when that differs from `resolved`, such
+    /// as Homebrew's `/opt/homebrew/opt/<formula>/lib/…` link. Containment grants the file under
+    /// that name, so every link on the way is reachable, the way it grants a program's own
+    /// libraries. Containment takes one read grant per file, so the file is granted once, by name.
+    pub(crate) loaded_as: Option<PathBuf>,
 }
 
 impl DirectGrant {
@@ -56,8 +61,12 @@ impl DirectGrant {
             Some(reason) => format!("  ({reason})"),
             None => String::new(),
         };
+        let loaded_as = match &self.loaded_as {
+            Some(name) => format!("  (loaded as {})", name.display()),
+            None => String::new(),
+        };
         format!(
-            "  {:<10}  {}{store}{access}{added}",
+            "  {:<10}  {}{store}{access}{added}{loaded_as}",
             self.kind.key(),
             self.resolved.display()
         )
@@ -70,6 +79,8 @@ pub(crate) struct AddedEntry {
     pub(crate) kind: Grant,
     pub(crate) path: PathBuf,
     pub(crate) reason: &'static str,
+    /// The name a library load requests for `path`; see [`DirectGrant::loaded_as`].
+    pub(crate) loaded_as: Option<PathBuf>,
 }
 
 /// Mark each grant Box added, so the startup disclosure tells it from the operator's own.
@@ -80,6 +91,7 @@ pub(crate) fn mark_added(reach: &mut DirectReach, added: &[AddedEntry], table: &
             .find(|entry| entry.kind == grant.kind && Path::new(&grant.authored) == entry.path)
         {
             grant.added = Some(format!("added for {table}: {}", entry.reason));
+            grant.loaded_as.clone_from(&entry.loaded_as);
         }
     }
 }
@@ -558,6 +570,7 @@ fn entry_grant(
         credential_store,
         access: "",
         added: None,
+        loaded_as: None,
     })
 }
 
