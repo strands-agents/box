@@ -1869,6 +1869,33 @@ interpreter without turning Monty off, a workload runs it by its absolute path, 
 under the `[tool.<name>]` table whose `command` names that path. Monty is stateless and refuses the
 interactive frames, so a `python` with no `-c` and no script file refuses instead of opening a REPL.
 
+<a id="box-refuses-writes-into-the-python-install"></a>
+### Box refuses writes into the Python install a Python tool runs
+
+With `monty = false`, `[tool.python3]` or `[tool.python]` runs a host Python, and that Python loads
+code from folders outside its command file: its standard library, its `site-packages`, the user
+site, a venv's own `site-packages`, the extra folders Homebrew's `sitecustomize.py` adds, and the
+sources of editable installs. Box reads these folders from the install's files without running it.
+Box refuses any write into them, both at startup and while the box runs:
+
+- At startup, Box refuses a write grant in `[agent]`, any `[tool.<name>]` or any local `[mcp.<name>]`
+  table that is at, above or inside one of those folders, or a single-file grant inside one.
+- At startup, Box also refuses an editable install whose source is inside the agent's workspace, or
+  that a write grant reaches.
+- While the box runs, a write through Strands Shell or Monty at, inside or above one of those
+  folders is refused, even when `policy.dw` permits it.
+
+Why: before this, Box protected only the command's own path. An agent could write a `.pth` file
+into a venv's `site-packages` through the Shell. Python runs a `.pth` file's `import` lines at every
+start, so that code ran inside the tool, and later again outside the box, with the operator's full
+rights, the next time anyone used the venv.
+
+The cost: a write grant on a folder that holds the install is refused. So a write grant on `$HOME`
+is refused whenever the user site (`~/Library/Python/3.X/...` for a framework build on macOS,
+`~/.local/lib/python3.X/site-packages` otherwise) exists, and a venv inside the project is refused
+when the project is writable. Keep the venv outside the project, or use one that nothing in the box
+writes. `pip install` inside the box fails; the operator adds packages outside the box.
+
 <a id="monty-is-judged-at-the-effect-level-alone"></a>
 ### Monty is judged at the effect level alone, above two deny-only floors
 

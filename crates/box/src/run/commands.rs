@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use containment::{Operation, Scope};
 
+use super::python_install::{self, InstallRoots, PythonInstall};
 use crate::error::{BoxError, ConfigError};
 use crate::record::config::Record;
 use crate::record::config::filesystem::DirectReach;
@@ -18,6 +19,15 @@ mod aliases;
 #[derive(Debug, Default)]
 pub(crate) struct ConfiguredCommands {
     tools: BTreeMap<String, Arc<ConfiguredCommand>>,
+    /// The Python tool that answers `python3` and `python`, when `monty = false` declares one.
+    python: Option<PythonTool>,
+}
+
+/// The `[tool.python3]` or `[tool.python]` table, and the install its command starts.
+#[derive(Debug)]
+pub(crate) struct PythonTool {
+    table: String,
+    install: PythonInstall,
 }
 
 /// The file each bare name runs in the hosted Shell, from the `[tool]` tables that answer to it.
@@ -99,6 +109,10 @@ pub(crate) enum CommandMutationRefusal {
     HardLinkAlias,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     IncompleteScan(std::io::Error),
+    /// The path is at, inside or above a folder the Python tool `table` loads code from.
+    PythonInstall {
+        table: String,
+    },
 }
 
 #[derive(Debug)]
@@ -137,6 +151,11 @@ impl FileState {
 
 impl ConfiguredCommands {
     pub(crate) fn load(record: &Record) -> Result<Self, BoxError> {
+        Self::load_with(record, &InstallRoots::host())
+    }
+
+    /// [`Self::load`], with the folders a Python install is looked up under given.
+    pub(crate) fn load_with(record: &Record, roots: &InstallRoots) -> Result<Self, BoxError> {
         let tools = record
             .tool
             .iter()
@@ -190,7 +209,76 @@ impl ConfiguredCommands {
                 Ok((label.clone(), Arc::new(command)))
             })
             .collect::<Result<_, BoxError>>()?;
-        Ok(Self { tools })
+        let mut commands = Self {
+            tools,
+            python: None,
+        };
+        commands.python = commands.python_tool(record, roots)?;
+        Ok(commands)
+    }
+
+    /// With `monty = false`, the Python table's install. An install Box doesn't recognize, or an
+    /// editable install whose source is inside the agent's workspace, refuses startup.
+    fn python_tool(
+        &self,
+        record: &Record,
+        roots: &InstallRoots,
+    ) -> Result<Option<PythonTool>, BoxError> {
+        use crate::record::config::PYTHON_TABLES;
+        if record.monty {
+            return Ok(None);
+        }
+        let Some((label, command)) = PYTHON_TABLES
+            .iter()
+            .find_map(|label| self.tools.get(*label).map(|command| (*label, command)))
+        else {
+            return Ok(None);
+        };
+        let table = format!("[tool.{label}]");
+        // The spelling that runs it: a venv's `bin/python3` keeps the `pyvenv.cfg` beside it.
+        let install = python_install::detect(command.invoked(), roots).map_err(|error| {
+            ConfigError::Process {
+                table: table.clone(),
+                reason: error.to_string(),
+            }
+        })?;
+        let workspace = record
+            .agent
+            .as_ref()
+            .and_then(|agent| agent.workspace.as_deref());
+        if let Some(workspace) = workspace
+            && let Some(source) = install
+                .editable_sources
+                .iter()
+                .find(|source| touches(source, workspace))
+        {
+            return Err(ConfigError::Process {
+                table,
+                reason: format!(
+                    "an editable install's source {} is inside the agent's workspace {}, so the \
+                     agent could change code the Python install loads. Install that package \
+                     without -e, or move its source outside the workspace",
+                    source.display(),
+                    workspace.display()
+                ),
+            }
+            .into());
+        }
+        Ok(Some(PythonTool { table, install }))
+    }
+
+    /// The folders the Python tool loads code from, its venv root, and its editable sources.
+    /// Empty when Monty answers `python3`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the stderr hint is wired in by a later change")
+    )]
+    pub(crate) fn python_protected(&self) -> Vec<PathBuf> {
+        self.python
+            .iter()
+            .flat_map(|python| python.protected())
+            .cloned()
+            .collect()
     }
 
     pub(crate) fn get(&self, label: &str) -> Option<&Arc<ConfiguredCommand>> {
@@ -326,6 +414,13 @@ impl ConfiguredCommands {
         if self.tools.values().any(|command| command.enclosed_by(path)) {
             return Some(CommandMutationRefusal::CommandOrAncestor);
         }
+        if let Some(python) = &self.python
+            && python.protected().any(|folder| touches(path, folder))
+        {
+            return Some(CommandMutationRefusal::PythonInstall {
+                table: python.table.clone(),
+            });
+        }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             let identities = self.mutable_aliases(path);
@@ -364,6 +459,9 @@ impl ConfiguredCommands {
                     }
                     .into());
                 }
+            }
+            if let Some(python) = &self.python {
+                python.validate_write(table, grant)?;
             }
             #[cfg(any(target_os = "macos", target_os = "linux"))]
             if grant.scope != Scope::File {
@@ -573,6 +671,87 @@ fn write_access(_opened: &File, path: &Path) -> std::io::Result<()> {
     } else {
         Err(std::io::Error::last_os_error())
     }
+}
+
+impl PythonTool {
+    /// The folders Python loads code from, its venv root, and its editable sources.
+    fn protected(&self) -> impl Iterator<Item = &PathBuf> {
+        self.install
+            .protected
+            .iter()
+            .chain(&self.install.editable_sources)
+    }
+
+    /// Refuse a write grant that reaches the install or an editable source, in either direction.
+    fn validate_write(
+        &self,
+        table: &str,
+        grant: &crate::record::config::filesystem::DirectGrant,
+    ) -> Result<(), BoxError> {
+        let reached = |folder: &Path| match grant.scope {
+            Scope::Root | Scope::Dir => touches(&grant.resolved, folder),
+            Scope::File => lies_within(&grant.resolved, folder),
+        };
+        let reason = if let Some(folder) = self.install.protected.iter().find(|f| reached(f)) {
+            format!(
+                "this write grant reaches {}, which {} loads Python code from. Keep the Python \
+                 install outside every write grant",
+                folder.display(),
+                self.table
+            )
+        } else if let Some(source) = self.install.editable_sources.iter().find(|s| reached(s)) {
+            format!(
+                "this write grant reaches {}, the source of an editable install {} loads Python \
+                 code from. Keep the Python install outside every write grant",
+                source.display(),
+                self.table
+            )
+        } else {
+            return Ok(());
+        };
+        Err(ConfigError::Filesystem {
+            table: table.to_string(),
+            entry: grant.authored.clone(),
+            reason,
+        }
+        .into())
+    }
+}
+
+/// Whether `path` is `folder`, inside it, or above it.
+fn touches(path: &Path, folder: &Path) -> bool {
+    lies_within(path, folder) || lies_within(folder, path)
+}
+
+/// Whether a failed call's stderr shows a write the read-only Python install refused: a non-zero
+/// `status`, a protected folder (or a path inside one) named in `stderr`, and a permission error.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the stderr hint is wired in by a later change")
+)]
+pub(crate) fn read_only_install_hint(status: i32, stderr: &[u8], protected: &[PathBuf]) -> bool {
+    const REFUSALS: [&str; 3] = [
+        "Permission denied",
+        "Operation not permitted",
+        "Read-only file system",
+    ];
+    if status == 0 {
+        return false;
+    }
+    let text = String::from_utf8_lossy(stderr);
+    REFUSALS.iter().any(|refusal| text.contains(refusal))
+        && protected.iter().any(|folder| {
+            let folder = folder.to_string_lossy();
+            let folder = folder.trim_end_matches('/');
+            !folder.is_empty()
+                && text.match_indices(folder).any(|(start, _)| {
+                    // Only the folder itself or a path inside it: `site-packages2` is another folder.
+                    text[start + folder.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|next| !next.is_alphanumeric() && !"._-@+".contains(next))
+                })
+        })
 }
 
 fn refusal(table: &str, path: &Path, reason: &str) -> BoxError {
@@ -1434,7 +1613,12 @@ mod tests {
             .iter()
             .map(|(label, spec)| ((*label).to_string(), spec.clone()))
             .collect();
-        ConfiguredCommands::load(&record)
+        // Names only: these fake programs are no Python install, so load them with Monty on.
+        let loaded = Record {
+            monty: true,
+            ..record.clone()
+        };
+        ConfiguredCommands::load(&loaded)
             .expect("the commands load")
             .bare_names(&record, std::ffi::OsStr::new(""))
     }
@@ -1846,5 +2030,309 @@ mod tests {
             names.declared.get("git").map(|(path, _)| path.clone()),
             Some(root.join("bin/git"))
         );
+    }
+
+    /// A home folder holding a standard Python base, a venv over it, and a project.
+    struct PythonTree {
+        _directory: tempfile::TempDir,
+        home: PathBuf,
+        base: PathBuf,
+        venv: PathBuf,
+        project: PathBuf,
+    }
+
+    impl PythonTree {
+        fn new() -> Self {
+            let directory = tempfile::tempdir().expect("directory");
+            let home = directory
+                .path()
+                .canonicalize()
+                .expect("canonical directory");
+            // Below `work`, so one grant can sit above the venv without being the home folder.
+            let base = home.join("work/base");
+            std::fs::create_dir_all(base.join("bin")).expect("base bin");
+            program(&base.join("bin/python3.12"));
+            std::fs::create_dir_all(base.join("lib/python3.12/site-packages")).expect("stdlib");
+            std::fs::write(base.join("lib/python3.12/os.py"), "").expect("os.py");
+            let venv = home.join("work/venv");
+            std::fs::create_dir_all(venv.join("bin")).expect("venv bin");
+            std::fs::create_dir_all(venv.join("lib/python3.12/site-packages")).expect("venv site");
+            std::fs::write(
+                venv.join("pyvenv.cfg"),
+                format!(
+                    "home = {}\ninclude-system-site-packages = false\nversion = 3.12.4\n",
+                    base.join("bin").display()
+                ),
+            )
+            .expect("pyvenv.cfg");
+            std::os::unix::fs::symlink(base.join("bin/python3.12"), venv.join("bin/python3.12"))
+                .expect("venv python3.12");
+            std::os::unix::fs::symlink("python3.12", venv.join("bin/python3")).expect("python3");
+            let project = home.join("project");
+            std::fs::create_dir(&project).expect("project");
+            Self {
+                _directory: directory,
+                home,
+                base,
+                venv,
+                project,
+            }
+        }
+
+        fn site_packages(&self) -> PathBuf {
+            self.venv.join("lib/python3.12/site-packages")
+        }
+
+        fn roots(&self) -> InstallRoots {
+            InstallRoots {
+                homebrew: vec![self.home.join("no-brew")],
+                macos_library: self.home.join("no-library"),
+                system: self.home.join("no-system"),
+                home: Some(self.home.join("user")),
+                user_site: python_install::UserSiteLayout::MacOs,
+            }
+        }
+
+        /// `monty = false`, `[tool.python3]` running `command`, and an agent in the project.
+        fn record(&self, command: &Path, monty: bool) -> Record {
+            let mut record = record(command);
+            let spec = record.tool.remove("reader").expect("tool");
+            record.monty = monty;
+            record.agent = Some(ProcessSpec {
+                command: vec!["/bin/sh".to_string()],
+                workspace: Some(self.project.clone()),
+                ..spec.clone()
+            });
+            record.tool.insert("python3".to_string(), spec);
+            record
+        }
+
+        fn commands(&self) -> ConfiguredCommands {
+            ConfiguredCommands::load_with(
+                &self.record(&self.venv.join("bin/python3"), false),
+                &self.roots(),
+            )
+            .expect("python commands")
+        }
+    }
+
+    const INSTALL_REFUSAL: &str = "which [tool.python3] loads Python code from. Keep the Python \
+                                   install outside every write grant";
+
+    #[test]
+    fn a_write_grant_on_the_python_install_is_refused_in_either_direction() {
+        let tree = PythonTree::new();
+        let commands = tree.commands();
+        assert!(
+            commands.python_protected().contains(&tree.site_packages()),
+            "{:?}",
+            commands.python_protected()
+        );
+
+        // The venv itself, which also holds the command's path.
+        commands
+            .validate_reach("[agent]", &reach(&tree.home, &tree.venv))
+            .expect_err("a venv inside a write grant is refused");
+        // A grant inside site-packages, and one above the base's standard library.
+        for writable in [
+            tree.site_packages(),
+            tree.site_packages().join("pkg"),
+            tree.base.join("lib"),
+        ] {
+            std::fs::create_dir_all(&writable).expect("writable folder");
+            for table in ["[agent]", "[tool.python3]", "[mcp.server]"] {
+                let error = commands
+                    .validate_reach(table, &reach(&tree.home, &writable))
+                    .expect_err("a write grant reaching the install is refused")
+                    .to_string();
+                assert!(error.contains(INSTALL_REFUSAL), "{error}");
+                assert!(error.contains(table), "{error}");
+            }
+        }
+        // A grant on the folder that holds the venv and the base.
+        commands
+            .validate_reach("[agent]", &reach(&tree.home, &tree.home.join("work")))
+            .expect_err("a write grant above the venv is refused");
+        commands
+            .validate_reach("[agent]", &reach(&tree.home, &tree.project))
+            .expect("the project stays writable");
+    }
+
+    #[test]
+    fn a_write_grant_on_one_file_is_refused_only_inside_the_install() {
+        let tree = PythonTree::new();
+        let commands = tree.commands();
+        let planted = tree.site_packages().join("x.pth");
+        std::fs::write(&planted, "").expect("x.pth");
+        let file_reach = |path: &Path| {
+            direct_grants(
+                &Filesystem {
+                    write_file: vec![path.to_path_buf()],
+                    ..Default::default()
+                },
+                &FilesystemContext {
+                    table: "[agent]",
+                    operator_home: &tree.home,
+                    policy: None,
+                    authority_directories: Vec::new(),
+                    program_search_directories: Vec::new(),
+                },
+            )
+            .expect("file reach")
+        };
+        let error = commands
+            .validate_reach("[agent]", &file_reach(&planted))
+            .expect_err("a file grant inside site-packages is refused")
+            .to_string();
+        assert!(error.contains(INSTALL_REFUSAL), "{error}");
+        let notes = tree.home.join("notes.txt");
+        std::fs::write(&notes, "").expect("notes");
+        commands
+            .validate_reach("[agent]", &file_reach(&notes))
+            .expect("a file outside the install stays writable");
+    }
+
+    #[test]
+    fn a_shell_write_into_the_python_install_is_refused_while_the_box_runs() {
+        let tree = PythonTree::new();
+        let commands = tree.commands();
+        for path in [
+            tree.venv.clone(),
+            tree.venv.join("bin"),
+            tree.site_packages().join("x.pth"),
+            tree.site_packages().join("pkg/__init__.py"),
+            tree.base.join("lib"),
+        ] {
+            assert!(
+                commands.mutation_refusal(&path).is_some(),
+                "{} must be refused",
+                path.display()
+            );
+        }
+        let refusal = commands.mutation_refusal(&tree.site_packages().join("x.pth"));
+        assert!(
+            matches!(
+                &refusal,
+                Some(CommandMutationRefusal::PythonInstall { table }) if table == "[tool.python3]"
+            ),
+            "{refusal:?}"
+        );
+        assert!(
+            commands
+                .mutation_refusal(&tree.project.join("a.py"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn an_editable_install_whose_source_is_in_the_project_refuses_startup() {
+        let tree = PythonTree::new();
+        let source = tree.project.join("src");
+        std::fs::create_dir(&source).expect("source");
+        let record_folder = tree.site_packages().join("pkg-1.0.dist-info");
+        std::fs::create_dir(&record_folder).expect("dist-info");
+        std::fs::write(
+            record_folder.join("direct_url.json"),
+            format!(
+                r#"{{"url": "file://{}", "dir_info": {{"editable": true}}}}"#,
+                source.display()
+            ),
+        )
+        .expect("direct_url.json");
+
+        let error = ConfiguredCommands::load_with(
+            &tree.record(&tree.venv.join("bin/python3"), false),
+            &tree.roots(),
+        )
+        .expect_err("an editable source in the workspace refuses startup")
+        .to_string();
+        assert!(error.contains("editable install"), "{error}");
+        assert!(error.contains(&source.display().to_string()), "{error}");
+
+        // Outside the workspace, only a write grant that reaches it is refused.
+        let mut record = tree.record(&tree.venv.join("bin/python3"), false);
+        record.agent.as_mut().expect("agent").workspace = Some(tree.home.join("elsewhere"));
+        let commands =
+            ConfiguredCommands::load_with(&record, &tree.roots()).expect("source outside");
+        let error = commands
+            .validate_reach("[agent]", &reach(&tree.home, &tree.project))
+            .expect_err("a write grant on an editable source is refused")
+            .to_string();
+        assert!(
+            error.contains("the source of an editable install"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn with_monty_on_box_detects_no_python_install() {
+        let tree = PythonTree::new();
+        let unknown = tree.home.join("tools/python3");
+        std::fs::create_dir_all(unknown.parent().expect("tools")).expect("tools");
+        program(&unknown);
+
+        let commands = ConfiguredCommands::load_with(&tree.record(&unknown, true), &tree.roots())
+            .expect("Monty on ignores the Python table's install");
+        assert!(commands.python_protected().is_empty());
+        let venv_commands = ConfiguredCommands::load_with(
+            &tree.record(&tree.venv.join("bin/python3"), true),
+            &tree.roots(),
+        )
+        .expect("Monty on");
+        assert!(venv_commands.python_protected().is_empty());
+        venv_commands
+            .validate_reach("[agent]", &reach(&tree.home, &tree.site_packages()))
+            .expect("with Monty on, site-packages is not protected");
+
+        let error = ConfiguredCommands::load_with(&tree.record(&unknown, false), &tree.roots())
+            .expect_err("Monty off refuses an unknown install")
+            .to_string();
+        assert!(
+            error.contains(&format!(
+                "[tool.python3]` table: {} is not a Python install Box recognizes. Use a venv",
+                unknown.display()
+            )),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn the_read_only_install_hint_needs_a_failure_a_protected_path_and_a_permission_error() {
+        let protected = vec![PathBuf::from("/venv/lib/python3.12/site-packages")];
+        let pip = b"ERROR: Could not install packages due to an OSError: [Errno 13] \
+                    Permission denied: '/venv/lib/python3.12/site-packages/numpy'";
+        assert!(read_only_install_hint(1, pip, &protected));
+        assert!(read_only_install_hint(
+            1,
+            b"OSError: [Errno 1] Operation not permitted: '/venv/lib/python3.12/site-packages'",
+            &protected
+        ));
+        assert!(read_only_install_hint(
+            2,
+            b"Read-only file system: /venv/lib/python3.12/site-packages/x.pth",
+            &protected
+        ));
+        assert!(!read_only_install_hint(0, pip, &protected), "success");
+        assert!(
+            !read_only_install_hint(1, b"Permission denied: '/project/out.txt'", &protected),
+            "another folder"
+        );
+        assert!(
+            !read_only_install_hint(
+                1,
+                b"Permission denied: '/venv/lib/python3.12/site-packages2/x'",
+                &protected
+            ),
+            "a sibling folder whose name only starts the same"
+        );
+        assert!(
+            !read_only_install_hint(
+                1,
+                b"No such file: '/venv/lib/python3.12/site-packages/x'",
+                &protected
+            ),
+            "not a permission error"
+        );
+        assert!(!read_only_install_hint(1, pip, &[]), "nothing protected");
     }
 }

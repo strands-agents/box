@@ -457,6 +457,10 @@ fn command_mutation_reason(refusal: CommandMutationRefusal) -> Cow<'static, str>
         CommandMutationRefusal::IncompleteScan(error) => {
             format!("{COMMAND_SCAN_INCOMPLETE}: {error}").into()
         }
+        CommandMutationRefusal::PythonInstall { table } => format!(
+            "is inside the Python install {table} runs, which this run does not allow to change"
+        )
+        .into(),
     }
 }
 
