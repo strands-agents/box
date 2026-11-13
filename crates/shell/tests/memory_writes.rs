@@ -17,3 +17,16 @@ fn concurrent_truncating_writes_overwrite_and_appends_extend() {
         }
     }
 }
+
+/// `touch` on an existing memory file moves its modification time forward.
+#[test]
+fn touch_updates_an_existing_memory_file() {
+    let mut shell = support::builder().build().expect("shell builds");
+    let out = support::run(shell.run(
+        "printf a >/tmp/touched; sleep 0.05; printf b >/tmp/reference; sleep 0.05; \
+         touch /tmp/touched; if test /tmp/touched -nt /tmp/reference; then echo UPDATED; \
+         else echo STALE; fi; cat /tmp/touched",
+    ));
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "UPDATED\na");
+}

@@ -66,6 +66,7 @@ pub(super) async fn open(
         if cap > 0 && held >= cap {
             return Err(io::Error::other("file size limit exceeded"));
         }
+        vfs.append_file(ino, &[])?;
     } else {
         vfs.write_file(ino, Vec::new())?;
     }
