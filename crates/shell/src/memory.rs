@@ -119,15 +119,17 @@ async fn drain(
         } else {
             chunk.len()
         };
-        let end = position + fits;
-        if data.len() < position {
-            data.resize(position, 0);
+        if fits > 0 {
+            let end = position + fits;
+            if data.len() < position {
+                data.resize(position, 0);
+            }
+            let overlap = data.len().min(end);
+            data[position..overlap].copy_from_slice(&chunk[..overlap - position]);
+            data.extend_from_slice(&chunk[overlap - position..fits]);
+            inode.mtime = std::time::SystemTime::now();
+            position = end;
         }
-        let overlap = data.len().min(end);
-        data[position..overlap].copy_from_slice(&chunk[..overlap - position]);
-        data.extend_from_slice(&chunk[overlap - position..fits]);
-        inode.mtime = std::time::SystemTime::now();
-        position = end;
         if fits < chunk.len() {
             failed.store(true, Ordering::Relaxed);
             return;

@@ -30,3 +30,37 @@ fn touch_updates_an_existing_memory_file() {
     assert_eq!(out.status, 0, "{}", out.stderr);
     assert_eq!(out.stdout, "UPDATED\na");
 }
+
+/// A write the cap refuses entirely leaves a file that another writer truncated unchanged.
+#[test]
+fn a_refused_write_does_not_grow_a_truncated_file() {
+    use strands_shell::os::{Kernel as _, OpenFlags};
+    use tokio::io::AsyncWriteExt as _;
+
+    let mut vfs = strands_shell::vfs_config::build_vfs(&Default::default()).expect("vfs");
+    vfs.max_file_size = 2;
+    let filesystem =
+        std::sync::Arc::new(box_shell::Filesystem::serving(vfs, &[]).expect("a filesystem"));
+    let kernel = box_shell::ShellKernel::over(filesystem, std::sync::Arc::new(support::PermitAll));
+    let mut proc = kernel.new_process();
+    let (refused, length) = support::run(async {
+        let first = kernel
+            .open(&mut proc, "/tmp/grown", OpenFlags::write())
+            .await;
+        let mut first = proc.take_writer(first.expect("opens")).expect("a writer");
+        first.write_all(b"AB").await.expect("fits");
+        let second = kernel
+            .open(&mut proc, "/tmp/grown", OpenFlags::write())
+            .await;
+        drop(
+            proc.take_writer(second.expect("truncates"))
+                .expect("a writer"),
+        );
+        let refused = first.write_all(b"CD").await.is_err();
+        drop(first);
+        tokio::task::yield_now().await;
+        (refused, kernel.stat(&proc, "/tmp/grown").await.len)
+    });
+    assert!(refused, "the cap refuses the second write");
+    assert_eq!(length, 0);
+}
