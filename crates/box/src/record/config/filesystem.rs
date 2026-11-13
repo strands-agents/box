@@ -35,6 +35,8 @@ pub(crate) struct DirectGrant {
     /// Whether the entry names a credential store exactly, which is the one way through the floor.
     pub(crate) credential_store: bool,
     access: &'static str,
+    /// Why Box added this grant itself, or `None` for an entry the operator wrote.
+    pub(crate) added: Option<String>,
 }
 
 impl DirectGrant {
@@ -50,11 +52,35 @@ impl DirectGrant {
         } else {
             format!("  ({})", self.access)
         };
+        let added = match &self.added {
+            Some(reason) => format!("  ({reason})"),
+            None => String::new(),
+        };
         format!(
-            "  {:<10}  {}{store}{access}",
+            "  {:<10}  {}{store}{access}{added}",
             self.kind.key(),
             self.resolved.display()
         )
+    }
+}
+
+/// One entry Box adds to a table's lists, and the reason the disclosure names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AddedEntry {
+    pub(crate) kind: Grant,
+    pub(crate) path: PathBuf,
+    pub(crate) reason: &'static str,
+}
+
+/// Mark each grant Box added, so the startup disclosure tells it from the operator's own.
+pub(crate) fn mark_added(reach: &mut DirectReach, added: &[AddedEntry], table: &str) {
+    for grant in &mut reach.grants {
+        if let Some(entry) = added
+            .iter()
+            .find(|entry| entry.kind == grant.kind && Path::new(&grant.authored) == entry.path)
+        {
+            grant.added = Some(format!("added for {table}: {}", entry.reason));
+        }
     }
 }
 
@@ -531,6 +557,7 @@ fn entry_grant(
         scope,
         credential_store,
         access: "",
+        added: None,
     })
 }
 

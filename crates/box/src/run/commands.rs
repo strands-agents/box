@@ -10,7 +10,8 @@ use containment::{Operation, Scope};
 use super::python_install::{self, InstallRoots, PythonInstall};
 use crate::error::{BoxError, ConfigError};
 use crate::record::config::Record;
-use crate::record::config::filesystem::DirectReach;
+use crate::record::config::filesystem::{AddedEntry, DirectReach};
+use crate::record::config::process::{Grant, ProcessSpec};
 use crate::record::layout::{disk_identity, lies_within, open_without_following};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -28,6 +29,8 @@ pub(crate) struct ConfiguredCommands {
 pub(crate) struct PythonTool {
     table: String,
     install: PythonInstall,
+    /// The agent's workspace, which the tool reads and writes when its table names no lists.
+    workspace: PathBuf,
 }
 
 /// The file each bare name runs in the hosted Shell, from the `[tool]` tables that answer to it.
@@ -150,12 +153,39 @@ impl FileState {
 }
 
 impl ConfiguredCommands {
+    /// [`Self::load_in`], against the workspace `record` names, else the current directory.
+    #[cfg(test)]
     pub(crate) fn load(record: &Record) -> Result<Self, BoxError> {
         Self::load_with(record, &InstallRoots::host())
     }
 
+    /// [`Self::load`], against the agent's effective workspace rather than the one `record` names.
+    pub(crate) fn load_in(record: &Record, workspace: &Path) -> Result<Self, BoxError> {
+        Self::load_in_with(record, &InstallRoots::host(), workspace)
+    }
+
     /// [`Self::load`], with the folders a Python install is looked up under given.
+    #[cfg(test)]
     pub(crate) fn load_with(record: &Record, roots: &InstallRoots) -> Result<Self, BoxError> {
+        let workspace = match record
+            .agent
+            .as_ref()
+            .and_then(|agent| agent.workspace.clone())
+        {
+            Some(workspace) => workspace,
+            None => std::env::current_dir().map_err(|source| ConfigError::Contract {
+                reason: format!("cannot read the current directory: {source}"),
+            })?,
+        };
+        Self::load_in_with(record, roots, &workspace)
+    }
+
+    /// [`Self::load_in`], with the folders a Python install is looked up under given.
+    pub(crate) fn load_in_with(
+        record: &Record,
+        roots: &InstallRoots,
+        workspace: &Path,
+    ) -> Result<Self, BoxError> {
         let tools = record
             .tool
             .iter()
@@ -213,7 +243,7 @@ impl ConfiguredCommands {
             tools,
             python: None,
         };
-        commands.python = commands.python_tool(record, roots)?;
+        commands.python = commands.python_tool(record, roots, workspace)?;
         Ok(commands)
     }
 
@@ -223,6 +253,7 @@ impl ConfiguredCommands {
         &self,
         record: &Record,
         roots: &InstallRoots,
+        workspace: &Path,
     ) -> Result<Option<PythonTool>, BoxError> {
         use crate::record::config::PYTHON_TABLES;
         if record.monty {
@@ -242,15 +273,10 @@ impl ConfiguredCommands {
                 reason: error.to_string(),
             }
         })?;
-        let workspace = record
-            .agent
-            .as_ref()
-            .and_then(|agent| agent.workspace.as_deref());
-        if let Some(workspace) = workspace
-            && let Some(source) = install
-                .editable_sources
-                .iter()
-                .find(|source| touches(source, workspace))
+        if let Some(source) = install
+            .editable_sources
+            .iter()
+            .find(|source| touches(source, workspace))
         {
             return Err(ConfigError::Process {
                 table,
@@ -264,7 +290,16 @@ impl ConfiguredCommands {
             }
             .into());
         }
-        Ok(Some(PythonTool { table, install }))
+        Ok(Some(PythonTool {
+            table,
+            install,
+            workspace: workspace.to_path_buf(),
+        }))
+    }
+
+    /// The Python tool that answers `python3` and `python`, when `monty = false` declares one.
+    pub(crate) fn python(&self) -> Option<&PythonTool> {
+        self.python.as_ref()
     }
 
     /// The folders the Python tool loads code from, its venv root, and its editable sources.
@@ -674,6 +709,96 @@ fn write_access(_opened: &File, path: &Path) -> std::io::Result<()> {
 }
 
 impl PythonTool {
+    /// The table this tool came from, as a refusal names it.
+    pub(crate) fn table(&self) -> &str {
+        &self.table
+    }
+
+    /// `spec` with the grants Python needs to start added, and those entries.
+    ///
+    /// Box adds read on the folders the install loads code from, read on the venv's `pyvenv.cfg`,
+    /// and read on the certificate bundle. A link can't be granted, so a linked bundle gets read on
+    /// the folder that holds the link. With no lists in the table, Box adds read and write on the
+    /// agent's workspace; an operator's own lists replace only that. An entry already covered by
+    /// another is left out, and an operator's read entry inside an added folder is dropped, so no
+    /// path is granted twice.
+    pub(crate) fn augmented(&self, spec: &ProcessSpec) -> (ProcessSpec, Vec<AddedEntry>) {
+        let mut spec = spec.clone();
+        let mut wanted: Vec<(Grant, PathBuf, &'static str)> = Vec::new();
+        if spec.filesystem.is_empty() {
+            wanted.push((Grant::Read, self.workspace.clone(), "workspace"));
+            wanted.push((Grant::Write, self.workspace.clone(), "workspace"));
+        }
+        for folder in python_install::outermost(&self.install.code_folders) {
+            wanted.push((Grant::Read, folder, "install"));
+        }
+        if matches!(self.install.kind, python_install::InstallKind::Venv { .. }) {
+            let marker = self.install.prefix.join("pyvenv.cfg");
+            if marker.is_file() {
+                wanted.push((Grant::ReadFile, canonical(&marker), "install"));
+            }
+        }
+        for certificate in self
+            .install
+            .cert_bundle
+            .iter()
+            .chain(&self.install.cert_link_chain)
+        {
+            let linked = std::fs::symlink_metadata(certificate)
+                .map(|metadata| metadata.is_symlink())
+                .unwrap_or(false);
+            match certificate.parent() {
+                Some(folder) if linked => {
+                    wanted.push((Grant::Read, canonical(folder), "certificates"));
+                }
+                _ if certificate.is_file() => {
+                    wanted.push((Grant::ReadFile, canonical(certificate), "certificates"));
+                }
+                _ => {}
+            }
+        }
+        let mut added: Vec<AddedEntry> = Vec::new();
+        for (kind, path, reason) in wanted {
+            let operation_of = |kind: Grant| match kind {
+                Grant::Read | Grant::ReadFile => Some(Grant::Read),
+                Grant::Write | Grant::WriteFile => Some(Grant::Write),
+                _ => None,
+            };
+            let same = |other: Grant| operation_of(other) == operation_of(kind);
+            let tree = |other: Grant| matches!(other, Grant::Read | Grant::Write);
+            let operator_covers = spec.filesystem.entries().any(|(other, entry)| {
+                same(other) && (entry == path || tree(other) && lies_within(&path, entry))
+            });
+            let added_covers = added.iter().any(|entry| {
+                same(entry.kind)
+                    && (entry.path == path || tree(entry.kind) && lies_within(&path, &entry.path))
+            });
+            if operator_covers || added_covers {
+                continue;
+            }
+            if tree(kind) {
+                // A narrower entry inside this folder would grant one path twice.
+                added.retain(|entry| !(same(entry.kind) && lies_within(&entry.path, &path)));
+                for list in [&mut spec.filesystem.read, &mut spec.filesystem.read_file] {
+                    if operation_of(kind) == Some(Grant::Read) {
+                        list.retain(|entry| !lies_within(entry, &path));
+                    }
+                }
+            }
+            added.push(AddedEntry { kind, path, reason });
+        }
+        for entry in &added {
+            let list = match entry.kind {
+                Grant::Read => &mut spec.filesystem.read,
+                Grant::Write => &mut spec.filesystem.write,
+                Grant::ReadFile => &mut spec.filesystem.read_file,
+                _ => continue,
+            };
+            list.push(entry.path.clone());
+        }
+        (spec, added)
+    }
+
     /// The folders Python loads code from, its venv root, and its editable sources.
     fn protected(&self) -> impl Iterator<Item = &PathBuf> {
         self.install
@@ -719,6 +844,11 @@ impl PythonTool {
 }
 
 /// Whether `path` is `folder`, inside it, or above it.
+/// `path` with every link resolved, or as given when it can't be.
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 fn touches(path: &Path, folder: &Path) -> bool {
     lies_within(path, folder) || lies_within(folder, path)
 }
@@ -2113,6 +2243,180 @@ mod tests {
                 &self.roots(),
             )
             .expect("python commands")
+        }
+    }
+
+    /// The Python tool's judged grants, with `filesystem` as its table's lists and the agent in
+    /// `workspace`.
+    fn python_grants(
+        tree: &PythonTree,
+        filesystem: crate::record::config::process::Filesystem,
+        workspace: &Path,
+    ) -> Result<Vec<crate::record::config::filesystem::DirectGrant>, BoxError> {
+        let mut record = tree.record(&tree.venv.join("bin/python3"), false);
+        record.tool.get_mut("python3").expect("tool").filesystem = filesystem;
+        record.agent.as_mut().expect("agent").workspace = Some(workspace.to_path_buf());
+        let commands = ConfiguredCommands::load_in_with(&record, &tree.roots(), workspace)?;
+        let approved = crate::run::contain::boundary::ApprovedReach::judge_with(
+            &record,
+            &[],
+            Arc::new(commands),
+        )?;
+        Ok(approved
+            .table("[tool.python3]")
+            .expect("the python table")
+            .grants
+            .clone())
+    }
+
+    fn granted(
+        grants: &[crate::record::config::filesystem::DirectGrant],
+    ) -> Vec<(&'static str, PathBuf, Option<String>)> {
+        grants
+            .iter()
+            .map(|grant| {
+                (
+                    grant.kind.key(),
+                    grant.resolved.clone(),
+                    grant.added.clone(),
+                )
+            })
+            .collect()
+    }
+
+    fn added(reason: &str) -> Option<String> {
+        Some(format!("added for [tool.python3]: {reason}"))
+    }
+
+    #[test]
+    fn a_python_tool_with_no_lists_gets_the_workspace_and_its_install() {
+        let tree = PythonTree::new();
+        let grants = python_grants(&tree, Default::default(), &tree.project).expect("judged");
+        assert_eq!(
+            granted(&grants),
+            vec![
+                ("read", tree.project.clone(), added("workspace")),
+                ("read", tree.site_packages(), added("install")),
+                ("read", tree.base.join("lib/python3.12"), added("install")),
+                ("write", tree.project.clone(), added("workspace")),
+                ("read_file", tree.venv.join("pyvenv.cfg"), added("install")),
+            ]
+        );
+        let lines: Vec<String> = grants.iter().map(|grant| grant.disclosure()).collect();
+        assert!(
+            lines[0].ends_with("(read-write)  (added for [tool.python3]: workspace)"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[1].ends_with(&format!(
+                "{}  (read-only)  (added for [tool.python3]: install)",
+                tree.site_packages().display()
+            )),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_python_tools_own_lists_replace_only_the_workspace_grant() {
+        let tree = PythonTree::new();
+        let notes = tree.home.join("notes");
+        std::fs::create_dir(&notes).expect("notes");
+        let filesystem = crate::record::config::process::Filesystem {
+            read: vec![notes.clone()],
+            ..Default::default()
+        };
+        let grants = python_grants(&tree, filesystem, &tree.project).expect("judged");
+        assert_eq!(
+            granted(&grants),
+            vec![
+                ("read", notes, None),
+                ("read", tree.site_packages(), added("install")),
+                ("read", tree.base.join("lib/python3.12"), added("install")),
+                ("read_file", tree.venv.join("pyvenv.cfg"), added("install")),
+            ]
+        );
+        assert!(
+            !grants[0].disclosure().contains("added for"),
+            "{}",
+            grants[0].disclosure()
+        );
+    }
+
+    #[test]
+    fn an_operator_read_over_the_install_is_not_granted_twice() {
+        let tree = PythonTree::new();
+        let work = tree.home.join("work");
+        let filesystem = crate::record::config::process::Filesystem {
+            read: vec![work.clone()],
+            ..Default::default()
+        };
+        let grants = python_grants(&tree, filesystem, &tree.project).expect("judged");
+        assert_eq!(granted(&grants), vec![("read", work, None)]);
+
+        // An operator's narrower entry inside an added folder gives way to it.
+        let inside = tree.site_packages().join("pkg");
+        std::fs::create_dir(&inside).expect("pkg");
+        let filesystem = crate::record::config::process::Filesystem {
+            read: vec![inside],
+            write: vec![tree.project.clone()],
+            ..Default::default()
+        };
+        let grants = python_grants(&tree, filesystem, &tree.project).expect("judged");
+        assert_eq!(
+            granted(&grants),
+            vec![
+                ("read", tree.site_packages(), added("install")),
+                ("read", tree.base.join("lib/python3.12"), added("install")),
+                ("write", tree.project.clone(), None),
+                ("read_file", tree.venv.join("pyvenv.cfg"), added("install")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_venv_inside_the_workspace_refuses_the_default_grants() {
+        let tree = PythonTree::new();
+        let work = tree.home.join("work");
+        let error = python_grants(&tree, Default::default(), &work)
+            .expect_err("a writable workspace holding the venv is refused")
+            .to_string();
+        assert!(
+            error.contains("[tool.python3]") && error.contains(&work.display().to_string()),
+            "{error}"
+        );
+    }
+
+    /// Prints the grants Box adds for each `PYTHON_INSTALL_PROBE` command (`:`-separated).
+    #[test]
+    #[ignore = "reads this machine's Python installs"]
+    fn the_grants_for_this_machine() {
+        let Some(probes) = std::env::var_os("PYTHON_INSTALL_PROBE") else {
+            return;
+        };
+        for command in std::env::split_paths(&probes) {
+            let workspace = tempfile::tempdir().expect("workspace");
+            let workspace = workspace.path().canonicalize().expect("canonical");
+            let mut record = record(&command);
+            let spec = record.tool.remove("reader").expect("tool");
+            record.monty = false;
+            record.agent = Some(ProcessSpec {
+                command: vec!["/bin/sh".to_string()],
+                workspace: Some(workspace.clone()),
+                ..spec.clone()
+            });
+            record.tool.insert("python3".to_string(), spec);
+            let commands =
+                ConfiguredCommands::load_in(&record, &workspace).expect("the install loads");
+            let approved = crate::run::contain::boundary::ApprovedReach::judge_with(
+                &record,
+                &[],
+                Arc::new(commands),
+            )
+            .expect("the grants are judged");
+            println!("{}:", command.display());
+            for grant in &approved.table("[tool.python3]").expect("table").grants {
+                println!("{}", grant.disclosure());
+            }
         }
     }
 

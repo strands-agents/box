@@ -288,7 +288,10 @@ async fn hosted(
         .clone()
         .ok_or(ConfigError::EmptyWorkload)?;
     let home = agent_home(&agent)?;
-    let commands = Arc::new(ConfiguredCommands::load(&locked.record)?);
+    let commands = Arc::new(ConfiguredCommands::load_in(
+        &locked.record,
+        &locked.workspace,
+    )?);
     let policy = Arc::new(HostedBox::bind_tool_grammars(
         policy,
         &locked.record,

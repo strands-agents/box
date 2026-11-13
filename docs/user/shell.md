@@ -382,6 +382,12 @@ permit (principal, action == Box::Action::"shell:spawn", resource)
 when { context.input.program_path == "/Users/me/py-runtime/.venv/bin/python3" };
 ```
 
+The table needs no `[tool.python3.filesystem]`. Box adds the grants Python needs to start: read on
+the folders the install loads code from, read on a venv's `pyvenv.cfg`, read on the install's
+certificate bundle, and read and write on the agent's workspace. The startup notice marks each one,
+for example `(added for [tool.python3]: install)`. See
+[Automatic grants for a Python tool](config.md#automatic-grants-for-a-python-tool).
+
 With Monty off, every `python3` and `python` the agent types, and every call through the `python3`
 and `python` aliases, runs the tool's file. Nothing falls back to Monty:
 

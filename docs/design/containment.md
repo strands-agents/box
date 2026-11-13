@@ -585,6 +585,12 @@ restricts. Opening a file produces no `fs:*` decision, and its children raise no
 their own. See [a tool reaches only what its own lists
 name](decisions.md#a-tool-reaches-only-the-paths-its-own-lists-name).
 
+With `monty = false`, the Python tool's lists get the grants Box adds for its install before they
+are judged: read on the install's code folders, its venv's `pyvenv.cfg` and its certificate
+bundle, and read and write on the agent's workspace when the table names no lists. See [Box grants
+a Python tool its install and the
+workspace](decisions.md#box-grants-a-python-tool-its-install-and-the-workspace).
+
 A tool's sandbox grants more access than the agent's. A toolchain needs to run helpers that cannot
 all be listed before startup, load its build output, and check for optional configuration files
 under the home. On macOS, it has the following access:

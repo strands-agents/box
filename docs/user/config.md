@@ -511,6 +511,30 @@ Every process's writable grants must exclude the installed Box programs, their h
 mounted aliases, and enclosing directories.
 [Installation integrity](#installation-integrity) describes the checks and refusals.
 
+<a id="automatic-grants-for-a-python-tool"></a>
+### Automatic grants for a Python tool
+
+With `monty = false`, the Python tool (`[tool.python3]` or `[tool.python]`) gets grants Box adds
+itself, beside any the table writes:
+
+| Box adds | On | Marked in the startup notice |
+|---|---|---|
+| `read` | each folder the install loads code from: the standard library, `site-packages`, a venv's own `site-packages` | `(added for [tool.python3]: install)` |
+| `read_file` | a venv's `pyvenv.cfg` | `(added for [tool.python3]: install)` |
+| `read_file`, or `read` on the folder that holds a link | the install's certificate bundle and the file it links to, such as Homebrew's `etc/openssl@3/cert.pem` | `(added for [tool.python3]: certificates)` |
+| `read` and `write` | the agent's workspace, only when the table has no `[tool.python3.filesystem]` | `(added for [tool.python3]: workspace)` |
+
+A `[tool.python3.filesystem]` table replaces only the workspace grant, so the operator can narrow
+what Python writes. Box still adds the install and certificate reads. An added folder that one of
+the table's own `read` entries already covers isn't added again, and a table's `read` or
+`read_file` entry inside an added folder gives way to it, so no path is granted twice.
+
+The libraries that compiled extension modules (`.so` files) load aren't added yet. Grant them in the
+table, for example `read = ["/opt/homebrew/opt/openssl@3/lib"]`.
+
+The added workspace write is judged like any other: a venv inside a writable workspace is refused at
+startup, as [Configured command integrity](#configured-command-integrity) describes.
+
 | List | What each entry grants |
 |---|---|
 | `read` | Read the path. A directory entry covers everything below it. |

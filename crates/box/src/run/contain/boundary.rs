@@ -99,7 +99,20 @@ impl ApprovedReach {
             .chain(tools)
             .chain(servers)
             .map(|(table, spec)| {
-                let mut reach = judge_filesystem(spec, &table, stored, protected_sources)?;
+                // The Python tool gets the grants its install needs, judged and protected like the
+                // operator's own.
+                let python = commands
+                    .python()
+                    .filter(|python| python.table() == table.as_str());
+                let (spec, added) = match python {
+                    Some(python) => {
+                        let (spec, added) = python.augmented(spec);
+                        (std::borrow::Cow::Owned(spec), added)
+                    }
+                    None => (std::borrow::Cow::Borrowed(spec), Vec::new()),
+                };
+                let mut reach = judge_filesystem(&spec, &table, stored, protected_sources)?;
+                filesystem::mark_added(&mut reach, &added, &table);
                 commands.validate_reach(&table, &reach)?;
                 installation.validate_reach(&table, &reach)?;
                 reach.installation = Some(std::sync::Arc::clone(&installation));

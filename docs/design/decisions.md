@@ -1869,6 +1869,27 @@ interpreter without turning Monty off, a workload runs it by its absolute path, 
 under the `[tool.<name>]` table whose `command` names that path. Monty is stateless and refuses the
 interactive frames, so a `python` with no `-c` and no script file refuses instead of opening a REPL.
 
+<a id="box-grants-a-python-tool-its-install-and-the-workspace"></a>
+### Box grants a Python tool its install and the workspace
+
+With `monty = false`, Box adds grants to the Python tool's lists before it judges them: read on the
+folders the install loads code from and on a venv's `pyvenv.cfg`, read on the certificate bundle,
+and, when the table has no `[tool.python3.filesystem]`, read and write on the agent's workspace. The
+startup notice marks each added grant with `(added for [tool.python3]: install)`, `certificates` or
+`workspace`.
+
+Why: Box already knows these folders from the install's files, and an operator who lists them by
+hand gets one wrong (a Homebrew `site-packages` that is a link, a stdlib that encloses another
+entry). The added grants go through the same checks as the operator's own, including
+[the install's write protection](#box-refuses-writes-into-the-python-install), so the default
+workspace write is refused when the workspace holds the venv.
+
+The cost: inside Python, the `fs:write` rules in `policy.dw` don't apply. The tool writes the
+workspace directly through its own sandbox, so a policy that refuses `echo x > .github/a` in the
+Shell doesn't refuse `python3 -c "open('.github/a', 'w')"`. Monty follows those rules. Python can
+also write a program into the workspace and run it inside the tool's sandbox. An operator who needs
+a narrower write writes `[tool.python3.filesystem]`, which replaces the workspace grant.
+
 <a id="box-refuses-writes-into-the-python-install"></a>
 ### Box refuses writes into the Python install a Python tool runs
 
