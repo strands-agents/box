@@ -164,9 +164,10 @@ to Python's `os.stat()` and `Path.exists()`.
 
 A path that cannot be resolved can also produce a `::response`, even though the reachable paths
 check refuses it. Examples include paths below a missing folder or a folder the surrounding OS will
-not let Box search. Box records a `::response` only if the path is within the reachable paths, has
-no `.` or `..` component, crosses no symbolic link in a folder Box can inspect, and is outside Box's
-own state.
+not let Box search. Box classifies that case with the same no-follow directory walk the interpreters
+use, and records a `::response` only when that walk answers about the path and the path isn't in
+Box's own state. Shell and Monty resolve `.` and `..` before Reach sees the path; a symbolic link or
+an overlong component stays a `::error`.
 
 Other checks that Box refuses produce a `::error`. They cannot satisfy a precondition that requires
 a `::response`. This includes reachable paths refusals outside the cases above and changes between

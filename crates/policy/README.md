@@ -335,9 +335,11 @@ How an effect ended is carried by the event kind: an effect that happened or may
 have happened records a `::response`, and one that definitely did not happen records
 a `::error`. A `read_metadata` that got an answer, in the Shell or in Python, has happened, even
 when the answer is "no", so it records a `::response`. So does one of a path inside the reachable set that cannot be
-resolved, such as one under a missing folder, with no `.` or `..` component, no symbolic link, and
-nothing beneath the deny floor, although the reach check refuses it, because the workload has its
-answer; any other one that the reach floor or
+resolved, such as one under a missing folder, a non-directory parent, or an unsearchable folder,
+when the same no-follow directory walk the interpreters use answers about the path and nothing sits
+beneath the deny floor — although the reach check refuses it — because the workload has its answer.
+A symbolic link, an overlong component, or another refused walk records a `::error` instead. Shell
+and Monty resolve `.` and `..` before that walk sees the path. Any other one that the reach floor or
 a guard against a changed path refuses records a `::error`. Every filesystem response also carries `output.result`, one of three
 `Box::FsResponseResult` values: `"completed"`, `"descriptor_issued"` (an open issued a
 descriptor whose bytes move later), or `"indeterminate"` (a permit was dropped

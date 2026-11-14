@@ -924,12 +924,14 @@ through this path. Security finding disposition remains separate from this behav
 
 ## Open findings — divergences no decision covers
 
-- **An unresolved metadata read is classified by a second lookup.** `Reach::is_an_unresolved_answer`
-  walks the path with `symlink_metadata` after `approve_host` refused it, so the two lookups are not
-  atomic, and the walk stops at the first component it cannot see. A link removed between them, or
-  one behind a folder Box cannot search, can let the read record `::response`. That event is the
-  one a plain probe of the same reported path already records, and the refusal message does not
-  change, so it reveals nothing new. Closing it needs one `openat` walk with no following.
+- **Approval and unanswered classification still use two walks.** `approve_host` resolves (or
+  refuses) a spelling; when it returns `Unresolvable`, `Reach::is_an_unresolved_answer` classifies
+  the same path again through `HeldPath::reach` — the no-follow `openat` walk — so a metadata
+  `::response` matches what the interpreters would call an answered probe. The two walks are still
+  not one atomic `openat` from approval through classification: a link or permission change between
+  them can disagree with the resolver's reason while the refusal message and the floor stay the
+  same. Closing the remaining gap means classifying from the same walk that refused approval, not
+  adding another primitive.
 
 - **A configured command with several names must remain outside workload write reach.**
   The maintainers approved this premise for macOS and Linux: protect configured commands from

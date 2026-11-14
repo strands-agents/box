@@ -910,17 +910,18 @@ A metadata read that got an answer, in the Shell or in Python, records `::respon
 answer is "no", so a `read_metadata` budget counts a probe of a missing file in an existing folder,
 which `a_read_metadata_budget_counts_probes_of_absent_paths` and
 `a_read_metadata_budget_counts_stats_of_missing_paths` pin. A metadata read of a path that can't be
-resolved, such as one under a missing folder or under a folder the surrounding OS won't let Box
-search, also records `::response`, although the reachable paths check refuses it, which
+resolved, such as one under a missing folder, under a non-directory parent, or under a folder the
+surrounding OS won't let Box search, also records `::response`, although the reachable paths check
+refuses it, which
 `a_metadata_read_under_a_missing_folder_meets_a_response_precondition`,
 `a_metadata_read_under_a_missing_folder_spends_the_budget`, and
-`a_metadata_read_under_an_unsearchable_folder_spends_the_budget` pin. Box records that `::response`
-only for a path inside the reachable paths and outside Box's own state. The path must have no `.` or
-`..` component and cross no symbolic link in a folder Box can see.
-`only_a_plain_path_under_a_missing_folder_is_unresolved` and
-`a_stat_outside_the_reachable_set_spends_nothing` check these conditions. The event kind doesn't
-depend on what a symbolic link, a `.` or `..` component, or Box's own state holds, so those refusals
-stay `::error`.
+`a_metadata_read_under_an_unsearchable_folder_spends_the_budget` pin. Box classifies that case with
+the same no-follow directory walk the interpreters use (`HeldPath::reach`), and records
+`::response` only when that walk answers and the path isn't in Box's own state, which
+`only_a_held_path_answer_beneath_no_floor_is_unresolved` and
+`a_stat_outside_the_reachable_set_spends_nothing` pin. Shell and Monty resolve `.` and `..` before
+Reach sees the path. A symbolic link, an overlong component, or another refused walk stays
+`::error`.
 
 Other refused reads remain `::error`.
 `a_metadata_read_the_floor_refuses_meets_no_response_precondition` checks reach-floor refusals. The
@@ -933,8 +934,8 @@ We rejected recording a "no" as `::error` because the workload still learns the 
 the Shell record that outcome alike. The cost is that no event kind separates a "yes" from a "no",
 so a `::response` precondition on a metadata read is met by learning that a path is missing, also
 when the reachable paths check refused the read. A `::response` budget doesn't count a refused probe
-through a symbolic link, with a `.` or `..` component, or into Box's own state. A cap on attempts
-counts `::request`, which counts every probe.
+through a symbolic link, an overlong component, or into Box's own state. A cap on attempts counts
+`::request`, which counts every probe.
 
 The engine prunes history to the deepest authored window, which the workload itself fills. Window
 depth therefore bounds availability and does not establish enforcement strength. A counting rule
