@@ -1,13 +1,13 @@
 # Linux target tests
 
-Use this runner to check an installed Box package on ARM64 Linux.
+Use this runner to check an installed Box package on ARM64 or x86-64 Linux.
 It needs Python 3.9 or later, Bash at `/usr/bin/bash`, readable process information, and Linux process handles.
 Run it as the same user that starts Box in the intended deployment.
 It changes no platform settings and uses no cloud credentials.
 
 ## Prepare the package
 
-Build Box and the existing lifecycle fixture on an ARM64 Linux build host:
+Build Box and the existing lifecycle fixture on a Linux host with the target architecture:
 
 ```sh
 cargo build --locked -p strands-box -p strands-box-containment --all-features
@@ -25,6 +25,10 @@ The runner hashes each executable. The operator supplies the revision. The runne
 Use the deployment's normal Box environment and library dependencies.
 
 ## Run the checks
+
+On an x86-64 target, run `export EXPERIMENTAL_X86_SUPPORT=TRUE` in the shell that runs `target_validation.py`.
+Box requires this opt-in to start; the runner passes it unchanged.
+Keep it set for the restoration checks.
 
 ```sh
 python3 target_validation.py run \
