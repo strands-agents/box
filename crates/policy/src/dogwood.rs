@@ -3169,7 +3169,6 @@ when temporal {
     }
 
     #[test]
-    #[ignore = "Dogwood 1.0.0 temporal gensyms are not stable: #59"]
     fn a_generated_binder_never_takes_an_authored_name() {
         for ordinal in 0..TWO_MACRO_CALLS.len() + 64 {
             let authored = format!("t_{ordinal}");

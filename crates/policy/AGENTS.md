@@ -6,7 +6,7 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   names, readable attributes, and what `when temporal { … }` observes. An operator's policy file is
   their source code.
 - Fix the Box integration, the schema, and the event mapping behind the façade without approval.
-- `dogwood-language` and `dogwood-local-engine` are published crates, pinned at `=1.0.0`.
+- `dogwood-language` and `dogwood-local-engine` are published crates, pinned at `=1.1.1`.
 - Close a gap listed here; never widen one. Never delete or `#[ignore]` a test that pins one.
 
 ## Read This First: Durable Dogwood History

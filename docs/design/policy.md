@@ -380,9 +380,15 @@ has these limits:
 
 - Decisions serialize. Every decision waits for one disk sync and for the one lock, so requests in a
   burst wait for earlier decisions.
-- A temporal macro can lose its history. In Dogwood 1.0.0, a rule that calls a temporal macro such
+- A temporal macro can lose its history. In Dogwood 1.1.1, a rule that calls a temporal macro such
   as `count_within` loses its accumulated state when the text before the call changes, even by a
   comment. A rule written inline keeps its state. Nothing Box ships calls a macro.
+- Upgrading from Dogwood 1.0.0 to 1.1.1 can reset an exhausted macro budget without a policy edit.
+  When the newer macro expansion renames a generated variable to avoid an authored name, Box treats
+  the changed expanded statement as a new rule. Stored events remain, but the new rule starts with
+  empty history and can allow a request that the previous rule denied. Closing and reopening the
+  policy engine reproduces this failure without a crash. This upgrade needs a migration fix before
+  use with existing policy history.
 - A verdict is allow or deny. No rule can pause a request for human approval. See [there is no
   approval verdict](decisions.md#there-is-no-approval-verdict).
 - A refusal reveals policy details. It names the component, the reason, and the rule, so a workload

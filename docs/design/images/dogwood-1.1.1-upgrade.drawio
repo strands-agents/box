@@ -1,0 +1,51 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="drawio" type="device">
+  <diagram id="dogwood-1-1-1-upgrade" name="Dogwood dependency upgrade">
+    <mxGraphModel dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1400" pageHeight="980" math="0" shadow="0" background="#ffffff">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="&lt;div style=&quot;font-size:22px;line-height:26.40px&quot;&gt;Dogwood dependency upgrade&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeWidth=2;dashed=0;spacing=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;strokeColor=none;fillColor=none;verticalAlign=middle;align=center;fontSize=18;fontStyle=0;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="920" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="before-frame" value="&lt;div style=&quot;font-size:22px;line-height:26.40px&quot;&gt;Before&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeWidth=2;dashed=0;spacing=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;strokeColor=#232F3E;fillColor=none;verticalAlign=top;align=left;spacingLeft=16;spacingTop=6;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="40" y="120" width="440" height="470" as="geometry" />
+        </mxCell>
+        <mxCell id="before-adapter" value="Box policy adapter" style="rounded=0;html=1;whiteSpace=nowrap;strokeWidth=2;dashed=0;spacing=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;strokeColor=#232F3E;fillColor=none;verticalAlign=middle;align=center;fontSize=24;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry x="80" y="190" width="360" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="before-packages" value="&lt;div style=&quot;line-height:32px&quot;&gt;dogwood-language &lt;b&gt;1.0.0&lt;/b&gt;&lt;/div&gt;&lt;div style=&quot;line-height:32px&quot;&gt;dogwood-local-engine &lt;b&gt;1.0.0&lt;/b&gt;&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeWidth=2;dashed=0;spacing=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;strokeColor=#232F3E;fillColor=none;verticalAlign=middle;align=center;fontSize=24;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry x="80" y="340" width="360" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="before-dependencies" value="Direct dependencies" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;align=left;labelBackgroundColor=none;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="before-adapter" target="before-packages">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="12" y="0" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="after-frame" value="&lt;div style=&quot;font-size:22px;line-height:26.40px&quot;&gt;After&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeWidth=2;dashed=0;spacing=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;strokeColor=#232F3E;fillColor=none;verticalAlign=top;align=left;spacingLeft=16;spacingTop=6;fontSize=14;fontStyle=1;" vertex="1" parent="1">
+          <mxGeometry x="520" y="120" width="440" height="470" as="geometry" />
+        </mxCell>
+        <mxCell id="after-adapter" value="Box policy adapter" style="rounded=0;html=1;whiteSpace=nowrap;strokeWidth=2;dashed=0;spacing=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;strokeColor=#232F3E;fillColor=none;verticalAlign=middle;align=center;fontSize=24;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry x="560" y="190" width="360" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="after-packages" value="&lt;div style=&quot;line-height:32px&quot;&gt;dogwood-language &lt;b&gt;1.1.1&lt;/b&gt;&lt;/div&gt;&lt;div style=&quot;line-height:32px&quot;&gt;dogwood-local-engine &lt;b&gt;1.1.1&lt;/b&gt;&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeWidth=2;dashed=0;spacing=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;strokeColor=#232F3E;fillColor=none;verticalAlign=middle;align=center;fontSize=24;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry x="560" y="340" width="360" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="after-dependencies" value="Direct dependencies" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;align=left;labelBackgroundColor=none;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="after-adapter" target="after-packages">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="12" y="0" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="before-syntax" value="&lt;div style=&quot;font-size:18px;line-height:22px;color:#5F6B7A&quot;&gt;No separate syntax package&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeWidth=2;dashed=0;spacing=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;strokeColor=none;fillColor=none;verticalAlign=middle;align=center;fontSize=18;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry x="80" y="480" width="360" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="after-syntax" value="&lt;div style=&quot;font-size:18px;line-height:22px;color:#5F6B7A&quot;&gt;New dependency of dogwood-language&lt;/div&gt;&lt;div style=&quot;font-size:24px;line-height:32px&quot;&gt;dogwood-syntax &lt;b&gt;1.1.1&lt;/b&gt;&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeWidth=2;dashed=0;spacing=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;strokeColor=none;fillColor=none;verticalAlign=middle;align=center;fontSize=18;fontStyle=0;" vertex="1" parent="1">
+          <mxGeometry x="560" y="480" width="360" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="unchanged" value="&lt;div style=&quot;line-height:24px&quot;&gt;Box adapter code is unchanged.&lt;/div&gt;&lt;div style=&quot;line-height:24px&quot;&gt;Cedar 4.11.0 and redb 4.2.0 stay locked.&lt;/div&gt;&lt;div style=&quot;line-height:24px&quot;&gt;No periodic flushing is added.&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeWidth=2;dashed=0;spacing=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;strokeColor=none;fillColor=none;verticalAlign=middle;align=center;fontSize=18;fontStyle=0;fontColor=#5F6B7A;" vertex="1" parent="1">
+          <mxGeometry x="40" y="630" width="920" height="80" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
