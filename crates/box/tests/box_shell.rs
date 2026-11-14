@@ -1814,6 +1814,110 @@ fn every_python_alias_reaches_the_broker() {
     }
 }
 
+/// A box whose agent may read `{workspace}/sub`, which holds a `here.txt` and a `show.py` of its
+/// own. The workspace holds a different `here.txt`, so a command run in the wrong folder reads the
+/// wrong file instead of failing.
+fn box_with_a_sub_folder(policy_text: &str, name: &str) -> Configured {
+    let request = Request::with_policy(name, policy_text);
+    // Created before the grant names it, so the grant resolves to the folder's canonical path.
+    let workspace = request.operator_home().join("workspace");
+    std::fs::create_dir_all(workspace.join("sub")).expect("a sub folder");
+    std::fs::write(workspace.join("here.txt"), "WORKSPACE_FILE").expect("the workspace's file");
+    std::fs::write(workspace.join("sub/here.txt"), "SUB_FILE").expect("the sub folder's file");
+    std::fs::write(workspace.join("sub/show.py"), "print('SCRIPT_IN_SUB')\n")
+        .expect("a script only the sub folder holds");
+    request.agent_list("read", &["{workspace}/sub"]).expect()
+}
+
+/// **Every alias starts in the caller's folder.** Until protocol version 9 each one started in
+/// the workspace, so `zsh -c 'cat here.txt'` from a subfolder read the workspace's file and
+/// exited 0. The `python3` alias finds a script that exists only in the caller's folder.
+#[test]
+fn an_alias_run_from_a_subfolder_runs_in_that_subfolder() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = box_with_a_sub_folder(PERMISSIVE_POLICY, "alias-caller-folder");
+    let sub = box_.workspace().join("sub").display().to_string();
+
+    let output = box_.bash(
+        r#"cd sub || exit 9
+           zsh -c pwd
+           zsh -c 'cat here.txt'; printf '\n'
+           bash -c 'cat here.txt'; printf '\n'
+           python3 show.py
+           python show.py"#,
+    );
+
+    assert_eq!(
+        stdout(&output),
+        format!("{sub}\nSUB_FILE\nSUB_FILE\nSCRIPT_IN_SUB\nSCRIPT_IN_SUB\n"),
+        "each alias must run in the caller's folder: {output:?}"
+    );
+}
+
+/// **A folder the policy refuses fails the call, and the command runs nowhere.** The folder meets
+/// the same `fs:read` `change_dir` decision a typed `cd` gets.
+#[test]
+fn an_alias_in_a_folder_the_policy_refuses_runs_nothing() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    const NO_ENTRY_TO_SUB: &str = r#"
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
+permit(principal, action == Box::Action::"fs:read", resource);
+permit(principal, action == Box::Action::"fs:write", resource);
+forbid(principal, action == Box::Action::"fs:read", resource)
+when { context.input.operation == Box::FsReadOperation::"change_dir"
+       && context.input.path like "*/sub" };
+"#;
+    let box_ = box_with_a_sub_folder(NO_ENTRY_TO_SUB, "alias-refused-folder");
+    let workspace = box_.workspace();
+
+    let output = box_.bash(
+        r#"cd sub || exit 9
+           zsh -c 'printf RAN > ran.txt'; printf 'zsh=%s\n' "$?"
+           python3 -c "open('ran.txt', 'w').write('RAN')"; printf 'python3=%s\n' "$?""#,
+    );
+
+    assert_eq!(
+        stdout(&output),
+        format!("zsh={DENIED_STATUS}\npython3={DENIED_STATUS}\n"),
+        "a refused folder must fail each call: {output:?}"
+    );
+    assert!(
+        stderr(&output).contains("cannot start in"),
+        "the refusal must say which folder: {output:?}"
+    );
+    for folder in [workspace.join("sub"), workspace.clone()] {
+        assert!(
+            !folder.join("ran.txt").exists(),
+            "a refused folder must run nothing, there or in the workspace: {output:?}"
+        );
+    }
+}
+
+/// **The `python3` alias is a Shell command, so it needs a `shell:exec` permit.** Before protocol
+/// version 9 it reached Monty with no command-level decision.
+#[test]
+fn the_python_alias_needs_a_shell_exec_permit() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    const READS_ONLY: &str = r#"
+permit(principal, action == Box::Action::"fs:read", resource);
+"#;
+    let box_ = box_under(READS_ONLY, "monty-needs-exec");
+
+    let output = box_.bash(r#"python3 -c "print('RAN')"; printf 'status=%s\n' "$?""#);
+
+    assert_eq!(
+        stdout(&output),
+        format!("status={DENIED_STATUS}\n"),
+        "python3 with no shell:exec permit must be refused and print nothing: {output:?}"
+    );
+}
+
 /// A Python read the policy refuses raises, and reads nothing.
 ///
 /// The point of the whole integration: the interpreter is governed, not merely hosted.

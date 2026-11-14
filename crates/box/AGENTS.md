@@ -536,10 +536,14 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   waited on. `ProcessGroup` and `ForegroundTerminal` clean up on drop; do not remove those impls in
   favour of explicit calls alone.
 - **The box's trusted process hosts the Shell, and every interpreter route the workload has meets
-  the box's one Policy.** The workload reaches Monty two ways — the `python3` alias directly, and a
-  `python`/`python3` command inside the Shell
-  ([Monty two ways](../../docs/design/decisions.md#python-in-the-shell-is-monty)), and the box
-  judges both on the same `Arc<PolicyEngine>`. There is **one `Policy` per box** ([one policy
+  the box's one Policy.** The workload reaches Monty two ways — the `python3` alias, which sends its
+  name and arguments to the Shell, and a `python`/`python3` command inside the Shell
+  ([Monty two ways](../../docs/design/decisions.md#python-in-the-shell-is-monty)) — and both reach
+  the Shell's own `python3`, judged on the same `Arc<PolicyEngine>`. **`Open { mode: Python }` is
+  refused at protocol 9**: it ran Monty with no `shell:exec` decision, so a forbid on `python3`
+  didn't stop a socket client the workload wrote. `an_open_in_python_mode_is_refused_and_runs_nothing`
+  pins it. Its serving code in `host.rs` and `python::run_python` is unreachable and kept, because
+  deleting it also retires `REQUEST_TIMEOUT` and the `fetch.rs` ordering check. There is **one `Policy` per box** ([one policy
   engine](../../docs/design/decisions.md#one-policy-engine-per-box)): `broker/host` owns the one
   socket and its listener, and `broker/shell` builds the Shell on the same `Arc<PolicyEngine>` the
   egress gateway holds. The Shell is built **per connection** ([no state crosses a
@@ -556,6 +560,24 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     `["run", "box.sock"]` joined to the alias's grandparent, and **no path the box computes carries
     a `public/` component**. Accepting a socket as an argument would let the workload aim its
     requests at a socket it controls.
+  - **Every alias sends its working directory, and the broker decides it.** The `run` frame
+    carries the directory the alias was run from. `Program::enter` moves the Shell there through
+    `Mediated::change_dir`, the same `fs:read` `change_dir` decision a typed `cd` gets, and takes
+    no decision when the Program is already there, so a file-scoped policy still runs a `zsh -c`
+    from the workspace. It also refuses a directory `Reach::names_a_host_path` doesn't back, both
+    as spelled and as resolved: the reachable paths check passes a name no host path backs, and the
+    Shell's in-memory tree holds `/` and `/tmp`, so a command would run there and touch nothing on
+    the host. A refused directory runs nothing and exits 126. The directory never selects the socket. An alias that can't tell its directory exits 125
+    rather than letting the command run in the workspace.
+    `only_a_folder_other_than_the_programs_own_meets_the_change_dir_decision` and
+    `a_folder_the_box_cannot_enter_is_refused_and_runs_nothing` pin it, including `/`, `/tmp`,
+    and a `..` spelling that resolves into the in-memory tree.
+  - **A Python alias sends words, and only the trusted process quotes them.** `python3` and
+    `python` send their name and arguments as a list; `command_text` single-quotes every word
+    before the Shell parses it, so `$(…)`, backticks, and a newline in an argument stay literal.
+    The alias parses no option and reads no file, and the Shell's own `python3` refuses a bare
+    `python3` or `python3 -` with status 2. `a_command_as_words_keeps_every_argument_literal` pins
+    the quoting.
   - **The hosted Shell has no network of its own — it can reach only the gateway
     ([Shell network](../../docs/design/decisions.md#shell-network-goes-through-the-egress-gateway)).**
     The Shell itself never dials an origin: its one outbound path routes through the box's egress
@@ -691,7 +713,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   handler's own tree was granted. The floor names neither tree, because an operator makes a
   virtualenv or a `node_modules` wherever they like. An entry on a path that does not exist is
   refused, never skipped, and `record/config/filesystem.rs` states every other refusal class.
-- **A Shell alias streams finite stdin after the Call.** It classifies fd 0 with `fstat`: a pipe,
+- **A Shell alias streams finite stdin after the Run.** It classifies fd 0 with `fstat`: a pipe,
   a regular file, or a socket is read; a terminal, another device, or a closed fd is not. A thread
   reads it and `pump_input` sends `Input` frames, coalesced for `INPUT_COALESCE_WAIT` and up to
   `MAX_CHUNK_BYTES`, then `InputEof`. The broker merges a Program's unread stdin into one buffer, at most `max_stdin` bytes, behind a two-frame channel, so a writer's
@@ -712,11 +734,13 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   because the Shell's `ChannelReader` shifts a frame's remainder on each read. It refuses an `Input` longer than `MAX_ENCODED_CHUNK_BYTES`
   before it decodes it, and after a refused `Input` signals the running `Call`, leaves stdin open (`Close` also signals
   and leaves stdin open)
-  so the Call never reads end-of-file on part of its input, drops every later `Input`, and refuses each later `Call` on that
-  Program. Input for a Program whose Shell no longer reads stdin is dropped. Python and MCP aliases read no stdin here, and a tool leaf still gets
-  `Stdio::null()`.
-- **The alias must send `StdinEof`.** A Shell alias's `forward` sends `Open`, `Call`, each `Input`,
-  and **`StdinEof`**. The EOF frame is not optional. A harness invoking `zsh -c` often supplies nothing on stdin, so without the EOF
+  so the Call never reads end-of-file on part of its input, drops every later `Input`, and refuses each later `Call` or `Run` on that
+  Program. Input for a Program whose Shell no longer reads stdin is dropped. A `python3`/`python` alias forwards no stdin:
+  `forwards_stdin` is false for its `Command::Words`, so it sends `InputEof` right after its `Run`
+  and the Shell's own Python reads an empty input. An MCP alias relays its client's stdin through
+  `stream_mcp` instead, and a tool leaf still gets `Stdio::null()`.
+- **The alias must send `StdinEof`.** `forward` sends `Open` and `Run` (from `submission`), then each
+  `Input` a Shell alias forwards, and **`StdinEof`**, for every alias. The EOF frame is not optional. A harness invoking `zsh -c` often supplies nothing on stdin, so without the EOF
   the Program's stdin channel stays open and any command that pre-reads stdin blocks to its
   deadline — the `lua` builtin does exactly that, so **every** `lua` call took 34–36s and came back
   as `the call exceeded its deadline`. Two things worth not repeating:

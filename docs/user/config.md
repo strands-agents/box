@@ -221,8 +221,8 @@ an 8 MiB budget for the lifetime of one opened Shell program. These limits still
 Shell setting is increased or set to `0`.
 Positional script invocations such as `bash script.sh` retain the alias's separate 64 KiB script limit.
 
-The timeout setting applies to the calls forwarded by `zsh`, `bash`, and `sh`, including Python called
-inside the Shell. Python's [own limits](monty.md#limits-and-exit-statuses) also apply, including
+The timeout setting applies to the calls forwarded by `zsh`, `bash`, `sh`, `python3`, and `python`,
+including Python called inside the Shell. Python's [own limits](monty.md#limits-and-exit-statuses) also apply, including
 with `shell.timeout = false`. Synchronous Python execution can delay timeout reporting.
 See [Shell timeouts](shell.md#limitsshelltimeout) for the call scope and
 [stored configuration](native-filesystem-policy.md#stored-configuration-and-rollback) for rollback.

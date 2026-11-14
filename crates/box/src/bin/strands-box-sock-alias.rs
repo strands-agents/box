@@ -1,5 +1,5 @@
 //! The socket alias: what the contained workload execs when it believes it is running
-//! `zsh` or `python3`.
+//! `zsh` or `python3`. Each sends its command and the caller's working directory to the Shell.
 
 // Included by path rather than through a `lib.rs` façade, because the crate is `[[bin]]`-only by
 // choice and a library surface is a separate decision with its own stability obligations.
@@ -16,7 +16,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use shell_protocol::{
-    BOUNDARY_FAILURE_STATUS, Body, Frame, Interpreter, MAX_CHUNK_BYTES, MAX_FRAME_BYTES,
+    BOUNDARY_FAILURE_STATUS, Body, Command, Frame, Interpreter, MAX_CHUNK_BYTES, MAX_FRAME_BYTES,
     PROTOCOL_VERSION, SignalKind, Stream, decode_payload, encode_payload, read_frame, write_frame,
 };
 use tokio::net::UnixStream;
@@ -37,9 +37,6 @@ const MAX_SCRIPT_BYTES: usize = MAX_FRAME_BYTES / 16;
 /// Bound on one framed read or write against the daemon's Shell socket.
 const SERVE_IO_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Bound on waiting for the daemon's direct Python interpreter to answer.
-const PYTHON_RESPONSE_TIMEOUT: Duration = Duration::from_secs(35);
-
 const MCP_OPEN_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// How long a Shell alias waits after a read of stdin for more before it sends a frame.
@@ -53,12 +50,13 @@ enum Outcome {
     },
 }
 
-/// One forwarded submission: which interpreter, and the program text for it.
+/// One forwarded submission: which interpreter, and the command for it.
 #[derive(Debug)]
 struct Mode {
     socket: PathBuf,
     interpreter: Interpreter,
-    source: String,
+    /// What the Shell runs. `None` for an MCP server, whose client's own frames are the traffic.
+    command: Option<Command>,
 }
 
 fn main() -> ExitCode {
@@ -127,19 +125,41 @@ async fn run() -> io::Result<Outcome> {
     let Mode {
         socket,
         interpreter,
-        source,
+        command,
     } = parse_mode(
         std::env::current_exe()?,
         std::env::args_os().skip(1).collect(),
     )?;
-    let input = match interpreter {
-        Interpreter::Shell => match classify_stdin(0)? {
+    let Some(command) = command else {
+        // An MCP server is a stream, not a submission: it gets `Open` and then this alias pumps
+        // stdin frames for as long as the client speaks.
+        return stream_mcp(connect(&socket).await?, interpreter).await;
+    };
+    let directory = working_directory(
+        identity(Path::new(".")),
+        std::env::var_os("PWD").map(PathBuf::from),
+        std::env::current_dir(),
+    )?;
+    let input = if forwards_stdin(&command) {
+        match classify_stdin(0)? {
             StdinKind::Finite => Some(spawn_input_reader(std::io::stdin())?),
             StdinKind::Absent => None,
-        },
-        Interpreter::Python | Interpreter::Mcp { .. } => None,
+        }
+    } else {
+        None
     };
-    forward(&socket, interpreter, source, input).await
+    forward(&socket, command, directory, input).await
+}
+
+/// Whether an alias forwards its own stdin with `command`.
+///
+/// A Shell alias sends command text and forwards finite stdin. A `python3`/`python` alias sends
+/// words and forwards none, so the Shell's own Python reads an empty input.
+fn forwards_stdin(command: &Command) -> bool {
+    match command {
+        Command::Text(_) => true,
+        Command::Words { .. } => false,
+    }
 }
 
 /// Whether a stdin descriptor holds finite input this alias forwards.
@@ -346,7 +366,7 @@ fn parse_mode(executable: PathBuf, arguments: Vec<OsString>) -> io::Result<Mode>
 /// Parse the alias invocation, deriving the socket from this image's own path.
 fn parse_alias(executable: &Path, name: &str, arguments: Vec<OsString>) -> io::Result<Mode> {
     if PYTHON_ALIAS_NAMES.contains(&name) {
-        return parse_script_alias(executable, arguments);
+        return python_mode(executable, name, arguments);
     }
     // Any other name is an MCP server's program.
     if !SHELL_ALIAS_NAMES.contains(&name) {
@@ -374,9 +394,7 @@ fn parse_alias(executable: &Path, name: &str, arguments: Vec<OsString>) -> io::R
                 server: name.to_string(),
                 arguments,
             },
-            // An MCP server takes no program text: it is a stream, and the client's own frames are
-            // the traffic. `forward` sends no `Call` for this interpreter.
-            source: String::new(),
+            command: None,
         });
     }
     let usage = "Shell alias accepts only -c COMMAND, -lc COMMAND, -c -l COMMAND, or SCRIPT";
@@ -430,45 +448,81 @@ fn shell_mode(executable: &Path, command: OsString) -> io::Result<Mode> {
     Ok(Mode {
         socket: socket_beside(workload_root, &BROKER_SOCKET_RELATIVE),
         interpreter: Interpreter::Shell,
-        source: command,
+        command: Some(Command::Text(command)),
     })
 }
 
-/// Parse a `python3`/`python` invocation into one script submission.
-fn parse_script_alias(executable: &Path, arguments: Vec<OsString>) -> io::Result<Mode> {
-    let usage = "Python alias accepts only -c SOURCE or SCRIPT";
-    // No origin label crosses the wire: the broker labels a traceback itself, because a label the
-    // workload chooses is not something the daemon should echo into its own diagnostics.
-    let source = match <[OsString; 2]>::try_from(arguments) {
-        Ok([flag, source]) => {
-            if flag != "-c" {
-                return Err(invalid_input(usage));
-            }
-            source
-                .into_string()
-                .map_err(|_| invalid_input("Python source is not valid UTF-8"))?
-        }
-        Err(arguments) => {
-            let [script] =
-                <[OsString; 1]>::try_from(arguments).map_err(|_| invalid_input(usage))?;
-            let script = PathBuf::from(script);
-            // A leading `-` is a flag this alias does not implement, and reading a file named `-i`
-            // would be a confusing way to say so.
-            if script.to_string_lossy().starts_with('-') {
-                return Err(invalid_input(usage));
-            }
-            read_script(&script)?
-        }
-    };
+/// One `python3`/`python` invocation, sent to the Shell as its name and its arguments unchanged.
+///
+/// The Shell's own `python3` reads the options and the script, and refuses a form it can't run, so
+/// this alias parses no option and reads no file.
+fn python_mode(executable: &Path, name: &str, arguments: Vec<OsString>) -> io::Result<Mode> {
+    let arguments = arguments
+        .into_iter()
+        .enumerate()
+        .map(|(index, argument)| {
+            argument.into_string().map_err(|_| {
+                invalid_input(format!("Python argument {} is not valid UTF-8", index + 1))
+            })
+        })
+        .collect::<io::Result<Vec<_>>>()?;
     let workload_root = executable
         .parent()
         .and_then(Path::parent)
         .ok_or_else(|| invalid_input("Python alias is not inside a bin directory"))?;
     Ok(Mode {
         socket: socket_beside(workload_root, &BROKER_SOCKET_RELATIVE),
-        interpreter: Interpreter::Python,
-        source,
+        interpreter: Interpreter::Shell,
+        command: Some(Command::Words {
+            name: name.to_string(),
+            arguments,
+        }),
     })
+}
+
+/// The `(device, inode)` that names `path`'s directory.
+fn identity(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    std::fs::metadata(path)
+        .ok()
+        .map(|metadata| (metadata.dev(), metadata.ino()))
+}
+
+/// The caller's working directory, from the first source that names it.
+///
+/// `PWD` counts only when it is absolute and names the same directory as `.`, because a harness that
+/// starts a child in another directory often leaves `PWD` unchanged. Then `getcwd`. On macOS a
+/// process that may only enter its directory can't read that directory's path, so `getcwd` can fail;
+/// then the alias refuses, because running the command in another directory is a silent wrong
+/// answer.
+fn working_directory(
+    here: Option<(u64, u64)>,
+    pwd: Option<PathBuf>,
+    getcwd: io::Result<PathBuf>,
+) -> io::Result<String> {
+    let directory = match pwd {
+        Some(pwd) if pwd.is_absolute() && here.is_some() && identity(&pwd) == here => pwd,
+        _ => match getcwd {
+            Ok(directory) if directory.is_absolute() => directory,
+            Ok(directory) => {
+                return Err(invalid_input(format!(
+                    "the working directory {} is not an absolute path; set PWD to it",
+                    directory.display()
+                )));
+            }
+            Err(error) => {
+                return Err(io::Error::new(
+                    error.kind(),
+                    format!("read the working directory: {error}; set PWD to it"),
+                ));
+            }
+        },
+    };
+    directory
+        .into_os_string()
+        .into_string()
+        .map_err(|_| invalid_input("the working directory is not valid UTF-8"))
 }
 
 /// Pump one MCP server's traffic: stdin to the box, the box's output to stdout.
@@ -627,15 +681,9 @@ fn read_script(script: &Path) -> io::Result<String> {
 /// The one Program an alias opens.
 const ALIAS_PROGRAM: u32 = 1;
 
-/// Submit one Call to one Program, stream `input` to it while it runs, and reproduce its result
-/// locally.
-async fn forward(
-    socket: &Path,
-    interpreter: Interpreter,
-    source: String,
-    input: Option<Input>,
-) -> io::Result<Outcome> {
-    let mut stream = tokio::time::timeout(SERVE_IO_TIMEOUT, UnixStream::connect(socket))
+/// Connect to the box's broker.
+async fn connect(socket: &Path) -> io::Result<UnixStream> {
+    tokio::time::timeout(SERVE_IO_TIMEOUT, UnixStream::connect(socket))
         .await
         .map_err(|_| timed_out("connect to the box broker"))?
         .map_err(|error| {
@@ -643,30 +691,46 @@ async fn forward(
                 error.kind(),
                 format!("connect to the box broker {}: {error}", socket.display()),
             )
-        })?;
+        })
+}
 
-    // An MCP server is a stream, not a submission: it gets `Open` and then this alias pumps stdin
-    // frames for as long as the client speaks.
-    if let Interpreter::Mcp { .. } = &interpreter {
-        return stream_mcp(stream, interpreter).await;
-    }
-    let python = matches!(interpreter, Interpreter::Python);
-    write_alias_frame(&mut stream, Body::Open { mode: interpreter }).await?;
-    write_alias_frame(
-        &mut stream,
-        Body::Call {
-            source,
+/// The frames that submit `command` to one Shell Program, started in `directory`.
+///
+/// Stdin follows them in [`forward`]: each `Input` and then `InputEof`, or `InputEof` alone when
+/// the alias forwards no input.
+fn submission(command: Command, directory: String) -> [Body; 2] {
+    [
+        Body::Open {
+            mode: Interpreter::Shell,
+        },
+        Body::Run {
+            command,
+            directory,
             correlation: Box::new(call_correlation()),
         },
-    )
-    .await?;
+    ]
+}
+
+/// Submit one command to one Program, stream `input` to it while it runs, and reproduce its result
+/// locally.
+async fn forward(
+    socket: &Path,
+    command: Command,
+    directory: String,
+    input: Option<Input>,
+) -> io::Result<Outcome> {
+    let mut stream = connect(socket).await?;
+    for body in submission(command, directory) {
+        write_alias_frame(&mut stream, body).await?;
+    }
     let (mut stream, mut writer) = stream.into_split();
     let refused: Refusal = input
         .as_ref()
         .map(|input| std::sync::Arc::clone(&input.refused))
         .unwrap_or_default();
     match input {
-        // Without the EOF, a command that reads stdin waits for its deadline.
+        // Without the EOF, a command that reads stdin waits for its deadline: a harness invoking
+        // `zsh -c` often gives the command nothing on stdin.
         None => write_alias_frame(&mut writer, Body::InputEof).await?,
         Some(Input { events, refused }) => {
             tokio::spawn(async move {
@@ -687,18 +751,11 @@ async fn forward(
     let refusal = || refused.lock().ok().and_then(|reason| reason.clone());
 
     // Relayed as it arrives rather than accumulated, so a long-running command is observable
-    // while it runs.
+    // while it runs. No alias timeout: the broker owns the configured Shell deadline.
     loop {
-        let response = read_frame::<Frame, _>(&mut stream);
-        let frame = if python {
-            tokio::time::timeout(PYTHON_RESPONSE_TIMEOUT, response)
-                .await
-                .map_err(|_| timed_out("read a transport frame"))?
-        } else {
-            // The broker owns the configured Shell deadline.
-            response.await
-        }?
-        .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "the box broker closed"))?;
+        let frame = read_frame::<Frame, _>(&mut stream)
+            .await?
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "the box broker closed"))?;
         match frame.body {
             Body::Output {
                 stream: which,
@@ -775,6 +832,16 @@ mod tests {
 
     use super::*;
 
+    /// Shell command text, as a shell alias sends it.
+    fn text(command: &str) -> Command {
+        Command::Text(command.to_string())
+    }
+
+    /// The caller's directory a test alias sends.
+    fn workspace() -> String {
+        "/work".to_string()
+    }
+
     #[tokio::test(start_paused = true)]
     async fn an_mcp_route_that_never_answers_times_out() {
         let (mut alias, _broker) = UnixStream::pair().unwrap();
@@ -827,15 +894,13 @@ mod tests {
             )
             .unwrap();
             let Mode {
-                socket,
-                source: command,
-                ..
+                socket, command, ..
             } = mode;
             assert_eq!(
                 socket,
                 PathBuf::from("/private/scaffold/public/run/box.sock")
             );
-            assert_eq!(command, "printf ok");
+            assert_eq!(command, Some(text("printf ok")));
         }
     }
 
@@ -852,12 +917,11 @@ mod tests {
         .expect("a bare script is a valid alias invocation");
 
         let Mode {
-            socket,
-            source: command,
-            ..
+            socket, command, ..
         } = mode;
         assert_eq!(
-            command, "printf ok\n",
+            command,
+            Some(text("printf ok\n")),
             "the shim must receive the script's text, not its path"
         );
         assert_eq!(
@@ -923,7 +987,7 @@ mod tests {
                 PathBuf::from("/private/scaffold/public/run/box.sock"),
                 "the socket must still come from the image's own path"
             );
-            assert_eq!(mode.source, "printf ok");
+            assert_eq!(mode.command, Some(text("printf ok")));
             assert!(matches!(mode.interpreter, Interpreter::Shell));
         }
     }
@@ -1014,12 +1078,10 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("{name} must be accepted as the alias: {error}"));
             let Mode {
-                socket,
-                source: command,
-                ..
+                socket, command, ..
             } = mode;
             assert_eq!(socket, PathBuf::from("/private/run/public/run/box.sock"));
-            assert_eq!(command, "printf ok");
+            assert_eq!(command, Some(text("printf ok")));
         }
 
         // A name in neither list is an MCP server, named for the alias the box placed. It takes no
@@ -1044,7 +1106,7 @@ mod tests {
                 "the socket is still derived from the image's own path"
             );
             assert!(
-                mode.source.is_empty(),
+                mode.command.is_none(),
                 "an MCP server takes no program text"
             );
         }
@@ -1159,6 +1221,174 @@ mod tests {
                 panic!("a shell name must not route to an MCP server {server:?}: {socket:?}")
             }
             Err(_) => {}
+        }
+    }
+
+    // ── Python aliases ────────────────────────────────────────────────────────
+
+    /// A Python alias sends its own name and every argument unchanged, as a list, to the Shell. It
+    /// parses no option and reads no file, so text a shell would expand stays literal here.
+    #[test]
+    fn a_python_alias_forwards_its_name_and_arguments_unchanged() {
+        let cases: &[&[&str]] = &[
+            &[],
+            &["-"],
+            &["-m", "pytest"],
+            &["-c", "print(1)"],
+            &["--version"],
+            &["script.py", "--flag", "value"],
+            &["-c", "import os; print('$(rm x)')", "`rm x`"],
+            &["-c", "print(1)\nprint(2)\n"],
+            &["it's", "\"double\"", "a b", ""],
+            &["/nonexistent/attacker.py"],
+        ];
+        for name in PYTHON_ALIAS_NAMES {
+            for arguments in cases {
+                let mode = parse_mode(
+                    PathBuf::from(format!("/private/scaffold/public/bin/{name}")),
+                    arguments.iter().map(OsString::from).collect(),
+                )
+                .unwrap_or_else(|error| panic!("{name} {arguments:?} must be forwarded: {error}"));
+                assert_eq!(
+                    mode.interpreter,
+                    Interpreter::Shell,
+                    "a Python alias reaches the Shell"
+                );
+                assert_eq!(
+                    mode.command,
+                    Some(Command::Words {
+                        name: name.to_string(),
+                        arguments: arguments.iter().map(ToString::to_string).collect(),
+                    }),
+                    "{name} must forward {arguments:?} unchanged"
+                );
+                assert_eq!(
+                    mode.socket,
+                    PathBuf::from("/private/scaffold/public/run/box.sock"),
+                    "an argument never chooses the socket"
+                );
+            }
+        }
+    }
+
+    /// A Python alias refuses a non-UTF-8 argument, which the wire can't carry unchanged.
+    #[test]
+    fn a_python_alias_refuses_a_non_utf8_argument() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let error = parse_mode(
+            PathBuf::from("/private/run/public/bin/python3"),
+            vec![
+                OsString::from("-c"),
+                OsString::from_vec(vec![0x66, 0xff, 0x6f]),
+            ],
+        )
+        .expect_err("a non-UTF-8 argument must be refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert!(
+            error
+                .to_string()
+                .contains("Python argument 2 is not valid UTF-8"),
+            "the refusal must name the argument: {error}"
+        );
+    }
+
+    // ── The caller's working directory ────────────────────────────────────────
+
+    /// A directory with a `sub` folder, both canonical.
+    fn directory_with_sub() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().expect("a directory");
+        let top = root.path().canonicalize().expect("a canonical directory");
+        let sub = top.join("sub");
+        std::fs::create_dir(&sub).expect("a sub folder");
+        (root, top, sub)
+    }
+
+    fn unreadable() -> io::Result<PathBuf> {
+        Err(io::Error::from(io::ErrorKind::PermissionDenied))
+    }
+
+    /// `PWD` counts only when it names `.`, so a stale `PWD` gives way to `getcwd`.
+    #[test]
+    fn the_working_directory_comes_from_pwd_only_when_pwd_names_it() {
+        let (_root, top, sub) = directory_with_sub();
+        let here = identity(&sub);
+        let sub_text = sub.display().to_string();
+
+        assert_eq!(
+            working_directory(here, Some(sub.clone()), unreadable()).unwrap(),
+            sub_text,
+            "a PWD that names . is used even when getcwd fails"
+        );
+        assert_eq!(
+            working_directory(here, Some(top.clone()), Ok(sub.clone())).unwrap(),
+            sub_text,
+            "a stale PWD gives way to getcwd"
+        );
+        assert_eq!(
+            working_directory(here, Some(PathBuf::from("sub")), Ok(sub.clone())).unwrap(),
+            sub_text,
+            "a relative PWD doesn't count"
+        );
+        assert_eq!(
+            working_directory(None, Some(sub.clone()), Ok(top.clone())).unwrap(),
+            top.display().to_string(),
+            "with no identity for ., PWD can't be checked and getcwd wins"
+        );
+    }
+
+    /// With no usable source, the alias refuses rather than letting the command run elsewhere.
+    #[test]
+    fn an_unknown_working_directory_is_refused() {
+        let (_root, top, sub) = directory_with_sub();
+        for (here, pwd) in [
+            (identity(&sub), Some(top.clone())),
+            (identity(&sub), None),
+            (None, Some(sub.clone())),
+        ] {
+            let error = working_directory(here, pwd, unreadable())
+                .expect_err("an unknown working directory must be refused");
+            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert!(
+                error.to_string().contains("set PWD"),
+                "the refusal must say how to fix it: {error}"
+            );
+        }
+        let error = working_directory(None, None, Ok(PathBuf::from("relative")))
+            .expect_err("a relative working directory must be refused");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    /// Every submission opens a Shell Program and sends the caller's directory with the command.
+    #[test]
+    fn every_submission_sends_the_callers_directory() {
+        for command in [
+            text("printf ok"),
+            Command::Words {
+                name: "python3".to_string(),
+                arguments: vec!["x.py".to_string()],
+            },
+        ] {
+            let [open, run] = submission(command.clone(), "/work/sub".to_string());
+            assert!(
+                matches!(
+                    open,
+                    Body::Open {
+                        mode: Interpreter::Shell
+                    }
+                ),
+                "every alias opens a Shell Program: {open:?}"
+            );
+            match run {
+                Body::Run {
+                    command: sent,
+                    directory,
+                    ..
+                } => {
+                    assert_eq!(sent, command);
+                    assert_eq!(directory, "/work/sub", "the caller's directory is sent");
+                }
+                other => panic!("expected a run, got {other:?}"),
+            }
         }
     }
 
@@ -1304,10 +1534,8 @@ mod tests {
                 while input.refused.lock().unwrap().is_none() {
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
-                let broker =
-                    tokio::spawn(fake_broker(listener, 0, |kinds| kinds.contains(&"call")));
-                let Err(error) =
-                    forward(&socket, Interpreter::Shell, "true".to_string(), Some(input)).await
+                let broker = tokio::spawn(fake_broker(listener, 0, |kinds| kinds.contains(&"run")));
+                let Err(error) = forward(&socket, text("true"), workspace(), Some(input)).await
                 else {
                     panic!("a read error must fail the alias");
                 };
@@ -1365,7 +1593,7 @@ mod tests {
             };
             seen.kinds.push(match frame.body {
                 Body::Open { .. } => "open",
-                Body::Call { .. } => "call",
+                Body::Run { .. } => "run",
                 Body::Input { data } => {
                     seen.input.extend(decode_payload(&data).unwrap());
                     "input"
@@ -1405,7 +1633,7 @@ mod tests {
             .unwrap()
     }
 
-    /// The alias sends the Call first, then all of its stdin, then end-of-file.
+    /// The alias sends the run first, then all of its stdin, then end-of-file.
     #[cfg(unix)]
     #[test]
     fn the_alias_streams_its_stdin_after_the_call() {
@@ -1421,12 +1649,12 @@ mod tests {
                     kinds.last() == Some(&"eof")
                 }));
                 let events = spawn_input_reader(std::io::Cursor::new(input.clone())).unwrap();
-                let outcome = forward(&socket, Interpreter::Shell, "cat".to_string(), Some(events))
+                let outcome = forward(&socket, text("cat"), workspace(), Some(events))
                     .await
                     .unwrap();
                 assert!(matches!(outcome, Outcome::Status(0)));
                 let seen = broker.await.unwrap();
-                assert_eq!(seen.kinds[..2], ["open", "call"]);
+                assert_eq!(seen.kinds[..2], ["open", "run"]);
                 assert_eq!(seen.kinds.last(), Some(&"eof"));
                 assert!(
                     seen.kinds[2..seen.kinds.len() - 1]
@@ -1469,13 +1697,7 @@ mod tests {
                 });
                 let events =
                     spawn_input_reader(std::io::Cursor::new(vec![b'x'; 16 * 1024 * 1024])).unwrap();
-                let Err(error) = forward(
-                    &socket,
-                    Interpreter::Shell,
-                    "true".to_string(),
-                    Some(events),
-                )
-                .await
+                let Err(error) = forward(&socket, text("true"), workspace(), Some(events)).await
                 else {
                     panic!("a stdin write that timed out must fail the alias");
                 };
@@ -1498,16 +1720,11 @@ mod tests {
             let (reader, mut writer) = std::io::pipe().unwrap();
             use std::io::Write as _;
             writer.write_all(b"partial").unwrap();
-            let broker = tokio::spawn(fake_broker(listener, 7, |kinds| kinds.contains(&"call")));
+            let broker = tokio::spawn(fake_broker(listener, 7, |kinds| kinds.contains(&"run")));
             let events = spawn_input_reader(reader).unwrap();
             let outcome = tokio::time::timeout(
                 Duration::from_secs(10),
-                forward(
-                    &socket,
-                    Interpreter::Shell,
-                    "true".to_string(),
-                    Some(events),
-                ),
+                forward(&socket, text("true"), workspace(), Some(events)),
             )
             .await
             .expect("the alias returns when the command exits")
@@ -1518,23 +1735,45 @@ mod tests {
         });
     }
 
-    /// A Shell alias with no stdin sends end-of-file right after the Call.
+    /// An alias with no stdin to forward sends end-of-file right after the run: a Shell alias whose
+    /// stdin is absent, and every Python alias.
     #[cfg(unix)]
     #[test]
     fn a_shell_alias_with_no_stdin_sends_end_of_file_after_the_call() {
-        runtime().block_on(async {
-            let directory = tempfile::tempdir().unwrap();
-            let socket = directory.path().join("box.sock");
-            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-            let broker = tokio::spawn(fake_broker(listener, 3, |kinds| {
-                kinds.last() == Some(&"eof")
-            }));
-            let outcome = forward(&socket, Interpreter::Shell, "true".to_string(), None)
-                .await
-                .unwrap();
-            assert!(matches!(outcome, Outcome::Status(3)));
-            assert_eq!(broker.await.unwrap().kinds, ["open", "call", "eof"]);
-        });
+        for command in [
+            text("true"),
+            Command::Words {
+                name: "python3".to_string(),
+                arguments: vec!["-c".to_string(), "pass".to_string()],
+            },
+        ] {
+            runtime().block_on(async {
+                let directory = tempfile::tempdir().unwrap();
+                let socket = directory.path().join("box.sock");
+                let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+                let broker = tokio::spawn(fake_broker(listener, 3, |kinds| {
+                    kinds.last() == Some(&"eof")
+                }));
+                let outcome = forward(&socket, command, workspace(), None).await.unwrap();
+                assert!(matches!(outcome, Outcome::Status(3)));
+                assert_eq!(broker.await.unwrap().kinds, ["open", "run", "eof"]);
+            });
+        }
+    }
+
+    /// A Shell alias forwards its stdin; a Python alias forwards none.
+    #[test]
+    fn only_a_shell_alias_forwards_its_stdin() {
+        assert!(forwards_stdin(&text("cat")));
+        for name in PYTHON_ALIAS_NAMES {
+            let mode = parse_mode(
+                PathBuf::from(format!("/private/scaffold/public/bin/{name}")),
+                vec![OsString::from("-")],
+            )
+            .unwrap();
+            let command = mode.command.expect("a Python alias sends a command");
+            assert!(!forwards_stdin(&command), "{name} must forward no stdin");
+        }
     }
 
     // ── Fail-closed exit status ───────────────────────────────────────────────

@@ -1870,15 +1870,17 @@ answer. This remains an open residual risk.
 <a id="python-in-the-shell-is-monty"></a>
 ### A workload reaches Monty two ways, and Box judges both on its one policy
 
-The workload reaches Monty by running the `python3` alias directly through the broker or by typing
-`python` or `python3` in the hosted Shell. The Shell forwards source to Monty through a script
-interface. Both routes run one Monty VM per request, and Box judges both as the same principal under
-its one policy engine, so no route reaches an interpreter that policy does not see. Without the
-second route a `python` typed in the Shell exited 127, so an agent that reaches interpreters only
-through its shell never reached Monty.
+The workload reaches Monty by running the `python3` alias or by typing `python` or `python3` in the
+hosted Shell. The alias sends its name and arguments to the Shell, so both ways reach the Shell's
+own `python3`, which forwards source to Monty through a script interface. Each run is one Monty VM
+per request, and Box judges both ways as the same principal under its one policy engine, so no route
+reaches an interpreter that policy does not see. Without the Shell's `python3` a `python` typed in
+the Shell exited 127, so an agent that reaches interpreters only through its shell never reached
+Monty.
 
-The direct route adds an outer request timeout. A script file argument through the Shell can also
-reach a bind, while the direct alias cannot.
+The Shell's deadline bounds both ways, and the Shell reads a script file argument under policy.
+The broker refuses a request that opens Monty without the Shell, so a `shell:exec` decision covers
+every route.
 
 <a id="a-bare-python-name-always-means-monty"></a>
 ### A bare `python` name always means Monty, so a host interpreter needs its absolute path
@@ -1934,13 +1936,12 @@ means a broker or interpreter fault.
 
 The interpreter stops a script after 2 minutes of execution time, from inside its own run loop, so
 `while True: pass` stops even when the script makes no OS call. Time suspended on the surrounding OS
-does not count against that budget. Box adds a fixed outer wall-clock limit to direct Python calls,
-plus limits of 60 seconds for each `fetch`, 3 minutes for all sleeps, 10,000 suspensions, and 1 MiB
-for each `os.urandom` call.
+does not count against that budget. Box adds limits of 60 seconds for each `fetch`, 3 minutes for
+all sleeps, 10,000 suspensions, and 1 MiB for each `os.urandom` call.
 
-Python invoked through Shell shares the enclosing call's configured deadline and broker grace
-period. It does not receive a separate five-minute allowance. Monty's limits also apply. A shorter
-Shell deadline can expire first, although synchronous execution can delay its check. Box never
+Python runs through the Shell, so it shares the enclosing call's configured deadline and broker grace
+period. Monty's limits also apply. A shorter Shell deadline can expire first, although synchronous
+execution can delay its check. Box never
 shortens a sleep. A sleep that would exceed the total raises `TimeoutError` before waiting, as
 `a_sleep_longer_than_the_total_raises_at_once` checks. `a_script_stops_at_its_suspension_limit` and
 `urandom_above_its_cap_is_a_catchable_python_error` pin two of them. Monty refuses one allocation
