@@ -274,6 +274,57 @@ pub(crate) fn refuse_input_across_families(
     Ok(())
 }
 
+/// Refuse a rule whose action list names a `Box::Action` beside an MCP tool's action.
+///
+/// Cedar never validates such a list against the tool's action type, whether or not the tool's
+/// schema has staged, so the rule would stay pending, and a pending rule is dropped when discovery
+/// finishes: its `Box::Action` arms would silently stop being enforced.
+pub(crate) fn refuse_mixed_action_namespaces(
+    policies: &PolicySet,
+    rule_of: &dyn Fn(&str) -> Option<RuleRef>,
+) -> Result<(), Refused> {
+    for policy in policies.policies() {
+        let ActionConstraint::In(uids) = policy.action_constraint() else {
+            continue;
+        };
+        let boxed: Vec<_> = uids
+            .iter()
+            .filter(|uid| uid.type_name().to_string() == BOX_ACTION_TYPE)
+            .collect();
+        // A tool grammar's actions are declared at load, so a list that names one beside a
+        // `Box::Action` validates and commits; only an MCP tool's action waits for its schema.
+        let other: Vec<_> = uids
+            .iter()
+            .filter(|uid| {
+                uid.type_name().to_string() != BOX_ACTION_TYPE
+                    && uid.type_name().namespace_components().next()
+                        != Some(crate::grammar::TOOL_NAMESPACE)
+            })
+            .collect();
+        if boxed.is_empty() || other.is_empty() {
+            continue;
+        }
+        let rule = rule_name(policy);
+        let text = format!(
+            "{rule} lists {} beside {}, and an action list of more than one namespace never \
+             takes effect; write one rule for each namespace",
+            join_actions(&boxed),
+            join_actions(&other)
+        );
+        let rules = rule_of(policy.id().as_ref()).into_iter().collect();
+        return Err(Refused::new(
+            PolicyError::MixedActionNamespaces(text.clone()),
+            vec![crate::check::Finding::new(text).with_rules(rules)],
+        ));
+    }
+    Ok(())
+}
+
+fn join_actions(uids: &[&EntityUid]) -> String {
+    let named: Vec<String> = uids.iter().map(|uid| uid.to_string()).collect();
+    format!("[{}]", named.join(", "))
+}
+
 fn input_across_families(policy: &Policy, rule: &str, conditions: &Value) -> Option<String> {
     let read = input_read(conditions)?;
     let uids = match policy.action_constraint() {

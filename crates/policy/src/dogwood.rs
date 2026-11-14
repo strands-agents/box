@@ -931,7 +931,8 @@ pub(crate) fn refuse_input_reads_before_discovery(expanded: &[String]) -> Result
     };
     let rule_of = |cedar_policy_id: &str| rule_ref(&lowered, cedar_policy_id, &[]);
     crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &rule_of)?;
-    crate::spelling::refuse_input_across_families(lowered.as_cedar(), &rule_of)
+    crate::spelling::refuse_input_across_families(lowered.as_cedar(), &rule_of)?;
+    crate::spelling::refuse_mixed_action_namespaces(lowered.as_cedar(), &rule_of)
 }
 
 /// A rendered rule with each `temporal { … }` expression replaced by `true`.
@@ -1120,6 +1121,7 @@ pub(crate) fn check_against(
     let rule_of = |cedar_policy_id: &str| rule_ref(&lowered, cedar_policy_id, positions);
     crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &rule_of)?;
     crate::spelling::refuse_input_across_families(lowered.as_cedar(), &rule_of)?;
+    crate::spelling::refuse_mixed_action_namespaces(lowered.as_cedar(), &rule_of)?;
     let cap_warnings = crate::cap::judge(&parsed, &lowered, positions)?;
 
     // Strict schema validation, and it is load-bearing: `lower` alone accepts a

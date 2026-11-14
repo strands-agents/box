@@ -151,6 +151,14 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   across a tool action and another family is refused, not parked; a rule scoped to one tool action
   loads. Pinned by
   `tests/runtime_mcp_policy_staging.rs::a_rule_that_reads_the_input_across_a_tool_action_is_refused_before_its_schema_stages`.
+- A pending rule is dropped when discovery finishes, so an action list that names a `Box::Action`
+  beside an MCP tool's action is refused at load whether or not it reads the input, because Cedar
+  never validates that list against the tool's type (`spelling::refuse_mixed_action_namespaces`).
+  Pinned by
+  `tests/load_time_rule_checks.rs::an_action_list_across_namespaces_refuses_validate_and_open`.
+  A rule that names the two in a condition and not in its head loads, and a catalog that never
+  stages still drops it; the gateway forces `identity` on every MCP frame, so a workload cannot
+  make a catalog fail to stage.
 - An MCP union argument reads as its generated `typeChoice` record. `ToolInputs::conform` places a
   bare value in every member it matches, before the request gate and the event, so a rule on a
   duplicate member still fires. It refuses a value that matches none, including a value already in

@@ -247,12 +247,11 @@ async fn run_l7_legs(
         },
         None => None,
     };
-    // A tool call's reply is read into policy history, so ask for it uncompressed; otherwise the
-    // workload could hide its own reply from history by asking for a compressed one.
-    if mcp_target
-        .as_ref()
-        .is_some_and(|(_, target)| target.method() == "tools/call")
-    {
+    // The reply to an MCP frame is read by the policy: a tool call's into history, and a catalog
+    // into the staged schema. Ask for it uncompressed; otherwise the workload could hide its own
+    // reply from history, or fail a catalog's staging and leave a rule unenforced, by asking for a
+    // compressed one.
+    if mcp_target.is_some() {
         req.headers.set("Accept-Encoding", "identity");
     }
 
