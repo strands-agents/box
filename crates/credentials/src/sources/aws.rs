@@ -1,5 +1,7 @@
 //! AWS SigV4 signing and the AWS credential source.
 
+use std::sync::Arc;
+
 use zeroize::Zeroizing;
 
 use crate::{AwsSessionCredentials, CredentialError, Locator, Result};
@@ -474,8 +476,8 @@ impl AwsAcquisition {
             AwsAcquisition::Profile(_) | AwsAcquisition::Credsd(_) => None,
             AwsAcquisition::DefaultChain => Some(
                 "signing with the host's ambient AWS identity: a bare aws:// resolved the default \
-                 credential provider chain, not a declared scoped profile. Prefer aws://PROFILE to \
-                 pin the identity, and grant the workload no write access to ~/.aws",
+                 credential provider chain. Name a scoped profile (aws://PROFILE) to pin which \
+                 identity signs, and grant the workload no write access to ~/.aws",
             ),
         }
     }
@@ -501,35 +503,49 @@ impl std::fmt::Debug for AwsResolution {
     }
 }
 
-/// Materializes AWS session credentials — the seam a real SDK-backed provider chain plugs into.
-trait AwsCredentialProvider: Send + Sync {
-    /// Resolve credentials for `profile` (or the default chain when `None`).
+/// Materializes AWS session credentials — the seam the SDK-backed provider plugs into, and the one
+/// the vault injects (a fake in a test, the shared singleton in production). Crate-internal: no
+/// external caller supplies an AWS provider.
+pub(crate) trait AwsCredentialProvider: Send + Sync + std::fmt::Debug {
+    /// Resolve credentials for `profile` (or the bare default chain when `None`).
     fn provide(&self, profile: Option<&str>) -> Result<AwsSessionCredentials>;
 }
 
-/// The default provider: the AWS SDK default credential chain for a bare reference, or the
-/// operator's named profile.
+/// The default provider: the AWS SDK resolves both forms.
 ///
-/// With no profile it resolves the SDK default chain
+/// With no profile it resolves the SDK default credential provider chain
 /// ([`SdkChainProvider`](super::aws_chain::SdkChainProvider)) — environment, profile files
 /// (including `credential_process`), web identity, the container endpoint, then instance metadata.
-/// With one it resolves the operator's AWS configuration for static keys, which the chain is not
-/// asked for, so a named identity stays on the static-key path.
+/// With a profile it resolves only that profile through a profile-only provider (static keys,
+/// `credential_process`, assume-role, or web identity), never the ambient `AWS_*` keys or instance
+/// metadata; a missing profile is a hard error. Both forms share one worker, one cache, and one risk
+/// (docs/design/decisions.md#a-provider-refuses-an-identity-it-cannot-honour).
+#[derive(Debug)]
 struct DefaultAwsProvider;
 
 impl AwsCredentialProvider for DefaultAwsProvider {
     fn provide(&self, profile: Option<&str>) -> Result<AwsSessionCredentials> {
-        match profile {
-            None => super::aws_chain::SdkChainProvider::shared().provide(),
-            Some(profile) => crate::sources::aws_profile::resolve_profile(profile),
-        }
+        super::aws_chain::SdkChainProvider::shared().provide(profile)
     }
+}
+
+/// A handle to the production default provider, forwarding to the process-wide shared SDK worker.
+/// The vault stores this by default; a test stores a fake instead.
+pub(crate) fn default_aws_provider() -> Arc<dyn AwsCredentialProvider> {
+    Arc::new(DefaultAwsProvider)
+}
+
+/// Whether `loc` is a bare `aws://` that resolves the default credential provider chain (no scoped
+/// profile). A named profile, a `credsd://` route, or any other scheme is not. Used to decide
+/// whether the vault eagerly validates the chain at open.
+pub(crate) fn is_bare_aws_default_chain(loc: &Locator) -> bool {
+    matches!(AwsSource::parse_profile(loc), Ok(None))
 }
 
 /// The AWS credential source: selected by structured config (`source = "aws"`, optional `profile`),
 /// returns [`AwsSessionCredentials`] material.
 pub(crate) struct AwsSource {
-    provider: Box<dyn AwsCredentialProvider>,
+    provider: Arc<dyn AwsCredentialProvider>,
     ambient_policy: AmbientFallbackPolicy,
 }
 
@@ -543,17 +559,14 @@ impl AwsSource {
     /// Construct the source backed by the default provider, with an explicit ambient-fallback
     /// `policy`.
     pub(crate) fn with_policy(policy: AmbientFallbackPolicy) -> Self {
-        Self {
-            provider: Box::new(DefaultAwsProvider),
-            ambient_policy: policy,
-        }
+        Self::with_provider(default_aws_provider(), policy)
     }
 
-    /// Construct the source backed by a custom provider — the test seam for exercising the
-    /// config-parse, ambient-fallback, and error-mapping paths without a real AWS environment.
-    #[cfg(test)]
-    fn with_provider(
-        provider: Box<dyn AwsCredentialProvider>,
+    /// Construct the source backed by `provider` and `policy`. The vault passes its stored provider
+    /// here; a test passes a fake to exercise the config-parse, ambient-fallback, and error-mapping
+    /// paths without a real AWS environment.
+    pub(crate) fn with_provider(
+        provider: Arc<dyn AwsCredentialProvider>,
         policy: AmbientFallbackPolicy,
     ) -> Self {
         Self {
@@ -1007,6 +1020,7 @@ mod tests {
     // --- AWS source: config parse + acquisition ------------------------------
 
     /// A provider that records the profile it was handed and returns fixed credentials.
+    #[derive(Debug)]
     struct RecordingProvider(std::sync::Mutex<Vec<Option<String>>>);
     impl AwsCredentialProvider for RecordingProvider {
         fn provide(&self, profile: Option<&str>) -> Result<AwsSessionCredentials> {
@@ -1021,6 +1035,7 @@ mod tests {
     }
 
     /// A provider that always reports the chain unreachable.
+    #[derive(Debug)]
     struct UnreachableProvider;
     impl AwsCredentialProvider for UnreachableProvider {
         fn provide(&self, _profile: Option<&str>) -> Result<AwsSessionCredentials> {
@@ -1076,6 +1091,7 @@ mod tests {
     #[test]
     fn resolve_structured_profile_returns_aws_material() {
         let recorder = std::sync::Arc::new(RecordingProvider(std::sync::Mutex::new(Vec::new())));
+        #[derive(Debug)]
         struct Forward(std::sync::Arc<RecordingProvider>);
         impl AwsCredentialProvider for Forward {
             fn provide(&self, p: Option<&str>) -> Result<AwsSessionCredentials> {
@@ -1083,7 +1099,7 @@ mod tests {
             }
         }
         let src = AwsSource::with_provider(
-            Box::new(Forward(recorder.clone())),
+            Arc::new(Forward(recorder.clone())),
             AmbientFallbackPolicy::AllowWithWarning,
         );
 
@@ -1108,6 +1124,7 @@ mod tests {
     #[test]
     fn resolve_without_profile_falls_back_to_ambient_with_warning() {
         let recorder = std::sync::Arc::new(RecordingProvider(std::sync::Mutex::new(Vec::new())));
+        #[derive(Debug)]
         struct Forward(std::sync::Arc<RecordingProvider>);
         impl AwsCredentialProvider for Forward {
             fn provide(&self, p: Option<&str>) -> Result<AwsSessionCredentials> {
@@ -1115,7 +1132,7 @@ mod tests {
             }
         }
         let src = AwsSource::with_provider(
-            Box::new(Forward(recorder.clone())),
+            Arc::new(Forward(recorder.clone())),
             AmbientFallbackPolicy::AllowWithWarning,
         );
 
@@ -1154,6 +1171,7 @@ mod tests {
     }
 
     /// A provider that panics if it is ever reached.
+    #[derive(Debug)]
     struct PanicProvider;
 
     impl AwsCredentialProvider for PanicProvider {
@@ -1166,7 +1184,7 @@ mod tests {
     /// the provider is never consulted.
     #[test]
     fn resolve_without_profile_is_refused_under_deny_policy() {
-        let src = AwsSource::with_provider(Box::new(PanicProvider), AmbientFallbackPolicy::Deny);
+        let src = AwsSource::with_provider(Arc::new(PanicProvider), AmbientFallbackPolicy::Deny);
         let err = src.resolve(&structured(&[("source", "aws")])).unwrap_err();
         assert!(!err.is_soft(), "denied ambient fallback must fail closed");
     }
@@ -1175,7 +1193,7 @@ mod tests {
     /// never reached.
     #[test]
     fn bare_aws_is_refused_under_deny() {
-        let src = AwsSource::with_provider(Box::new(PanicProvider), AmbientFallbackPolicy::Deny);
+        let src = AwsSource::with_provider(Arc::new(PanicProvider), AmbientFallbackPolicy::Deny);
         let err = src
             .resolve(&Locator::parse_uri("aws://").unwrap())
             .unwrap_err();
@@ -1189,7 +1207,7 @@ mod tests {
     #[test]
     fn scoped_profile_resolves_under_deny() {
         let src = AwsSource::with_provider(
-            Box::new(RecordingProvider(std::sync::Mutex::new(Vec::new()))),
+            Arc::new(RecordingProvider(std::sync::Mutex::new(Vec::new()))),
             AmbientFallbackPolicy::Deny,
         );
         let resolution = src
@@ -1205,7 +1223,7 @@ mod tests {
     #[test]
     fn resolve_rejects_wrong_form_or_source() {
         let src = AwsSource::with_provider(
-            Box::new(PanicProvider),
+            Arc::new(PanicProvider),
             AmbientFallbackPolicy::AllowWithWarning,
         );
 
@@ -1236,6 +1254,7 @@ mod tests {
     #[test]
     fn bare_aws_resolves_through_the_sdk_chain() {
         let recorder = std::sync::Arc::new(RecordingProvider(std::sync::Mutex::new(Vec::new())));
+        #[derive(Debug)]
         struct Forward(std::sync::Arc<RecordingProvider>);
         impl AwsCredentialProvider for Forward {
             fn provide(&self, p: Option<&str>) -> Result<AwsSessionCredentials> {
@@ -1243,7 +1262,7 @@ mod tests {
             }
         }
         let src = AwsSource::with_provider(
-            Box::new(Forward(recorder.clone())),
+            Arc::new(Forward(recorder.clone())),
             AmbientFallbackPolicy::AllowWithWarning,
         );
 
@@ -1257,6 +1276,7 @@ mod tests {
     #[test]
     fn scoped_profile_still_reads_the_profile_files() {
         let recorder = std::sync::Arc::new(RecordingProvider(std::sync::Mutex::new(Vec::new())));
+        #[derive(Debug)]
         struct Forward(std::sync::Arc<RecordingProvider>);
         impl AwsCredentialProvider for Forward {
             fn provide(&self, p: Option<&str>) -> Result<AwsSessionCredentials> {
@@ -1264,7 +1284,7 @@ mod tests {
             }
         }
         let src = AwsSource::with_provider(
-            Box::new(Forward(recorder.clone())),
+            Arc::new(Forward(recorder.clone())),
             AmbientFallbackPolicy::AllowWithWarning,
         );
 
@@ -1286,7 +1306,7 @@ mod tests {
     #[test]
     fn resolve_maps_unreachable_chain_to_keystore_access() {
         let src = AwsSource::with_provider(
-            Box::new(UnreachableProvider),
+            Arc::new(UnreachableProvider),
             AmbientFallbackPolicy::AllowWithWarning,
         );
         let err = src.resolve(&structured(&[("source", "aws")])).unwrap_err();
@@ -1301,7 +1321,7 @@ mod tests {
     #[test]
     fn resolution_debug_redacts_material() {
         let src = AwsSource::with_provider(
-            Box::new(RecordingProvider(std::sync::Mutex::new(Vec::new()))),
+            Arc::new(RecordingProvider(std::sync::Mutex::new(Vec::new()))),
             AmbientFallbackPolicy::AllowWithWarning,
         );
         let resolution = src

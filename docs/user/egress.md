@@ -169,49 +169,49 @@ available.
 | `secret.ref` | Read from | When |
 |---|---|---|
 | `env://NAME` | The variable `NAME` in the environment of `box run` | Once, when the box starts. The agent, each tool, each stdio MCP server, and the Shell get a placeholder in `NAME`. Every destination that names `NAME`, in one route or in several, accepts the same placeholder. |
-| `aws://PROFILE` | The static access keys of `PROFILE` in the operator's AWS configuration | On each request. The gateway signs the request with SigV4. |
+| `aws://PROFILE` | The named profile `PROFILE`, resolved through the AWS SDK | On each request. The gateway signs the request with SigV4. |
 | `aws://` (no profile) | The AWS SDK default credential provider chain on the host | On each request. The gateway signs the request with SigV4, under the host's ambient identity. |
 
 An `aws://` route takes no placement, `header`, `prefix`, `param`, `inject`, or
 `phantom_prefix`. The gateway signs each request to the destinations. The service and region come
 from the host, which ends in `.amazonaws.com` or `.api.aws`.
 
-A bare `aws://` with no profile signs with the host's **ambient** AWS identity. It resolves the AWS
-SDK default credential provider chain, in order: the `AWS_*` environment variables, the profile
-files (including `credential_process`), web identity, the ECS or EKS container endpoint, then EC2
-instance metadata. `aws://PROFILE` instead reads the static keys of one named profile and nothing
-else.
+Both forms resolve through the AWS SDK, so they share one capability. A bare `aws://` resolves the
+default credential provider chain, in order: the `AWS_*` environment variables, the profile files
+(including `credential_process`), web identity, the ECS or EKS container endpoint, then EC2 instance
+metadata — the host's **ambient** identity. `aws://PROFILE` resolves **only** the named profile: its
+static keys, `credential_process`, assume-role, or web identity. It never reads the ambient `AWS_*`
+keys or instance metadata, and a missing profile is refused rather than signing as the ambient
+identity — like the AWS CLI's `--profile`. Naming a profile pins *which* identity signs; it does not
+avoid `credential_process` (see the writable-`~/.aws` note below).
 
 This build does **not** resolve **AWS SSO** or `aws login` profiles (the SDK's `sso` provider is
-compiled out to keep the dependency surface small). A default profile from `aws configure sso` is
-refused, and the refusal names the missing provider. If your ambient identity is SSO, log in with a
-tool that writes static or session keys to `~/.aws/credentials`, or bind `aws://PROFILE` to a
-profile that carries keys.
+compiled out to keep the dependency surface small). Such a profile, named or default, is refused,
+and the refusal names the missing provider. If your identity is SSO, log in with a tool that writes
+static or session keys to `~/.aws/credentials`.
 
 Because a bare `aws://` signs with whatever identity the host carries, the box prints a warning on
 **every** request it signs that way:
 
 ```
 strands-box credentials [<tenant>]: signing with the host's ambient AWS identity: a bare aws://
-resolved the default credential provider chain, not a declared scoped profile. Prefer aws://PROFILE
-to pin the identity, and grant the workload no write access to ~/.aws
+resolved the default credential provider chain. Name a scoped profile (aws://PROFILE) to pin which
+identity signs, and grant the workload no write access to ~/.aws
 ```
 
-To pin the identity, name a profile: `aws://PROFILE` reads one profile's static keys, never the
-ambient chain, and never warns. The shipped box has no setting that refuses a bare `aws://` outright
-— it always signs with a warning — so a deployment that must not sign with an ambient identity
-writes `aws://PROFILE` rather than a bare `aws://`.
+Naming a profile with `aws://PROFILE` pins *which* identity signs and does not warn. The shipped box
+has no setting that refuses a bare `aws://` outright — it always signs with a warning — so a
+deployment that must pin the identity writes `aws://PROFILE` rather than a bare `aws://`.
 
-> **Writable `~/.aws` is a remote-code-execution path.** The default chain reads the profile files,
+> **Writable `~/.aws` is a remote-code-execution path.** Both `aws://` forms read the profile files,
 > which include the `credential_process` setting — a program the AWS SDK **executes** to obtain
 > credentials. That program runs inside the box's trusted process, **outside** the sandbox. So if a
 > filesystem list grants the workload (the agent, a tool, the interpreter, or the Shell) write
 > access to `~/.aws` or any parent of it, the workload can write
 > `credential_process = /path/to/its-own-program` and have the box run it outside containment on the
-> next bare-`aws://` request. **Grant write access to `~/.aws` only when every process that can write
-> there is trusted** — this is the box's only mitigation for a bare `aws://`. `aws://PROFILE` does
-> not read `credential_process`, so a named profile is not exposed to this path; prefer one when the
-> workload may reach `~/.aws`.
+> next `aws://` request. This covers a named profile as much as the bare form, since both resolve
+> `credential_process` through the SDK. **Grant write access to `~/.aws` only when every process that
+> can write there is trusted** — that is the box's only mitigation for either form.
 
 The gateway adds a credential only over HTTPS. A plain `http://` request to a destination a route
 names is refused.
@@ -272,6 +272,7 @@ not upgrade `rust-lang.org`.
 | A `backends.auth` uses `aws://` without a valid `aws.service`/`aws.region` (or sets them on a non-`aws://` auth) | An `aws://` backend auth signs over the backend host, so state `backends.auth.aws.service` and `backends.auth.aws.region`, each non-empty and only lowercase letters, digits, or `-`. They are valid only on an `aws://` auth. |
 | `secret.ref` has a scheme other than `env` or `aws` | Use one of the two schemes. |
 | `env://NAME` names a variable that is unset, blank, or reserved by the box | Set `NAME` in the host OS's shell that runs `box run`, or choose another name. |
+| A bare `aws://` route whose default credential chain resolves no credentials at startup (no env keys, no default profile, no IMDS), or whose `credential_process` does not finish within the resolve timeout | Configure the host's AWS credentials, or name a profile with `aws://PROFILE`. The box validates a bare `aws://` chain once at startup, so a broken one stops `box run` rather than the first request. |
 | An `aws://` route sets a placement, `header`, `prefix`, `param`, `inject`, or `phantom_prefix` | Remove the key. A signed route takes none. |
 | `placement` is not `header`, `basic_auth`, or `query_param`, or is set with a key it does not take | Use one of the three, with only its own keys. |
 | `placement = "query_param"` has no `param` | Name the query parameter. |
@@ -287,7 +288,7 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 | Body | Cause |
 |---|---|
 | The policy decision, naming the rule | `net:connect` or `http:request` refused the request. |
-| `blocked by egress control` | A request to a route's destinations lacks the placeholder, carries a different value, or can't be signed. A bare `aws://` route whose default chain resolves no credentials can't be signed and refuses here. |
+| `blocked by egress control` | A request to a route's destinations lacks the placeholder, carries a different value, or can't be signed. A bare `aws://` chain that resolved at startup but later stops (a rotated-away credential, a `credential_process` that begins to fail) can't be signed and refuses here; one that is already broken at startup stops `box run` instead. |
 | `credential not permitted on a plaintext request` | A plain `http://` request went to a route's destination, including one the gateway [upgrades to HTTPS](#upgrade-plain-http-to-https). |
 | `request authority rejected` | The request inside a `CONNECT` named a different host. |
 | `response blocked by egress control` | The server sent a compressed response to a credentialed request. |

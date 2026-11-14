@@ -5,7 +5,12 @@ use std::path::{Path, PathBuf};
 use crate::attach::{Attachment, Inbound, Outbound, Redactions};
 use crate::config::MissingRoutePolicy;
 use crate::model::RouteKind;
-use crate::sources::{AmbientFallbackPolicy, CREDSD_SCHEME, resolve_credsd_socket};
+use std::sync::Arc;
+
+use crate::sources::{
+    AmbientFallbackPolicy, AwsCredentialProvider, CREDSD_SCHEME, default_aws_provider,
+    is_bare_aws_default_chain, resolve_credsd_socket,
+};
 use crate::{
     Backend, CredentialDiagnostic, CredentialError, Destination, DestinationPattern, InjectMode,
     Locator, Opened, Phantom, PhantomCheck, PhantomToken, RequestId, ResponseRedactor, Result,
@@ -154,6 +159,11 @@ pub struct Vault {
     /// scoped profile. Held here because the resolve happens per request, so the policy has to outlive
     /// the open that chose it.
     ambient_policy: AmbientFallbackPolicy,
+    /// The AWS credential provider a signed route resolves through. Defaults to the process-wide
+    /// shared SDK worker; a test injects a fake. An injectable field, so signing runs through the
+    /// vault rather than a hardcoded global, which both restores the end-to-end `sign_aws` test seam
+    /// and lets `open` validate the chain eagerly.
+    aws_provider: Arc<dyn AwsCredentialProvider>,
     /// The acquisition-audit sink. Every resolve emits one record through it, success or
     /// failure; the default discards, since the shared L2 lane does not exist yet.
     emitter: Box<dyn crate::Emitter>,
@@ -165,13 +175,41 @@ pub struct Vault {
 impl Vault {
     /// Resolve every declared route and open the vault.
     pub fn open(config: VaultConfig) -> Result<Opened> {
-        Self::open_with_emitter(config, Box::new(crate::audit::DiscardingEmitter))
+        Self::open_with(
+            config,
+            Box::new(crate::audit::DiscardingEmitter),
+            default_aws_provider(),
+        )
     }
 
     /// [`open`](Self::open) with the audit sink supplied, so a test can observe that every resolve
     /// emits exactly one record. The public entry point injects the discarding sink; when the shared L2
     /// audit lane lands it is substituted here rather than added as a new path.
+    #[cfg(test)]
     fn open_with_emitter(config: VaultConfig, emitter: Box<dyn crate::Emitter>) -> Result<Opened> {
+        Self::open_with(config, emitter, default_aws_provider())
+    }
+
+    /// [`open`](Self::open) with the AWS provider injected, so a test drives the real signing and
+    /// eager-validate paths through a fake provider rather than the live SDK chain.
+    #[cfg(test)]
+    pub(crate) fn open_with_aws_provider(
+        config: VaultConfig,
+        aws_provider: Arc<dyn AwsCredentialProvider>,
+    ) -> Result<Opened> {
+        Self::open_with(
+            config,
+            Box::new(crate::audit::DiscardingEmitter),
+            aws_provider,
+        )
+    }
+
+    /// The one open path: resolve every route, then eagerly validate a bare `aws://` chain.
+    fn open_with(
+        config: VaultConfig,
+        emitter: Box<dyn crate::Emitter>,
+        aws_provider: Arc<dyn AwsCredentialProvider>,
+    ) -> Result<Opened> {
         let (backend, tenant, routes, missing, ambient_policy, credsd_socket_config) =
             config.into_parts();
         let mut vault = Self {
@@ -182,6 +220,7 @@ impl Vault {
             signed_aws: Vec::new(),
             backend,
             ambient_policy,
+            aws_provider,
             emitter,
             credsd_socket: None,
         };
@@ -319,6 +358,22 @@ impl Vault {
             vault.credsd_socket = Some(resolve_credsd_socket(credsd_socket_config.as_deref())?);
         }
 
+        // Eagerly validate the bare default chain at open, so a broken chain (an unreadable profile,
+        // an SSO-only default, a stuck `credential_process` within the resolve timeout) fails at
+        // `box run` rather than on the first signed request. Only when a bare `aws://` route exists
+        // and ambient fallback is allowed: a named-profile-only vault, a `credsd://` vault, or one
+        // under `require_scoped_aws_profile` does no resolve at open, so a box that never signs a
+        // bare route forces no credentials to exist. The resolve primes the shared provider cache,
+        // and `audit_aws_resolve` emits the one prepare-step record.
+        if vault.ambient_policy != AmbientFallbackPolicy::Deny
+            && let Some(locator) = vault
+                .signed_aws
+                .iter()
+                .find_map(|(_, (loc, _))| is_bare_aws_default_chain(loc).then(|| loc.clone()))
+        {
+            vault.audit_aws_resolve(&locator)?;
+        }
+
         Ok(Opened::new(vault, phantoms, skipped))
     }
 
@@ -405,6 +460,12 @@ impl Vault {
         self.ambient_policy
     }
 
+    /// The AWS provider a signed route resolves through, for the per-request signing resolve in
+    /// `legs`. A cheap `Arc` clone of the shared provider (or a test's injected fake).
+    pub(crate) fn aws_provider(&self) -> Arc<dyn AwsCredentialProvider> {
+        self.aws_provider.clone()
+    }
+
     /// The resolved `credsd` socket, for the per-request credsd resolve in `legs`. `Some` whenever a
     /// `credsd://` route was declared.
     pub(crate) fn credsd_socket(&self) -> Option<&Path> {
@@ -417,6 +478,8 @@ impl Vault {
             "strands-box credentials [{tenant}]: {message}",
             tenant = self.tenant
         );
+        #[cfg(test)]
+        CAPTURED_WARNINGS.with(|warnings| warnings.borrow_mut().push(message.to_string()));
     }
 
     /// What must be edited on `req` before it goes upstream, or `None` when this vault governs no
@@ -507,6 +570,21 @@ impl Vault {
             .find(|(pattern, _)| pattern.matches(dest))
             .map(|(_, value)| value)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Warnings `Vault::warn` emitted on this thread, so a test can observe a per-request warning
+    /// without capturing stderr. Drained by [`drain_captured_warnings`]. Hermetic: a test injects a
+    /// fake AWS provider, so `warn` runs on the test thread and never reaches the SDK worker.
+    static CAPTURED_WARNINGS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Take and clear the warnings captured on this thread (test-only).
+#[cfg(test)]
+pub(crate) fn drain_captured_warnings() -> Vec<String> {
+    CAPTURED_WARNINGS.with(|warnings| std::mem::take(&mut *warnings.borrow_mut()))
 }
 
 #[cfg(test)]
@@ -797,6 +875,60 @@ mod tests {
         )
         .expect("a signed route must not touch the backend at open");
         assert!(opened.phantoms().is_empty());
+    }
+
+    /// An AWS provider that fails hard if it is ever consulted — proves whether `open` resolved.
+    #[derive(Debug)]
+    struct FailingAwsProvider;
+
+    impl AwsCredentialProvider for FailingAwsProvider {
+        fn provide(&self, _profile: Option<&str>) -> Result<crate::AwsSessionCredentials> {
+            Err(CredentialError::KeystoreAccess(
+                "the chain is broken".to_string(),
+            ))
+        }
+    }
+
+    /// A bare `aws://` route is eagerly validated at open, so a broken chain fails `box run` rather
+    /// than the first signed request. The failing provider turns that eager resolve into a hard
+    /// error; `aws_config("")` is the bare form (`is_bare_aws_default_chain` holds).
+    #[test]
+    fn a_broken_bare_aws_chain_fails_the_open() {
+        let error = Vault::open_with_aws_provider(
+            VaultConfig::new(backend_with(Box::new(BrokenSource)), "t").route(
+                RouteSpec::signed_aws(
+                    DestinationPattern::parse("*.amazonaws.com").unwrap(),
+                    aws_config(""),
+                ),
+            ),
+            Arc::new(FailingAwsProvider),
+        )
+        .expect_err("a broken bare chain must fail the open");
+        assert!(
+            !error.is_soft(),
+            "a broken bare chain is a hard open failure: {error:?}"
+        );
+    }
+
+    /// Only a bare route is eagerly validated. A named-profile-only vault does no resolve at open, so
+    /// a box that never signs a bare route forces no credentials to exist — proven by a provider that
+    /// would fail hard if it were consulted.
+    #[test]
+    fn a_named_profile_only_vault_does_not_resolve_at_open() {
+        let opened = Vault::open_with_aws_provider(
+            VaultConfig::new(backend_with(Box::new(BrokenSource)), "t").route(
+                RouteSpec::signed_aws(
+                    DestinationPattern::parse("*.amazonaws.com").unwrap(),
+                    aws_config("prod"),
+                ),
+            ),
+            Arc::new(FailingAwsProvider),
+        )
+        .expect("a named-profile-only vault must not resolve at open");
+        assert!(
+            opened.phantoms().is_empty(),
+            "a signed route mints no phantom"
+        );
     }
 
     // --- audit ---------------------------------------------------------------

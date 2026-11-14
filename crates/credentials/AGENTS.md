@@ -175,34 +175,79 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   `AmbientFallbackPolicy::Deny` unreachable, and emits a lying `AwsAcquisition::Profile(..)`. The
   `Structured` arm carries the mirror check on `source`. `AWS_SCHEME` is one `pub(crate)` constant in
   `sources/aws.rs`, re-exported through `sources/mod.rs`; do not reintroduce a second `"aws"` literal.
-- The no-profile branch resolves the SDK default chain (`SdkChainProvider`), not a named profile.
-  `DefaultAwsProvider` calls the concrete `SdkChainProvider::shared().provide()`; the type carries no
-  profile, so it cannot substitute one. `AwsAcquisition::DefaultChain` carries the ambient warning,
-  and `Profile(_)` carries none, so the bare form is never silent. `EnvAwsProvider` is gone — the SDK
-  chain reads the environment first, so it subsumes the old ambient-env provider.
+- Both forms resolve through the SDK (`SdkChainProvider`), but through **different providers**, so
+  the audit never lies. A bare `aws://` resolves a `DefaultCredentialsChain` (env, then the default
+  profile, then web identity, ECS, and IMDS — the ambient identity). A named `aws://PROFILE` resolves
+  a profile-only `ProfileFileCredentialsProvider` pinned with `.profile_name`: it reads *only* that
+  profile's `credential_process`, assume-role, web identity, or static keys, and it never reads the
+  ambient `AWS_*` keys or instance metadata. A missing profile is a hard error, not a fall-through.
+  Do **not** build the named form from `DefaultCredentialsChain::builder().profile_name(..)`:
+  `.profile_name` there only redirects the profile-file and region sub-providers, so the env provider
+  still sits in front and a missing profile falls through to IMDS — the named route would then sign as
+  the ambient identity while `Profile(_)` claims otherwise. `named_profile_ignores_ambient_env_and_
+  refuses_a_missing_profile` pins the profile-only path against a temp credentials file with a
+  conflicting `AWS_ACCESS_KEY_ID`. `DefaultAwsProvider::provide(profile)` forwards both forms to the
+  one shared worker. `AwsAcquisition::DefaultChain` carries the ambient warning and `Profile(_)`
+  carries none, so the bare form is never silent and a named profile is recorded as itself — the audit
+  names what signed. There is no static-key-only path and no hand-rolled INI parser; both were deleted
+  with `sources/aws_profile.rs`. The `credential_process` RCE residual now covers a named profile too,
+  bounded by the writable-`~/.aws` filesystem rule
+  (docs/design/decisions.md#a-provider-refuses-an-identity-it-cannot-honour).
 
-### The default-chain provider (`sources/aws_chain.rs`)
+### The SDK provider (`sources/aws_chain.rs`)
 
-- **The chain runs on a dedicated worker thread with a current-thread runtime**, because the chain is
-  async and `Vault::sign_aws` is synchronous. `provide()` sends a request and waits on a channel with
+- **One worker thread with a current-thread runtime serves both forms**, because the chain is async
+  and `Vault::sign_aws` is synchronous. `provide(profile)` sends a request and waits on a channel with
   a bounded `CALLER_DEADLINE`, so no caller on a runtime thread calls `block_on`. The worker skips a
   request whose deadline already passed, so a slow chain does not run work for callers that left.
+- **Each resolve is bounded by `RESOLVE_TIMEOUT` (shorter than `CALLER_DEADLINE`).** The AWS SDK sets
+  no timeout on a `credential_process` helper, so a stuck helper would otherwise wedge the single
+  worker for the life of the box; the timeout makes the resolve a hard error and frees the worker for
+  the next request. A timed-out helper the SDK still owns may keep running (no `kill_on_drop` hook is
+  exposed); the worker no longer waits on it. Residual: each such orphan holds a blocking-pool thread
+  on the worker's runtime until it exits on its own, so a `~/.aws` that names a helper which always
+  hangs leaks one thread per resolve. The writable-`~/.aws` filesystem rule bounds who can plant such
+  a helper. `resolve_within` is the one seam that bounds the wait; a hermetic test
+  (`resolve_within_cuts_off_a_resolve_that_never_completes`) pins it with a never-completing future,
+  so deleting the `tokio::time::timeout` wrapper fails the suite.
 - **The chain is rebuilt on each resolve, not once.** A `ProviderConfig` parses the profile files
   once (a `OnceCell`), so a chain held for the run returns the first credential forever, even after a
-  tool rewrites `~/.aws/credentials`. The `RefreshCache` serves an expiring credential within its
-  buffer and re-resolves a non-expiring one (`expiry == None`) on every call, so a rotated file or
-  environment credential is picked up.
-- **The region is resolved once, from the environment then the profile, never instance metadata**,
-  and pinned on each rebuild with `.region(..)`. Letting the rebuild run the SDK region chain would
-  reach IMDS on every request on a host with no configured region. The signing region still comes
-  from the route host, so the chain region only selects the STS endpoint for an assume-role or
-  web-identity profile; dropping the profile's `region =` breaks GovCloud, China, and VPC-endpoint
-  subnets.
-- **SSO and `aws login` are compiled out** (`default-features = false`, no `sso`), so a bare `aws://`
-  does not resolve an SSO default profile. `resolve_once` walks the error source chain so the refusal
-  names the missing `sso` feature rather than a bare "not properly configured".
+  tool rewrites `~/.aws/credentials`. The `RefreshCache` is keyed by profile (`Option<String>`), so a
+  bare route and a named profile never evict each other; it serves an expiring credential within its
+  buffer and re-resolves a non-expiring one (`expiry == None`) on every call (per-request resolve, the
+  decided rotation behaviour), so a rotated file or environment credential is picked up. Cache
+  validity is judged on the clock read *after* the resolve, not before it: a resolve can take real
+  time (a `credential_process` helper, an STS round trip), so a failed refresh serves the cached
+  credential only when it is still valid *now*, and a freshly resolved credential that is already
+  expired does not displace a still-valid cached one.
+  `cache_does_not_serve_a_cached_credential_that_expired_during_a_failed_refresh` and
+  `cache_keeps_a_valid_credential_over_an_expired_fresh_resolve` pin both.
+- **The region is resolved from the environment then a profile, never instance metadata**, and
+  pinned on the provider so the rebuild never runs the SDK region chain (which would reach IMDS on a
+  host with no configured region). The bare form resolves the region once from env then the *default*
+  profile and pins it with `.region(..)`. A named form resolves the region from env then *its own*
+  named profile (`ProfileFileRegionProvider::builder().profile_name(..)`), falling back to the shared
+  region, and passes it through `ProviderConfig::with_region(..)`. The signing region still comes from
+  the route host, so the chain region only selects the STS endpoint for an assume-role or web-identity
+  profile; a named profile must use its own `region =`, or an assume-role for a GovCloud, China, or
+  VPC-endpoint profile reaches the wrong STS endpoint. Both region providers read only env and files,
+  so resolving the named region per resolve never reaches IMDS.
+- **SSO and `aws login` are compiled out** (`default-features = false`, no `sso`), so neither form
+  resolves an SSO default profile. `resolve_once` walks the error source chain so the refusal names
+  the missing `sso` feature rather than a bare "not properly configured".
+- **The provider is an injectable `Arc<dyn AwsCredentialProvider>` on the `Vault`**, defaulting to
+  `default_aws_provider()` (the shared singleton forwarder). `sign_aws` resolves through the field,
+  not a hardcoded `shared()`, so a test opens a vault with a fake provider and drives the real
+  `Vault::sign_aws` end to end (`sign_aws_warns_on_bare_and_not_on_scoped`). Production still has one
+  shared worker and cache; nothing is per-vault.
+- **`Vault::open` eagerly validates a bare `aws://` chain once** (via `audit_aws_resolve`), so a
+  broken chain fails at `box run` rather than on the first request. Only when a bare route exists and
+  `ambient_policy != Deny`; a named-profile-only or `credsd://` vault does no resolve at open, so a
+  box that never signs a bare route forces no credentials to exist. The resolve primes the shared
+  cache and emits the one prepare-step audit record.
 - Build the per-request resolve from the vault's retained `ambient_policy` via
-  `AwsSource::with_policy`, never `AwsSource::new()`, or `require_scoped_aws_profile` is unreachable.
+  `AwsSource::with_provider(self.aws_provider(), …)`, never `AwsSource::new()`, or
+  `require_scoped_aws_profile` is unreachable.
 - Derive the signing name with `derive_service_region`. `bedrock-runtime` and
   `bedrock-agent-runtime` sign as `bedrock`; a global host signs `us-east-1`; `execute-api` signs as
   itself; a trailing dot is trimmed; anything else returns `None`, so the caller refuses to sign.

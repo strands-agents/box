@@ -2375,29 +2375,41 @@ broken config after the box starts. Do not delete one because the other exists.
 
 <a id="a-provider-refuses-an-identity-it-cannot-honour"></a>
 <a id="a-bare-aws-resolves-the-default-credential-chain"></a>
-### An AWS binding resolves a named profile's static keys, and a bare aws:// resolves the full chain
+### Both aws:// forms resolve through the AWS SDK and share one risk
 
-`aws://PROFILE` reads the named profile's static keys and nothing else: it never runs
-`credential_process` (which runs a subprocess), SSO, or assume-role (each an STS or SSO call),
-because a credential that is not the one the operator named is a silent authority change. A bare
-`aws://` resolves the AWS SDK default credential provider chain: the environment, the profile files
-(including `credential_process`), web identity, the container endpoint, then instance metadata.
+`aws://PROFILE` and a bare `aws://` both resolve through the AWS SDK credential providers, so they
+share one capability, but through different providers so the audit never lies. `aws://PROFILE`
+resolves only the named profile, through a profile provider: it reads that profile's static keys,
+`credential_process`, assume-role, or web identity, never the ambient `AWS_*` keys or instance
+metadata, and a missing profile is refused rather than falling through to the ambient identity. A
+bare `aws://` resolves the default credential provider chain: the environment, the profile files,
+web identity, the container endpoint, then instance metadata. A named profile records its own
+acquisition and a bare form records the default chain, so the audit names what actually signed.
+Building the named form from the default chain with a pinned profile name was rejected, because that
+chain keeps the environment provider in front of the profile and falls through a missing profile to
+instance metadata, so a named route could sign as the ambient identity while the audit still claimed
+the profile. The earlier split, where `aws://PROFILE` read static keys only and refused
+`credential_process` as a boundary, is also gone: it made the named form weaker than the unscoped one
+and drove operators to set `AWS_PROFILE` and use a bare `aws://`, which signed as the profile but
+mislabelled the audit as the default chain.
 
 The credentials crate owns the SDK (`aws-config`, an HTTP/TLS stack, and a current-thread runtime on
-a dedicated worker thread), because the crate that already resolves `aws://PROFILE` owns every AWS
+a dedicated worker thread), because the crate that already resolves AWS routes owns every AWS
 credential path; the box crate injecting a resolver across a seam was rejected for splitting that
 ownership. The reserved tokens `aws://@instance-role` and `aws://@container-role`, and
 `aws://default`, were rejected, the last because `default` is a real profile and the overlap would
 be a silent identity substitution. The SDK's `sso` and `credentials-login` providers are compiled
-out (`default-features = false`), so a bare `aws://` does not resolve an AWS SSO or `aws login`
-default profile; such a profile is refused, and the refusal names the missing provider.
+out (`default-features = false`), so neither form resolves an AWS SSO or `aws login` profile; such a
+profile is refused, and the refusal names the missing provider.
 
 The cost: the SDK, a runtime, and a TLS stack link into the one process that holds every resolved
 plaintext; and a workload with write access to `~/.aws` can name a `credential_process` program the
 trusted process runs outside the sandbox, which is remote code execution
-([how access choices change the risk](limitations.md#how-access-choices-change-the-risk)). The
-shipped box exposes no setting that refuses a bare `aws://`, so the mitigation is a named profile or
-keeping `~/.aws` unwritable.
+([how access choices change the risk](limitations.md#how-access-choices-change-the-risk)). This
+residual now covers a named profile as well as the bare form. The bare form also signs with the
+host's ambient identity, so the box warns on every such request; `require_scoped_aws_profile` refuses
+the bare form, but it does not gate a named profile that declares `credential_process`. The one
+mitigation that covers both is keeping `~/.aws` unwritable by the workload.
 
 <a id="a-route-may-set-the-phantom-check-to-advisory"></a>
 ### A route may attach its secret always, not only against the phantom
