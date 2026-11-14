@@ -214,17 +214,20 @@ async fn hosted(
         }
     };
 
-    // Validate any declared credsd credential before the workload starts, so a missing daemon or an
-    // unusable environment fails here rather than at the first signed request. The check does
-    // blocking socket I/O with a per-environment deadline, so run it off the async worker: a slow or
-    // hung daemon then delays this startup alone and never stalls the runtime.
+    // Validate any declared credsd credential, and sign once with each telemetry `aws://` profile,
+    // before the workload starts, so a missing daemon, an unusable environment, or a profile that
+    // cannot sign fails here rather than at the first signed request. The checks do blocking I/O
+    // with a per-environment deadline, so run them off the async worker: a slow or hung daemon then
+    // delays this startup alone and never stalls the runtime.
     let egress = locked.record.egress.clone();
     let remote_mcp = locked.record.remote_mcp.clone();
+    let telemetry_targets = locked.record.telemetry.clone();
     tokio::task::spawn_blocking(move || {
-        crate::run::credential::preflight_credsd(&egress, &remote_mcp)
+        crate::run::credential::preflight_credsd(&egress, &remote_mcp, &telemetry_targets)?;
+        crate::record::config::telemetry::preflight_aws(&telemetry_targets)
     })
     .await
-    .expect("the credsd preflight task panicked")?;
+    .expect("the credential preflight task panicked")?;
 
     let agent = locked
         .record
