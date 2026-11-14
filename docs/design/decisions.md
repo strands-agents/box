@@ -2220,7 +2220,7 @@ because the backend handles the destination's auth downstream. On the same heade
 before the backend token attaches, so the backend token wins and no placeholder rides upstream.
 A backend `auth` of `aws://` is SigV4-signed over the **backend** host: the gateway signs the
 re-routed request AFTER it rewrites the `Host` to the backend and joins the path, so the signature
-covers exactly the bytes the backend receives, with service and region derived from the backend host
+covers exactly the bytes the backend receives, under the service and region the `aws://` auth states
 ([where a re-route signs a backend auth](#where-a-re-route-signs-a-backend-auth-of-aws)). The backend
 host is a gateway or custom domain with no derivable scope, so the `aws://` auth states an explicit
 `aws.service` and `aws.region`, which the loader requires — Box never guesses a vendor's host shape.
