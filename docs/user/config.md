@@ -354,7 +354,7 @@ Each tool and each `stdio` MCP server runs in its own separate sandbox (see
 `file-watching = true` permits macOS FSEvents for the selected process and its descendants.
 Set it on an existing `[agent]`, `[tool.<name>]`, or local stdio `[mcp.<name>]` table.
 Each table selects the setting independently; an agent's selection does not enable its tools or MCP servers.
-Omission and `false` keep FSEvents unavailable. Linux accepts the setting and keeps its existing watcher behavior.
+Omission and `false` keep FSEvents unavailable. The setting has no effect on Linux, which accepts the key.
 
 For a Node development server, add the setting to that tool's table:
 
@@ -944,7 +944,7 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | `argument_wildcards` | bool | For `stdio`: `false` by default. `true` lets this server's whole-argument `*` entries match and forward caller-supplied values. See [argument wildcards](mcp.md#argument-wildcards). |
 | `network.contain_egress` | bool | For `stdio`: `true` by default. `false` gives this one server direct network access, with no gateway, no policy decision per request, and no credential injection. |
 | `native-filesystem-policy` | boolean | For `stdio`: override the global experimental filesystem policy setting. Remote `http` entries refuse this field. See [workload selection](native-filesystem-policy.md#select-workloads). |
-| `file-watching` | boolean | For `stdio`: `false` by default. Permit macOS FSEvents with the [metadata limitation](#file-watching). Remote `http` entries refuse this field. |
+| `file-watching` | boolean | For `stdio`: `false` by default. Permit macOS FSEvents with the [metadata limitation](#file-watching). Linux ignores this setting. Remote `http` entries refuse this field. |
 | `destinations` | string array | For `http`: the hosts the server answers on. |
 | `secret.ref` | string | For `http`: the credential the gateway attaches on the way out. |
 
