@@ -133,6 +133,12 @@ with `expected ipaddr but saw String`.
 A rule on `path` has caveats for repeated slashes and `%2F`.
 [Forbid one URL path on a host](../policy.md#forbid-one-url-path-on-a-host) lists them.
 
+A request that the gateway refuses before any rule decides it, such as an inner `Host` that names
+another authority or an MCP frame the gateway cannot classify, enters history as an `http:request`
+request, so a rule that counts attempts still sees it. A path that is not a valid address has no
+canonical form, so that request carries the path as the workload sent it. A refused MCP frame
+enters history as `http:request` only, and not as `mcp:call`.
+
 Cloud metadata and link-local protection is two `forbid` rules on `net:connect`;
 [what Box always enforces](../security.md#what-box-always-enforces) lists them.
 

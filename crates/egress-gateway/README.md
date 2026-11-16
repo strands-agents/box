@@ -42,6 +42,10 @@ Domain authorization is supplied as an `EffectInterceptor`:
 ```rust
 pub trait EffectInterceptor: Send + Sync {
     fn intercept(&self, effect: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>>;
+    fn stage_mcp_catalog(&self, _server: &str, _reply: McpListReply<'_>) -> io::Result<()> {
+        Ok(())
+    }
+    fn observe_refused(&self, _effect: &EffectAttempt<'_>) {}
 }
 
 pub trait EffectPermit: Send {
@@ -72,6 +76,10 @@ No attempt carries a header, a body, or credential material. `path` excludes the
 query string and is the path the workload sent, captured before any credential
 edit. `HttpRequest::body_bytes` is the complete request body length. Response release requires
 no upfront body length.
+
+The proxy hands an `HttpRequest` that it refuses before `intercept` to `observe_refused`. That
+call carries no permit and no outcome, because the effect never ran. It lets an authority keep the
+attempt in its history. The default does nothing.
 
 Both `EffectPermit` methods consume `self: Box<Self>`, so one permit reaches
 exactly one terminal transition. The proxy reports `EffectOutcome::Connected`,

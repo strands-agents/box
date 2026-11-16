@@ -122,6 +122,7 @@ enum Event {
     Attempt(AttemptSnapshot),
     Outcome(EffectKind, EffectOutcome),
     MarkedIndeterminate(EffectKind),
+    Refused(AttemptSnapshot),
 }
 
 #[derive(Clone)]
@@ -173,6 +174,13 @@ impl EffectInterceptor for RecordingInterceptor {
             kind,
             fail_recording: self.fail_recording == Some(kind),
         }))
+    }
+
+    fn observe_refused(&self, attempt: &EffectAttempt<'_>) {
+        self.events
+            .lock()
+            .unwrap()
+            .push(Event::Refused(AttemptSnapshot::capture(attempt)));
     }
 }
 
@@ -282,6 +290,7 @@ fn event_names(events: &[Event]) -> Vec<&'static str> {
                 EffectKind::HttpRequest => "indeterminate:request",
                 EffectKind::ResponseRelease => "indeterminate:response",
             },
+            Event::Refused(_) => "refused:request",
         })
         .collect()
 }
@@ -2208,4 +2217,419 @@ fn a_reply_the_server_holds_open_finishes_once_its_answer_arrives() {
         "the observer finishes while the stream is still open"
     );
     drop(sender);
+}
+
+/// The one refused attempt a single gateway refusal leaves, after it claimed no request effect.
+fn refused_request(events: &Arc<Mutex<Vec<Event>>>) -> AttemptSnapshot {
+    let events = wait_for_event_count(events, 4);
+    assert_eq!(
+        event_names(&events),
+        vec![
+            "attempt:resolve",
+            "attempt:connect",
+            "outcome:connect",
+            "refused:request"
+        ],
+        "a gateway refusal claims no request effect and is observed exactly once"
+    );
+    match &events[3] {
+        Event::Refused(snapshot) => snapshot.clone(),
+        other => panic!("expected a refused request, saw {other:?}"),
+    }
+}
+
+/// Each request the gateway refuses before its effect claim reaches the interceptor as an
+/// observed refusal, so policy history can count it.
+#[test]
+fn a_request_the_gateway_refuses_is_observed_without_a_claim() {
+    const SECRET: &str = "sk_live_refused_secret";
+    let host = "refused.test";
+    let upstream = TlsUpstream::start(host);
+    let port = upstream.port();
+
+    // The Host binding, the path canonicalization, and a credential control each refuse.
+    for refusal in ["binding", "path", "credential"] {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let controls = if refusal == "credential" {
+            credential_route(host, port, SECRET).0
+        } else {
+            no_injection()
+        };
+        let handle = MitmInterceptor::start(
+            config_for(host, &upstream),
+            controls,
+            Arc::new(RecordingInterceptor::allowing(events.clone())),
+        )
+        .unwrap();
+        let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+        let (method, judged_path) = match refusal {
+            "binding" => {
+                client.send_request_with_authority(
+                    "GET",
+                    "/x/../%70ivot?q=1",
+                    "metadata.google.internal",
+                    &[],
+                    b"",
+                );
+                ("GET", "/pivot")
+            }
+            "path" => {
+                client.send_request("GET", "/a%zz", &[], b"");
+                ("GET", "/a%zz")
+            }
+            _ => {
+                client.send_request(
+                    "POST",
+                    "/v1/items",
+                    &[("Authorization", "Bearer not-the-phantom")],
+                    b"probe",
+                );
+                ("POST", "/v1/items")
+            }
+        };
+        let status = client.read_status();
+        assert!((400..500).contains(&status), "{refusal}: status {status}");
+
+        let refused = refused_request(&events);
+        assert!(
+            matches!(
+                &refused,
+                AttemptSnapshot::HttpRequest { host: h, port: p, method: m, path, .. }
+                    if h == host && *p == port && m == method && path == judged_path
+            ),
+            "{refusal}: {refused:?}"
+        );
+        assert!(
+            !format!("{refused:?}").contains(SECRET),
+            "a refused attempt carries no credential"
+        );
+    }
+    assert_eq!(
+        upstream.request_count(),
+        0,
+        "no refused request reaches the origin"
+    );
+}
+
+/// A request the interceptor itself denies was already decided, so it is not observed again.
+#[test]
+fn a_denied_request_effect_is_not_observed_as_a_second_refusal() {
+    let host = "denied.test";
+    let upstream = TlsUpstream::start(host);
+    let port = upstream.port();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let handle = MitmInterceptor::start(
+        config_for(host, &upstream),
+        no_injection(),
+        Arc::new(RecordingInterceptor::denying(
+            events.clone(),
+            EffectKind::HttpRequest,
+        )),
+    )
+    .unwrap();
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+    client.send_request("GET", "/v1/items", &[], b"");
+    assert_eq!(client.read_status(), 403);
+    let events = wait_for_event_count(&events, 4);
+    assert_eq!(
+        event_names(&events),
+        vec![
+            "attempt:resolve",
+            "attempt:connect",
+            "outcome:connect",
+            "attempt:request"
+        ]
+    );
+}
+
+/// The one request-leg denial the gateway journalled, which must name `reason`.
+fn assert_denied_for(emitter: &StubEmitter, reason: &str) {
+    let denials: Vec<String> = emitter
+        .records()
+        .into_iter()
+        .filter(|record| record.decision == AuditDecision::Deny && !record.method.is_empty())
+        .map(|record| record.reason)
+        .collect();
+    assert_eq!(denials.len(), 1, "{denials:?}");
+    assert!(denials[0].contains(reason), "{denials:?}");
+}
+
+/// The refused attempt for `method` and `path` on `host:port`, observed once, with no `secret`.
+fn assert_refused(
+    events: &Arc<Mutex<Vec<Event>>>,
+    (host, port): (&str, u16),
+    (method, path): (&str, &str),
+    secret: Option<&str>,
+) {
+    let refused = refused_request(events);
+    assert!(
+        matches!(
+            &refused,
+            AttemptSnapshot::HttpRequest { host: h, port: p, method: m, path: judged, .. }
+                if h == host && *p == port && m == method && judged == path
+        ),
+        "{refused:?}"
+    );
+    if let Some(secret) = secret {
+        assert!(
+            !format!("{refused:?}").contains(secret),
+            "a refused attempt carries no credential"
+        );
+    }
+}
+
+/// A credential on a plaintext request is refused before the claim, and the refusal is observed.
+#[test]
+fn a_plaintext_credential_refusal_is_observed() {
+    use std::io::Write as _;
+    const SECRET: &str = "sk_live_plaintext_secret";
+    let host = "plain.test";
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = upstream.local_addr().unwrap().port();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let (controls, _) = credential_route(host, port, SECRET);
+    let emitter = Arc::new(StubEmitter::new());
+    let handle = MitmInterceptor::start_with(
+        MitmConfig {
+            dns_overrides: vec![(host.to_string(), "127.0.0.1".parse().unwrap())],
+            ..MitmConfig::default()
+        },
+        controls,
+        Arc::new(RecordingInterceptor::allowing(events.clone())),
+        Box::new(SharedEmitter(emitter.clone())),
+        None,
+    )
+    .unwrap();
+    let mut client = std::net::TcpStream::connect(("127.0.0.1", proxy_port(&handle))).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    write!(
+        client,
+        "GET http://{host}:{port}/v1/items HTTP/1.1\r\nHost: {host}:{port}\r\nConnection: close\r\n\r\n"
+    )
+    .unwrap();
+    let head = harness::read_http_head(&mut client);
+    assert!(head.starts_with("HTTP/1.1 403"), "{head}");
+    assert_refused(&events, (host, port), ("GET", "/v1/items"), Some(SECRET));
+    assert_denied_for(&emitter, "a secret must ride TLS");
+}
+
+/// An encoded separator under a backend path prefix is refused, and the refusal is observed.
+#[test]
+fn a_backend_prefix_refusal_is_observed() {
+    let backend_host = "prefix-backend.test";
+    let upstream = TlsUpstream::start(backend_host);
+    let port = upstream.port();
+    let original = "prefix-original.test";
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emitter = Arc::new(StubEmitter::new());
+    let handle = MitmInterceptor::start_with(
+        MitmConfig {
+            upstream_ca_pems: vec![upstream.ca_pem()],
+            dns_overrides: vec![(backend_host.to_string(), "127.0.0.1".parse().unwrap())],
+            backends: vec![(
+                destination(original, port),
+                egress_gateway::BackendDial {
+                    host: backend_host.to_string(),
+                    port,
+                    tls: true,
+                    path_prefix: "/github".to_string(),
+                },
+            )],
+            ..MitmConfig::default()
+        },
+        no_injection(),
+        Arc::new(RecordingInterceptor::allowing(events.clone())),
+        Box::new(SharedEmitter(emitter.clone())),
+        None,
+    )
+    .unwrap();
+    let mut client = WorkloadClient::connect(proxy_port(&handle), original, port);
+    client.send_request("GET", "/..%2Fslack/secret", &[], b"");
+    assert_eq!(client.read_status(), 403);
+    assert_refused(
+        &events,
+        (original, port),
+        ("GET", "/..%2Fslack/secret"),
+        None,
+    );
+    assert_eq!(upstream.request_count(), 0);
+    assert_denied_for(&emitter, "encoded separator");
+}
+
+/// A credential edit that breaks the CONNECT binding is refused by the re-check, and the
+/// refusal is observed with the path the workload sent, not the edited one.
+#[test]
+fn a_post_edit_binding_refusal_is_observed() {
+    const SECRET: &str = "/rebound.evil.test/sk_live_rebind_secret";
+    let host = "rebind.test";
+    let upstream = TlsUpstream::start(host);
+    let port = upstream.port();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant").route(
+        RouteSpec::opaque(
+            destination(host, port),
+            env_locator(SECRET),
+            InjectMode::url_path("/{}").expect("a valid url-path placement"),
+        ),
+    ))
+    .unwrap();
+    let phantom = opened.phantoms()[0].token().to_string();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(
+        destination(host, port),
+        Arc::new(opened.into_vault()),
+    )]);
+    let emitter = Arc::new(StubEmitter::new());
+    let handle = MitmInterceptor::start_with(
+        config_for(host, &upstream),
+        controls,
+        Arc::new(RecordingInterceptor::allowing(events.clone())),
+        Box::new(SharedEmitter(emitter.clone())),
+        None,
+    )
+    .unwrap();
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+    let workload_path = format!("/{phantom}");
+    client.send_request("GET", &workload_path, &[], b"");
+    let status = client.read_status();
+    assert!((400..500).contains(&status), "status {status}");
+    assert_refused(
+        &events,
+        (host, port),
+        ("GET", &workload_path),
+        Some("sk_live_rebind_secret"),
+    );
+    assert_eq!(upstream.request_count(), 0);
+    assert_denied_for(&emitter, "origin-form request target");
+}
+
+/// An MCP frame the classifier refuses is refused before the claim, and the refusal is observed.
+#[test]
+fn a_refused_mcp_frame_is_observed() {
+    let host = "mcp-refused.test";
+    let upstream = TlsUpstream::start(host);
+    let port = upstream.port();
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let emitter = Arc::new(StubEmitter::new());
+    let handle = MitmInterceptor::start_with(
+        MitmConfig {
+            mcp_servers: vec![(host.to_string(), "demo".to_string())],
+            ..config_for(host, &upstream)
+        },
+        no_injection(),
+        Arc::new(RecordingInterceptor::allowing(events.clone())),
+        Box::new(SharedEmitter(emitter.clone())),
+        None,
+    )
+    .unwrap();
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, port);
+    let batch = br#"[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]"#;
+    client.send_request(
+        "POST",
+        "/mcp",
+        &[("Content-Type", "application/json")],
+        batch,
+    );
+    assert_eq!(client.read_status(), 403);
+    assert_refused(&events, (host, port), ("POST", "/mcp"), None);
+    assert_eq!(upstream.request_count(), 0);
+    assert_denied_for(&emitter, "MCP frame refused");
+}
+
+/// A backend signature the vault refuses is refused before the claim, and the refusal is observed.
+#[test]
+fn a_backend_signing_refusal_is_observed() {
+    const SECRET: &str = "sk_live_backend_signing_secret";
+    let backend_host = "signing-backend.test";
+    let upstream = TlsUpstream::start(backend_host);
+    let port = upstream.port();
+    let original = "signing-original.test";
+    let events = Arc::new(Mutex::new(Vec::new()));
+    // The capability matches the original host, and its vault route names the backend host, so the
+    // request leg attaches nothing and the backend pass finds a strict route with no phantom.
+    let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant").route(
+        RouteSpec::opaque(
+            destination(backend_host, port),
+            env_locator(SECRET),
+            InjectMode::header("Bearer {}".to_string(), None).unwrap(),
+        ),
+    ))
+    .unwrap();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(
+        destination(original, port),
+        Arc::new(opened.into_vault()),
+    )]);
+    let emitter = Arc::new(StubEmitter::new());
+    let handle = MitmInterceptor::start_with(
+        MitmConfig {
+            upstream_ca_pems: vec![upstream.ca_pem()],
+            dns_overrides: vec![(backend_host.to_string(), "127.0.0.1".parse().unwrap())],
+            backends: vec![(
+                destination(original, port),
+                egress_gateway::BackendDial {
+                    host: backend_host.to_string(),
+                    port,
+                    tls: true,
+                    path_prefix: String::new(),
+                },
+            )],
+            ..MitmConfig::default()
+        },
+        controls,
+        Arc::new(RecordingInterceptor::allowing(events.clone())),
+        Box::new(SharedEmitter(emitter.clone())),
+        None,
+    )
+    .unwrap();
+    let mut client = WorkloadClient::connect(proxy_port(&handle), original, port);
+    client.send_request("GET", "/v1/items", &[], b"");
+    assert_eq!(client.read_status(), 403);
+    assert_refused(
+        &events,
+        (original, port),
+        ("GET", "/v1/items"),
+        Some(SECRET),
+    );
+    assert_eq!(upstream.request_count(), 0);
+    assert_denied_for(&emitter, "no phantom token found");
+    a_backend_signing_route_alone_attaches_nothing(backend_host, original, SECRET);
+}
+
+/// The control for the signing refusal: the same capability without the re-route is admitted, so
+/// the refusal came from the backend signing pass and not from the request leg.
+fn a_backend_signing_route_alone_attaches_nothing(
+    backend_host: &str,
+    original: &str,
+    secret: &str,
+) {
+    let upstream = TlsUpstream::start(original);
+    let port = upstream.port();
+    let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant").route(
+        RouteSpec::opaque(
+            destination(backend_host, port),
+            env_locator(secret),
+            InjectMode::header("Bearer {}".to_string(), None).unwrap(),
+        ),
+    ))
+    .unwrap();
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(
+        destination(original, port),
+        Arc::new(opened.into_vault()),
+    )]);
+    let handle = MitmInterceptor::start(
+        config_for(original, &upstream),
+        controls,
+        Arc::new(RecordingInterceptor::allowing(Arc::new(Mutex::new(
+            Vec::new(),
+        )))),
+    )
+    .unwrap();
+    let mut client = WorkloadClient::connect(proxy_port(&handle), original, port);
+    client.send_request("GET", "/v1/items", &[], b"");
+    assert_eq!(
+        client.read_status(),
+        200,
+        "the request leg attaches nothing"
+    );
 }

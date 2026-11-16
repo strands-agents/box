@@ -265,6 +265,33 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
         self.report_if_remote_finished();
         staged
     }
+
+    fn observe_refused(&self, effect: &EgressEffectAttempt<'_>) {
+        let EgressEffectAttempt::HttpRequest {
+            host,
+            port,
+            method,
+            path,
+            body_bytes,
+            intercepted,
+            ..
+        } = effect
+        else {
+            return;
+        };
+        self.policy.observe_refused(
+            &self.governed,
+            &self.principal,
+            &Request::Http {
+                host,
+                port: *port,
+                method,
+                path,
+                body_bytes: *body_bytes,
+                intercepted: *intercepted,
+            },
+        );
+    }
 }
 
 impl EgressPolicyInterceptor {
@@ -2422,6 +2449,48 @@ mod tests {
             .intercept(&response)
             .expect("the release is admitted whatever policy says")
             .mark_indeterminate();
+    }
+
+    /// A request the gateway refused before its claim enters history, so a cap over refused
+    /// attempts locks the destination down.
+    #[test]
+    fn a_gateway_refused_request_counts_toward_an_attempt_cap() {
+        let source = r#"permit(principal, action == Box::Action::"http:request", resource)
+               when { context.input.host == "api.github.com" };
+               forbid(principal, action == Box::Action::"http:request", resource)
+               when temporal {
+                 exists (n: Long). (
+                   (count for (t: Timepoint). where (
+                     formerly within 3600s (
+                       Box::Action::"http:request"::request{ input.host: "api.github.com" } && tp(t)
+                     )
+                   )) == n
+                   && n >= 3
+                 )
+               };"#;
+        let request = EgressEffectAttempt::HttpRequest {
+            host: "api.github.com",
+            port: 443,
+            method: "GET",
+            path: "/admin",
+            body_bytes: 0,
+            intercepted: true,
+            mcp: None,
+        };
+
+        let control = interceptor(source);
+        control
+            .intercept(&request)
+            .expect("one attempt is under the cap")
+            .mark_indeterminate();
+
+        let probed = interceptor(source);
+        probed.observe_refused(&request);
+        probed.observe_refused(&request);
+        assert!(
+            probed.intercept(&request).is_err(),
+            "two refused probes and this attempt reach the cap"
+        );
     }
 
     /// The forbid a reply status arms: three 500s within the window refuse the fourth request,
