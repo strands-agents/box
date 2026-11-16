@@ -41,18 +41,58 @@ impl Operator {
 
     /// Name the absolute directories that a filesystem rule matches as
     /// `context.input.locations.contains(Box::Location::"<name>")`.
+    ///
+    /// Each absolute directory without a `.` or `..` component is resolved once, here, the way a
+    /// requested host path is, so it matches the canonical path a request carries; a directory
+    /// that resolves to one already listed appears once. Every other directory is kept as given,
+    /// and the load refuses it.
     #[must_use]
     pub fn with_locations(
         mut self,
         locations: impl IntoIterator<Item = (String, Vec<PathBuf>)>,
     ) -> Self {
-        self.locations = locations.into_iter().collect();
+        self.locations = locations
+            .into_iter()
+            .map(|(name, directories)| {
+                let mut resolved: Vec<PathBuf> = Vec::new();
+                for directory in directories {
+                    let directory =
+                        if directory.is_absolute() && crate::schema::is_normal(&directory) {
+                            crate::path::resolve_host_directory(&directory)
+                        } else {
+                            directory
+                        };
+                    if !resolved.contains(&directory) {
+                        resolved.push(directory);
+                    }
+                }
+                (name, resolved)
+            })
+            .collect();
         self
     }
 
     /// The declared locations, by name.
     pub(crate) fn locations(&self) -> &BTreeMap<String, Vec<PathBuf>> {
         &self.locations
+    }
+
+    /// Refuse declared locations without a home, because a filesystem outcome names a path under
+    /// the home as `~/…` and its locations are found by expanding that spelling.
+    pub(crate) fn refuse_locations_without_home(&self) -> Result<(), PolicyError> {
+        if self.locations.is_empty() || self.home.is_some() {
+            return Ok(());
+        }
+        Err(PolicyError::Schema(
+            "locations are declared for an operator with no home; a path under the home is \
+             reported as `~/…`, so state the home with `Operator::anchored_at`"
+                .to_string(),
+        ))
+    }
+
+    /// Each spelling of the home a `~/…` path is expanded under: as stated, and canonical.
+    pub(crate) fn home_directories(&self) -> Vec<PathBuf> {
+        self.homes().into_iter().map(PathBuf::from).collect()
     }
 
     /// Every spelling of the home a literal is judged against: as stated, and canonical.

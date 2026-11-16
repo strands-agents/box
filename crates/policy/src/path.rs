@@ -323,6 +323,33 @@ impl PathResolver {
     }
 }
 
+/// An absolute directory resolved as [`PathResolver::approve_host`] resolves a requested path: its
+/// canonical spelling, or, when it does not exist, its nearest existing ancestor's canonical
+/// spelling with the missing components rejoined. It is kept as given when an ancestor cannot be
+/// resolved for a reason other than its absence.
+pub(crate) fn resolve_host_directory(directory: &Path) -> PathBuf {
+    let mut missing = Vec::new();
+    let mut existing = directory;
+    loop {
+        match std::fs::canonicalize(existing) {
+            Ok(canonical) => {
+                return missing
+                    .iter()
+                    .rev()
+                    .fold(canonical, |path, name| path.join(name));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
+                    return directory.to_path_buf();
+                };
+                missing.push(name);
+                existing = parent;
+            }
+            Err(_) => return directory.to_path_buf(),
+        }
+    }
+}
+
 /// Close `.` and `..` in a virtual path, so neither can alias the identity policy judges.
 ///
 /// One implementation serves [`PathResolver::approve_virtual`] and the script adapter,

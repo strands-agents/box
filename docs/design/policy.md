@@ -204,6 +204,17 @@ program starts, Box checks that its launch directory matches the absolute direct
 the policy check.
 The caller's Shell keeps its own working directory.
 
+When `box.toml` declares [locations](../user/config.md#locations), every filesystem request and its
+`::response` or `::error` carry `input.locations`, a set of `Box::Location` values: each declared
+location that holds the path. The schema declares the `Box::Location` enum and the field only for
+such a box, so a rule that names a location loads only where it's declared. The request's set comes
+from its resolved path. An outcome names the path as the caller reported it, which is `~/…` under
+the operator's home, so Box expands that spelling under the home and matches it again. History keeps
+the names, not the directories: if a later run points `project` somewhere else, the earlier events
+still count as `project`. A history predicate can't hold a set constant, and it compares a set as a
+whole, so a budget per location reads `input.locations: context.input.locations`, which counts
+events whose set equals the request's.
+
 Each caller fills in the outcome from what it saw. A filesystem response carries `output.result` as
 `completed`, `descriptor_issued`, or `indeterminate`, so a rule that counts certain completions can
 leave the other two out. A shell response carries the command's exit status as `output.status`, and
@@ -292,7 +303,9 @@ refuses a rule that reads `context.input` under actions of more than one family,
 because a field means what the action makes it mean. See [a rule that reads the input names one
 action family](decisions.md#a-rule-that-reads-the-input-names-one-action-family). It also refuses a
 temporal predicate on `mcp:call::error` or a per-tool `::error`, because an MCP call records only
-`::response`.
+`::response`. It also refuses a rule that names a `Box::Location` that `box.toml` doesn't
+declare, even when the rule also waits for an MCP server's schema, because no server's schema can
+declare a location.
 
 The `run` verb validates the policy before it writes any box state. A box with no local MCP server
 validates against the complete action schema, and that check accepts and refuses exactly what the

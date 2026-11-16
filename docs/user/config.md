@@ -273,9 +273,13 @@ when { context.input.locations.contains(Box::Location::"project") };
 | A directory has no `.` or `..` component. | ``` `[locations] <name>` entry "<entry>" is refused: it holds a `.` or `..` component``` |
 | A location lists each directory once. | ``` `[locations] <name>` lists "<entry>" twice``` |
 
-The box expands `~/` against the operator's home. It resolves the symbolic links in a directory
-that exists, so the location matches the resolved path that a rule's `path` holds. A directory that
-does not exist is kept as written. Two locations may list the same directory.
+The box expands `~/` against the operator's home. It then resolves each directory the same way it
+resolves a request's path: it follows the symbolic links in the directory, and when the directory
+doesn't exist yet, it follows them in the nearest folder above it that does. So a directory that
+you create later under a linked folder still matches. A path matches by its resolved spelling, as
+`path` does. The box resolves the directories once, when it builds the policy for `run` or for a
+check. A directory that you replace with a symbolic link after that no longer matches files through
+the link. Two locations may list the same directory.
 
 A path is in a location when it is one of the location's directories or below one, by whole path
 components. A path can be in more than one location, and a rule on each of them applies to it.

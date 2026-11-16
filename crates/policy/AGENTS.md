@@ -178,13 +178,17 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - `body_bytes` is the offer on a `::request` and the delivery on a `::response`.
 - `context.input.locations` is generated: `schema::base_schema` adds `Box::Location` and the field
   only when the operator declares a location, so every composition takes the operator's
-  locations and a box with none stores `SCHEMA_SRC` unchanged. A filesystem outcome names its
-  path by the reported spelling, which can be `~/…`, so the engine keeps each allowed request's
-  set by offset and records it on the outcome. It keeps at most `MAXIMUM_AWAITED_LOCATIONS`; an
-  outcome past that, or a second outcome for one request, matches its reported path instead, and
-  a home-relative path then records an empty set. A temporal predicate refuses an array constant
-  and compares a set as an ordered whole, so a rule counts by `input.locations:
-  context.input.locations`. Pinned by `tests/path_locations.rs` and
+  locations and a box with none stores `SCHEMA_SRC` unchanged. `Operator::with_locations`
+  resolves each root with `path::resolve_host_directory`, the rule `approve_host` uses for a
+  request, so roots and request paths cannot drift. A filesystem outcome names its path by the
+  reported spelling, so the engine expands `~` and `~/…` under each spelling of the operator home
+  and matches that; it keeps nothing per request. The load refuses locations for an operator with
+  no home (`Operator::refuse_locations_without_home`), because such an outcome could not be
+  matched. `classify_naming` refuses an undeclared `Box::Location` literal before a rule may be
+  held for an MCP schema (`dogwood::refuse_undeclared_locations`), because no MCP schema can
+  declare one. A temporal predicate refuses an array constant and compares a set as an ordered
+  whole, so a rule counts by `input.locations: context.input.locations`. Pinned by
+  `tests/path_locations.rs` and
   `dogwood::tests::a_location_budget_holds_in_each_window_and_counts_each_location_set_apart`.
 - Sum an outbound budget over `http:request::response`, as `tests/policies/egress_byte_budget.dw`
   does. One exchange records one such event, at reply time, with the delivered request bytes and
@@ -224,6 +228,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   refusal of a path the caller may not reach.
 - LIVE GAP: `like` is case-sensitive and macOS is not, so `policy.DW` stays exposed. Do not widen
   the pattern to `*.dw`, which over-denies an ordinary `.dw` file.
+  Location matching is case-sensitive too, because it compares path components, so on macOS a
+  path spelled with other casing than its root is in no location.
 - `SELF_DEFENDED_FILES` is `["box.toml", "policy.dw"]`, and it is public so tests and
   `box/src/define/layout.rs` derive from it. Add no `*.cedar` rule and no speculative entry. A
   defended filename costs an escalation chain, as `mcp.toml` did.

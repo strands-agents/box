@@ -25,13 +25,18 @@ fn sources(text: &str) -> Vec<Policy> {
     }]
 }
 
+/// The operator home every fixture states, which does not exist on the test host.
+const HOME: &str = "/nonexistent-box-home/dev";
+
 fn operator(locations: &[(&str, &[&str])]) -> Operator {
-    Operator::unanchored().with_locations(locations.iter().map(|(name, directories)| {
-        (
-            (*name).to_string(),
-            directories.iter().map(PathBuf::from).collect(),
-        )
-    }))
+    Operator::unanchored()
+        .anchored_at(HOME)
+        .with_locations(locations.iter().map(|(name, directories)| {
+            (
+                (*name).to_string(),
+                directories.iter().map(PathBuf::from).collect(),
+            )
+        }))
 }
 
 fn project() -> Operator {
@@ -361,7 +366,12 @@ when temporal {
 fn a_response_named_by_its_home_relative_spelling_carries_its_requests_locations() {
     let directory = tempfile::tempdir().expect("history directory");
     let history = directory.path().join("h.redb");
-    let home = operator(&[("project", &["/home/dev/src/app"])]);
+    let home = Operator::unanchored()
+        .anchored_at("/home/dev")
+        .with_locations([(
+            "project".to_string(),
+            vec![PathBuf::from("/home/dev/src/app")],
+        )]);
     let engine = open(&home, PROJECT_WRITE, &history);
     let approved = PathResolver::over([PathBuf::from("/home/dev")])
         .expect("the root is absolute")
@@ -386,6 +396,267 @@ fn a_response_named_by_its_home_relative_spelling_carries_its_requests_locations
             &request_id.expect("an allow carries a request id"),
             &Outcome::Fs {
                 path: Path::new("~/src/app/main.rs"),
+                operation: FsOperation::WriteContent,
+                result: FsResult::Completed,
+            },
+        )
+        .expect("the outcome records");
+    drop(engine);
+
+    let project = Some(vec!["project".to_string()]);
+    assert_eq!(recorded_locations(&history), [project.clone(), project]);
+}
+
+/// A rule that also names a per-tool MCP action is held pending until that server's schema
+/// stages; a location literal it names must still refuse at load.
+#[test]
+fn a_rule_held_for_an_mcp_schema_refuses_an_undeclared_location_at_load() {
+    let held = |location: &str| {
+        format!(
+            r#"
+permit (principal, action == Box::Action::"fs:write", resource);
+@id("guarded")
+forbid (principal, action == Box::Action::"fs:write", resource)
+when {{ context.input.locations.contains(Box::Location::"{location}") }}
+unless temporal {{ formerly within 1h alpha::Action::"deploy"::response{{}} }};
+"#
+        )
+    };
+    let in_history = r#"
+permit (principal, action == Box::Action::"fs:write", resource);
+@id("guarded")
+forbid (principal, action == Box::Action::"fs:write", resource)
+unless temporal {
+    formerly within 1h (
+        alpha::Action::"deploy"::response{}
+        && Box::Action::"fs:write"::response{ input.locations: context.input.locations,
+                                              input.operation: Box::FsWriteOperation::"write_content" }
+    )
+};
+"#;
+    let directory = tempfile::tempdir().expect("history directory");
+    let cases = [
+        ("misspelled", project(), held("projcet")),
+        ("undeclared", Operator::unanchored(), held("project")),
+    ];
+    for (label, declared, text) in cases {
+        let opened =
+            PolicyEngine::open_staged(&declared, sources(&text), &directory.path().join(label));
+        let Err(error) = opened else {
+            panic!("{label}: open_staged must refuse the location");
+        };
+        assert!(
+            error.to_string().contains("Box::Location"),
+            "{label}: {error}"
+        );
+        let check = PolicyEngine::check(&declared, &sources(&text), false);
+        assert!(
+            !check.errors().is_empty() && check.unchecked().is_empty(),
+            "{label}: check must refuse the rule rather than list it as unchecked: {:?}",
+            check.errors()
+        );
+    }
+
+    let engine = open(
+        &project(),
+        &held("project"),
+        &directory.path().join("valid"),
+    );
+    assert!(
+        allows(&engine, "/work/a"),
+        "a declared location loads, and the held rule waits"
+    );
+    let check = PolicyEngine::check(&project(), &sources(&held("project")), false);
+    assert!(check.errors().is_empty(), "{:?}", check.errors());
+    assert_eq!(check.unchecked().len(), 1);
+    drop(engine);
+
+    let engine = open(&project(), in_history, &directory.path().join("history"));
+    assert!(
+        allows(&engine, "/work/a"),
+        "a rule that names no location literal is held as before"
+    );
+}
+
+/// Every outcome names its path `~/…`, as the Shell and Python report one under the home, so
+/// its set comes from that spelling and from nothing kept per request.
+#[test]
+fn more_outstanding_requests_than_any_cap_record_their_own_locations() {
+    const OUTSTANDING: usize = 4_200;
+    let directory = tempfile::tempdir().expect("history directory");
+    let history = directory.path().join("h.redb");
+    let nested = operator(&[
+        ("project", &["/nonexistent-box-home/dev/work"]),
+        ("docs", &["/nonexistent-box-home/dev/work/docs"]),
+    ]);
+    let engine = open(
+        &nested,
+        r#"permit (principal, action == Box::Action::"fs:write", resource);"#,
+        &history,
+    );
+    let resolver = PathResolver::over([PathBuf::from(HOME), PathBuf::from("/elsewhere")])
+        .expect("the roots are absolute")
+        .reporting_under(HOME);
+    let path = |index: usize| match index % 3 {
+        0 => format!("{HOME}/work/{index}"),
+        1 => format!("{HOME}/work/docs/{index}"),
+        _ => format!("/elsewhere/{index}"),
+    };
+    let admitted: Vec<_> = (0..OUTSTANDING)
+        .map(|index| {
+            let approved = resolver
+                .approve_virtual(Path::new(&path(index)))
+                .expect("the path resolves");
+            let (decision, request_id) = engine.decide(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                &Request::Fs {
+                    path: &approved,
+                    operation: FsOperation::WriteContent,
+                },
+            );
+            assert!(decision.is_allow());
+            (
+                approved.reported().into_owned(),
+                request_id.expect("an allow carries a request id"),
+            )
+        })
+        .collect();
+    assert!(admitted[0].0.starts_with("~/"), "{}", admitted[0].0);
+    for (reported, request_id) in &admitted {
+        engine
+            .record(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                request_id,
+                &Outcome::Fs {
+                    path: Path::new(reported),
+                    operation: FsOperation::WriteContent,
+                    result: FsResult::Completed,
+                },
+            )
+            .expect("the outcome records");
+    }
+    drop(engine);
+
+    let expected = |index: usize| {
+        Some(match index % 3 {
+            0 => vec!["project".to_string()],
+            1 => vec!["docs".to_string(), "project".to_string()],
+            _ => Vec::new(),
+        })
+    };
+    let recorded = recorded_locations(&history);
+    assert_eq!(recorded.len(), 2 * OUTSTANDING);
+    for index in 0..OUTSTANDING {
+        assert_eq!(recorded[index], expected(index), "request {index}");
+        assert_eq!(
+            recorded[OUTSTANDING + index],
+            expected(index),
+            "response {index}"
+        );
+    }
+}
+
+#[test]
+fn a_root_that_does_not_exist_yet_under_a_linked_parent_matches_once_created() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let real = directory.path().join("real");
+    std::fs::create_dir(&real).expect("the real directory");
+    let link = directory.path().join("link");
+    std::os::unix::fs::symlink(&real, &link).expect("the link");
+    let root = link.join("new").join("deeper");
+    let declared = Operator::unanchored()
+        .anchored_at(HOME)
+        .with_locations([("project".to_string(), vec![root.clone()])]);
+    let engine = open(&declared, PROJECT_WRITE, &directory.path().join("h.redb"));
+
+    std::fs::create_dir_all(&root).expect("the root is created after the box starts");
+    // The request carries the canonical path, through the real directory and not the link.
+    let approved = PathResolver::over([directory.path().canonicalize().expect("canonical")])
+        .expect("the root is absolute")
+        .approve_host(
+            &real
+                .canonicalize()
+                .expect("canonical")
+                .join("new/deeper/file"),
+        )
+        .expect("the canonical path resolves");
+    let (decision, _) = engine.decide(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        &Request::Fs {
+            path: &approved,
+            operation: FsOperation::WriteContent,
+        },
+    );
+    assert!(
+        decision.is_allow(),
+        "the root resolves through its linked parent: {decision:?}"
+    );
+}
+
+#[test]
+fn locations_without_an_operator_home_refuse_to_load() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let unanchored = Operator::unanchored()
+        .with_locations([("project".to_string(), vec![PathBuf::from("/work")])]);
+    let permit = r#"permit (principal, action == Box::Action::"fs:read", resource);"#;
+
+    let Err(error) =
+        PolicyEngine::open_staged(&unanchored, sources(permit), &directory.path().join("h"))
+    else {
+        panic!("open_staged must refuse locations without a home");
+    };
+    assert!(error.to_string().contains("no home"), "{error}");
+    assert!(PolicyEngine::validate(&unanchored, &sources(permit)).is_err());
+    for complete in [true, false] {
+        assert!(
+            !PolicyEngine::check(&unanchored, &sources(permit), complete)
+                .errors()
+                .is_empty()
+        );
+    }
+}
+
+/// The operator states its home through a link, and a location's root resolves through it; a
+/// `~/…` outcome is matched under the home's canonical spelling as well.
+#[test]
+fn a_home_relative_outcome_matches_under_the_canonical_home() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let real = directory.path().join("real-home");
+    std::fs::create_dir_all(real.join("work")).expect("the home");
+    let link = directory.path().join("home");
+    std::os::unix::fs::symlink(&real, &link).expect("the link");
+    let canonical = real.canonicalize().expect("canonical");
+    let history = directory.path().join("h.redb");
+    let declared = Operator::unanchored()
+        .anchored_at(&link)
+        .with_locations([("project".to_string(), vec![link.join("work")])]);
+    let engine = open(&declared, PROJECT_WRITE, &history);
+    let approved = PathResolver::over([canonical.clone()])
+        .expect("the root is absolute")
+        .reporting_under(&canonical)
+        .approve_host(&canonical.join("work/file"))
+        .expect("the path resolves");
+    assert_eq!(approved.reported(), "~/work/file");
+
+    let (decision, request_id) = engine.decide(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        &Request::Fs {
+            path: &approved,
+            operation: FsOperation::WriteContent,
+        },
+    );
+    assert!(decision.is_allow(), "{decision:?}");
+    engine
+        .record(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            &request_id.expect("an allow carries a request id"),
+            &Outcome::Fs {
+                path: Path::new("~/work/file"),
                 operation: FsOperation::WriteContent,
                 result: FsResult::Completed,
             },

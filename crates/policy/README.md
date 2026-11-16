@@ -344,14 +344,20 @@ permit (principal, action == Box::Action::"fs:write", resource)
 when { context.input.locations.contains(Box::Location::"project") };
 ```
 
-A location names directories and grants no reach. A rule that names an undeclared location is a
-load error in `open_staged`, `validate`, and `check`. A box that declares no location has neither
-the enum nor the field, so a rule that names `Box::Location` does not load there. `open` and
-`open_with_mcp_schemas` declare no location. These calls also refuse a bad declaration: a name
-that is not a letter followed by at most 63 letters, digits, `_`, or `-`, an empty directory
-list, or a directory that is relative or has a `.` or `..` component.
+A location names directories and grants no reach. `with_locations` resolves each directory the
+way `PathResolver::approve_host` resolves a requested path, so a root spelled through a symbolic
+link, or one that does not exist yet below a linked parent, matches the canonical path a request
+carries. A rule that names an undeclared location is a load error in `open_staged`, `validate`,
+and `check`, also when the rule waits for an MCP schema. A box that declares no location has
+neither the enum nor the field, so a rule that names `Box::Location` does not load there. `open`
+and `open_with_mcp_schemas` declare no location. These calls also refuse a bad declaration: a
+name that is not a letter followed by at most 63 letters, digits, `_`, or `-`, an empty directory
+list, or a directory that is relative or has a `.` or `..` component. They refuse locations for
+an operator with no home, too (see `Operator::anchored_at`), because an outcome names a path
+under the home as `~/…`.
 
-The response of a filesystem request records the request's set. A temporal predicate cannot hold
+The response of a filesystem request records the set of the path it names, with `~/…` expanded
+under the operator's home. A temporal predicate cannot hold
 an array constant, and it compares a set as a whole. So
 `Box::Action::"fs:write"::response{ input.locations: context.input.locations }` matches the writes
 whose locations are the same as this request's. History keeps the names, so an event recorded

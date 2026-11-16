@@ -115,7 +115,7 @@ fn refuse_bad_locations(locations: &Locations) -> Result<(), PolicyError> {
 }
 
 /// Whether `path` spells no `.` or `..` component, including one that `Path::components` drops.
-fn is_normal(path: &Path) -> bool {
+pub(crate) fn is_normal(path: &Path) -> bool {
     path.components().all(|component| {
         matches!(
             component,

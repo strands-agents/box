@@ -15,7 +15,7 @@ const MAXIMUM_LOCATION_NAME: usize = 64;
 #[serde(transparent)]
 pub(crate) struct Locations(BTreeMap<String, Vec<String>>);
 
-/// Each location's directories, absolute and canonical where they exist.
+/// Each location's directories, with `~/` expanded; the policy operator resolves them.
 pub(crate) type ResolvedLocations = BTreeMap<String, Vec<PathBuf>>;
 
 impl Locations {
@@ -58,8 +58,9 @@ impl Locations {
         Ok(())
     }
 
-    /// Each location's directories with `~/` expanded against `operator_home`, and each one that
-    /// exists canonicalized.
+    /// Each location's directories with `~/` expanded against `operator_home`, each listed once.
+    /// `policy::Operator::with_locations` resolves symbolic links, the same way as a request's
+    /// path.
     pub(crate) fn resolved(&self, operator_home: &Path) -> ResolvedLocations {
         self.0
             .iter()
@@ -70,9 +71,8 @@ impl Locations {
                         Some(relative) => operator_home.join(relative),
                         None => PathBuf::from(entry),
                     };
-                    let directory = expanded.canonicalize().unwrap_or(expanded);
-                    if !resolved.contains(&directory) {
-                        resolved.push(directory);
+                    if !resolved.contains(&expanded) {
+                        resolved.push(expanded);
                     }
                 }
                 (name.clone(), resolved)
@@ -247,7 +247,7 @@ mod tests {
     }
 
     #[test]
-    fn an_existing_entry_is_canonicalized_and_a_missing_one_is_kept() {
+    fn a_linked_entry_is_resolved_by_the_policy_operator_and_appears_once() {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let real = directory.path().join("real");
         std::fs::create_dir(&real).expect("the real directory");
@@ -257,16 +257,30 @@ mod tests {
         let spelled = |path: &Path| path.to_str().expect("UTF-8").to_string();
         let table = Locations(BTreeMap::from([(
             "project".to_string(),
-            vec![spelled(&link), spelled(&missing), spelled(&real)],
+            vec![
+                spelled(&link),
+                spelled(&missing),
+                spelled(&real),
+                spelled(&link),
+            ],
         )]));
-        table.validate().expect("the table is valid");
+        let resolved = table.resolved(Path::new("/unused"));
         assert_eq!(
-            table.resolved(Path::new("/unused")),
+            resolved,
             BTreeMap::from([(
                 "project".to_string(),
-                vec![real.canonicalize().expect("canonical"), missing],
+                vec![link.clone(), missing.clone(), real.clone()],
             )]),
-            "the link resolves to its target, which then appears once"
+            "the table only expands and dedupes; it resolves no link"
+        );
+        let canonical = directory.path().canonicalize().expect("canonical");
+        assert_eq!(
+            policy::Operator::unanchored().with_locations(resolved),
+            policy::Operator::unanchored().with_locations([(
+                "project".to_string(),
+                vec![canonical.join("real"), canonical.join("missing")],
+            )]),
+            "the operator resolves the link to its target, which then appears once"
         );
     }
 

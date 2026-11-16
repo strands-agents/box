@@ -13,7 +13,8 @@ use super::{Policy, SchemaStage, authored};
 use crate::check::{Finding, Refused, RuleRef, annotated_id};
 use crate::dogwood::{
     DogwoodEngine, check_canonical_policy_set, expand_policy_source,
-    refuse_input_reads_before_discovery, rule_conditions, validate_canonical_policy_set,
+    refuse_input_reads_before_discovery, refuse_undeclared_locations, rule_conditions,
+    validate_canonical_policy_set,
 };
 use crate::request::ActionRequest;
 use crate::schema::{
@@ -126,7 +127,7 @@ impl Authority {
             operator,
             sources,
             Vec::new(),
-            DogwoodEngine::open_for_staging(history, operator.locations())?,
+            DogwoodEngine::open_for_staging(history, operator)?,
         )
     }
 
@@ -142,7 +143,7 @@ impl Authority {
             operator,
             sources,
             grammar_schemas,
-            DogwoodEngine::open_for_staging_file(history, label, operator.locations())?,
+            DogwoodEngine::open_for_staging_file(history, label, operator)?,
         )
     }
 
@@ -758,6 +759,17 @@ impl ProposalState {
                         {
                             return Err((ordinal, refused));
                         }
+                        // No MCP schema can declare a location, so a rule that names an
+                        // undeclared one is refused rather than held for a schema.
+                        if let Some(candidate) = self.candidates.get(ordinal)
+                            && let Err(undeclared) = refuse_undeclared_locations(
+                                &candidate.expanded_source,
+                                self.operator.locations(),
+                                ordinal,
+                            )
+                        {
+                            return Err((ordinal, undeclared));
+                        }
                         self.pending.insert(ordinal, refused.error.to_string());
                     }
                 }
@@ -1220,6 +1232,9 @@ pub(super) fn check_staged(
     sources: &[Policy],
     grammar_schemas: Vec<String>,
 ) -> Result<(Vec<PolicyWarning>, Vec<RuleRef>), Vec<Finding>> {
+    operator
+        .refuse_locations_without_home()
+        .map_err(|error| vec![Finding::new(error.to_string())])?;
     let candidates = candidates(&authored(sources)).map_err(|refused| refused.findings)?;
     let mut proposal = ProposalState {
         operator: operator.clone(),
