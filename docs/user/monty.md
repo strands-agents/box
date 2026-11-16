@@ -20,9 +20,14 @@ Path('out/notes.txt').write_text(text.upper())
 print('wrote', len(text))"
 ```
 
-To let the script read the project and write in `out`, permit both in `policy.dw`:
+To let the agent run `python3`, and let the script read the project and write in `out`, permit all
+three in `policy.dw`:
 
 ```cedar
+@id("python")
+permit (principal, action == Box::Action::"shell:exec", resource)
+when { ["python", "python3"].contains(context.input.program) };
+
 @id("project_read")
 permit (principal, action == Box::Action::"fs:read", resource)
 when {
@@ -57,12 +62,19 @@ in the next. An uncaught exception prints `<exception type>: <message>` on stder
 
 ## Running a script
 
-| | The `python3` or `python` alias | `python` or `python3` in Strands Shell |
-|---|---|---|
-| Example | `python3 -c "print(6*7)"`, run by the harness | `python3 report.py` in Strands Shell, such as `zsh -c 'python3 report.py'` |
-| Forms | `-c SOURCE`, or one `SCRIPT` file | `-c SOURCE`, one `SCRIPT` file, `--version` or `-V`, and `--help` or `-h` |
-| Script file | Read with the agent's own access, so a list in `[agent.filesystem]` must grant it | Read by Strands Shell, under an `fs:read` decision |
-| Policy decisions | The script's file operations | `shell:exec` for the command, `fs:read` for a script file, and the script's file operations |
+The `python3` and `python` aliases send their name and arguments, unchanged, to Strands Shell. So
+`python3 report.py` run by the harness and `zsh -c 'python3 report.py'` take one route:
+
+- **Forms:** `-c SOURCE`, one `SCRIPT` file, `--version` or `-V`, and `--help` or `-h`. The
+  broker puts each argument in single quotes, and each `'` in it takes four bytes, so the whole
+  command must fit the Shell's [input limit](./shell.md#configuration), 256 KiB by default. A
+  longer `-c SOURCE` exits `1` with `strands-shell: input too large`; put it in a script file.
+- **Working directory:** the directory the alias was run from. A directory other than the workspace
+  takes an `fs:read` decision with operation `change_dir`, as `cd` does.
+- **Script file:** read by Strands Shell from that directory, under an `fs:read` decision. The
+  agent's own filesystem lists don't decide it.
+- **Policy decisions:** `shell:exec` for the command, `fs:read` for a script file, and the script's
+  file operations.
 
 In Strands Shell, `python` and `python3` always run Monty, whatever the operator's `PATH` holds, and
 `python3 --version` prints `Monty (Strands-Box Python subset)`. Strands Shell refuses these forms
@@ -75,7 +87,8 @@ with exit status `2`:
 ## File operations
 
 Each file operation is one decision, on `context.input.path` and `context.input.operation`. A
-relative path is rooted at the workspace, and a path under the operator's home starts with `~/`.
+relative path is rooted at the workspace, even when the script file was found in another directory,
+and a path under the operator's home starts with `~/`.
 
 | Python | Action | `operation` |
 |---|---|---|
@@ -183,9 +196,10 @@ Example output:
 |---|---|
 | `0` | The script completed. |
 | `1` | The script raised an exception it did not catch, including a policy refusal and a limit. |
-| `2` | Strands Shell route only: a form the command refuses. |
-| `125` | Box did not run the script to its end: Box failed, or the script ran longer than the alias waits for it. |
-| `126` | Strands Shell route only: policy refused `shell:exec` for the command. |
+| `2` | A form the command refuses. |
+| `125` | Box did not run the script to its end: Box failed, or the call ran longer than [`limits.shell.timeout`](./shell.md#limitsshelltimeout). Box checks that limit only when Monty hands control back, so a script that never pauses, such as `while True: pass`, runs until Monty's own 120-second limit stops it, however short `limits.shell.timeout` is. |
+| `125` | The alias couldn't tell which directory it was run from, or that directory's name isn't valid UTF-8. Nothing ran. |
+| `126` | Policy refused `shell:exec` for the command, or Box refused the directory the alias was run from. |
 
 ## Policy
 
@@ -200,7 +214,7 @@ forbid (principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], 
 when { context.input.path like "~/.ssh/*" || context.input.path like "~/.aws/*" };
 ```
 
-To run `python` and `python3` in Strands Shell, permit `shell:exec` for them:
+To run `python` and `python3`, through the aliases or in Strands Shell, permit `shell:exec` for them:
 
 ```cedar
 @id("python_in_shell")
@@ -228,6 +242,8 @@ table](./egress.md#example).
 | `PermissionError: policy denied this operation on '<path>' [policy: <id>]` | The rule with that `@id` refused the operation. | Change the rule, or the path. |
 | `fetch()` returns status `403` with header `x-strands-box-egress: refused` | The gateway refused the request. The body says why. | Permit `net:connect` and `http:request` for the host. |
 | `strands-shell: effect denied: policy denied this operation on 'python'`, exit status `126` | No `shell:exec` permit names the command. | Permit `shell:exec` for `python` and `python3`. |
+| `strands-box: cannot start in <directory>: ...`, exit status `126` | Policy refused `fs:read` with operation `change_dir` on the directory the alias was run from, or the directory is outside the operator's home, the agent's home, and the workspace, such as `/tmp`. | Permit `fs:read` on that directory, or run the script from the workspace. |
+| `strands-box-sock-alias: read the working directory: ...; set PWD to it`, exit status `125` | The alias could not read which directory it was run from. | Set `PWD` to that directory before running `python3`. |
 
 The decision log records each decision with the rule's `@id` ([getting
 started](./getting-started.md#step-7-read-the-decision-log)).

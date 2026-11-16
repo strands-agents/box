@@ -489,17 +489,13 @@ impl Journal {
         let found = records.iter().any(|record| {
             record.attribute("strands.box.policy.action") == Some("shell:exec")
                 && record.attribute("strands.box.policy.verdict") == Some("permit")
-                && record
-                    .lists
-                    .get("process.command_args")
-                    .is_some_and(|args| args.iter().any(|arg| arg == crate::MEDIATED))
+                && record.attribute("process.command") == Some("echo")
         });
         assert!(
             found,
-            "{} holds no `shell:exec` permit for the Shell's own `echo {}`; the command ran in a \
+            "{} holds no `shell:exec` permit for the Shell's own `echo`; the command ran in a \
              shell that did not reach the broker, or the records went elsewhere. {} record(s): {:?}",
             self.path.display(),
-            crate::MEDIATED,
             records.len(),
             records
                 .iter()

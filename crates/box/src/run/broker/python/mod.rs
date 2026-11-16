@@ -1,8 +1,9 @@
 //! Python, as one interpreter behind the box's one broker socket. Monty is the implementation.
 //!
-//! No listener and no protocol of its own: `run::broker::host` dispatches an
-//! `Interpreter::Python` Call here. The interpreter is stateless per Call, which is why this is a
-//! function rather than a host.
+//! No listener and no protocol of its own: the Shell's `python3` reaches `drive_monty` through the
+//! script hook `run::broker::shell` installs. `run_python`, the route an `Interpreter::Python` Call
+//! took, is unreachable since protocol 9 refuses that mode. The interpreter is stateless per Call,
+//! which is why this is a function rather than a host.
 
 mod clock;
 mod effects;

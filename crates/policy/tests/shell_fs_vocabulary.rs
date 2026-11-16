@@ -1,9 +1,9 @@
-//! Every kernel filesystem verb the vendored Shell declares today rides one of the four named
-//! actions or, for `Locate` alone, decides nothing, and `fs:other` has no producer.
+//! Every filesystem verb the box's kernel presents rides one of the four named actions or, for
+//! `Locate` alone, decides nothing, and `fs:other` has no producer.
 //!
-//! `strands_shell::FsOperation` and `FsPairOperation` are `#[non_exhaustive]`, so a `match` in
-//! this crate cannot be exhaustive and the two lists below are the pin. The vendored source is
-//! read beside them, so a variant upstream adds fails this file and is named in the failure.
+//! `box_shell::FsOperation` and `FsPairOperation` are `#[non_exhaustive]`, so a `match` in
+//! this crate cannot be exhaustive and the two lists below are the pin. The declaring source is
+//! read beside them, so a variant added there fails this file and is named in the failure.
 
 #![cfg(feature = "shell-adapter")]
 
@@ -13,8 +13,8 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use box_shell::{EffectAttempt, EffectInterceptor, FsOperation, FsPairOperation};
 use policy::{Decision, DecisionObserver, GovernedBox, Policy, Principal, ShellPolicyInterceptor};
-use strands_shell::{EffectAttempt, EffectInterceptor, FsOperation, FsPairOperation};
 
 const EFFECT_SOURCE: &str = include_str!("../../shell/src/effect.rs");
 
@@ -29,7 +29,7 @@ enum Expected {
     NoDecision,
 }
 
-/// Every single-path verb the vendored Shell declares, and what the adapter decides for each.
+/// Every single-path verb the kernel presents, and what the adapter decides for each.
 const SINGLE: &[(FsOperation, Expected)] = &[
     (FsOperation::ReadContent, Expected::Action("fs:read")),
     (
@@ -59,7 +59,7 @@ const SINGLE: &[(FsOperation, Expected)] = &[
     (FsOperation::ReadLink, Expected::Action("fs:read")),
 ];
 
-/// Every two-path verb the vendored Shell declares, and the actions its legs ride, in order:
+/// Every two-path verb the kernel presents, and the actions its legs ride, in order:
 /// the pair action on the source, a content read of the source, and the pair action on the
 /// target; a rename onto a bound destination adds `fs:delete` on the target before it.
 const PAIR: &[(FsPairOperation, &[&str])] = &[
@@ -182,7 +182,7 @@ async fn every_declared_kernel_verb_rides_a_named_action_and_none_rides_fs_other
 }
 
 #[test]
-fn the_pinned_lists_name_every_variant_the_vendored_shell_declares() {
+fn the_pinned_lists_name_every_variant_the_effect_vocabulary_declares() {
     let pinned_single: BTreeSet<String> = SINGLE
         .iter()
         .map(|(operation, _)| variant_name(&format!("{operation:?}")))
@@ -202,7 +202,7 @@ fn assert_same_variants(enum_name: &str, pinned: &BTreeSet<String>) {
     let removed: Vec<&String> = pinned.difference(&declared).collect();
     assert!(
         added.is_empty() && removed.is_empty(),
-        "the vendored `{enum_name}` changed: added {added:?}, removed {removed:?}; \
+        "`box_shell::{enum_name}` changed: added {added:?}, removed {removed:?}; \
          extend this list and the one in the box crate's `run/broker/shell.rs` test \
          `every_kernel_verb_labels_the_action_the_policy_adapter_decides`, and map each new \
          variant to a named action or to no decision"
@@ -216,12 +216,12 @@ fn variant_name(debug: &str) -> String {
         .collect()
 }
 
-/// The variant names of `pub enum <enum_name>` in the vendored `effect.rs`.
+/// The variant names of `pub enum <enum_name>` in `crates/shell/src/effect.rs`.
 fn declared_variants(source: &str, enum_name: &str) -> BTreeSet<String> {
     let header = format!("pub enum {enum_name} {{\n");
     let start = source
         .find(&header)
-        .unwrap_or_else(|| panic!("`{header}` is declared in the vendored effect.rs"))
+        .unwrap_or_else(|| panic!("`{header}` is declared in crates/shell/src/effect.rs"))
         + header.len();
     let body = &source[start..];
     let end = body.find("\n}").expect("the enum closes");

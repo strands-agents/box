@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{BoxError, ConfigError};
-use crate::record::config::egress::EgressSecret;
+use crate::record::config::egress::{EgressBackend, EgressSecret};
 use crate::record::config::process::{ContainedMcp, Filesystem, NetworkConfig, ProcessSpec};
 
 /// One `[mcp.<name>]` entry, as the operator writes it. The `type` field selects the transport:
@@ -47,13 +47,18 @@ pub(crate) enum McpEntry {
         network: NetworkConfig,
     },
     /// A remote MCP server reached over HTTP. `destinations` are its egress hosts; `secret` is the
-    /// optional credential the gateway attaches.
+    /// optional credential the gateway attaches; `backends` re-routes its requests to an
+    /// operator-controlled backend (at most one, an empty list means no re-route).
     Http {
         /// The egress destinations that name this server's host(s).
         destinations: Vec<String>,
         /// The credential to attach, if the entry names one.
         #[serde(default)]
         secret: Option<EgressSecret>,
+        /// The backends this server re-routes to. At most one at launch; an empty list means the box
+        /// dials the server's own host. Reuses the egress backend shape, validation, and gateway path.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        backends: Vec<EgressBackend>,
     },
 }
 
@@ -67,6 +72,8 @@ pub(crate) struct HttpMcp {
     pub(crate) destinations: Vec<String>,
     /// The credential to attach, if the entry names one.
     pub(crate) secret: Option<EgressSecret>,
+    /// The backends this server re-routes to, carried to the egress fan-out unchanged.
+    pub(crate) backends: Vec<EgressBackend>,
 }
 
 /// One declared stdio server with its policy name and executable command.
@@ -175,10 +182,12 @@ pub(crate) fn partition(
             McpEntry::Http {
                 destinations,
                 secret,
+                backends,
             } => http.push(HttpMcp {
                 name: name.clone(),
                 destinations: destinations.clone(),
                 secret: secret.clone(),
+                backends: backends.clone(),
             }),
         }
     }
@@ -977,12 +986,62 @@ mod tests {
             McpEntry::Http {
                 destinations,
                 secret,
+                backends,
             } => {
                 assert_eq!(destinations, ["api.githubcopilot.com"]);
                 assert!(secret.is_some(), "the named credential is carried");
+                assert!(
+                    backends.is_empty(),
+                    "an absent backends key is an empty list"
+                );
             }
             other => panic!("expected an http entry, got {other:?}"),
         }
+    }
+
+    /// An http entry carries its declared `[[mcp.<name>.backends]]`, reusing the egress backend shape.
+    #[test]
+    fn an_http_entry_carries_a_backend() {
+        let parsed = entry(
+            "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n\
+             [[mcp.github.backends]]\n\
+             url = \"https://abc.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp\"\n\
+             auth.ref = \"aws://bedrock\"\n",
+        )
+        .expect("an http entry with a backend parses");
+        match parsed {
+            McpEntry::Http { backends, .. } => {
+                assert_eq!(backends.len(), 1, "the one declared backend is carried");
+                assert_eq!(
+                    backends[0].url,
+                    "https://abc.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
+                );
+                assert_eq!(
+                    backends[0]
+                        .auth
+                        .as_ref()
+                        .expect("the backend auth")
+                        .reference,
+                    "aws://bedrock"
+                );
+            }
+            other => panic!("expected an http entry, got {other:?}"),
+        }
+    }
+
+    /// A `backends` key on a stdio entry is an unknown field: a local child has no remote endpoint to
+    /// re-route, so the re-route vocabulary belongs only to an http entry.
+    #[test]
+    fn a_stdio_entry_refuses_a_backends_key() {
+        let error = entry(
+            "[mcp.local]\ntype = \"stdio\"\ncommand = [\"server\"]\n\
+             [[mcp.local.backends]]\nurl = \"https://gw.example.com/mcp\"\n",
+        )
+        .expect_err("a stdio entry has no `backends`");
+        assert!(
+            error.to_string().contains("backends"),
+            "the unknown-field error names `backends`: {error}"
+        );
     }
 
     /// The transport tag is mandatory: an entry with no `type` cannot be resolved to either variant.

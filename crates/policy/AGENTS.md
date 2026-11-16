@@ -194,8 +194,7 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
    [`decisions.md`](../../docs/design/decisions.md).
 2. Reconcile the public names across the code, the tests, and `README.md`.
 3. Run `build`, `test`, `clippy --all-targets`, and `fmt --check` for `-p strands-box-policy`, each
-   with and without `--all-features`, plus `RUSTDOCFLAGS="-D warnings" cargo doc`. Vendored
-   clippy warnings from `strands-shell` are expected; policy-owned warnings must be zero.
+   with and without `--all-features`, plus `RUSTDOCFLAGS="-D warnings" cargo doc`. Policy-owned clippy warnings must be zero.
 4. Give a temporal change a long-run test, because a short one passes on a sawtooth.
 5. Run `feature-critic` before you commit. Keep `Cargo.lock`, `egress-gateway`, and `credentials`
    unchanged.

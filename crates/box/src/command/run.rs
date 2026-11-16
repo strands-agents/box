@@ -186,6 +186,7 @@ pub(crate) async fn execute(
     argv: &[OsString],
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
+    box_id: Option<&str>,
     #[cfg(all(
         target_os = "linux",
         feature = "native-filesystem-policy",
@@ -219,14 +220,14 @@ pub(crate) async fn execute(
             drop(guard);
             None
         };
-        (prepare_contract(contract, config, argv)?, guard)
+        (prepare_contract(contract, config, argv, box_id)?, guard)
     };
     #[cfg(not(all(
         target_os = "linux",
         feature = "native-filesystem-policy",
         box_native_adapter_tests
     )))]
-    let locked = prepare(config, argv)?;
+    let locked = prepare(config, argv, box_id)?;
     locked.announce_credential_stores()?;
     let collector = telemetry::open(&locked.root, &locked.record)?;
     let name = locked.root.name().to_string();
@@ -438,14 +439,15 @@ fn read_contract(config: &Path) -> Result<RunContract, BoxError> {
     feature = "native-filesystem-policy",
     box_native_adapter_tests
 )))]
-fn prepare(config: &Path, argv: &[OsString]) -> Result<LockedRun, BoxError> {
-    prepare_contract(read_contract(config)?, config, argv)
+fn prepare(config: &Path, argv: &[OsString], box_id: Option<&str>) -> Result<LockedRun, BoxError> {
+    prepare_contract(read_contract(config)?, config, argv, box_id)
 }
 
 fn prepare_contract(
     contract: RunContract,
     config: &Path,
     argv: &[OsString],
+    box_id: Option<&str>,
 ) -> Result<LockedRun, BoxError> {
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     if contract.experimental_features().native_filesystem_policy {
@@ -462,7 +464,7 @@ fn prepare_contract(
     contract.validate_declared_directory()?;
     let (mut root, root_lock) = BoxRoot::lock_directory(contract.box_directory())?;
     contract.validate_directory(root.root())?;
-    root.settle_identity()?;
+    root.settle_identity(box_id)?;
     let workspace = contract.workspace().to_path_buf();
     let request = contract.into_request(&root)?;
     let existed = root.is_configured();

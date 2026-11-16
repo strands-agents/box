@@ -5,7 +5,7 @@
 //! makes a history-dependent rule enforceable at the filesystem boundary:
 //!
 //! ```text
-//! Shell::run -> Mediated::admit -> ShellPolicyInterceptor::intercept -> PolicyEngine::decide
+//! Shell::run -> ShellKernel -> ShellPolicyInterceptor::intercept -> PolicyEngine::decide
 //!                    |                                                       ^
 //!                    '-> effect -> record_outcome -> PolicyEngine::record ----------'
 //! ```
@@ -14,45 +14,16 @@
 
 mod support;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
-use policy::{GovernedBox, Policy, PolicyEngine, Principal, ShellPolicyInterceptor};
+use policy::PolicyEngine;
 use strands_shell::Shell;
 
-/// Run a future on the current-thread runtime the Shell requires.
-///
-/// The Shell uses `spawn_local`, so it needs a `LocalSet`; a multi-thread runtime
-/// panics.
-fn run<F, T>(body: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime builds");
-    let local = tokio::task::LocalSet::new();
-    runtime.block_on(local.run_until(body))
-}
+use support::shell::{adapter, backend, policy, run, shell_on, shell_with_spawner, try_policy};
 
 fn shell_governed_by(source: &str) -> (Shell, Arc<PolicyEngine>) {
-    let policy = Arc::new(
-        support::open_policy(vec![Policy {
-            origin: PathBuf::from("shell-temporal.dw"),
-            text: source.to_string(),
-        }])
-        .expect("policy loads"),
-    );
-    let interceptor = ShellPolicyInterceptor::into_handle(
-        Arc::clone(&policy),
-        Principal::agent(),
-        GovernedBox::assigned("test-box"),
-    );
-    let shell = Shell::builder()
-        .effect_interceptor(interceptor)
-        .build()
-        .expect("shell builds");
+    let policy = policy(source);
+    let shell = shell_on(&backend(&[]), adapter(Arc::clone(&policy), None));
     (shell, policy)
 }
 
@@ -208,16 +179,8 @@ permit(principal == Box::Agent::"self", action == Box::Action::"fs:read", resour
 fn an_absent_policy_denies_every_effect() {
     // Deny-by-default at the boundary: an empty policy set loads, so nothing matches and
     // every effect is refused.
-    let policy = Arc::new(support::open_policy(Vec::new()).expect("an empty policy set loads"));
-    let interceptor = ShellPolicyInterceptor::into_handle(
-        policy,
-        Principal::agent(),
-        GovernedBox::assigned("test-box"),
-    );
-    let mut shell = Shell::builder()
-        .effect_interceptor(interceptor)
-        .build()
-        .expect("shell builds");
+    let empty = Arc::new(support::open_policy(Vec::new()).expect("an empty policy set loads"));
+    let mut shell = shell_on(&backend(&[]), adapter(empty, None));
 
     run(async {
         assert!(shell.write_file("/tmp/x.txt", b"x").await.is_err());
@@ -534,23 +497,8 @@ when temporal {{
 }};
 "#
     );
-    let policy = Arc::new(
-        support::open_policy(vec![Policy {
-            origin: PathBuf::from("shell-temporal-path-walk.dw"),
-            text: source,
-        }])
-        .expect("policy loads"),
-    );
-    let interceptor = ShellPolicyInterceptor::into_handle(
-        Arc::clone(&policy),
-        Principal::agent(),
-        GovernedBox::assigned("test-box"),
-    );
-    let mut shell = Shell::builder()
-        .effect_interceptor(interceptor)
-        .env("PATH", "/home/lash/one:/home/lash/two:/home/lash/three")
-        .build()
-        .expect("shell builds");
+    let mut shell = shell_on(&backend(&[]), adapter(policy(&source), None));
+    shell.set_env("PATH", "/home/lash/one:/home/lash/two:/home/lash/three");
 
     run(async {
         let planted = shell
@@ -574,23 +522,7 @@ when temporal {{
 
 /// A shell whose paths under `home` reach policy spelled `~/…`.
 fn shell_governed_under_home(source: &str, home: &str) -> Shell {
-    let policy = Arc::new(
-        support::open_policy(vec![Policy {
-            origin: PathBuf::from("shell-temporal-cap.dw"),
-            text: source.to_string(),
-        }])
-        .expect("policy loads"),
-    );
-    let interceptor = ShellPolicyInterceptor::into_handle_reporting_under(
-        policy,
-        Principal::agent(),
-        GovernedBox::assigned("test-box"),
-        home,
-    );
-    Shell::builder()
-        .effect_interceptor(interceptor)
-        .build()
-        .expect("shell builds")
+    shell_on(&backend(&[]), adapter(policy(source), Some(home)))
 }
 
 /// A narrow permit: content writes under `~/project`, plus the directory creation a write's
@@ -628,10 +560,7 @@ when temporal {{
 permit(principal == Box::Agent::"self", action == Box::Action::"fs:write", resource);
 {cap}"#
     );
-    match support::open_policy(vec![Policy {
-        origin: PathBuf::from("shell-temporal-cap.dw"),
-        text: beside_a_broad_permit,
-    }]) {
+    match try_policy(&beside_a_broad_permit) {
         Err(policy::PolicyError::InertTemporalPermit(reason)) => assert_eq!(
             reason,
             "rule @id(\"write_budget\") (rule 3) carries a temporal clause beside rule \
@@ -643,11 +572,8 @@ permit(principal == Box::Agent::"self", action == Box::Action::"fs:write", resou
     }
 
     let beside_narrow_permits = format!("{NARROW_WRITE}{cap}");
-    let engine = support::open_policy(vec![Policy {
-        origin: PathBuf::from("shell-temporal-cap.dw"),
-        text: beside_narrow_permits.clone(),
-    }])
-    .expect("the heuristic shape loads with a warning");
+    let engine =
+        try_policy(&beside_narrow_permits).expect("the heuristic shape loads with a warning");
     let warnings: Vec<String> = engine.warnings().iter().map(ToString::to_string).collect();
     assert_eq!(
         warnings.len(),
@@ -809,10 +735,8 @@ unless temporal {
 #[test]
 fn a_permitted_binary_that_cannot_start_records_status_126() {
     run(async {
-        let policy = Arc::new(
-            support::open_policy(vec![Policy {
-                origin: PathBuf::from("shell-launch-failure.dw"),
-                text: r#"
+        let policy = policy(
+            r#"
 permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
 permit(principal == Box::Agent::"self", action == Box::Action::"shell:spawn", resource);
 @id("after_a_launch_failure")
@@ -822,25 +746,46 @@ unless temporal {
     formerly within 60s
     Box::Action::"shell:spawn"::response{ input.program: "hostname", output.status: 126 }
 };
-"#
-                .to_string(),
-            }])
-            .expect("policy loads"),
+"#,
         );
-        let refusing: strands_shell::os::HostSpawner =
+        let refusing: box_shell::HostSpawner =
             Arc::new(|_| Box::pin(async { Err(std::io::Error::other("the leaf cannot start")) }));
-        let mut shell = Shell::builder()
-            .effect_interceptor(ShellPolicyInterceptor::into_handle(
-                policy,
-                Principal::agent(),
-                GovernedBox::assigned("test-box"),
-            ))
-            .host_spawner(refusing)
-            .build()
-            .expect("shell builds");
+        let mut shell = shell_with_spawner(&backend(&[]), adapter(policy, None), refusing);
 
         let launched = shell.run("hostname").await;
         assert_eq!(launched.status, 126, "{}", rendered(&launched));
+        let gated = shell.run("printf gated").await;
+        assert_eq!(gated.status, 0, "{}", rendered(&gated));
+    });
+}
+
+/// A command the kernel allowed and the Shell never ran is recorded as indeterminate, status -1.
+#[test]
+fn an_allowed_command_that_never_runs_records_status_minus_one() {
+    run(async {
+        let (mut shell, _policy) = shell_governed_by(
+            r#"
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource)
+when { context.input.program == "echo" };
+@id("after_a_dropped_echo")
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource)
+when { context.input.program == "printf" }
+when temporal {
+    formerly within 60s
+    Box::Action::"shell:exec"::response{ input.program: "echo", output.status: -1 }
+};
+"#,
+        );
+        let gated = shell.run("printf gated").await;
+        assert_ne!(
+            gated.status,
+            0,
+            "nothing was dropped yet: {}",
+            rendered(&gated)
+        );
+        let refused = shell.run("echo hi | cat").await;
+        assert_eq!(refused.status, 126, "{}", rendered(&refused));
+        assert!(refused.stdout.is_empty(), "{}", rendered(&refused));
         let gated = shell.run("printf gated").await;
         assert_eq!(gated.status, 0, "{}", rendered(&gated));
     });
