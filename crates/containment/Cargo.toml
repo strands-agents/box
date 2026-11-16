@@ -42,6 +42,9 @@ strands-box-egress-gateway = { path = "../egress-gateway" }
 # to tests/, so it is declared again here for the same target.
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 libc = "0.2"
+# The inbound-connector tests drive the real relay against `serve_inbound`.
+strands-box-ingress = { path = "../ingress" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
 # The `containment-test-probe` helper binary backs Linux enforcement tests.
 [[bin]]

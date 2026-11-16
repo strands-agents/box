@@ -189,6 +189,7 @@ pub(crate) fn command(
     let (helper, opened) = installation.launcher();
     let prepared = identity_bound_command(helper, opened, launch.image_name)?;
     let mut command = prepared.command;
+    crate::run::descriptor_limit::restore_in_child(&mut command);
     let setup_status = SetupStatusPipe::attach(&mut command)?;
     attach_descriptor(&mut command, launch.config_file, "--config-fd")?;
     #[cfg(target_os = "linux")]

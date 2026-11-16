@@ -71,6 +71,10 @@ const ACROSS_A_TOOL: &str = "@id(\"mixed\") forbid (principal, action in [Box::A
 
 const ACROSS_A_TOOL_TEMPORAL: &str = "@id(\"mixed_temporal\") forbid (principal, action in [Box::Action::\"fs:read\", alpha::Action::\"read\"], resource) when { context.input has path } when temporal { formerly within 60s ( alpha::Action::\"read\"::request{ input.path: _ } ) };\n";
 
+const MCP_ERROR: &str = "@id(\"mcp_error\") forbid (principal, action == Box::Action::\"shell:exec\", resource) when temporal { formerly within 60s ( Box::Action::\"mcp:call\"::error{ input.server: \"alpha\" } ) };\n";
+
+const TOOL_ERROR: &str = "@id(\"tool_error\") forbid (principal, action == Box::Action::\"shell:exec\", resource) when temporal { formerly within 60s ( alpha::Action::\"read\"::error{} ) };\n";
+
 const TYPED: &str =
     "@id(\"tool\") permit (principal, action == alpha::Action::\"read\", resource);\n";
 
@@ -169,6 +173,7 @@ fn a_check_refuses_exactly_what_open_refuses() {
         CAP_AS_PERMIT,
         SPELLING,
         ACROSS_FAMILIES,
+        MCP_ERROR,
         TYPED,
         "",
     ] {
@@ -194,6 +199,8 @@ fn a_staged_check_refuses_exactly_what_open_staged_refuses() {
         ACROSS_FAMILIES,
         ACROSS_A_TOOL,
         ACROSS_A_TOOL_TEMPORAL,
+        MCP_ERROR,
+        TOOL_ERROR,
         TYPED,
     ] {
         let with_tool = format!("{text}\n{TYPED}");
@@ -326,4 +333,22 @@ fn a_finding_about_the_whole_rule_names_no_line() {
         })
         .expect("cedar names the rule's scope too");
     assert_eq!(whole.location(), None);
+}
+
+#[test]
+fn a_rule_on_an_mcp_error_is_refused_by_check_open_and_staged_check() {
+    let complete = check(MCP_ERROR);
+    assert!(
+        complete
+            .errors()
+            .iter()
+            .any(|finding| finding.message().contains("rule @id(\"mcp_error\")")),
+        "{:?}",
+        complete.errors()
+    );
+    assert!(support::open_policy(vec![source(MCP_ERROR)]).is_err());
+    for text in [MCP_ERROR, TOOL_ERROR] {
+        assert!(!check_staged(text).errors().is_empty(), "{text}");
+        assert!(!open_staged(text), "{text}");
+    }
 }

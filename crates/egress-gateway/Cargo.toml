@@ -82,3 +82,7 @@ rustls-pki-types = "1"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 # The unit tests drive both sockets of one exchange in memory.
 tokio = { version = "1", features = ["io-util", "macros", "rt"] }
+# The backend-signing E2E independently recomputes a SigV4 signature over the request the upstream
+# received, to prove the box signed exactly those bytes. `ring` is already in the tree (the
+# `tls-intercept` backend), so this adds no new locked dependency.
+ring = "0.17"

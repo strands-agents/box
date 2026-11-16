@@ -104,6 +104,20 @@ impl Resolver<'_> {
     }
 }
 
+/// The search path that the hosted Shell finds a bare program name on: this process's `PATH`, else
+/// `/usr/bin:/bin`.
+pub(crate) fn host_search_path() -> std::ffi::OsString {
+    std::env::var_os("PATH").unwrap_or_else(|| "/usr/bin:/bin".into())
+}
+
+/// The first executable `program` in a non-empty entry of `search_path`, as the hosted Shell finds it.
+pub(crate) fn find_on(program: &str, search_path: &OsStr) -> Option<PathBuf> {
+    std::env::split_paths(search_path)
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .map(|directory| directory.join(program))
+        .find(|candidate| is_executable(candidate))
+}
+
 /// Whether `path` is an executable regular file.
 pub(crate) fn is_executable(path: &Path) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {

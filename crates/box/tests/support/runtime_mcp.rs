@@ -280,6 +280,7 @@ write("home", os.environ.get("HOME", "<absent>"))
 write("path", os.environ.get("PATH", "<absent>"))
 write("cwd", pathlib.Path.cwd().resolve())
 write("sentinel", "present" if {sentinel:?} in os.environ else "absent")
+write("program", sys.argv[0])
 write("argv", json.dumps(sys.argv[1:], separators=(",", ":")))
 write("environment", json.dumps(dict(sorted(os.environ.items())), separators=(",", ":")))
 if behavior in ("fail", "hang"):
@@ -647,6 +648,15 @@ while True:
         std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
     }
 
+    pub fn set_server_executable(&self, server: &str, executable: &Path) {
+        let path = self.workspace.join(".strands-box").join("box.toml");
+        let mut config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        config["mcp"][server]["command"][0] =
+            toml::Value::String(executable.to_str().unwrap().to_string());
+        std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
+    }
+
     pub fn plant_generated_schema_artifacts(&self, schema: &str) -> (PathBuf, PathBuf, PathBuf) {
         let workspace_directory = self.workspace.join(".strands-box");
         let workspace_actions = workspace_directory.join("actions.cedarschema");
@@ -670,6 +680,12 @@ while True:
     pub fn spawn(&self) -> RunningBox {
         self.address_the_newest_workspace();
         self.spawn_attempt()
+    }
+
+    /// Prepare an owning run whose standard streams the test supplies.
+    pub fn command_for_run(&self) -> Command {
+        self.address_the_newest_workspace();
+        self.command()
     }
 
     pub fn spawn_from_operator_home(&self) -> RunningBox {

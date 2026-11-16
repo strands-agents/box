@@ -49,9 +49,9 @@ the engine decides a request and what a history rule can see.
 ### The broker
 
 The broker accepts connections from the alias on `run/box.sock` in the box directory. It checks
-the protocol version and routes each request by type. Strands Shell handles shell commands, Monty
-handles Python scripts, and the MCP broker handles requests to local MCP servers. The broker does
-not authorize requests itself.
+the protocol version and routes each request by type. Strands Shell handles shell commands and the
+`python3` and `python` aliases, and runs Python scripts in Monty. The MCP broker handles requests to
+local MCP servers. The broker does not authorize requests itself.
 
 The alias is part of the untrusted workload. The broker therefore treats its input as hostile, as
 described in [why interpreters run outside the workload](decisions.md#interpreters-are-brokered-aliases).
@@ -99,7 +99,7 @@ how Box handles secrets, and [outbound traffic](egress.md) explains the network 
 ### The MCP broker
 
 The MCP broker handles requests to local MCP servers within the broker. Each stdio server runs in
-its own sandbox. It starts when the agent invokes the server's full command through an alias and
+its own sandbox. It starts when the agent invokes the server's alias with matching arguments and
 policy permits `shell:spawn`. The command comes from
 [the server's configuration table](decisions.md#an-mcp-server-is-one-configuration-table).
 
@@ -196,7 +196,7 @@ flowchart TD
     alias -->|"one request over run/box.sock"| broker
     agent -->|"every outbound request"| gateway
     broker -->|"a shell command"| shell
-    broker -->|"a Python script"| monty
+    shell -->|"a Python script"| monty
     broker -->|"a local MCP request"| mcp
     shell -->|"asks"| policy
     monty -->|"asks"| policy
@@ -278,6 +278,7 @@ interpreters are part of the code the operator must trust.
    using the file identity opened by the run. It declares each stdio `[mcp.<name>]` program.
    For each `[tool]` or stdio `[mcp.<name>]` entry covered by a grammar, Box prints a line on stderr.
    Rules for `shell:spawn` do not apply to a spawn of those programs by the bound name.
+   Box also prints, for each bare name a `[tool]` answers to, the file the Shell runs for it.
 5. It resolves bound secrets and starts the gateway with its own certificate authority.
    It checks each process specification's filesystem grants, then binds the broker socket.
    A grant it cannot check stops startup.

@@ -73,7 +73,7 @@ impl Containment {
 #[cfg(target_os = "linux")]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum LinuxMechanism {
-    /// The namespace launcher on ARM64 at every probed ABI.
+    /// The namespace launcher on ARM64 and x86-64.
     Namespace,
     /// Refused. Carries why, so the caller does not compose the message.
     Refused(String),
@@ -84,10 +84,11 @@ pub(crate) enum LinuxMechanism {
 pub(crate) fn linux_mechanism(platform: Platform, architecture: &str) -> LinuxMechanism {
     // Selection is by platform, not a config key and not a build flag.
     match platform {
-        // The namespace launcher is the one mechanism on the measured architecture.
-        Platform::Linux if architecture == "aarch64" => LinuxMechanism::Namespace,
+        Platform::Linux if matches!(architecture, "aarch64" | "x86_64") => {
+            LinuxMechanism::Namespace
+        }
         Platform::Linux => LinuxMechanism::Refused(format!(
-            "Linux containment supports ARM64 (aarch64), not {architecture}"
+            "Linux containment supports ARM64 (aarch64) and x86-64 (x86_64), not {architecture}"
         )),
         other => LinuxMechanism::Refused(format!(
             "this Linux build has no backend for platform {other:?}"
@@ -214,12 +215,23 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_non_arm64_linux_architecture_is_refused() {
+    fn an_x86_64_kernel_selects_the_namespace_launcher() {
         use super::{LinuxMechanism, linux_mechanism};
 
-        let decision = linux_mechanism(Platform::Linux, "x86_64");
+        assert_eq!(
+            linux_mechanism(Platform::Linux, "x86_64"),
+            LinuxMechanism::Namespace
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unimplemented_linux_architecture_is_refused() {
+        use super::{LinuxMechanism, linux_mechanism};
+
+        let decision = linux_mechanism(Platform::Linux, "riscv64");
         assert!(matches!(decision, LinuxMechanism::Refused(reason) if
-            reason.contains("ARM64") && reason.contains("x86_64")));
+            reason.contains("ARM64") && reason.contains("x86-64") && reason.contains("riscv64")));
     }
 
     #[test]

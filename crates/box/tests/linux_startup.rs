@@ -1,4 +1,4 @@
-//! Linux commands validate configuration without an environment opt-in.
+//! Linux x86 commands require explicit operator consent before startup.
 
 #![cfg(target_os = "linux")]
 
@@ -7,17 +7,25 @@ use std::os::unix::ffi::OsStringExt;
 use std::process::{Command, Output};
 
 const LEGACY_OPT_IN: &str = "EXPERIMENTAL_LINUX_SUPPORT";
+const X86_OPT_IN: &str = "EXPERIMENTAL_X86_SUPPORT";
+const X86_REFUSAL: &str = "strands-box: refusing to run: x86 support on Linux is experimental. Set EXPERIMENTAL_X86_SUPPORT=TRUE to enable it.\n";
 
-fn command(value: Option<&OsStr>, args: &[&str]) -> Output {
+fn command(legacy: Option<&OsStr>, x86: Option<&OsStr>, args: &[&str]) -> Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_strands-box"));
-    command.env_remove(LEGACY_OPT_IN).args(args);
-    if let Some(value) = value {
+    command
+        .env_remove(LEGACY_OPT_IN)
+        .env_remove(X86_OPT_IN)
+        .args(args);
+    if let Some(value) = legacy {
         command.env(LEGACY_OPT_IN, value);
+    }
+    if let Some(value) = x86 {
+        command.env(X86_OPT_IN, value);
     }
     command.output().expect("execute the Box command")
 }
 
-fn legacy_values() -> Vec<Option<OsString>> {
+fn values() -> Vec<Option<OsString>> {
     vec![
         None,
         Some(OsString::from("")),
@@ -35,9 +43,10 @@ fn legacy_values() -> Vec<Option<OsString>> {
 fn linux_run_validates_configuration_regardless_of_legacy_opt_in() {
     let directory = tempfile::tempdir().expect("create configuration parent");
     let config = directory.path().join("missing-linux-config.toml");
-    for value in legacy_values() {
+    for value in values() {
         let output = command(
             value.as_deref(),
+            Some(OsStr::new("TRUE")),
             &[
                 "run",
                 "--config",
@@ -48,6 +57,7 @@ fn linux_run_validates_configuration_regardless_of_legacy_opt_in() {
         assert!(!output.status.success(), "{stderr}");
         assert!(stderr.contains("missing-linux-config.toml"), "{stderr}");
         assert!(!stderr.contains(LEGACY_OPT_IN), "{stderr}");
+        assert!(!stderr.contains(X86_OPT_IN), "{stderr}");
     }
 }
 
@@ -56,9 +66,10 @@ fn linux_schema_validates_configuration_regardless_of_legacy_opt_in() {
     let directory = tempfile::tempdir().expect("create output parent");
     let destination = directory.path().join("schema");
     let config = directory.path().join("missing-linux-schema.toml");
-    for value in legacy_values() {
+    for value in values() {
         let output = command(
             value.as_deref(),
+            Some(OsStr::new("TRUE")),
             &[
                 "policy",
                 "generate-schema",
@@ -72,14 +83,56 @@ fn linux_schema_validates_configuration_regardless_of_legacy_opt_in() {
         assert!(!output.status.success(), "{stderr}");
         assert!(stderr.contains("missing-linux-schema.toml"), "{stderr}");
         assert!(!stderr.contains(LEGACY_OPT_IN), "{stderr}");
+        assert!(!stderr.contains(X86_OPT_IN), "{stderr}");
         assert!(!destination.exists());
     }
 }
 
 #[test]
+fn linux_commands_require_exact_x86_opt_in_only_on_x86() {
+    let directory = tempfile::tempdir().expect("create configuration parent");
+    let config = directory.path().join("missing-platform-config.toml");
+    let destination = directory.path().join("schema");
+    let config_text = config.to_str().expect("UTF-8 temporary path");
+    let destination_text = destination.to_str().expect("UTF-8 temporary path");
+    for value in values() {
+        let admitted =
+            !cfg!(target_arch = "x86_64") || value.as_deref() == Some(OsStr::new("TRUE"));
+        for args in [
+            vec!["run", "--config", config_text],
+            vec![
+                "policy",
+                "generate-schema",
+                "--config",
+                config_text,
+                "--output-dir",
+                destination_text,
+            ],
+        ] {
+            let output = command(Some(OsStr::new("TRUE")), value.as_deref(), &args);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(!output.status.success(), "{stderr}");
+            if admitted {
+                assert!(stderr.contains("missing-platform-config.toml"), "{stderr}");
+                assert!(!stderr.contains(X86_OPT_IN), "{stderr}");
+            } else {
+                assert_eq!(stderr, X86_REFUSAL, "value: {value:?}");
+                assert!(!stderr.contains("missing-platform-config.toml"), "{stderr}");
+            }
+            assert!(!destination.exists());
+        }
+    }
+}
+
+#[test]
 fn linux_help_and_version_remain_available_without_opt_in() {
-    for args in [&["--help"][..], &["--version"][..], &["run", "--help"][..]] {
-        let output = command(None, args);
+    for args in [
+        &["--help"][..],
+        &["--version"][..],
+        &["run", "--help"][..],
+        &["policy", "generate-schema", "--help"][..],
+    ] {
+        let output = command(None, None, args);
         assert!(
             output.status.success(),
             "{}",

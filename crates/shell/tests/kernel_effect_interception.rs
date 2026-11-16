@@ -4,20 +4,20 @@
 //! expansion, the fail-closed behavior of each denial path, and the outcome each
 //! operation reports.
 
+mod support;
+
 use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt as _;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use strands_shell::os::Kernel;
-use strands_shell::vfs_kernel::VfsKernel;
-use strands_shell::{
+use box_shell::{
     EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, EffectResult, FsOperation,
-    FsPairOperation, Shell,
+    FsPairOperation,
 };
-use strands_shell::{Follow, Resolved};
+use strands_shell::Shell;
 
 /// One admitted effect, rendered as a stable string for assertions.
 fn render(effect: &EffectAttempt<'_>) -> String {
@@ -101,11 +101,6 @@ impl Recorder {
     }
 
     /// A recorder whose denial only takes effect once `armed` is set.
-    ///
-    /// For tests whose *setup* must legitimately touch the very path the payload is
-    /// then forbidden to touch — creating a protected file before proving it cannot
-    /// be overwritten. Arming after setup keeps the precondition honest instead of
-    /// carving a hole in the predicate that the payload could also slip through.
     fn armable<F>(deny: F) -> (Arc<Self>, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>)
     where
         F: Fn(&str) -> bool + Send + Sync + 'static,
@@ -173,7 +168,7 @@ where
 }
 
 fn shell_with(interceptor: Arc<dyn EffectInterceptor>) -> Shell {
-    Shell::builder()
+    support::builder()
         .effect_interceptor(interceptor)
         .build()
         .expect("shell builds")
@@ -181,15 +176,6 @@ fn shell_with(interceptor: Arc<dyn EffectInterceptor>) -> Shell {
 
 /// The headline property: one admission per **resolved command**, many individually-admitted
 /// effects underneath each.
-///
-/// The payload writes through a glob-driven loop, copies, then deletes — so it
-/// exercises enumeration, repeated append opens, a two-path read/write copy, and a
-/// no-follow probe before a delete.
-///
-/// The command count is no longer 1. Admission moved from the submitted text to the resolved
-/// command, so a submission running `mkdir`, `cat`, `cp`, and `rm` is four decisions rather
-/// than one — each naming the program it authorizes. That is the point of the move: a single
-/// verdict over a whole line could not say which program it was granting.
 #[test]
 fn one_command_admission_expands_into_individual_effect_admissions() {
     let (interceptor, admitted) = Recorder::allowing_everything();
@@ -303,53 +289,6 @@ fn admitted_paths_are_resolved_not_caller_spelled() {
     assert!(
         !effects.iter().any(|e| e.contains("..")),
         "no effect admission may carry an unresolved dot segment: {effects:?}"
-    );
-}
-
-/// A denied write is refused even though the command itself was admitted.
-#[test]
-fn denying_a_write_effect_blocks_it_under_an_admitted_command() {
-    let (interceptor, _) = Recorder::denying(|e| e.starts_with("write(") && e.contains("blocked"));
-    let mut shell = shell_with(interceptor);
-
-    let (allowed, denied) = run(async {
-        let allowed = shell.run("printf 'ok' > /home/lash/fine.txt").await;
-        let denied = shell.run("printf 'no' > /home/lash/blocked.txt").await;
-        (allowed, denied)
-    });
-
-    assert_eq!(allowed.status, 0, "unrelated write: {}", allowed.stderr);
-    assert_ne!(denied.status, 0, "denied write must fail");
-
-    let content = run(async { shell.read_file("/home/lash/blocked.txt").await });
-    assert!(
-        content.is_err(),
-        "a denied write must not leave content behind"
-    );
-}
-
-/// Enumeration is its own decision: denying the glob starves the loop that follows.
-#[test]
-fn denying_enumeration_yields_no_matches() {
-    let (interceptor, _) = Recorder::denying(|e| e.starts_with("enumerate"));
-    let mut shell = shell_with(interceptor);
-
-    let out = run(async {
-        let setup = shell
-            .run("mkdir -p /home/lash/g && printf 'x' > /home/lash/g/one.txt")
-            .await;
-        assert_eq!(setup.status, 0, "setup: {}", setup.stderr);
-        shell
-            .run("for f in /home/lash/g/*.txt; do printf 'saw:%s\\n' \"$f\"; done")
-            .await
-    });
-
-    // A denied glob expands to nothing, so the pattern stays literal and no real
-    // file is ever read.
-    assert!(
-        !out.stdout.contains("one.txt"),
-        "a denied enumeration must not reveal matches: {:?}",
-        out.stdout
     );
 }
 
@@ -663,7 +602,7 @@ fn a_probe_the_admission_window_refuses_reports_a_failure() {
         outcomes: Arc::clone(&outcomes),
         deny: Box::new(|_| false),
     });
-    let mut shell = Shell::builder()
+    let mut shell = support::builder()
         .effect_interceptor(Arc::new(Slow { inner: recorder }))
         .build()
         .expect("shell builds");
@@ -673,6 +612,7 @@ fn a_probe_the_admission_window_refuses_reports_a_failure() {
             .run("printf x > /home/lash/present && ln -s present /home/lash/link")
             .await;
         assert_eq!(setup.status, 0, "setup: {}", setup.stderr);
+        outcomes.lock().unwrap().clear();
         shell
             .run(
                 "for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do mkdir /home/lash/churn; rmdir /home/lash/churn; done & \\
@@ -713,100 +653,7 @@ fn a_probe_the_admission_window_refuses_reports_a_failure() {
     );
 }
 
-/// A symlink cannot launder a denied read.
-///
-/// `abs` normalizes a path string but does not follow symlinks. Admitting its output
-/// would authorize the link's own name while the kernel reads the link's target, so a
-/// rule denying a path could be evaded by reading a symlink pointing at it. Following
-/// operations are therefore admitted on the canonical target.
-#[test]
-fn a_symlink_cannot_launder_a_denied_read() {
-    let (interceptor, admitted) = Recorder::denying(|e| e == "read /home/lash/secret");
-    let mut shell = shell_with(interceptor);
-
-    let out = run(async {
-        let setup = shell
-            .run("printf 'TOPSECRET' > /home/lash/secret && ln -s /home/lash/secret /home/lash/alias")
-            .await;
-        assert_eq!(setup.status, 0, "setup: {}", setup.stderr);
-        shell.run("cat /home/lash/alias").await
-    });
-
-    assert!(
-        !out.stdout.contains("TOPSECRET"),
-        "reading through a symlink must hit the same denial: {:?}",
-        out.stdout
-    );
-    let seen = admitted.lock().unwrap().clone();
-    assert!(
-        !seen.iter().any(|e| e == "read /home/lash/alias"),
-        "the link's own name must never be what gets authorized: {seen:?}"
-    );
-}
-
-/// A *directory* symlink cannot launder mutations into a protected subtree.
-///
-/// The sharper form of the previous test, and the one that defeats prefix rules — the
-/// dominant Cedar shape — without needing a link per file. It also covers the
-/// not-yet-existing leaf: canonicalizing the whole path fails for a create, so the
-/// existing ancestors must be resolved and the missing tail re-appended.
-#[test]
-fn a_directory_symlink_cannot_launder_mutations() {
-    let (interceptor, admitted) = Recorder::denying(|e| {
-        let mutating =
-            e.starts_with("write(") || e.starts_with("remove_file") || e.starts_with("create_dir");
-        mutating && e.contains("/home/lash/secrets/")
-    });
-    let mut shell = shell_with(interceptor);
-
-    let (new_file, existing, made_dir, content) = run(async {
-        let setup = shell
-            .run("mkdir -p /home/lash/secrets && ln -s /home/lash/secrets /home/lash/alias")
-            .await;
-        assert_eq!(setup.status, 0, "setup: {}", setup.stderr);
-        admitted.lock().unwrap().clear();
-
-        let new_file = shell.run("printf 'PWNED' > /home/lash/alias/newfile").await;
-        let existing = shell.run("printf 'PWNED' > /home/lash/alias/key.pem").await;
-        let made_dir = shell.run("mkdir /home/lash/alias/sub").await;
-        let content = shell.run("cat /home/lash/secrets/newfile").await;
-        (new_file, existing, made_dir, content)
-    });
-
-    assert_ne!(
-        new_file.status, 0,
-        "creating through a dir symlink must deny"
-    );
-    assert_ne!(
-        existing.status, 0,
-        "overwriting through a dir symlink must deny"
-    );
-    assert_ne!(made_dir.status, 0, "mkdir through a dir symlink must deny");
-    assert!(
-        !content.stdout.contains("PWNED"),
-        "nothing may land in the protected subtree: {:?}",
-        content.stdout
-    );
-
-    // The command text legitimately names the alias — it is the unparsed submission.
-    // No *effect* admission may, because that is what authorization binds to.
-    let effects: Vec<_> = admitted
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|e| !e.starts_with("shell:run"))
-        .cloned()
-        .collect();
-    assert!(
-        !effects.iter().any(|e| e.contains("/home/lash/alias/")),
-        "the alias spelling must never be what gets authorized: {effects:?}"
-    );
-}
-
 /// A read-write open (`<>`) needs the read authorization too.
-///
-/// The implementation hands back a reader seeded with current content, so admitting it
-/// as write-only would disclose a file under a write-only permit.
 #[test]
 fn a_read_write_open_requires_read_authorization() {
     let (interceptor, _) = Recorder::denying(|e| e.starts_with("read /home/lash/secret.txt"));
@@ -828,9 +675,6 @@ fn a_read_write_open_requires_read_authorization() {
 }
 
 /// A no-follow operation is admitted on the link, not on its target.
-///
-/// The mirror of the test above: `lstat`, `read_link`, and `rm` act on the name
-/// itself, so resolving the final symlink there would authorize the wrong object.
 #[test]
 fn no_follow_operations_are_admitted_on_the_link_itself() {
     let (interceptor, admitted) = Recorder::allowing_everything();
@@ -939,20 +783,10 @@ fn a_rename_reports_whether_its_destination_exists() {
 }
 
 /// No *effect* attempt carries a request URL, so none can leak its query.
-///
-/// The Shell raises no network attempt at all. That is stronger than the
-/// query-stripping it replaces: there is no request attempt for a secret to leak
-/// into.
-///
-/// The `shell:run` admission is a deliberate exception and is excluded here. It
-/// carries the command exactly as submitted — including any secret the caller put in
-/// it — because a command-authorizing rule must see the real text. Redacting it would
-/// mean authorizing something the workload did not run. Any interceptor that journals
-/// command submissions is therefore handling secret-bearing material by design.
 #[test]
 fn no_effect_attempt_carries_a_request_url() {
     let (interceptor, admitted) = Recorder::allowing_everything();
-    let mut shell = Shell::builder()
+    let mut shell = support::builder()
         .effect_interceptor(interceptor)
         .build()
         .expect("shell builds");
@@ -995,122 +829,6 @@ fn no_effect_attempt_carries_a_request_url() {
 // `curl_integration.rs` exercises it, but the "floor precedes transport" ordering has no
 // test because there is no transport to order against.
 
-/// `mv` through a directory symlink must be judged on the resolved destination.
-///
-/// The acceptance proof for the resolved-capability seam. `Kernel::open` routes its path
-/// through `resolved_target`, which follows symlinks; `Kernel::rename` routes through
-/// `Self::abs`, which does not. So the
-/// same laundering attack that `a_directory_symlink_cannot_launder_mutations`
-/// already blocks for `>` and `mkdir` succeeds via `mv`: policy is asked about
-/// `/home/lash/alias/key.pem` while the bytes land in `/home/lash/secrets/key.pem`.
-///
-/// Closed by the resolved-capability seam: `Kernel::rename` takes `Resolved`, so it
-/// cannot receive an unresolved spelling, and `Mediated::rename` resolves both sides
-/// before admission.
-#[test]
-fn mv_through_a_directory_symlink_is_judged_on_its_target() {
-    // Deny every mutation naming the protected subtree, armed only after setup —
-    // setup must create the protected file, which the payload is then forbidden to
-    // replace. The command text is exempt because it legitimately names the alias:
-    // it is the unparsed submission, not an effect identity.
-    let (interceptor, admitted, armed) =
-        Recorder::armable(|e| !e.starts_with("shell:run") && e.contains("/home/lash/secrets/"));
-    let mut shell = shell_with(interceptor);
-
-    let (moved, content) = run(async {
-        let setup = shell
-            .run(
-                "mkdir -p /home/lash/secrets \
-                 && printf 'original' > /home/lash/secrets/key.pem \
-                 && ln -s /home/lash/secrets /home/lash/alias \
-                 && printf 'PWNED' > /home/lash/payload",
-            )
-            .await;
-        assert_eq!(setup.status, 0, "setup: {}", setup.stderr);
-        armed.store(true, Ordering::SeqCst);
-        admitted.lock().unwrap().clear();
-
-        let moved = shell
-            .run("mv /home/lash/payload /home/lash/alias/key.pem")
-            .await;
-        // Disarm to verify: the check reads the protected file by its real name, so
-        // the assertion cannot be satisfied by the alias pointing somewhere harmless.
-        armed.store(false, Ordering::SeqCst);
-        let content = shell.run("cat /home/lash/secrets/key.pem").await;
-        (moved, content)
-    });
-
-    assert_ne!(
-        moved.status, 0,
-        "mv through a directory symlink must be denied, not merely audited"
-    );
-    assert_eq!(
-        content.stdout, "original",
-        "the protected file must be untouched"
-    );
-
-    let effects: Vec<_> = admitted
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|e| !e.starts_with("shell:run"))
-        .cloned()
-        .collect();
-    assert!(
-        !effects.iter().any(|e| e.contains("/home/lash/alias/")),
-        "the alias spelling must never be the authorized identity: {effects:?}"
-    );
-}
-
-/// `mkdir -p` creates no ancestor whose metadata probe is denied.
-///
-/// A denied probe reports not-found, which is also what a missing directory reports. The
-/// builtin must not act on that answer for an ancestor: it creates only below the first
-/// component the kernel reports missing, and raises no `create_dir` above it.
-#[test]
-fn mkdir_p_creates_no_ancestor_whose_probe_is_denied() {
-    let above_the_grant = ["/home", "/home/lash", "/home/lash/project"];
-    let (interceptor, admitted, armed) = Recorder::armable(move |effect| {
-        above_the_grant
-            .iter()
-            .any(|path| effect.ends_with(&format!(" {path}")))
-    });
-    let mut shell = shell_with(interceptor.clone());
-
-    let (made, listing, setup_attempts) = run(async {
-        let setup = shell.run("mkdir -p /home/lash/project").await;
-        assert_eq!(setup.status, 0, "setup: {}", setup.stderr);
-        let setup_attempts = interceptor.attempted.lock().unwrap().len();
-        armed.store(true, Ordering::SeqCst);
-        let made = shell.run("mkdir -p /home/lash/project/c/d").await;
-        let listing = shell.run("ls /home/lash/project/c").await;
-        (made, listing, setup_attempts)
-    });
-
-    assert_eq!(made.status, 0, "{}", made.stderr);
-    assert_eq!(listing.stdout.trim(), "d", "{}", listing.stderr);
-    let admitted = admitted.lock().unwrap();
-    assert!(
-        admitted.contains(&"create_dir /home/lash/project/c".to_string())
-            && admitted.contains(&"create_dir /home/lash/project/c/d".to_string()),
-        "{admitted:?}"
-    );
-    let attempted = interceptor.attempted.lock().unwrap();
-    let created_above = attempted[setup_attempts..]
-        .iter()
-        .filter(|effect| effect.starts_with("create_dir "))
-        .filter(|effect| {
-            above_the_grant
-                .iter()
-                .any(|path| effect.ends_with(&format!(" {path}")))
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        created_above.is_empty(),
-        "no create_dir may reach an ancestor the probe could not see: {created_above:?}"
-    );
-}
-
 /// `mkdir -p` accepts a `.` or `..` component after a component it created.
 #[test]
 fn mkdir_p_accepts_a_dot_component_after_a_created_one() {
@@ -1129,219 +847,6 @@ fn mkdir_p_accepts_a_dot_component_after_a_created_one() {
         ["/home/lash/x:", "new", "sib", "/home/lash/y:", "b"],
         "{}",
         listing.stderr
-    );
-}
-
-/// `Kernel::resolve` is the sole mint point for a path identity.
-///
-/// Tested directly rather than through a command, because these are the properties
-/// every admission then depends on: get resolution wrong and every downstream
-/// decision is made about the wrong object.
-mod resolve {
-    use super::run;
-    use strands_shell::Shell;
-    use strands_shell::os::{Follow, Kernel};
-
-    /// Build a shell, run `setup`, and hand back its kernel plus a process for
-    /// probing.
-    ///
-    /// The process is freshly minted rather than cloned from the shell: `resolve`
-    /// reads only the working directory, and `Process` is deliberately not `Clone`.
-    fn kernel_after(setup: &str) -> (std::sync::Arc<dyn Kernel>, strands_shell::os::Process) {
-        // The kernel is constructed here rather than borrowed from a built Shell,
-        // because `Shell` now hands out the *mediated* handle and these tests probe
-        // `Kernel::resolve` itself — resolution below the admission layer.
-        //
-        // Seeded via `build_vfs`, not a bare `Vfs::new()`: the standard tree creates
-        // `/home/lash`, and without it every setup command fails with
-        // "mkdir: permission denied".
-        let vfs =
-            strands_shell::vfs_config::build_vfs(&Default::default()).expect("standard vfs builds");
-        let trait_object: std::sync::Arc<dyn Kernel> =
-            std::sync::Arc::new(strands_shell::vfs_kernel::VfsKernel::new(vfs));
-        let mut shell = Shell::builder()
-            .kernel(trait_object.clone())
-            .build()
-            .expect("shell builds");
-        let out = run(async { shell.run(setup).await });
-        assert_eq!(out.status, 0, "setup: {}", out.stderr);
-        let proc = trait_object.new_process();
-        (trait_object, proc)
-    }
-
-    /// The working directory is applied and `..` folded, with no symlink involved.
-    #[test]
-    fn applies_cwd_and_folds_dot_dot() {
-        let (kernel, proc) = kernel_after("mkdir -p /home/lash/a/b && printf x > /home/lash/n");
-        let resolved = run(async { kernel.resolve(&proc, "a/b/../../n", Follow::Yes).await });
-        assert_eq!(resolved.path(), "/home/lash/n");
-        assert_eq!(resolved.follow(), Follow::Yes);
-    }
-
-    /// `Follow::Yes` resolves a final symlink; `Follow::No` leaves it alone.
-    ///
-    /// The pair that makes the disposition load-bearing: the same input string yields
-    /// two different identities, and each is correct for its own operation.
-    #[test]
-    fn follow_decides_whether_a_final_symlink_resolves() {
-        let (kernel, proc) = kernel_after(
-            "mkdir -p /home/lash/real && printf x > /home/lash/real/f \
-             && ln -s /home/lash/real/f /home/lash/link",
-        );
-
-        let followed = run(async { kernel.resolve(&proc, "/home/lash/link", Follow::Yes).await });
-        assert_eq!(followed.path(), "/home/lash/real/f");
-
-        let kept = run(async { kernel.resolve(&proc, "/home/lash/link", Follow::No).await });
-        assert_eq!(kept.path(), "/home/lash/link");
-    }
-
-    /// A leaf that does not exist yet resolves under its real parent.
-    ///
-    /// This is the create case a directory symlink exploits: authorizing the
-    /// unresolved spelling would judge `/alias/new` instead of `/secrets/new`.
-    #[test]
-    fn a_missing_leaf_resolves_under_a_symlinked_ancestor() {
-        let (kernel, proc) = kernel_after(
-            "mkdir -p /home/lash/secrets && ln -s /home/lash/secrets /home/lash/alias",
-        );
-        let resolved = run(async {
-            kernel
-                .resolve(&proc, "/home/lash/alias/newfile", Follow::Yes)
-                .await
-        });
-        assert_eq!(resolved.path(), "/home/lash/secrets/newfile");
-    }
-
-    /// Several missing levels — `mkdir -p` deep — keep the whole tail.
-    #[test]
-    fn several_missing_levels_are_appended_to_the_canonical_base() {
-        let (kernel, proc) = kernel_after(
-            "mkdir -p /home/lash/secrets && ln -s /home/lash/secrets /home/lash/alias",
-        );
-        let resolved = run(async {
-            kernel
-                .resolve(&proc, "/home/lash/alias/x/y/z", Follow::Yes)
-                .await
-        });
-        assert_eq!(resolved.path(), "/home/lash/secrets/x/y/z");
-    }
-
-    /// With nothing on the path resolvable, the normalized spelling is the identity.
-    ///
-    /// It names no existing object, so a rule matching it denies a create — the
-    /// fail-closed direction.
-    #[test]
-    fn an_unresolvable_path_falls_back_to_its_normalized_spelling() {
-        let (kernel, proc) = kernel_after("printf x > /home/lash/anchor");
-        let resolved = run(async {
-            kernel
-                .resolve(&proc, "/nonexistent/deep/leaf", Follow::Yes)
-                .await
-        });
-        assert_eq!(resolved.path(), "/nonexistent/deep/leaf");
-    }
-
-    /// A dangling symlink resolves to the path it names, as the kernel follows it.
-    #[test]
-    fn a_dangling_symlink_resolves_to_the_path_it_names() {
-        let (kernel, proc) = kernel_after(
-            "mkdir -p /tmp/probes && ln -s /nonexistent_probe /tmp/probes/missing \
-             && ln -s ../gone /tmp/probes/relative \
-             && ln -s /tmp/probes/missing /tmp/probes/chained",
-        );
-        let resolve = |path: &'static str, follow| {
-            run(async { kernel.resolve(&proc, path, follow).await.path().to_string() })
-        };
-        assert_eq!(
-            resolve("/tmp/probes/missing/x", Follow::Yes),
-            "/nonexistent_probe/x"
-        );
-        assert_eq!(
-            resolve("/tmp/probes/missing", Follow::Yes),
-            "/nonexistent_probe"
-        );
-        assert_eq!(
-            resolve("/tmp/probes/relative/x", Follow::Yes),
-            "/tmp/gone/x"
-        );
-        assert_eq!(
-            resolve("/tmp/probes/chained/x/y", Follow::Yes),
-            "/nonexistent_probe/x/y"
-        );
-        assert_eq!(
-            resolve("/tmp/probes/missing/x", Follow::No),
-            "/nonexistent_probe/x"
-        );
-        assert_eq!(
-            resolve("/tmp/probes/missing", Follow::No),
-            "/tmp/probes/missing"
-        );
-    }
-
-    /// A symlink loop ends resolution instead of hanging it.
-    #[test]
-    fn a_symlink_loop_terminates() {
-        let (sender, receiver) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let (kernel, proc) = kernel_after("ln -s /tmp/b /tmp/a && ln -s /tmp/a /tmp/b");
-            let resolved = run(async { kernel.resolve(&proc, "/tmp/a/x", Follow::Yes).await });
-            let _ = sender.send(resolved.path().to_string());
-        });
-        let resolved = receiver
-            .recv_timeout(std::time::Duration::from_secs(10))
-            .expect("resolution of a symlink loop must end");
-        assert!(resolved.ends_with("/x"), "{resolved}");
-    }
-}
-
-/// A denial does not depend on whether a symlink's target exists.
-///
-/// `cd` through a link to an existing path and through a link to a missing
-/// path must both be judged on the target, so the error does not tell them apart.
-#[test]
-fn a_dangling_symlink_is_no_existence_oracle() {
-    let (interceptor, admitted) = Recorder::denying(|e| {
-        e.starts_with("change_dir ")
-            && !e.starts_with("change_dir /tmp")
-            && !e.starts_with("change_dir /home/lash")
-    });
-    let mut shell = shell_with(interceptor);
-
-    let (present, missing) = run(async {
-        let setup = shell
-            .run(
-                "mkdir -p /tmp/probes && ln -s /usr /tmp/probes/present \
-                 && ln -s /nonexistent_probe /tmp/probes/missing",
-            )
-            .await;
-        assert_eq!(setup.status, 0, "setup: {}", setup.stderr);
-        (
-            shell.run("cd /tmp/probes/present/x").await,
-            shell.run("cd /tmp/probes/missing/x").await,
-        )
-    });
-
-    assert!(
-        present
-            .stderr
-            .contains("test policy denied: change_dir /usr/x"),
-        "{}",
-        present.stderr
-    );
-    assert!(
-        missing
-            .stderr
-            .contains("test policy denied: change_dir /nonexistent_probe/x"),
-        "{}",
-        missing.stderr
-    );
-    let seen = admitted.lock().unwrap().clone();
-    assert!(
-        !seen
-            .iter()
-            .any(|e| e.starts_with("change_dir /tmp/probes/")),
-        "a symlink's own name must never be what gets authorized: {seen:?}"
     );
 }
 
@@ -1397,8 +902,6 @@ fn a_long_symlink_chain_is_no_existence_oracle() {
 }
 
 /// `mkdir` and `mv` act on a symlink at the final component, whether or not its target exists.
-///
-/// Neither the verdict nor the error may depend on the link's target.
 #[test]
 fn mkdir_and_mv_act_on_a_final_symlink_itself() {
     let (interceptor, admitted) = Recorder::denying(|e| {
@@ -1441,303 +944,6 @@ fn mkdir_and_mv_act_on_a_final_symlink_itself() {
     );
 }
 
-/// A kernel built without an interceptor is unchanged.
-#[test]
-fn an_unmediated_shell_still_works() {
-    let mut shell = Shell::builder().build().expect("shell builds");
-    let out = run(async {
-        shell
-            .run("mkdir -p /home/lash/plain && printf 'hi' > /home/lash/plain/f && cat /home/lash/plain/f")
-            .await
-    });
-    assert_eq!(out.status, 0, "{}", out.stderr);
-    assert_eq!(out.stdout, "hi");
-}
-
-/// A caller-supplied kernel is mediated exactly as the bundled one is.
-///
-/// This is the property the resolved-capability seam exists for. Admission used to
-/// live inside `VfsKernel`, so `.effect_interceptor(p).kernel(k)` compiled, emitted no
-/// warning, and enforced policy on the *command* while every file effect underneath it
-/// went unchecked. The seam moved admission above the trait, so the backend an embedder
-/// chooses can no longer decide whether policy applies.
-///
-/// The delegating kernel below is the shape a real third-party kernel takes — it
-/// forwards to a `VfsKernel` and adds no admission of its own, exactly as an S3- or
-/// database-backed implementation would.
-#[test]
-fn a_supplied_kernel_is_mediated_identically() {
-    struct Delegating {
-        inner: VfsKernel,
-    }
-
-    #[async_trait]
-    impl Kernel for Delegating {
-        fn new_process(&self) -> strands_shell::os::Process {
-            self.inner.new_process()
-        }
-        async fn resolve(
-            &self,
-            proc: &strands_shell::os::Process,
-            path: &str,
-            follow: Follow,
-        ) -> Resolved {
-            self.inner.resolve(proc, path, follow).await
-        }
-        fn isatty(&self, fd: i32) -> bool {
-            self.inner.isatty(fd)
-        }
-        fn now(&self) -> std::time::SystemTime {
-            self.inner.now()
-        }
-        async fn settle_writes(&self) -> Vec<strands_shell::os::WriteFailure> {
-            self.inner.settle_writes().await
-        }
-        async fn open(
-            &self,
-            proc: &mut strands_shell::os::Process,
-            path: Resolved,
-            flags: strands_shell::os::OpenFlags,
-        ) -> io::Result<strands_shell::os::Fd> {
-            self.inner.open(proc, path, flags).await
-        }
-        async fn list_dir(
-            &self,
-            proc: &strands_shell::os::Process,
-            path: Resolved,
-        ) -> io::Result<Vec<strands_shell::os::DirEntry>> {
-            self.inner.list_dir(proc, path).await
-        }
-        async fn change_dir(
-            &self,
-            proc: &mut strands_shell::os::Process,
-            path: Resolved,
-        ) -> io::Result<()> {
-            self.inner.change_dir(proc, path).await
-        }
-        async fn stat(
-            &self,
-            proc: &strands_shell::os::Process,
-            path: Resolved,
-        ) -> strands_shell::os::FileStat {
-            self.inner.stat(proc, path).await
-        }
-        async fn lstat(
-            &self,
-            proc: &strands_shell::os::Process,
-            path: Resolved,
-        ) -> strands_shell::os::FileStat {
-            self.inner.lstat(proc, path).await
-        }
-        async fn access(
-            &self,
-            proc: &strands_shell::os::Process,
-            path: Resolved,
-            mode: i32,
-        ) -> bool {
-            self.inner.access(proc, path, mode).await
-        }
-        async fn stat_answer(
-            &self,
-            proc: &strands_shell::os::Process,
-            path: Resolved,
-        ) -> io::Result<strands_shell::os::FileStat> {
-            self.inner.stat_answer(proc, path).await
-        }
-        async fn lstat_answer(
-            &self,
-            proc: &strands_shell::os::Process,
-            path: Resolved,
-        ) -> io::Result<strands_shell::os::FileStat> {
-            self.inner.lstat_answer(proc, path).await
-        }
-        async fn access_answer(
-            &self,
-            proc: &strands_shell::os::Process,
-            path: Resolved,
-            mode: i32,
-        ) -> io::Result<bool> {
-            self.inner.access_answer(proc, path, mode).await
-        }
-        async fn canonicalize(
-            &self,
-            proc: &strands_shell::os::Process,
-            path: Resolved,
-        ) -> io::Result<std::path::PathBuf> {
-            self.inner.canonicalize(proc, path).await
-        }
-        async fn is_executable(&self, proc: &strands_shell::os::Process, path: Resolved) -> bool {
-            self.inner.is_executable(proc, path).await
-        }
-        async fn glob(&self, proc: &strands_shell::os::Process, pattern: &str) -> Vec<String> {
-            self.inner.glob(proc, pattern).await
-        }
-        async fn remove_file(
-            &self,
-            proc: &strands_shell::os::Process,
-            path: Resolved,
-        ) -> io::Result<()> {
-            self.inner.remove_file(proc, path).await
-        }
-        async fn remove_dir(
-            &self,
-            proc: &strands_shell::os::Process,
-            path: Resolved,
-        ) -> io::Result<()> {
-            self.inner.remove_dir(proc, path).await
-        }
-        async fn create_dir(
-            &self,
-            proc: &strands_shell::os::Process,
-            path: Resolved,
-        ) -> io::Result<()> {
-            self.inner.create_dir(proc, path).await
-        }
-        async fn rename(
-            &self,
-            proc: &strands_shell::os::Process,
-            from: Resolved,
-            to: Resolved,
-        ) -> io::Result<()> {
-            self.inner.rename(proc, from, to).await
-        }
-        async fn symlink(
-            &self,
-            proc: &strands_shell::os::Process,
-            target: &str,
-            link: Resolved,
-        ) -> io::Result<()> {
-            self.inner.symlink(proc, target, link).await
-        }
-        async fn read_link(
-            &self,
-            proc: &strands_shell::os::Process,
-            path: Resolved,
-        ) -> io::Result<String> {
-            self.inner.read_link(proc, path).await
-        }
-        async fn set_permissions(
-            &self,
-            proc: &strands_shell::os::Process,
-            path: Resolved,
-            mode: u32,
-        ) -> io::Result<()> {
-            self.inner.set_permissions(proc, path, mode).await
-        }
-        fn check_url(&self, url: &str) -> io::Result<()> {
-            self.inner.check_url(url)
-        }
-    }
-
-    let (interceptor, admitted, armed) =
-        Recorder::armable(|e| !e.starts_with("shell:run") && e.contains("/home/lash/guarded/"));
-    let vfs = strands_shell::vfs_config::build_vfs(&Default::default()).expect("vfs builds");
-    let supplied: Arc<dyn Kernel> = Arc::new(Delegating {
-        inner: VfsKernel::new(vfs),
-    });
-    let mut shell = Shell::builder()
-        .effect_interceptor(interceptor)
-        .kernel(supplied)
-        .build()
-        .expect("shell builds");
-
-    let (blocked, elsewhere, content) = run(async {
-        let setup = shell
-            .run("mkdir -p /home/lash/guarded && printf 'original' > /home/lash/guarded/f")
-            .await;
-        assert_eq!(setup.status, 0, "setup: {}", setup.stderr);
-        armed.store(true, Ordering::SeqCst);
-
-        let blocked = shell.run("printf 'PWNED' > /home/lash/guarded/f").await;
-        let elsewhere = shell.run("printf 'fine' > /home/lash/open.txt").await;
-        armed.store(false, Ordering::SeqCst);
-        let content = shell.run("cat /home/lash/guarded/f").await;
-        (blocked, elsewhere, content)
-    });
-
-    assert_ne!(
-        blocked.status, 0,
-        "a supplied kernel must not escape admission"
-    );
-    assert_eq!(
-        content.stdout, "original",
-        "the guarded file must be untouched"
-    );
-    assert_eq!(
-        elsewhere.status, 0,
-        "an unrelated write still succeeds: {}",
-        elsewhere.stderr
-    );
-
-    let effects: Vec<_> = admitted
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|e| !e.starts_with("shell:run"))
-        .cloned()
-        .collect();
-    assert!(
-        !effects.is_empty(),
-        "effects under a supplied kernel must reach the interceptor"
-    );
-}
-
-/// Every mutating operation is judged on the resolved target, not the alias.
-///
-/// Task 13's coverage sweep. The originally-reported hole was `mv`, but the defect was
-/// per-method resolution, so the *class* is what needs pinning: one denial rule, one
-/// symlinked directory, and every operation that reaches through it. `>` / `mkdir` were
-/// already covered elsewhere; `mv`, `rm`, `rmdir`, `chmod`, and a read via `cat` were
-/// not.
-#[test]
-fn no_mutating_operation_can_launder_through_a_directory_symlink() {
-    let (interceptor, _admitted, armed) =
-        Recorder::armable(|e| !e.starts_with("shell:run") && e.contains("/home/lash/vault/"));
-    let mut shell = shell_with(interceptor);
-
-    let outcomes = run(async {
-        let setup = shell
-            .run(
-                "mkdir -p /home/lash/vault/sub \
-                 && printf 'original' > /home/lash/vault/f \
-                 && printf 'payload' > /home/lash/src \
-                 && ln -s /home/lash/vault /home/lash/alias",
-            )
-            .await;
-        assert_eq!(setup.status, 0, "setup: {}", setup.stderr);
-        armed.store(true, Ordering::SeqCst);
-
-        // Each reaches the protected subtree only through the alias.
-        let cases = vec![
-            (
-                "mv",
-                shell.run("mv /home/lash/src /home/lash/alias/f").await,
-            ),
-            ("rm", shell.run("rm /home/lash/alias/f").await),
-            ("rmdir", shell.run("rmdir /home/lash/alias/sub").await),
-            ("chmod", shell.run("chmod 777 /home/lash/alias/f").await),
-            ("cat", shell.run("cat /home/lash/alias/f").await),
-        ];
-
-        armed.store(false, Ordering::SeqCst);
-        let survived = shell.run("cat /home/lash/vault/f").await;
-        (cases, survived)
-    });
-
-    let (cases, survived) = outcomes;
-    for (label, out) in &cases {
-        assert_ne!(
-            out.status, 0,
-            "{label} through a directory symlink must be denied: {}",
-            out.stderr
-        );
-    }
-    assert_eq!(
-        survived.stdout, "original",
-        "the guarded file must be untouched by any of them"
-    );
-}
-
 /// A namespace change between admission and the effect fails closed.
 #[test]
 fn a_background_symlink_swap_cannot_beat_the_admission_window() {
@@ -1756,7 +962,7 @@ fn a_background_symlink_swap_cannot_beat_the_admission_window() {
 
     let (recorder, _admitted, armed) =
         Recorder::armable(|e| !e.starts_with("shell:run") && e.contains("/home/lash/sealed/"));
-    let mut shell = Shell::builder()
+    let mut shell = support::builder()
         .effect_interceptor(Arc::new(Slow { inner: recorder }))
         .build()
         .expect("shell builds");
@@ -1851,7 +1057,7 @@ fn a_protected_source_cannot_be_swapped_after_identity_approval() {
     std::fs::write(&decoy, "decoy").expect("decoy");
     std::os::unix::fs::symlink("decoy", &swing).expect("initial symlink");
     let source_metadata = std::fs::metadata(&source).expect("source identity");
-    let mut shell = Shell::builder()
+    let mut shell = support::builder()
         .bind_direct(directory.to_str().expect("UTF-8 host bind"), "/workspace")
         .effect_interceptor(Arc::new(SourceFloor {
             root: directory,
@@ -1883,35 +1089,27 @@ fn a_protected_source_cannot_be_swapped_after_identity_approval() {
 #[cfg(unix)]
 #[test]
 fn a_deferred_host_write_stays_on_the_admitted_inode() {
-    use strands_shell::vfs_config::{BindEntry, BindMode, VfsConfig, build_vfs};
+    use strands_shell::os::Kernel as _;
     use tokio::io::AsyncWriteExt as _;
 
-    let directory =
-        std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("deferred-host-write-inode");
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir(&directory).expect("host bind");
+    let directory = tempfile::tempdir().expect("host folder");
+    let directory = directory.path().to_path_buf();
     let source = directory.join("source");
     let decoy = directory.join("decoy");
     let admitted = directory.join("admitted");
     std::fs::write(&source, "original").expect("protected source");
     std::fs::write(&decoy, "decoy").expect("decoy");
-    let config = VfsConfig {
-        bind: vec![BindEntry {
-            mode: BindMode::Direct,
-            source: directory.to_str().expect("UTF-8").to_string(),
-            destination: "/workspace".to_string(),
-            readonly: false,
-        }],
-        ..Default::default()
-    };
-    let kernel = VfsKernel::new(build_vfs(&config).expect("vfs builds"));
-    let mut proc = Kernel::new_process(&kernel);
+    let vfs = strands_shell::vfs_config::build_vfs(&Default::default()).expect("vfs builds");
+    let served = directory.to_str().expect("UTF-8").to_string();
+    let filesystem =
+        Arc::new(box_shell::Filesystem::serving(vfs, &[(&served, "/workspace")]).expect("serves"));
+    let kernel = box_shell::ShellKernel::over(filesystem, Arc::new(support::PermitAll));
+    let mut proc = kernel.new_process();
     proc.cwd = std::path::PathBuf::from("/workspace");
 
     run(async {
-        let resolved = kernel.resolve(&proc, "decoy", Follow::Yes).await;
         let fd = kernel
-            .open(&mut proc, resolved, strands_shell::os::OpenFlags::write())
+            .open(&mut proc, "decoy", strands_shell::os::OpenFlags::write())
             .await
             .expect("the decoy opens");
 
@@ -1920,16 +1118,7 @@ fn a_deferred_host_write_stays_on_the_admitted_inode() {
         let mut writer = proc.take_writer(fd).expect("writer");
         writer.write_all(b"PWNED").await.expect("write");
         drop(writer);
-
-        for _ in 0..100 {
-            if matches!(
-                std::fs::read_to_string(&admitted),
-                Ok(contents) if contents == "PWNED"
-            ) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        tokio::task::yield_now().await;
     });
 
     assert_eq!(
@@ -1946,121 +1135,7 @@ fn a_deferred_host_write_stays_on_the_admitted_inode() {
     );
 }
 
-/// Every route that evaluates command text is admitted, not just `Shell::run`.
-///
-/// **Four routes bypassed admission entirely until 2026-08-08**, and this is the guard.
-/// Admission lived in `Shell::run`/`Shell::execute`, while Lua's `io.popen` and
-/// `os.execute`, `find -exec`, and `xargs` re-entered `exec::execute` from *inside* the
-/// crate. All four are reachable from an already-admitted command, so none needed a new
-/// grant: one permitted command fanned out to N unjudged ones, and a policy counting
-/// `shell:run` saw a single decision.
-///
-/// Asserted as *presence in the admitted list*, keyed on a marker unique to the nested
-/// command, so the test cannot pass merely because the outer command was admitted.
-#[test]
-fn every_nested_command_route_is_admitted() {
-    let (interceptor, admitted) = Recorder::allowing_everything();
-    let mut shell = shell_with(interceptor);
-
-    run(async {
-        let setup = shell.run("printf SEED > /tmp/seed.txt").await;
-        assert_eq!(setup.status, 0, "setup: {}", setup.stderr);
-
-        // Each entry is (payload, the marker that must appear in an admitted command).
-        // The marker is the *nested* text, never the outer command's.
-        for (payload, nested) in [
-            (
-                r"find /tmp -name seed.txt -exec printf NESTED_VIA_FIND {} ;",
-                "printf NESTED_VIA_FIND",
-            ),
-            (
-                "printf /tmp/seed.txt | xargs printf NESTED_VIA_XARGS",
-                "printf NESTED_VIA_XARGS",
-            ),
-            (
-                r#"lua -e "local h=io.popen([[printf NESTED_VIA_POPEN]]); io.write(h:read([[a]]) or [[none]])""#,
-                "printf NESTED_VIA_POPEN",
-            ),
-            (
-                r#"lua -e "os.execute([[printf NESTED_VIA_OS_EXECUTE]])""#,
-                "printf NESTED_VIA_OS_EXECUTE",
-            ),
-            // `sh <file>` reaches `execute_sourced` through `run_script`, and `.` through the
-            // source builtin — **both bypass `execute` entirely**, which is why admission had to
-            // move down to the two callees. Measured 2026-08-09: with the gate on `execute`,
-            // these two ran text a `forbid` rule named while `find -exec` was denied.
-            (
-                "printf 'printf NESTED_VIA_SH\n' > /tmp/n1.sh; sh /tmp/n1.sh",
-                "printf NESTED_VIA_SH",
-            ),
-            (
-                "printf 'printf NESTED_VIA_SOURCE\n' > /tmp/n2.sh; . /tmp/n2.sh",
-                "printf NESTED_VIA_SOURCE",
-            ),
-            // Command substitution is deliberately NOT here: its inner text is always a
-            // literal substring of the submission, so a `contains` assertion would pass on
-            // the outer command's own admission entry and prove nothing. It needs exact-entry
-            // matching — see `command_substitution_is_admitted_as_its_own_event`.
-        ] {
-            admitted.lock().unwrap().clear();
-            let out = shell.run(payload).await;
-            assert_eq!(out.status, 0, "{payload} failed: {}", out.stderr);
-
-            let seen = admitted.lock().unwrap().clone();
-            assert!(
-                seen.iter().any(|entry| entry.contains(nested)),
-                "the nested command {nested:?} must be admitted in its own right, not folded \
-                 into {payload:?}; admitted: {seen:?}"
-            );
-        }
-    });
-}
-
-/// A nested command the policy refuses does not run, from any of the four routes.
-///
-/// The counterpart to the test above: admission that is *recorded* but not *enforced* would
-/// satisfy the presence assertion while still executing the command. Here the interceptor
-/// denies exactly the nested text and the payload's output must not contain it.
-#[test]
-fn a_denied_nested_command_does_not_run() {
-    let (interceptor, _admitted) = Recorder::denying(|effect| effect.contains("printf LAUNDERED"));
-    let mut shell = shell_with(interceptor);
-
-    run(async {
-        let setup = shell.run("printf SEED > /tmp/seed2.txt").await;
-        assert_eq!(setup.status, 0, "setup: {}", setup.stderr);
-
-        for payload in [
-            r"find /tmp -name seed2.txt -exec printf LAUNDERED_FIND {} ;",
-            "printf /tmp/seed2.txt | xargs printf LAUNDERED_XARGS",
-            r#"lua -e "local h=io.popen([[printf LAUNDERED_POPEN]]); io.write(h:read([[a]]) or [[none]])""#,
-            r#"lua -e "os.execute([[printf LAUNDERED_OS_EXECUTE]])""#,
-            // The two routes that bypassed `execute`. The forbidden text is built so the OUTER
-            // command never contains the marker — otherwise the outer admission would deny and
-            // the test would pass without proving the nested route is judged.
-            "W=LAUND; X=ERED_SH; printf \"printf ${W}${X}\\n\" > /tmp/d1.sh; sh /tmp/d1.sh",
-            "W=LAUND; X=ERED_SRC; printf \"printf ${W}${X}\\n\" > /tmp/d2.sh; . /tmp/d2.sh",
-            // A trap body assembled from a file: text the submission never contained.
-            "V=$(cat /tmp/d1.sh); trap \"$V\" EXIT; printf outer",
-        ] {
-            let out = shell.run(payload).await;
-            assert!(
-                !out.stdout.contains("LAUNDERED"),
-                "a refused nested command must not execute: {payload:?} produced {:?}",
-                out.stdout
-            );
-        }
-    });
-}
-
 /// A substitution's inner text is admitted as its own event, matched **exactly**.
-///
-/// The exactness is the whole test. A substitution's inner text is always a literal substring
-/// of the submission, so a `contains` assertion — the shape
-/// [`every_nested_command_route_is_admitted`] uses for the other six routes — passes on the
-/// *outer* command's admission entry whether or not the substitution was ever judged.
-/// Measured: with the gate removed entirely, a `contains` version of this test still passed.
-/// Only an exact whole-entry match discriminates.
 #[test]
 fn command_substitution_is_admitted_as_its_own_event() {
     let (interceptor, admitted) = Recorder::allowing_everything();
@@ -2099,16 +1174,6 @@ fn command_substitution_is_admitted_as_its_own_event() {
 }
 
 /// A refused substitution does not run — and it is refused on what it **expands to**.
-///
-/// This is the property the move to post-resolution admission bought, and it is a strictly
-/// stronger claim than the one this test made before. The forbidden marker is assembled from
-/// two variables, so it appears nowhere in the submitted text; the old seam admitted the
-/// substitution's *unexpanded* source (`printf "${W}${X}"`) and therefore could not see it at
-/// all. Its own documentation recorded that as a residual: "it is not a claim that policy sees
-/// post-expansion text."
-///
-/// It is now. Admission happens after expansion, so the attempt names `printf` with the
-/// laundered argument, and a rule written against the value that runs refuses it.
 #[test]
 fn a_denied_command_substitution_does_not_run() {
     // Deny the EXPANDED form. Nothing in the submitted line contains this string, so a seam
@@ -2130,24 +1195,6 @@ fn a_denied_command_substitution_does_not_run() {
 }
 
 /// N substitutions in one submission produce N admissions, not one.
-///
-/// **This is the property the substitution gap actually cost**, and it is worth stating
-/// precisely because the more obvious framing is wrong. `capture_output`'s `cmd` is the
-/// substitution's *unexpanded* source text, so it is always a literal substring of the
-/// submission the outer gate already judged — admitting it does **not** close a
-/// text-laundering hole, and a test asserting that it does would be asserting something
-/// false. (Pre-expansion admission is a separate documented residual, and plain variable
-/// expansion exhibits it with no substitution involved at all.)
-///
-/// What was missing is the **event**. Before the fix, ten substitutions inside one
-/// submission produced *one* decision while the same ten through `eval`, `xargs`, or
-/// `source` produced eleven — so a policy counting them, or an audit reading temporal
-/// history, saw substitution fan-out as nothing at all. The equality against the other
-/// routes is the assertion, because parity is the point.
-///
-/// The absolute count is now **ten, not eleven**. The eleventh was the submission itself, and
-/// there is no longer a decision over a submission — only over each resolved command. Parity
-/// across the three routes is unchanged, which is what this test is for.
 #[test]
 fn substitution_fan_out_is_counted_like_every_other_route() {
     fn exec_events(payload: &str) -> usize {
@@ -2198,7 +1245,7 @@ fn rendered(out: &strands_shell::Output) -> String {
 
 /// Three `PATH` entries, and a script named `tool` under the ones `holding` names.
 fn shell_on_three_entries(interceptor: Arc<dyn EffectInterceptor>, holding: &[&str]) -> Shell {
-    let mut shell = Shell::builder()
+    let mut shell = support::builder()
         .effect_interceptor(interceptor)
         .env("PATH", "/home/lash/one:/home/lash/two:/home/lash/three")
         .build()
@@ -2295,29 +1342,6 @@ fn command_v_and_hash_resolve_with_the_same_single_decision() {
     }
 }
 
-/// A denied selection does not run, and the workload sees the absent answer it saw before.
-#[test]
-fn a_denied_selected_candidate_does_not_run() {
-    let (interceptor, _) = Recorder::denying(|e| e == "exec /home/lash/three/tool");
-    let mut shell = shell_on_three_entries(interceptor, &["three"]);
-
-    let (invoked, located) =
-        run(async { (shell.run("tool").await, shell.run("command -v tool").await) });
-    assert_ne!(invoked.status, 0, "{}", rendered(&invoked));
-    assert!(
-        !invoked.stdout.contains("FOUND-three"),
-        "the denied program must not run: {}",
-        rendered(&invoked)
-    );
-    assert!(
-        invoked.stderr.contains("tool: command not found"),
-        "a denied candidate is absent, as it was before: {}",
-        rendered(&invoked)
-    );
-    assert_eq!(located.status, 1, "{}", rendered(&located));
-    assert!(located.stdout.is_empty(), "{}", rendered(&located));
-}
-
 /// A denied candidate is presented once and refused, and the walk goes on to the next entry.
 #[test]
 fn a_denied_candidate_is_refused_and_the_walk_continues() {
@@ -2397,7 +1421,7 @@ fn a_path_entry_outside_the_kernels_reach_is_not_observed() {
         .to_string();
 
     let (interceptor, admitted) = Recorder::allowing_everything();
-    let mut unbound = Shell::builder()
+    let mut unbound = support::builder()
         .effect_interceptor(interceptor)
         .env("PATH", host.as_str())
         .build()
@@ -2412,7 +1436,7 @@ fn a_path_entry_outside_the_kernels_reach_is_not_observed() {
     );
 
     let (interceptor, admitted) = Recorder::allowing_everything();
-    let mut bound = Shell::builder()
+    let mut bound = support::builder()
         .effect_interceptor(interceptor)
         .bind_direct(host.as_str(), "/tools")
         .env("PATH", format!("{host}:/tools"))
@@ -2427,4 +1451,193 @@ fn a_path_entry_outside_the_kernels_reach_is_not_observed() {
         vec!["exec /tools/tool"],
         "the bound entry is found with one decision, the unbound one raises none: {seen:?}"
     );
+}
+
+/// Numbers each `ghost` decision and records what happened to each.
+struct Ghosts {
+    decided: AtomicUsize,
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+struct GhostPermit {
+    number: usize,
+    events: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait]
+impl EffectPermit for GhostPermit {
+    async fn record_outcome(self: Box<Self>, outcome: EffectOutcome) -> io::Result<()> {
+        if let EffectOutcome::ShellCommand { reported_status } = outcome {
+            let line = format!("#{} status {reported_status}", self.number);
+            self.events.lock().unwrap().push(line);
+        }
+        Ok(())
+    }
+
+    fn mark_indeterminate(self: Box<Self>) {
+        let line = format!("#{} indeterminate", self.number);
+        self.events.lock().unwrap().push(line);
+    }
+}
+
+#[async_trait]
+impl EffectInterceptor for Ghosts {
+    async fn intercept(&self, effect: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>> {
+        let EffectAttempt::ShellRun { program, .. } = effect else {
+            return Ok(Box::new(GhostPermit {
+                number: 0,
+                events: Arc::new(Mutex::new(Vec::new())),
+            }));
+        };
+        if *program == "blocked" {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "blocked"));
+        }
+        let number = self.decided.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(Box::new(GhostPermit {
+            number,
+            events: Arc::clone(&self.events),
+        }))
+    }
+}
+
+/// Run each script on one Shell, settling the Call after each as the box does, and return the
+/// events each decision recorded, sorted.
+fn ghosts(scripts: &[&str]) -> (Vec<strands_shell::Output>, Vec<String>) {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let kernel = Arc::new(support::kernel(Arc::new(Ghosts {
+        decided: AtomicUsize::new(0),
+        events: Arc::clone(&events),
+    })));
+    let mut shell = Shell::with_kernel(Arc::clone(&kernel) as Arc<dyn strands_shell::os::Kernel>);
+    let outputs = run(async {
+        let mut outputs = Vec::new();
+        for script in scripts {
+            outputs.push(shell.run(script).await);
+            kernel.settle();
+        }
+        outputs
+    });
+    let mut events = events.lock().unwrap().clone();
+    events.sort();
+    (outputs, events)
+}
+
+/// A fallback stage decided but never run is settled when its Call ends, so a later Call
+/// records its own outcome on its own decision.
+#[test]
+fn a_fallback_stage_that_never_runs_does_not_carry_its_decision_into_a_later_call() {
+    let (outputs, events) = ghosts(&["ghost | blocked", "ghost"]);
+    assert_eq!(outputs[0].status, 126, "{}", outputs[0].stderr);
+    assert_eq!(outputs[1].status, 127, "{}", outputs[1].stderr);
+    assert_eq!(events, ["#1 indeterminate", "#2 status 127"]);
+}
+
+/// A fallback stage whose redirect fails is settled when its Call ends.
+#[test]
+fn a_fallback_stage_whose_redirect_fails_is_settled_when_its_call_ends() {
+    let (outputs, events) = ghosts(&["ghost > /denied/out", "ghost"]);
+    assert_eq!(outputs[1].status, 127, "{}", outputs[1].stderr);
+    assert_eq!(events, ["#1 indeterminate", "#2 status 127"]);
+}
+
+/// Each fallback stage of a pipeline that runs is decided once and records its own outcome,
+/// even when two stages are the same command or an inner pipeline is refused.
+#[test]
+fn each_fallback_stage_that_runs_is_decided_once() {
+    let (_outputs, events) = ghosts(&["ghost | ghost"]);
+    assert_eq!(events, ["#1 status 127", "#2 status 127"]);
+    let (_outputs, events) = ghosts(&["{ blocked; true; } | ghost"]);
+    assert_eq!(events, ["#1 status 127", "#2 status 0"]);
+}
+
+// ── `mkdir -p` decides each component once ───────────────────────────────────────────────────
+
+/// How many metadata decisions `script` makes for each path, in the order first seen.
+fn metadata_decisions(
+    shell: &mut Shell,
+    recorder: &Recorder,
+    script: &str,
+) -> Vec<(String, usize)> {
+    recorder.attempted.lock().unwrap().clear();
+    let out = run(shell.run(script));
+    assert_eq!(out.status, 0, "{script}: {}", rendered(&out));
+    let mut counts: Vec<(String, usize)> = Vec::new();
+    for attempt in recorder.attempted.lock().unwrap().iter() {
+        let Some(path) = attempt.strip_prefix("meta(follow=true) ") else {
+            continue;
+        };
+        match counts.iter_mut().find(|(seen, _)| seen == path) {
+            Some((_, count)) => *count += 1,
+            None => counts.push((path.to_string(), 1)),
+        }
+    }
+    counts
+}
+
+/// `mkdir -p` makes one metadata decision for each component, whether the ancestor is missing,
+/// exists, or is refused, in the memory filesystem and in a host folder.
+#[test]
+fn mkdir_p_makes_one_metadata_decision_per_component() {
+    let directory = tempfile::tempdir().expect("host folder");
+    for root in ["/home/lash", "/workspace"] {
+        let refused = format!("meta(follow=true) {root}");
+        let (recorder, _, armed) = Recorder::armable(move |effect| {
+            effect == "meta(follow=true) /home" || effect == refused
+        });
+        let mut shell = support::builder()
+            .bind_direct(directory.path().to_str().expect("UTF-8"), "/workspace")
+            .effect_interceptor(Arc::clone(&recorder) as Arc<dyn EffectInterceptor>)
+            .build()
+            .expect("shell builds");
+        let once = |paths: &[&str]| -> Vec<(String, usize)> {
+            paths
+                .iter()
+                .map(|path| (format!("{root}/{path}"), 1))
+                .collect()
+        };
+        let created = format!("cd {root} && mkdir -p m/a/b/c");
+        let missing = once(&["m", "m/a", "m/a/b", "m/a/b/c"]);
+        assert_eq!(
+            metadata_decisions(&mut shell, &recorder, &created),
+            missing,
+            "missing"
+        );
+        assert_eq!(
+            metadata_decisions(&mut shell, &recorder, &created),
+            missing,
+            "existing"
+        );
+
+        armed.store(true, Ordering::SeqCst);
+        let mut expected: Vec<(String, usize)> = if root == "/home/lash" {
+            vec![("/home".into(), 1), ("/home/lash".into(), 1)]
+        } else {
+            vec![("/workspace".into(), 1)]
+        };
+        expected.extend(once(&["r", "r/a", "r/a/b"]));
+        assert_eq!(
+            metadata_decisions(&mut shell, &recorder, &format!("mkdir -p {root}/r/a/b")),
+            expected,
+            "refused"
+        );
+    }
+}
+
+/// A `sleep` that the deadline cuts short records a nonzero status.
+#[test]
+fn a_sleep_the_deadline_cuts_short_records_a_nonzero_status() {
+    let events = Arc::new(Mutex::new(Vec::new()));
+    let mut shell = shell_with(Arc::new(Ghosts {
+        decided: AtomicUsize::new(0),
+        events: Arc::clone(&events),
+    }));
+    let out = run(async {
+        shell.proc.deadline =
+            Some(tokio::time::Instant::now() + std::time::Duration::from_millis(500));
+        shell.run("sleep 5").await
+    });
+    assert_ne!(out.status, 0, "{}", rendered(&out));
+    let events = events.lock().unwrap().clone();
+    assert_eq!(events.len(), 1, "{events:?}");
+    assert_ne!(events[0], "#1 status 0", "{events:?}");
 }

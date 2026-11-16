@@ -84,11 +84,14 @@ impl McpTarget {
             ));
         };
         if object.contains_key("result") || object.contains_key("error") {
-            return Err(refuse(
+            let reason = if object.get("method").is_some_and(Value::is_string) {
+                "an MCP frame that carries both a method and a result or error is refused: the \
+                 box cannot say whether it is a request or a response"
+            } else {
                 "a client-sent JSON-RPC response is refused: it answers no request the server \
                  sent, and the box will not forward an unjudged frame"
-                    .to_string(),
-            ));
+            };
+            return Err(refuse(reason.to_string()));
         }
         let method = match object.get("method") {
             Some(Value::String(method)) => method.as_str(),
@@ -349,6 +352,19 @@ mod tests {
             );
             assert!(classify(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#).is_err());
             assert!(classify(br#"{"jsonrpc":"2.0","id":1,"method":"resources/read"}"#).is_err());
+            for answer in [
+                &br#"{"jsonrpc":"2.0","id":5,"method":"ping","result":{"action":"accept"}}"#[..],
+                br#"{"jsonrpc":"2.0","id":5,"method":"ping","error":{"code":-1,"message":"x"}}"#,
+                br#"{"jsonrpc":"2.0","id":5,"method":"notifications/x","result":{}}"#,
+            ] {
+                let error = classify(answer).expect_err("a frame with a method and an answer");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("both a method and a result or error"),
+                    "the wrong refusal: {error}"
+                );
+            }
         }
     }
 

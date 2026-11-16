@@ -28,7 +28,7 @@ pub(crate) mod aliases;
 pub(crate) mod complete;
 mod held;
 pub(crate) mod host;
-mod kernel;
+pub(crate) mod kernel;
 pub(crate) mod mcp;
 pub(crate) mod mcp_remote;
 pub(crate) mod program;

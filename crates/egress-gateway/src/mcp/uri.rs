@@ -48,16 +48,13 @@ pub(crate) fn canonicalize_resource_uri(uri: &str) -> Result<String, String> {
         return Ok(uri.to_string()); // opaque / custom scheme — never touch
     };
 
-    // Split off `#fragment`, which drops: RFC 3986 §3.5 separates it before dereference, so it
-    // never reaches the server and names no resource of its own. Then split off `?query`, where an
-    // empty query is no query, so a bare `?` drops with it. Under `http`/`https` a non-empty query
-    // is part of the request RFC 3986 §3.4 sends to the origin server, so it stays verbatim —
-    // a literal or a credential may live there, which mirrors the egress query handling.
+    // Drop fragments and keep HTTP and HTTPS queries, including an empty query.
     let before_fragment = rest.split_once('#').map_or(rest, |(before, _)| before);
     let (hierarchical, query) = match before_fragment.split_once('?') {
-        Some((hierarchical, query)) => (hierarchical, (!query.is_empty()).then_some(query)),
+        Some((hierarchical, query)) => (hierarchical, Some(query)),
         None => (before_fragment, None),
     };
+    let query = query.filter(|query| scheme != "file" || !query.is_empty());
 
     // RFC 8089 §2 gives a `file:` URI no query — `file-URI = file-scheme ":" file-hier-part` — so a
     // query names no part of the resource, and a resolver opens the hier-part alone. Such a URI is
@@ -668,6 +665,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_empty_http_query_is_preserved() {
+        for scheme in ["http", "https"] {
+            for (spelling, expected) in [
+                ("notes/report?", "notes/report?"),
+                ("notes/report?#section", "notes/report?"),
+                ("notes?", "notes/?"),
+                ("NOTES/reports/../report?", "notes/report?"),
+                ("notes/report", "notes/report"),
+                ("notes/report#?section", "notes/report"),
+                ("notes/report?format=text", "notes/report?format=text"),
+            ] {
+                let uri = format!("{scheme}://{spelling}");
+                assert_eq!(
+                    canonicalize_resource_uri(&uri),
+                    format!("{scheme}://{expected}"),
+                    "{uri}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_http_query_reaches_the_decision_and_forwarded_frame() {
+        for scheme in ["http", "https"] {
+            for (spelling, expected) in [
+                ("notes/report?", "notes/report?"),
+                ("NOTES/reports/../report?", "notes/report?"),
+                ("notes/report?#section", "notes/report?"),
+                ("notes?", "notes/?"),
+                ("notes/report", "notes/report"),
+            ] {
+                let uri = format!("{scheme}://{spelling}");
+                let expected = format!("{scheme}://{expected}");
+                let frame = serde_json::to_vec(&serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "resources/read",
+                    "params": {"uri": uri, "_meta": {"progressToken": "keep-me"}},
+                }))
+                .unwrap();
+                for target in [
+                    crate::mcp::McpTarget::of_http_request(&frame),
+                    crate::mcp::McpTarget::of_stdio_request(&frame),
+                ] {
+                    assert_eq!(
+                        target.unwrap().unwrap().uri(),
+                        Some(expected.as_str()),
+                        "policy input for {uri}"
+                    );
+                }
+                let forwarded = canonicalize_frame_uri(&frame).unwrap_or(frame);
+                let parsed: Value = serde_json::from_slice(&forwarded).unwrap();
+                assert_eq!(
+                    parsed,
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "resources/read",
+                        "params": {"uri": expected, "_meta": {"progressToken": "keep-me"}},
+                    }),
+                    "the forwarded frame changes only the resource URI for {uri}"
+                );
+            }
+        }
+    }
+
     /// A URL parser gives a space, a control character, and a `\` each a meaning of its own, so
     /// such a URI names one resource to the box and another to the server. It is refused on every
     /// branch, including the one where the authored scheme already reads as `file`.
@@ -806,9 +870,9 @@ mod tests {
         assert!(kept > 1_000, "the https control ran only {kept} times");
     }
 
-    /// A fragment and an empty query give a resource no second identity.
+    /// File delimiters fold, and HTTP queries preserve their resource identity.
     #[test]
-    fn a_fragment_or_an_empty_query_names_no_second_resource() {
+    fn file_delimiters_fold_without_merging_http_queries() {
         let canonical = "file:///home/op/project/.env";
         for uri in [
             "file:///home/op/project/.env",
@@ -827,7 +891,7 @@ mod tests {
             canonicalize_resource_uri("https://h/a?b=1#f"),
             "https://h/a?b=1"
         );
-        assert_eq!(canonicalize_resource_uri("https://h/a?"), "https://h/a");
+        assert_eq!(canonicalize_resource_uri("https://h/a?"), "https://h/a?");
         assert_eq!(canonicalize_resource_uri("https://h/a#"), "https://h/a");
         // An authority with no path still gains its `/` once the delimiters are gone.
         assert_eq!(canonicalize_resource_uri("http://h#f"), "http://h/");

@@ -678,6 +678,14 @@ impl DecisionRecorder {
         }
     }
 
+    pub(crate) fn mcp_unmatched(&self, program: &str, arguments: &[String]) {
+        if let Some(collector) = &self.collector {
+            collector.mcp_unmatched(
+                telemetry::McpUnmatched::new(program, arguments).correlated(self.request_context()),
+            );
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn discarding() -> Arc<Self> {
         Arc::new(Self {

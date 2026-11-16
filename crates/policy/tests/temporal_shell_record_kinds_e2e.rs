@@ -5,41 +5,19 @@
 mod support;
 
 use std::os::unix::fs::PermissionsExt as _;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 
-use policy::{GovernedBox, Policy, Principal, ShellPolicyInterceptor};
 use strands_shell::{Output, Shell};
 
-/// A Shell over `project`, bound directly at `/work`, governed by `source`.
-fn shell_over(project: &Path, source: &str) -> Shell {
-    let policy = support::open_policy(vec![Policy {
-        origin: PathBuf::from("shell-record-kinds.dw"),
-        text: source.to_string(),
-    }])
-    .expect("policy opens");
-    let interceptor = ShellPolicyInterceptor::into_handle(
-        Arc::new(policy),
-        Principal::agent(),
-        GovernedBox::assigned("test-box"),
-    );
-    Shell::builder()
-        .bind_direct(project.display().to_string(), "/work")
-        .effect_interceptor(interceptor)
-        .build()
-        .expect("shell builds")
-}
+use support::shell::{adapter, backend, policy, run, shell_on};
 
-fn run<F, T>(body: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime builds");
-    let local = tokio::task::LocalSet::new();
-    runtime.block_on(local.run_until(body))
+/// A Shell over `project`, served at `/work`, governed by `source`.
+fn shell_over(project: &Path, source: &str) -> Shell {
+    let source_path = project.display().to_string();
+    shell_on(
+        &backend(&[(&source_path, "/work")]),
+        adapter(policy(source), None),
+    )
 }
 
 /// A project directory holding one regular file, `file`.

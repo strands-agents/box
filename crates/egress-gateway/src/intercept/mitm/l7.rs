@@ -11,7 +11,7 @@ use crate::audit::RequestId;
 
 use super::body::ResponseBody;
 use super::connect::{ConnectRequest, parse_authority, same_host};
-use super::{SharedState, http1};
+use super::{BackendDial, SharedState, http1};
 use crate::audit::Decision as AuditDecision;
 use crate::audit::EgressDecision;
 use crate::boundary::{HeaderMap, InterceptedRequest, Target};
@@ -23,20 +23,28 @@ use crate::mcp::{
 };
 
 /// Check the CONNECT binding of a request read in a TLS tunnel, then run [`run_l7_legs`].
+///
+/// When `backend` re-routes the destination, the upstream leg presents the backend host (SNI,
+/// certificate, and `Host`); the client leg's binding is still checked against the original CONNECT
+/// authority, so a workload cannot pivot.
 pub(crate) async fn forward_tls(
     mut parsed: http1::ParsedRequest,
     upstream: TcpStream,
+    backend: Option<&BackendDial>,
     connect: &ConnectRequest,
     state: &SharedState,
     correlation: RequestId,
     completion: &ResponseCompletion,
 ) -> Result<WorkloadResponse> {
-    // Check the upstream's TLS name before any request effect.
-    let server_name =
-        rustls::pki_types::ServerName::try_from(connect.host.clone()).map_err(|_| {
-            ProxyError::UpstreamConnect(format!("invalid upstream host {}", connect.host))
-        })?;
-    let upstream = Upstream::new(upstream, Some(server_name), state, completion);
+    // The upstream leg presents the backend host when a backend re-routes, else the original
+    // destination. A TLS backend terminates a fresh handshake to the backend's own certificate; a
+    // plaintext backend forwards without one. With no backend the client's CONNECT leg is mirrored.
+    // The TLS name is checked before any request effect.
+    let (upstream_host, upstream_tls) = match backend {
+        Some(dial) => (dial.host.as_str(), dial.tls),
+        None => (connect.host.as_str(), true),
+    };
+    let upstream = make_upstream(upstream, upstream_host, upstream_tls, state, completion)?;
     let correlation = correlation.with_headers(&parsed.headers);
     // Pre-leg binding: the inner request must name the CONNECT authority, before any mutation.
     if let Err(error) =
@@ -48,14 +56,20 @@ pub(crate) async fn forward_tls(
         return Ok(deny(state, connect, request, &reason, correlation, refusal));
     }
     let target = std::mem::take(&mut parsed.target);
+    let originally_empty_query = has_empty_query(&target);
     let req = intercepted_request(connect, &target, parsed);
 
     // The post-mutation binding re-check is TLS-only, so it rides in as a closure rather than as a
     // flag inside the shared core.
     run_l7_legs(
         connect,
+        backend,
         req,
+        originally_empty_query,
         upstream,
+        // The workload connection is the CONNECT/TLS tunnel, regardless of the backend scheme.
+        true,
+        upstream_tls,
         state,
         correlation,
         |method, target, headers| validate_request_binding(connect, method, target, headers),
@@ -63,17 +77,56 @@ pub(crate) async fn forward_tls(
     .await
 }
 
+/// Build the upstream leg: a TLS handshake to `host`'s certificate, or a plaintext forward.
+fn make_upstream<'a>(
+    socket: TcpStream,
+    host: &str,
+    tls: bool,
+    state: &SharedState,
+    completion: &'a ResponseCompletion,
+) -> Result<Upstream<'a>> {
+    let server_name = if tls {
+        Some(
+            rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|_| {
+                ProxyError::UpstreamConnect(format!("invalid upstream host {host}"))
+            })?,
+        )
+    } else {
+        None
+    };
+    Ok(Upstream::new(socket, server_name, state, completion))
+}
+
+/// The `Host` authority a re-routed request presents to the backend: `host`, or `host:port` when the
+/// port is not the scheme's default.
+fn backend_host_header(dial: &BackendDial) -> String {
+    let default_port = if dial.tls { 443 } else { 80 };
+    if dial.port == default_port {
+        dial.host.clone()
+    } else {
+        format!("{}:{}", dial.host, dial.port)
+    }
+}
+
 /// Run the request and response legs, and return the response for the workload. `revalidate`
 /// re-checks the CONNECT binding after the credential edit; plain HTTP passes a no-op.
+#[allow(clippy::too_many_arguments)]
 async fn run_l7_legs(
     connect: &ConnectRequest,
+    backend: Option<&BackendDial>,
     mut req: InterceptedRequest,
+    originally_empty_query: bool,
     upstream: Upstream<'_>,
+    // Whether the WORKLOAD connection (agent→box) is TLS, read from the caller — a CONNECT tunnel
+    // (`forward_tls`) is `true`, a plain-HTTP request (`forward_plain`) is `false`. NOT the backend
+    // leg's transport: with a re-route the box→backend leg may differ in scheme, so the plaintext
+    // floor and the judged transport must read the workload side instead.
+    intercepted: bool,
+    upstream_tls: bool,
     state: &SharedState,
     correlation: RequestId,
     revalidate: impl FnOnce(&str, &str, &HeaderMap) -> Result<()>,
 ) -> Result<WorkloadResponse> {
-    let intercepted = upstream.is_tls();
     let correlation = correlation.with_headers(&req.headers);
     let correlation = if state.mcp_server_for(&connect.host).is_some() {
         correlation.with_mcp(&req.body)
@@ -139,12 +192,42 @@ async fn run_l7_legs(
     let allow_reason = req.advisory_note.take().unwrap_or_default();
 
     // Serialize the fully mutated request before claiming its effect permit.
-    let fwd_target = reconstruct_target(&req.target);
+    // The target the upstream receives. A backend may prepend a path prefix, so the agent's
+    // `/zen` leaves as `/github/zen`. This is the box's action: `workload_path` above (what policy
+    // and audit judge) stays the agent's own path, and the credential match already ran on it. An
+    // explicitly empty query is preserved through `originally_empty_query`.
+    let backend_prefix = backend.map(|dial| dial.path_prefix.as_str()).unwrap_or("");
+    // A backend prefix joins in front of the agent path. An encoded path separator (`%2F`, `%5C`)
+    // survives path canonicalization (which only decodes unreserved octets), so if the backend
+    // decodes it AFTER removing dot-segments, `/..%2Fslack/x` → `/github/..%2Fslack/x` could escape
+    // the prefix and reach another target under the same credential, while policy judged the
+    // pre-decode path. Whether a given backend decodes it is backend-specific and unknown, so a
+    // re-route with a prefix fails closed on either encoding rather than risk the escape.
+    if !backend_prefix.is_empty() {
+        let lower = workload_path.to_ascii_lowercase();
+        if lower.contains("%2f") || lower.contains("%5c") {
+            return Ok(refuse(
+                "a re-routed path under a backend prefix may not carry an encoded separator (%2F \
+                 or %5C): the backend could decode it and escape the prefix",
+                WorkloadResponse::refusal(403, b"request path is not a valid address"),
+            ));
+        }
+    }
+    let fwd_target = prefixed_target(backend_prefix, &req.target, originally_empty_query);
     if let Err(error) = revalidate(&method, &fwd_target, &req.headers) {
         return Ok(refuse(
             &error.to_string(),
             WorkloadResponse::refusal(error.http_status(), b"request authority rejected"),
         ));
+    }
+    // A re-route presents the backend host to the backend, AFTER the binding re-check above has
+    // confirmed the workload named the original destination. The `Host` the workload sent is the
+    // original (and stays the authorized, judged, and credential-matched identity); only the byte
+    // that leaves for the backend names the backend, so the backend's own edge routes and validates
+    // on its own name
+    // (docs/design/decisions.md#a-re-routed-request-presents-the-backend-as-its-origin).
+    if let Some(dial) = backend {
+        req.headers.set("Host", backend_host_header(dial));
     }
     // Remote MCP door: if this destination is a configured MCP server, classify the JSON-RPC frame
     // so the `mcp:call` gate can run alongside `http:request`. The `server` is config-assigned (the
@@ -166,24 +249,15 @@ async fn run_l7_legs(
         },
         None => None,
     };
+    // A tool call's reply is read into policy history, so ask for it uncompressed; otherwise the
+    // workload could hide its own reply from history by asking for a compressed one.
+    if mcp_target
+        .as_ref()
+        .is_some_and(|(_, target)| target.method() == "tools/call")
+    {
+        req.headers.set("Accept-Encoding", "identity");
+    }
 
-    let mcp_source = if mcp_target.is_some() {
-        let session = match mcp_request_session(&req.headers) {
-            Ok(session) => session,
-            Err(reason) => {
-                return Ok(refuse(
-                    reason,
-                    WorkloadResponse::refusal(403, b"MCP frame refused"),
-                ));
-            }
-        };
-        Some(McpSource {
-            endpoint: mcp_endpoint(connect, &req.target, &method, intercepted),
-            session,
-        })
-    } else {
-        None
-    };
     let list_request = if mcp_target
         .as_ref()
         .is_some_and(|(_, target)| target.method() == "tools/list")
@@ -214,6 +288,56 @@ async fn run_l7_legs(
             canonicalize_mcp_frame(&req.body).map_or(Cow::Borrowed(&req.body), Cow::Owned)
         }
         _ => Cow::Borrowed(&req.body),
+    };
+    // A re-routed request whose backend `auth` is `aws://` is SigV4-signed here, over the backend
+    // host and the forwarded bytes — AFTER the `Host` rewrite and the phantom strip, so the signature
+    // covers exactly what the backend receives
+    // (docs/design/decisions.md#where-a-re-route-signs-a-backend-auth-of-aws). A backend with no
+    // signing auth produces no edits. The mutations only set headers, so they touch fields disjoint
+    // from the `forwarded_body` borrow of `req.body`.
+    if let Some(dial) = backend {
+        let original = credentials::Destination {
+            host: &connect.host,
+            port: connect.port,
+            path: &workload_path,
+        };
+        match state.controls.backend_signature_mutations(
+            &original,
+            &method,
+            req.headers.iter(),
+            dial,
+            &fwd_target,
+            &forwarded_body,
+        ) {
+            Ok(mutations) => {
+                for mutation in mutations {
+                    mutation.apply(&mut req.headers, &mut req.target);
+                }
+            }
+            Err(reason) => {
+                return Ok(refuse(
+                    &reason,
+                    WorkloadResponse::refusal(403, b"blocked by egress control"),
+                ));
+            }
+        }
+    }
+    let mcp_source = if mcp_target.is_some() {
+        let session = match mcp_request_session(&req.headers) {
+            Ok(session) => session,
+            Err(reason) => {
+                return Ok(refuse(
+                    reason,
+                    WorkloadResponse::refusal(403, b"MCP frame refused"),
+                ));
+            }
+        };
+        Some(McpSource {
+            endpoint: mcp_endpoint(connect, backend, &method, &fwd_target, upstream_tls),
+            session,
+        })
+    } else {
+        None
     };
     let prepared_request =
         http1::write_request(&method, &fwd_target, &req.headers, forwarded_body.len())?;
@@ -248,7 +372,7 @@ async fn run_l7_legs(
         }),
         mcp_source,
     };
-    let request_permit = match claim_effect(state, &request_attempt) {
+    let mut request_permit = match claim_effect(state, &request_attempt) {
         Ok(permit) => permit,
         Err(error) => {
             let mcp_request = state.mcp_server_for(&connect.host).map(|_| &req.body[..]);
@@ -267,6 +391,16 @@ async fn run_l7_legs(
         &allow_reason,
         correlation.clone(),
     );
+    // A tool call's reply goes to the request permit's observer once it has reached the workload.
+    let reply_observer = mcp_target
+        .as_ref()
+        .filter(|(_, target)| target.method() == "tools/call")
+        .and_then(|_| {
+            let request_id = serde_json::from_slice::<serde_json::Value>(&req.body)
+                .ok()
+                .and_then(|request| request.get("id").map(ToString::to_string));
+            request_permit.reply_observer(request_id.as_deref())
+        });
     // The request permit follows the upstream exchange through its terminal response.
     let forwarded_body = match forwarded_body {
         Cow::Owned(body) => body,
@@ -320,6 +454,13 @@ async fn run_l7_legs(
     }
     let mut progress = Some(body.progress());
     let mut body = ResponseBody::streaming(body, controls.redactors);
+    if let Some(observer) = reply_observer {
+        body = body.observed(
+            observer,
+            state.config.response_limits.max_body_bytes,
+            std::sync::Arc::clone(&state.reply_copies),
+        );
+    }
 
     // Lazy remote MCP discovery: on the workload's `tools/list` to a configured MCP server, stage
     // the response catalog into the authority so the server's per-tool actions reach runtime
@@ -372,17 +513,25 @@ async fn run_l7_legs(
     })
 }
 
-/// Run [`run_l7_legs`] for a plain-HTTP request; `origin_target` is its `/path?query`.
+/// Run [`run_l7_legs`] for a plain-HTTP request; `origin_target` is its `/path?query`. When `backend`
+/// re-routes the destination, the upstream leg dials the backend (with TLS when the backend scheme is
+/// `https`), and `run_l7_legs` rewrites `Host` to the backend. `upgraded` marks a request to a host in
+/// [`MitmConfig::upgrade_http`](super::MitmConfig::upgrade_http), whose upstream leg speaks TLS.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_plain(
     upstream: TcpStream,
+    backend: Option<&BackendDial>,
     connect: &ConnectRequest,
     parsed: http1::ParsedRequest,
     origin_target: String,
+    upgraded: bool,
     state: &SharedState,
     correlation: RequestId,
     completion: &ResponseCompletion,
 ) -> Result<WorkloadResponse> {
-    let upstream = Upstream::new(upstream, None, state, completion);
+    let (upstream_host, upstream_tls) = plain_upstream_leg(backend, &connect.host, upgraded);
+    let upstream = make_upstream(upstream, upstream_host, upstream_tls, state, completion)?;
+    let originally_empty_query = has_empty_query(&origin_target);
     let mut req = intercepted_request(connect, &origin_target, parsed);
 
     // Bind the `Host` header to the URL authority the gateway judged. A plain-HTTP request carries its
@@ -391,25 +540,56 @@ pub(crate) async fn forward_plain(
     // CONNECT authority to bind against, so it normalizes instead: rewrite `Host` to the URL host, so
     // the destination the box authorized is the one the upstream routes on (no vhost smuggling).
     //
-    // The port is omitted only for 80 — plain HTTP's sole default. `http://host:443/` keeps `:443`,
-    // because 443 is not the default under the `http` scheme, and a dropped port would make `Host`
-    // name a different authority than the one authorized.
-    let host_value = if connect.port == 80 {
-        connect.host.clone()
-    } else {
-        format!("{}:{}", connect.host, connect.port)
-    };
-    req.headers.set("Host", host_value);
+    req.headers
+        .set("Host", plain_host_header(connect, upgraded));
 
     run_l7_legs(
         connect,
+        backend,
         req,
+        originally_empty_query,
         upstream,
+        // The workload connection is plain HTTP, regardless of the backend scheme.
+        false,
+        upstream_tls,
         state,
         correlation,
         |_method, _target, _headers| Ok(()),
     )
     .await
+}
+
+/// The host a plain-HTTP request's upstream leg presents, and whether that leg speaks TLS. A backend
+/// decides both. Without one, an upgraded request speaks TLS to its own host, checked against the
+/// gateway's upstream roots, and any other request forwards over plaintext.
+fn plain_upstream_leg<'a>(
+    backend: Option<&'a BackendDial>,
+    host: &'a str,
+    upgraded: bool,
+) -> (&'a str, bool) {
+    match backend {
+        Some(dial) => (dial.host.as_str(), dial.tls),
+        None => (host, upgraded),
+    }
+}
+
+/// The `Host` a plain-HTTP request carries upstream: the authority the gateway judged, without the
+/// port when it is the default of the upstream scheme.
+///
+/// Plain HTTP's only default is 80, so `http://host:443/` keeps `:443`: 443 is not the default
+/// under the `http` scheme, and a dropped port would name a different authority than the one
+/// authorized. An upgraded request goes upstream as `https` on 443, so its `Host` is the bare host.
+fn plain_host_header(connect: &ConnectRequest, upgraded: bool) -> String {
+    let default_port = if upgraded {
+        super::connect::HTTPS_PORT
+    } else {
+        super::connect::HTTP_PORT
+    };
+    if connect.port == default_port {
+        connect.host.clone()
+    } else {
+        format!("{}:{}", connect.host, connect.port)
+    }
 }
 
 /// The boundary request for `parsed`, sent to `connect` with the origin-form `target`.
@@ -624,19 +804,22 @@ fn mcp_request_session(headers: &HeaderMap) -> std::result::Result<Option<&str>,
 
 fn mcp_endpoint(
     connect: &ConnectRequest,
-    target: &Target,
+    backend: Option<&BackendDial>,
     method: &str,
-    intercepted: bool,
+    forwarded_target: &str,
+    upstream_tls: bool,
 ) -> [u8; 32] {
+    let (host, port) = backend.map_or((connect.host.as_str(), connect.port), |dial| {
+        (dial.host.as_str(), dial.port)
+    });
     let mut context = ring::digest::Context::new(&ring::digest::SHA256);
     context.update(b"strands-box/mcp-endpoint/v1");
-    context.update(&[u8::from(intercepted)]);
-    context.update(&connect.port.to_be_bytes());
+    context.update(&[u8::from(upstream_tls)]);
+    context.update(&port.to_be_bytes());
     for value in [
         method.as_bytes(),
-        connect.host.as_bytes(),
-        target.path.as_bytes(),
-        target.query.as_bytes(),
+        host.as_bytes(),
+        forwarded_target.as_bytes(),
     ] {
         context.update(&(value.len() as u64).to_be_bytes());
         context.update(value);
@@ -655,12 +838,37 @@ fn split_target(target: &str) -> (String, String) {
     }
 }
 
-/// Reconstruct the origin-form target (`path[?query]`) from a (possibly mutated) [`Target`].
-fn reconstruct_target(target: &Target) -> String {
-    if target.query.is_empty() {
-        target.path.clone()
+/// Keep an explicitly empty query distinct from an absent query before [`split_target`] runs.
+fn has_empty_query(target: &str) -> bool {
+    target
+        .split_once('?')
+        .is_some_and(|(_, query)| query.is_empty())
+}
+
+/// The origin-form target the upstream receives, with a backend path `prefix` prepended. An empty
+/// `prefix` forwards the agent's target unchanged; otherwise `/zen` becomes `/github/zen`. A target
+/// that is not origin-form (the `*` of `OPTIONS *`) takes no prefix, because a prefix only composes
+/// with a path. `originally_empty_query` preserves an explicitly empty query through the rebuild.
+fn prefixed_target(prefix: &str, target: &Target, originally_empty_query: bool) -> String {
+    let origin = reconstruct_target(target, originally_empty_query);
+    if prefix.is_empty() || !origin.starts_with('/') {
+        origin
     } else {
+        format!("{prefix}{origin}")
+    }
+}
+
+/// Reconstruct the origin-form target (`path[?query]`) from a (possibly mutated) [`Target`].
+fn reconstruct_target(target: &Target, originally_empty_query: bool) -> String {
+    if !target.query.is_empty() {
         format!("{}?{}", target.path, target.query)
+    } else if originally_empty_query && !target.path.contains('?') {
+        // Preserve the workload's empty delimiter, including across header or path edits. A path
+        // rewrite can itself supply a query; do not append a second delimiter to that replacement.
+        // Stripping the last parameter from an originally nonempty query still removes its `?`.
+        format!("{}?", target.path)
+    } else {
+        target.path.clone()
     }
 }
 
@@ -717,31 +925,38 @@ mod tests {
     #[test]
     fn catalog_endpoint_identity_separates_scheme_authority_path_and_query() {
         let connection = connect("tools.example", 443);
-        let mut target = Target::new("tools.example", 443);
-        target.path = "/mcp".to_string();
-        target.query = "tenant=one".to_string();
-        let identity = mcp_endpoint(&connection, &target, "POST", true);
-        assert_eq!(identity, mcp_endpoint(&connection, &target, "POST", true));
-        assert_ne!(identity, mcp_endpoint(&connection, &target, "POST", false));
-        assert_ne!(identity, mcp_endpoint(&connection, &target, "GET", true));
-        assert_ne!(
+        let target = "/mcp?tenant=one";
+        let identity = mcp_endpoint(&connection, None, "POST", target, true);
+        assert_eq!(
             identity,
-            mcp_endpoint(&connect("other.example", 443), &target, "POST", true)
+            mcp_endpoint(&connection, None, "POST", target, true)
         );
         assert_ne!(
             identity,
-            mcp_endpoint(&connect("tools.example", 8443), &target, "POST", true)
+            mcp_endpoint(&connection, None, "POST", target, false)
         );
-        let mut other = target.clone();
-        other.path = "/other".to_string();
-        assert_ne!(identity, mcp_endpoint(&connection, &other, "POST", true));
-        other = target.clone();
-        other.query = "tenant=two".to_string();
-        assert_ne!(identity, mcp_endpoint(&connection, &other, "POST", true));
-        other = target.clone();
-        other.path = "/mc".to_string();
-        other.query = "ptenant=one".to_string();
-        assert_ne!(identity, mcp_endpoint(&connection, &other, "POST", true));
+        assert_ne!(
+            identity,
+            mcp_endpoint(&connection, None, "GET", target, true)
+        );
+        assert_ne!(
+            identity,
+            mcp_endpoint(&connect("other.example", 443), None, "POST", target, true)
+        );
+        assert_ne!(
+            identity,
+            mcp_endpoint(&connect("tools.example", 8443), None, "POST", target, true)
+        );
+        for other in ["/other?tenant=one", "/mcp?tenant=two", "/mc?ptenant=one"] {
+            assert_ne!(
+                identity,
+                mcp_endpoint(&connection, None, "POST", other, true)
+            );
+        }
+        assert_ne!(
+            mcp_endpoint(&connection, None, "POST", "/mcp", true),
+            mcp_endpoint(&connection, None, "POST", "/mcp?", true)
+        );
     }
 
     #[test]
@@ -796,6 +1011,115 @@ mod tests {
             ("mcp-session-id".to_string(), "second".to_string()),
         ]);
         assert!(mcp_request_session(&duplicate).is_err());
+    }
+
+    /// An upgraded request speaks TLS to its own host; a backend still decides the leg.
+    #[test]
+    fn an_upgraded_plain_request_speaks_tls_to_its_own_host() {
+        assert_eq!(
+            plain_upstream_leg(None, "static.rust-lang.org", true),
+            ("static.rust-lang.org", true)
+        );
+        assert_eq!(
+            plain_upstream_leg(None, "example.com", false),
+            ("example.com", false),
+            "a request that is not upgraded forwards over plaintext, as before"
+        );
+        let dial = BackendDial {
+            host: "gw.example.com".to_string(),
+            port: 8080,
+            tls: false,
+            path_prefix: String::new(),
+        };
+        assert_eq!(
+            plain_upstream_leg(Some(&dial), "static.rust-lang.org", true),
+            ("gw.example.com", false),
+            "a backend of the upgraded destination decides the leg, as for a CONNECT to it"
+        );
+    }
+
+    /// The plain-HTTP `Host` omits only the upstream scheme's default port.
+    #[test]
+    fn a_plain_host_header_omits_the_upstream_schemes_default_port() {
+        let to = |port| ConnectRequest {
+            host: "static.rust-lang.org".to_string(),
+            port,
+        };
+        assert_eq!(plain_host_header(&to(80), false), "static.rust-lang.org");
+        assert_eq!(
+            plain_host_header(&to(443), false),
+            "static.rust-lang.org:443",
+            "`http://host:443/` keeps its port, because 443 is not plain HTTP's default"
+        );
+        assert_eq!(
+            plain_host_header(&to(8080), false),
+            "static.rust-lang.org:8080"
+        );
+        assert_eq!(
+            plain_host_header(&to(443), true),
+            "static.rust-lang.org",
+            "an upgraded request goes upstream as https on 443, so its Host is the bare host"
+        );
+    }
+
+    /// A backend path prefix is prepended to the agent's path; an empty prefix forwards unchanged.
+    #[test]
+    fn prefixed_target_prepends_the_backend_prefix() {
+        let mut t = Target::new("api.github.com".to_string(), 443);
+        t.path = "/zen".to_string();
+        assert_eq!(prefixed_target("/github", &t, false), "/github/zen");
+        assert_eq!(prefixed_target("", &t, false), "/zen");
+
+        // The query rides along after the joined path.
+        t.path = "/search".to_string();
+        t.query = "q=rust".to_string();
+        assert_eq!(
+            prefixed_target("/github", &t, false),
+            "/github/search?q=rust"
+        );
+
+        // A root request under a prefix keeps one slash from the agent path.
+        t.path = "/".to_string();
+        t.query = String::new();
+        assert_eq!(prefixed_target("/github", &t, false), "/github/");
+
+        // An `OPTIONS *` asterisk-form target is not origin-form, so a prefix does not compose with
+        // it: forward `*` unchanged rather than the malformed `/github*`.
+        t.path = "*".to_string();
+        t.query = String::new();
+        assert_eq!(prefixed_target("/github", &t, false), "*");
+    }
+
+    /// The backend `Host` header omits the scheme's default port and keeps any other.
+    #[test]
+    fn backend_host_header_omits_the_default_port() {
+        let dial = |host: &str, port, tls| BackendDial {
+            host: host.to_string(),
+            port,
+            tls,
+            path_prefix: String::new(),
+        };
+        assert_eq!(
+            backend_host_header(&dial("gw.example.com", 443, true)),
+            "gw.example.com"
+        );
+        assert_eq!(
+            backend_host_header(&dial("gw.example.com", 8443, true)),
+            "gw.example.com:8443"
+        );
+        assert_eq!(
+            backend_host_header(&dial("gw.example.com", 80, false)),
+            "gw.example.com"
+        );
+        assert_eq!(
+            backend_host_header(&dial("gw.example.com", 8080, false)),
+            "gw.example.com:8080"
+        );
+        // A TLS backend on port 80 is not the default for https, so the port is kept.
+        assert_eq!(
+            backend_host_header(&dial("gw.example.com", 80, true)),
+            "gw.example.com:80"
+        );
     }
 
     /// **A gateway-originated refusal carries the marker.** The client turns the marker into a
@@ -915,10 +1239,63 @@ mod tests {
         target.path = canonicalize_request_path(&path);
         target.query = query;
         assert_eq!(
-            reconstruct_target(&target),
+            reconstruct_target(&target, false),
             "/x?%61=%62",
             "the forwarded target keeps the canonical path and the verbatim query"
         );
+    }
+
+    #[test]
+    fn forwarding_preserves_empty_and_absent_queries_through_request_edits() {
+        use crate::boundary::Mutation;
+
+        let header = || Mutation::SetHeader {
+            name: "Authorization".into(),
+            value: Zeroizing::new("fixture".into()),
+        };
+        let strip = || Mutation::StripQueryParam { name: "key".into() };
+        let add = || Mutation::AddQueryParam {
+            name: "key".into(),
+            value: Zeroizing::new("value".into()),
+        };
+        let rewrite = |path: &str| Mutation::RewritePath {
+            path: Zeroizing::new(path.into()),
+        };
+        for (original, mutations, expected) in [
+            ("/report?", vec![], "/report?"),
+            ("/report", vec![], "/report"),
+            ("/report??", vec![], "/report??"),
+            ("/report?format=text", vec![], "/report?format=text"),
+            ("/report?", vec![header()], "/report?"),
+            ("/report?", vec![strip()], "/report?"),
+            ("/report?key=placeholder", vec![strip()], "/report"),
+            ("/report?", vec![add()], "/report?key=value"),
+            (
+                "/report?key=placeholder",
+                vec![strip(), add()],
+                "/report?key=value",
+            ),
+            ("/report?", vec![rewrite("/replacement")], "/replacement?"),
+            (
+                "/report?",
+                vec![rewrite("/replacement?token")],
+                "/replacement?token",
+            ),
+        ] {
+            let (path, query) = split_target(original);
+            let mut target = Target::new("notes", 443);
+            target.path = path;
+            target.query = query;
+            let mut headers = HeaderMap::default();
+            for mutation in mutations {
+                mutation.apply(&mut headers, &mut target);
+            }
+            assert_eq!(
+                reconstruct_target(&target, has_empty_query(original)),
+                expected,
+                "forwarded target after edits to {original}"
+            );
+        }
     }
 
     fn connect(host: &str, port: u16) -> ConnectRequest {

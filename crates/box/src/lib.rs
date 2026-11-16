@@ -34,10 +34,22 @@ pub struct RunOptions<'a> {
     pub terminal: Option<std::fs::File>,
     /// Called after hardening and signal registration, before workload setup; an error aborts the run.
     pub on_ready: Option<Box<dyn FnOnce() -> std::io::Result<()> + 'a>>,
+    /// The box ID a new box takes; `None` generates one, a configured box refuses any other ID, and a
+    /// malformed ID is refused before `run` uses the process's one attempt.
+    pub box_id: Option<String>,
 }
 
 /// Run the existing Box command with a configuration.
 pub fn run(config: PathBuf, workload: Vec<OsString>, options: RunOptions<'_>) -> ExitCode {
+    if let Some(found) = options.box_id.as_deref()
+        && !record::config::valid_box_identity(found)
+    {
+        let error = error::ConfigError::SuppliedIdentity {
+            found: found.to_string(),
+        };
+        eprintln!("strands-box: error: {error}");
+        return ExitCode::FAILURE;
+    }
     if STARTED.swap(true, Ordering::SeqCst) {
         eprintln!("strands-box: refusing to run: this process already attempted to run a box");
         return ExitCode::FAILURE;
@@ -155,7 +167,9 @@ pub enum GrantRefusal {
     NotAbsolute,
     /// The path, or a directory on the way to it, does not exist.
     Absent,
-    /// The path is a symbolic link.
+    /// The path is a symbolic link that a grant cannot name: a link to a directory, a link outside
+    /// its real folder or inside a credential store, or a link in any list but `read` and
+    /// `read_file`.
     Link,
     /// The path is not the canonical spelling, such as `/etc/hosts` for `/private/etc/hosts` on
     /// macOS, or a spelling with `.` or `..`.
@@ -215,6 +229,34 @@ pub enum EnvRefusal {
     LoadsCode,
     /// The name is `HOME` or `TMPDIR`, and the value is not an absolute path.
     NotAbsolute,
+}
+
+/// The kind of environment variable name a box reserves, or `None` for a name it leaves to the
+/// operator, such as `HOME`, `PATH`, or `NODE_PATH`.
+///
+/// A caller that writes `box.toml` can use it to drop the names Box sets and refuse the names that
+/// load code, without copying Box's lists.
+pub fn reserved_env(name: &str) -> Option<ReservedEnv> {
+    record::config::env::reserved_kind(name)
+}
+
+/// The kind of a name [`reserved_env`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReservedEnv {
+    /// A proxy setting, such as `HTTPS_PROXY` or `NO_PROXY`, that Box sets in a process whose
+    /// egress goes through the gateway. A table with `contain_egress = false` may set it in `env`.
+    GatewayProxy,
+    /// A CA file setting, such as `SSL_CERT_FILE` or `GIT_SSL_CAINFO`, that Box points at the
+    /// gateway's CA in a process whose egress goes through the gateway. A table with
+    /// `contain_egress = false` may set it in `env`, and also needs a `read_file` entry for the file.
+    GatewayCaFile,
+    /// A name Box sets in every process: `PWD`, `USER`, or an `OTEL_EXPORTER_OTLP_` name.
+    SetByBox,
+    /// A name that makes a program load code before its first line, such as `LD_PRELOAD`,
+    /// `DYLD_INSERT_LIBRARIES`, `NODE_OPTIONS`, or a `PYTHON` name. A credential cannot take it.
+    /// A table's `env` refuses only the `LD_` and `DYLD_` names, and may set the others.
+    LoadsCode,
 }
 
 /// Generate policy action and event schemas from a Box configuration.

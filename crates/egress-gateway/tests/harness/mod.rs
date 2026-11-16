@@ -524,7 +524,8 @@ pub fn header_value<'a>(head: &'a str, name: &str) -> Option<&'a str> {
     })
 }
 
-/// A serialized guard that sets the ambient `AWS_*` env for the v1 provider and restores it on drop.
+/// A serialized guard that sets the ambient `AWS_*` env for the default chain's environment provider
+/// and restores it on drop.
 pub struct AwsEnvGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
 }

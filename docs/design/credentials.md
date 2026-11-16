@@ -28,22 +28,22 @@ policy decides it. This page covers what happens to the credential.
 A route names its destinations and one secret. `secret.ref` selects where the secret comes from. The
 scheme determines how Box reads and uses the secret.
 
-| | `env://NAME` | `aws://PROFILE` |
-|---|---|---|
-| The secret comes from | The variable `NAME` in the environment of `box run` | The static access keys of the AWS profile `PROFILE` |
-| Box reads it | Once, at startup | On each request |
-| A process in the box gets | A placeholder in `NAME` | Placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` |
-| The gateway | Swaps the placeholder for the secret | Signs the request with SigV4 |
-| Where the secret goes | A header, HTTP basic auth, or a query parameter | The SigV4 headers |
-| The response | Every copy of the secret is redacted | Not scanned |
-| The usual failure | A request without the placeholder gets a 403 | The host names no AWS service and region |
+| | `env://NAME` | `aws://PROFILE` | `aws://` (no profile) |
+|---|---|---|---|
+| The secret comes from | The variable `NAME` in the environment of `box run` | The AWS profile `PROFILE`, resolved through the SDK (static keys, `credential_process`, assume-role, or web identity) | The AWS SDK default credential provider chain (the host's ambient identity) |
+| Box reads it | Once, at startup | On each request | On each request |
+| A process in the box gets | A placeholder in `NAME` | Placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` | The same placeholder AWS keys |
+| The gateway | Swaps the placeholder for the secret | Signs the request with SigV4 | Signs with SigV4, and warns that it used the ambient identity |
+| Where the secret goes | A header, HTTP basic auth, or a query parameter | The SigV4 headers | The SigV4 headers |
+| The response | Every copy of the secret is redacted | Not scanned | Not scanned |
+| The usual failure | A request without the placeholder gets a 403 | The host names no AWS service and region | The chain resolves no credentials |
 
 An HTTP MCP server, `[mcp.<name>] type = "http"`, takes the same `secret` keys. Its credential uses
 the same route, and everything on this page applies to it as described in [the `[mcp.<name>]`
 table](../user/mcp.md).
 
-Box accepts only these two schemes. A route that names any other scheme is refused when the
-configuration loads. See [a credential the box can't deliver is refused at
+Box accepts only the `env://` and `aws://` schemes. A route that names any other scheme is refused
+when the configuration loads. See [a credential the box can't deliver is refused at
 load](./decisions.md#an-undeliverable-credential-is-refused-at-load).
 
 ## The parts
@@ -91,16 +91,21 @@ names the route.
 3. Box opens one vault for each `env://` variable and one for each signed route. An `env://` vault
    reads the variable and creates one placeholder, shared by every destination that names the
    variable. A signed vault reads nothing yet.
-4. The agent, each tool, and each stdio MCP server get every placeholder in their environments.
+4. The agent, each tool, each stdio MCP server, and the hosted Shell get every placeholder in their
+   environments.
 
 A placeholder starts with the route's `phantom_prefix`, or `strands_box_`, followed by 64 random hex
 characters. `box.toml` calls it a phantom. The workload can read it and learn that a credential
 exists, but cannot use it to authenticate outside Box.
 
-An `aws://` route uses only the named AWS profile. It never falls back to ambient `AWS_*` variables
-and it refuses a profile that uses `credential_process`, because that would make the box's trusted
-process run a program a configuration file names. See [a provider refuses an identity it can't
-honour](./decisions.md#a-provider-refuses-an-identity-it-cannot-honour).
+**An `aws://` route has two forms, both resolved through the AWS SDK.** `aws://PROFILE` pins the
+chain to one named profile; a bare `aws://` resolves the default chain, the host's ambient identity,
+which the box warns about on every request. The decision
+[Both aws:// forms resolve through the AWS SDK and share one risk](./decisions.md#a-bare-aws-resolves-the-default-credential-chain)
+states both forms, the SDK placement, and the writable-`~/.aws` cost.
+
+The box resolves a bare `aws://` chain once at `box run`, so a chain that cannot produce credentials
+fails the start rather than the first request. A named `aws://PROFILE` resolves on each request only.
 
 ## On each request
 
@@ -215,8 +220,18 @@ the host, which must end in `.amazonaws.com` or `.api.aws`, and refuses a host i
 The process gets placeholder AWS keys so that an AWS SDK builds and signs its own request. The
 gateway replaces that signature, so the placeholder keys never reach AWS.
 
-`aws://` uses static keys. The vault resolves the profile's access key and secret key on each
-request.
+**Both forms resolve through the AWS SDK on a dedicated worker thread**, because the chain is async
+and the signing path is synchronous. A bare `aws://` resolves the default chain (the host's ambient
+identity). `aws://PROFILE` resolves only the named profile, through a profile-only provider: it
+reads that profile's static keys, `credential_process`, assume-role, or web identity, never the
+ambient `AWS_*` keys or instance metadata, and a missing profile is refused rather than falling
+through to the ambient identity. The worker owns a current-thread runtime and a refresh
+cache keyed by profile: it serves a cached credential while valid, resolves again near expiry, and
+on a failed refresh serves a still-valid cached one rather than dropping it. Each resolve is bounded
+by a timeout, so a stuck `credential_process` helper cannot wedge the worker. The identity each form
+signs with, the SSO exclusion, and the writable-`~/.aws` cost are stated in
+[the decision](./decisions.md#a-bare-aws-resolves-the-default-credential-chain); the operator view is
+in [the egress guide](../user/egress.md#credential-sources).
 
 <a id="credentials-in-a-leaf-box"></a>
 

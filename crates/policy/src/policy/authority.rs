@@ -20,7 +20,10 @@ use crate::schema::{
     ActionIdentity, GovernedBox, composed_action_schema, mcp_action_namespace, mcp_tool_action,
 };
 use crate::spelling::{Operator, PolicyWarning};
-use crate::{Decision, Outcome, PolicyError, PolicyStagingError, Principal, Request, RequestId};
+use crate::{
+    Decision, Outcome, PendingToolResponse, PolicyError, PolicyStagingError, Principal, Request,
+    RequestId,
+};
 
 #[derive(Debug, Clone)]
 struct CandidatePolicy {
@@ -28,6 +31,8 @@ struct CandidatePolicy {
     expanded_source: String,
     /// The per-tool actions the head names, decoded at parse time.
     head_tools: BTreeSet<(String, String)>,
+    /// Whether every action the head names is a per-tool action.
+    decides_only_tools: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -38,6 +43,10 @@ struct ProposalState {
     schemas: BTreeMap<String, String>,
     ready: BTreeSet<usize>,
     pending: BTreeMap<usize, String>,
+    /// The MCP fragments the previous run installed, by namespace, recovered from the history.
+    previous_schemas: BTreeMap<String, String>,
+    /// The pending rules installed under `previous_schemas`, so that they keep their history.
+    retained: BTreeSet<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +165,8 @@ impl Authority {
             schemas: BTreeMap::new(),
             ready: BTreeSet::new(),
             pending: BTreeMap::new(),
+            previous_schemas: BTreeMap::new(),
+            retained: BTreeSet::new(),
         };
         let complete = proposal.complete_policy_set();
         refuse_input_reads_before_discovery(&complete).map_err(Refused::into_error)?;
@@ -190,8 +201,15 @@ impl Authority {
                     operator,
                     &proposal.ready_positions(),
                 )?;
-                engine
-                    .commit_staged(&subset, effective_schema)
+                // The base is this build's Box actions and tool grammars, so an upgrade never
+                // lends this run a stale built-in declaration.
+                proposal.previous_schemas = composed_action_schema(&proposal.grammar_schemas, &[])
+                    .map(|base| engine.stored_mcp_schemas(&base.source))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect();
+                let retaining = proposal.retaining_install(&engine.stored_statements(), &[]);
+                commit_discovering(&mut engine, retaining, &subset, effective_schema)
                     .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
                 (
                     Readiness::Discovering,
@@ -368,11 +386,21 @@ impl Authority {
                     &proposed.operator,
                     &proposed.ready_positions(),
                 )?;
+                // Read the stored rules under a short lock and validate without it. The proposal
+                // lock is held throughout, so no other commit can change the stored set between.
+                let stored = self
+                    .live
+                    .lock()
+                    .map_err(|_| {
+                        PolicyStagingError::Durable("policy authority lock poisoned".to_string())
+                    })?
+                    .engine
+                    .stored_statements();
+                let retaining = proposed.retaining_install(&stored, &schemas);
                 let mut live = self.live.lock().map_err(|_| {
                     PolicyStagingError::Durable("policy authority lock poisoned".to_string())
                 })?;
-                live.engine
-                    .commit_staged(&subset, subset_schema)
+                commit_discovering(&mut live.engine, retaining, &subset, subset_schema)
                     .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
                 live.pending_tools = pending_typed_tools(&proposed);
                 live.readiness = Readiness::Discovering;
@@ -396,7 +424,7 @@ impl Authority {
     /// for that tool to be declared. `servers_a_pending_rule_waits_for` states which servers reach
     /// the warning.
     pub(super) fn finish_mcp_discovery(&self) -> Result<Vec<String>, PolicyStagingError> {
-        let proposal = self
+        let mut proposal = self
             .proposal
             .lock()
             .map_err(|_| PolicyStagingError::Durable("policy staging lock poisoned".to_string()))?;
@@ -405,6 +433,24 @@ impl Authority {
         })?;
         if live.readiness == Readiness::Ready {
             return Ok(Vec::new());
+        }
+        // A retained rule waited for a schema that never arrived, so it leaves with the
+        // previous run's placeholder schema and the ready subset becomes the final authority.
+        if let Some(proposal) = proposal.as_mut()
+            && !proposal.retained.is_empty()
+        {
+            let ready = proposal.ready_policy_set();
+            let (ready_schema, _) = validate_canonical_policy_set(
+                &ready,
+                &proposal.grammar_schemas,
+                &proposal.schema_sources(),
+                &proposal.operator,
+                &proposal.ready_positions(),
+            )?;
+            live.engine
+                .commit_staged(&ready, ready_schema)
+                .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
+            proposal.retained.clear();
         }
         // The still-pending typed rules have not validated, so the tools they decide are not
         // enforceable. Hold them fail-closed and finish `Ready`.
@@ -512,9 +558,9 @@ impl Authority {
         principal: &Principal,
         request: &Request<'_>,
         identity: &ActionIdentity,
-    ) -> Decision {
+    ) -> (Decision, Option<PendingToolResponse>) {
         let Ok(live) = self.live.lock() else {
-            return Decision::internal_fault();
+            return (Decision::internal_fault(), None);
         };
         Self::refine_tool_call_locked(&live, governed, principal, request, identity)
     }
@@ -528,9 +574,9 @@ impl Authority {
         identity: &ActionIdentity,
         server: &str,
         fragment: &str,
-    ) -> Decision {
+    ) -> (Decision, Option<PendingToolResponse>) {
         let Ok(mut proposal) = self.proposal.lock() else {
-            return Decision::internal_fault();
+            return (Decision::internal_fault(), None);
         };
         let live = if proposal
             .as_ref()
@@ -539,13 +585,13 @@ impl Authority {
         {
             match self.live.lock() {
                 Ok(live) => live,
-                Err(_) => return Decision::internal_fault(),
+                Err(_) => return (Decision::internal_fault(), None),
             }
         } else {
             match self.stage_mcp_schema_locked(&mut proposal, server, fragment) {
                 Ok(StagedAuthority::Accepted(live)) => live,
                 Ok(StagedAuthority::Rejected { .. }) | Err(_) => {
-                    return Decision::internal_fault();
+                    return (Decision::internal_fault(), None);
                 }
             }
         };
@@ -558,27 +604,32 @@ impl Authority {
         principal: &Principal,
         request: &Request<'_>,
         identity: &ActionIdentity,
-    ) -> Decision {
+    ) -> (Decision, Option<PendingToolResponse>) {
         if let ActionIdentity::McpTool { namespace, tool } = identity {
             let key = (namespace.clone(), tool.clone());
             if live.degraded_tools.contains(&key) {
-                return Decision::no_match();
+                return (Decision::no_match(), None);
             }
             if live.readiness == Readiness::Discovering && live.pending_tools.contains(&key) {
-                return Decision::policy_pending();
+                return (Decision::policy_pending(), None);
             }
         }
         let Ok(action) = identity.cedar_uid() else {
-            return Decision::internal_fault();
+            return (Decision::internal_fault(), None);
         };
-        let decision = if live.engine.declares_tool_action(&action) {
-            live.engine
-                .decide(governed, principal, ActionRequest::Request(request))
-                .0
+        let (decision, pending) = if live.engine.declares_tool_action(&action) {
+            let (decision, request_id, input) =
+                live.engine
+                    .decide_recording(governed, principal, ActionRequest::Request(request));
+            let pending = request_id.zip(input).map(|(request_id, input)| {
+                live.engine
+                    .pending_tool_response(request_id, identity.clone(), input)
+            });
+            (decision, pending)
         } else {
-            Decision::no_match()
+            (Decision::no_match(), None)
         };
-        match decision {
+        let decision = match decision {
             // No per-tool rule matched: ride the coarse `mcp:call` allow rather than default-denying.
             Decision::Deny {
                 reason: crate::DenyReason::NoMatch,
@@ -590,7 +641,25 @@ impl Authority {
             },
             // An explicit `forbid`, an internal fault, or an allow — enforce as decided.
             other => other,
-        }
+        };
+        // Only a call that goes on to the server owes a response.
+        let pending = pending.filter(|_| decision.is_allow());
+        (decision, pending)
+    }
+
+    /// Records the `::response` that one allowed per-tool `tools/call` owes.
+    pub(super) fn record_tool_response(
+        &self,
+        response: PendingToolResponse,
+        reply: crate::McpReply,
+        structured: Option<&serde_json::Value>,
+    ) -> Result<(), PolicyError> {
+        let live = self
+            .live
+            .lock()
+            .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?;
+        live.engine
+            .observe_tool_response(response, reply, structured)
     }
 
     #[cfg(test)]
@@ -796,7 +865,83 @@ impl ProposalState {
         RuleRef::new(ordinal, id)
     }
 
+    /// The policy set and schema that keep each stored pending rule the previous run's schemas validate.
+    fn retaining_install(
+        &mut self,
+        stored: &[String],
+        staged_schemas: &[String],
+    ) -> Option<(Vec<String>, crate::schema::ActionSchema)> {
+        self.retained.clear();
+        let staged: BTreeSet<String> = self
+            .schemas
+            .keys()
+            .map(|server| mcp_action_namespace(server))
+            .collect();
+        let mut schemas = staged_schemas.to_vec();
+        schemas.extend(
+            self.previous_schemas
+                .iter()
+                .filter(|(namespace, _)| !staged.contains(*namespace))
+                .map(|(_, fragment)| fragment.clone()),
+        );
+        if schemas.len() == staged_schemas.len() {
+            return None;
+        }
+        let eligible: Vec<usize> = self
+            .pending
+            .keys()
+            .copied()
+            .filter(|ordinal| {
+                self.candidates.get(*ordinal).is_some_and(|candidate| {
+                    candidate.decides_only_tools && stored.contains(&candidate.expanded_source)
+                })
+            })
+            .collect();
+        for ordinal in eligible {
+            self.retained.insert(ordinal);
+            if self.check_installed(&schemas).is_err() {
+                self.retained.remove(&ordinal);
+            }
+        }
+        if self.retained.is_empty() {
+            return None;
+        }
+        match self.check_installed(&schemas) {
+            Ok(schema) => Some((self.installed_policy_set(), schema)),
+            Err(()) => {
+                self.retained.clear();
+                None
+            }
+        }
+    }
+
+    /// The ready rules and the retained rules, in authored order.
+    fn installed_policy_set(&self) -> Vec<String> {
+        self.candidates
+            .iter()
+            .filter(|candidate| {
+                self.ready.contains(&candidate.ordinal)
+                    || self.retained.contains(&candidate.ordinal)
+            })
+            .map(|candidate| candidate.expanded_source.clone())
+            .collect()
+    }
+
+    fn check_installed(&self, schemas: &[String]) -> Result<crate::schema::ActionSchema, ()> {
+        let positions: Vec<usize> = self.ready.union(&self.retained).copied().collect();
+        check_canonical_policy_set(
+            &self.installed_policy_set(),
+            &self.grammar_schemas,
+            schemas,
+            &self.operator,
+            &positions,
+        )
+        .map(|(schema, _)| schema)
+        .map_err(drop)
+    }
+
     fn mark_all_ready(&mut self) {
+        self.retained.clear();
         self.ready = self
             .candidates
             .iter()
@@ -817,6 +962,21 @@ impl ProposalState {
     }
 }
 
+/// Install the ready `subset` while discovery is pending, or `retaining`, which also keeps rules.
+fn commit_discovering(
+    engine: &mut DogwoodEngine,
+    retaining: Option<(Vec<String>, crate::schema::ActionSchema)>,
+    subset: &[String],
+    served_schema: crate::schema::ActionSchema,
+) -> Result<(), DurableError> {
+    match retaining {
+        Some((policies, installed)) => {
+            engine.commit_staged_under(&policies, &installed.source, served_schema)
+        }
+        None => engine.commit_staged(subset, served_schema),
+    }
+}
+
 /// Parse and macro-expand an authored bundle into one candidate per rule.
 fn candidates(source: &str) -> Result<Vec<CandidatePolicy>, Refused> {
     Ok(expand_policy_source(source)?
@@ -826,6 +986,7 @@ fn candidates(source: &str) -> Result<Vec<CandidatePolicy>, Refused> {
             ordinal,
             expanded_source: policy.source,
             head_tools: policy.head_tools,
+            decides_only_tools: policy.decides_only_tools,
         })
         .collect())
 }
@@ -1117,6 +1278,8 @@ pub(super) fn check_staged(
         schemas: BTreeMap::new(),
         ready: BTreeSet::new(),
         pending: BTreeMap::new(),
+        previous_schemas: BTreeMap::new(),
+        retained: BTreeSet::new(),
     };
     let unlocated = |findings: Vec<Finding>| -> Vec<Finding> {
         findings.into_iter().map(Finding::without_span).collect()
@@ -1301,14 +1464,16 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
             uri: None,
             arguments: Some(arguments),
         };
-        authority.refine_tool_call_with_schema(
-            &governed(),
-            &Principal::agent(),
-            &request,
-            &crate::schema::ActionIdentity::mcp_tool("alpha", "read"),
-            "alpha",
-            fragment,
-        )
+        authority
+            .refine_tool_call_with_schema(
+                &governed(),
+                &Principal::agent(),
+                &request,
+                &crate::schema::ActionIdentity::mcp_tool("alpha", "read"),
+                "alpha",
+                fragment,
+            )
+            .0
     }
 
     #[test]

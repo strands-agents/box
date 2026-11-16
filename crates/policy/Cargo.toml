@@ -15,7 +15,7 @@ path = "src/lib.rs"
 # judge holds every host literal to the gateway's own `normalize_host` and
 # `is_bindable_host`; this feature adds only the adapter.
 egress-adapter = []
-shell-adapter = ["dep:async-trait", "dep:strands-shell"]
+shell-adapter = ["dep:async-trait", "dep:box-shell"]
 # The Monty adapter answers the interpreter's OS-call suspensions. Synchronous and
 # socket-free, so it needs no async runtime — unlike the Shell adapter, whose
 # `EffectInterceptor` is an async trait.
@@ -50,7 +50,7 @@ toml = "1"
 # `egress-adapter` target. `default-features = false` drops egress-gateway's TLS
 # stack; neither the rule nor the adapter contract needs a socket.
 strands-box-egress-gateway = { path = "../egress-gateway", default-features = false }
-strands-shell = { path = "../shell", optional = true }
+box-shell = { package = "strands-box-shell", path = "../shell", optional = true }
 # The Monty adapter targets, behind the default-off `script-adapter` feature. Published
 # crates, not vendored: the integration needs no interpreter change, so there is nothing
 # to carry a fork for. `monty` drives the run loop; `monty-types` carries the OS-call
@@ -59,6 +59,8 @@ monty = { version = "1.0.0", optional = true }
 monty-types = { version = "1.0.0", optional = true }
 
 [dev-dependencies]
+# The Shell the `fs:*` end-to-end tests drive over `box-shell`'s kernel.
+strands-shell = { git = "https://github.com/strands-agents/shell", rev = "20c642b0634e9f1a752fa884d9b21d0aadf40b33", default-features = false }
 tokio = { version = "1", features = ["macros", "rt"] }
 dogwood-local-engine = { version = "=1.0.0", features = ["fault-injection"] }
 # Real directories for the script end-to-end tests: a rule that guards a path is only

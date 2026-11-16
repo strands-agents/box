@@ -21,6 +21,13 @@ pub(crate) struct GrammarTable(toml::Table);
 
 impl Eq for GrammarTable {}
 
+impl GrammarTable {
+    /// The `program` this table names, when it names one as a string.
+    pub(crate) fn program(&self) -> Option<&str> {
+        self.0.get("program").and_then(toml::Value::as_str)
+    }
+}
+
 /// The name a `[tool]` command runs its program by: the last component of `command` element 0.
 pub(crate) fn called_name(spec: &ProcessSpec) -> &str {
     let program = spec.program();
@@ -30,8 +37,22 @@ pub(crate) fn called_name(spec: &ProcessSpec) -> &str {
         .unwrap_or(program)
 }
 
+/// The name a `[tool]` binds its program file under: its grammar's `program`, or the
+/// [`called_name`] of a tool that has no grammar.
+pub(crate) fn bound_name(spec: &ProcessSpec) -> Option<&str> {
+    match &spec.grammar {
+        Some(grammar) => grammar.program(),
+        None => Some(called_name(spec)),
+    }
+}
+
+/// The key path of the grammar table under `[tool.<label>]`.
+pub(crate) fn grammar_key(label: &str) -> String {
+    format!("tool.{}.grammar", key_segment(label))
+}
+
 /// The grammar of each `[tool.<label>]` in `tools`, checked, with no two that share a name or a
-/// program. A grammar whose `program` is not the name its own `[tool]` runs is refused.
+/// program.
 pub(crate) fn tool_grammars(
     tools: &BTreeMap<String, ProcessSpec>,
 ) -> Result<ToolGrammars, ConfigError> {
@@ -40,22 +61,8 @@ pub(crate) fn tool_grammars(
         let Some(GrammarTable(table)) = &spec.grammar else {
             continue;
         };
-        let table_key = format!("tool.{}.grammar", key_segment(label));
-        let grammar = ToolGrammar::from_table(table.clone(), &table_key)
+        let grammar = ToolGrammar::from_table(table.clone(), &grammar_key(label))
             .map_err(|source| ConfigError::ToolGrammar { source })?;
-        let called = called_name(spec);
-        if grammar.program() != called {
-            return Err(ConfigError::Process {
-                table: format!("[tool.{label}]"),
-                reason: format!(
-                    "`{table_key}.program` is {:?}, but `command` runs {called:?}; a grammar \
-                     reads only the program its own tool runs, so set `program = {called:?}` or \
-                     move the grammar to the tool that runs {:?}",
-                    grammar.program(),
-                    grammar.program(),
-                ),
-            });
-        }
         grammars.push(grammar);
     }
     ToolGrammars::new(grammars).map_err(|source| ConfigError::ToolGrammar { source })
@@ -126,15 +133,15 @@ usage = "git push [<remote>]"
     }
 
     #[test]
-    fn a_grammar_whose_program_is_not_its_tools_called_name_is_refused() {
-        let error = tool_grammars(&tools(&[("gh", tool("gh", Some(GIT)))]))
-            .expect_err("the grammar cannot read gh");
+    fn a_grammar_whose_program_is_not_the_last_component_of_its_command_loads() {
+        let spec = tool("/usr/lib/node_modules/git/bin/git-cli.js", Some(GIT));
 
+        tool_grammars(&tools(&[("git", spec.clone())])).expect("the grammar loads");
+        assert_eq!(bound_name(&spec), Some("git"));
         assert_eq!(
-            error.to_string(),
-            "invalid `[tool.gh]` table: `tool.gh.grammar.program` is \"git\", but `command` runs \
-             \"gh\"; a grammar reads only the program its own tool runs, so set `program = \"gh\"` \
-             or move the grammar to the tool that runs \"git\""
+            bound_name(&tool("/usr/bin/git", None)),
+            Some("git"),
+            "a tool with no grammar binds under the name its command runs"
         );
     }
 

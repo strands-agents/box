@@ -34,6 +34,11 @@ fn main() {
     }
     #[cfg(target_os = "linux")]
     if std::env::args().any(|argument| argument == "--linux-startup") {
+        let admitted = !cfg!(target_arch = "x86_64")
+            || std::env::var_os("EXPERIMENTAL_X86_SUPPORT").as_deref()
+                == Some(std::ffi::OsStr::new("TRUE"));
+        // SAFETY: this isolated probe holds no Box credentials or workload.
+        assert_eq!(unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0) }, 0);
         let mut called = false;
         assert_eq!(
             strands_box::run(
@@ -49,7 +54,16 @@ fn main() {
             ),
             std::process::ExitCode::FAILURE
         );
-        assert!(called, "startup must reach the callback without an opt-in");
+        assert_eq!(
+            called, admitted,
+            "only admitted startup reaches the callback"
+        );
+        // SAFETY: PR_GET_DUMPABLE reads this isolated process's current setting.
+        assert_eq!(
+            unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0) },
+            i32::from(!admitted),
+            "platform refusal precedes hardening"
+        );
         assert_eq!(
             strands_box::generate_policy_schema(
                 "/missing-linux-schema.toml".into(),
@@ -58,6 +72,43 @@ fn main() {
             std::process::ExitCode::FAILURE
         );
         return;
+    }
+    if let [_, mode, config, malformed, valid] = std::env::args().collect::<Vec<_>>().as_slice()
+        && mode == "--box-id-retry"
+    {
+        let attempt = |box_id: &str| {
+            strands_box::run(
+                config.into(),
+                Vec::new(),
+                strands_box::RunOptions {
+                    box_id: Some(box_id.to_string()),
+                    ..Default::default()
+                },
+            )
+        };
+        assert_eq!(attempt(malformed), std::process::ExitCode::FAILURE);
+        std::process::exit(if attempt(valid) == std::process::ExitCode::SUCCESS {
+            0
+        } else {
+            1
+        });
+    }
+    if let [_, mode, config, rest @ ..] = std::env::args().collect::<Vec<_>>().as_slice()
+        && mode == "--box-id"
+    {
+        let code = strands_box::run(
+            config.into(),
+            Vec::new(),
+            strands_box::RunOptions {
+                box_id: rest.first().cloned(),
+                ..Default::default()
+            },
+        );
+        std::process::exit(if code == std::process::ExitCode::SUCCESS {
+            0
+        } else {
+            1
+        });
     }
     if std::env::args().any(|argument| argument == "--probe") {
         hardening_and_repeat_run();
@@ -97,6 +148,7 @@ fn main() {
     let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
         .arg("--probe")
         .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
+        .env("EXPERIMENTAL_X86_SUPPORT", "TRUE")
         .output()
         .expect("run the library probe");
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -111,6 +163,7 @@ fn main() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("--callback-error")
         .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
+        .env("EXPERIMENTAL_X86_SUPPORT", "TRUE")
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -124,6 +177,7 @@ fn main() {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .arg("--callback-config")
         .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
+        .env("EXPERIMENTAL_X86_SUPPORT", "TRUE")
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -139,7 +193,8 @@ fn main() {
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
         command
             .arg("--linux-startup")
-            .env_remove("EXPERIMENTAL_LINUX_SUPPORT");
+            .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
+            .env("EXPERIMENTAL_X86_SUPPORT", "TRUE");
         if let Some(value) = value {
             command.env("EXPERIMENTAL_LINUX_SUPPORT", value);
         }
@@ -150,7 +205,169 @@ fn main() {
         assert!(stderr.contains("missing-linux-schema.toml"), "{stderr}");
         assert!(!stderr.contains("EXPERIMENTAL_LINUX_SUPPORT"), "{stderr}");
     }
+    #[cfg(target_os = "linux")]
+    x86_startup_matrix();
+    #[cfg(target_os = "macos")]
+    a_supplied_box_id_names_the_box_and_its_telemetry();
     reload_tests::suite();
+}
+
+/// **A caller-supplied box ID names a new box, its record, and its telemetry, and a configured box
+/// refuses any other ID.**
+#[cfg(target_os = "macos")]
+fn a_supplied_box_id_names_the_box_and_its_telemetry() {
+    let parent = tempfile::Builder::new()
+        .prefix("bid")
+        .tempdir_in("/tmp")
+        .expect("short box parent");
+    let parent = parent.path().canonicalize().expect("canonical box parent");
+    let workspace = parent.join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    let config_for = |folder: &str| {
+        let config = parent.join(format!("{folder}.toml"));
+        std::fs::write(
+            &config,
+            format!(
+                "name = \"probe\"\nbox_dir = {:?}\n\n[agent]\ncommand = [\"/usr/bin/true\"]\n\
+                 workspace = {:?}\nenv = {{ PATH = \"/usr/bin:/bin\" }}\n",
+                parent.join(folder).display().to_string(),
+                workspace.display().to_string(),
+            ),
+        )
+        .expect("box configuration");
+        config
+    };
+    let host = parent.join("bin");
+    std::fs::create_dir(&host).expect("host directory");
+    std::fs::copy(std::env::current_exe().unwrap(), host.join("host")).expect("host program");
+    let built = std::path::Path::new(env!("CARGO_BIN_EXE_strands-box"))
+        .parent()
+        .expect("build directory");
+    for helper in ["strands-box-sock-alias", "strands-box-contain-trampoline"] {
+        std::fs::copy(built.join(helper), host.join(helper)).expect("helper beside the host");
+    }
+    let run = |config: &std::path::Path, box_id: Option<&str>| {
+        let mut command = std::process::Command::new(host.join("host"));
+        command
+            .arg("--box-id")
+            .arg(config)
+            .args(box_id)
+            .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
+            .env("EXPERIMENTAL_X86_SUPPORT", "TRUE");
+        let output = command.output().expect("run the box ID probe");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+        )
+    };
+    let stored = |folder: &str| {
+        let record = std::fs::read_to_string(parent.join(folder).join("private/box.toml"))
+            .expect("stored record");
+        record
+            .lines()
+            .find_map(|line| line.strip_prefix("box_id = "))
+            .map(|value| value.trim_matches('"').to_string())
+            .expect("stored box_id")
+    };
+
+    let supplied = "claude-code-wit-3f9a1c0e7b2d4a6f";
+    let config = config_for(supplied);
+    let (ok, stderr) = run(&config, Some(supplied));
+    assert!(ok, "{stderr}");
+    assert!(
+        stderr.contains(&format!("strands-box: box {supplied} created")),
+        "{stderr}"
+    );
+    assert_eq!(stored(supplied), supplied);
+    let records = std::fs::read_to_string(
+        parent
+            .join(supplied)
+            .join("private/telemetry/records.jsonl"),
+    )
+    .expect("default telemetry records");
+    assert!(
+        records.contains(&format!(
+            "{{\"key\":\"strands.box.name\",\"value\":{{\"stringValue\":\"{supplied}\"}}}}"
+        )),
+        "{records}"
+    );
+
+    let (ok, stderr) = run(&config, Some(supplied));
+    assert!(ok, "the same ID reopens its box: {stderr}");
+    let (ok, stderr) = run(&config, Some("claude-code-wit-0000000000000000"));
+    assert!(!ok, "another ID must be refused");
+    assert!(stderr.contains("does not match this box"), "{stderr}");
+    assert_eq!(stored(supplied), supplied);
+
+    let retried = "claude-code-wit-aaaaaaaaaaaaaaaa";
+    let retry_config = config_for(retried);
+    let output = std::process::Command::new(host.join("host"))
+        .arg("--box-id-retry")
+        .arg(&retry_config)
+        .arg("claude-code-wit-AAAAAAAAAAAAAAAA")
+        .arg(retried)
+        .env_remove("EXPERIMENTAL_LINUX_SUPPORT")
+        .env("EXPERIMENTAL_X86_SUPPORT", "TRUE")
+        .output()
+        .expect("run the box ID retry probe");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "a malformed ID must leave the run attempt for a corrected one: {stderr}"
+    );
+    assert!(stderr.contains("is invalid"), "{stderr}");
+    assert!(!stderr.contains("already attempted"), "{stderr}");
+    assert_eq!(stored(retried), retried);
+
+    let generated_config = config_for("generated");
+    let (ok, stderr) = run(&generated_config, None);
+    assert!(ok, "{stderr}");
+    let generated = stored("generated");
+    assert!(
+        generated.starts_with("box-") && generated.len() == "box-".len() + 16,
+        "{generated}"
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn x86_startup_matrix() {
+    use std::ffi::{OsStr, OsString};
+    use std::os::unix::ffi::OsStringExt;
+
+    for value in [
+        None,
+        Some(OsString::from("")),
+        Some(OsString::from("TRUE")),
+        Some(OsString::from("true")),
+        Some(OsString::from("1")),
+        Some(OsString::from("FALSE")),
+        Some(OsString::from(" TRUE")),
+        Some(OsString::from("TRUE ")),
+        Some(OsString::from_vec(vec![0xff])),
+    ] {
+        let admitted =
+            !cfg!(target_arch = "x86_64") || value.as_deref() == Some(OsStr::new("TRUE"));
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("--linux-startup")
+            .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE")
+            .env_remove("EXPERIMENTAL_X86_SUPPORT");
+        if let Some(value) = value {
+            command.env("EXPERIMENTAL_X86_SUPPORT", value);
+        }
+        let output = command.output().expect("run the platform startup probe");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        if admitted {
+            assert!(stderr.contains("missing-linux-library.toml"), "{stderr}");
+            assert!(stderr.contains("missing-linux-schema.toml"), "{stderr}");
+            assert!(!stderr.contains("EXPERIMENTAL_X86_SUPPORT"), "{stderr}");
+        } else {
+            let refusal = "strands-box: refusing to run: x86 support on Linux is experimental. Set EXPERIMENTAL_X86_SUPPORT=TRUE to enable it.";
+            assert_eq!(stderr.lines().collect::<Vec<_>>(), [refusal, refusal]);
+        }
+        assert!(!stderr.contains("EXPERIMENTAL_LINUX_SUPPORT"), "{stderr}");
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -382,7 +599,8 @@ mod reload_tests {
             .arg(configured.config())
             .arg(configured.box_home())
             .env("HOME", configured.operator_home())
-            .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE");
+            .env("EXPERIMENTAL_LINUX_SUPPORT", "TRUE")
+            .env("EXPERIMENTAL_X86_SUPPORT", "TRUE");
         let output = bounded_output::bounded_output(command);
         assert!(
             output.status.success(),

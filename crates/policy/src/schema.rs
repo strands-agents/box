@@ -24,6 +24,7 @@ pub(crate) struct ActionSchema {
     pub(crate) source: String,
     pub(crate) cedar: Schema,
     pub(crate) tool_actions: HashSet<EntityUid>,
+    pub(crate) tool_inputs: crate::mcp_input::ToolInputs,
 }
 
 /// Compose the canonical schema with ordered MCP schema fragments.
@@ -61,11 +62,13 @@ pub(crate) fn composed_action_schema(
                 && action.type_name().to_string() != FIXED_ACTION_TYPE
         })
         .cloned()
-        .collect();
+        .collect::<HashSet<_>>();
+    let tool_inputs = crate::mcp_input::ToolInputs::new(&source, &tool_actions);
     Ok(ActionSchema {
         source,
         cedar,
         tool_actions,
+        tool_inputs,
     })
 }
 
@@ -286,6 +289,10 @@ pub(crate) mod attr {
     /// `output.status` — the upstream's reply status on an `http:request` response event, and
     /// the exit status on a `shell:exec` or `shell:spawn` response event.
     pub(crate) const STATUS: &str = "status";
+    /// `context.output.reply` — how an MCP tool call ended.
+    pub(crate) const REPLY: &str = "reply";
+    /// A tool's declared `structuredContent`, on its own `::response`.
+    pub(crate) const STRUCTURED: &str = "structured";
     /// `context.input.body_bytes` — HTTP body length (`http:request`).
     pub(crate) const BODY_BYTES: &str = "body_bytes";
     /// `context.input.intercepted` — whether HTTP was seen through TLS interception.

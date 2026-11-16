@@ -10,7 +10,7 @@ use serde_json::Value;
 use crate::PolicyError;
 use crate::check::{Refused, RuleRef};
 use crate::schema::action::FS_OTHER;
-use crate::schema::attr::{HOST, IP4, IP6, PATH, PROGRAM, PROGRAM_PATH, REMOVED_IP};
+use crate::schema::attr::{CWD, HOST, IP4, IP6, PATH, PROGRAM, PROGRAM_PATH, REMOVED_IP};
 
 const BOX_ACTION_TYPE: &str = "Box::Action";
 
@@ -375,9 +375,11 @@ impl Scope {
 
     fn checks(self, attribute: &str) -> Option<Checks> {
         match (self, attribute) {
-            (Self::Filesystem, PATH) | (Self::Shell, PROGRAM | PROGRAM_PATH) => Some(Checks {
-                trailing_slash: true,
-            }),
+            (Self::Filesystem, PATH) | (Self::Shell, PROGRAM | PROGRAM_PATH | CWD) => {
+                Some(Checks {
+                    trailing_slash: true,
+                })
+            }
             (Self::Network, HOST | IP4 | IP6) => Some(Checks {
                 trailing_slash: false,
             }),
@@ -889,12 +891,11 @@ fn collect(node: &Value, out: &mut Vec<(String, Comparison)>) {
     }
 }
 
-/// `path`, `program_path`, `program`, `host`, `ip4`, or `ip6` when `node` is
-/// `context.input.<that>`.
+/// The checked attribute when `node` reads a path, program, host, or address under `context.input`.
 fn input_attribute(node: &Value) -> Option<String> {
     let access = node.get(".")?;
     let attribute = access.get("attr")?.as_str()?;
-    if ![PATH, PROGRAM_PATH, PROGRAM, HOST, IP4, IP6].contains(&attribute) {
+    if ![PATH, PROGRAM_PATH, PROGRAM, CWD, HOST, IP4, IP6].contains(&attribute) {
         return None;
     }
     is_context_input(access.get("left")?).then(|| attribute.to_string())

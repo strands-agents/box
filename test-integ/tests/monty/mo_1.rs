@@ -1,10 +1,11 @@
 use strands_det_harness::det_case;
 
-// The direct alias: the workload execs `python3 -c '…'`, which forwards the source to the box's
-// interpreter, Monty (docs/design/decisions.md#interpreters-are-brokered-aliases,
+// The alias: the workload execs `python3 -c '…'`, which forwards its arguments to the Shell's
+// `python3`, which runs the box's interpreter, Monty
+// (docs/design/decisions.md#interpreters-are-brokered-aliases,
 // docs/design/decisions.md#python-in-the-shell-is-monty), and the computed value returns. The
 // identity control pins the interpreter is Monty (not host CPython) first; `run_py` then drives the
-// direct `python3` alias (not the Shell path — that is MO-2 / SH-SCR-PY). Measured green on macOS
+// `python3` alias (a command typed in the Shell is MO-2 / SH-SCR-PY). Measured green on macOS
 // 2026-09-22 (cargo test --test monty): python3 identified as Monty, `42`.
 det_case! {
     name: mo_1,

@@ -32,8 +32,19 @@ agent's sandbox, under the agent's own filesystem grants, and sends its text. Po
 text, never the file name. A tool's sandbox gets no alias and can't connect to the broker, so a
 `bash` that a tool runs is the host OS's `bash`, inside that tool's sandbox.
 
-The alias sends one command and closes. Interpreter state does not persist between requests, so a
-variable exported in one `zsh -c` is unset in the next.
+The alias sends one command, with the directory it was run from, and closes. The `python3` and
+`python` aliases are the alias too: each sends its name and its arguments as a list, and the broker
+quotes each argument as one literal word before the Shell parses the command. Interpreter state does
+not persist between requests, so a variable exported in one `zsh -c` is unset in the next.
+
+The Shell starts each command in the workspace. When the alias sends another directory, the broker
+moves the Shell there through the same `fs:read` decision, with operation `change_dir`, that a `cd`
+gets. The broker also refuses a directory outside the operator's home, the agent's home, and the
+workspace, both as the alias spelled it and as the Shell resolved it. The Shell holds `/`, `/tmp`,
+and a few other directories only in memory, so a command run in one of them would read and write
+nothing on the host. If policy refuses, the directory is outside those three, or the path isn't a
+directory, the command doesn't run. The alias doesn't fall back to the workspace: when it can't
+tell which directory it was run from, it refuses to send the command.
 
 ## How the Shell decides a command
 
@@ -153,12 +164,13 @@ every `fs:read` permit to a path. See [where policy sits](./policy.md#where-poli
 
 ### Programs outside the Shell
 
-A program the Shell doesn't implement raises `shell:spawn`. A bare name is looked up on the `PATH`
-of the box's trusted process, which is the `PATH` of the host OS's shell where the operator ran `box
-run`, with `/usr/bin:/bin` as the fallback. A name with a `/` is that path, relative to the Shell's
-working directory. Either way, the Shell resolves every link, and `program_path` is the file that
-will run, and the program gets the agent's spelling as its `argv[0]`. See [a program resolves on the
-operator's `PATH`](decisions.md#a-host-binary-resolves-on-the-operator-path).
+A program the Shell doesn't implement raises `shell:spawn`. A bare name that a `[tool]` answers to,
+the last part of its `command` element 0, runs that tool's file, which Box opened and checked at
+startup. Any other bare name is looked up on the `PATH` of the box's trusted process, which is the
+`PATH` of the host OS's shell where the operator ran `box run`, with `/usr/bin:/bin` as the
+fallback. A name with a `/` is that path, relative to the Shell's working directory. Either way, the Shell resolves every link, and `program_path` is the file that
+will run, and the program gets the agent's spelling as its `argv[0]`. See [a bare name runs its tool's
+file](decisions.md#a-host-binary-resolves-on-the-operator-path).
 
 Use `context.input.program_path` to allow a program by its resolved file, which reads as `~/…` under
 the operator's home, as a path does. `program` and the argument fields work as they do for
@@ -234,7 +246,14 @@ The Shell uses distinct exit statuses so a harness can identify the outcome: `12
 fails the command the way the operation's own error would. The
 [reference](../user/shell.md#exit-statuses) lists each status and its message.
 
-## Execution deadlines
+<a id="execution-deadlines"></a>
+## Execution limits
+
+The stored configuration supplies `max_input` and `max_output` whenever the broker constructs
+Strands Shell, including each new call. Omitted sizes retain the 256 KiB input and 64 KiB output
+defaults; an explicit `0` disables the corresponding Shell size limit. The output limit also bounds
+script files that Shell loads with `source`.
+The broker's framing and streamed-output budgets remain separate.
 
 **Each call uses the operator's execution limit.** The operator sets
 [`limits.shell.timeout`](../user/config.md#limits), keeps the 30-second default, or selects
@@ -255,9 +274,9 @@ same before returning a call result. These checks reject a late result, but neit
 synchronous work nor undo effects already performed.
 
 Monty's 120-second active execution limit and 180-second cumulative sleep limit also apply,
-including with `shell.timeout = false`. A finite Shell allowance can expire first. The direct
-Python aliases retain their separate limits. A broker that stops making progress can leave a
-Shell alias waiting; the alias's wait is not proof that the call has stopped.
+including with `shell.timeout = false`. A finite Shell allowance can expire first. The Python
+aliases reach Monty through the Shell, so the same limits apply to them. A broker that stops making
+progress can leave a Shell alias waiting; the alias's wait is not proof that the call has stopped.
 
 ## Example: find the to-dos and stage them
 

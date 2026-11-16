@@ -1415,22 +1415,44 @@ fn every_network_allow_names_a_granted_target() {
     }
 }
 
-/// Relaxing `require_expressible` to accept `AllowAll` must not accept the postures it still cannot
-/// express. A `Network::Localhost` with an inbound `listen` port has no lowering on this backend, so
-/// the profile must refuse it rather than silently render a boundary that omits the bind — the
-/// macOS backend surfaces the unexpressible posture instead of masking it.
+/// A listen port renders one bind rule and one inbound rule, each on that port at localhost.
 #[test]
-fn a_localhost_listen_port_is_still_rejected() {
+fn a_localhost_listen_port_renders_one_bind_and_one_inbound_rule() {
     let (_directory, config) = fixed_config();
 
-    let with_listen = config
-        .set_network(Network::localhost().connect(43123).listen(8080))
-        .expect("the portable model accepts a listen port");
-    let refusal = generate_seatbelt_profile(&with_listen)
-        .expect_err("a listen port has no lowering on macOS and must be refused");
+    let without = generate_seatbelt_profile(
+        &config
+            .clone()
+            .set_network(Network::localhost().connect(43123))
+            .expect("one connect port"),
+    )
+    .expect("the profile renders");
+    let with = generate_seatbelt_profile(
+        &config
+            .set_network(Network::localhost().connect(43123).listen(8080))
+            .expect("the portable model accepts a listen port"),
+    )
+    .expect("a listen port renders");
+
+    for operation in ["network-bind", "network-inbound"] {
+        assert_eq!(
+            rules(&with).matches(&format!("(allow {operation}")).count(),
+            rules(&without)
+                .matches(&format!("(allow {operation}"))
+                .count()
+                + 1,
+            "a listen port adds one {operation} rule"
+        );
+        assert!(
+            rules(&with).contains(&format!(
+                "(allow {operation}\n    (local tcp \"localhost:8080\"))"
+            )),
+            "the {operation} rule names the listen port: {with}"
+        );
+    }
     assert!(
-        refusal.to_string().contains("localhost ports"),
-        "the refusal must name the unexpressible network posture: {refusal}"
+        !rules(&with).contains("(remote tcp \"localhost:8080\")"),
+        "a listen port grants no outbound connection to itself: {with}"
     );
 }
 
@@ -2746,9 +2768,9 @@ fn a_second_served_port_renders_one_more_localhost_rule_and_nothing_else() {
     );
 }
 
-/// Listen ports and a telemetry port do not compose, and the refusal says which shape failed.
+/// Listen ports render beside the composition's connect ports, and neither list leaks into the other.
 #[test]
-fn listen_ports_are_still_the_only_network_shape_the_profile_refuses() {
+fn listen_ports_render_beside_the_composition_ports() {
     let (directory, _config) = fixed_config();
     let root = directory.path().canonicalize().expect("canonical tempdir");
     let home_directory = root.join("home");
@@ -2772,12 +2794,27 @@ fn listen_ports_are_still_the_only_network_shape_the_profile_refuses() {
         )
         .expect("the portable model accepts listen ports");
 
-    let error = generate_seatbelt_profile(&config).expect_err("the profile cannot bind");
+    let profile = rules(&generate_seatbelt_profile(&config).expect("the profile renders"));
+    for port in [43123, 43124] {
+        assert!(
+            profile.contains(&format!("(remote tcp \"localhost:{port}\")")),
+            "{profile}"
+        );
+        assert!(
+            !profile.contains(&format!("(local tcp \"localhost:{port}\")")),
+            "{profile}"
+        );
+    }
     assert!(
-        error.to_string().contains("network access other than"),
-        "unexpected error: {error}"
+        profile.contains("(local tcp \"localhost:3000\")"),
+        "{profile}"
+    );
+    assert!(
+        !profile.contains("(remote tcp \"localhost:3000\")"),
+        "{profile}"
     );
 }
+
 /// An execute grant whose CALLER spelling sits inside the read-write root carries the warning.
 ///
 /// The check once compared only the resolved target, and this backend renders

@@ -85,6 +85,25 @@ pub(crate) fn parse_absolute_target(target: &str) -> Option<(String, u16, String
     Some((host, port, origin))
 }
 
+/// The port plain HTTP names when its URL names none.
+pub(crate) const HTTP_PORT: u16 = 80;
+
+/// The port an upgraded request is decided and dialed on.
+pub(crate) const HTTPS_PORT: u16 = 443;
+
+/// The destination a plain-HTTP request is decided and sent to, and whether its upstream leg speaks
+/// TLS. A request to port 80 of a host in `upgrade_http` becomes the same host on port 443 over TLS;
+/// every other request keeps its own destination and stays plaintext.
+pub(crate) fn plain_destination(
+    upgrade_http: &[String],
+    host: String,
+    port: u16,
+) -> (ConnectRequest, bool) {
+    let upgraded = port == HTTP_PORT && upgrade_http.iter().any(|listed| same_host(listed, &host));
+    let port = if upgraded { HTTPS_PORT } else { port };
+    (ConnectRequest { host, port }, upgraded)
+}
+
 /// Compare authority hosts without making DNS names case- or trailing-dot-sensitive. The
 /// dot-insensitivity keeps the Host-header-vs-CONNECT binding check (`validate_request_binding`) in
 /// agreement with the normalized `ConnectRequest.host`: a client may spell a trailing-dot FQDN on one
@@ -231,6 +250,52 @@ mod tests {
         );
         // Not an absolute URL: an origin-form target names no destination and is refused.
         assert!(parse_absolute_target("/mcp?foo=bar").is_none());
+    }
+
+    /// Only port 80 of a listed host is upgraded, to 443 over TLS; the list matches as `same_host`.
+    #[test]
+    fn only_port_80_of_a_listed_host_is_upgraded_to_443() {
+        let listed = vec!["static.rust-lang.org".to_string()];
+        let upgraded = |host: &str, port| plain_destination(&listed, host.to_string(), port);
+        let to = |host: &str, port| ConnectRequest {
+            host: host.to_string(),
+            port,
+        };
+
+        assert_eq!(
+            upgraded("static.rust-lang.org", 80),
+            (to("static.rust-lang.org", 443), true)
+        );
+        assert_eq!(
+            upgraded("Static.Rust-Lang.Org.", 80),
+            (to("Static.Rust-Lang.Org.", 443), true),
+            "the list matches without regard to case or a trailing dot"
+        );
+        assert_eq!(
+            upgraded("static.rust-lang.org", 8080),
+            (to("static.rust-lang.org", 8080), false),
+            "another port of a listed host stays plain"
+        );
+        assert_eq!(
+            upgraded("static.rust-lang.org", 443),
+            (to("static.rust-lang.org", 443), false),
+            "an explicit `http://host:443` stays plain, as today"
+        );
+        assert_eq!(
+            upgraded("example.com", 80),
+            (to("example.com", 80), false),
+            "an unlisted host stays plain"
+        );
+        assert_eq!(
+            upgraded("rust-lang.org", 80),
+            (to("rust-lang.org", 80), false),
+            "a parent domain of a listed host is not listed"
+        );
+        assert_eq!(
+            plain_destination(&[], "static.rust-lang.org".to_string(), 80),
+            (to("static.rust-lang.org", 80), false),
+            "an empty list upgrades nothing"
+        );
     }
 
     #[test]

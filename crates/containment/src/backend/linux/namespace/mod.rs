@@ -1,6 +1,7 @@
 //! The Linux namespace launcher backend.
 
 pub(crate) mod authority;
+mod filesystem_queries;
 pub(crate) mod netns;
 pub(crate) mod probe;
 pub(crate) mod reaper;
@@ -91,17 +92,15 @@ impl ContainmentBackend for NamespaceBackend {
         // `AllowAll` is the operator's `contain_egress = false` trust grant: this leaf joins the host
         // network namespace (see `enter_namespaces`) rather than a private, routeless one, so the
         // host's routes are already present and there is nothing to lower here. `Blocked` and
-        // `Localhost` are set up in `apply`. The listen-port refusal below still applies to
-        // `Localhost`; `AllowAll` carries no listen ports.
+        // `Localhost` are set up in `apply`.
 
-        if let Network::Localhost { listen, .. } = config.network()
-            && !listen.is_empty()
+        if let Network::Localhost { connect, listen } = config.network()
+            && let Some(port) = listen.iter().find(|port| connect.contains(port))
         {
-            return Err(unenforceable(
-                "Localhost listen ports: this backend passes one listening \
-                 descriptor into the namespace and has no lowering for an \
-                 inbound bind",
-            ));
+            return Err(unenforceable(&format!(
+                "Localhost listen port {port}: the port is also a connect port, and that port's \
+                 listener already holds it inside the namespace"
+            )));
         }
 
         // Breadth before cell.
@@ -129,7 +128,6 @@ impl ContainmentBackend for NamespaceBackend {
         }
 
         require_no_configured_devices(config)?;
-        require_nonroot_directory_writes(config)?;
 
         crate::grants::require_read_for_writes(
             &config
@@ -160,7 +158,6 @@ impl ContainmentBackend for NamespaceBackend {
         // `ContainmentBackend` contract.
         config.require_live_path_identities()?;
         require_no_configured_devices(config)?;
-        require_nonroot_directory_writes(config)?;
 
         // Build the plan and compile both filters before anything irreversible.
         let view = view::MountView::plan(config)?;
@@ -180,8 +177,9 @@ impl ContainmentBackend for NamespaceBackend {
         // descriptor and that order is the wire contract. A socket's network namespace is fixed
         // when the socket is created, so none of them can be bound anywhere else.
         let mut listeners = Vec::new();
+        let mut connector = None;
         match config.network() {
-            Network::Localhost { connect, .. } => {
+            Network::Localhost { connect, listen } => {
                 // Without a handoff the endpoint would be bound and unreachable: the box could
                 // never accept on it, so every request would hang rather than fail.
                 let handoff = egress_handoff.ok_or_else(|| {
@@ -198,6 +196,16 @@ impl ContainmentBackend for NamespaceBackend {
                     let listener = netns::listen_on_loopback(*port)?;
                     netns::send_descriptor(handoff, &listener)?;
                     listeners.push(listener);
+                }
+                // PID 1 creates each inbound connection's socket in this namespace, on the box's
+                // request, and the box connects it. The workload's copy of the handoff closes at its
+                // `exec`.
+                if !listen.is_empty() {
+                    use std::os::fd::AsRawFd as _;
+                    netns::close_on_exec(handoff.as_raw_fd())?;
+                    connector = Some(reaper::Connector {
+                        handoff: handoff.as_raw_fd(),
+                    });
                 }
             }
             // `Blocked` gets the namespace and no listener, so there is no route.
@@ -216,11 +224,17 @@ impl ContainmentBackend for NamespaceBackend {
             use std::os::fd::AsRawFd as _;
             keep.extend(listeners.iter().map(|listener| listener.as_raw_fd()));
         }
-        establish_pid_namespace_and_reaper(&view, &keep, confirm_fd)?;
+        keep.extend(connector.as_ref().map(|connector| connector.handoff));
+        let filesystem_handoff =
+            establish_pid_namespace_and_reaper(&view, &keep, confirm_fd, connector)?;
 
         // Only the workload process reaches here, in the pivoted view.
         authority::drop_all_capabilities()?;
         authority::set_no_new_privileges()?;
+        filesystem_queries::install(&filters.filesystem_queries, &filesystem_handoff).map_err(
+            |source| apply_failure(format!("installing filesystem query mediation: {source}")),
+        )?;
+        drop(filesystem_handoff);
         install_syscall_filters(&filters)?;
 
         // Every listener belongs to a relay, and each relay lives in the box.
@@ -244,28 +258,6 @@ impl ContainmentBackend for NamespaceBackend {
             details: details.to_string(),
         }
     }
-}
-
-/// Refuse writable host directories when the launcher has a root identity.
-fn require_nonroot_directory_writes(config: &ContainmentConfig) -> Result<(), ContainmentError> {
-    // SAFETY: these calls only read the launcher's identities before namespace entry.
-    let (uid, effective_uid) = unsafe { (libc::getuid(), libc::geteuid()) };
-    if uid != 0 && effective_uid != 0 {
-        return Ok(());
-    }
-    for granted in config.authorizations() {
-        if granted.operation == Operation::Write && granted.scope == Scope::Root {
-            return Err(ContainmentError::UnsupportedCapability {
-                capability: format!(
-                    "root launch cannot grant writes to host directory '{}'; \
-                     run as a non-root account for directory writes, or grant writes to existing files",
-                    granted.original.display()
-                ),
-                backend: MECHANISM.to_string(),
-            });
-        }
-    }
-    Ok(())
 }
 
 fn require_no_configured_devices(config: &ContainmentConfig) -> Result<(), ContainmentError> {
@@ -445,13 +437,57 @@ fn reaper_exit_code(mut wait: impl FnMut(&mut libc::c_int) -> std::io::Result<()
     }
 }
 
+fn close_reaper_descriptors(keep: &[libc::c_int], confirm_fd: Option<libc::c_int>) {
+    if let Err(error) = authority::close_inherited_descriptors(keep) {
+        eprintln!("strands-box: namespace reaper could not close descriptors: {error}");
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
+        // SAFETY: PID 1 exits before the workload starts, terminating the namespace.
+        unsafe { libc::_exit(127) };
+    }
+}
+
+fn protect_reaper_memory(confirm_fd: Option<libc::c_int>) {
+    if let Err(error) = authority::refuse_process_memory_access() {
+        eprintln!(
+            "strands-box: namespace reaper could not refuse process-memory access \
+             ({error:?}); killing the namespace rather than starting a workload \
+             from a reachable PID 1"
+        );
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
+        // SAFETY: PID 1 exiting kills the namespace before any workload starts.
+        unsafe { libc::_exit(127) };
+    }
+}
+
+fn drop_reaper_authority(confirm_fd: Option<libc::c_int>) {
+    let dropped = authority::drop_all_capabilities();
+    let locked = authority::set_no_new_privileges();
+    if dropped.is_err() || locked.is_err() {
+        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
+        eprintln!(
+            "strands-box: namespace reaper could not drop its own authority \
+             ({dropped:?}, {locked:?}); killing the namespace rather than \
+             supervising from a privileged PID 1"
+        );
+        // The workload is already running with the view, but PID 1 would keep capabilities —
+        // the exact escape this closes.
+        unsafe { libc::_exit(127) };
+    }
+}
+
 fn establish_pid_namespace_and_reaper(
     view: &view::MountView,
     keep: &[libc::c_int],
     confirm_fd: Option<std::os::fd::RawFd>,
-) -> Result<(), ContainmentError> {
+    connector: Option<reaper::Connector>,
+) -> Result<std::os::unix::net::UnixStream, ContainmentError> {
+    use std::os::fd::AsRawFd as _;
+    let proc = filesystem_queries::open_proc()
+        .map_err(|source| apply_failure(format!("pinning the launcher process view: {source}")))?;
     let (parent_control, reaper_control) = std::os::unix::net::UnixStream::pair()
         .map_err(|source| apply_failure(format!("creating reaper lifetime channel: {source}")))?;
+    let (query_parent, query_workload) = std::os::unix::net::UnixStream::pair()
+        .map_err(|source| apply_failure(format!("creating filesystem query handoff: {source}")))?;
     // SAFETY: a single syscall with a constant argument. Affects children only.
     if unsafe { libc::unshare(libc::CLONE_NEWPID) } != 0 {
         return Err(apply_failure(format!(
@@ -472,27 +508,43 @@ fn establish_pid_namespace_and_reaper(
 
     if reaper > 0 {
         drop(reaper_control);
+        drop(query_workload);
+        let preserved = [
+            0,
+            1,
+            2,
+            proc.as_raw_fd(),
+            query_parent.as_raw_fd(),
+            parent_control.as_raw_fd(),
+        ];
+        let mut preserved = preserved.to_vec();
+        preserved.extend(confirm_fd);
+        let hardened = authority::close_inherited_descriptors(&preserved)
+            .and_then(|_| authority::retain_workload_memory_access())
+            .and_then(|_| authority::set_no_new_privileges())
+            .and_then(|_| authority::refuse_process_memory_access());
+        if let Err(error) = hardened {
+            eprintln!("strands-box: filesystem query supervisor could not drop authority: {error}");
+            write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
+            // SAFETY: exit closes an incomplete lifetime handshake or triggers the armed parent-death signal.
+            unsafe { libc::_exit(127) };
+        }
         if !reaper::confirm_parent_death(&parent_control) {
             write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
-            // SAFETY: the identifier names this process's unreaped child.
-            unsafe { libc::kill(reaper, libc::SIGKILL) };
+            // SAFETY: exit closes an incomplete lifetime handshake or triggers the armed parent-death signal.
+            unsafe { libc::_exit(127) };
         }
         drop(parent_control);
         close_confirm_descriptor(confirm_fd);
-        // The original caller.
-        let code = reaper_exit_code(|status| {
-            // SAFETY: waiting on this process's own child.
-            if unsafe { libc::waitpid(reaper, status, 0) } != -1 {
-                Ok(())
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        });
+        // The original caller retains only scoped process inspection and the notification channel.
+        let code = filesystem_queries::supervise(reaper, proc, query_parent);
         // SAFETY: exiting the launcher process with the run's status.
         unsafe { libc::_exit(code) };
     }
 
     // Namespace PID 1.
+    drop(proc);
+    drop(query_parent);
     drop(parent_control);
     if !reaper::arm_parent_death(&reaper_control) {
         write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
@@ -512,22 +564,10 @@ fn establish_pid_namespace_and_reaper(
 
     // Close the reaper's inherited descriptors before forking, so the workload does
     // not inherit them a second time through PID 1.
-    if let Err(error) = authority::close_inherited_descriptors(keep) {
-        eprintln!("strands-box: namespace reaper could not close descriptors: {error}");
-        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
-        // SAFETY: as above.
-        unsafe { libc::_exit(127) };
-    }
-    if let Err(error) = authority::refuse_process_memory_access() {
-        eprintln!(
-            "strands-box: namespace reaper could not refuse process-memory access \
-             ({error:?}); killing the namespace rather than starting a workload \
-             from a reachable PID 1"
-        );
-        write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
-        // SAFETY: PID 1 exiting kills the namespace before any workload starts.
-        unsafe { libc::_exit(127) };
-    }
+    let mut keep = keep.to_vec();
+    keep.push(query_workload.as_raw_fd());
+    close_reaper_descriptors(&keep, confirm_fd);
+    protect_reaper_memory(confirm_fd);
 
     // Fork the workload.
     let workload = unsafe { libc::fork() };
@@ -540,32 +580,21 @@ fn establish_pid_namespace_and_reaper(
 
     if workload > 0 {
         // Still PID 1.
-        let dropped = authority::drop_all_capabilities();
-        let locked = authority::set_no_new_privileges();
-        if dropped.is_err() || locked.is_err() {
-            write_confirm_byte(confirm_fd, APPLY_FAILURE_BYTE);
-            eprintln!(
-                "strands-box: namespace reaper could not drop its own authority \
-                 ({dropped:?}, {locked:?}); killing the namespace rather than \
-                 supervising from a privileged PID 1"
-            );
-            // The workload is already running with the view, but PID 1 would keep capabilities —
-            // the exact escape this closes.
-            unsafe { libc::_exit(127) };
-        }
+        drop(query_workload);
+        drop_reaper_authority(confirm_fd);
 
         write_confirm_byte(confirm_fd, REAPER_READY_BYTE);
         close_confirm_descriptor(confirm_fd);
 
         // Supervise, then exit. Exiting is what makes the kernel terminate every
         // survivor in the namespace.
-        let code = reaper::supervise(workload);
+        let code = reaper::supervise(workload, connector);
         // SAFETY: terminating namespace PID 1.
         unsafe { libc::_exit(code) };
     }
 
     // The workload process — the only one that returns `Ok`.
-    Ok(())
+    Ok(query_workload)
 }
 
 /// An apply failure carrying this backend's mechanism name.
@@ -722,18 +751,28 @@ mod tests {
             .expect("Localhost is this backend's supported network");
     }
 
-    /// An inbound bind has no lowering, so asking for one is refused rather than silently dropped
-    /// -- a dropped bind port would look like a working listener that no one can reach.
     #[test]
-    fn a_requested_bind_port_is_refused_rather_than_dropped() {
+    fn a_listen_port_validates() {
         let backend = NamespaceBackend::with_probe_result(true);
         let config = acceptable()
             .set_network(Network::localhost().connect(33085).listen(8080))
             .expect("a listen port is a valid request to make");
 
+        backend
+            .validate_config(&config)
+            .expect("a listen port has a lowering");
+    }
+
+    #[test]
+    fn a_listen_port_that_is_also_a_connect_port_is_refused() {
+        let backend = NamespaceBackend::with_probe_result(true);
+        let config = acceptable()
+            .set_network(Network::localhost().connect(33085).listen(33085))
+            .expect("the vocabulary does not compare the two lists");
+
         let error = backend
             .validate_config(&config)
-            .expect_err("a bind port must be refused, not dropped");
+            .expect_err("the connect port's listener already holds the port");
 
         assert!(
             matches!(error, ContainmentError::UnsupportedCapability { .. }),
@@ -1356,6 +1395,84 @@ mod tests {
         libc::WEXITSTATUS(status)
     }
 
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn x86_access_distinguishes_readable_and_missing_files_under_the_filters() {
+        let directory = tempfile::tempdir().expect("create the access fixture");
+        let present = directory.path().join("present");
+        std::fs::write(&present, b"readable").expect("write the access fixture");
+        let present = std::ffi::CString::new(present.as_os_str().as_encoded_bytes()).unwrap();
+        let missing = std::ffi::CString::new(
+            directory
+                .path()
+                .join("missing")
+                .as_os_str()
+                .as_encoded_bytes(),
+        )
+        .unwrap();
+        let probe = || {
+            for mode in [libc::F_OK, libc::R_OK] {
+                // SAFETY: the live C string names this test's existing readable file.
+                if unsafe { libc::syscall(libc::SYS_access, present.as_ptr(), mode) } != 0 {
+                    return 10;
+                }
+            }
+            // SAFETY: the live C string names an absent child of the same test directory.
+            let result = unsafe { libc::syscall(libc::SYS_access, missing.as_ptr(), libc::F_OK) };
+            if result != -1 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ENOENT)
+            {
+                return 11;
+            }
+            0
+        };
+        assert_eq!(probe(), 0, "the unfiltered access control must work");
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        assert_eq!(
+            in_filtered_child(&filters, probe),
+            0,
+            "10 = an existing readable file was refused, 11 = a missing file did not report ENOENT, 40 = filter installation failed"
+        );
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn x86_thread_setup_is_permitted_without_other_arch_commands() {
+        let mut fs_base: libc::c_ulong = 0;
+        // SAFETY: the kernel writes the current thread's base into a valid output slot.
+        let current = unsafe { libc::syscall(libc::SYS_arch_prctl, 0x1003_u64, &mut fs_base) };
+        assert_eq!(current, 0, "the unfiltered thread-state query must work");
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        let outcome = in_filtered_child(&filters, || {
+            for high in [0_u64, 1_u64 << 32] {
+                // SAFETY: restoring the existing base preserves this child's thread-local state.
+                if unsafe { libc::syscall(libc::SYS_arch_prctl, high | 0x1002, fs_base) } != 0 {
+                    return 10;
+                }
+                for operation in [0x1003_u64, 0x1004_u64, 0x7fff_ffff_u64] {
+                    let mut observed: libc::c_ulong = 0;
+                    // SAFETY: queries receive a valid output slot; the unknown command has no effect.
+                    let result = unsafe {
+                        libc::syscall(libc::SYS_arch_prctl, high | operation, &mut observed)
+                    };
+                    if result != -1
+                        || std::io::Error::last_os_error().raw_os_error() != Some(libc::EPERM)
+                    {
+                        return 11;
+                    }
+                }
+            }
+            0
+        });
+        assert_eq!(
+            outcome, 0,
+            "10 = thread setup refused, 11 = another architecture command was not denied, 40 = filter installation failed"
+        );
+    }
+
     #[test]
     fn the_event_loop_timer_call_is_permitted_under_the_filters() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
@@ -1380,6 +1497,176 @@ mod tests {
             "10 = TIMERFD_CREATE WAS REFUSED WITH EPERM, so uSockets' us_create_timer returns \
              null and Bun panics before the agent runs, 11 = refused with another errno, \
              12 = refused with no errno, 40 = installing the filters failed"
+        );
+    }
+
+    #[test]
+    fn a_child_is_awaited_with_waitid_under_the_filters() {
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        let outcome = in_filtered_child(&filters, || {
+            let waitid = |idtype: libc::idtype_t, id: libc::c_long, options: libc::c_int| {
+                // SAFETY: an all-zero siginfo_t is a valid output buffer.
+                let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                // SAFETY: the kernel writes only into the live siginfo_t; rusage is null.
+                let result = unsafe {
+                    libc::syscall(
+                        libc::SYS_waitid,
+                        idtype,
+                        id,
+                        &mut info,
+                        options,
+                        std::ptr::null_mut::<libc::rusage>(),
+                    )
+                };
+                (result, info)
+            };
+            let refused = |result: libc::c_long| {
+                result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+            };
+            // SAFETY: the grandchild only exits.
+            let child = unsafe { libc::fork() };
+            if child == -1 {
+                return 13;
+            }
+            if child == 0 {
+                // SAFETY: terminating the grandchild with a known status.
+                unsafe { libc::_exit(7) };
+            }
+            let (result, _) = waitid(
+                libc::P_ALL,
+                0,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            );
+            if result != 0 {
+                return if refused(result) { 10 } else { 14 };
+            }
+            // SAFETY: opening a descriptor for this process's own child.
+            let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, child, 0) };
+            if pidfd < 0 {
+                return 15;
+            }
+            let (result, info) = waitid(libc::P_PIDFD, pidfd, libc::WEXITED | libc::WNOWAIT);
+            // SAFETY: closing the descriptor this child just opened.
+            unsafe { libc::close(pidfd as libc::c_int) };
+            // SAFETY: the kernel filled a CLD_EXITED record for a child.
+            if result != 0 || unsafe { info.si_pid() } != child {
+                return if refused(result) { 11 } else { 16 };
+            }
+            let (result, info) = waitid(libc::P_PID, child.into(), libc::WEXITED);
+            // SAFETY: the kernel filled a CLD_EXITED record for a child.
+            if result != 0 || unsafe { info.si_status() } != 7 {
+                return if refused(result) { 12 } else { 17 };
+            }
+            0
+        });
+        assert_eq!(
+            outcome, 0,
+            "10/11/12 = WAITID WAS REFUSED WITH EPERM for P_ALL with WNOHANG, P_PIDFD, or P_PID, \
+             so Go's os/exec fails every child it starts and gh cannot run git, \
+             13 = fork failed, 14/16/17 = waitid failed with another errno or a wrong record, \
+             15 = pidfd_open failed, 40 = installing the filters failed"
+        );
+    }
+
+    #[test]
+    fn select_waits_on_held_descriptors_under_the_filters() {
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        let outcome = in_filtered_child(&filters, || {
+            let mut pipe = [0; 2];
+            // SAFETY: the kernel writes two descriptors into the live array.
+            if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+                return 13;
+            }
+            // SAFETY: writing one byte from a live buffer into this child's own pipe.
+            if unsafe { libc::write(pipe[1], b"x".as_ptr().cast(), 1) } != 1 {
+                return 14;
+            }
+            let ready = |result: libc::c_long, set: &libc::fd_set| -> Option<i32> {
+                if result == -1 {
+                    return Some(
+                        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
+                            10
+                        } else {
+                            11
+                        },
+                    );
+                }
+                // SAFETY: reading a bit of a live, initialized set.
+                (result != 1 || !unsafe { libc::FD_ISSET(pipe[0], set) }).then_some(12)
+            };
+            let readable = || {
+                // SAFETY: an all-zero fd_set is an empty set.
+                let mut set: libc::fd_set = unsafe { std::mem::zeroed() };
+                // SAFETY: the pipe's read end is far below FD_SETSIZE.
+                unsafe { libc::FD_SET(pipe[0], &mut set) };
+                set
+            };
+            // glibc's select(), which issues pselect6 on ARM64 and whichever call it picks on x86.
+            let mut set = readable();
+            let mut timeout = libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            };
+            let null = std::ptr::null_mut::<libc::fd_set>();
+            // SAFETY: every pointer is live or null for the duration of the call.
+            let result = unsafe { libc::select(pipe[0] + 1, &mut set, null, null, &mut timeout) };
+            if let Some(code) = ready(result.into(), &set) {
+                return code;
+            }
+            let mut set = readable();
+            let timeout = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: every pointer is live or null; a null sigmask argument leaves the mask alone.
+            let result = unsafe {
+                libc::syscall(
+                    libc::SYS_pselect6,
+                    pipe[0] + 1,
+                    &mut set,
+                    null,
+                    null,
+                    &timeout,
+                    std::ptr::null::<libc::c_void>(),
+                )
+            };
+            if let Some(code) = ready(result, &set) {
+                return code + 10;
+            }
+            #[cfg(target_arch = "x86_64")]
+            {
+                let mut set = readable();
+                let mut timeout = libc::timeval {
+                    tv_sec: 0,
+                    tv_usec: 0,
+                };
+                // SAFETY: every pointer is live or null for the duration of the call.
+                let result = unsafe {
+                    libc::syscall(
+                        libc::SYS_select,
+                        pipe[0] + 1,
+                        &mut set,
+                        null,
+                        null,
+                        &mut timeout,
+                    )
+                };
+                if let Some(code) = ready(result, &set) {
+                    return code + 20;
+                }
+            }
+            0
+        });
+        assert_eq!(
+            outcome, 0,
+            "10/20/30 = glibc select / raw pselect6 / raw x86 select WAS REFUSED WITH EPERM, so \
+             cargo's vendored libcurl fails every download with 'Unrecoverable error in \
+             select/poll'; 11/21/31 = refused with another errno; 12/22/32 = the readable pipe \
+             was not reported; 13/14 = pipe setup failed; 40 = installing the filters failed"
         );
     }
 

@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="740" viewBox="0 0 1280 740" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<defs>
+<marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8a9099"/></marker>
+<marker id="an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1f8f4e"/></marker>
+<marker id="aa" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c27c0e"/></marker>
+</defs>
+<rect x="0" y="0" width="1280" height="740" rx="18" fill="#ffffff"/>
+<text x="40" y="52" font-size="26" font-weight="700" fill="#1d2228">macOS: each caller, and who else can reach the agent</text>
+<text x="40" y="82" font-size="15" fill="#6b7280">Green: through the relay (new). Amber: around it, an accepted risk on macOS.</text>
+<rect x="25" y="110" width="250" height="56" rx="10" fill="#f4f5f7" stroke="#d6d9de"/>
+<text x="150" y="138" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Caller</text>
+<text x="150" y="158" text-anchor="middle" font-size="12.5" fill="#6b7280">connects to listen</text>
+<line x1="150" y1="168" x2="150" y2="616" stroke="#d6d9de" stroke-width="2" stroke-dasharray="5 6"/>
+<rect x="355" y="110" width="250" height="56" rx="10" fill="#f4f5f7" stroke="#d6d9de"/>
+<text x="480" y="138" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Box's trusted process</text>
+<text x="480" y="158" text-anchor="middle" font-size="12.5" fill="#6b7280">(TCB): the ingress relay</text>
+<line x1="480" y1="168" x2="480" y2="616" stroke="#d6d9de" stroke-width="2" stroke-dasharray="5 6"/>
+<rect x="705" y="110" width="250" height="56" rx="10" fill="#f4f5f7" stroke="#d6d9de"/>
+<text x="830" y="138" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Agent's server</text>
+<text x="830" y="158" text-anchor="middle" font-size="12.5" fill="#6b7280">on workload_port</text>
+<line x1="830" y1="168" x2="830" y2="616" stroke="#d6d9de" stroke-width="2" stroke-dasharray="5 6"/>
+<rect x="1005" y="110" width="250" height="56" rx="10" fill="#f4f5f7" stroke="#d6d9de"/>
+<text x="1130" y="138" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Others</text>
+<text x="1130" y="158" text-anchor="middle" font-size="12.5" fill="#6b7280">local processes · the LAN</text>
+<line x1="1130" y1="168" x2="1130" y2="616" stroke="#d6d9de" stroke-width="2" stroke-dasharray="5 6"/>
+<rect x="680" y="92" width="300" height="538" rx="16" fill="none" stroke="#9aa3ae" stroke-width="1.5" stroke-dasharray="3 5"/>
+<text x="830.0" y="84" text-anchor="middle" font-size="13" font-weight="600" fill="#6b7280">Seatbelt sandbox (shares the Mac's network)</text>
+<circle cx="46" cy="214" r="15" fill="#1f8f4e"/>
+<text x="46" y="219" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">1</text>
+<line x1="150" y1="220" x2="472" y2="220" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="315.0" y="210" text-anchor="middle" font-size="15" font-weight="600" fill="#0f5c31">Connect to listen</text>
+<circle cx="46" cy="276" r="15" fill="#1f8f4e"/>
+<text x="46" y="281" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">2</text>
+<path d="M480,264 h28 v18 h-24" fill="none" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="520" y="278" text-anchor="start" font-size="15" font-weight="600" fill="#0f5c31">Accept the caller (waits for a free slot at the cap)</text>
+<circle cx="46" cy="338" r="15" fill="#1f8f4e"/>
+<text x="46" y="343" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">3</text>
+<line x1="480" y1="344" x2="822" y2="344" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="655.0" y="334" text-anchor="middle" font-size="15" font-weight="600" fill="#0f5c31">New TCP socket, connect to 127.0.0.1:workload_port</text>
+<circle cx="46" cy="400" r="15" fill="#1f8f4e"/>
+<text x="46" y="405" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">4</text>
+<path d="M830,388 h28 v18 h-24" fill="none" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="816" y="402" text-anchor="end" font-size="15" font-weight="600" fill="#0f5c31">Accept (the agent's own server)</text>
+<rect x="20" y="436" width="1240" height="56" rx="10" fill="#e3f5ea"/>
+<circle cx="46" cy="462" r="15" fill="#1f8f4e"/><text x="46" y="467" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">5</text>
+<line x1="158" y1="470" x2="472" y2="470" stroke="#1f8f4e" stroke-width="3" marker-start="url(#an)" marker-end="url(#an)"/>
+<line x1="488" y1="470" x2="822" y2="470" stroke="#1f8f4e" stroke-width="3" marker-start="url(#an)" marker-end="url(#an)"/>
+<text x="490.0" y="456" text-anchor="middle" font-size="15" font-weight="700" fill="#0f5c31">Box copies bytes both ways until either side closes</text>
+<rect x="20" y="498" width="1240" height="56" rx="10" fill="#fdf1dc"/>
+<circle cx="46" cy="524" r="15" fill="#c27c0e"/>
+<text x="46" y="529" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">6</text>
+<line x1="1130" y1="530" x2="838" y2="530" stroke="#c27c0e" stroke-width="2.4" stroke-dasharray="8 6" marker-end="url(#aa)"/>
+<text x="980.0" y="520" text-anchor="middle" font-size="15" font-weight="600" fill="#7a4a00">A local process, any user: 127.0.0.1:workload_port</text>
+<rect x="20" y="560" width="1240" height="56" rx="10" fill="#fdf1dc"/>
+<circle cx="46" cy="586" r="15" fill="#c27c0e"/>
+<text x="46" y="591" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">7</text>
+<line x1="1130" y1="592" x2="838" y2="592" stroke="#c27c0e" stroke-width="2.4" stroke-dasharray="8 6" marker-end="url(#aa)"/>
+<text x="980.0" y="582" text-anchor="middle" font-size="15" font-weight="600" fill="#7a4a00">The LAN: the Mac's address, when the agent listens on 0.0.0.0</text>
+<text x="40" y="678" text-anchor="start" font-size="13.5" fill="#6b7280">A tool or MCP server with network.contain_egress = false may connect anywhere, so it can reach the agent's port too.</text>
+<text x="40" y="700" text-anchor="start" font-size="13.5" fill="#6b7280">Seatbelt limits the port the agent listens on, not who connects. A Mac is mostly a development machine, so the design accepts this (D3).</text>
+</svg>

@@ -339,9 +339,13 @@ The production facade selects on the platform and, on Linux, on the architecture
 | host | selection |
 |------|-----------|
 | macOS | Seatbelt, and the one checked-in profile above. |
-| Linux, ARM64 (`aarch64`) | The namespace launcher under `src/backend/linux/namespace/`. |
+| Linux, ARM64 (`aarch64`) or x86-64 (`x86_64`) | The namespace launcher under `src/backend/linux/namespace/`. |
 | Linux, any other architecture | `ContainmentError::PlatformUnsupported`, carrying the reason. |
 | Windows and other targets | `ContainmentError::PlatformUnsupported`. |
+
+This table describes the standalone containment library. The Box application separately
+requires `EXPERIMENTAL_X86_SUPPORT=TRUE` before executing a command on Linux x86-64.
+See the [Box interface](../box/README.md#the-interface) for the startup opt-in.
 
 Landlock was considered as the Linux mechanism and rejected: it restricts the calling process in
 place and expresses no right that denies all network, which is the default mode, so a contained
@@ -349,13 +353,21 @@ child would keep unrestricted network. The launcher builds the filesystem view t
 forks into it instead.
 
 On Linux, `apply` returns in a different process than the one that called it.
-The launcher unshares a PID namespace and forks twice: the caller waits, a
+The launcher unshares a PID namespace and forks twice: the caller serves filesystem queries and waits, a
 reaper becomes namespace PID 1, and the workload is namespace PID 2, where
 `apply` returns `Ok`. Before it forks the workload, PID 1 sets
 `PR_SET_DUMPABLE` to `0`, so the workload cannot open PID 1 memory through
 procfs. If that setup step fails, PID 1 reports an apply failure before it exits.
 No post-apply code may depend on `getpid()` being stable across the call. The
 exit status propagates outward unchanged.
+
+After the workload executes its program, the original caller handles `statfs` notifications with only
+`CAP_SYS_PTRACE` in the sandbox's private user namespace. The workload transfers its listener before
+execution. The caller returns the actual filesystem type and geometry, with capacity, inode counts,
+and identifiers set to zero. A direct `apply` caller that does not execute a program can receive a
+refusal because its inherited memory still belongs to an ancestor user namespace. See
+[Linux filesystem metadata](../../docs/design/containment.md#linux-filesystem-metadata) for path,
+process-memory, and lifecycle limits.
 
 Run the macOS enforcement proof on a macOS host:
 

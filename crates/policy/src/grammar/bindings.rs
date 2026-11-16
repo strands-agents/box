@@ -121,12 +121,11 @@ pub(crate) enum GrammarCoverage<'a> {
         grammar: &'a Grammar,
         file: ProgramFile,
     },
-    /// A grammar binds the file or a spelling of it, and Box refuses the spawn before any policy
-    /// decides it.
+    /// A required grammar binding is unavailable, so Box refuses the spawn before policy decides it.
     Refused(CoverageRefusal),
 }
 
-/// Why Box refuses a spawn of a file that a grammar binds, whatever the policy permits.
+/// Why Box refuses a spawn that requires a grammar binding, whatever the policy permits.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum CoverageRefusal {
     #[error(
@@ -139,6 +138,11 @@ pub(crate) enum CoverageRefusal {
         .program_path.display()
     )]
     ReplacedFile { name: String, program_path: PathBuf },
+    #[error(
+        "`{name}` cannot start `{}`: its tool grammar requires an approved program file",
+        .program_path.display()
+    )]
+    UnboundServer { name: String, program_path: PathBuf },
 }
 
 /// Why Box refuses to declare a tool, or to install bindings.
@@ -282,6 +286,15 @@ impl GrammarBindings {
         self.bound.is_empty()
     }
 
+    /// A server whose called name has an installed grammar must use a bound program file.
+    pub(crate) fn requires_binding(&self, spelling: &str, starter: Starter) -> bool {
+        starter == Starter::Server
+            && self
+                .grammars
+                .iter()
+                .any(|grammar| grammar.program == called_name(spelling))
+    }
+
     /// The first spelling bound under `name` that no longer leads to the file it was bound to.
     fn gone_under(&self, name: &str) -> Option<&Path> {
         self.named.get(name)?.iter().find_map(|(spelling, bound)| {
@@ -344,12 +357,20 @@ impl GrammarBindings {
             )))
         };
         let replaced = |name, program_path| CoverageRefusal::ReplacedFile { name, program_path };
+        let unbound = |path: &Path| {
+            self.requires_binding(spelling, starter).then(|| {
+                GrammarCoverage::Refused(CoverageRefusal::UnboundServer {
+                    name: name.to_string(),
+                    program_path: path.to_path_buf(),
+                })
+            })
+        };
         let program = match read {
             Ok(program) => program,
             Err(unreadable) if self.spellings.contains_key(&unreadable.path) => {
                 return refused(replaced, &unreadable.path);
             }
-            Err(_) => return None,
+            Err(unreadable) => return unbound(&unreadable.path),
         };
         if self.replaced(&program, name) {
             return refused(replaced, &program.path);
@@ -376,7 +397,7 @@ impl GrammarBindings {
                 &program.path,
             );
         }
-        None
+        unbound(&program.path)
     }
 }
 
@@ -449,6 +470,7 @@ mod tests {
         Parsed(String),
         ServerName,
         Replaced,
+        UnboundServer,
     }
 
     fn answer(coverage: Option<GrammarCoverage<'_>>) -> Option<Answer> {
@@ -456,6 +478,9 @@ mod tests {
             GrammarCoverage::Parsed { grammar, .. } => Answer::Parsed(grammar.name.clone()),
             GrammarCoverage::Refused(CoverageRefusal::ServerName { .. }) => Answer::ServerName,
             GrammarCoverage::Refused(CoverageRefusal::ReplacedFile { .. }) => Answer::Replaced,
+            GrammarCoverage::Refused(CoverageRefusal::UnboundServer { .. }) => {
+                Answer::UnboundServer
+            }
         })
     }
 
@@ -672,6 +697,65 @@ mod tests {
                 "{case}: {MISE} called as {name}"
             );
         }
+    }
+
+    #[test]
+    fn a_server_requires_its_grammar_when_its_program_is_unreadable() {
+        let host = Host::new();
+        let bindings = GrammarBindings::installed(&ToolGrammars::corpus(&["git"]), 0);
+        let missing = host.path("late/git");
+        let read = ProgramFile::read(&missing);
+        assert!(read.is_err(), "the server program is absent");
+        let coverage = bindings.coverage_for(read, "git", Starter::Server);
+        let Some(GrammarCoverage::Refused(refusal)) = coverage else {
+            panic!("a missing required server binding must refuse its start");
+        };
+        assert_eq!(
+            refusal,
+            CoverageRefusal::UnboundServer {
+                name: "git".into(),
+                program_path: missing.clone(),
+            }
+        );
+        assert!(
+            bindings
+                .coverage_for(ProgramFile::read(&missing), "git", Starter::Agent)
+                .is_none()
+        );
+        assert!(
+            bindings
+                .coverage_for(ProgramFile::read(&missing), "notes", Starter::Server)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_server_requires_its_grammar_even_without_any_bound_files() {
+        let host = Host::new();
+        let bindings = GrammarBindings::installed(&ToolGrammars::corpus(&["git"]), 0);
+        let late = host.program("late/git");
+        let Some(GrammarCoverage::Refused(refusal)) =
+            bindings.coverage_for(Ok(late.clone()), "git", Starter::Server)
+        else {
+            panic!("a new server program must not bypass its required grammar");
+        };
+        assert_eq!(
+            refusal,
+            CoverageRefusal::UnboundServer {
+                name: "git".into(),
+                program_path: late.path.clone(),
+            }
+        );
+        assert!(
+            bindings
+                .coverage_for(Ok(late.clone()), "git", Starter::Agent)
+                .is_none()
+        );
+        assert!(
+            bindings
+                .coverage_for(Ok(late), "notes", Starter::Server)
+                .is_none()
+        );
     }
 
     #[test]

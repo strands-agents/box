@@ -3,7 +3,9 @@
 use std::io;
 
 use egress_gateway::McpTarget;
-use policy::{Decision, GovernedBox, PolicyEngine, Principal, Request, RequestId};
+use policy::{
+    Decision, GovernedBox, PendingToolResponse, PolicyEngine, Principal, Request, RequestId,
+};
 use serde_json::Value;
 
 use crate::record::config::mcp::McpServer;
@@ -15,11 +17,11 @@ pub(crate) fn admit_server<'a>(
     program: &str,
     arguments: &[String],
     launched: impl Fn(&McpServer) -> Option<Vec<String>>,
-) -> io::Result<&'a McpServer> {
+) -> io::Result<Option<&'a McpServer>> {
     use crate::record::config::mcp::{for_command, on_program};
 
     if let Some(server) = for_command(declared, program, arguments, &launched) {
-        return Ok(server);
+        return Ok(Some(server));
     }
     let mut matches = declared.iter().filter(|server| {
         server.has_argument_wildcards()
@@ -37,7 +39,12 @@ pub(crate) fn admit_server<'a>(
                 ),
             ));
         }
-        return Ok(server);
+        return Ok(Some(server));
+    }
+    if on_program(declared, program).next().is_some()
+        && on_program(declared, program).all(|server| launched(server).is_some())
+    {
+        return Ok(None);
     }
     let received = std::iter::once(program.to_string())
         .chain(arguments.iter().cloned())
@@ -158,8 +165,12 @@ pub(super) fn admit_tool_call(
                     format!("MCP tool arguments are not valid JSON: {error}"),
                 )
             })?;
+            let mut tool_response = None;
             let (refined, refined_action) = capture_policy_action(|| {
-                policy.refine_tool_call(governed, principal, server, tool, &arguments)
+                let (decision, pending) =
+                    policy.refine_tool_call(governed, principal, server, tool, &arguments);
+                tool_response = pending;
+                decision
             });
             match &refined {
                 Decision::Deny { .. } => {
@@ -182,12 +193,19 @@ pub(super) fn admit_tool_call(
                             &refined,
                         ),
                         request_id,
+                        tool_response,
                     ));
                 }
-                Decision::Allow { .. } => {}
+                Decision::Allow { .. } => {
+                    return Ok(McpRequestAdmission::Allowed(
+                        coarse,
+                        request_id,
+                        tool_response,
+                    ));
+                }
             }
         }
-        Ok(McpRequestAdmission::Allowed(coarse, request_id))
+        Ok(McpRequestAdmission::Allowed(coarse, request_id, None))
     })
 }
 
@@ -211,7 +229,8 @@ pub(super) fn request_refusal(decision: &Decision, method: &str) -> io::Error {
 
 pub(super) enum McpRequestAdmission {
     Undecided,
-    Allowed(EffectiveDecision, RequestId),
+    /// The coarse `mcp:call` request, and the per-tool response an allowed `tools/call` owes.
+    Allowed(EffectiveDecision, RequestId, Option<PendingToolResponse>),
     PolicyPending(EffectiveDecision, io::Error),
     Denied {
         decision: EffectiveDecision,
@@ -281,7 +300,7 @@ mod tests {
     }
 
     /// Admit through an **alias**, named for the declared program, with the arguments it received.
-    fn admit(program: &str, arguments: &[&str]) -> io::Result<McpServer> {
+    fn admit(program: &str, arguments: &[&str]) -> io::Result<Option<McpServer>> {
         let arguments = arguments
             .iter()
             .map(ToString::to_string)
@@ -289,7 +308,7 @@ mod tests {
         admit_server(&declared(), program, &arguments, |server| {
             Some(server.arguments().to_vec())
         })
-        .cloned()
+        .map(|server| server.cloned())
     }
 
     #[test]
@@ -304,19 +323,32 @@ mod tests {
         let launch = |server: &McpServer| Some(server.arguments().to_vec());
         for value in ["runtime", "", "${ANYTHING:-default}", "two words", "*"] {
             let args = words(&["--token", value, "prefix*", "second"]);
-            assert!(admit_server(&servers, "server", &args, launch).is_ok());
-            assert!(admit_server(&literal, "server", &args, launch).is_err());
+            assert!(
+                admit_server(&servers, "server", &args, launch)
+                    .is_ok_and(|server| server.is_some())
+            );
+            assert!(
+                admit_server(&literal, "server", &args, launch)
+                    .unwrap()
+                    .is_none()
+            );
         }
         for (program, args) in [
-            ("other", words(&["--token", "x", "prefix*", "y"])),
             ("server", words(&["--other", "x", "prefix*", "y"])),
             ("server", words(&["--token", "x", "prefix-expanded", "y"])),
             ("server", words(&["--token", "x", "prefix*"])),
             ("server", words(&["--token", "x", "prefix*", "y", "extra"])),
         ] {
-            assert!(admit_server(&servers, program, &args, launch).is_err());
+            assert!(
+                admit_server(&servers, program, &args, launch)
+                    .unwrap()
+                    .is_none()
+            );
         }
-        assert!(admit_server(&literal, "server", literal[0].arguments(), launch).is_ok());
+        assert!(
+            admit_server(&literal, "server", literal[0].arguments(), launch)
+                .is_ok_and(|server| server.is_some())
+        );
     }
 
     #[test]
@@ -346,7 +378,10 @@ mod tests {
             words(&["${OTEL_EXPORTER_OTLP_PROTOCOL}", "value"]),
             words(&["http/protobuf", "value"]),
         ] {
-            assert!(admit_server(std::slice::from_ref(&one), "server", &args, launch).is_ok());
+            assert!(
+                admit_server(std::slice::from_ref(&one), "server", &args, launch)
+                    .is_ok_and(|server| server.is_some())
+            );
         }
         assert!(
             admit_server(
@@ -355,7 +390,8 @@ mod tests {
                 &words(&["wrong", "value"]),
                 launch
             )
-            .is_err()
+            .unwrap()
+            .is_none()
         );
         assert!(
             admit_server(
@@ -426,12 +462,14 @@ mod tests {
                 assert_eq!(
                     admit_server(&servers, "server", &words(&[value]), launch)
                         .unwrap()
+                        .unwrap()
                         .name,
                     "exact",
                 );
             }
             assert_eq!(
                 admit_server(&servers, "server", &words(&["other"]), launch)
+                    .unwrap()
                     .unwrap()
                     .name,
                 "wildcard",
@@ -460,6 +498,7 @@ mod tests {
                 assert_eq!(
                     admit_server(&servers, "server", &words(&["--token", value]), launch)
                         .unwrap()
+                        .unwrap()
                         .name,
                     selected
                 );
@@ -475,7 +514,8 @@ mod tests {
                     &words(&["--token", "runtime"]),
                     launch
                 )
-                .is_err()
+                .unwrap()
+                .is_none()
             );
         }
     }
@@ -510,7 +550,9 @@ mod tests {
     #[test]
     fn a_declared_server_resolves_to_the_files_own_argv() {
         // Through `uvx`, because that is the alias the harness executes for this server.
-        let admitted = admit("uvx", &["mcp-proxy-for-aws@latest"]).expect("uvx is declared");
+        let admitted = admit("uvx", &["mcp-proxy-for-aws@latest"])
+            .expect("uvx is declared")
+            .unwrap();
         assert_eq!(admitted.program(), "uvx");
         assert_eq!(
             admitted.name, "aws-mcp",
@@ -524,6 +566,7 @@ mod tests {
         assert_eq!(
             admit("uvx", &["mcp-server-fetch"])
                 .expect("the second server on uvx is declared")
+                .unwrap()
                 .name,
             "fetch",
             "the arguments select the server among those on one program"
@@ -550,53 +593,15 @@ mod tests {
         }
     }
 
-    /// A launch that matches no declared command is refused with the servers on its program.
     #[test]
-    fn a_launch_matching_no_declared_command_is_refused_and_names_the_servers_on_its_program() {
+    fn an_unmatched_call_on_a_declared_program_selects_ordinary_execution() {
         for arguments in [
             &["-y", "some-other-server"][..],
             &[],
             &["mcp-proxy-for-aws@latest", "--extra"],
         ] {
-            let refusal = admit("uvx", arguments)
-                .expect_err("a launch matching no declared command must be refused");
-            assert_eq!(refusal.kind(), io::ErrorKind::PermissionDenied);
-            let text = refusal.to_string();
-            let received = std::iter::once("uvx")
-                .chain(arguments.iter().copied())
-                .collect::<Vec<_>>()
-                .join(" ");
-            assert!(
-                text.contains(&format!("no MCP server declares \"{received}\"")),
-                "the refusal must name the received command: {text}"
-            );
-            assert!(
-                text.ends_with("; servers on uvx: aws-mcp, fetch"),
-                "the refusal must name the servers on the program: {text}"
-            );
-            assert!(
-                !text.contains("mcp-server-fetch"),
-                "the refusal must not print a declared command: {text}"
-            );
+            assert!(admit("uvx", arguments).unwrap().is_none());
         }
-    }
-
-    /// A launch by the program alone is refused when the declared command has arguments.
-    #[test]
-    fn a_launch_by_the_program_alone_is_refused_when_the_command_has_arguments() {
-        let servers = vec![McpServer {
-            argument_wildcards: false,
-            name: "aws-mcp".to_string(),
-            command: vec!["uvx".to_string(), "mcp-proxy-for-aws@latest".to_string()],
-        }];
-        let refusal = admit_server(&servers, "uvx", &[], |server| {
-            Some(server.arguments().to_vec())
-        })
-        .expect_err("the program alone is not the declared command");
-        assert_eq!(
-            refusal.to_string(),
-            "no MCP server declares \"uvx\"; servers on uvx: aws-mcp"
-        );
     }
 
     /// A server whose command does not expand never matches, and the refusal names it.
@@ -623,11 +628,11 @@ mod tests {
     /// A refusal quotes and escapes each received word.
     #[test]
     fn a_refusal_spells_each_word_unambiguously() {
-        let text = admit("uvx", &["a b", "", "c\u{1b}[2J", "it's"])
+        let text = admit("bad", &["a b", "", "c\u{1b}[2J", "it's"])
             .expect_err("undeclared")
             .to_string();
         assert!(
-            text.contains(r#""uvx 'a b' '' c\u{1b}[2J it\'s""#),
+            text.contains(r#""bad 'a b' '' c\u{1b}[2J it\'s""#),
             "{text}"
         );
     }
@@ -636,7 +641,7 @@ mod tests {
     #[test]
     fn a_long_received_command_is_cut_short() {
         let long = "x".repeat(crate::run::broker::protocol::MAX_FRAME_BYTES);
-        let text = admit("uvx", &[long.as_str()])
+        let text = admit("bad", &[long.as_str()])
             .expect_err("undeclared")
             .to_string();
         assert!(text.len() < 1024, "{} bytes", text.len());
@@ -656,10 +661,10 @@ mod tests {
     #[test]
     fn a_cut_command_keeps_each_escape_whole() {
         let control = "\u{1b}".repeat(RECEIVED_LIMIT);
-        let text = admit("uvx", &[control.as_str()])
+        let text = admit("bad", &[control.as_str()])
             .expect_err("undeclared")
             .to_string();
-        let printed = format!("\"uvx {}...\"", r"\u{1b}".repeat(RECEIVED_LIMIT - 3));
+        let printed = format!("\"bad {}...\"", r"\u{1b}".repeat(RECEIVED_LIMIT - 3));
         assert!(text.contains(&printed), "{text}");
     }
 
@@ -903,7 +908,7 @@ mod tests {
 
         // Two calls under the cap: each admitted, each records a `mcp:call::response`.
         for _ in 0..2 {
-            let McpRequestAdmission::Allowed(_, request_id) = admit_tool_call(
+            let McpRequestAdmission::Allowed(_, request_id, _) = admit_tool_call(
                 &engine,
                 &governed,
                 &Principal::agent(),
@@ -950,7 +955,7 @@ mod tests {
             SEARCH,
         )
         .expect("the tool call is valid");
-        let McpRequestAdmission::Allowed(decision, _) = admission else {
+        let McpRequestAdmission::Allowed(decision, ..) = admission else {
             panic!("the coarse permit must be the final permit");
         };
         let (action, resource, rule, verdict, reason) = decision.parts();
@@ -1084,7 +1089,7 @@ mod tests {
                @id("tool") @description("tool permit")
                permit(principal, action == issues_mcp::Action::"SearchIssues", resource);"#,
         );
-        let McpRequestAdmission::Allowed(decision, _) = admit_tool_call(
+        let McpRequestAdmission::Allowed(decision, ..) = admit_tool_call(
             &policy,
             &GovernedBox::assigned("test-box"),
             &Principal::agent(),

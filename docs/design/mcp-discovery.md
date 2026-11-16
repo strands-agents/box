@@ -106,8 +106,8 @@ stages on that thread before it writes the response.
 
 | Step | What happens | Server state |
 |---|---|---|
-| 1 | The harness runs the server's full command through its alias. `shell:spawn` decides the declared program, and Box starts the server in its own sandbox. | `Undiscovered` |
-| 2 | The harness sends `initialize`. Box forwards it without a decision, and the broker checks the protocol version in the reply. | `Undiscovered` |
+| 1 | The harness runs the server's alias with matching arguments. `shell:spawn` decides the declared program, and Box starts the server in its own sandbox. | `Undiscovered` |
+| 2 | A legacy harness completes `initialize` and `notifications/initialized`. A modern harness sends per-request metadata; `server/discover` is optional. The broker validates the selected protocol. | `Undiscovered` |
 | 3 | The harness sends `tools/list`, and `mcp:call` decides it. A refused list never reaches the server. | `Failed` if refused |
 | 4 | The broker relays the request. Box captures a list that names no cursor, and gives it 30 seconds for each reply. | `Undiscovered` |
 | 5 | Box merges and forwards a page with a `nextCursor` immediately. | `Listing` |
@@ -118,6 +118,24 @@ stages on that thread before it writes the response.
 
 A failure at steps 5 to 7 sends the harness an MCP error that names the failed step, in place of the
 reply. A stdio server that fails there takes no new connections, and its other connections close.
+
+For MCP `2026-07-28`, the broker validates the version and capabilities on every request.
+It checks that a list result has `resultType: "complete"`, a nonnegative `ttlMs`, and a valid
+`cacheScope` before catalog capture. It forwards these fields unchanged. The catalog holds the
+policy schema for this run; it is not a shared response cache.
+
+The offline schema command starts its own server and probes with `server/discover`. Any error
+other than a recognized error from the new protocol, or an empty probe timeout, selects the
+legacy handshake. A recognized modern error does
+not trigger that fallback. A timeout within a partial frame fails discovery, so a frame suffix
+cannot become a new message. If the server closes stdout before sending any response bytes,
+discovery reaps it and starts it once more with the legacy handshake as its first request.
+A partial response followed by EOF fails without a restart. The probe uses two seconds of the
+existing 30-second discovery deadline. If a valid modern discovery reply arrives while the legacy handshake waits, discovery reaps
+the server and starts a fresh process with a metadata-bearing `tools/list` request. This also
+applies when an initialize error arrives before the late discovery reply. An explicit legacy
+probe error cannot select this path. Both fallback paths share one restart allowance and the
+time remaining under the original deadline. Each modern page request carries its own metadata.
 
 ### An http server
 
@@ -138,6 +156,13 @@ address remains reachable, but its tool calls are refused until its catalog is a
 Other sources keep their accepted tools.
 
 ### Separate HTTP catalog sources
+
+*Calls to `/alpha` and `/beta` use separate catalogs and argument schemas. Both paths use one
+policy engine and one shared history. The same separation applies when session identifiers differ.*
+
+![Two separate groups show catalogs and calls for the /alpha and /beta addresses. Each catalog supplies only its own call path with an argument schema. Both call paths join one policy engine, which records schema and policy changes in one shared history.](images/catalog-source-isolation.png)
+
+[Editable diagram](images/catalog-source-isolation.drawio).
 
 A source identifies the connected scheme, host, and port; the HTTP method and forwarded path and
 query; and the request's `Mcp-Session-Id`, when present. The gateway computes an opaque endpoint

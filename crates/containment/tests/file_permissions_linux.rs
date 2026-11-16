@@ -1,5 +1,8 @@
 //! Direct Linux file-permission enforcement through the production trampoline.
-#![cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#![cfg(all(
+    target_os = "linux",
+    any(target_arch = "aarch64", target_arch = "x86_64")
+))]
 
 use std::ffi::CString;
 use std::os::fd::AsRawFd;
@@ -47,12 +50,24 @@ fn file_permission_probe() {
     let mut outcomes = Vec::new();
     for operation in [
         "fchmod",
+        #[cfg(target_arch = "x86_64")]
+        "chmod",
         "fchmodat",
         "fchmodat2",
         "openat",
         "openat-tmpfile",
         "openat-unused-mode",
+        #[cfg(target_arch = "x86_64")]
+        "open",
+        #[cfg(target_arch = "x86_64")]
+        "open-tmpfile",
+        #[cfg(target_arch = "x86_64")]
+        "open-unused-mode",
+        #[cfg(target_arch = "x86_64")]
+        "open-unused-mode-high-flags",
         "mkdirat",
+        #[cfg(target_arch = "x86_64")]
+        "mkdir",
         "openat2",
         "mknodat",
         "fchown",
@@ -63,7 +78,7 @@ fn file_permission_probe() {
                 continue;
             }
             let path = directory.join(format!("{operation}-{mode:o}"));
-            let target = if operation == "openat-tmpfile" {
+            let target = if matches!(operation, "openat-tmpfile" | "open-tmpfile") {
                 directory
             } else {
                 &path
@@ -71,7 +86,14 @@ fn file_permission_probe() {
             let name = CString::new(target.as_os_str().as_encoded_bytes()).unwrap();
             let existing = !matches!(
                 operation,
-                "openat" | "openat-tmpfile" | "mkdirat" | "openat2" | "mknodat"
+                "openat"
+                    | "openat-tmpfile"
+                    | "open"
+                    | "open-tmpfile"
+                    | "mkdirat"
+                    | "mkdir"
+                    | "openat2"
+                    | "mknodat"
             );
             let file =
                 existing.then(|| std::fs::File::create(&path).expect("create owned fixture"));
@@ -81,11 +103,19 @@ fn file_permission_probe() {
                 mode,
                 0,
             ];
+            #[cfg(target_arch = "x86_64")]
+            let unused_third_argument = if mode & 0o6000 == 0 { 0o6000_u64 } else { 0 };
+            #[cfg(target_arch = "x86_64")]
+            let unused_fourth_argument = if mode & 0o6000 == 0 { 0o6000_u64 } else { 0 };
             // SAFETY: strings remain live and each descriptor belongs to its fixture.
             let result = unsafe {
                 match operation {
                     "fchmod" => {
                         libc::syscall(libc::SYS_fchmod, file.as_ref().unwrap().as_raw_fd(), mode)
+                    }
+                    #[cfg(target_arch = "x86_64")]
+                    "chmod" => {
+                        libc::syscall(libc::SYS_chmod, name.as_ptr(), mode, unused_third_argument)
                     }
                     "fchmodat" => {
                         libc::syscall(libc::SYS_fchmodat, libc::AT_FDCWD, name.as_ptr(), mode)
@@ -112,8 +142,43 @@ fn file_permission_probe() {
                         libc::O_RDONLY,
                         mode,
                     ),
+                    #[cfg(target_arch = "x86_64")]
+                    "open" => libc::syscall(
+                        libc::SYS_open,
+                        name.as_ptr(),
+                        libc::O_CREAT | libc::O_EXCL | libc::O_WRONLY,
+                        mode,
+                        unused_fourth_argument,
+                    ),
+                    #[cfg(target_arch = "x86_64")]
+                    "open-tmpfile" => libc::syscall(
+                        libc::SYS_open,
+                        name.as_ptr(),
+                        libc::O_TMPFILE | libc::O_RDWR,
+                        mode,
+                        unused_fourth_argument,
+                    ),
+                    #[cfg(target_arch = "x86_64")]
+                    "open-unused-mode" | "open-unused-mode-high-flags" => {
+                        let high_flags = if operation == "open-unused-mode-high-flags" {
+                            ((libc::O_CREAT | libc::O_TMPFILE) as u64) << 32
+                        } else {
+                            0
+                        };
+                        libc::syscall(
+                            libc::SYS_open,
+                            name.as_ptr(),
+                            high_flags | libc::O_RDONLY as u64,
+                            mode,
+                            unused_fourth_argument,
+                        )
+                    }
                     "mkdirat" => {
                         libc::syscall(libc::SYS_mkdirat, libc::AT_FDCWD, name.as_ptr(), mode)
+                    }
+                    #[cfg(target_arch = "x86_64")]
+                    "mkdir" => {
+                        libc::syscall(libc::SYS_mkdir, name.as_ptr(), mode, unused_third_argument)
                     }
                     "openat2" => libc::syscall(
                         libc::SYS_openat2,
@@ -151,19 +216,20 @@ fn file_permission_probe() {
             } else {
                 0
             };
-            let metadata = if operation == "openat-tmpfile" && result >= 0 {
+            let metadata = if matches!(operation, "openat-tmpfile" | "open-tmpfile") && result >= 0
+            {
                 use std::os::fd::FromRawFd;
                 // SAFETY: the successful open returned an owned descriptor.
                 let temporary = unsafe { std::fs::File::from_raw_fd(result as i32) };
                 let metadata = temporary.metadata().ok();
                 std::mem::forget(temporary);
                 metadata
-            } else if operation == "openat-tmpfile" {
+            } else if matches!(operation, "openat-tmpfile" | "open-tmpfile") {
                 None
             } else {
                 std::fs::metadata(&path).ok()
             };
-            if operation.starts_with("openat") && result >= 0 {
+            if operation.starts_with("open") && result >= 0 {
                 // SAFETY: the successful open returned an owned descriptor.
                 unsafe { libc::close(result as i32) };
             }
@@ -286,18 +352,26 @@ fn direct_file_permissions_preserve_writes_and_refuse_special_modes() {
     }
     let controls = run_probe(host.path(), false, owner_group);
     let outcomes = run_probe(boxed.path(), true, owner_group);
-    assert_eq!(controls.len(), outcomes.len());
+    let expected = 80 + usize::from(cfg!(target_arch = "x86_64")) * 48;
+    assert_eq!(controls.len(), expected);
+    assert_eq!(outcomes.len(), expected);
     let mut failures = Vec::new();
     for (control, outcome) in controls.iter().zip(&outcomes) {
         let special = outcome.requested & 0o6000 != 0;
         let owner_change = matches!(outcome.operation.as_str(), "fchown" | "fchownat");
         let unlisted = matches!(outcome.operation.as_str(), "openat2" | "mknodat");
-        let denied =
-            owner_change || unlisted || (special && outcome.operation != "openat-unused-mode");
+        let unused_mode = matches!(
+            outcome.operation.as_str(),
+            "openat-unused-mode" | "open-unused-mode" | "open-unused-mode-high-flags"
+        );
+        let denied = owner_change || unlisted || (special && !unused_mode);
         let unavailable = control.result == -1
             && ((matches!(control.operation.as_str(), "fchmodat2" | "openat2")
                 && control.errno == libc::ENOSYS)
-                || (control.operation == "openat-tmpfile" && control.errno == libc::EOPNOTSUPP));
+                || (matches!(
+                    control.operation.as_str(),
+                    "openat-tmpfile" | "open-tmpfile"
+                ) && control.errno == libc::EOPNOTSUPP));
         if unavailable {
             eprintln!(
                 "host prerequisite absent for {}: errno {}; denial checks still run",
@@ -312,7 +386,14 @@ fn direct_file_permissions_preserve_writes_and_refuse_special_modes() {
             && !unavailable
             && matches!(
                 control.operation.as_str(),
-                "fchmod" | "fchmodat" | "fchmodat2" | "openat" | "openat-tmpfile"
+                "fchmod"
+                    | "chmod"
+                    | "fchmodat"
+                    | "fchmodat2"
+                    | "openat"
+                    | "openat-tmpfile"
+                    | "open"
+                    | "open-tmpfile"
             )
         {
             assert_eq!(
@@ -339,7 +420,7 @@ fn direct_file_permissions_preserve_writes_and_refuse_special_modes() {
             }
             if matches!(
                 outcome.operation.as_str(),
-                "openat" | "mkdirat" | "openat2" | "mknodat"
+                "openat" | "open" | "mkdirat" | "mkdir" | "openat2" | "mknodat"
             ) && outcome.mode.is_some()
             {
                 failures.push(format!("refused creation left a host entry: {outcome:?}"));
@@ -355,7 +436,10 @@ fn direct_file_permissions_preserve_writes_and_refuse_special_modes() {
         let path = boxed
             .path()
             .join(format!("{}-{:o}", outcome.operation, outcome.requested));
-        if outcome.operation == "openat-tmpfile" {
+        if matches!(
+            outcome.operation.as_str(),
+            "openat-tmpfile" | "open-tmpfile"
+        ) {
             continue;
         }
         if denied && outcome.before_mode.is_none() {

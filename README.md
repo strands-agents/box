@@ -47,6 +47,9 @@ actions and elapsed time to decide what is allowed next. For example, a file rea
 through Shell or Python can cause the gateway to deny a later outbound HTTP request.
 
 **Preview:** Box supports local execution on Linux ARM64 and macOS with Apple silicon.
+Linux x86-64 is experimental and requires `EXPERIMENTAL_X86_SUPPORT=TRUE` in the
+environment of the Box process. See [building from source](docs/user/getting-started.md#build-from-source)
+for the x86-64 opt-in; release downloads remain ARM64-only on Linux.
 We welcome feedback through [GitHub issues](https://github.com/strands-agents/box/issues).
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 
@@ -87,8 +90,14 @@ By default, it uses the process's terminal and returns its exit
 code. The second argument appends arguments to `[agent] command`.
 Use `RunOptions::terminal` to supply the workload's terminal and `RunOptions::on_ready`
 to start host threads after hardening and signal registration, before workload setup.
+Use `RunOptions::box_id` to give a new box your own ID, such as
+`my-app-3f9a1c0e7b2d4a6f`: a prefix of 1 to 15 letters, digits, `.`, `_`, or `-`, then `-` and 16
+lowercase hexadecimal digits. Box stores it, prints it, and labels telemetry with it. A box that
+already has an ID refuses a different one. Without `box_id`, Box generates `box-` and 16
+hexadecimal digits.
 Call it before starting application threads or loading secrets, and use one Box workload
-per host process. Later `run` calls fail, even if the first call failed.
+per host process. Later `run` calls fail, even if the first call failed, unless `run` refused a
+malformed `box_id`.
 Ship the matching Box helper binaries beside the host application.
 
 To replace the running box's policy from a host thread:

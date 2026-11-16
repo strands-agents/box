@@ -52,6 +52,73 @@ def manifest(args):
                      'template': {'spec': pod}}}
 
 
+def require_sandbox_settings(pod, source):
+    """Reject API responses that lost the workload's required sandbox settings."""
+    differences = []
+    if pod.get('hostUsers') is not False:
+        differences.append(
+            f"hostUsers: expected false; received {json.dumps(pod.get('hostUsers'))}; "
+            'check UserNamespacesSupport and admission rules'
+        )
+    workload = next((c for c in pod.get('containers', []) if c.get('name') == 'workload'), None)
+    if workload is None:
+        differences.append('containers: required workload container is absent')
+    else:
+        security = workload.get('securityContext', {})
+        if security.get('procMount') != 'Unmasked':
+            differences.append(
+                f"procMount: expected Unmasked; received {json.dumps(security.get('procMount'))}; "
+                'check ProcMountType and admission rules'
+            )
+        seccomp = security.get('seccompProfile', pod.get('securityContext', {}).get('seccompProfile', {}))
+        if seccomp.get('type') != 'Unconfined':
+            differences.append(
+                f"seccompProfile.type: expected Unconfined; received {json.dumps(seccomp.get('type'))}; "
+                'check Pod Security and other admission rules'
+            )
+    if differences:
+        raise RuntimeError(
+            f'The cluster did not preserve required Box settings in {source}:\n  '
+            + '\n  '.join(differences)
+            + '\nBox cannot start its sandbox with this configuration. '
+            'See docs/user/tutorials/eks.md#cluster-baseline for cluster, worker, and admission requirements. '
+            'These are troubleshooting hints, not a confirmed cause; '
+            'this check does not read feature gates or admission rules.'
+        )
+
+
+def collect_node_diagnostics(node_names, call, dest):
+    """Record assigned node versions within a separate diagnostic time budget."""
+    if not node_names:
+        return
+    deadline = time.monotonic() + DIAGNOSTIC_TIMEOUT_SECONDS
+    recorded = {}
+    for node_name in sorted(node_names):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            details = {'error': 'The node diagnostic time budget expired before this lookup'}
+        else:
+            result = call('get', 'node', node_name, '-o', 'json', required=False,
+                          timeout=min(DIAGNOSTIC_TIMEOUT_SECONDS, remaining))
+            if result.returncode:
+                details = {'error': result.stderr.strip() or f'Node lookup exited {result.returncode}'}
+            else:
+                try:
+                    info = json.loads(result.stdout)['status']['nodeInfo']
+                    details = {key: info.get(key, '<unknown>') for key in (
+                        'kubeletVersion', 'kernelVersion', 'containerRuntimeVersion', 'architecture')}
+                except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+                    details = {'error': 'The node response did not contain valid status.nodeInfo'}
+        recorded[node_name] = details
+        (dest / 'node-diagnostics.json').write_text(json.dumps(recorded, indent=2))
+        if 'error' in details:
+            print('Could not inspect assigned node ' + node_name + ': ' + details['error'],
+                  file=sys.stderr, flush=True)
+        else:
+            print('Assigned node ' + node_name + ': ' + ', '.join(
+                key + '=' + str(value) for key, value in details.items()), file=sys.stderr, flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image', required=True)
@@ -88,6 +155,13 @@ def main():
         if required and result.returncode:
             raise RuntimeError(result.stderr.strip() or shlex.join(command) + f' exited {result.returncode}')
         return result
+    preview_result = call('create', '--dry-run=server', '-f', '-', '-o', 'json',
+                          data=json.dumps(job), timeout=COMMAND_TIMEOUT_SECONDS)
+    if preview_result.stderr.strip():
+        print(preview_result.stderr.strip(), file=sys.stderr, flush=True)
+    preview = json.loads(preview_result.stdout)
+    require_sandbox_settings(preview.get('spec', {}).get('template', {}).get('spec', {}),
+                             'the server dry-run Job; no Job was created')
     created = json.loads(call('create', '-f', '-', '-o', 'json', data=json.dumps(job)).stdout)
     name = created['metadata']['name']
     dest = Path('evidence') / name
@@ -97,21 +171,71 @@ def main():
     deadline = time.monotonic() + JOB_WAIT_SECONDS[args.mode]
     current = created
     polling_error = None
+    event_warning_printed = False
+    last_creation_error = None
+    pod_seen = False
+    assigned_nodes = set()
     try:
+        require_sandbox_settings(created.get('spec', {}).get('template', {}).get('spec', {}),
+                                 'the created Job')
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise RuntimeError('The deadline expired before Job completion was confirmed')
             current = json.loads(call('get', 'job', name, '-o', 'json',
                                       timeout=min(COMMAND_TIMEOUT_SECONDS, remaining)).stdout)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError('The deadline expired before Pod configuration was confirmed')
+            observed = json.loads(call('get', 'pods', '-l', 'job-name=' + name, '-o', 'json',
+                                       timeout=min(COMMAND_TIMEOUT_SECONDS, remaining)).stdout)
+            (dest / 'pod-configuration.json').write_text(json.dumps(observed, indent=2))
+            if observed.get('items'):
+                pod_seen = True
+                last_creation_error = None
+            for pod in observed.get('items', []):
+                node_name = pod.get('spec', {}).get('nodeName')
+                if node_name:
+                    assigned_nodes.add(node_name)
+                require_sandbox_settings(pod.get('spec', {}),
+                                         'Pod ' + pod.get('metadata', {}).get('name', '<unknown>'))
+            if not pod_seen:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError('The deadline expired before Pod creation events could be inspected')
+                events = call('get', 'events', '--field-selector',
+                              'involvedObject.uid=' + created['metadata']['uid'] + ',reason=FailedCreate',
+                              '-o', 'json', required=False, timeout=min(COMMAND_TIMEOUT_SECONDS, remaining))
+                (dest / 'pod-creation-events.json').write_text(events.stdout)
+                if events.returncode:
+                    (dest / 'pod-creation-events.stderr.txt').write_text(events.stderr)
+                    if not event_warning_printed:
+                        print('Could not inspect Pod creation events: ' + events.stderr.strip(),
+                              file=sys.stderr, flush=True)
+                        event_warning_printed = True
+                else:
+                    failures = json.loads(events.stdout).get('items', [])
+                    if failures:
+                        messages = '; '.join(event.get('message') or 'No event message' for event in failures)
+                        if messages != last_creation_error:
+                            print('The Job controller could not create a Pod: ' + messages,
+                                  file=sys.stderr, flush=True)
+                        last_creation_error = messages
             status = current.get('status', {})
-            if status.get('succeeded') or status.get('failed') or any(
+            if status.get('succeeded') and not observed.get('items'):
+                raise RuntimeError('The Job completed but no Pod configuration could be verified')
+            failed = status.get('failed') or any(
                 x.get('type') == 'Failed' and x.get('status') == 'True' for x in status.get('conditions', [])
-            ):
+            )
+            if failed and not pod_seen and last_creation_error:
+                raise RuntimeError('The Job failed before a Pod was created')
+            if status.get('succeeded') or failed:
                 break
             time.sleep(min(POLL_INTERVAL_SECONDS, max(0, deadline - time.monotonic())))
     except (RuntimeError, json.JSONDecodeError) as error:
         polling_error = str(error)
+        if last_creation_error:
+            polling_error += '\nLast Pod creation error: ' + last_creation_error
     receipt = {'job': name, 'image': args.image, 'mode': args.mode,
                'passed': False, 'checks': {}, 'error': polling_error,
                'recorded_at': datetime.datetime.now(datetime.timezone.utc).isoformat()}
@@ -145,6 +269,7 @@ def main():
                    error=polling_error or state.get('error') or (logs.stderr if logs.returncode else None),
                    recorded_at=datetime.datetime.now(datetime.timezone.utc).isoformat())
     (dest / 'receipt.json').write_text(json.dumps(receipt, indent=2))
+    collect_node_diagnostics(assigned_nodes, call, dest)
     print(json.dumps(receipt, indent=2))
     print('Evidence: ' + str(dest), file=sys.stderr)
     return 0 if receipt['passed'] else 1

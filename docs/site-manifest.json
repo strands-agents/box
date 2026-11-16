@@ -172,6 +172,17 @@
       }
     },
     {
+      "id": "tool-grammars",
+      "source": "docs/user/tool-grammars.md",
+      "slug": "guides/tool-grammars",
+      "title": "Tool grammars",
+      "description": "Experimental. Describe a program such as git as actions and effects, and write one rule for every spelling of a command.",
+      "nav": {
+        "group": "Guides",
+        "order": 15
+      }
+    },
+    {
       "id": "security",
       "source": "docs/user/security.md",
       "slug": "security",

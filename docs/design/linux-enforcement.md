@@ -178,6 +178,10 @@ Seccomp checks system call numbers and selected arguments.
 It does not resolve pathnames or replace filesystem grants.
 The filters refuse operations outside their permit set.
 
+The permit set includes `copy_file_range` and `sendfile`, which Node uses to copy files.
+Both calls move data from a file that the workload already has open, to a file, pipe, or connected socket that it already has open.
+So they reach only what the filesystem grants and the network restrictions already allow.
+
 The filter rejects simultaneous writable and executable memory mappings.
 The `mprotect` and `pkey_mprotect` system calls change memory access permissions.
 The filter refuses `mprotect` requests whose permissions include executable access, including requests that retain that access.
@@ -225,7 +229,7 @@ The sandbox cannot connect directly to the surrounding OS's loopback listeners, 
 `localhost`, or [abstract Unix sockets](#terms).
 A client can reach a surrounding-OS HTTP service through the gateway when it explicitly sends the request there and policy permits.
 Box sets `NO_PROXY=127.0.0.1,localhost`, so clients that honor it attempt direct connections to those destinations inside the private namespace.
-Strands Shell `curl` and Monty `fetch()` refuse URLs naming `localhost` or a literal loopback, private, or link-local address.
+Strands Shell `curl` and Monty `fetch()` refuse URLs naming `localhost` or a literal loopback, private, link-local, `0.0.0.0/8`, or one of two cloud metadata addresses outside `169.254.0.0/16`, or an IPv4-mapped, IPv4-compatible, IPv4-translated, 6to4, Teredo, or `64:ff9b::/96` NAT64 address that carries one of these, or any `64:ff9b:1::/48` address.
 See [how traffic reaches the gateway](egress.md#how-traffic-reaches-the-gateway).
 
 `contain_egress = false` selects the surrounding OS network namespace.

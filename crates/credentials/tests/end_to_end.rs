@@ -75,6 +75,92 @@ fn clear_var(name: &str) {
     unsafe { std::env::remove_var(name) };
 }
 
+/// A box-owned route attaches the box's own credential unconditionally: no phantom is minted, the
+/// workload presents none, and the real secret is attached at the inject location with no advisory.
+#[test]
+fn box_owned_route_attaches_the_real_secret_with_no_phantom() {
+    set_var("E2E_BACKEND_TOKEN", "gw_real_token");
+    let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant-a").route(
+        RouteSpec::box_owned(
+            DestinationPattern::parse("api.github.com").unwrap(),
+            Locator::parse_uri("env://E2E_BACKEND_TOKEN").unwrap(),
+            header("Bearer {}"),
+        ),
+    ))
+    .expect("the box-owned route resolves");
+    assert!(
+        opened.phantoms().is_empty(),
+        "a box-owned route mints no phantom"
+    );
+    let store = opened.into_vault();
+
+    // The workload presents NO placeholder; the box attaches its own token anyway.
+    let headers: Vec<(String, String)> = Vec::new();
+    let attachment = store
+        .attach_for(bearer_request(
+            dest("api.github.com", 443, "/zen"),
+            &headers,
+            "https://api.github.com/zen",
+        ))
+        .expect("box-owned attaches without a phantom check")
+        .expect("a credential is bound");
+    assert_eq!(
+        attachment
+            .set_headers()
+            .find(|(name, _)| name.eq_ignore_ascii_case("Authorization"))
+            .map(|(_, value)| value.to_string()),
+        Some("Bearer gw_real_token".to_string()),
+        "the real backend token is attached"
+    );
+    assert!(
+        attachment.advisory_reason().is_none(),
+        "a box-owned attach is not an advisory injection"
+    );
+    clear_var("E2E_BACKEND_TOKEN");
+}
+
+/// A strip-phantom route mints a placeholder (provisioned to the workload) and resolves no real
+/// secret; on a request it strips the placeholder and attaches nothing.
+#[test]
+fn strip_phantom_route_mints_a_placeholder_and_attaches_nothing() {
+    // No env var is set: a strip-phantom route resolves no real secret.
+    let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant-a").route(
+        RouteSpec::strip_phantom(
+            DestinationPattern::parse("api.github.com").unwrap(),
+            header("Bearer {}"),
+        ),
+    ))
+    .expect("a strip-phantom route opens with no secret to resolve");
+    assert_eq!(
+        opened.phantoms().len(),
+        1,
+        "a strip-phantom route mints a placeholder for the workload"
+    );
+    let store = opened.into_vault();
+
+    // The workload presents the phantom; the box strips it and attaches nothing.
+    let headers = bearer_headers("strands_box_deadbeef");
+    let attachment = store
+        .attach_for(bearer_request(
+            dest("api.github.com", 443, "/zen"),
+            &headers,
+            "https://api.github.com/zen",
+        ))
+        .expect("strip-phantom attaches nothing")
+        .expect("the route governs this destination");
+    assert_eq!(
+        attachment.set_headers().count(),
+        0,
+        "a strip-phantom route attaches no real credential"
+    );
+    assert!(
+        attachment
+            .strip_headers()
+            .any(|name| name.eq_ignore_ascii_case("Authorization")),
+        "the placeholder is stripped so it never rides upstream"
+    );
+}
+
 /// The happy path: two `env://` routes open cleanly, and each destination attaches the real secret
 /// pulled from the environment — the whole `route → open → attach_for` chain, through the public API
 /// only, against the real `Backend::local` and its `env://` source.

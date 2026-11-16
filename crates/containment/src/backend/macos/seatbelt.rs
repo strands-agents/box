@@ -78,6 +78,9 @@ const LEAF_OVERLAY: &str = "{{LEAF_OVERLAY}}";
 /// The `mDNSResponder` socket that `getaddrinfo` connects to.
 const SYSTEM_RESOLVER: &str = "/private/var/run/mDNSResponder";
 
+/// The services Apple's certificate trust evaluation asks, granted to native egress alone.
+const TRUST_SERVICES: [&str; 2] = ["com.apple.trustd.agent", "com.apple.SecurityServer"];
+
 /// The `file-write*` leaves a write root grants, and the set every overriding deny must also name.
 pub(crate) const WRITE_ROOT_LEAVES: [&str; 6] = [
     "file-write-data",
@@ -139,6 +142,9 @@ fn inside_operator_home(path: &std::path::Path, homes: &[std::path::PathBuf]) ->
 /// Group grants by resolved path, so a duplicate operation and a scope disagreement are structural.
 fn group_by_path(config: &ContainmentConfig) -> Result<Vec<(&PathGrant, BTreeSet<Operation>)>> {
     let mut groups: Vec<(&PathGrant, BTreeSet<Operation>)> = Vec::new();
+    // Each spelling granted per operation. Two links to one file are two spellings of one grant:
+    // the renderer walks each grant, so each spelling gets its own traversal rules.
+    let mut spellings: BTreeSet<(&std::path::Path, Operation)> = BTreeSet::new();
     for granted in config.authorizations() {
         // Breadth first, and independent of the cell: the widest possible grant is also a
         // well-formed one, so recognizing the cell would accept it.
@@ -160,7 +166,8 @@ fn group_by_path(config: &ContainmentConfig) -> Result<Vec<(&PathGrant, BTreeSet
                         granted.scope,
                     )));
                 }
-                if !operations.insert(granted.operation) {
+                operations.insert(granted.operation);
+                if !spellings.insert((granted.original.as_path(), granted.operation)) {
                     return Err(unsupported(format!(
                         "{} is granted {:?} twice",
                         granted.resolved.display(),
@@ -168,7 +175,10 @@ fn group_by_path(config: &ContainmentConfig) -> Result<Vec<(&PathGrant, BTreeSet
                     )));
                 }
             }
-            None => groups.push((granted, BTreeSet::from([granted.operation]))),
+            None => {
+                spellings.insert((granted.original.as_path(), granted.operation));
+                groups.push((granted, BTreeSet::from([granted.operation])));
+            }
         }
     }
     Ok(groups)
@@ -186,9 +196,9 @@ fn require_expressible(config: &ContainmentConfig) -> Result<()> {
         ));
     }
     match config.network() {
-        // Localhost with no inbound bind (the mediated default), or AllowAll (operator-declared
-        // native egress, contain_egress = false). A `listen` port is still unsupported on macOS.
-        Network::Localhost { listen, .. } if listen.is_empty() => {}
+        // Localhost, with or without inbound ports, or AllowAll (operator-declared native egress,
+        // contain_egress = false).
+        Network::Localhost { .. } => {}
         Network::AllowAll => {}
         _ => {
             return Err(unsupported(
@@ -847,10 +857,16 @@ pub(crate) fn render_profile_with_streams(
     }
 
     match config.network() {
-        Network::Localhost { connect, .. } => {
+        Network::Localhost { connect, listen } => {
             for port in connect {
                 cells.entry(CONNECT_PORTS).or_default().push_str(&format!(
                     "(allow network-outbound\n    (remote tcp \"localhost:{port}\"))\n"
+                ));
+            }
+            for port in listen {
+                cells.entry(CONNECT_PORTS).or_default().push_str(&format!(
+                    "(allow network-bind\n    (local tcp \"localhost:{port}\"))\n\
+                     (allow network-inbound\n    (local tcp \"localhost:{port}\"))\n"
                 ));
             }
         }
@@ -860,6 +876,16 @@ pub(crate) fn render_profile_with_streams(
                 "(allow network-outbound\n    (remote ip \"*:*\"))\n\
                  (allow network-outbound\n    (literal \"{SYSTEM_RESOLVER}\"))\n"
             ));
+            // The system's certificate check, which a direct connection meets the real server
+            // with. Through the gateway these add nothing: the gateway's CA is not in the keychain.
+            for service in TRUST_SERVICES {
+                cells
+                    .entry(RUNTIME_SERVICES)
+                    .or_default()
+                    .push_str(&format!(
+                        "(allow mach-lookup (global-name \"{service}\"))\n"
+                    ));
+            }
         }
         Network::Blocked => {}
     }
@@ -1124,6 +1150,43 @@ mod tests {
             .expect("read tree again");
         assert!(matches!(
             group_by_path(&twice),
+            Err(ContainmentError::UnsupportedCapability { .. })
+        ));
+
+        // Two links to one file are two spellings, so both render; one link twice is refused.
+        let file = root.join("gcc");
+        std::fs::write(&file, "").expect("a file");
+        for name in ["cc", "c99"] {
+            std::os::unix::fs::symlink(&file, root.join(name)).expect("a link");
+        }
+        let two_names = ContainmentConfig::new()
+            .allow(root.join("cc"), Operation::Read, Scope::File)
+            .expect("cc")
+            .allow(root.join("c99"), Operation::Read, Scope::File)
+            .expect("c99");
+        let groups = group_by_path(&two_names).expect("two names for one file");
+        assert_eq!(groups.len(), 1);
+        let program = root.join("agent");
+        std::fs::write(&program, "agent").expect("program fixture");
+        let rendered = two_names
+            .set_network(Network::localhost().connect(33085))
+            .expect("localhost")
+            .allow(&program, Operation::Exec, Scope::File)
+            .expect("exec");
+        let profile = render_profile(&rendered).expect("a profile");
+        for name in ["cc", "c99"] {
+            assert!(
+                profile.contains(&format!("{}\")", root.join(name).display())),
+                "{name} must have its own rule: {profile}"
+            );
+        }
+        let one_name_twice = ContainmentConfig::new()
+            .allow(root.join("cc"), Operation::Read, Scope::File)
+            .expect("cc")
+            .allow(root.join("cc"), Operation::Read, Scope::File)
+            .expect("cc again");
+        assert!(matches!(
+            group_by_path(&one_name_twice),
             Err(ContainmentError::UnsupportedCapability { .. })
         ));
     }
@@ -1652,6 +1715,48 @@ mod tests {
             leaf.contains(&literal),
             "the leaf keeps the enumerated literal (broad exec is additive): {leaf}"
         );
+    }
+
+    /// **Native egress, and only native egress, reaches the system's certificate check.** The same
+    /// leaf renders `com.apple.trustd.agent` and `com.apple.SecurityServer` with `AllowAll` and
+    /// neither through the gateway's localhost port.
+    #[test]
+    fn the_trust_services_render_only_with_native_egress() {
+        let home = tempfile::tempdir().expect("an operator home");
+        let home_path = home.path().canonicalize().expect("the home resolves");
+        let program = home_path.join("tool");
+        std::fs::write(&program, "tool").expect("an executable fixture");
+        let leaf = |network: Network| {
+            let config = ContainmentConfig::new()
+                .set_network(network)
+                .expect("the network")
+                .anchored_at(&home_path)
+                .allow(&program, Operation::Exec, Scope::File)
+                .expect("an executable")
+                .allow_runtime_services()
+                .allow_broad_exec();
+            render_profile(&config).expect("the leaf profile renders")
+        };
+        let rules: Vec<String> = TRUST_SERVICES
+            .iter()
+            .map(|service| format!("(allow mach-lookup (global-name \"{service}\"))"))
+            .collect();
+
+        let native = leaf(Network::AllowAll);
+        for rule in &rules {
+            assert_eq!(
+                native.matches(rule.as_str()).count(),
+                1,
+                "native egress renders {rule} once: {native}"
+            );
+        }
+        let gateway = leaf(Network::localhost().connect(33085));
+        for rule in &rules {
+            assert!(
+                !gateway.contains(rule.as_str()),
+                "gateway egress renders no {rule}: {gateway}"
+            );
+        }
     }
 
     /// **The map-exec allow is additive and wins by last-match.** The write cell's

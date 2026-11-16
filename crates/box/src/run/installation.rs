@@ -14,6 +14,9 @@ use crate::record::layout::{disk_identity, lies_within};
 #[path = "installation_mounts.rs"]
 mod mounts;
 
+#[cfg(target_os = "linux")]
+pub(super) use mounts::inspect_single_mount;
+
 #[cfg(not(target_os = "macos"))]
 pub(super) fn executable() -> io::Result<PathBuf> {
     std::env::current_exe()

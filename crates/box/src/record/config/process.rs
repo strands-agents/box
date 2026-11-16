@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
 
-use super::env::{refusal_reason, refused_name, refused_value};
+use super::env::{refusal_reason, refused_name, refused_native_egress_name, refused_value};
 use super::grammar::GrammarTable;
 
 /// One process declaration, shared by `[agent]` and every `[tool.<name>]`.
@@ -53,6 +53,9 @@ pub(crate) struct ProcessSpec {
     /// The tool grammar of a `[tool.<name>]`. Every other table refuses it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) grammar: Option<GrammarTable>,
+    /// Where callers reach the agent's servers, from `[[agent.ingress]]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) ingress: Vec<super::ingress::Ingress>,
 }
 
 /// The eight path lists. A directory entry is recursive, and a file entry is exact.
@@ -209,6 +212,22 @@ impl ProcessSpec {
         Ok(())
     }
 
+    pub(crate) fn validate_ingress_selection(
+        &self,
+        table: &str,
+        enabled: bool,
+    ) -> Result<(), ConfigError> {
+        if !self.ingress.is_empty() && !enabled {
+            return Err(ConfigError::Process {
+                table: table.into(),
+                reason: "`ingress` is experimental: set `ingress = true` in \
+                         `[experimental-features]` to load it"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate_native_policy(
         &self,
         table: &str,
@@ -246,6 +265,15 @@ impl ProcessSpec {
             table: table.to_string(),
             reason,
         };
+        if !self.ingress.is_empty() {
+            if table != "[agent]" {
+                return Err(refuse(
+                    "`ingress` is supported on `[agent]` only; a tool's ingress is not built yet"
+                        .into(),
+                ));
+            }
+            super::ingress::validate_all(&self.ingress, table)?;
+        }
         if table == "[agent]" && self.network.is_some() {
             return Err(refuse(
                 "`network` is refused on `[agent]`: the agent always reaches the network through \
@@ -287,8 +315,14 @@ impl ProcessSpec {
                 workspace.display()
             )));
         }
+        // A native-egress table's proxy and CA names are the operator's: Core sets none of them.
+        let refused = if self.native_egress() {
+            refused_native_egress_name
+        } else {
+            refused_name
+        };
         for name in self.env.keys() {
-            if let Some(kind) = refused_name(name) {
+            if let Some(kind) = refused(name) {
                 return Err(refuse(refusal_reason(kind, name, "")));
             }
         }
@@ -437,6 +471,46 @@ mod tests {
             assert!(
                 !message.contains("set by the box itself"),
                 "the box does not set {name}: {message}"
+            );
+        }
+    }
+
+    /// **A `contain_egress = false` table may set the gateway's proxy and CA names, and a gateway
+    /// table may not.** Core sets none of those names on a native-egress process, so the operator's
+    /// own value is the only one it receives. Core's other names stay refused on both.
+    #[test]
+    fn only_a_native_egress_table_may_set_the_proxy_and_ca_names() {
+        let table = |env: &str, native: bool| {
+            let network = if native {
+                "\n[network]\ncontain_egress = false"
+            } else {
+                ""
+            };
+            spec(&format!("command = [\"x\"]\nenv = {{ {env} }}{network}")).validate("[tool.x]")
+        };
+        for name in [
+            "HTTPS_PROXY",
+            "NO_PROXY",
+            "NODE_USE_ENV_PROXY",
+            "SSL_CERT_FILE",
+            "AWS_CA_BUNDLE",
+            "GIT_SSL_CAINFO",
+        ] {
+            let entry = format!("{name} = \"/etc/corp/ca.pem\"");
+            assert!(
+                table(&entry, true).is_ok(),
+                "a native-egress table sets {name}"
+            );
+            let refused = table(&entry, false).expect_err("a gateway table refuses it");
+            assert!(
+                refused.to_string().contains("set by the box itself"),
+                "{name}: {refused}"
+            );
+        }
+        for name in ["PWD", "USER", "OTEL_EXPORTER_OTLP_ENDPOINT", "LD_PRELOAD"] {
+            assert!(
+                table(&format!("{name} = \"/x\""), true).is_err(),
+                "a native-egress table still may not set {name}"
             );
         }
     }

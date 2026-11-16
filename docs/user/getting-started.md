@@ -105,6 +105,17 @@ cp box-src/target/release/strands-box box-core/box
 cp box-src/target/release/strands-box-sock-alias box-src/target/release/strands-box-contain-trampoline box-core/
 ```
 
+Linux x86-64 builds are experimental. Release downloads still target Linux ARM64.
+To run an x86-64 build, set the Box startup opt-in in the same terminal:
+
+```sh
+export EXPERIMENTAL_X86_SUPPORT=TRUE
+```
+
+Box requires the exact value `TRUE` for `run` and `policy generate-schema`, including
+their Rust library entry points. Help and version output do not require the flag.
+ARM64 does not require the flag. It does not change the sandbox permissions.
+
 </details>
 
 ## Step 2. Install the Strands CLI

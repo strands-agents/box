@@ -90,7 +90,7 @@ pub(crate) enum SignalGroup {
     Permit,
     /// The agent's own spans, and this box's control-plane operations.
     Trace,
-    /// The agent's own log records.
+    /// The agent's log records and unmatched MCP routing diagnostics.
     Logs,
     /// The agent's own metrics.
     Metrics,
@@ -103,7 +103,7 @@ impl SignalGroup {
             Self::Deny => vec![Signal::PolicyDenied],
             Self::Permit => vec![Signal::PolicyPermitted],
             Self::Trace => vec![Signal::AgentTrace, Signal::ControlPlane],
-            Self::Logs => vec![Signal::AgentLogs],
+            Self::Logs => vec![Signal::AgentLogs, Signal::McpUnmatched],
             Self::Metrics => vec![Signal::AgentMetrics],
         }
     }
@@ -514,13 +514,16 @@ mod tests {
             signals_for(&[SignalGroup::Trace]),
             vec![Signal::AgentTrace, Signal::ControlPlane]
         );
-        assert_eq!(signals_for(&[SignalGroup::Logs]), vec![Signal::AgentLogs]);
+        assert_eq!(
+            signals_for(&[SignalGroup::Logs]),
+            vec![Signal::AgentLogs, Signal::McpUnmatched]
+        );
         assert_eq!(
             signals_for(&[SignalGroup::Metrics]),
             vec![Signal::AgentMetrics]
         );
 
-        // Counted against the crate's own set, so a seventh signal no word reaches fails here.
+        // Every signal is reachable through an include word.
         let every = signals_for(&SignalGroup::every());
         assert_eq!(every.len(), Signal::every().len(), "{every:?}");
     }
@@ -547,7 +550,12 @@ mod tests {
             "an absent include must reach every signal: {:?}",
             target.signals()
         );
-        for expected in [Signal::AgentLogs, Signal::AgentMetrics, Signal::AgentTrace] {
+        for expected in [
+            Signal::AgentLogs,
+            Signal::AgentMetrics,
+            Signal::AgentTrace,
+            Signal::McpUnmatched,
+        ] {
             assert!(
                 target.signals().contains(&expected),
                 "{} must arrive with no include written",
