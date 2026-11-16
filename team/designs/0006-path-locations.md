@@ -55,6 +55,16 @@ caches = ["~/.cache/my-agent", "~/.npm"]
 - An empty list is an error, because the name would label nothing.
 - Without a `[locations]` table, nothing changes.
 
+Box resolves each directory once, when it loads the policy, with the same rule it uses for a
+file's path. So `/Users/dev/src/app` and `~/src/app` name the same place, and a directory reached
+through a symlink, such as `/tmp/work` on macOS, matches the files under `/private/tmp/work`.
+
+- **A directory that doesn't exist yet** is fine. Box resolves its nearest existing parent and adds
+  the missing names back, so `~/.cache/my-agent` matches once the agent creates it.
+- **A directory Box can't resolve** stops the box from starting, and the error names the location.
+  That covers a broken symlink, a folder Box has no permission to search, and a path that is a
+  file.
+
 ## 3. How does Box decide which locations a file is in?
 
 A file is in a location when it's one of the location's directories, or anywhere inside one.
@@ -107,6 +117,8 @@ One PR after this doc. It adds the `[locations]` table, the `locations` field, t
 - `/work-old` is not in `/work`.
 - A misspelled location name stops the box from starting.
 - A policy that uses a location stops the box from starting when `box.toml` declares none.
+- A location written as an absolute path under the home matches the `~/...` paths in requests.
+- A location under a symlinked folder matches, whether or not it exists yet.
 
 Some parts of Box can only change with an approved design. If we accept this doc, we approve these
 changes to them:
