@@ -4297,6 +4297,49 @@ when temporal {
             "the previous release counts the events this build recorded with `locations`"
         );
     }
+
+    /// An event the previous release recorded has no `locations`, so a budget on a location skips it.
+    #[test]
+    fn a_location_budget_does_not_count_an_event_the_previous_release_recorded() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        let (canonical, _, _) = validate_and_expand(WRITE_BUDGET, &[], &Operator::unanchored())
+            .expect("the budget validates");
+        let mut previous = open_history(&path, durable_config()).expect("history opens");
+        previous
+            .install(
+                &canonical.join("\n"),
+                PREVIOUS_RELEASE,
+                Some(EVENTS_DWSCHEMA),
+                None,
+            )
+            .expect("the previous release installs");
+        assert_eq!(previous_release_write(&mut previous, "/work/a"), Some(true));
+        drop(previous);
+
+        let source = r#"
+permit (principal, action == Box::Action::"fs:write", resource)
+when temporal {
+    exists (total: Long). (
+        (count for (t: Timepoint). where (
+            formerly within 1h (
+                Box::Action::"fs:write"::response{ input.locations.project: true } && tp(t)
+            )
+        )) == total
+        && total < 2
+    )
+};
+"#;
+        let operator = located(&[("project", "/work")]);
+        let (current, _) = DogwoodEngine::open_with_mcp_schemas(source, &[], &path, &operator)
+            .expect("this build opens it");
+        assert!(located_write(&current, "/work/b"));
+        assert!(
+            located_write(&current, "/work/c"),
+            "the previous release's write is outside the budget on `project`"
+        );
+        assert!(!located_write(&current, "/work/d"));
+    }
 }
 
 #[cfg(test)]
