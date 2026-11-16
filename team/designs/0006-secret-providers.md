@@ -93,12 +93,17 @@ protocol        = "box.secret-source.v1"
 command         = ["${{ inputs.aws.path }}", "secretsmanager", "get-secret-value",
                    "--secret-id", "{ref}", "--query", "SecretString", "--output", "json"]
 output          = "json"
-pass-env        = ["AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION"]
-pass-secret-env = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]
-reads           = ["~/.aws"]
+pass-env        = ["AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_ROLE_ARN",
+                   "AWS_WEB_IDENTITY_TOKEN_FILE", "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                   "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE",
+                   "AWS_EC2_METADATA_DISABLED"]
+pass-secret-env = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+                   "AWS_CONTAINER_AUTHORIZATION_TOKEN"]
+reads           = ["~/.aws", "/var/run/secrets/eks.amazonaws.com",
+                   "/var/run/secrets/pods.eks.amazonaws.com"]
 ```
 
-The command prints the secret string as JSON. A binary secret prints `null`, which Box refuses. The `aws` child finds its identity in the variables that it gets and in `~/.aws`. So exported keys, such as from `aws-vault exec`, and `~/.aws` profiles work. Container and web-identity credentials are not passed. Do not use a profile that sets `credential_process` with this plugin. Box does not refuse such a profile. A bare program name there fails on the fixed `PATH`. An absolute path runs outside every sandbox, and Box does not protect that program. Box does not check that this identity is the one a bare `aws://` route signs with.
+The command prints the secret string as JSON. A binary secret prints `null`, which Box refuses. The `aws` child finds its identity in the variables that it gets and in `~/.aws`. So exported keys, such as from `aws-vault exec`, and `~/.aws` profiles work. The plugin also passes the variables of a container or web identity, such as EKS Pod Identity, and it protects the token files. It passes `AWS_EC2_METADATA_DISABLED` too, so the child reads instance metadata only where a bare `aws://` route does. So the child gets the identity that a bare `aws://` route gets there. The secret must be in the region that the child is configured for, because the `aws` CLI does not read the region from an ARN. Do not use a profile that sets `credential_process` with this plugin. Box does not refuse such a profile. A bare program name there fails on the fixed `PATH`. An absolute path runs outside every sandbox, and Box does not protect that program. Box does not check that this identity is the one a bare `aws://` route signs with.
 
 One secret in AWS Secrets Manager often holds a JSON object with several keys, so a reference can name one field with `#FIELD`. A profile then sends one key of that secret to a telemetry target:
 
@@ -129,7 +134,7 @@ The plugin tells Box what to protect. For `box/1password`, this declaration cove
 - `deny`: other access paths, such as directories containing the desktop app's authentication sockets.
 - `pass-secret-env`: host credentials the provider needs, such as `OP_SERVICE_ACCOUNT_TOKEN`.
 
-Box keeps the declared files and sockets outside the agent's, tools', and MCP servers' reach. It refuses a grant that gives a workload a path in `reads` or `deny`, and the refusal names the plugin and the entry. This also applies to a path that a workload can get by name today, such as `~/.aws`. It refuses write grants that could let them replace the executable or its configuration. A declaration passes host variables to the provider in two lists. `pass-env` holds plain settings, such as `AWS_REGION`, and a workload can set the same names. `pass-secret-env` holds credentials. Box refuses a workload environment that holds the operator's value of one of them, under any name. A placeholder under the same name is allowed, such as the `AWS_ACCESS_KEY_ID` placeholder of a signed `aws://` route. A name in either list can end with `*`, which passes each variable with that prefix. The 1Password plugin uses `OP_SESSION_*` for the token of a manual `op signin`, because that name holds the account ID. `OP_ACCOUNT` selects the account when the operator has more than one. These protections must also cover the hosted Shell and Python paths.
+Box keeps the declared files and sockets outside the agent's, tools', and MCP servers' reach. It refuses a grant that gives a workload a path in `reads` or `deny`, and the refusal names the plugin and the entry. This also applies to a path that a workload can get by name today, such as `~/.aws`. It refuses write grants that could let them replace the executable or its configuration. A declaration passes host variables to the provider in two lists. `pass-env` holds plain settings, such as `AWS_REGION`, and a workload can set the same names. `pass-secret-env` holds credentials. Box refuses a workload environment that holds the operator's value of one of them, under any name. A placeholder under the same name is allowed, such as the `AWS_ACCESS_KEY_ID` placeholder of a signed `aws://` route. Box also refuses an `env://NAME` or `secret://NAME` reference when `NAME` is in a `pass-secret-env` list. So no route or telemetry target can send that credential out. A name in either list can end with `*`, which passes each variable with that prefix. The 1Password plugin uses `OP_SESSION_*` for the token of a manual `op signin`, because that name holds the account ID. `OP_ACCOUNT` selects the account when the operator has more than one. These protections must also cover the hosted Shell and Python paths.
 
 Box does not discover these paths automatically, so protection depends on the plugin declaring every access path. On Linux, only paths present at configuration time are protected. Before shipping the plugin, we must verify the real 1Password authentication paths on Linux and macOS.
 
