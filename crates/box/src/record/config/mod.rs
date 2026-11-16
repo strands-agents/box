@@ -18,6 +18,7 @@
 //! | [`grammar`] | `[tool.<name>.grammar]`: the tool grammars a box installs |
 //! | [`ingress`] | `[[agent.ingress]]`: where callers reach the agent |
 //! | [`limits`] | `[limits.shell]`: the execution timeout of one Shell submission |
+//! | [`locations`] | `[locations]`: the names a filesystem rule reads for a path |
 //! | `env` | which environment names a process may set, and which Core owns |
 //! | [`mcp`] | `[mcp.<name>]`: which local MCP servers exist, and how each starts |
 //! | [`telemetry`] | `[telemetry.<label>]`: where a box's decision records go |
@@ -32,6 +33,7 @@ pub(crate) mod gateway;
 pub(crate) mod grammar;
 pub(crate) mod ingress;
 pub(crate) mod limits;
+pub(crate) mod locations;
 pub(crate) mod mcp;
 pub(crate) mod process;
 pub(crate) mod telemetry;
@@ -59,6 +61,7 @@ use self::env::{LOADER_HOOK_PREFIXES, LOADER_HOOKS};
 use self::env::{reserved_workload_environment, valid_environment_name};
 use self::gateway::Gateway;
 use self::limits::Limits;
+use self::locations::{Locations, ResolvedLocations};
 use self::process::{ContainedMcp, ProcessSpec};
 use credentials::DestinationPattern;
 
@@ -450,7 +453,7 @@ impl RunContract {
         let (policy, policy_source) = read_authored_policy(
             policy_path.as_deref(),
             mcp_servers.is_empty() && http_mcp.is_empty(),
-            &policy_operator()?,
+            &policy_operator(&self.file.locations)?.0,
             &self.grammars,
         )?;
         if let Some(source) = &policy_source
@@ -513,6 +516,7 @@ impl RunContract {
             record: Record {
                 version: record_version(
                     root.box_id(),
+                    &self.file.locations,
                     self.file.file_attributes,
                     &self.file.experimental_features,
                     &self.file.limits,
@@ -534,6 +538,7 @@ impl RunContract {
                 file_attributes: self.file.file_attributes,
                 gateway: self.file.gateway.clone(),
                 limits: self.file.limits.clone(),
+                locations: self.file.locations.clone(),
                 box_id: root.box_id().to_string(),
                 box_dir: root.root().to_path_buf(),
                 name: self.file.name.clone(),
@@ -605,6 +610,9 @@ pub(crate) struct Record {
     /// The operator-selected execution limits.
     #[serde(default, skip_serializing_if = "Limits::is_default")]
     pub(crate) limits: Limits,
+    /// The directories each location names, as written.
+    #[serde(default, skip_serializing_if = "Locations::is_empty")]
+    pub(crate) locations: Locations,
 
     /// The immutable identity that Box generated for this directory.
     pub(crate) box_id: String,
@@ -708,6 +716,9 @@ const FILE_WATCHING_RECORD_VERSION: u32 = 35;
 /// `secret.prefix`, `secret.placement`, or a secret that is not read from the environment. A vendor
 /// kind stores these, so an earlier build refuses the record instead of sending without them.
 const TELEMETRY_EXPORT_RECORD_VERSION: u32 = 36;
+/// The record version of a record that declares `[locations]`, so an older build refuses the box
+/// rather than resuming it with rules on a location that match nothing.
+const LOCATIONS_RECORD_VERSION: u32 = 37;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -758,6 +769,7 @@ impl ExperimentalFeatures {
 #[allow(clippy::too_many_arguments)]
 fn record_version<'a>(
     box_id: &str,
+    locations: &Locations,
     file_attributes: bool,
     features: &ExperimentalFeatures,
     limits: &Limits,
@@ -768,7 +780,9 @@ fn record_version<'a>(
     gateway: &Gateway,
     targets: &BTreeMap<String, telemetry::TelemetryEntry>,
 ) -> u32 {
-    if telemetry::needs_export_record(targets) {
+    if !locations.is_empty() {
+        LOCATIONS_RECORD_VERSION
+    } else if telemetry::needs_export_record(targets) {
         TELEMETRY_EXPORT_RECORD_VERSION
     } else if specs.clone().any(|spec| spec.file_watching) {
         FILE_WATCHING_RECORD_VERSION
@@ -1066,6 +1080,7 @@ impl Record {
             SUPPLIED_IDENTITY_RECORD_VERSION,
             FILE_WATCHING_RECORD_VERSION,
             TELEMETRY_EXPORT_RECORD_VERSION,
+            LOCATIONS_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1086,6 +1101,7 @@ impl Record {
         }
         let expected = record_version(
             &record.box_id,
+            &record.locations,
             record.file_attributes,
             &record.experimental_features,
             &record.limits,
@@ -1111,6 +1127,7 @@ impl Record {
         }
         BoxName::parse(&record.name)?;
         record.gateway.validate()?;
+        record.locations.validate()?;
         record.validate_processes()?;
         Ok(record)
     }
@@ -1267,10 +1284,10 @@ fn identity_digits(digits: &str) -> bool {
 }
 
 /// The policy that the configuration at `path` selects, read as `run` reads it, whether `run`
-/// validates it completely, and the tool grammars it validates against.
+/// validates it completely, the tool grammars it validates against, and its declared locations.
 pub(crate) fn read_checked_policy(
     path: &Path,
-) -> Result<(Option<Policy>, bool, ToolGrammars), BoxError> {
+) -> Result<(Option<Policy>, bool, ToolGrammars, Locations), BoxError> {
     let (source, text) = AuthoritySource::read(path, "configuration")?;
     let file = ConfigFile::parse(&text, source.path())?;
     let grammars = grammar::tool_grammars(&file.tool)?;
@@ -1289,13 +1306,21 @@ pub(crate) fn read_checked_policy(
         policy,
         mcp_servers.is_empty() && http_mcp.is_empty(),
         grammars,
+        file.locations,
     ))
 }
 
-/// The operator a policy loads for, anchored at the operator's own home.
-pub(crate) fn policy_operator() -> Result<policy::Operator, BoxError> {
+/// The operator a policy loads for, anchored at the operator's own home, with `locations` resolved
+/// against that home and returned as the operator holds them.
+pub(crate) fn policy_operator(
+    locations: &Locations,
+) -> Result<(policy::Operator, ResolvedLocations), BoxError> {
     let home = crate::record::layout::operator_home_directory()?;
-    Ok(policy::Operator::unanchored().anchored_at(home))
+    let resolved = locations.resolved(&home);
+    let operator = policy::Operator::unanchored()
+        .anchored_at(home)
+        .with_locations(resolved.clone());
+    Ok((operator, resolved))
 }
 
 /// Read the authored policy text, keeping its origin for diagnostics and audit.
@@ -1406,6 +1431,9 @@ struct ConfigFile {
     /// The execution limits for hosted interpreters.
     #[serde(default)]
     limits: Limits,
+    /// The names a filesystem rule reads for the directories each one lists.
+    #[serde(default)]
+    locations: Locations,
     /// The operator's name for this box, which is one path component.
     name: String,
 
@@ -1498,6 +1526,7 @@ impl ConfigFile {
         self.experimental_features.validate()?;
         BoxName::parse(&self.name)?;
         self.gateway.validate()?;
+        self.locations.validate()?;
         if let Some(agent) = &self.agent {
             agent.validate("[agent]")?;
             agent.validate_native_policy(
@@ -1601,6 +1630,7 @@ mod tests {
                     assert_eq!(
                         record_version(
                             "box-0123456789abcdef",
+                            &Locations::default(),
                             stored.file_attributes,
                             &stored.experimental_features,
                             &stored.limits,
@@ -1655,6 +1685,7 @@ mod tests {
         assert_eq!(
             record_version(
                 "box-0123456789abcdef",
+                &Locations::default(),
                 stored.file_attributes,
                 &stored.experimental_features,
                 &stored.limits,
@@ -1821,6 +1852,7 @@ mod tests {
             file_attributes: false,
             gateway: Default::default(),
             limits: Default::default(),
+            locations: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/codex"),
             name: "codex".to_string(),
@@ -2072,6 +2104,7 @@ native-filesystem-policy = false
                             assert_eq!(
                                 record_version(
                                     "box-0123456789abcdef",
+                                    &Locations::default(),
                                     file_attributes,
                                     &features,
                                     &limits,
@@ -2361,6 +2394,152 @@ native-filesystem-policy = false
         );
         let ordinary = toml::to_string(&record(None, BTreeMap::new())).unwrap();
         assert!(!ordinary.contains("gateway"), "{ordinary}");
+    }
+
+    #[test]
+    fn a_box_without_locations_keeps_its_record_and_version() {
+        let stored = record_from_config("").expect("the configuration loads");
+        assert!(stored.locations.is_empty());
+        assert_eq!(stored.version, RECORD_VERSION);
+        let encoded = stored.to_toml().unwrap();
+        assert!(!encoded.contains("locations"), "{encoded}");
+        assert_eq!(
+            Record::parse(&encoded, Path::new("record.toml")).unwrap(),
+            stored
+        );
+    }
+
+    #[test]
+    fn a_box_with_locations_stores_them_at_the_locations_record_version() {
+        let stored = record_from_config(
+            "[locations]\nproject = [\"/work/app\", \"~/src/app\"]\ncaches = [\"~/.npm\"]\n",
+        )
+        .expect("the configuration loads");
+        assert_eq!(stored.version, LOCATIONS_RECORD_VERSION);
+        let encoded = stored.to_toml().unwrap();
+        assert!(encoded.contains("[locations]"), "{encoded}");
+        assert!(
+            encoded.contains("\"~/src/app\""),
+            "the record keeps each entry as written: {encoded}"
+        );
+        let parsed = Record::parse(&encoded, Path::new("record.toml")).unwrap();
+        assert_eq!(parsed, stored);
+        assert_eq!(
+            parsed.locations.resolved(Path::new("/home/operator")),
+            BTreeMap::from([
+                (
+                    "caches".to_string(),
+                    vec![PathBuf::from("/home/operator/.npm")]
+                ),
+                (
+                    "project".to_string(),
+                    vec![
+                        PathBuf::from("/work/app"),
+                        PathBuf::from("/home/operator/src/app")
+                    ]
+                ),
+            ])
+        );
+    }
+
+    #[test]
+    fn locations_cannot_hide_in_an_older_record_version() {
+        let mut stored = record(None, BTreeMap::new());
+        stored.locations = toml::from_str("project = [\"/work/app\"]").unwrap();
+        for found in [
+            RECORD_VERSION,
+            UPGRADE_HTTP_RECORD_VERSION,
+            SUPPLIED_IDENTITY_RECORD_VERSION,
+        ] {
+            stored.version = found;
+            assert!(
+                matches!(
+                    Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion {
+                        found: refused,
+                        expected: LOCATIONS_RECORD_VERSION
+                    }) if refused == found
+                ),
+                "version {found}"
+            );
+        }
+        stored.version = LOCATIONS_RECORD_VERSION;
+        assert_eq!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+            stored
+        );
+        stored.locations = toml::from_str("project = [\"work/app\"]").unwrap();
+        assert!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).is_err(),
+            "a stored entry is checked again when the record is read"
+        );
+        let mut ordinary = record(None, BTreeMap::new());
+        ordinary.version = LOCATIONS_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&ordinary.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: LOCATIONS_RECORD_VERSION,
+                expected: RECORD_VERSION
+            })
+        ));
+    }
+
+    #[test]
+    fn a_locations_table_is_refused_at_load_by_its_key() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        for (body, reason) in [
+            ("1st = [\"/work\"]", "is not a location name"),
+            ("project = []", "lists no directory"),
+            ("project = [\"work\"]", "neither absolute nor `~/`-relative"),
+            ("project = [\"/work/../etc\"]", "a `.` or `..` component"),
+            ("project = [\"/work\", \"/work\"]", "twice"),
+        ] {
+            let text = format!("{required}[locations]\n{body}\n");
+            let error = ConfigFile::parse(&text, Path::new("box.toml"))
+                .expect_err(body)
+                .to_string();
+            assert!(error.contains("`[locations] "), "{body}: {error}");
+            assert!(error.contains(reason), "{body}: {error}");
+        }
+        for text in [
+            format!("{required}[locations]\nproject = \"/work\"\n"),
+            format!("{required}[location]\nproject = [\"/work\"]\n"),
+        ] {
+            assert!(
+                ConfigFile::parse(&text, Path::new("box.toml")).is_err(),
+                "{text} must be refused"
+            );
+        }
+        let absent = ConfigFile::parse(required, Path::new("box.toml")).unwrap();
+        assert!(absent.locations.is_empty());
+    }
+
+    #[test]
+    fn the_operator_a_policy_validates_against_carries_the_locations() {
+        let home = tempfile::tempdir().expect("operator home");
+        let home = home.path().canonicalize().expect("canonical home");
+        std::fs::create_dir(home.join("project")).expect("project directory");
+        let locations: Locations =
+            toml::from_str("project = [\"~/project\", \"/absent/data\"]").unwrap();
+        let (operator, resolved) = crate::test_support::with_operator_home(&home, || {
+            policy_operator(&locations).expect("the operator builds")
+        });
+        let expected = BTreeMap::from([(
+            "project".to_string(),
+            vec![home.join("project"), PathBuf::from("/absent/data")],
+        )]);
+        assert_eq!(resolved, expected);
+        assert_eq!(
+            operator,
+            policy::Operator::unanchored()
+                .anchored_at(home.clone())
+                .with_locations(expected)
+        );
+        let (bare, none) = crate::test_support::with_operator_home(&home, || {
+            policy_operator(&Locations::default()).expect("the operator builds")
+        });
+        assert!(none.is_empty());
+        assert_eq!(bare, policy::Operator::unanchored().anchored_at(home));
     }
 
     #[test]
@@ -3139,7 +3318,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, TELEMETRY_EXPORT_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, LOCATIONS_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

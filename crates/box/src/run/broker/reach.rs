@@ -1189,6 +1189,7 @@ mod linked_command_mutation_tests {
             file_attributes: false,
             gateway: Default::default(),
             limits: Default::default(),
+            locations: Default::default(),
             box_id: "linked-command-reach".to_string(),
             box_dir: home.join("box-state"),
             name: "linked-command-reach".to_string(),

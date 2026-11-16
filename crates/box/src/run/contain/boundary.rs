@@ -1991,6 +1991,7 @@ mod tests {
                 file_attributes: false,
                 gateway: Default::default(),
                 limits: Default::default(),
+                locations: Default::default(),
                 box_id: root.name().to_string(),
                 box_dir: root.root().to_path_buf(),
                 name: "codex".to_string(),

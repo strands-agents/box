@@ -852,6 +852,49 @@ fn path_relationship_refusals_create_no_box_state() {
     assert_eq!(std::fs::read_dir(&nested).expect("box reads").count(), 0);
 }
 
+#[test]
+fn an_invalid_locations_table_is_refused_by_its_key_before_any_box_state() {
+    let fixture = ContractFixture::new();
+    for (table, expected) in [
+        (
+            "[locations]\nproject = []\n",
+            "`[locations] project` lists no directory",
+        ),
+        (
+            "[locations]\nproject = [\"src/app\"]\n",
+            "`[locations] project` entry \"src/app\" is refused",
+        ),
+        (
+            "[locations]\n9lives = [\"/srv\"]\n",
+            "`[locations] 9lives` is not a location name",
+        ),
+    ] {
+        std::fs::write(
+            &fixture.config,
+            format!(
+                "name = \"contract\"\nbox_dir = {:?}\n{table}[agent]\ncommand = [{:?}]\n\
+                 workspace = {:?}\n",
+                fixture.box_directory.display().to_string(),
+                no_op_program(),
+                fixture.workspace_text()
+            ),
+        )
+        .expect("configuration");
+
+        let output = fixture.run(&fixture.config, &[]);
+        assert!(!output.status.success(), "{table}");
+        assert!(
+            text(&output).contains(expected),
+            "{table} must be refused with {expected:?}: {}",
+            text(&output)
+        );
+        assert!(
+            !fixture.box_directory.join("private").exists(),
+            "a refused document must create no box state"
+        );
+    }
+}
+
 /// **The macOS data-volume spelling places no box state against the workspace or an authority
 /// source**: each refusal fires as it does for the ordinary spelling.
 #[cfg(target_os = "macos")]

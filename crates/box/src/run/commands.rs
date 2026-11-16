@@ -517,6 +517,7 @@ mod tests {
             file_attributes: false,
             gateway: Default::default(),
             limits: Default::default(),
+            locations: Default::default(),
             box_id: "commands-test".to_string(),
             box_dir: path.parent().expect("directory").join("box-state"),
             name: "commands-test".to_string(),

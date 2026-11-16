@@ -64,6 +64,17 @@ A rule with a `when temporal { … }` clause also reads the box's recorded histo
 earlier events or require one. [A budget over time](#a-budget-over-time) and [commit only after
 the tests passed](#commit-only-after-the-tests-passed) show the two shapes.
 
+A filesystem rule can name a directory by a location that [`[locations]`](config.md#locations) in
+`box.toml` declares, so the rule does not spell the path. This rule forbids reads of `.env` files
+anywhere in the `project` location:
+
+```text
+@id("no_env_in_project")
+forbid (principal, action == Box::Action::"fs:read", resource)
+when { context.input.locations.contains(Box::Location::"project") &&
+       context.input.path like "*/.env" };
+```
+
 ## How a denial reads
 
 A denial names the path, program, or host the rule saw, then the rule, then its description:

@@ -180,6 +180,35 @@ fn write_bare_name_disclosures(
     Ok(())
 }
 
+/// One line for each `[locations]` name and the directories a filesystem rule matches it on.
+fn write_location_disclosures(
+    locations: &crate::record::config::locations::ResolvedLocations,
+    operator_home: &Path,
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    let canonical_home = operator_home.canonicalize().ok();
+    let spelled = |directory: &Path| -> String {
+        let relative = std::iter::once(operator_home)
+            .chain(canonical_home.as_deref())
+            .find_map(|home| directory.strip_prefix(home).ok());
+        let text = match relative {
+            Some(rest) if rest.as_os_str().is_empty() => "~".to_string(),
+            Some(rest) => format!("~/{}", rest.display()),
+            None => directory.display().to_string(),
+        };
+        text.chars().flat_map(char::escape_default).collect()
+    };
+    for (name, directories) in locations {
+        let directories: Vec<String> = directories.iter().map(|path| spelled(path)).collect();
+        writeln!(
+            output,
+            "strands-box: [locations] {name}: {}  (a name for policy rules; grants no access)",
+            directories.join(", ")
+        )?;
+    }
+    Ok(())
+}
+
 /// Run one contained agent from one locked configuration snapshot.
 pub(crate) async fn execute(
     config: &Path,
@@ -283,7 +312,7 @@ async fn hosted(
 ) -> Result<ExitCode, BoxError> {
     let sources: Vec<Policy> = locked.policy.into_iter().collect();
     let subject = telemetry::policy_subject(&sources);
-    let operator = crate::record::config::policy_operator()?;
+    let (operator, locations) = crate::record::config::policy_operator(&locked.record.locations)?;
     let policy = match HostedBox::prepare_policy(&locked.root, &operator, sources, locked.grammars)
     {
         Ok(engine) => {
@@ -420,6 +449,12 @@ async fn hosted(
         &site,
     )?;
     eprintln!("{}", boundary.disclosure());
+    write_location_disclosures(
+        &locations,
+        &crate::record::layout::operator_home_directory()?,
+        std::io::stderr().lock(),
+    )
+    .map_err(|source| ConfigError::Disclosure { source })?;
     let contained = Contained::spawn(boundary, &locked.root, hosted, terminal, signals).await?;
     contained.wait().await
 }
@@ -548,6 +583,7 @@ mod tests {
             file_attributes: false,
             gateway: Default::default(),
             limits: Default::default(),
+            locations: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/probe"),
             name: "probe".to_string(),
@@ -693,5 +729,42 @@ mod tests {
             String::from_utf8(output).expect("the announcement is UTF-8"),
             "strands-box: [tool.aws-suite]: exposes ~/.aws/\\u{1b}[2J\\u{202e} (read)\n"
         );
+    }
+
+    #[test]
+    fn startup_discloses_each_location_with_home_directories_spelled_under_the_home() {
+        let locations = BTreeMap::from([
+            (
+                "project".to_string(),
+                vec![
+                    PathBuf::from("/nonexistent-home/me/src/app"),
+                    PathBuf::from("/srv/shared"),
+                ],
+            ),
+            (
+                "home".to_string(),
+                vec![PathBuf::from("/nonexistent-home/me")],
+            ),
+            ("odd".to_string(), vec![PathBuf::from("/srv/\u{1b}[2J")]),
+        ]);
+        let mut output = Vec::new();
+
+        write_location_disclosures(&locations, Path::new("/nonexistent-home/me"), &mut output)
+            .expect("the disclosure writes");
+
+        assert_eq!(
+            String::from_utf8(output).expect("the disclosure is UTF-8"),
+            "strands-box: [locations] home: ~  (a name for policy rules; grants no access)\n\
+             strands-box: [locations] odd: /srv/\\u{1b}[2J  (a name for policy rules; grants no access)\n\
+             strands-box: [locations] project: ~/src/app, /srv/shared  (a name for policy rules; grants no access)\n"
+        );
+    }
+
+    #[test]
+    fn startup_discloses_nothing_for_a_box_without_locations() {
+        let mut output = Vec::new();
+        write_location_disclosures(&BTreeMap::new(), Path::new("/Users/me"), &mut output)
+            .expect("the disclosure writes");
+        assert!(output.is_empty());
     }
 }

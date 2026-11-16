@@ -80,10 +80,10 @@ every harness's stored credentials, through an interpreter that runs outside con
 refusal tells the operator to make a directory for the workspace and to work there, and
 `the_operator_home_is_not_a_project` pins it.
 
-The config file's complete key set is **twelve**: `name`, `box_dir`, `policy`, `[agent]`,
+The config file's complete key set is **thirteen**: `name`, `box_dir`, `policy`, `[agent]`,
 `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
-`[experimental-features]`, `file-attributes`, `[limits]`, and `[gateway]`. `name` and `box_dir`
-are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
+`[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, and `[locations]`. `name`
+and `box_dir` are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
 every removed spelling is refused by its own name with its replacement.
 `four_inputs.rs::the_config_record_carries_only_the_four_inputs` pins the set, and
 `run_config.rs::name_is_required_and_every_removed_key_is_refused_by_name` pins the refusals.
@@ -108,6 +108,11 @@ the egress gateway decides and sends as `https://` on port 443. Policy still dec
 request, on port 443, so the key grants no reach a permit does not. An entry with a scheme, a port, a
 path, a wildcard, or an IP address is a load error. See
 [upgrade plain HTTP to HTTPS](../../docs/user/egress.md#upgrade-plain-http-to-https).
+
+`[locations]` maps each location name to a non-empty list of absolute or `~/` directories. A
+filesystem rule reads the names that hold a request's path as `context.input.locations`, so the
+policy names a location and not its directories. A location grants no reach, and `run` discloses
+each one on stderr. See [`[locations]`](../../docs/user/config.md#locations).
 
 **`[agent]` and each `[tool.<label>]` hold the same four fields.** `[agent]` is the process the
 operator starts. A `[tool.<label>]` is a process the Shell runs for a request the policy already

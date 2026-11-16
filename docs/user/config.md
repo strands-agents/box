@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries twelve keys. `name` and `box_dir` are required.
+The file carries thirteen keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -84,8 +84,9 @@ The file carries twelve keys. `name` and `box_dir` are required.
 | `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, and ingress. Each is disabled by default. |
 | `[limits]` | table | Execution limits for Strands Shell. |
 | `[gateway]` | table | Settings for every request through the egress gateway: `upgrade_http`, the hosts whose plain `http://` on port 80 the gateway sends as `https://` on port 443. See [`[gateway]`](#gateway). |
+| `[locations]` | table | Names for directories, which a filesystem rule in the policy reads as `context.input.locations`. Grants no access. See [`[locations]`](#locations). |
 
-The example uses five of the twelve: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the thirteen: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -245,6 +246,55 @@ upgraded request on port 443, as it decides HTTPS to that host, and a credential
 it. A box that sets the list stores its record at version 32, and an older build refuses it.
 [Upgrade plain HTTP to HTTPS](egress.md#upgrade-plain-http-to-https) describes the behaviour and
 its limits.
+
+## `[locations]`
+
+Each key in `[locations]` is a location name, and its value lists one or more directories. A
+filesystem rule in the policy reads the names of the locations that hold a request's path as
+`context.input.locations`, so the rule does not spell the directory:
+
+```toml
+[locations]
+project = ["/Users/dev/src/app"]
+caches = ["~/.cache/my-agent", "~/.npm"]
+```
+
+```text
+@id("project_write")
+permit (principal, action == Box::Action::"fs:write", resource)
+when { context.input.locations.contains(Box::Location::"project") };
+```
+
+| Rule | Refusal |
+|---|---|
+| A name starts with an ASCII letter, and holds at most 64 ASCII letters, digits, `_`, or `-`. | ``` `[locations] <name>` is not a location name``` |
+| A location lists at least one directory. | ``` `[locations] <name>` lists no directory``` |
+| Each directory is absolute or starts with `~/`. | ``` `[locations] <name>` entry "<entry>" is refused: it is neither absolute nor `~/`-relative``` |
+| A directory has no `.` or `..` component. | ``` `[locations] <name>` entry "<entry>" is refused: it holds a `.` or `..` component``` |
+| A location lists each directory once. | ``` `[locations] <name>` lists "<entry>" twice``` |
+
+The box expands `~/` against the operator's home. It resolves the symbolic links in a directory
+that exists, so the location matches the resolved path that a rule's `path` holds. A directory that
+does not exist is kept as written. Two locations may list the same directory.
+
+A path is in a location when it is one of the location's directories or below one, by whole path
+components. A path can be in more than one location, and a rule on each of them applies to it.
+[The filesystem actions](policy/actions.md#filesystem) describe the `locations` field.
+
+A location grants no access. The agent still reaches a directory only through
+[`[agent.filesystem]`](#agentfilesystem-and-toolnamefilesystem) and a policy permit. A rule that
+names a location this file does not declare refuses to load.
+
+The startup disclosure prints one line for each location, after the agent's filesystem grants. A
+directory under the operator's home is spelled `~/…`:
+
+```text
+strands-box: [locations] caches: ~/.cache/my-agent, ~/.npm  (a name for policy rules; grants no access)
+strands-box: [locations] project: /Users/dev/src/app  (a name for policy rules; grants no access)
+```
+
+A box that declares a location stores its record at version 35, and an older build refuses it.
+Without `[locations]`, the record is unchanged.
 
 ## `[experimental-features]`
 
@@ -1133,7 +1183,8 @@ absent or invalid `name`, an absent or relative `box_dir`, an empty or relative 
 relative `workspace`, an `env` name the box owns, a relative `env.HOME` or `env.TMPDIR`, a patterned
 or relative `filesystem` path, a `filesystem` path carrying `..`, a duplicated `filesystem` path, an
 overlapping or all-hosts egress destination, a secretless egress entry, a literal egress secret,
-each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal, an `ingress` outside `[agent]`, an
+each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal, each [`[locations]`](#locations) refusal,
+an `ingress` outside `[agent]`, an
 `[[agent.ingress]]` while `ingress` is off in `[experimental-features]`, more than
 five `[[agent.ingress]]` entries, an `[[agent.ingress]] listen` that is not an IP address and port, a
 port of 0, two entries with one `listen` port or one `workload_port`, and on macOS a `listen` port

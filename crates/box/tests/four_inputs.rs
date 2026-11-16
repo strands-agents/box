@@ -34,7 +34,7 @@
 //! guards, in the file whose own header calls that spelling load-bearing. It now calls
 //! `parser_source::fields_of`, which takes the last token before the colon.
 //!
-//! # The configuration holds twelve keys, and the four inputs still stand
+//! # The configuration holds thirteen keys, and the four inputs still stand
 //!
 //! `policy` and credentials are authority, `name` and `box_dir` select state, and `[agent] command`
 //! plus the trailing argv select the workload. `[mcp]`, `[telemetry]`, `[tool]`, and `[agent.ingress]`
@@ -53,6 +53,10 @@
 //! `https://` on port 443. Policy still decides each such request, on port 443, as it decides a
 //! CONNECT to the same host, so the key changes which port a request is judged on and grants no
 //! reach a permit does not.
+//!
+//! `[locations]` gives names to directories, and a filesystem rule reads the names that hold a
+//! request's path as `context.input.locations`. Policy still decides each request, and a location
+//! makes no path reachable, so the key is part of the policy input and not a fifth one.
 //!
 //! `mcp` declares which local MCP servers exist, with a program and its argv. The configuration
 //! selects which servers can start, and `shell:spawn` decides each start. `mcp:call` decides each
@@ -205,15 +209,17 @@ fn the_config_record_carries_only_the_four_inputs() {
             "file_attributes",
             "gateway",
             "limits",
+            "locations",
             "mcp",
             "name",
             "policy",
             "telemetry",
             "tool"
         ],
-        "the twelve config keys include execution limits, explicit experimental enforcement selection, \
-         `file-attributes`, which widens only the workload's own write grants, and `[gateway]`, \
-         whose upgraded requests policy still decides. \
+        "the thirteen config keys include execution limits, explicit experimental enforcement selection, \
+         `file-attributes`, which widens only the workload's own write grants, `[gateway]`, \
+         whose upgraded requests policy still decides, and `[locations]`, which names directories \
+         for policy rules and grants nothing. \
          Unknown keys must remain errors; any further input requires a deliberate contract change."
     );
 }
