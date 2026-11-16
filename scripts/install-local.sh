@@ -260,15 +260,16 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-box_local=${BOX_LOCAL_DIR-}
+box_file=${BOX_LOCAL_FILE-}
 case "$#" in
     0) ;;
-    2) [ "$1" = --from ] || die "usage: install-local.sh [--from DIR]"; box_local=$2 ;;
-    *) die "usage: install-local.sh [--from DIR]" ;;
+    2) [ "$1" = --from ] || die "usage: install-local.sh --from PATH"; box_file=$2 ;;
+    *) die "usage: install-local.sh --from PATH" ;;
 esac
-[ -n "$box_local" ] || die "pass --from DIR or set BOX_LOCAL_DIR to the folder with the downloaded files"
-[ -d "$box_local" ] || die "not a directory: $box_local"
-box_local=$(cd "$box_local" && pwd -P) || die "cannot read $box_local"
+[ -n "$box_file" ] || die "pass --from PATH to the downloaded box-v<version>-<platform>.tar.gz, or set BOX_LOCAL_FILE"
+{ [ -f "$box_file" ] && [ ! -L "$box_file" ]; } || die "not a regular file: $box_file"
+box_name=${box_file##*/}
+box_local=$(cd "$(dirname "$box_file")" && pwd -P) || die "cannot read the folder of $box_file"
 box_unsigned=${BOX_ALLOW_UNSIGNED-0}
 case "$box_unsigned" in 0|1) ;; *) die "BOX_ALLOW_UNSIGNED must be 0 or 1" ;; esac
 box_no_path=${BOX_NO_MODIFY_PATH-0}
@@ -381,9 +382,10 @@ BOX_FISH_PATH
     done
 fi
 
-set -- "$box_local"/box-v*-"$box_triple".tar.gz
-{ [ "$#" -eq 1 ] && [ -f "$1" ]; } || die "expected exactly one box-v<version>-$box_triple.tar.gz in $box_local"
-box_name=${1##*/}
+case "$box_name" in
+    box-v*-"$box_triple".tar.gz) ;;
+    *) die "expected a file named box-v<version>-$box_triple.tar.gz, got $box_name" ;;
+esac
 box_version=${box_name#box-v}
 box_version=${box_version%-"$box_triple".tar.gz}
 version "$box_version"
