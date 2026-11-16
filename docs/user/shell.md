@@ -110,7 +110,7 @@ command substitution, `eval`, `source`, `find -exec`, `xargs`, or Lua's `io.pope
 | Field | Type | Present | Value |
 |---|---|---|---|
 | `context.input.command` | String | Always | The command line, rebuilt from the expanded words. |
-| `context.input.program` | String | Always | The first word after expansion, such as `grep`. `/bin/sh` and `/bin/lash` appear as `sh` and `lash`. |
+| `context.input.program` | String | Always | The first word after expansion, such as `grep`. A command the Shell implements appears by its name, also when it is called by its `/bin/` path, so `/bin/sh` appears as `sh` and `/bin/cat` as `cat`. Another path, such as `/usr/bin/grep`, names a host program and is decided as `shell:spawn`. |
 | `context.input.arg1`, `arg2` | String | When the command has that many arguments | The first and second arguments. Test each with `has` first. |
 | `context.input.arg_count` | Long | Always | The number of arguments. |
 | `context.input.cwd` | String | Always | The Shell's working directory: `~` for the operator's home, `~/…` below it, and an absolute path elsewhere. |
