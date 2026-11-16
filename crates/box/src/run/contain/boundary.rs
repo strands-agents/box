@@ -1681,7 +1681,10 @@ mod tests {
     use crate::record::config::process::{ContainedMcp, Filesystem};
     use crate::run::credential::ProvisionedVariable;
 
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
     #[tokio::test]
     async fn setup_reporting_preserves_late_failures_in_buffered_and_streaming_execution() {
         if !the_host_can_build_a_view() {
@@ -1726,7 +1729,10 @@ mod tests {
         }
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
     #[tokio::test]
     async fn setup_reporting_preserves_successful_buffered_and_streaming_execution() {
         if !the_host_can_build_a_view() {
@@ -1782,7 +1788,10 @@ mod tests {
         assert_eq!(output, b"STREAM_OK");
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
     fn the_host_can_build_a_view() -> bool {
         // SAFETY: the child uses syscalls only and calls `_exit`.
         let child = unsafe { libc::fork() };
@@ -5118,7 +5127,10 @@ write = ["/Users/example/box-demo/aws-tmp"]
         );
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
     mod live_script_mutation {
         use super::*;
         use crate::run::contain::supervise::{CapturedLeaf, LeafBox};

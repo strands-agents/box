@@ -245,9 +245,11 @@ binaries in the same directory.
 
 The [release guide](docs/dev/releases.md) covers version selection and publication for macOS and Linux ARM64.
 
-Linux workspace tests run on Ubuntu ARM64 with user, mount, and process namespaces enabled.
+Linux workspace tests run on Ubuntu ARM64 and x86-64 with user, mount, and process namespaces enabled.
+The x86-64 jobs set `EXPERIMENTAL_X86_SUPPORT=TRUE` to test the experimental runtime.
 Unexpected prerequisite skips fail the job. The accepted alias-read limitation and missing
-credential-daemon fixture remain explicit in the report. Deterministic integration failures on either platform fail `CI Gate`.
+credential-daemon fixture remain explicit in the report. Workspace and deterministic integration
+failures on either Linux architecture or macOS fail `CI Gate`.
 
 The [macOS release guide](docs/dev/macos-release.md) covers the native-feature build,
 automated signing, notarization, package verification, and release gates.

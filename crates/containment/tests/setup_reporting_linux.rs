@@ -1,5 +1,8 @@
 //! Setup status from the real Linux trampoline.
-#![cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#![cfg(all(
+    target_os = "linux",
+    any(target_arch = "aarch64", target_arch = "x86_64")
+))]
 
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, RawFd};

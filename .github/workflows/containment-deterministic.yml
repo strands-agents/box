@@ -34,13 +34,13 @@ jobs:
     # than running to the 6-hour default -- CN-* cases spawn real subprocesses
     # under a cage, and a wedged one would otherwise burn the whole budget.
     timeout-minutes: 45
-    # Both platforms affect CI Gate. Linux needs ARM64 to execute the namespace backend.
+    # Every runner affects CI Gate, including experimental Linux x86-64.
     strategy:
       # Report every OS's outcome even if one fails. A Linux failure is not a
       # reason to hide the macOS one.
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04-arm, macos-latest]
+        os: [ubuntu-24.04-arm, ubuntu-24.04, macos-latest]
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -63,6 +63,10 @@ jobs:
       - name: Free disk (linux only)
         if: ${{ startsWith(matrix.os, 'ubuntu') }}
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+
+      - name: Enable experimental x86 runtime tests
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: echo "EXPERIMENTAL_X86_SUPPORT=TRUE" >> "$GITHUB_ENV"
 
       # The Linux cage cannot be built without unprivileged user namespaces.
       # Ubuntu 23.10+ gates them behind an AppArmor profile; hosted runners
@@ -88,7 +92,7 @@ jobs:
             || echo "WARNING: unshare(CLONE_NEWUSER) still refused"
 
       - name: Cache cargo
-        # rust-cache keys include the runner OS. A distinct shared-key keeps this
+        # rust-cache keys include the runner OS and architecture. A distinct shared-key keeps this
         # workflow's cache separate from the unit-test leg's: the two build
         # different target sets (here: two release binaries plus a standalone
         # crate with its own lockfile) and would otherwise evict each other.

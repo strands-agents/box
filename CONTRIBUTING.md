@@ -32,6 +32,10 @@ Please read before contributing: [Strands AI usage policy](https://github.com/st
 
 ## Before you open a pull request
 
+On Linux x86-64, run `export EXPERIMENTAL_X86_SUPPORT=TRUE` before testing to opt in to
+Box's experimental runtime. The value must be exactly `TRUE`. Without it, the shared Box
+test helper reports a prerequisite skip.
+
 Run the gates with [`just`](https://github.com/casey/just):
 
 ```console
@@ -49,8 +53,9 @@ Three notes on the test suites:
   success. `just test` passes the flag.
 - **A test that cannot run on your host skips instead of failing.** Watch the output for
   `skipping:`, because a skipped test has proved nothing.
-- **Linux continuous integration runs on Ubuntu ARM64 with namespace support.**
-  It runs the workspace tests without the former namespace exclusions and rejects unexpected
+- **Linux continuous integration runs on Ubuntu ARM64 and x86-64 with namespace support.**
+  The x86-64 jobs set `EXPERIMENTAL_X86_SUPPORT=TRUE` to test the experimental runtime.
+  Both architectures run the workspace tests without the former namespace exclusions and reject unexpected
   prerequisite skips. The accepted alias-read limitation and missing credential-daemon
   fixture remain explicit reported gaps.
   Local machines without the required architecture or permissions can still skip tests.
