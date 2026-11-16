@@ -291,21 +291,6 @@ fn other_spelling_metadata(granted: &PathGrant) -> Result<String> {
     Ok(rules)
 }
 
-/// One `file-read-metadata` rule per symbolic link among the directories a requested spelling
-/// traverses, which a load through a linked directory needs beside the file's own spellings.
-fn linked_directory_metadata(requested: &std::path::Path) -> Result<String> {
-    let mut rules = String::new();
-    for ancestor in requested.ancestors().skip(1) {
-        if std::fs::symlink_metadata(ancestor).is_ok_and(|metadata| metadata.is_symlink()) {
-            let route = escaped(ancestor)?;
-            rules.push_str(&format!(
-                "(allow file-read-metadata (literal \"{route}\"))\n"
-            ));
-        }
-    }
-    Ok(rules)
-}
-
 /// One executable-mapping allow per exec grant this write grant reaches, after the cell's own deny.
 ///
 /// Empty unless an exec grant overlaps this write grant, which is the pair `floors::warnings`
@@ -492,15 +477,16 @@ pub(crate) fn render_profile_with_streams(
                 // The images the program loads from outside the shared cache are read-file cells:
                 // `file-read*` on each identity, and metadata on the spelling the load requests.
                 for loaded in super::macho::collect_dylibs(&granted.resolved, config, &mut missing)? {
-                    let image = &loaded.original;
+                    // The grant's traversal walk holds the linked folders on the spelling the load
+                    // requests, so `other_spelling_metadata` renders each one once, judged like the
+                    // other nodes.
                     if !loaded_images.insert(loaded.resolved.clone()) {
                         continue;
                     }
                     cells.entry(READ_FILE).or_default().push_str(&format!(
-                        "(allow file-read* (literal \"{}\"))\n{}{}",
+                        "(allow file-read* (literal \"{}\"))\n{}",
                         escaped(&loaded.resolved)?,
-                        other_spelling_metadata(&loaded)?,
-                        linked_directory_metadata(image)?
+                        other_spelling_metadata(&loaded)?
                     ));
                 }
             }
