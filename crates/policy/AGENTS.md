@@ -41,9 +41,10 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `McpReply`,
   `Outcome`, `PendingToolResponse`, `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`,
   `EffectivePolicy`, `Policy`, `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`,
-  `FsOperation`, `Principal`, `Request`, `RequestId`, `GovernedBox`, `Operator`, `PolicyWarning`,
-  `ToolGrammar`, `ToolGrammars`, `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`. That is 60
-  names with `--all-features` and 54 by default; recompute it when you touch the façade.
+  `FsOperation`, `Principal`, `Request`, `RequestId`, `WebSocketDirection`, `WebSocketOpcode`,
+  `GovernedBox`, `Operator`, `PolicyWarning`, `ToolGrammar`, `ToolGrammars`, `ToolGrammarError`,
+  `GrammarBindings`, `BindingRefusal`. That is 62 names with `--all-features` and 56 by default;
+  recompute it when you touch the façade.
 - `check` and `validate` share one composition (`check_and_expand`), and the staged check repeats
   the steps of `open_staged_with_engine` with no engine. A finding keeps a span only when the span
   is an offset into the authored text: a Dogwood parse error and a Cedar validation error over
@@ -174,7 +175,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `::a_server_that_never_lists_its_tools_unloads_the_kept_rule`. A namespace that this build's
   base schema declares is never read as a server, which
   `mcp_schema::tests::a_previous_build_of_the_box_actions_is_not_read_as_a_server` pins.
-- `body_bytes` is the offer on a `::request` and the delivery on a `::response`.
+- `body_bytes` and `payload_bytes` are the offer on a `::request` and the delivery on a
+  `::response`.
 - Sum an outbound budget over `http:request::response`, as `tests/policies/egress_byte_budget.dw`
   does. One exchange records one such event, at reply time, with the delivered request bytes and
   the reply's `output.status`. Pinned by

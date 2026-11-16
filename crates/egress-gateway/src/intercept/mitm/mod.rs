@@ -150,7 +150,7 @@ impl Default for MitmConfig {
 /// The shared, read-only state every connection handler borrows (behind an `Arc`).
 pub(crate) struct SharedState {
     /// Part B — the controls this adapter drives.
-    controls: CapabilitySet,
+    pub(crate) controls: CapabilitySet,
     /// The adapter config.
     pub(crate) config: MitmConfig,
     /// The ephemeral session CA.

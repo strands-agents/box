@@ -410,6 +410,7 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
 enum EgressLeg {
     Connection,
     Request,
+    Message(&'static str),
 }
 
 impl EgressLeg {
@@ -458,7 +459,33 @@ impl EgressIdentity {
                 method: (*method).to_string(),
                 path: (*path).to_string(),
             }),
+            EgressEffectAttempt::WebSocketSend {
+                host, port, path, ..
+            } => Some(Self::message(
+                r#"Box::Action::"websocket:send""#,
+                host,
+                *port,
+                path,
+            )),
+            EgressEffectAttempt::WebSocketReceive {
+                host, port, path, ..
+            } => Some(Self::message(
+                r#"Box::Action::"websocket:receive""#,
+                host,
+                *port,
+                path,
+            )),
             _ => None,
+        }
+    }
+
+    fn message(action: &'static str, host: &str, port: u16, path: &str) -> Self {
+        Self {
+            leg: EgressLeg::Message(action),
+            host: host.to_string(),
+            port,
+            method: "GET".to_string(),
+            path: path.to_string(),
         }
     }
 
@@ -478,7 +505,9 @@ impl EgressIdentity {
     fn subject(&self) -> telemetry::Subject {
         match self.leg {
             EgressLeg::Connection => telemetry::Subject::destination(&self.host, self.port),
-            EgressLeg::Request => telemetry::Subject::http(&self.host, self.port, &self.method),
+            EgressLeg::Request | EgressLeg::Message(_) => {
+                telemetry::Subject::http(&self.host, self.port, &self.method)
+            }
         }
     }
 
@@ -487,12 +516,16 @@ impl EgressIdentity {
     /// A connection compares on host and port alone, because the gateway emits a placeholder for
     /// the method and path a connection does not have.
     fn is(&self, other: &Self) -> bool {
-        if self.leg != other.leg || self.host != other.host || self.port != other.port {
+        let leg = |leg| match leg {
+            EgressLeg::Message(_) => EgressLeg::Request,
+            leg => leg,
+        };
+        if leg(self.leg) != leg(other.leg) || self.host != other.host || self.port != other.port {
             return false;
         }
         match self.leg {
             EgressLeg::Connection => true,
-            EgressLeg::Request => self.method == other.method && self.path == other.path,
+            _ => self.method == other.method && self.path == other.path,
         }
     }
 
@@ -500,13 +533,14 @@ impl EgressIdentity {
         match self.leg {
             EgressLeg::Connection => r#"Box::Action::"net:connect""#,
             EgressLeg::Request => r#"Box::Action::"http:request""#,
+            EgressLeg::Message(action) => action,
         }
     }
 
     fn resource(&self) -> String {
         match self.leg {
             EgressLeg::Connection => format!("{}:{}", self.host, self.port),
-            EgressLeg::Request => format!("{}:{}{}", self.host, self.port, self.path),
+            _ => format!("{}:{}{}", self.host, self.port, self.path),
         }
     }
 }
@@ -1078,6 +1112,7 @@ mod tests {
                 path: "/",
                 body_bytes: 0,
                 intercepted: true,
+                upgrade: "",
                 mcp: None,
             })
             .expect("ordinary HTTP is admitted")
@@ -1164,6 +1199,7 @@ mod tests {
                 path: "/v1/messages",
                 body_bytes: 0,
                 intercepted: true,
+                upgrade: "",
                 mcp: None,
             })
             .err()
@@ -1210,6 +1246,55 @@ mod tests {
         assert_eq!(recorded[1].cause(), DecisionCause::NoMatch);
     }
 
+    #[test]
+    fn a_refused_websocket_message_records_its_own_action() {
+        let history = tempfile::tempdir().expect("history directory");
+        let policy = PolicyEngine::open(
+            vec![Policy {
+                origin: PathBuf::from("websocket-telemetry.dw"),
+                text: r#"permit(principal, action == Box::Action::"http:request", resource);"#
+                    .to_string(),
+            }],
+            &history.path().join("dogwood.redb"),
+        )
+        .expect("policy opens")
+        .observed_by(Arc::new(PolicyDecisionObserver));
+        let interceptor = EgressDecisionInterceptor::over(EgressPolicyInterceptor::into_handle(
+            Arc::new(policy),
+            Principal::agent(),
+            GovernedBox::assigned("test-box"),
+        ));
+        let recorder = DecisionRecorder::discarding();
+        let refusal = interceptor
+            .intercept(&EgressEffectAttempt::WebSocketSend {
+                host: "realtime.example.com",
+                port: 443,
+                path: "/v1/realtime",
+                opcode: egress_gateway::WebSocketOpcode::Text,
+                payload_bytes: 5,
+            })
+            .err()
+            .expect("no permit matches a message");
+        EgressDecisionRecorder::over(Arc::clone(&recorder)).emit(EgressDecision {
+            host: "realtime.example.com".to_string(),
+            port: 443,
+            method: "GET".to_string(),
+            path: "/v1/realtime".to_string(),
+            decision: AuditDecision::Deny,
+            reason: refusal.to_string(),
+            correlation: RequestId::new("message"),
+        });
+
+        let [recorded] = &recorder.recorded()[..] else {
+            panic!("one record");
+        };
+        let (action, resource, _, verdict, reason) = recorded.parts();
+        assert_eq!(action, r#"Box::Action::"websocket:send""#);
+        assert_eq!(resource, "realtime.example.com:443/v1/realtime");
+        assert_eq!(verdict, EffectiveVerdict::Deny);
+        assert_eq!(reason, Some("no permit matched"));
+    }
+
     /// **One exchange's verdict never reaches another exchange's record.** The captured verdict is
     /// held in one slot, so an emitted decision naming a different exchange must fall back to the
     /// gateway's own label rather than take what is waiting there.
@@ -1242,6 +1327,7 @@ mod tests {
             path,
             body_bytes: 0,
             intercepted: true,
+            upgrade: "",
             mcp: None,
         };
         let emitted = |host: &str, port, method: &str, path: &str| EgressDecision {
@@ -1453,6 +1539,7 @@ mod tests {
             path: "/mcp",
             body_bytes: arguments.len(),
             intercepted: false,
+            upgrade: "",
             mcp: Some(McpFrame::ToolCall {
                 server: "demo",
                 tool: "add",

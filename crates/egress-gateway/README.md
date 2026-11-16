@@ -15,7 +15,7 @@ operators inspecting egress decisions.
 
 ## Public Interface
 
-The crate root is the complete public API — 36 names, 31 unconditional and 5
+The crate root is the complete public API — 37 names, 32 unconditional and 5
 behind the `tls-intercept` feature:
 
 | Area | Items |
@@ -24,7 +24,7 @@ behind the `tls-intercept` feature:
 | Boundary values | `HeaderMap`, `InterceptedRequest`, `InterceptedResponse`, `Mutation`, `MutationTarget`, `Target` |
 | Credential mutators | `CapabilitySet`, `CredentialCapability` |
 | Host spelling | `is_bindable_host`, `normalize_host` |
-| Effect lifecycle | `EffectAttempt`, `EffectInterceptor`, `EffectOutcome`, `EffectPermit`, `McpFrame`, `McpListReply`, `ReplyObserver` |
+| Effect lifecycle | `EffectAttempt`, `EffectInterceptor`, `EffectOutcome`, `EffectPermit`, `McpFrame`, `McpListReply`, `ReplyObserver`, `WebSocketOpcode` |
 | Remote MCP | `McpTarget`, `McpTargetIdentity`, `canonicalize_mcp_frame`, `mcp_denial_response`, `refuse_duplicate_mcp_keys` |
 | Audit seam | `Emitter`, `StubEmitter` |
 | Errors | `PROXY_ORIGIN_HEADER`, `PROXY_ORIGIN_VALUE`, `ProxyError`, `Result` |
@@ -59,13 +59,14 @@ pub trait ReplyObserver: Send {
 }
 ```
 
-The seam speaks `std::io::Result`, not `ProxyError`. There are three attempt
-kinds, and the proxy presents each one immediately before its effect:
+The seam speaks `std::io::Result`, not `ProxyError`. The proxy presents each attempt immediately
+before its effect:
 
 | Attempt | Fields | Reported when |
 |---|---|---|
 | `EffectAttempt::Connect` | `host`, `port`, `address`, `http_visibility` | before one upstream socket opens, once per pinned address |
-| `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes` | after the request is serialized, before it is written |
+| `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes`, `upgrade` | after the request is serialized, before it is written |
+| `EffectAttempt::WebSocketSend`, `WebSocketReceive` | `host`, `port`, `path`, `opcode`, `payload_bytes` | before any payload byte moves on: at the header of a binary message in one frame, else after the whole message |
 | `EffectAttempt::ResponseRelease` | `host`, `port`, `method`, `path`, `status` | after header controls and required catalog capture, before the workload receives bytes |
 
 No attempt carries a header, a body, or credential material. `path` excludes the

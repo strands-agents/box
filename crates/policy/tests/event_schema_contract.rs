@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 use dogwood_language::{LoweredPolicySet, PolicySchema, ServiceSchema};
 use policy::{
     Delivery, FsOperation, FsResult, GovernedBox, Outcome, PathResolver, Policy, PolicyEngine,
-    Principal, Request, compose_action_schema, event_schema_source, generate_mcp_schema,
+    Principal, Request, WebSocketDirection, WebSocketOpcode, compose_action_schema,
+    event_schema_source, generate_mcp_schema,
 };
 
 fn record_operation(
@@ -147,6 +148,7 @@ fn every_public_producer_populates_the_reserved_fields_declared_by_its_schema() 
                 path: "/upload",
                 body_bytes: 5,
                 intercepted: true,
+                upgrade: "",
             },
             Outcome::Http {
                 host: "api.example.com",
@@ -156,9 +158,34 @@ fn every_public_producer_populates_the_reserved_fields_declared_by_its_schema() 
                 delivery,
                 status: None,
                 intercepted: true,
+                upgrade: "",
             },
             &mut identifiers,
         );
+    }
+    for direction in [WebSocketDirection::Send, WebSocketDirection::Receive] {
+        for delivery in [Delivery::Completed { bytes: 5 }, Delivery::Failed] {
+            record_operation(
+                &engine,
+                Request::WebSocket {
+                    direction,
+                    host: "api.example.com",
+                    port: 443,
+                    path: "/v1/realtime",
+                    opcode: WebSocketOpcode::Text,
+                    payload_bytes: 5,
+                },
+                Outcome::WebSocket {
+                    direction,
+                    host: "api.example.com",
+                    port: 443,
+                    path: "/v1/realtime",
+                    opcode: WebSocketOpcode::Text,
+                    delivery,
+                },
+                &mut identifiers,
+            );
+        }
     }
     let words = vec!["value".to_string()];
     record_operation(
@@ -261,6 +288,7 @@ fn every_public_producer_populates_the_reserved_fields_declared_by_its_schema() 
             path: "/upload",
             body_bytes: 5,
             intercepted: true,
+            upgrade: "",
         },
     );
     assert!(
@@ -323,7 +351,10 @@ fn every_public_producer_populates_the_reserved_fields_declared_by_its_schema() 
                 // are completed responses, so those declared error kinds have no public producer.
                 "error" => {
                     signature.action().starts_with("fs:")
-                        || matches!(signature.action(), "net:connect" | "http:request")
+                        || matches!(
+                            signature.action(),
+                            "net:connect" | "http:request" | "websocket:send" | "websocket:receive"
+                        )
                 }
                 other => panic!("new event kind {other} needs producer coverage"),
             }

@@ -925,6 +925,7 @@ permit(principal == Box::Agent::"self", action == Box::Action::"http:request", r
                 path: "/v1",
                 body_bytes: 10,
                 intercepted: true,
+                upgrade: "",
             },
         ]
     }

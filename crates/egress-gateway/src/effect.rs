@@ -84,6 +84,21 @@ impl std::fmt::Debug for McpFrame<'_> {
     }
 }
 
+/// The RFC 6455 opcode of a WebSocket message's first frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WebSocketOpcode {
+    /// `0x1`, UTF-8 text.
+    Text,
+    /// `0x2`, binary data.
+    Binary,
+    /// `0x9`, a control frame that asks for a Pong.
+    Ping,
+    /// `0xA`, a control frame that answers a Ping.
+    Pong,
+    /// `0x8`, a control frame that ends the WebSocket.
+    Close,
+}
+
 /// An outbound operation presented immediately before its external effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -126,6 +141,34 @@ pub enum EffectAttempt<'a> {
         /// The MCP frame this request carries, when its destination is a configured remote MCP
         /// server; `None` otherwise. Present drives the `mcp:call` gate alongside `http:request`.
         mcp: Option<McpFrame<'a>>,
+        /// `websocket` on a WebSocket handshake, and empty on every other request.
+        upgrade: &'a str,
+    },
+    /// Sending one whole WebSocket message from the workload to the upstream.
+    WebSocketSend {
+        /// The handshake's logical destination host.
+        host: &'a str,
+        /// The handshake's logical destination port.
+        port: u16,
+        /// The handshake's path, without its query.
+        path: &'a str,
+        /// The opcode of the message's first frame.
+        opcode: WebSocketOpcode,
+        /// The payload length, after the mask comes off.
+        payload_bytes: usize,
+    },
+    /// Sending one whole WebSocket message from the upstream to the workload.
+    WebSocketReceive {
+        /// The handshake's logical destination host.
+        host: &'a str,
+        /// The handshake's logical destination port.
+        port: u16,
+        /// The handshake's path, without its query.
+        path: &'a str,
+        /// The opcode of the message's first frame.
+        opcode: WebSocketOpcode,
+        /// The payload length.
+        payload_bytes: usize,
     },
     /// Returning one serialized, governed HTTP response to the workload.
     ResponseRelease {

@@ -269,6 +269,7 @@ fn streamed_http_and_mcp_history_waits_for_upstream_termination() {
                 path,
                 body_bytes: 0,
                 intercepted: true,
+                upgrade: "",
                 mcp: None,
             })
         };

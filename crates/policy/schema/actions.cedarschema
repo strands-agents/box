@@ -174,7 +174,8 @@ type NetworkRequestInput = {
   path: String,
   body_bytes: Long,
   // Whether the gateway terminated TLS and parsed the exchange.
-  intercepted: Bool
+  intercepted: Bool,
+  upgrade: String
 };
 
 // The reply, on the `output` of an `http:request` response event. `status` is the
@@ -199,6 +200,28 @@ action "http:request" appliesTo {
   principal: Agent,
   resource: Resource,
   context: { input: NetworkRequestInput, output?: NetworkResponseOutput }
+};
+
+entity WebSocketOpcode enum ["text", "binary", "ping", "pong", "close"];
+
+type WebSocketMessageInput = {
+  host: String,
+  port: Long,
+  path: String,
+  opcode: WebSocketOpcode,
+  payload_bytes: Long
+};
+
+action "websocket:send" appliesTo {
+  principal: Agent,
+  resource: Resource,
+  context: { input: WebSocketMessageInput }
+};
+
+action "websocket:receive" appliesTo {
+  principal: Agent,
+  resource: Resource,
+  context: { input: WebSocketMessageInput }
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -39,6 +39,7 @@ fn request() -> Request<'static> {
         path: "/upload",
         body_bytes: 5,
         intercepted: true,
+        upgrade: "",
     }
 }
 
@@ -51,6 +52,7 @@ fn response() -> Outcome<'static> {
         delivery: Delivery::Completed { bytes: 5 },
         status: Some(200),
         intercepted: true,
+        upgrade: "",
     }
 }
 
@@ -325,6 +327,7 @@ fn failed_http_outcomes_trip_identifier_error_predicates_and_leave_response_pred
                     delivery: Delivery::Failed,
                     status: None,
                     intercepted: true,
+                    upgrade: "",
                 },
             )
             .expect("the failed operation records");
@@ -352,6 +355,7 @@ fn a_refusal_before_submission_returns_no_token_and_records_no_event() {
             path: "/upload",
             body_bytes: usize::MAX,
             intercepted: true,
+            upgrade: "",
         },
     );
     assert!(
@@ -549,6 +553,7 @@ fn captured_legacy_events_reopen_without_erasing_facts_or_inventing_identifiers(
         path,
         body_bytes: 5,
         intercepted: true,
+        upgrade: "",
     };
     let (host_decision, _) = engine.decide(
         &GovernedBox::assigned("request-id-test"),

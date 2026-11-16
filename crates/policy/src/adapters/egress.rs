@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use egress_gateway::{
     EffectAttempt as EgressEffectAttempt, EffectInterceptor as EgressEffectInterceptor,
     EffectOutcome as EgressEffectOutcome, EffectPermit as EgressEffectPermit, McpFrame,
-    McpListReply, ReplyObserver as EgressReplyObserver,
+    McpListReply, ReplyObserver as EgressReplyObserver, WebSocketOpcode as EgressWebSocketOpcode,
 };
 
 use crate::GovernedBox;
@@ -18,7 +18,7 @@ use crate::{
 };
 use crate::{
     Decision, Delivery, DenyReason, McpReply, Outcome, PendingToolResponse, PolicyEngine,
-    PolicyError, Principal, Request, RequestId,
+    PolicyError, Principal, Request, RequestId, WebSocketDirection, WebSocketOpcode,
 };
 
 /// Binds one policy and egress principal to outbound effect interception.
@@ -218,6 +218,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                 body_bytes,
                 intercepted,
                 mcp,
+                upgrade,
             } => {
                 // HTTP and MCP decisions are separate requests, even in one gateway exchange.
                 authorize(
@@ -231,6 +232,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                         path,
                         body_bytes: *body_bytes,
                         intercepted: *intercepted,
+                        upgrade,
                     },
                 )
                 .map_err(|reason| format!("http:request gate: {reason}"))
@@ -241,7 +243,11 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
             }
             // Response release records nothing: the HTTP permit already records the reply.
             EgressEffectAttempt::ResponseRelease { .. } => Ok((None, (None, None))),
-            _ => Err("policy does not support this egress effect".to_string()),
+            other => match websocket_request(other) {
+                Some(request) => authorize(&self.policy, &self.governed, &self.principal, &request)
+                    .map(|request_id| (Some(request_id), (None, None))),
+                None => Err("policy does not support this egress effect".to_string()),
+            },
         };
 
         decision
@@ -371,6 +377,14 @@ enum AttemptIdentity {
         intercepted: bool,
         /// Present when this request carried an `mcp:call`; drives the response-leg recording.
         mcp: Option<McpCallIdentity>,
+        upgrade: String,
+    },
+    WebSocket {
+        direction: WebSocketDirection,
+        host: String,
+        port: u16,
+        path: String,
+        opcode: WebSocketOpcode,
     },
     /// An attempt kind this adapter does not map, and the release of a reply. Each is admitted
     /// only if the authorization arm above allowed it, and it records nothing.
@@ -397,6 +411,7 @@ impl AttemptIdentity {
                 path,
                 intercepted,
                 mcp,
+                upgrade,
                 ..
             } => Self::Http {
                 host: (*host).to_string(),
@@ -404,6 +419,7 @@ impl AttemptIdentity {
                 method: (*method).to_string(),
                 path: (*path).to_string(),
                 intercepted: *intercepted,
+                upgrade: (*upgrade).to_string(),
                 // Record a response leg only for an actual tool/resource/prompt CALL — never for
                 // `List`/enumeration (tools/list, resources/list, prompts/list). Discovery drives
                 // those `List` frames through the gateway at startup; counting them would inflate a
@@ -433,7 +449,23 @@ impl AttemptIdentity {
                     }),
                 }),
             },
-            _ => Self::Unmapped,
+            other => match websocket_request(other) {
+                Some(Request::WebSocket {
+                    direction,
+                    host,
+                    port,
+                    path,
+                    opcode,
+                    ..
+                }) => Self::WebSocket {
+                    direction,
+                    host: host.to_string(),
+                    port,
+                    path: path.to_string(),
+                    opcode,
+                },
+                _ => Self::Unmapped,
+            },
         }
     }
 }
@@ -722,6 +754,7 @@ impl LocalPolicyEffectPermit {
                     path,
                     intercepted,
                     mcp,
+                    upgrade,
                 },
                 Some(delivery),
             ) => {
@@ -737,6 +770,7 @@ impl LocalPolicyEffectPermit {
                         delivery,
                         status: reply_status_of(outcome),
                         intercepted: *intercepted,
+                        upgrade,
                     },
                 );
                 // Record the `mcp:call::response` leg for a remote (http) MCP call, so temporal caps
@@ -780,6 +814,28 @@ impl LocalPolicyEffectPermit {
                     _ => http,
                 }
             }
+            (
+                AttemptIdentity::WebSocket {
+                    direction,
+                    host,
+                    port,
+                    path,
+                    opcode,
+                },
+                Some(delivery),
+            ) => self.policy.record(
+                &self.governed,
+                &self.principal,
+                request_id,
+                &Outcome::WebSocket {
+                    direction: *direction,
+                    host,
+                    port: *port,
+                    path,
+                    opcode: *opcode,
+                    delivery,
+                },
+            ),
             // A message attempt whose outcome carries no delivery, or an unmapped
             // attempt: nothing truthful to record.
             _ => Ok(()),
@@ -860,6 +916,46 @@ fn reply_status_of(outcome: EgressEffectOutcome) -> Option<u16> {
         EgressEffectOutcome::Replied { status, .. } => Some(status),
         _ => None,
     }
+}
+
+fn websocket_request<'a>(effect: &EgressEffectAttempt<'a>) -> Option<Request<'a>> {
+    let (EgressEffectAttempt::WebSocketSend {
+        host,
+        port,
+        path,
+        opcode,
+        payload_bytes,
+    }
+    | EgressEffectAttempt::WebSocketReceive {
+        host,
+        port,
+        path,
+        opcode,
+        payload_bytes,
+    }) = *effect
+    else {
+        return None;
+    };
+    let direction = if matches!(effect, EgressEffectAttempt::WebSocketSend { .. }) {
+        WebSocketDirection::Send
+    } else {
+        WebSocketDirection::Receive
+    };
+    let opcode = match opcode {
+        EgressWebSocketOpcode::Text => WebSocketOpcode::Text,
+        EgressWebSocketOpcode::Binary => WebSocketOpcode::Binary,
+        EgressWebSocketOpcode::Ping => WebSocketOpcode::Ping,
+        EgressWebSocketOpcode::Pong => WebSocketOpcode::Pong,
+        EgressWebSocketOpcode::Close => WebSocketOpcode::Close,
+    };
+    Some(Request::WebSocket {
+        direction,
+        host,
+        port,
+        path,
+        opcode,
+        payload_bytes,
+    })
 }
 
 /// Map a classified MCP frame onto the `mcp:call` request. `server` and `method` are on every
@@ -1052,6 +1148,7 @@ mod tests {
             path: "/mcp",
             body_bytes: 32,
             intercepted: false,
+            upgrade: "",
             mcp: Some(McpFrame::List { server, method }),
         }
     }
@@ -1069,6 +1166,7 @@ mod tests {
             path: "/mcp",
             body_bytes: 64,
             intercepted: false,
+            upgrade: "",
             mcp: Some(McpFrame::ToolCall {
                 server,
                 tool,
@@ -2330,6 +2428,7 @@ mod tests {
                 path: "/v1/messages",
                 body_bytes: 42,
                 intercepted: true,
+                upgrade: "",
                 mcp: None,
             })
             .expect("request is allowed")
@@ -2359,6 +2458,7 @@ mod tests {
             path: "/",
             body_bytes: 0,
             intercepted: true,
+            upgrade: "",
             mcp: None,
         };
         let response = EgressEffectAttempt::ResponseRelease {
@@ -2449,6 +2549,7 @@ mod tests {
             path: "/",
             body_bytes: 0,
             intercepted: true,
+            upgrade: "",
             mcp: None,
         };
         for _ in 0..3 {
@@ -2517,6 +2618,7 @@ mod tests {
             path: "/",
             body_bytes: 0,
             intercepted: true,
+            upgrade: "",
             mcp: None,
         };
         for (source, admitted_after) in [(count_all, false), (count_errors, true)] {
@@ -2643,6 +2745,7 @@ mod tests {
             path: "/v1/messages",
             body_bytes,
             intercepted: true,
+            upgrade: "",
             mcp: None,
         };
 
@@ -2674,6 +2777,7 @@ mod tests {
             path: "/v1/messages",
             body_bytes: 0,
             intercepted,
+            upgrade: "",
             mcp: None,
         };
 
@@ -2713,6 +2817,7 @@ mod tests {
             path: "/v1/messages",
             body_bytes: 0,
             intercepted,
+            upgrade: "",
             mcp: None,
         };
         let exchange = |fixture: &InterceptorFixture, intercepted| {

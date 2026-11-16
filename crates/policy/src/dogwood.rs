@@ -1997,7 +1997,7 @@ fn outcome_kind(outcome: &Outcome<'_>) -> &'static str {
                 KIND_ERROR
             }
         }
-        Outcome::Http { delivery, .. } => {
+        Outcome::Http { delivery, .. } | Outcome::WebSocket { delivery, .. } => {
             if matches!(delivery, Delivery::Failed) {
                 KIND_ERROR
             } else {
@@ -2054,6 +2054,7 @@ fn outcome_action_id(outcome: &Outcome<'_>) -> &'static str {
     match outcome {
         Outcome::Connect { .. } => action::NET_CONNECT,
         Outcome::Http { .. } => action::HTTP_REQUEST,
+        Outcome::WebSocket { direction, .. } => crate::schema::websocket_action_id(*direction),
         Outcome::ShellRun { .. } => action::SHELL_EXEC,
         Outcome::ShellSpawn { .. } => action::SHELL_SPAWN,
         // The response names the SAME coarse action as the request, so a rule joining
@@ -2066,13 +2067,35 @@ fn outcome_action_id(outcome: &Outcome<'_>) -> &'static str {
 }
 
 /// The operation entity value for one kernel verb, mirroring the Cedar mapping's
-/// `fs_operation_expr` so the two bags carry one representation.
+/// `enum_expr` so the two bags carry one representation.
 fn fs_operation_value(operation: crate::request::FsOperation) -> Value {
     let (entity_type, verb) = crate::schema::fs_operation_entity(operation);
     Value::Entity {
         ty: entity_type.to_string(),
         id: verb.to_string(),
     }
+}
+
+fn websocket_fields(
+    host: &str,
+    port: u16,
+    path: &str,
+    opcode: crate::request::WebSocketOpcode,
+    payload_bytes: usize,
+) -> Vec<(&'static str, Value)> {
+    vec![
+        (attr::HOST, Value::String(host.to_string())),
+        (attr::PORT, Value::Int(i64::from(port))),
+        (attr::PATH, Value::String(path.to_string())),
+        (
+            attr::OPCODE,
+            Value::Entity {
+                ty: crate::schema::WEBSOCKET_OPCODE_TYPE.to_string(),
+                id: opcode.as_str().to_string(),
+            },
+        ),
+        (attr::PAYLOAD_BYTES, Value::Int(clamp(payload_bytes))),
+    ]
 }
 
 /// The `input` fields of a request event. Same names and types the Cedar mapping
@@ -2104,6 +2127,7 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
             path,
             body_bytes,
             intercepted,
+            upgrade,
         } => vec![
             (attr::HOST, Value::String((*host).to_string())),
             (attr::PORT, Value::Int(i64::from(*port))),
@@ -2111,7 +2135,16 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
             (attr::PATH, Value::String((*path).to_string())),
             (attr::BODY_BYTES, Value::Int(clamp(*body_bytes))),
             (attr::INTERCEPTED, Value::Bool(*intercepted)),
+            (attr::UPGRADE, Value::String((*upgrade).to_string())),
         ],
+        Request::WebSocket {
+            host,
+            port,
+            path,
+            opcode,
+            payload_bytes,
+            ..
+        } => websocket_fields(host, *port, path, *opcode, *payload_bytes),
         Request::McpCall {
             server,
             method,
@@ -2234,6 +2267,7 @@ fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
             path,
             delivery,
             intercepted,
+            upgrade,
             ..
         } => vec![
             (attr::HOST, Value::String((*host).to_string())),
@@ -2247,7 +2281,16 @@ fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
                 Value::Int(clamp(delivery.accepted_bytes())),
             ),
             (attr::INTERCEPTED, Value::Bool(*intercepted)),
+            (attr::UPGRADE, Value::String((*upgrade).to_string())),
         ],
+        Outcome::WebSocket {
+            host,
+            port,
+            path,
+            opcode,
+            delivery,
+            ..
+        } => websocket_fields(host, *port, path, *opcode, delivery.accepted_bytes()),
         Outcome::ShellRun {
             command,
             program,
@@ -3234,6 +3277,7 @@ when temporal {
             delivery: crate::Delivery::Completed { bytes },
             status: Some(200),
             intercepted: true,
+            upgrade: "",
         }
     }
 
@@ -3245,6 +3289,7 @@ when temporal {
             path: "/v1",
             body_bytes: 10,
             intercepted: true,
+            upgrade: "",
         }
     }
 
@@ -3319,6 +3364,7 @@ when temporal {
                         delivery: crate::Delivery::Completed { bytes: 10 },
                         status: Some(200),
                         intercepted: true,
+                        upgrade: "",
                     }
                 )
                 .is_err(),
@@ -3420,6 +3466,7 @@ when temporal {
             delivery: crate::Delivery::Completed { bytes: 150 },
             status: Some(200),
             intercepted: true,
+            upgrade: "",
         };
         let request_id = permitted_http_request(&engine);
         engine

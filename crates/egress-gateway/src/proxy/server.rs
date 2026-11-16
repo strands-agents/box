@@ -17,7 +17,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::time::Sleep;
 use tokio_rustls::TlsAcceptor;
 
-use crate::audit::RequestId;
+use crate::audit::{Decision as AuditDecision, RequestId};
 use crate::client::http::{ResponseCompletion, ResponseProgress, ResponseState};
 use crate::error::{ProxyError, Result};
 use crate::intercept::mitm::body::ResponseBody;
@@ -25,6 +25,7 @@ use crate::intercept::mitm::connect::{self, ConnectRequest};
 use crate::intercept::mitm::l7::{self, WorkloadResponse};
 use crate::intercept::mitm::listener::open_governed_upstream;
 use crate::intercept::mitm::{BackendDial, SharedState, http1, tls};
+use crate::proxy::websocket::{self, Handshake};
 use crate::transport::socket::{self, Counted, HeadCopy, MAX_HEAD_BYTES, Socket, WriteCount};
 
 /// Serve one connection. `connect_only` refuses plain HTTP, for the AF_UNIX transport.
@@ -87,7 +88,8 @@ async fn first_request(
         let connect = ConnectRequest { host, port };
         let correlation = RequestId::unique();
         // Open the upstream before the CONNECT ack, so a denial opens no socket.
-        let (upstream, backend) = match admit(state, &connect, token.as_deref(), &correlation) {
+        let (upstream, backend) = match admit(state, &connect, token.as_deref(), &correlation, None)
+        {
             Ok(opened) => opened,
             Err(refusal) => return Ok(*refusal),
         };
@@ -108,6 +110,8 @@ async fn first_request(
     }
 
     // A plain `http://` request: the same decisions, with no TLS and no CONNECT ack.
+    let handshake = websocket::classify(&request) != Handshake::None;
+    let method = request.method().to_string();
     let max_body = state.config.response_limits.max_body_bytes;
     let Ok(parsed) = http1::read_request(&head, request.into_body(), max_body).await else {
         return Ok(WorkloadResponse::bare(400));
@@ -119,10 +123,13 @@ async fn first_request(
     // A listed host's port 80 is decided and sent as port 443 over TLS, exactly as a CONNECT to it.
     let (connect, upgraded) = connect::plain_destination(&state.config.upgrade_http, host, port);
     let correlation = RequestId::unique().with_headers(&parsed.headers);
-    let (upstream, backend) = match admit(state, &connect, token.as_deref(), &correlation) {
-        Ok(opened) => opened,
-        Err(refusal) => return Ok(*refusal),
-    };
+    let path = l7::judged_path(&origin_target);
+    let handshake = handshake.then_some((method.as_str(), path.as_str()));
+    let (upstream, backend) =
+        match admit(state, &connect, token.as_deref(), &correlation, handshake) {
+            Ok(opened) => opened,
+            Err(refusal) => return Ok(*refusal),
+        };
     l7::forward_plain(
         upstream,
         backend.as_ref(),
@@ -144,9 +151,26 @@ fn admit(
     connect: &ConnectRequest,
     token: Option<&str>,
     correlation: &RequestId,
+    plain_handshake: Option<(&str, &str)>,
 ) -> std::result::Result<(TcpStream, Option<BackendDial>), Box<WorkloadResponse>> {
     if !connect::token_ok(state.config.expected_token.as_deref(), token) {
         return Err(Box::new(WorkloadResponse::bare(407)));
+    }
+    if let Some(request) = plain_handshake {
+        let reason = "websocket: handshake on a plaintext request";
+        let correlation = correlation.clone();
+        l7::emit_decision(
+            state,
+            connect,
+            request,
+            AuditDecision::Deny,
+            reason,
+            correlation,
+        );
+        return Err(Box::new(WorkloadResponse::refusal(
+            403,
+            b"WebSocket requires TLS",
+        )));
     }
     open_governed_upstream(state, connect, correlation).map_err(|error| Box::new(error.response()))
 }
@@ -170,22 +194,36 @@ async fn intercept_tls(tunnel: Tunnel, state: &SharedState) -> Result<()> {
         ..
     } = tunnel;
     let completion = ResponseCompletion::default();
-    let completion = &completion;
-    serve(client, completion, |request, head| async move {
+    let (completion, connect, pending) = (&completion, &connect, &Cell::new(None));
+    serve(client, completion, |mut request, head| async move {
+        let handshake = websocket::classify(&request);
+        let upgrade = hyper::upgrade::on(&mut request);
         let max_body = state.config.response_limits.max_body_bytes;
         let parsed = http1::read_request(&head, request.into_body(), max_body).await?;
-        l7::forward_tls(
+        let mut response = l7::forward_tls(
             parsed,
             upstream,
             backend.as_ref(),
-            &connect,
+            connect,
             state,
             correlation,
             completion,
+            handshake,
         )
-        .await
+        .await?;
+        if let Some(relay) = response.relay.take() {
+            pending.set(Some((upgrade, relay)));
+        }
+        Ok(response)
     })
-    .await
+    .await?;
+    if let Some((upgrade, relay)) = pending.take() {
+        let workload = upgrade
+            .await
+            .map_err(|e| ProxyError::Io(format!("WebSocket upgrade: {e}")))?;
+        websocket::run(workload, relay, state, connect).await;
+    }
+    Ok(())
 }
 
 /// Serve one request with hyper, and record the release outcome once the response is written.
@@ -222,7 +260,6 @@ where
     });
     let mut connection = Box::pin(
         hyper::server::conn::http1::Builder::new()
-            .keep_alive(false)
             .half_close(true)
             .auto_date_header(false)
             .max_headers(64)
@@ -289,6 +326,10 @@ fn hyper_response(response: WorkloadResponse) -> Response<ResponseBody> {
     let mut out = Response::new(response.body);
     *out.status_mut() = StatusCode::from_u16(response.status).unwrap_or(StatusCode::BAD_GATEWAY);
     *out.extensions_mut() = response.header_case;
+    if response.status != 101 {
+        let close = HeaderValue::from_static("close");
+        out.headers_mut().insert(hyper::header::CONNECTION, close);
+    }
     if let Some(reason) = response.reason {
         out.extensions_mut()
             .insert(hyper::ext::ReasonPhrase::from_static(reason.as_bytes()));
@@ -329,6 +370,7 @@ mod tests {
             release: None,
             header_case: Default::default(),
             progress: None,
+            relay: None,
         }
     }
 

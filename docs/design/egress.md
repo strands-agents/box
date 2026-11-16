@@ -162,6 +162,28 @@ A request the gateway refuses gets a 403 with the header `x-strands-box-egress: 
 that says why. A `net:connect` refusal of a `CONNECT` arrives before the `200`, so the client never
 starts TLS. A policy refusal of a request to an HTTP MCP server gets a JSON-RPC error body.
 
+### WebSocket
+
+A WebSocket handshake inside a `CONNECT` is one `http:request`, with `upgrade` set to
+`"websocket"`. The gateway refuses a handshake that isn't a valid RFC 6455 `GET` with 400, a plain
+HTTP handshake with 403 before any decision, and a handshake to an HTTP MCP server with 403. It
+removes `Sec-WebSocket-Extensions`, adds the credential to the handshake as to any request, and
+refuses a `101` with a wrong `Sec-WebSocket-Accept` or with an extension with 502.
+
+After the `101`, the gateway asks policy `websocket:send` for each message from the workload and
+`websocket:receive` for each one from the server, before any byte of it moves on. A binary message
+in one frame carries its length in its header, so the gateway decides at the header and streams the
+payload. From the server it has no size cap, as an HTTP response has none. From the workload it is
+capped at 16 MiB, as an HTTP request body is. The gateway reads every other message whole, up to the
+16 MiB cap: a text message, which must be checked for UTF-8, a
+message in more than one frame, and a server message on a host with a credential, which is redacted
+after its decision. It sends each message on as one frame, masked again toward the server. A Ping,
+Pong, or Close is a message of its own. A refused message closes both sides: 1008 to the workload and 1001 to
+the server, with one refusal record. A broken frame gets 1002, bad UTF-8 gets 1007, and a message
+over the cap gets 1009. When one side breaks a rule or drops, the other side gets 1001 after the
+workload or 1014 after the server. After 300 seconds with no byte on either leg, both sides get
+1001.
+
 ### Cloud instance metadata
 
 For gateway traffic, policy provides the only check on metadata endpoints. The gateway has no

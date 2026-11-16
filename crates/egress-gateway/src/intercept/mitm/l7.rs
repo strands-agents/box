@@ -21,12 +21,14 @@ use crate::error::{ProxyError, Result};
 use crate::mcp::{
     McpTarget, McpTargetIdentity, canonicalize_mcp_frame, mcp_denial_response, normalize_path,
 };
+use crate::proxy::websocket::{Handshake, Relay};
 
 /// Check the CONNECT binding of a request read in a TLS tunnel, then run [`run_l7_legs`].
 ///
 /// When `backend` re-routes the destination, the upstream leg presents the backend host (SNI,
 /// certificate, and `Host`); the client leg's binding is still checked against the original CONNECT
 /// authority, so a workload cannot pivot.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn forward_tls(
     mut parsed: http1::ParsedRequest,
     upstream: TcpStream,
@@ -35,6 +37,7 @@ pub(crate) async fn forward_tls(
     state: &SharedState,
     correlation: RequestId,
     completion: &ResponseCompletion,
+    handshake: Handshake,
 ) -> Result<WorkloadResponse> {
     // The upstream leg presents the backend host when a backend re-routes, else the original
     // destination. A TLS backend terminates a fresh handshake to the backend's own certificate; a
@@ -71,6 +74,7 @@ pub(crate) async fn forward_tls(
         true,
         state,
         correlation,
+        handshake,
         |method, target, headers| validate_request_binding(connect, method, target, headers),
     )
     .await
@@ -123,6 +127,7 @@ async fn run_l7_legs(
     intercepted: bool,
     state: &SharedState,
     correlation: RequestId,
+    handshake: Handshake,
     revalidate: impl FnOnce(&str, &str, &HeaderMap) -> Result<()>,
 ) -> Result<WorkloadResponse> {
     let correlation = correlation.with_headers(&req.headers);
@@ -168,6 +173,25 @@ async fn run_l7_legs(
             refusal,
         )
     };
+
+    let accept = match handshake {
+        Handshake::None => None,
+        Handshake::Malformed(why) => {
+            let refusal = WorkloadResponse::refusal(400, b"malformed WebSocket handshake");
+            return Ok(refuse(why, refusal));
+        }
+        Handshake::WebSocket { .. } if state.mcp_server_for(&connect.host).is_some() => {
+            let refusal = WorkloadResponse::refusal(403, b"WebSocket refused for an MCP server");
+            return Ok(refuse(
+                "websocket: handshake to a remote MCP server",
+                refusal,
+            ));
+        }
+        Handshake::WebSocket { accept } => Some(accept),
+    };
+    if accept.is_some() {
+        req.headers.remove("Sec-WebSocket-Extensions");
+    }
 
     // A secret rides only TLS: refuse on the same canonical target the credential match below sees.
     if !intercepted && state.controls.matches_any(&target.as_destination()) {
@@ -303,8 +327,13 @@ async fn run_l7_legs(
             }
         }
     }
-    let prepared_request =
-        http1::write_request(&method, &fwd_target, &req.headers, forwarded_body.len())?;
+    let prepared_request = http1::write_request(
+        &method,
+        &fwd_target,
+        &req.headers,
+        forwarded_body.len(),
+        accept.is_some(),
+    )?;
     let request_attempt = EffectAttempt::HttpRequest {
         host: &connect.host,
         port: connect.port,
@@ -312,6 +341,7 @@ async fn run_l7_legs(
         path: &workload_path,
         body_bytes: forwarded_body.len(),
         intercepted,
+        upgrade: if accept.is_some() { "websocket" } else { "" },
         mcp: mcp_target.as_ref().map(|(server, target)| {
             let server = *server;
             match &target.identity {
@@ -379,6 +409,7 @@ async fn run_l7_legs(
             &method,
             prepared_request,
             Zeroizing::new(forwarded_body),
+            accept.as_deref(),
         )
         .await;
     let response = match response {
@@ -387,9 +418,14 @@ async fn run_l7_legs(
             request_permit.record_outcome(outcome).map_err(|error| {
                 ProxyError::Io(format!("recording upstream request outcome: {error}"))
             })?;
+            if let (Some(_), ProxyError::Intercept(reason)) = (&accept, &error) {
+                let refusal = WorkloadResponse::refusal(502, b"WebSocket upgrade response refused");
+                return Ok(refuse(reason, refusal));
+            }
             return Err(error);
         }
     };
+    let upgraded = response.upgraded;
     let mut head = response.head;
     let mut body = response.body;
     body.track_request(request_permit, outcome)
@@ -465,6 +501,19 @@ async fn run_l7_legs(
         Ok(permit) => permit,
         Err(error) => return Ok(interceptor_error(&error, None)),
     };
+    let relay = upgraded.map(|upstream| {
+        head.headers.set("Upgrade", "websocket");
+        head.headers.set("Connection", "Upgrade");
+        Relay {
+            upstream,
+            path: workload_path.clone(),
+            scrub: state
+                .controls
+                .matches_any(&target.as_destination())
+                .then(|| target.clone()),
+            correlation: correlation.clone(),
+        }
+    });
 
     Ok(WorkloadResponse {
         status: head.status,
@@ -474,6 +523,7 @@ async fn run_l7_legs(
         release: Some(response_permit),
         header_case: head.header_case,
         progress,
+        relay,
     })
 }
 
@@ -517,6 +567,7 @@ pub(crate) async fn forward_plain(
         false,
         state,
         correlation,
+        Handshake::None,
         |_method, _target, _headers| Ok(()),
     )
     .await
@@ -588,11 +639,12 @@ pub(crate) struct WorkloadResponse {
     /// The upstream's header case. Without it, hyper writes header names in lowercase.
     pub(crate) header_case: hyper::http::Extensions,
     pub(crate) progress: Option<ResponseProgress>,
+    pub(crate) relay: Option<Relay>,
 }
 
 impl WorkloadResponse {
     /// A proxy-originated diagnostic, outside the response-release lifecycle.
-    fn refusal(status: u16, body: &[u8]) -> Self {
+    pub(crate) fn refusal(status: u16, body: &[u8]) -> Self {
         Self {
             reason: None,
             headers: proxy_originated_headers(),
@@ -617,6 +669,7 @@ impl WorkloadResponse {
             release: None,
             header_case: hyper::http::Extensions::new(),
             progress: None,
+            relay: None,
         }
     }
 
@@ -630,7 +683,7 @@ impl WorkloadResponse {
 }
 
 /// Claim one effect from the authorization authority.
-fn claim_effect(
+pub(crate) fn claim_effect(
     state: &SharedState,
     attempt: &EffectAttempt<'_>,
 ) -> io::Result<ClaimedEffectPermit> {
@@ -728,6 +781,11 @@ fn list_cursor(body: &[u8]) -> Option<String> {
 }
 
 /// Split an origin-form request target into `(path, query)`.
+pub(crate) fn judged_path(target: &str) -> String {
+    let (path, _) = split_target(target);
+    canonicalize_request_path(&path).unwrap_or(path)
+}
+
 fn split_target(target: &str) -> (String, String) {
     match target.split_once('?') {
         Some((p, q)) => (p.to_string(), q.to_string()),

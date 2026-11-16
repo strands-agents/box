@@ -313,6 +313,23 @@ A request the gateway refuses while the box runs gets an HTTP 403 with the heade
 
 A 502 with no `x-strands-box-egress` header means the gateway couldn't resolve or reach the server.
 
+A WebSocket needs `wss://`, so it rides a `CONNECT`. The handshake is decided as `http:request`
+with `upgrade` set to `"websocket"`, and the gateway adds the credential to it. Each message is
+decided as [`websocket:send` or `websocket:receive`](policy/actions.md#network), and its own
+permit must allow it. A refusal answers the handshake, or closes the WebSocket:
+
+| Response | Cause |
+|---|---|
+| 400 `malformed WebSocket handshake` | The handshake isn't an HTTP/1.1 `GET` with `Connection: upgrade`, `Sec-WebSocket-Version: 13`, a 16-byte `Sec-WebSocket-Key`, and no body. |
+| 403 `WebSocket requires TLS` | A plain `ws://` handshake, including to a host in `upgrade_http`. |
+| 403 `WebSocket refused for an MCP server` | The handshake went to an HTTP MCP server's host. |
+| 502 `WebSocket upgrade response refused` | The server's `101` doesn't answer the handshake, or names an extension. |
+| Close 1008 | Policy refused a message. The server gets 1001. |
+| Close 1002, 1007, or 1009 | A frame broke RFC 6455, a text message or Close reason wasn't UTF-8, or a message from the workload, or one that the gateway reads whole, was over 16 MiB. A binary message in one frame from the server streams and has no cap. |
+| Close 1014 | The server broke RFC 6455 or dropped. |
+| Close 1011 | The gateway couldn't decide a message or record its outcome. |
+| Close 1001 | No byte moved on either leg for 300 seconds. |
+
 Responses arrive progressively, including on credentialed routes. Credential redaction retains a
 short tail until more bytes arrive or the response completes cleanly. Requests and HTTP MCP
 `tools/list` responses retain the default 16 MiB cap. The gateway's 300-second upstream deadline
