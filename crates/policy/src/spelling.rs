@@ -1,5 +1,6 @@
 //! Load-time judgement of the path, program, host, and address literals a rule compares.
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::PathBuf;
 
@@ -18,13 +19,17 @@ const BOX_ACTION_TYPE: &str = "Box::Action";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Operator {
     home: Option<PathBuf>,
+    locations: BTreeMap<String, Vec<PathBuf>>,
 }
 
 impl Operator {
     /// An operator with no stated home, so no literal is judged against one.
     #[must_use]
     pub fn unanchored() -> Self {
-        Self { home: None }
+        Self {
+            home: None,
+            locations: BTreeMap::new(),
+        }
     }
 
     /// State the home a rule's path literal is spelled `~/…` under.
@@ -32,6 +37,23 @@ impl Operator {
     pub fn anchored_at(mut self, home: impl Into<PathBuf>) -> Self {
         self.home = Some(home.into());
         self
+    }
+
+    /// Name the absolute directories that a filesystem rule matches as
+    /// `context.input.locations.contains(Box::Location::"<name>")`.
+    #[must_use]
+    pub fn with_locations(
+        mut self,
+        locations: impl IntoIterator<Item = (String, Vec<PathBuf>)>,
+    ) -> Self {
+        self.locations = locations.into_iter().collect();
+        self
+    }
+
+    /// The declared locations, by name.
+    #[expect(dead_code, reason = "the engine reads it once locations reach the schema")]
+    pub(crate) fn locations(&self) -> &BTreeMap<String, Vec<PathBuf>> {
+        &self.locations
     }
 
     /// Every spelling of the home a literal is judged against: as stated, and canonical.
