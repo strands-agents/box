@@ -15,7 +15,7 @@ project = ["/Users/dev/src/app"]
 # policy.dw
 @id("project_write")
 permit (principal, action == Box::Action::"fs:write", resource)
-when { context.input.locations.contains(Box::Location::"project") };
+when { context.input.locations.project };
 ```
 
 The rule says "the agent may write anything in `project`". It doesn't say where `project` is. So the
@@ -51,9 +51,12 @@ caches = ["~/.cache/my-agent", "~/.npm"]
 ```
 
 - Each key is a name. Each value is a list of one or more directories.
+- A name starts with a letter and holds only letters, digits and `_`, so a rule can write
+  `locations.my_cache`. Cedar's reserved words, such as `if` and `in`, aren't allowed.
 - A directory is an absolute path or starts with `~/`.
 - An empty list is an error, because the name would label nothing.
-- Without a `[locations]` table, nothing changes.
+- Without a `[locations]` table, every file request carries an empty `locations`, and a policy
+  that doesn't mention locations works as it does today.
 
 Box resolves each directory once, when it loads the policy, with the same rule it uses for a
 file's path. So `/Users/dev/src/app` and `~/src/app` name the same place, and a directory reached
@@ -88,20 +91,39 @@ Here's a starter policy that a tool could ship once and use for every project:
 ```text
 @id("project_read")
 permit (principal, action == Box::Action::"fs:read", resource)
-when { context.input.locations.contains(Box::Location::"project") };
+when { context.input.locations.project };
 
 @id("project_write")
 permit (principal, action == Box::Action::"fs:write", resource)
-when { context.input.locations.contains(Box::Location::"project") };
+when { context.input.locations.project };
 
 @id("no_env")
 forbid (principal, action == Box::Action::"fs:read", resource)
-when { context.input.locations.contains(Box::Location::"project") &&
-       context.input.path like "*/.env" };
+when { context.input.locations.project && context.input.path like "*/.env" };
 ```
 
-`locations` sits next to `path` in the request, so time-based rules (the `when temporal` rules)
-can use it too, for example to limit writes in the project to 200 an hour.
+`context.input.locations` has one true-or-false field for each location `box.toml` declares. A
+field is true when the file is in that location.
+
+**Time-based rules.** History records `locations` with each event, so a rule can count events in
+one location. This counts every write in `project`, including writes that are also in `docs`:
+
+```text
+formerly within 1h ( Box::Action::"fs:write"::response{ input.locations.project: true } )
+```
+
+**Rules that work with or without a location.** A starter may want to allow writes to `secrets`
+in boxes that declare it, and still load in boxes that don't. Cedar's `has` does that:
+
+```text
+@id("secrets_write")
+permit (principal, action == Box::Action::"fs:write", resource)
+when { context.input.locations has secrets && context.input.locations.secrets };
+```
+
+In a box without `secrets`, this rule loads and matches nothing. Use this form on a `permit`, never
+on a `forbid`. If `box.toml` misspells `secrets`, a `forbid` written this way loads and protects
+nothing (see D2).
 
 ## 5. What does it cost?
 
@@ -119,11 +141,18 @@ One PR after this doc. It adds the `[locations]` table, the `locations` field, t
 - A policy that uses a location stops the box from starting when `box.toml` declares none.
 - A location written as an absolute path under the home matches the `~/...` paths in requests.
 - A location under a symlinked folder matches, whether or not it exists yet.
+- A time-based budget on `project` counts writes that are also in `docs`.
+- A rule using `has` loads when the location isn't declared, and matches when it is.
+- A history from the previous release opens, and its events still count toward budgets.
+
+An existing box doesn't have to be created again. Its history records the new field the next time
+it opens, the same way it records any other change to the actions.
 
 Some parts of Box can only change with an approved design. If we accept this doc, we approve these
 changes to them:
 - A new `box.toml` table, `[locations]`.
-- A new field, `locations`, on the five `fs:*` actions, and a new type, `Box::Location`.
+- A new field, `locations`, on the five `fs:*` actions. It's an empty record unless `box.toml`
+  declares locations.
 - A newer stored record version for a box that declares locations, as other optional features do.
 
 ## 7. Key decisions
@@ -133,6 +162,13 @@ changes to them:
 In a Box rule, `principal` and `resource` are always the same, and everything about a request is in
 `context.input`. For a file that's `path` and `operation`. We add `locations` beside them, so a rule
 reads `context.input.locations` the same way it reads `context.input.path`.
+
+`locations` has one true-or-false field per declared location, so a rule reads
+`context.input.locations.project`. We first tried a list of names, `locations.contains(...)`.
+Time-based rules can't check whether a list holds a name, only whether two lists are the same. So a
+budget on `project` would count writes in `{project}` and writes in `{project, docs}` separately,
+and a budget `forbid` would let through more than it says. A time-based rule can check one field,
+so the field shape doesn't have this problem.
 
 The other option was Cedar's usual way of grouping things, `resource in Box::Location::"project"`.
 For that, Box would have to make each file a resource that belongs to its locations. Box decided
@@ -146,7 +182,7 @@ with `project` declared, this rule is an error:
 
 ```text
 forbid (principal, action == Box::Action::"fs:read", resource)
-when { context.input.locations.contains(Box::Location::"projcet") };
+when { context.input.locations.projcet };
 ```
 
 Without this check, the typo would load, and the `forbid` would quietly protect nothing. Box already
@@ -155,6 +191,9 @@ too.
 
 This also covers a policy moved to a box that has no locations. A policy written for `project`
 won't start a box that doesn't say where `project` is.
+
+A rule that should work either way says so with `has` (section 4). That's a choice the author makes
+for each rule, so the default stays strict.
 
 ### D3. A location gives no access
 
@@ -205,7 +244,7 @@ adding a location never changes what an existing rule matches.
 
 1. **The name.** We picked "locations". We avoided "tags", because Dogwood and Cedar already use
    that word for other things.
-2. **Changing an existing box.** Box keeps a history whose format comes from the policy's types.
-   Does adding `[locations]`, or a new name, to an existing box mean it has to be created again?
+2. **Rules that can never match.** A `has` rule in a box without its location never matches.
+   Should Box print a warning for it at startup, so an operator can see which rules are off?
 3. **Denial messages.** Should the message the agent sees when it's refused list the file's
    locations, or should only the decision record have them?
