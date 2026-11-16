@@ -127,10 +127,10 @@ Both tables hold the same four fields, and a `[tool.<label>]` also holds `gramma
 `tool_grammars.rs` pins the `tool-grammars` switch, the startup refusals, and the grammar action
 that decides a spawn of a bound program.
 
-`[agent]`, each `[tool.<label>]`, and each stdio `[mcp.<name>]` also take `native-file-watching`,
+`[agent]`, each `[tool.<label>]`, and each stdio `[mcp.<name>]` also take `file-watching`,
 `false` by default, which permits macOS FSEvents for that process alone. It can disclose denied names
 and event metadata, so Box prints that limitation at startup. See
-[native file watching](../../docs/user/config.md#native-file-watching).
+[file watching](../../docs/user/config.md#file-watching).
 
 `filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
 `exec`, and `deny`. They give this process's own filesystem calls direct reach, because an

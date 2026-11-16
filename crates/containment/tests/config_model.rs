@@ -587,20 +587,20 @@ fn the_file_attributes_switch_round_trips_and_defaults_off() {
     assert_eq!(restored.to_json().expect("re-serialize"), off);
 }
 
-/// The native-file-watching switch survives the wire, and an unselected config keeps the wire
+/// The file-watching switch survives the wire, and an unselected config keeps the wire
 /// shape it had before the switch.
 #[test]
-fn the_native_file_watching_switch_round_trips_and_defaults_off() {
+fn the_file_watching_switch_round_trips_and_defaults_off() {
     let off = ContainmentConfig::new().to_json().expect("serialize");
     let off_wire: serde_json::Value = serde_json::from_str(&off).expect("parse");
-    assert!(off_wire.get("native_file_watching").is_none());
+    assert!(off_wire.get("file_watching").is_none());
 
     let on = ContainmentConfig::new()
-        .allow_native_file_watching()
+        .allow_file_watching()
         .to_json()
         .expect("serialize");
     let on_wire: serde_json::Value = serde_json::from_str(&on).expect("parse");
-    assert_eq!(on_wire["native_file_watching"], serde_json::json!(true));
+    assert_eq!(on_wire["file_watching"], serde_json::json!(true));
     let restored = ContainmentConfig::from_json(&on).expect("round trip");
     assert_eq!(restored.to_json().expect("re-serialize"), on);
 }

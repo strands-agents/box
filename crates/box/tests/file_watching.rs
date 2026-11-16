@@ -47,9 +47,8 @@ impl WatchBox {
             .output()
             .unwrap();
         assert!(build.status.success(), "{build:?}");
-        let setting = |value: Option<bool>| {
-            value.map_or(String::new(), |v| format!("native-file-watching = {v}\n"))
-        };
+        let setting =
+            |value: Option<bool>| value.map_or(String::new(), |v| format!("file-watching = {v}\n"));
         let grants = format!(
             "read = [{workspace:?}]\nwrite = [{workspace:?}]\n\
              deny = [{denied:?}]\n",
@@ -223,7 +222,7 @@ fn an_agent_must_opt_in_before_fsevents_starts() {
         let mut running = fixture.start();
         running.expect("ACCESS_OK", None);
         running.expect("WATCH_REFUSED", None);
-        assert!(!running.finish().contains("native file watching:"));
+        assert!(!running.finish().contains("file watching:"));
     }
 }
 
@@ -234,7 +233,7 @@ fn an_opted_in_agent_watches_changes_and_keeps_direct_denials() {
     running.expect("ACCESS_OK", None);
     fixture.changes(&mut running);
     let stderr = running.finish();
-    assert!(stderr.contains("[agent] native file watching:"));
+    assert!(stderr.contains("[agent] file watching:"));
     assert_eq!(
         std::fs::read_to_string(fixture.workspace.join("denied/seed")).unwrap(),
         "secret"
@@ -248,8 +247,8 @@ fn an_opted_in_tool_watches_without_enabling_its_agent() {
     running.expect("ACCESS_OK", None);
     fixture.changes(&mut running);
     let stderr = running.finish();
-    assert!(stderr.contains("[tool.watcher] native file watching:"));
-    assert!(!stderr.contains("[agent] native file watching:"));
+    assert!(stderr.contains("[tool.watcher] file watching:"));
+    assert!(!stderr.contains("[agent] file watching:"));
 }
 
 #[test]
@@ -259,6 +258,6 @@ fn an_agent_opt_in_does_not_enable_a_tool() {
     running.expect("ACCESS_OK", None);
     running.expect("WATCH_REFUSED", None);
     let stderr = running.finish();
-    assert!(stderr.contains("[agent] native file watching:"));
-    assert!(!stderr.contains("[tool.watcher] native file watching:"));
+    assert!(stderr.contains("[agent] file watching:"));
+    assert!(!stderr.contains("[tool.watcher] file watching:"));
 }

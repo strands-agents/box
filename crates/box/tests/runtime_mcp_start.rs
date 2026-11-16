@@ -135,7 +135,7 @@ fn unmatched_diagnostic(text: &str, program: &str) -> serde_json::Value {
 }
 
 #[test]
-fn native_file_watching_is_disclosed_before_an_unstarted_server_is_needed() {
+fn file_watching_is_disclosed_before_an_unstarted_server_is_needed() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
@@ -158,10 +158,10 @@ fn native_file_watching_is_disclosed_before_an_unstarted_server_is_needed() {
             let path = box_.operator_home().join("workspace/.strands-box/box.toml");
             let mut config: toml::Value =
                 toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            config["mcp"]["watcher"].as_table_mut().unwrap().insert(
-                "native-file-watching".into(),
-                toml::Value::Boolean(selected),
-            );
+            config["mcp"]["watcher"]
+                .as_table_mut()
+                .unwrap()
+                .insert("file-watching".into(), toml::Value::Boolean(selected));
             std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
         }
         let output = box_.spawn().wait(BOX_STARTUP);
@@ -170,7 +170,7 @@ fn native_file_watching_is_disclosed_before_an_unstarted_server_is_needed() {
         assert_eq!(box_.invocation_count("other-mcp"), 0);
         let stderr = String::from_utf8(output.stderr).unwrap();
         let agent = stderr.find("AGENT_STARTED").expect("the agent ran");
-        let warning = stderr.find("[mcp.watcher] native file watching:");
+        let warning = stderr.find("[mcp.watcher] file watching:");
         assert_eq!(
             warning.is_some(),
             selection == Some(true) && cfg!(target_os = "macos"),
@@ -179,14 +179,8 @@ fn native_file_watching_is_disclosed_before_an_unstarted_server_is_needed() {
         if let Some(warning) = warning {
             assert!(warning < agent, "{stderr}");
         }
-        assert!(
-            !stderr.contains("[agent] native file watching:"),
-            "{stderr}"
-        );
-        assert!(
-            !stderr.contains("[mcp.other] native file watching:"),
-            "{stderr}"
-        );
+        assert!(!stderr.contains("[agent] file watching:"), "{stderr}");
+        assert!(!stderr.contains("[mcp.other] file watching:"), "{stderr}");
     }
 }
 

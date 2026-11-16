@@ -1532,7 +1532,7 @@ fn agent_account_lookup_does_not_grant_leaf_network_runtime_services() {
 }
 
 #[test]
-fn native_file_watching_adds_only_the_exact_fsevents_lookup() {
+fn file_watching_adds_only_the_exact_fsevents_lookup() {
     for leaf in [false, true] {
         let (_directory, mut config) = fixed_config();
         if leaf {
@@ -1540,7 +1540,7 @@ fn native_file_watching_adds_only_the_exact_fsevents_lookup() {
         }
         let baseline = generate_seatbelt_profile(&config).unwrap();
         assert!(!baseline.contains("com.apple.FSEvents"));
-        let selected = generate_seatbelt_profile(&config.allow_native_file_watching()).unwrap();
+        let selected = generate_seatbelt_profile(&config.allow_file_watching()).unwrap();
         let grant = "(allow mach-lookup (global-name \"com.apple.FSEvents\"))\n";
         assert_eq!(selected.matches(grant).count(), 1);
         assert_eq!(

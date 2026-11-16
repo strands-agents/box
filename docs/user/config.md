@@ -275,7 +275,7 @@ Both tables hold one process, in one shape:
 | `env` | table | The literal environment. `HOME` and `PATH` default to the operator's own; every other variable is present only when `env` names it. |
 | `[<table>.filesystem]` | table | The path lists the process's own system calls reach. Eight for `[agent]`; six for a `[tool.<name>]`, which has no `metadata` or `exec` list. |
 | `native-filesystem-policy` | boolean | Optional override of the global experimental setting for this process and its descendants. See [workload selection](native-filesystem-policy.md#select-workloads). |
-| `native-file-watching` | boolean | `false` by default. On macOS, permit FSEvents for this process and its descendants, with the [metadata limitation](#native-file-watching). Linux ignores this setting. |
+| `file-watching` | boolean | `false` by default. On macOS, permit FSEvents for this process and its descendants, with the [metadata limitation](#file-watching). Linux ignores this setting. |
 | `[tool.<name>.grammar]` | table | Experimental, and `[tool.<name>]` only. The tool grammar for the program this tool runs. See [`[tool.<name>.grammar]`](#toolnamegrammar). |
 | `[[agent.ingress]]` | list of tables | `[agent]` only. Where callers reach the agent's servers, one entry per port. See [`[[agent.ingress]]`](#agentingress). |
 
@@ -349,9 +349,9 @@ the box is the credential boundary: a process that must not hold a credential go
 Each tool and each `stdio` MCP server runs in its own separate sandbox (see
 [the sandboxes for tools and local MCP servers](../design/containment.md#the-agents-box-and-leaf-boxes)).
 
-### Native file watching
+### File watching
 
-`native-file-watching = true` permits macOS FSEvents for the selected process and its descendants.
+`file-watching = true` permits macOS FSEvents for the selected process and its descendants.
 Set it on an existing `[agent]`, `[tool.<name>]`, or local stdio `[mcp.<name>]` table.
 Each table selects the setting independently; an agent's selection does not enable its tools or MCP servers.
 Omission and `false` keep FSEvents unavailable. Linux accepts the setting and keeps its existing watcher behavior.
@@ -362,7 +362,7 @@ For a Node development server, add the setting to that tool's table:
 [tool.dev]
 command = ["node", "/work/project/server.js"]
 workspace = "/work/project"
-native-file-watching = true
+file-watching = true
 
 [tool.dev.filesystem]
 read = ["/work/project"]
@@ -386,7 +386,7 @@ On macOS, the startup disclosure names each selected process before the agent st
 This includes stdio MCP servers that remain unstarted; Box repeats their disclosure when they start.
 
 ```text
-strands-box: [tool.dev] native file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events; file-content and write restrictions still apply
+strands-box: [tool.dev] file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events; file-content and write restrictions still apply
 ```
 
 A record with any selected process requires version 35.
@@ -534,7 +534,7 @@ mounted aliases, and enclosing directories.
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
 
-On macOS, opting into [native file watching](#native-file-watching) permits an event stream that can
+On macOS, opting into [file watching](#file-watching) permits an event stream that can
 disclose denied names and activity despite these direct-access restrictions.
 
 On Linux, root and non-root launches support directory writes with explicit read and write grants.
@@ -944,7 +944,7 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | `argument_wildcards` | bool | For `stdio`: `false` by default. `true` lets this server's whole-argument `*` entries match and forward caller-supplied values. See [argument wildcards](mcp.md#argument-wildcards). |
 | `network.contain_egress` | bool | For `stdio`: `true` by default. `false` gives this one server direct network access, with no gateway, no policy decision per request, and no credential injection. |
 | `native-filesystem-policy` | boolean | For `stdio`: override the global experimental filesystem policy setting. Remote `http` entries refuse this field. See [workload selection](native-filesystem-policy.md#select-workloads). |
-| `native-file-watching` | boolean | For `stdio`: `false` by default. Permit macOS FSEvents with the [metadata limitation](#native-file-watching). Remote `http` entries refuse this field. |
+| `file-watching` | boolean | For `stdio`: `false` by default. Permit macOS FSEvents with the [metadata limitation](#file-watching). Remote `http` entries refuse this field. |
 | `destinations` | string array | For `http`: the hosts the server answers on. |
 | `secret.ref` | string | For `http`: the credential the gateway attaches on the way out. |
 

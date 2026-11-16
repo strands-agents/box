@@ -832,8 +832,8 @@ pub(crate) fn render_profile_with_streams(
     }
 
     // Opt-in: FSEvents serves directory watchers. The stream can name denied paths and past
-    // events, so only a process that selects `native-file-watching` gets the lookup.
-    if config.native_file_watching() {
+    // events, so only a process that selects `file-watching` gets the lookup.
+    if config.file_watching() {
         cells
             .entry(RUNTIME_SERVICES)
             .or_default()

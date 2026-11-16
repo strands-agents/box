@@ -25,10 +25,10 @@ pub(crate) struct ProcessSpec {
     /// Permit macOS FSEvents, including possible disclosure of denied names and event metadata.
     #[serde(
         default,
-        rename = "native-file-watching",
+        rename = "file-watching",
         skip_serializing_if = "std::ops::Not::not"
     )]
-    pub(crate) native_file_watching: bool,
+    pub(crate) file_watching: bool,
 
     /// Override the box-wide native filesystem policy selection for this process tree.
     #[serde(

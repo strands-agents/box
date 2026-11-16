@@ -1733,10 +1733,10 @@ gains neither `net.*` reads nor a routing socket, while tool and MCP server sand
 in gain no lookup. `account_lookup_is_allowed_but_preferences_services_remain_denied` checks live
 account lookup and preference-service denials against successful outside controls.
 
-<a id="native-file-watching-requires-explicit-acceptance-of-metadata-disclosure"></a>
-### Native file watching requires explicit acceptance of metadata disclosure
+<a id="file-watching-requires-explicit-acceptance-of-metadata-disclosure"></a>
+### File watching requires explicit acceptance of metadata disclosure
 
-The approved `native-file-watching = true` option is an explicit exception to the four-inputs authority test because it grants access to event metadata that policy does not judge and that can extend beyond the process's filesystem grants.
+The approved `file-watching = true` option is an explicit exception to the four-inputs authority test because it grants access to event metadata that policy does not judge and that can extend beyond the process's filesystem grants.
 This exception accepts possible disclosure of denied names and event metadata, including outside the workspace and from past events; direct file-content and write restrictions remain in force.
 Box permits FSEvents only for each process table that opts in, so the default remains off and the agent's selection does not enable its tools or local MCP servers.
 Automatically permitting FSEvents for tools would restore directory watching without the operator accepting this additional authority.

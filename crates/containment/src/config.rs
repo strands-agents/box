@@ -62,7 +62,7 @@ pub struct ContainmentConfig {
     runtime_services: bool,
     /// Whether macOS FSEvents may disclose names and event metadata beyond the filesystem grants.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    native_file_watching: bool,
+    file_watching: bool,
 }
 
 /// One credential-store floor exception, tied to its matching path grant.
@@ -103,7 +103,7 @@ impl ContainmentConfig {
             broad_exec: false,
             file_attributes: false,
             runtime_services: false,
-            native_file_watching: false,
+            file_watching: false,
         }
     }
 
@@ -177,13 +177,13 @@ impl ContainmentConfig {
     /// Permit macOS FSEvents, which can disclose denied names and event metadata. Linux ignores
     /// this setting.
     #[must_use]
-    pub fn allow_native_file_watching(mut self) -> Self {
-        self.native_file_watching = true;
+    pub fn allow_file_watching(mut self) -> Self {
+        self.file_watching = true;
         self
     }
 
-    pub(crate) fn native_file_watching(&self) -> bool {
-        self.native_file_watching
+    pub(crate) fn file_watching(&self) -> bool {
+        self.file_watching
     }
 
     /// Resolve one existing filesystem path before an authorization decision.

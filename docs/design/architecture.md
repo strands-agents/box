@@ -287,7 +287,7 @@ interpreters are part of the code the operator must trust.
    because those accesses do not produce `fs:*` decisions. If Box cannot build a tool's sandbox
    grants, startup fails before the agent starts. On macOS, `file-attributes` adds a line for each
    sandbox that states which attributes its write grants can set.
-   A process that selects `native-file-watching` gets a line that FSEvents can expose denied names
+   A process that selects `file-watching` gets a line that FSEvents can expose denied names
    and event metadata. A selected stdio MCP server gets it before the agent starts, and again when
    the server starts.
 
