@@ -33,6 +33,8 @@ impl Socket for std::net::TcpStream {
 
     fn into_async(self) -> io::Result<Self::Async> {
         self.set_nonblocking(true)?;
+        // Best-effort: Nagle's algorithm off. The crate's `AGENTS.md` records the measurement.
+        let _ = self.set_nodelay(true);
         tokio::net::TcpStream::from_std(self)
     }
 }
@@ -318,6 +320,18 @@ mod tests {
             flushed,
             failure,
         }
+    }
+
+    #[test]
+    fn a_tcp_socket_made_async_has_tcp_nodelay_set() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let _client = std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (accepted, _peer) = listener.accept().unwrap();
+        let nodelay = block_on(async { accepted.into_async().unwrap().nodelay().unwrap() });
+        assert!(
+            nodelay.unwrap(),
+            "Nagle's algorithm is off on the accepted socket"
+        );
     }
 
     #[test]

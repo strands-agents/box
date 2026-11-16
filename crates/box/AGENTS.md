@@ -840,6 +840,14 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   every request is still judged by the gateway's policy interceptor. **Adding a destination check
   here would be a second authority beside the policy.** On macOS none of this runs, because
   Seatbelt's `network-outbound` rule pins the workload to the proxy port directly.
+- **The relay turns Nagle's algorithm off on both sockets of a splice (`pair_with_sink`).** The
+  relay writes what it reads, so a small write from the workload or from its sink stays a small
+  write. Nagle's algorithm holds a small write until the peer acknowledges the write before it. The
+  relay serves two sinks, the gateway port and the port of the telemetry collector, and the sockets
+  of both get the option. The gateway sets `TCP_NODELAY` on its own sockets for the same reason, and
+  [its guidance](../egress-gateway/AGENTS.md) records the measurement on Linux loopback. The
+  relay's sockets are not measured, for either sink. Each call is best-effort: after a failure, the
+  next read or write reports the dead socket.
 - **`run/broker/python/effects.rs` is the script's filesystem boundary, and its path-approval
   primitive is `Reach::approve` in `run/broker/reach.rs`. Treat any change to either as a change to
   the security boundary** — together they are the only thing between attacker-supplied Python and the

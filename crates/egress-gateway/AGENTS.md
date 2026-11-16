@@ -155,6 +155,15 @@ Conventions: `docs/conventions.md`.
   the median of 4 alternated pairs (macOS, release build). For an 8 KiB `POST`, which is several
   segments on those paths, the measurement resolved no change. The call is best-effort: after a
   failure, the next read or write reports the dead socket.
+- Keep `TCP_NODELAY` on the TCP socket that the gateway accepts from the client. `Socket::into_async`
+  sets it. A streamed response is a series of small writes, and Nagle's algorithm holds a small
+  write until the client acknowledges the write before it. The measurement used a response that
+  sends a chunk every 10 ms, on Linux loopback. Without the option, the first chunk reached the
+  client after about 53 ms. With the option, it arrived after 10.5 ms (2 alternated passes of 30
+  requests, release build, gateway only). The response ended at the same time in both, and macOS
+  loopback showed no difference. The call is best-effort, and the AF_UNIX transport has no such
+  option. The upstream socket also passes through `into_async`, so it gets a second call that
+  changes nothing.
 
 ## Change Checklist
 
