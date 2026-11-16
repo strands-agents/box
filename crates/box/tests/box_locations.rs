@@ -11,8 +11,8 @@ mod fixture;
 
 use fixture::Request;
 
-/// The exit status the alias reports for a policy denial.
-const DENIED_STATUS: i32 = 126;
+/// What the Shell prints when policy refuses a write.
+const DENIED: &str = "policy denied this operation";
 
 /// Every command and every read, and writes only in the `project` location.
 const PROJECT_WRITES: &str = r#"
@@ -47,7 +47,8 @@ fn a_rule_on_a_location_permits_a_write_inside_it_and_denies_one_outside() {
     );
 
     let outside = box_.bash(r#"zsh -lc "printf escaped > \"$BOX_HOME/outside.txt\"""#);
-    assert_eq!(outside.status.code(), Some(DENIED_STATUS), "{outside:?}");
+    assert!(!outside.status.success(), "{outside:?}");
+    assert!(stderr(&outside).contains(DENIED), "{outside:?}");
     assert!(
         !box_.box_home().join("outside.txt").exists(),
         "a write outside every location must not land: {outside:?}"
@@ -72,7 +73,8 @@ fn a_sibling_with_a_shared_prefix_is_not_in_the_location() {
     assert!(inside.status.success(), "{inside:?}");
 
     let sibling = box_.bash(r#"zsh -lc "printf out > ./app-old/kept.txt""#);
-    assert_eq!(sibling.status.code(), Some(DENIED_STATUS), "{sibling:?}");
+    assert!(!sibling.status.success(), "{sibling:?}");
+    assert!(stderr(&sibling).contains(DENIED), "{sibling:?}");
     assert!(!box_.workspace().join("app-old/kept.txt").exists());
 }
 
@@ -99,7 +101,8 @@ fn a_forbid_on_a_nested_location_beats_a_permit_on_the_outer_one() {
     std::fs::create_dir_all(box_.workspace().join("docs")).expect("the nested directory");
 
     let docs = box_.bash(r#"zsh -lc "printf no > ./docs/intro.md""#);
-    assert_eq!(docs.status.code(), Some(DENIED_STATUS), "{docs:?}");
+    assert!(!docs.status.success(), "{docs:?}");
+    assert!(!box_.workspace().join("docs/intro.md").exists());
     assert!(
         stderr(&docs).contains("no_docs_writes"),
         "the denial names the forbid: {docs:?}"
