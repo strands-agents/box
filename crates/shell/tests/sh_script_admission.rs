@@ -188,3 +188,26 @@ fn a_bin_sh_interpreter_line_in_memory_is_decided_as_sh() {
     );
     assert!(run.spawned.is_empty(), "spawned: {:?}", run.spawned);
 }
+
+#[test]
+fn a_bin_lash_file_is_decided_as_lash() {
+    let run = run_script("/bin/lash /tmp/judged.sh", "echo SCRIPT_RAN\n", None);
+    assert_eq!(run.status, 0);
+    assert_eq!(run.stdout, "SCRIPT_RAN\n");
+    assert_eq!(
+        run.decisions,
+        [Decision::Exec("lash".into()), Decision::Exec("echo".into())]
+    );
+    assert!(run.spawned.is_empty(), "spawned: {:?}", run.spawned);
+}
+
+#[test]
+fn a_rule_on_sh_alone_does_not_refuse_lash() {
+    let run = run_script("lash /tmp/judged.sh", "echo SCRIPT_RAN\n", Some("sh"));
+    assert_eq!(run.status, 0);
+    assert_eq!(run.stdout, "SCRIPT_RAN\n");
+    assert_eq!(
+        run.decisions,
+        [Decision::Exec("lash".into()), Decision::Exec("echo".into())]
+    );
+}

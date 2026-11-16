@@ -593,23 +593,40 @@ zsh -c 'cat {box_home}/shared/w1.txt {box_home}/shared/w2.txt {box_home}/shared/
 /// A program the box never saw behaves like a Unix program.
 ///
 /// Every other test here exercises builtins Strands Shell implements. This one runs a script
-/// the *test* creates on the host, inside the box's mount, so the box has no knowledge of it — the
-/// closest reachable thing to "a fake command". It checks the parts an agent harness depends on: an
-/// argument, stdout and stderr kept separate, and the tool's own exit code.
+/// the *test* creates on the host, inside the box's mount, as a host program in its own sandbox —
+/// the closest reachable thing to "a fake command". It checks the parts an agent harness depends
+/// on: a shebang, an argument, stdout and stderr kept separate, and the tool's own exit code.
 ///
-/// `sh FILE` runs the file in the Shell, so the test needs no `shell:spawn` permit and no
-/// `[tool.sh]` table; `sh_script_admission.rs` pins that decision.
+/// The script is a declared tool called by its bare name, so it is decided as `shell:spawn` on
+/// `faketool`. `sh FILE` would run the file in the Shell instead (`sh_script_admission.rs`).
 #[test]
 fn a_program_the_box_never_saw_behaves_like_a_unix_program() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let box_ = Request::with_policy("prog-fake-cmd", PERMISSIVE).expect();
+    /// `PERMISSIVE` plus a spawn of the one host program this test runs, and no other.
+    const PERMISSIVE_PLUS_FAKETOOL: &str = r#"
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:spawn", resource)
+when { context.input.program == "faketool" };
+permit(principal, action == Box::Action::"fs:read", resource);
+permit(principal, action == Box::Action::"fs:write", resource);
+"#;
 
-    // Written from the host side into the box home, which the box mounts. Writing it here rather
-    // than through a nested `zsh -c` keeps the shell quoting legible; the *use* of it below is
-    // still a full round trip through the boundary.
-    let tool = box_.box_home().join("faketool");
+    // The script is a declared tool in the workspace, outside every write grant, and reads only
+    // its own directory.
+    let request = Request::with_config(
+        "prog-fake-cmd",
+        PERMISSIVE_PLUS_FAKETOOL,
+        "[tool.faketool]\ncommand = [\"{workspace}/fake-bin/faketool\"]\n\
+         [tool.faketool.filesystem]\nread = [\"{workspace}/fake-bin\"]\n",
+    );
+
+    // Written from the host side before the box exists, because a declared tool's file must
+    // exist when the box is created.
+    let bin = request.workspace().join("fake-bin");
+    std::fs::create_dir_all(&bin).expect("create the fake tool's directory");
+    let tool = bin.join("faketool");
     std::fs::write(
         &tool,
         "#!/bin/sh\nprintf 'out:%s' \"$1\"\nprintf 'err:%s' \"$1\" >&2\nexit 3\n",
@@ -617,8 +634,9 @@ fn a_program_the_box_never_saw_behaves_like_a_unix_program() {
     .expect("write the fake tool");
     std::fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755))
         .expect("make the fake tool executable");
+    let box_ = request.expect();
 
-    let output = box_.bash(r#"zsh -c 'sh {box_home}/faketool ARG; printf "|status=%s" "$?"'"#);
+    let output = box_.bash(r#"zsh -c 'faketool ARG; printf "|status=%s" "$?"'"#);
 
     assert_workload_launched(&output, "the fake tool");
     let text = stdout(&output);
