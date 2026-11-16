@@ -1233,7 +1233,7 @@ pub(super) fn check_staged(
     grammar_schemas: Vec<String>,
 ) -> Result<(Vec<PolicyWarning>, Vec<RuleRef>), Vec<Finding>> {
     operator
-        .refuse_locations_without_home()
+        .refuse_unusable_locations()
         .map_err(|error| vec![Finding::new(error.to_string())])?;
     let candidates = candidates(&authored(sources)).map_err(|refused| refused.findings)?;
     let mut proposal = ProposalState {

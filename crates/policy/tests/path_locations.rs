@@ -667,3 +667,126 @@ fn a_home_relative_outcome_matches_under_the_canonical_home() {
     let project = Some(vec!["project".to_string()]);
     assert_eq!(recorded_locations(&history), [project.clone(), project]);
 }
+
+/// Assert that open_staged, validate, and check each refuse `declared`, naming `fragment`.
+fn assert_refused_at_load(declared: &Operator, fragment: &str, history: &Path) {
+    let permit = r#"permit (principal, action == Box::Action::"fs:read", resource);"#;
+    let Err(error) = PolicyEngine::open_staged(declared, sources(permit), history) else {
+        panic!("open_staged must refuse {declared:?}");
+    };
+    assert!(error.to_string().contains(fragment), "{error}");
+    let Err(error) = PolicyEngine::validate(declared, &sources(permit)) else {
+        panic!("validate must refuse {declared:?}");
+    };
+    assert!(error.to_string().contains(fragment), "{error}");
+    for complete in [true, false] {
+        let check = PolicyEngine::check(declared, &sources(permit), complete);
+        assert!(
+            check
+                .errors()
+                .iter()
+                .any(|finding| finding.message().contains(fragment)),
+            "check (complete: {complete}) must refuse: {:?}",
+            check.errors()
+        );
+    }
+}
+
+#[test]
+fn a_root_that_is_a_dangling_link_refuses_to_load() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let canonical = directory.path().canonicalize().expect("canonical");
+    let link = canonical.join("link");
+    std::os::unix::fs::symlink(canonical.join("absent"), &link).expect("the dangling link");
+    for root in [link.clone(), link.join("below")] {
+        let declared = Operator::unanchored()
+            .anchored_at(HOME)
+            .with_locations([("project".to_string(), vec![root.clone()])]);
+        assert_refused_at_load(
+            &declared,
+            &format!("location \"project\": {}", root.display()),
+            &directory.path().join("h.redb"),
+        );
+    }
+}
+
+#[test]
+fn a_root_under_a_directory_that_cannot_be_searched_refuses_to_load() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let canonical = directory.path().canonicalize().expect("canonical");
+    let locked = canonical.join("locked");
+    std::fs::create_dir_all(locked.join("project")).expect("the locked tree");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    if std::fs::read_dir(&locked).is_ok() {
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        eprintln!("skipping: a privileged user searches a directory with no permission bits");
+        return;
+    }
+    let root = locked.join("project");
+    let declared = Operator::unanchored()
+        .anchored_at(HOME)
+        .with_locations([("project".to_string(), vec![root.clone()])]);
+    assert_refused_at_load(
+        &declared,
+        &format!("location \"project\": {}", root.display()),
+        &canonical.join("h.redb"),
+    );
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+}
+
+#[test]
+fn a_home_relative_outcome_matches_under_a_home_that_is_not_utf8() {
+    use std::os::unix::ffi::OsStrExt as _;
+
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let home = directory
+        .path()
+        .canonicalize()
+        .expect("canonical")
+        .join(std::ffi::OsStr::from_bytes(b"home-\xff"));
+    std::fs::create_dir_all(home.join("work")).expect("the home");
+    assert!(home.to_str().is_none(), "the home is not UTF-8");
+    let history = directory.path().join("h.redb");
+    let declared = Operator::unanchored()
+        .anchored_at(&home)
+        .with_locations([("project".to_string(), vec![home.join("work")])]);
+    let engine = open(&declared, PROJECT_WRITE, &history);
+    let approved = PathResolver::over([home.clone()])
+        .expect("the root is absolute")
+        .reporting_under(&home)
+        .approve_host(&home.join("work/file"))
+        .expect("the path resolves");
+    assert_eq!(
+        approved.reported(),
+        "~/work/file",
+        "a path under the home is reported home-relative"
+    );
+
+    let (decision, request_id) = engine.decide(
+        &GovernedBox::assigned("test-box"),
+        &Principal::agent(),
+        &Request::Fs {
+            path: &approved,
+            operation: FsOperation::WriteContent,
+        },
+    );
+    assert!(decision.is_allow(), "{decision:?}");
+    engine
+        .record(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            &request_id.expect("an allow carries a request id"),
+            &Outcome::Fs {
+                path: Path::new("~/work/file"),
+                operation: FsOperation::WriteContent,
+                result: FsResult::Completed,
+            },
+        )
+        .expect("the outcome records");
+    drop(engine);
+
+    let project = Some(vec!["project".to_string()]);
+    assert_eq!(recorded_locations(&history), [project.clone(), project]);
+}

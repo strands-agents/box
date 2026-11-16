@@ -323,29 +323,37 @@ impl PathResolver {
     }
 }
 
-/// An absolute directory resolved as [`PathResolver::approve_host`] resolves a requested path: its
-/// canonical spelling, or, when it does not exist, its nearest existing ancestor's canonical
-/// spelling with the missing components rejoined. It is kept as given when an ancestor cannot be
-/// resolved for a reason other than its absence.
-pub(crate) fn resolve_host_directory(directory: &Path) -> PathBuf {
+/// Resolve an absolute directory as [`PathResolver::approve_host`] resolves a requested path, or
+/// say why it cannot be resolved.
+pub(crate) fn resolve_host_directory(directory: &Path) -> Result<PathBuf, String> {
     let mut missing = Vec::new();
     let mut existing = directory;
     loop {
         match std::fs::canonicalize(existing) {
             Ok(canonical) => {
-                return missing
+                return Ok(missing
                     .iter()
                     .rev()
-                    .fold(canonical, |path, name| path.join(name));
+                    .fold(canonical, |path, name| path.join(name)));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match existing.symlink_metadata() {
+                    Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {}
+                    Ok(_) => {
+                        return Err(format!(
+                            "{} is a symbolic link whose target does not exist",
+                            existing.display()
+                        ));
+                    }
+                    Err(error) => return Err(format!("{}: {error}", existing.display())),
+                }
                 let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
-                    return directory.to_path_buf();
+                    return Err(format!("{}: {error}", existing.display()));
                 };
                 missing.push(name);
                 existing = parent;
             }
-            Err(_) => return directory.to_path_buf(),
+            Err(error) => return Err(format!("{}: {error}", existing.display())),
         }
     }
 }

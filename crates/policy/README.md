@@ -352,9 +352,10 @@ and `check`, also when the rule waits for an MCP schema. A box that declares no 
 neither the enum nor the field, so a rule that names `Box::Location` does not load there. `open`
 and `open_with_mcp_schemas` declare no location. These calls also refuse a bad declaration: a
 name that is not a letter followed by at most 63 letters, digits, `_`, or `-`, an empty directory
-list, or a directory that is relative or has a `.` or `..` component. They refuse locations for
-an operator with no home, too (see `Operator::anchored_at`), because an outcome names a path
-under the home as `~/…`.
+list, a directory that is relative or has a `.` or `..` component, or a directory that cannot be
+resolved, such as a broken symbolic link or one below a folder that refuses to be searched. They
+refuse locations for an operator with no home, too (see `Operator::anchored_at`), because an
+outcome names a path under the home as `~/…`.
 
 The response of a filesystem request records the set of the path it names, with `~/…` expanded
 under the operator's home. A temporal predicate cannot hold

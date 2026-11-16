@@ -257,7 +257,7 @@ impl DogwoodEngine {
         history: &Path,
         operator: &Operator,
     ) -> Result<Self, PolicyStagingError> {
-        operator.refuse_locations_without_home()?;
+        operator.refuse_unusable_locations()?;
         let effective_schema = composed_action_schema(operator.locations(), &[], &[])?;
         let engine = open_history(history, durable_config())
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
@@ -269,7 +269,7 @@ impl DogwoodEngine {
         label: PathBuf,
         operator: &Operator,
     ) -> Result<Self, PolicyStagingError> {
-        operator.refuse_locations_without_home()?;
+        operator.refuse_unusable_locations()?;
         let effective_schema = composed_action_schema(operator.locations(), &[], &[])?;
         let log = DurableLog::open(opened_file_path(&history))
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
@@ -1176,7 +1176,7 @@ pub(crate) fn check_against(
     authored: bool,
     positions: &[usize],
 ) -> Result<(Vec<String>, crate::schema::ActionSchema, Vec<PolicyWarning>), Refused> {
-    operator.refuse_locations_without_home()?;
+    operator.refuse_unusable_locations()?;
     let policy_schema = PolicySchema::from_cedarschema_str(&effective_schema.source)
         .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
 
@@ -1484,10 +1484,6 @@ fn reply_literals(condition: &dogwood_language::temporal_ast::Condition, out: &m
 
 /// Refuse a macro-expanded rule that names a `Box::Location` value `locations` does not declare,
 /// or any `Box::Location` when none is declared.
-///
-/// Strict validation refuses such a rule too, but a rule that also names a per-tool action is held
-/// pending until its server's schema stages, and an MCP schema can never declare a location. So
-/// this check runs before a rule may become pending.
 pub(crate) fn refuse_undeclared_locations(
     expanded: &str,
     locations: &Locations,

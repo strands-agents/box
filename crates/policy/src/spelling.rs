@@ -20,6 +20,8 @@ const BOX_ACTION_TYPE: &str = "Box::Action";
 pub struct Operator {
     home: Option<PathBuf>,
     locations: BTreeMap<String, Vec<PathBuf>>,
+    /// Why each location directory that cannot be resolved was not.
+    unresolved: Vec<String>,
 }
 
 impl Operator {
@@ -29,6 +31,7 @@ impl Operator {
         Self {
             home: None,
             locations: BTreeMap::new(),
+            unresolved: Vec::new(),
         }
     }
 
@@ -39,18 +42,14 @@ impl Operator {
         self
     }
 
-    /// Name the absolute directories that a filesystem rule matches as
-    /// `context.input.locations.contains(Box::Location::"<name>")`.
-    ///
-    /// Each absolute directory without a `.` or `..` component is resolved once, here, the way a
-    /// requested host path is, so it matches the canonical path a request carries; a directory
-    /// that resolves to one already listed appears once. Every other directory is kept as given,
-    /// and the load refuses it.
+    /// Name the directories a filesystem rule matches as `Box::Location::"<name>"`, each resolved
+    /// once, here, as a requested host path is resolved.
     #[must_use]
     pub fn with_locations(
         mut self,
         locations: impl IntoIterator<Item = (String, Vec<PathBuf>)>,
     ) -> Self {
+        let mut unresolved = Vec::new();
         self.locations = locations
             .into_iter()
             .map(|(name, directories)| {
@@ -58,7 +57,16 @@ impl Operator {
                 for directory in directories {
                     let directory =
                         if directory.is_absolute() && crate::schema::is_normal(&directory) {
-                            crate::path::resolve_host_directory(&directory)
+                            match crate::path::resolve_host_directory(&directory) {
+                                Ok(canonical) => canonical,
+                                Err(reason) => {
+                                    unresolved.push(format!(
+                                        "location {name:?}: {} cannot be resolved: {reason}",
+                                        directory.display()
+                                    ));
+                                    directory
+                                }
+                            }
                         } else {
                             directory
                         };
@@ -69,6 +77,7 @@ impl Operator {
                 (name, resolved)
             })
             .collect();
+        self.unresolved = unresolved;
         self
     }
 
@@ -77,9 +86,12 @@ impl Operator {
         &self.locations
     }
 
-    /// Refuse declared locations without a home, because a filesystem outcome names a path under
-    /// the home as `~/…` and its locations are found by expanding that spelling.
-    pub(crate) fn refuse_locations_without_home(&self) -> Result<(), PolicyError> {
+    /// Refuse declared locations that the engine cannot match: a directory that did not resolve,
+    /// or any location for an operator with no home.
+    pub(crate) fn refuse_unusable_locations(&self) -> Result<(), PolicyError> {
+        if !self.unresolved.is_empty() {
+            return Err(PolicyError::Schema(self.unresolved.join("; ")));
+        }
         if self.locations.is_empty() || self.home.is_some() {
             return Ok(());
         }
@@ -90,9 +102,21 @@ impl Operator {
         ))
     }
 
-    /// Each spelling of the home a `~/…` path is expanded under: as stated, and canonical.
+    /// Each spelling of the home, as stated and canonical, that a `~/…` path is expanded under.
     pub(crate) fn home_directories(&self) -> Vec<PathBuf> {
-        self.homes().into_iter().map(PathBuf::from).collect()
+        let Some(home) = &self.home else {
+            return Vec::new();
+        };
+        let mut homes: Vec<PathBuf> = Vec::new();
+        for candidate in [Some(home.clone()), home.canonicalize().ok()]
+            .into_iter()
+            .flatten()
+        {
+            if !homes.contains(&candidate) {
+                homes.push(candidate);
+            }
+        }
+        homes
     }
 
     /// Every spelling of the home a literal is judged against: as stated, and canonical.
