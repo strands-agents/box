@@ -711,6 +711,26 @@ fn a_root_that_is_a_dangling_link_refuses_to_load() {
 }
 
 #[test]
+fn a_root_that_is_a_file_or_a_link_to_one_refuses_to_load() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let canonical = directory.path().canonicalize().expect("canonical");
+    let file = canonical.join("file");
+    std::fs::write(&file, "not a directory").expect("the file");
+    let link = canonical.join("link-to-file");
+    std::os::unix::fs::symlink(&file, &link).expect("the link to the file");
+    for root in [file.clone(), link.clone(), file.join("below")] {
+        let declared = Operator::unanchored()
+            .anchored_at(HOME)
+            .with_locations([("project".to_string(), vec![root.clone()])]);
+        assert_refused_at_load(
+            &declared,
+            &format!("location \"project\": {}", root.display()),
+            &directory.path().join("h.redb"),
+        );
+    }
+}
+
+#[test]
 fn a_root_under_a_directory_that_cannot_be_searched_refuses_to_load() {
     use std::os::unix::fs::PermissionsExt as _;
 

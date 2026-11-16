@@ -1,8 +1,4 @@
-//! End-to-end `[locations]`: a Shell write decided by a rule that names a location, not a path.
-//!
-//! Each case drives the real `strands-box`, so it checks that the directories `box.toml` names
-//! reach the decision through the stored record, and that a write lands, or does not land, on the
-//! host.
+//! End-to-end `[locations]`: a real box decides a Shell write by a rule that names a location.
 
 use std::process::Output;
 

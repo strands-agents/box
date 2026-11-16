@@ -59,8 +59,6 @@ impl Locations {
     }
 
     /// Each location's directories with `~/` expanded against `operator_home`, each listed once.
-    /// `policy::Operator::with_locations` resolves symbolic links, the same way as a request's
-    /// path.
     pub(crate) fn resolved(&self, operator_home: &Path) -> ResolvedLocations {
         self.0
             .iter()

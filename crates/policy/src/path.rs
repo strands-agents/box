@@ -331,6 +331,11 @@ pub(crate) fn resolve_host_directory(directory: &Path) -> Result<PathBuf, String
     loop {
         match std::fs::canonicalize(existing) {
             Ok(canonical) => {
+                match std::fs::metadata(&canonical) {
+                    Ok(metadata) if metadata.is_dir() => {}
+                    Ok(_) => return Err(format!("{} is not a directory", existing.display())),
+                    Err(error) => return Err(format!("{}: {error}", existing.display())),
+                }
                 return Ok(missing
                     .iter()
                     .rev()

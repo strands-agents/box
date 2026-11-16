@@ -272,7 +272,7 @@ when { context.input.locations.contains(Box::Location::"project") };
 | Each directory is absolute or starts with `~/`. | ``` `[locations] <name>` entry "<entry>" is refused: it is neither absolute nor `~/`-relative``` |
 | A directory has no `.` or `..` component. | ``` `[locations] <name>` entry "<entry>" is refused: it holds a `.` or `..` component``` |
 | A location lists each directory once. | ``` `[locations] <name>` lists "<entry>" twice``` |
-| A directory resolves: it is not, and is not below, a broken symbolic link, and no folder on its way refuses to be searched. | ``` location "<name>": <directory> cannot be resolved: <reason>``` |
+| A directory resolves: it is not, and is not below, a broken symbolic link or a file, and no folder on its way refuses to be searched. | ``` location "<name>": <directory> cannot be resolved: <reason>``` |
 
 The box expands `~/` against the operator's home. It then resolves each directory the same way it
 resolves a request's path: it follows the symbolic links in the directory, and when the directory
