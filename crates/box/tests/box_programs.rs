@@ -614,12 +614,20 @@ permit(principal, action == Box::Action::"fs:write", resource);
 "#;
 
     // The script is a declared tool in the workspace, outside every write grant, and reads only
-    // its own directory.
+    // its own directory and its `#!/bin/sh` interpreter. Linux grants an interpreter only through
+    // the tool's own table, so the table names the file `/bin/sh` resolves to.
+    let sh = std::path::Path::new("/bin/sh")
+        .canonicalize()
+        .expect("resolve /bin/sh");
     let request = Request::with_config(
         "prog-fake-cmd",
         PERMISSIVE_PLUS_FAKETOOL,
-        "[tool.faketool]\ncommand = [\"{workspace}/fake-bin/faketool\"]\n\
-         [tool.faketool.filesystem]\nread = [\"{workspace}/fake-bin\"]\n",
+        &format!(
+            "[tool.faketool]\ncommand = [\"{{workspace}}/fake-bin/faketool\"]\n\
+             [tool.faketool.filesystem]\nread = [\"{{workspace}}/fake-bin\"]\n\
+             read_file = [\"{}\"]\n",
+            sh.display()
+        ),
     );
 
     // Written from the host side before the box exists, because a declared tool's file must
