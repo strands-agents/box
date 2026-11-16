@@ -1,14 +1,19 @@
-// An outbound byte budget — the rule shape Cedar cannot express.
+// A completion-based outbound byte budget.
 //
-// Permit an outbound HTTP request only while the bytes DELIVERED in the last 60
-// seconds stay under the budget. The sum walks `http:request::response` events, never
-// `::request` ones: a request's `body_bytes` is what the workload *offered*, while a
-// resolution's is what actually left the box. Charging for the offer would let a
-// workload burn budget on writes that never egressed, and — worse — a request that is
-// denied never produces a resolution, so only real egress is ever counted.
+// Permit an outbound HTTP request while delivered request bytes recorded in
+// `http:request::response` history during the last 60 seconds total less than 100.
+// The gateway records the outcome when the exchange ends, including completion,
+// failure, or timeout. The window uses recording time, not physical delivery time.
 //
-// `formerly within 60s` bounds the window, which is also what keeps the engine's
-// retained state bounded: an unbounded window never evicts.
+// Pending exchanges do not count yet, so stalled or concurrent exchanges can exceed
+// the threshold. The rule also permits the next request without adding its size to
+// the recorded total, so that request can exceed the threshold.
+//
+// Sum `::response` events, never `::request` ones: a request's `body_bytes` is what
+// the workload offered, while an outcome reports request bytes known to have reached
+// the operating system. A denied attempt does not consume this budget.
+//
+// `formerly within 60s` bounds the window and the engine's retained state.
 @id("egress_byte_budget")
 permit (
     principal,
