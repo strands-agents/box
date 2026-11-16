@@ -200,6 +200,9 @@ pub trait EffectInterceptor: Send + Sync {
     fn stage_mcp_catalog(&self, _server: &str, _reply: McpListReply<'_>) -> io::Result<()> {
         Ok(())
     }
+
+    /// Observe one `HttpRequest` attempt that the gateway refused before it claimed the effect.
+    fn observe_refused(&self, _effect: &EffectAttempt<'_>) {}
 }
 
 /// Correlates one admitted outbound effect with its eventual outcome.

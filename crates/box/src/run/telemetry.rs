@@ -403,6 +403,10 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
     ) -> io::Result<()> {
         self.inner.stage_mcp_catalog(server, reply)
     }
+
+    fn observe_refused(&self, effect: &EgressEffectAttempt<'_>) {
+        self.inner.observe_refused(effect);
+    }
 }
 
 /// Which leg of one exchange a decision is about.
@@ -1430,6 +1434,44 @@ mod tests {
                 .push(POLICY_OBSERVATIONS.with(|observations| observations.borrow().is_some()));
             Ok(Box::new(DiscardPermit))
         }
+    }
+
+    /// Counts each refused attempt the wrapper hands on.
+    struct RefusalProbe {
+        refused: Arc<Mutex<usize>>,
+    }
+
+    impl EgressEffectInterceptor for RefusalProbe {
+        fn intercept(
+            &self,
+            _effect: &EgressEffectAttempt<'_>,
+        ) -> io::Result<Box<dyn EgressEffectPermit>> {
+            Ok(Box::new(DiscardPermit))
+        }
+
+        fn observe_refused(&self, _effect: &EgressEffectAttempt<'_>) {
+            *self.refused.lock().expect("refusal count") += 1;
+        }
+    }
+
+    /// **A gateway refusal reaches the policy through the decision wrapper.** A default no-op here
+    /// would keep every refused probe out of history.
+    #[test]
+    fn a_gateway_refusal_is_handed_to_the_wrapped_interceptor() {
+        let refused = Arc::new(Mutex::new(0));
+        let interceptor = EgressDecisionInterceptor::over(Arc::new(RefusalProbe {
+            refused: Arc::clone(&refused),
+        }));
+        interceptor.observe_refused(&EgressEffectAttempt::HttpRequest {
+            host: "api.example.com",
+            port: 443,
+            method: "GET",
+            path: "/admin",
+            body_bytes: 0,
+            intercepted: true,
+            mcp: None,
+        });
+        assert_eq!(*refused.lock().expect("refusal count"), 1);
     }
 
     struct DiscardPermit;

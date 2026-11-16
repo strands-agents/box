@@ -468,7 +468,7 @@ impl PolicyEngine {
 
     /// Enter `request` into history as an attempt that Box refused before any rule decided it, and
     /// report no verdict for it.
-    #[cfg(feature = "shell-adapter")]
+    #[cfg(any(feature = "egress-adapter", feature = "shell-adapter"))]
     pub(crate) fn observe_refused(
         &self,
         governed: &GovernedBox,

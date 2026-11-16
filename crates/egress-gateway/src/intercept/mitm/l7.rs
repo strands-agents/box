@@ -52,6 +52,14 @@ pub(crate) async fn forward_tls(
     {
         let refusal = WorkloadResponse::refusal(error.http_status(), b"request authority rejected");
         let request = (parsed.method.as_str(), parsed.target.as_str());
+        let path = refused_binding_path(&parsed.target);
+        observe_refused(
+            state,
+            connect,
+            (&parsed.method, &path),
+            parsed.body.len(),
+            true,
+        );
         let reason = error.to_string();
         return Ok(deny(state, connect, request, &reason, correlation, refusal));
     }
@@ -143,6 +151,7 @@ async fn run_l7_legs(
         Err(reason) => {
             let refusal = WorkloadResponse::refusal(403, b"request path is not a valid address");
             let request = (req.method.as_str(), req.target.path.as_str());
+            observe_refused(state, connect, request, req.body.len(), intercepted);
             return Ok(deny(state, connect, request, &reason, correlation, refusal));
         }
     };
@@ -157,8 +166,12 @@ async fn run_l7_legs(
     let workload_path = req.target.path.clone();
     // The target every credential matches, on the request and on its response.
     let target = req.target.clone();
+    // A refusal observes the body length the workload sent; only the forwarded MCP frame differs.
+    let body_bytes = req.body.len();
+    // Refuse before the effect is claimed: the attempt still enters policy history.
     let refuse = |reason: &str, refusal: WorkloadResponse| {
         let request = (method.as_str(), workload_path.as_str());
+        observe_refused(state, connect, request, body_bytes, intercepted);
         deny(
             state,
             connect,
@@ -338,9 +351,14 @@ async fn run_l7_legs(
     let mut request_permit = match claim_effect(state, &request_attempt) {
         Ok(permit) => permit,
         Err(error) => {
+            // The claim already decided the attempt into history, so it is not observed again.
             let mcp_request = state.mcp_server_for(&connect.host).map(|_| &req.body[..]);
-            return Ok(refuse(
+            return Ok(deny(
+                state,
+                connect,
+                (method.as_str(), workload_path.as_str()),
                 &format!("request effect interception failed: {error}"),
+                correlation.clone(),
                 interceptor_error(&error, mcp_request),
             ));
         }
@@ -638,6 +656,38 @@ fn claim_effect(
         .effect_interceptor
         .intercept(attempt)
         .map(ClaimedEffectPermit::new)
+}
+
+/// The canonical path of a target the CONNECT binding refused, or the target's own path when it
+/// has no canonical form.
+fn refused_binding_path(target: &str) -> String {
+    let (path, _) = split_target(target);
+    let path = match path.split_once("://") {
+        Some((_, rest)) => rest.find('/').map_or("/", |at| &rest[at..]).to_string(),
+        None => path,
+    };
+    canonicalize_request_path(&path).unwrap_or(path)
+}
+
+/// Enter an HTTP request the gateway refused before its effect claim into policy history.
+fn observe_refused(
+    state: &SharedState,
+    connect: &ConnectRequest,
+    (method, path): (&str, &str),
+    body_bytes: usize,
+    intercepted: bool,
+) {
+    state
+        .effect_interceptor
+        .observe_refused(&EffectAttempt::HttpRequest {
+            host: &connect.host,
+            port: connect.port,
+            method,
+            path,
+            body_bytes,
+            intercepted,
+            mcp: None,
+        });
 }
 
 /// The response to an effect refusal or a static interceptor failure.
@@ -1004,6 +1054,21 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A probe the CONNECT binding refuses is recorded under the path a permitted request would be
+    /// judged on, so a path-keyed count cannot be dodged by a respelling.
+    #[test]
+    fn a_binding_refusal_records_the_canonical_path() {
+        for (target, path) in [
+            ("/x/../%61dmin?token=1", "/admin"),
+            ("https://169.254.169.254/latest/../meta-data", "/meta-data"),
+            ("http://other.example", "/"),
+            ("/a%zz", "/a%zz"),
+            ("*", "*"),
+        ] {
+            assert_eq!(refused_binding_path(target), path, "{target:?}");
         }
     }
 

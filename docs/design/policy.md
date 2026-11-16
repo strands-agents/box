@@ -123,6 +123,11 @@ the append to disk before returning the verdict. After the operation runs, the c
 ended. Only these trusted callers write history, and the workload never does. See [only trusted
 enforcement points submit history](decisions.md#only-trusted-enforcement-points-submit-history).
 
+The egress gateway refuses some requests itself before any rule decides them, such as an inner
+`Host` that names another authority or an MCP frame it cannot classify. Each one enters history as
+an `http:request` request with no verdict and no outcome, so a rule that counts attempts still sees
+it. A refused MCP frame enters history as `http:request` only, and not as `mcp:call`.
+
 ## What a history rule sees
 
 A history rule, which Dogwood calls a temporal rule, is an ordinary `permit` or `forbid` with a
