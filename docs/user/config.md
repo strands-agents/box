@@ -245,6 +245,59 @@ it. A box that sets the list stores its record at version 32, and an older build
 [Upgrade plain HTTP to HTTPS](egress.md#upgrade-plain-http-to-https) describes the behaviour and
 its limits.
 
+## `monty`
+
+`monty` decides what a bare `python3` or `python` in the Shell runs. It is `true` by default: both
+names run Monty, Box's built-in Python subset ([Python in a box](monty.md)), even when a
+`[tool.python3]` is declared or the host's `PATH` has a Python. Startup names a Python table that
+Monty leaves unused.
+
+```toml
+monty = false
+```
+
+With `false`, Box installs no Monty, and both names resolve like any other program the Shell
+starts. A tool whose command file is named `python3` or `python` answers that name, and otherwise
+the host's `PATH` decides. Each spawn needs a `shell:spawn` permit, and nothing falls back to Monty.
+Startup says which file each name runs, or that neither a tool nor `PATH` has it.
+
+Box treats the Python tool like any other tool. It adds no grants and doesn't inspect the install,
+so the tool's table lists what Python reads and writes:
+
+```toml
+monty = false
+
+[tool.python3]
+command = ["/opt/runtime/.venv/bin/python3"]
+
+[tool.python3.filesystem]
+read = ["/path/to/project", "/opt/runtime/.venv", "/opt/homebrew/Cellar", "/opt/homebrew/opt"]
+write = ["/path/to/project"]
+```
+
+```cedar
+permit (principal, action == Box::Action::"shell:spawn", resource)
+when {
+  context.input.program_path == "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14" &&
+  ["python3", "python"].contains(context.input.program)
+};
+```
+
+`program_path` is the file the venv's `python3` resolves to, with every link followed. The `read`
+list covers the venv, Python's own install, and the libraries its modules load; on macOS with
+Homebrew those are under `/opt/homebrew/Cellar`, reached through `/opt/homebrew/opt`. A bare
+`python` needs a `[tool.python]` too, and a versioned name such as `python3.14` is a separate
+program that needs its own permit.
+
+Keep the venv and Python's install out of every write grant and every `fs:write` rule. A file
+written into `site-packages`, such as a `.pth`, runs at every Python start, later also outside the
+box. Box refuses a write grant that can change the tool's command or its path
+([Configured command integrity](#configured-command-integrity)), but not one that reaches the rest
+of the venv. A program the Shell starts receives no standard input yet, so a piped
+`printf x | python3 -c '...'` reads an empty stdin.
+
+A box that sets `monty = false` stores its record at version 36, and an older build refuses it.
+
 ## `[experimental-features]`
 
 Native filesystem policy checks require a compatible, signed build and explicit selection:

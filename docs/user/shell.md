@@ -94,6 +94,7 @@ The Shell implements these, each in place of a program of the same name on the `
 - Files: `ls`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `ln`, `chmod`, `touch`, `mktemp`, `readlink`.
 - Data and network: `jq`, `curl`.
 - Interpreters: `lua`, and `python` and `python3`, which run in Monty, Box's Python interpreter.
+  With [`monty = false`](./config.md#monty), `python` and `python3` are external programs instead.
 
 Paths outside the operator's home, the agent's home, and the workspace, such as `/tmp`, exist only
 in the Shell's memory, for one command. A file written to `/tmp` is gone when the command ends.
