@@ -183,9 +183,10 @@ adding a location never changes what an existing rule matches.
 1. **The policy alone doesn't show the paths.** Someone reviewing `policy.dw` sees `project`, not
    where it is. Box prints each location and its directories when it starts, next to the
    filesystem grants it already prints.
-2. **History keeps names, not paths.** Time-based rules count past events by location name. If a
-   later run of the same box points `project` somewhere else, the old events still count as
-   `project`.
+2. **A moved location keeps its old events.** Every record and history event still has the full
+   path. `locations` is an extra field next to it, holding the names the path was in at the time.
+   If a later run of the same box points `project` somewhere else, time-based rules still count
+   the earlier events as `project`.
 3. **Only file rules.** Containment (the `filesystem` lists in `box.toml`) still uses paths.
 
 ## 9. Open questions
