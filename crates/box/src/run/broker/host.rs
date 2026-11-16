@@ -174,11 +174,9 @@ impl BrokerHost {
         commands: Arc<crate::run::commands::ConfiguredCommands>,
         installation: Arc<crate::run::installation::TrustedInstallation>,
     ) -> Result<Self, BoxError> {
-        let bare_names =
-            commands.bare_names(record, &crate::run::contain::executable::host_search_path());
-        let host_programs = bare_names.programs();
-        let replaced_commands = bare_names.replaced_commands();
-        let refused_commands = bare_names.refused_commands();
+        let host_programs = commands
+            .bare_names(record, &crate::run::contain::executable::host_search_path())
+            .programs();
         // The agent's workspace is the interpreters' working directory, and its `HOME` is what every
         // participant reads, so one directory has one name on both sides of the socket.
         let reach = Arc::new(
@@ -230,11 +228,7 @@ impl BrokerHost {
                     phantoms,
                     recorder,
                     host_spawner,
-                    DeclaredCommands {
-                        host_programs,
-                        replaced_commands,
-                        refused_commands,
-                    },
+                    host_programs,
                     shell_limits,
                     &ready_sender,
                     shutdown_receiver,
@@ -501,17 +495,6 @@ struct McpHosting {
     leaf_launcher: Option<Arc<crate::run::hosted::McpLeafLauncher>>,
 }
 
-/// What the record's bare names tell the Shell, all from one `BareNames`.
-struct DeclaredCommands {
-    /// The `[tool]` file each declared bare name runs, in place of a host `PATH` lookup.
-    host_programs: strands_shell::os::HostPrograms,
-    /// The Shell commands that run their declared file instead (`python3` and `python` when
-    /// `monty = false` and a Python tool is declared).
-    replaced_commands: strands_shell::os::ReplacedCommands,
-    /// The bare names the Shell refuses with exit status 126, and the reason it prints.
-    refused_commands: strands_shell::os::RefusedCommands,
-}
-
 // Private thread entry point. It threads the box's serving inputs one per parameter, the
 // same shape `host.rs`'s module doc already records as known debt; egress routing adds one
 // more. Bundling them would hide which value each stage needs, so the count is accepted here.
@@ -527,7 +510,7 @@ fn host(
     phantoms: Vec<ProvisionedVariable>,
     recorder: Arc<crate::run::telemetry::DecisionRecorder>,
     host_spawner: Option<crate::run::hosted::ToolSpawner>,
-    declared_commands: DeclaredCommands,
+    host_programs: strands_shell::os::HostPrograms,
     limits: ShellLimits,
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
     shutdown: oneshot::Receiver<()>,
@@ -568,9 +551,7 @@ fn host(
             phantoms,
             recorder,
             host_spawner,
-            host_programs: declared_commands.host_programs,
-            replaced_commands: declared_commands.replaced_commands,
-            refused_commands: declared_commands.refused_commands,
+            host_programs,
         };
         // Built once here and dropped immediately — a *probe*, not the serving Shell.
         if let Err(error) = spec.build() {
@@ -2102,8 +2083,6 @@ done"#;
             recorder: crate::run::telemetry::DecisionRecorder::discarding(),
             host_spawner: None,
             host_programs: Default::default(),
-            replaced_commands: Default::default(),
-            refused_commands: Default::default(),
         })
     }
 
@@ -2368,8 +2347,6 @@ done"#;
             recorder: crate::run::telemetry::DecisionRecorder::discarding(),
             host_spawner: None,
             host_programs: Default::default(),
-            replaced_commands: Default::default(),
-            refused_commands: Default::default(),
         })
     }
 
@@ -5080,8 +5057,6 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
                 host_programs: Default::default(),
-                replaced_commands: Default::default(),
-                refused_commands: Default::default(),
             });
             let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
@@ -5401,8 +5376,6 @@ done"#,
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
                 host_programs: Default::default(),
-                replaced_commands: Default::default(),
-                refused_commands: Default::default(),
             });
             let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);
@@ -5565,8 +5538,6 @@ done"#;
                 recorder: crate::run::telemetry::DecisionRecorder::discarding(),
                 host_spawner: None,
                 host_programs: Default::default(),
-                replaced_commands: Default::default(),
-                refused_commands: Default::default(),
             });
             let declared = spec.mcp[0].arguments().to_vec();
             let (_directory, socket) = serving_socket(spec);

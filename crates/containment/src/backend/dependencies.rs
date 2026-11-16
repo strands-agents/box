@@ -13,12 +13,12 @@ fn failure(backend: &str, reason: String) -> ContainmentError {
 }
 
 #[derive(Default)]
-pub(crate) struct MissingReads {
+pub(super) struct MissingReads {
     paths: BTreeMap<PathBuf, BTreeSet<PathBuf>>,
 }
 
 impl MissingReads {
-    pub(crate) fn add(&mut self, dependency: &Path, image: &Path) {
+    pub(super) fn add(&mut self, dependency: &Path, image: &Path) {
         self.paths
             .entry(dependency.to_owned())
             .or_default()
