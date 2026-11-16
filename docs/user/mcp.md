@@ -332,6 +332,7 @@ to the server in both modes.
 | `secret.param` | string | none | The query parameter's name, for `placement = "query_param"`. |
 | `secret.inject` | string | `phantom` | For `env://`: `phantom` attaches the credential to a request that carries the placeholder, and `always` attaches it to every request to the destinations. |
 | `secret.phantom_prefix` | string | `strands_box_` | For `env://`: the start of the placeholder value. |
+| `backends` | table array | none | A backend to re-route the server's requests to. At most one. See [Backends](#backends). |
 
 With `secret.ref = "env://NAME"`, `box run` reads `NAME` from its own environment. The agent gets
 a placeholder in `NAME`, and the gateway swaps in the real value on each request to the server.
@@ -364,14 +365,47 @@ Requests to destinations without an MCP match remain subject to network and HTTP
 Follow [the remote-server policy guidance](mcp-policy.md#scope-of-remote-server-rules) to restrict
 alternative routes to the same application.
 
+### Backends
+
+A backend re-routes the server's requests to a gateway you control, such as a Bedrock AgentCore
+Gateway. The agent sends a request to the server's `destinations`, and the box sends it to the
+backend instead. Policy still decides the original server, not the backend: it reads
+`context.input.server` as the server's name, and decides `mcp:call` and `http:request` on the
+original host, before the re-route.
+
+```toml
+[mcp.github]
+type         = "http"
+destinations = ["api.githubcopilot.com"]
+
+[[mcp.github.backends]]
+url              = "https://abc.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
+auth.ref         = "aws://bedrock"
+auth.aws.service = "bedrock-agentcore"
+auth.aws.region  = "us-east-1"
+```
+
+A remote MCP backend is the egress backend applied to a remote MCP server: the same `url` and `auth`
+keys, the same validation, and the same re-route on the wire. See [Backends in the egress
+guide](./egress.md#backends) for the full rules — the backend `url` shape, the backend `auth`, the
+backend address check, and how a phantom-only `env://` `secret` rides beside a backend. The one
+difference is scope: a backend here re-routes a remote MCP server, and a `backends` key is refused on
+a `type = "stdio"` server, which is a local child with no remote endpoint.
+
+`policy generate-schema` cannot discover a re-routed server: the re-route and its backend `auth`
+apply only at `box run` time, in the egress gateway, and the offline command has no gateway. It
+refuses a `[mcp.<name>]` with a backend by name, which stops the whole run. Generate a schema from a
+`box.toml` without that server to get the rest, then write its `mcp:call` rules by hand.
+
 ## Errors and exit codes
 
 `box run` exits with an error before the agent starts when the configuration loader rejects a table.
 
 | Message | Cause |
 |---|---|
-| A configuration error that names `[mcp.<name>]` | A key is unknown, a required key is missing, or the name or the program breaks a rule on this page. |
+| A configuration error that names `[mcp.<name>]` | A key is unknown, a required key is missing, or the name or the program breaks a rule on this page. A `backends` key on a `type = "stdio"` table is an unknown field. |
 | `` `[mcp.<a>]` and `[mcp.<b>]` declare the same command "<command>" `` | Two tables declare the same exact command or wildcard pattern on one alias. Remove one, or change its arguments. |
+| A backend error (more than one backend, a bad backend `url`, a signed `secret` beside a backend, or a refused backend `auth`) | A remote MCP backend follows the egress backend rules. See [Errors in the egress guide](./egress.md#errors-and-exit-codes). |
 | `MCP server "<name>" failed during <step>` | The server failed while the box read its tool list. stderr names the step. |
 | `modern MCP requests require ...` | The client omitted required protocol metadata. Update the client to one that sends the fields on every request. |
 | `Unsupported MCP protocol version` | The request names a modern version Box does not support. The error lists the supported version. |

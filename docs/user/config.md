@@ -897,6 +897,7 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | `native-filesystem-policy` | boolean | For `stdio`: override the global experimental filesystem policy setting. Remote `http` entries refuse this field. See [workload selection](native-filesystem-policy.md#select-workloads). |
 | `destinations` | string array | For `http`: the hosts the server answers on. |
 | `secret.ref` | string | For `http`: the credential the gateway attaches on the way out. |
+| `backends` | table array | For `http`: a backend to re-route the server's requests to, at most one. The same shape and rules as an `[egress.<name>]` backend; a `stdio` table refuses it. See [Backends](mcp.md#backends). |
 
 Without native filesystem mediation, no `fs:*` decision covers a `stdio` server's direct file operations.
 The experiment checks selected operations while retaining the server's filesystem grants.

@@ -810,7 +810,7 @@ impl HostedBox {
         // provisioned to the workload and stripped at the gateway) and its box-owned backend token
         // (attached at the gateway, never placed in the workload environment). One control per
         // destination.
-        let credential::BackendProjection {
+        let credential::Projection {
             capabilities: backend_capabilities,
             workload_environment: backend_environment,
         } = credential::backend_capabilities(&record.backend_credentials()?)?;
