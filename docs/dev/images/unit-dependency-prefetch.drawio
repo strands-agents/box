@@ -1,0 +1,51 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<mxfile host="drawio" type="device">
+  <diagram id="unit-dependency-prefetch" name="Offline metadata dependency preparation">
+    <mxGraphModel dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1400" pageHeight="980" math="0" shadow="0" background="#ffffff">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="scope" value="&lt;div style=&quot;font-size:22px;line-height:26.40px;color:#232F3E;font-weight:bold&quot;&gt;Prepare the cache for offline metadata&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:21.60px;color:#5F6B7A;font-weight:normal&quot;&gt;Metadata resolves dependencies for every target platform.&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=none;strokeWidth=2;dashed=0;verticalAlign=top;align=left;spacing=0;spacingLeft=16;spacingTop=6;fontSize=14;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="920" height="600" as="geometry" />
+        </mxCell>
+        <mxCell id="before-label" value="&lt;div style=&quot;font-size:22px;line-height:26.40px;color:#232F3E;font-weight:bold&quot;&gt;Before: native dependencies only&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;spacing=0;fontSize=22;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="80" y="120" width="760" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="after-label" value="&lt;div style=&quot;font-size:22px;line-height:26.40px;color:#232F3E;font-weight:bold&quot;&gt;With the fetch step&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;spacing=0;fontSize=22;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="80" y="360" width="760" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="native-cache" value="&lt;div style=&quot;font-size:24px;line-height:28.80px;color:#232F3E;font-weight:normal&quot;&gt;Native dependencies&lt;/div&gt;&lt;div style=&quot;font-size:24px;line-height:28.80px;color:#5F6B7A;font-weight:normal&quot;&gt;&lt;i&gt;Build target only&lt;/i&gt;&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;fillColor=#ffffff;strokeWidth=2;dashed=0;verticalAlign=middle;align=center;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;strokeColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="80" y="180" width="320" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="metadata-fails" value="&lt;div style=&quot;font-size:24px;line-height:28.80px;color:#232F3E;font-weight:normal&quot;&gt;Offline metadata&lt;/div&gt;&lt;div style=&quot;font-size:24px;line-height:28.80px;color:#DD344C;font-weight:normal&quot;&gt;Archive missing&lt;/div&gt;&lt;div style=&quot;font-size:24px;line-height:28.80px;color:#DD344C;font-weight:normal&quot;&gt;Request fails&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;fillColor=#ffffff;strokeWidth=2;dashed=0;verticalAlign=middle;align=center;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;strokeColor=#DD344C;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="600" y="180" width="320" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="locked-cache" value="&lt;div style=&quot;font-size:24px;line-height:28.80px;color:#232F3E;font-weight:normal&quot;&gt;All locked dependencies&lt;/div&gt;&lt;div style=&quot;font-size:24px;line-height:28.80px;color:#5F6B7A;font-weight:normal&quot;&gt;&lt;i&gt;cargo fetch --locked&lt;/i&gt;&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;fillColor=#ffffff;strokeWidth=2;dashed=0;verticalAlign=middle;align=center;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;strokeColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="80" y="420" width="320" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="metadata-succeeds" value="&lt;div style=&quot;font-size:24px;line-height:28.80px;color:#232F3E;font-weight:normal&quot;&gt;Same offline metadata&lt;/div&gt;&lt;div style=&quot;font-size:24px;line-height:28.80px;color:#232F3E;font-weight:normal&quot;&gt;Archive available&lt;/div&gt;&lt;div style=&quot;font-size:24px;line-height:28.80px;color:#232F3E;font-weight:normal&quot;&gt;Request succeeds&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;fillColor=#ffffff;strokeWidth=2;dashed=0;verticalAlign=middle;align=center;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;strokeColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="600" y="420" width="320" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="scope-note" value="&lt;div style=&quot;font-size:16px;line-height:20px;color:#5F6B7A&quot;&gt;&lt;b&gt;Scope:&lt;/b&gt; success here means metadata setup only.&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;spacing=0;fontSize=16;fontStyle=0;fontColor=#5F6B7A;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="80" y="580" width="800" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="e-native" value="Cached archives" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="native-cache" target="metadata-fails">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="500" y="240" />
+            </Array>
+            <mxPoint x="0" y="-15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e-locked" value="Cached archives" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="locked-cache" target="metadata-succeeds">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="500" y="480" />
+            </Array>
+            <mxPoint x="0" y="-15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
