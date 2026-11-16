@@ -6,9 +6,9 @@ The source must belong to `main` history for publication.
 
 ## Choose a version
 
-Both channels publish macOS Apple silicon. Set `publish_linux=true` to include Amazon Linux 2023 ARM64.
+Both channels publish macOS Apple silicon. Set the workflow input `publish_linux=true` to include both Amazon Linux 2023 ARM64 and x86-64 archives.
 The default, `publish_linux=false`, keeps stable releases macOS-only. Linux preview versions require `publish_linux=true`.
-The x86_64 Linux build remains a workflow artifact and is not published as a release asset.
+Linux x86-64 remains experimental and requires the startup opt-in described below.
 
 | Version input | GitHub release | Latest stable release |
 |---|---|---|
@@ -63,21 +63,24 @@ With `publish_linux=true`, both channels publish these files, with the selected 
 
 - `box-<tag>-aarch64-apple-darwin.tar.gz`
 - `box-<tag>-linux-arm64.tar.gz`
+- `box-<tag>-linux-x86_64.tar.gz`
 - `SHA256SUMS.txt`
 
-The Linux archive uses the customer-facing name `linux-arm64`. Compilation and intermediate workflow artifacts retain the Rust target `aarch64-unknown-linux-gnu`.
+The Linux release archives use `linux-arm64` and `linux-x86_64` in their names.
+Compilation and intermediate workflow artifacts retain the Rust targets `aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu`, respectively.
+`SHA256SUMS.txt` contains a checksum for each published archive.
 Build jobs display `Linux ARM64`, `Linux x86_64`, or `macOS ARM64`.
 
-For a macOS-only stable release, the bundle omits the Linux archive and its checksum entry.
+For a macOS-only stable release, the bundle omits both Linux archives and their checksum entries.
 Its release notes omit Linux installation instructions. Linux builds and checks still run.
 This choice omits Linux from the new release. It does not remove archives from older releases.
 
 The final workflow check verifies asset names and prerelease metadata.
-It does not download and execute the published Linux package.
+It does not download and execute the published Linux packages.
 
 ## Verify the Linux download
 
-Run the downloader on the qualified Amazon Linux 2023 ARM64 host.
+Run the downloader separately on qualified Amazon Linux 2023 ARM64 and x86-64 hosts.
 Set `release_tag` to the published tag you are verifying. The command below uses `v0.1.1` as an example.
 
 ```sh
@@ -86,8 +89,9 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh
 ./box-core/box --version
 ```
 
-The downloader reads `SHA256SUMS.txt` from the selected release before downloading its archive.
-It prefers `box-<tag>-linux-arm64.tar.gz`. If that entry is absent, it accepts the older `box-<tag>-aarch64-unknown-linux-gnu.tar.gz` entry from the same release.
+The downloader selects the archive for the host CPU and reads `SHA256SUMS.txt` before downloading it.
+On ARM64, it prefers `box-<tag>-linux-arm64.tar.gz`. If that entry is absent, it accepts the older `box-<tag>-aarch64-unknown-linux-gnu.tar.gz` entry from the same release.
+On x86-64, it selects `box-<tag>-linux-x86_64.tar.gz`. A missing x86-64 archive or checksum stops the download; it never substitutes an ARM64 archive.
 A failed download or checksum for the selected archive stops the operation.
 The downloader verifies the checksum and checks all three Linux executables before extracting into `./box-core`.
 The package requires glibc 2.34 or newer and the GCC runtime library, `libgcc_s.so.1`.
@@ -95,11 +99,12 @@ Before replacing files, it runs the candidate's `box --version` inside an existi
 This staging location must be writable and permit execution. Temporary download storage can be `noexec`.
 A failed candidate check preserves existing destination files and shows the loader error.
 If execution fails after final extraction, the downloader reports failure and warns that destination files changed.
-If the release omits Linux, select a tag that includes its archive and checksum entry.
+If the release omits your Linux architecture, select a tag that includes its archive and checksum entry.
 The downloader does not fall back to an older release or a prerelease automatically.
-Manual checksum verification and extraction from the release notes remain an alternative.
+For ARM64, manual checksum verification and extraction from the release notes remain an alternative.
 Keep `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` together.
-Verify the reported version, an allowed operation, and a denied operation using the approved test configuration.
+On x86-64, set `EXPERIMENTAL_X86_SUPPORT=TRUE` in the environment before running workloads.
+Verify the reported version, an allowed operation, and a denied operation on each architecture using the approved test configuration.
 Record the release URL, source commit, archive hash, host baseline, commands, and results.
 
 Linux ARM64 startup requires no environment opt-in.

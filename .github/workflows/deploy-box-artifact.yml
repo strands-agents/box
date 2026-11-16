@@ -3,8 +3,8 @@ name: Release Box
 # GitHub-native release path for the box binaries. A manual dispatch names the
 # version and a commit; the workflow builds strands-box for each target below on
 # hosted runners, packages each binary set as a versioned tarball, and attaches
-# the macOS and ARM64 Linux tarballs with SHA256SUMS.txt to a GitHub Release.
-# Stable releases can omit Linux. Linux previews always include ARM64 Linux.
+# the macOS and Linux tarballs with SHA256SUMS.txt to a GitHub Release.
+# Stable releases can omit Linux. Linux previews include ARM64 and x86-64 Linux.
 # That naming and layout is what download.sh (curl | sh) and a Homebrew tap both
 # consume:
 #
@@ -12,8 +12,8 @@ name: Release Box
 #   SHA256SUMS.txt                    one aggregate file, `<sha256>  <asset>` per line
 #
 # Three targets build: macOS on Apple Silicon, and Linux (glibc) on x86_64 and
-# aarch64. The x86_64 Linux tarball stays a run artifact. Both Linux targets build
-# against Amazon Linux 2023. musl and native distro packages are not built here.
+# aarch64. Both Linux targets build against Amazon Linux 2023.
+# musl and native distro packages are not built here.
 #
 # Shape (mirrors the harness-sdk release workflows, retargeted to a binary
 # release): scan -> test-lint / build -> inspect -> approve ->
@@ -32,7 +32,7 @@ on:
         required: true
         type: string
       publish_linux:
-        description: 'Include the Linux ARM64 archive. Set false for a macOS-only stable release. Required for Linux previews.'
+        description: 'Include the Linux ARM64 and x86-64 archives. Set false for a macOS-only stable release. Required for Linux previews.'
         required: true
         default: false
         type: boolean
@@ -257,7 +257,6 @@ jobs:
       fail-fast: false
       matrix:
         target:
-          # x86_64 Linux remains a build artifact until its separate qualification.
           - triple: x86_64-unknown-linux-gnu
             label: Linux x86_64
             runner: ubuntu-22.04
@@ -618,9 +617,15 @@ jobs:
             echo "::error::missing the ARM64 Linux tarball $linux"
             exit 1
           fi
+          linux_x86="built/box-${NEW_TAG}-x86_64-unknown-linux-gnu.tar.gz"
+          if [ ! -f "$linux_x86" ]; then
+            echo "::error::missing the x86-64 Linux tarball $linux_x86"
+            exit 1
+          fi
           cp "$darwin" release/
           if [ "$PUBLISH_LINUX" = "true" ]; then
             cp "$linux" "release/box-${NEW_TAG}-linux-arm64.tar.gz"
+            cp "$linux_x86" "release/box-${NEW_TAG}-linux-x86_64.tar.gz"
           fi
           (cd release && sha256sum -- *.tar.gz | sort -k 2 > SHA256SUMS.txt)
           echo "Built tarballs:"
@@ -664,7 +669,7 @@ jobs:
           released=$(cd release && printf '%s\n' *.tar.gz | sort)
           release_assets=("box-${NEW_TAG}-aarch64-apple-darwin.tar.gz")
           if [ "$PUBLISH_LINUX" = "true" ]; then
-            release_assets+=("box-${NEW_TAG}-linux-arm64.tar.gz")
+            release_assets+=("box-${NEW_TAG}-linux-arm64.tar.gz" "box-${NEW_TAG}-linux-x86_64.tar.gz")
           fi
           expected_release=$(printf '%s\n' "${release_assets[@]}" | sort)
           if [ "$released" != "$expected_release" ]; then
@@ -794,11 +799,13 @@ jobs:
           This preview does not establish security acceptance or production readiness.
           EOF
           else
-            printf "\n## Linux ARM64\n" >> body.md
+            printf "\n## Linux\n" >> body.md
           fi
           cat >> body.md <<EOF
 
           Package availability does not establish security acceptance.
+          ### Linux ARM64
+
           For Amazon Linux 2023 ARM64, download \`box-${NEW_TAG}-linux-arm64.tar.gz\` and \`SHA256SUMS.txt\` from the assets below. In the download directory, run:
 
           \`\`\`sh
@@ -810,7 +817,17 @@ jobs:
             ./box-core/box run --config ./box.toml
           \`\`\`
 
-          The Linux build requires glibc 2.34 or newer, libgcc, and a host that permits Box's namespace, mount, and syscall-filter setup.
+          ### Linux x86-64 (experimental)
+
+          For Amazon Linux 2023 x86-64, use \`box-${NEW_TAG}-linux-x86_64.tar.gz\`. The downloader selects this archive and verifies its checksum. Download this exact release, then enable x86 support when starting a workload:
+
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh -o download-box.sh &&
+            BOX_VERSION=${NEW_TAG} sh download-box.sh &&
+            EXPERIMENTAL_X86_SUPPORT=TRUE ./box-core/box run --config ./box.toml
+          \`\`\`
+
+          The Linux builds require glibc 2.34 or newer, libgcc, and a host that permits Box's namespace, mount, and syscall-filter setup.
           EOF
           fi
           cat >> body.md <<EOF
@@ -890,7 +907,7 @@ jobs:
             "SHA256SUMS.txt"
           )
           if [ "$PUBLISH_LINUX" = "true" ]; then
-            expected+=("box-${NEW_TAG}-linux-arm64.tar.gz")
+            expected+=("box-${NEW_TAG}-linux-arm64.tar.gz" "box-${NEW_TAG}-linux-x86_64.tar.gz")
           fi
           for i in $(seq 1 30); do
             if names=$(gh release view "$NEW_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null); then

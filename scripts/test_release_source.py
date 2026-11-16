@@ -221,29 +221,34 @@ class ReleaseSourceTests(unittest.TestCase):
 
 class ReleaseBundleTests(unittest.TestCase):
     def test_published_assets_and_prerelease_state_must_match_the_channel(self):
-        for preview, publish_linux, metadata_preview, linux_asset, extra_asset, success in [
-            (False, True, False, True, False, True),
-            (True, True, True, True, False, True),
-            (False, False, False, False, False, True),
-            (False, False, False, True, False, False),
-            (False, False, True, False, False, False),
-            (False, False, False, False, True, False),
-            (True, True, False, True, False, False),
-            (False, True, True, True, False, False),
-            (False, True, False, False, False, False),
-            (True, True, True, False, False, False),
-            (False, True, False, True, True, False),
-            (True, True, True, True, True, False),
+        for preview, publish_linux, metadata_preview, arm_asset, x86_asset, extra_asset, success in [
+            (False, True, False, True, True, False, True),
+            (True, True, True, True, True, False, True),
+            (False, False, False, False, False, False, True),
+            (False, False, False, True, False, False, False),
+            (False, False, False, False, True, False, False),
+            (False, False, True, False, False, False, False),
+            (False, False, False, False, False, True, False),
+            (True, True, False, True, True, False, False),
+            (False, True, True, True, True, False, False),
+            (False, True, False, False, True, False, False),
+            (False, True, False, True, False, False, False),
+            (True, True, True, False, True, False, False),
+            (True, True, True, True, False, False, False),
+            (False, True, False, True, True, True, False),
+            (True, True, True, True, True, True, False),
         ]:
             with self.subTest(
                 preview=preview, publish_linux=publish_linux, metadata=metadata_preview,
-                linux=linux_asset, extra=extra_asset
+                arm=arm_asset, x86=x86_asset, extra=extra_asset
             ), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 tag = "v0.1.1-linux-preview.1" if preview else "v0.1.1"
                 names = ["SHA256SUMS.txt", f"box-{tag}-aarch64-apple-darwin.tar.gz"]
-                if linux_asset:
+                if arm_asset:
                     names.append(f"box-{tag}-linux-arm64.tar.gz")
+                if x86_asset:
+                    names.append(f"box-{tag}-linux-x86_64.tar.gz")
                 if extra_asset:
                     names.append(f"box-{tag}-x86_64-unknown-linux-gnu.tar.gz")
                 gh = root / "gh"
@@ -271,6 +276,82 @@ class ReleaseBundleTests(unittest.TestCase):
                 )
                 self.assertEqual(result.returncode == 0, success, result.stdout + result.stderr)
 
+    def test_x86_recipe_starts_only_after_a_successful_download(self):
+        for fetch_status, download_status in [(17, 0), (0, 19), (0, 0)]:
+            with self.subTest(fetch=fetch_status, download=download_status), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                tools = root / "tools"
+                tools.mkdir()
+                curl = tools / "curl"
+                curl.write_text(
+                    '#!/bin/sh\n[ "$FETCH_STATUS" = 0 ] || exit "$FETCH_STATUS"\n'
+                    'while [ "$#" -gt 0 ]; do\n'
+                    '  if [ "$1" = -o ]; then cp "$DOWNLOAD_FIXTURE" "$2"; exit 0; fi\n'
+                    '  shift\ndone\ncat "$DOWNLOAD_FIXTURE"\n'
+                )
+                curl.chmod(0o755)
+                fixture = root / "downloader-fixture.sh"
+                fixture.write_text(
+                    '#!/bin/sh\nprintf "%s\\n" "$BOX_VERSION" > "$DOWNLOAD_LOG"\n'
+                    'exit "$DOWNLOAD_STATUS"\n'
+                )
+                box = root / "box-core/box"
+                box.parent.mkdir()
+                box.write_text(
+                    '#!/bin/sh\n[ "$1" = run ] && [ "$EXPERIMENTAL_X86_SUPPORT" = TRUE ] || exit 96\n'
+                    'printf "started\\n" >> "$RUN_LOG"\n'
+                )
+                box.chmod(0o755)
+                environment = {
+                    **os.environ, "PATH": f"{tools}:{os.environ['PATH']}",
+                    "NEW_TAG": "v0.1.1", "LINUX_PREVIEW": "false", "PUBLISH_LINUX": "true",
+                    "FETCH_STATUS": str(fetch_status), "DOWNLOAD_STATUS": str(download_status),
+                    "DOWNLOAD_FIXTURE": str(fixture), "DOWNLOAD_LOG": str(root / "download.log"),
+                    "RUN_LOG": str(root / "run.log"),
+                }
+                composed = subprocess.run(
+                    ["bash", "-c", workflow_command("Compose release body (install block)")],
+                    cwd=root, env=environment, capture_output=True, text=True,
+                )
+                self.assertEqual(composed.returncode, 0, composed.stdout + composed.stderr)
+                recipe = re.search(
+                    r"### Linux x86-64.*?```sh\n(.*?)```", (root / "body.md").read_text(), re.DOTALL,
+                ).group(1)
+                result = subprocess.run(
+                    ["sh", "-c", recipe], cwd=root, env=environment, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, fetch_status or download_status, result.stdout + result.stderr)
+                self.assertEqual((root / "download.log").exists(), fetch_status == 0)
+                if fetch_status == 0:
+                    self.assertEqual((root / "download.log").read_text(), "v0.1.1\n")
+                if fetch_status or download_status:
+                    self.assertFalse((root / "run.log").exists())
+                else:
+                    self.assertEqual((root / "run.log").read_text(), "started\n")
+
+    def test_collection_requires_all_built_archives(self):
+        triples = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
+        for publish_linux in [False, True]:
+            for missing in triples:
+                with self.subTest(publish_linux=publish_linux, missing=missing), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    assets = root / "assets"
+                    assets.mkdir()
+                    for triple in triples:
+                        if triple != missing:
+                            (assets / f"box-v0.1.1-{triple}.tar.gz").write_bytes(b"fixture")
+                    result = subprocess.run(
+                        ["bash", "-c", workflow_command("Collect tarballs and compute SHA256SUMS.txt")],
+                        cwd=root,
+                        env={
+                            **os.environ, "NEW_TAG": "v0.1.1", "LINUX_PREVIEW": "false",
+                            "PUBLISH_LINUX": str(publish_linux).lower(),
+                        },
+                        capture_output=True, text=True,
+                    )
+                    self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("missing", result.stdout)
+
     def test_stable_and_preview_bundle_only_their_expected_platforms(self):
         import io
         import tarfile
@@ -290,9 +371,10 @@ class ReleaseBundleTests(unittest.TestCase):
                             "box", "strands-box-sock-alias", "strands-box-contain-trampoline",
                         ]:
                             entry = tarfile.TarInfo(name)
-                            entry.size = 4
+                            payload = f"{triple}:{name}".encode()
+                            entry.size = len(payload)
                             entry.mode = 0o755
-                            archive.addfile(entry, io.BytesIO(b"test"))
+                            archive.addfile(entry, io.BytesIO(payload))
                 environment = {
                     **os.environ, "NEW_TAG": tag,
                     "LINUX_PREVIEW": str(preview).lower(),
@@ -311,10 +393,10 @@ class ReleaseBundleTests(unittest.TestCase):
                 release = root / "release"
                 expected = {f"box-{tag}-aarch64-apple-darwin.tar.gz", "SHA256SUMS.txt"}
                 if publish_linux:
-                    expected.add(f"box-{tag}-linux-arm64.tar.gz")
+                    expected.update({f"box-{tag}-linux-arm64.tar.gz", f"box-{tag}-linux-x86_64.tar.gz"})
                 self.assertEqual({path.name for path in release.iterdir()}, expected)
                 checksums = (release / "SHA256SUMS.txt").read_text()
-                self.assertEqual(len(checksums.splitlines()), 2 if publish_linux else 1)
+                self.assertEqual(len(checksums.splitlines()), 3 if publish_linux else 1)
                 verified = subprocess.run(
                     ["sha256sum", "--check", "SHA256SUMS.txt"], cwd=release,
                     capture_output=True, text=True,
@@ -325,16 +407,22 @@ class ReleaseBundleTests(unittest.TestCase):
                         (release / f"box-{tag}-linux-arm64.tar.gz").read_bytes(),
                         (assets / f"box-{tag}-aarch64-unknown-linux-gnu.tar.gz").read_bytes(),
                     )
+                    self.assertEqual(
+                        (release / f"box-{tag}-linux-x86_64.tar.gz").read_bytes(),
+                        (assets / f"box-{tag}-x86_64-unknown-linux-gnu.tar.gz").read_bytes(),
+                    )
                     self.assertNotIn("unknown", checksums)
                 body = (root / "body.md").read_text()
                 self.assertNotIn("unknown-linux", body)
                 self.assertNotIn("EXPERIMENTAL_LINUX_SUPPORT", body)
                 self.assertEqual(f"box-{tag}-linux-arm64.tar.gz" in body, publish_linux)
+                self.assertEqual(f"box-{tag}-linux-x86_64.tar.gz" in body, publish_linux)
+                self.assertEqual("EXPERIMENTAL_X86_SUPPORT=TRUE" in body, publish_linux)
                 self.assertEqual("sha256sum --check box-linux.sha256" in body, publish_linux)
                 self.assertEqual("Package availability does not establish security acceptance" in body, publish_linux)
-                self.assertEqual("## Linux ARM64" in body, publish_linux and not preview)
+                self.assertEqual("### Linux ARM64" in body, publish_linux)
                 self.assertEqual("## Experimental Linux preview" in body, preview)
-                # Unqualified architectures must fail inspection in both channels.
+                # Raw build names must not leak into the public asset set.
                 extra = release / f"box-{tag}-x86_64-unknown-linux-gnu.tar.gz"
                 extra.write_bytes(b"unexpected")
                 result = subprocess.run(
