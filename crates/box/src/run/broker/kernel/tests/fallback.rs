@@ -234,7 +234,9 @@ fn monty_refuses_dash_m_and_names_the_real_python_switch() {
     });
     assert_eq!(output.status, 1, "{}", output.stderr);
     assert!(
-        output.stderr.contains("-m is not supported by Monty")
+        output
+            .stderr
+            .starts_with("python3: -m is not supported by Monty")
             && output.stderr.contains(box_shell::REAL_PYTHON_HINT),
         "{}",
         output.stderr

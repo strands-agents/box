@@ -114,16 +114,26 @@ fn write_grammar_disclosures(
 fn write_monty_disclosures(
     record: &Record,
     names: &crate::run::commands::BareNames,
+    search_path: &std::ffi::OsStr,
     mut output: impl std::io::Write,
 ) -> std::io::Result<()> {
     use crate::record::config::grammar::bound_name;
+    let escaped = |text: &str| -> String { text.chars().flat_map(char::escape_default).collect() };
     for name in ["python3", "python"] {
         if !record.monty && !names.declared.contains_key(name) {
-            writeln!(
-                output,
-                "strands-box: monty = false and no [tool] answers `{name}`, so a bare `{name}` in \
-                 the Shell runs the file `PATH` finds"
-            )?;
+            match crate::run::contain::executable::find_on(name, search_path) {
+                Some(path) => writeln!(
+                    output,
+                    "strands-box: monty = false and no [tool] answers `{name}`, so a bare \
+                     `{name}` in the Shell runs {}, the file `PATH` finds",
+                    escaped(&path.to_string_lossy())
+                )?,
+                None => writeln!(
+                    output,
+                    "strands-box: monty = false and neither a [tool] nor `PATH` has `{name}`, so \
+                     a bare `{name}` in the Shell is not found"
+                )?,
+            }
         }
         if record.monty {
             for (label, spec) in &record.tool {
@@ -273,14 +283,17 @@ async fn hosted(
     )?);
     write_grammar_disclosures(&locked.record, std::io::stderr().lock())
         .map_err(|source| ConfigError::Disclosure { source })?;
-    let names = commands.bare_names(
-        &locked.record,
-        &crate::run::contain::executable::host_search_path(),
-    );
+    let search_path = crate::run::contain::executable::host_search_path();
+    let names = commands.bare_names(&locked.record, &search_path);
     write_bare_name_disclosures(&names, std::io::stderr().lock())
         .map_err(|source| ConfigError::Disclosure { source })?;
-    write_monty_disclosures(&locked.record, &names, std::io::stderr().lock())
-        .map_err(|source| ConfigError::Disclosure { source })?;
+    write_monty_disclosures(
+        &locked.record,
+        &names,
+        &search_path,
+        std::io::stderr().lock(),
+    )
+    .map_err(|source| ConfigError::Disclosure { source })?;
     eprintln!("strands-box: starting workload");
     let hosted = HostedBox::open(
         &locked.root,
@@ -559,14 +572,18 @@ mod tests {
         let tools = BTreeMap::from([("python3".to_string(), spec("/venv/bin/python3", &[], &[]))]);
         let mut record = record_with(None, tools);
         let none = crate::run::commands::BareNames::default();
-        let lines = |record: &Record, names: &crate::run::commands::BareNames| {
+        let lines = |record: &Record,
+                     names: &crate::run::commands::BareNames,
+                     search_path: &std::ffi::OsStr| {
             let mut output = Vec::new();
-            write_monty_disclosures(record, names, &mut output).expect("the notes write");
+            write_monty_disclosures(record, names, search_path, &mut output)
+                .expect("the notes write");
             String::from_utf8(output).expect("UTF-8")
         };
+        let empty = std::ffi::OsStr::new("");
 
         assert_eq!(
-            lines(&record, &none),
+            lines(&record, &none, empty),
             "strands-box: [tool.python3]: not used for a bare `python3`, because Monty answers \
              it; set monty = false at the top of box.toml to use the tool\n"
         );
@@ -583,9 +600,24 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            lines(&record, &answered),
-            "strands-box: monty = false and no [tool] answers `python`, so a bare `python` in \
-             the Shell runs the file `PATH` finds\n"
+            lines(&record, &answered, empty),
+            "strands-box: monty = false and neither a [tool] nor `PATH` has `python`, so a bare \
+             `python` in the Shell is not found\n"
+        );
+
+        let bin = tempfile::tempdir().expect("a PATH folder");
+        let python = bin.path().join("python");
+        std::fs::write(&python, "").expect("a python file");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+        assert_eq!(
+            lines(&record, &answered, bin.path().as_os_str()),
+            format!(
+                "strands-box: monty = false and no [tool] answers `python`, so a bare `python` in \
+                 the Shell runs {}, the file `PATH` finds\n",
+                python.display()
+            )
         );
     }
 

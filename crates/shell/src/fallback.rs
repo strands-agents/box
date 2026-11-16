@@ -377,14 +377,12 @@ impl ShellKernel {
                 attached if attached.starts_with("-c") => source = Some(attached[2..].to_string()),
                 // `python3 -m pytest` or `-m venv` is the usual first try at real Python.
                 module if module.starts_with("-m") => {
-                    write_stderr(
-                        context,
-                        &format!(
-                            "python: -m is not supported by Monty, Box's built-in Python subset. \
-                             {REAL_PYTHON_HINT}\n"
-                        ),
-                    )
-                    .await;
+                    let message = format!(
+                        "{}: -m is not supported by Monty, Box's built-in Python subset. \
+                         {REAL_PYTHON_HINT}\n",
+                        context.program()
+                    );
+                    write_stderr(context, &message).await;
                     return 1;
                 }
                 other => {
