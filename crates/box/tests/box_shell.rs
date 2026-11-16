@@ -1199,7 +1199,7 @@ fn shell_state_does_not_persist_across_requests() {
 /// Two separate properties, and each has broken once.
 ///
 /// `HOME` is the *same* string on both sides. The Shell once fabricated its own mount while `HOME`
-/// kept the vendored default of `/home/lash`, so `~` expanded outside the mount and a bare `cd`
+/// kept the Shell's default of `/home/lash`, so `~` expanded outside the mount and a bare `cd`
 /// walked away from it. Then the composed workload environment moved `HOME` to the operator's home
 /// while this side still reported the box home — the same defect with the sides swapped. So the
 /// assertion is a *comparison* rather than a literal: whatever `HOME` is, both sides read one
@@ -1461,10 +1461,10 @@ fn reading_an_unrelated_file_leaves_egress_open() {
     );
 }
 
-/// The vendored Lua interpreter is reachable, and its effects are mediated.
+/// The Shell's Lua interpreter is reachable, and its effects are mediated.
 ///
 /// Recorded because it is the sharpest fact about what hosting the Shell puts in the
-/// daemon. `mlua` is a **non-optional** dependency of the vendored Shell
+/// daemon. `mlua` is a **non-optional** dependency of Strands Shell
 /// with `features = ["lua54", "async", "vendored"]`, so a Lua 5.4 **C** interpreter —
 /// roughly 500 `unsafe` FFI blocks in the binding alone — is compiled into whichever
 /// process hosts the Shell, and `builtins/mod.rs` exposes it as a `lua` builtin that
@@ -1511,7 +1511,7 @@ fn the_lua_interpreter_is_reachable_and_mediated() {
 /// **This was an `#[ignore]`d failing pin.** The attribute came off when the bypass closed;
 /// the history is kept because it explains why admission sits where it does.
 ///
-/// The vendored Shell used to admit a command in `Shell::run` → `intercept_shell_command`,
+/// The Shell used to admit a command in `Shell::run` → `intercept_shell_command`,
 /// while Lua's `io.popen` (`shell/src/builtins/lua.rs:682`) and `os.execute` (`:837`) called
 /// `exec::execute_capture` **directly**, performing no admission. So once a policy permitted
 /// *any* `lua -e …` command, two lines of Lua ran arbitrary shell text unjudged. Measured

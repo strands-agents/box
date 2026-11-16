@@ -129,6 +129,23 @@ pub(crate) fn read_remote_mcp_servers(path: &Path) -> Result<Vec<RemoteMcpServer
     let (_, remote_mcp) = mcp::partition(&file.mcp)?;
     let mut servers = Vec::new();
     for remote in remote_mcp {
+        // A re-routed server is reachable only through the backend, and that re-route — with its
+        // SigV4/`env://` backend auth — happens at `run` time in the egress gateway. Offline
+        // `generate-schema` has no gateway, so it cannot discover a re-routed server; refuse by name
+        // rather than silently discover the ORIGINAL host (wrong tools, and it would resolve the
+        // phantom-only destination `secret` against that host).
+        if !remote.backends.is_empty() {
+            return Err(ConfigError::Mcp {
+                name: remote.name,
+                reason: "re-routes to a backend, which generate-schema cannot discover (the \
+                         re-route and its backend auth apply only at run time, in the egress \
+                         gateway). This stops the whole run; generate a schema from a box.toml \
+                         without this server for the others, then author this server's mcp:call \
+                         rules by hand"
+                    .to_string(),
+            }
+            .into());
+        }
         let Some(destination) = remote.destinations.first() else {
             continue;
         };
@@ -469,8 +486,9 @@ impl RunContract {
                         destinations: remote.destinations,
                         protocol: Protocol::Mcp,
                         secret: remote.secret,
-                        // A remote MCP server is never a re-route target; it declares no backend.
-                        backends: Vec::new(),
+                        // A remote MCP server re-routes to its declared backend, exactly as an
+                        // `[egress.<name>]` entry does; an empty list means no re-route.
+                        backends: remote.backends,
                     },
                 )
             })
@@ -484,6 +502,7 @@ impl RunContract {
         Ok(ConfigureRequest {
             record: Record {
                 version: record_version(
+                    root.box_id(),
                     self.file.file_attributes,
                     &self.file.experimental_features,
                     &self.file.limits,
@@ -667,6 +686,12 @@ const UPGRADE_HTTP_RECORD_VERSION: u32 = 32;
 /// The record version of a record that sets `limits.shell.max_stdin`, so an older build refuses the
 /// box rather than resuming it with the default stdin limit.
 const SHELL_STDIN_LIMIT_RECORD_VERSION: u32 = 33;
+/// The record version of a record whose box identity a caller supplied, so an older build refuses
+/// the box by its version rather than by its identity.
+pub(crate) const SUPPLIED_IDENTITY_RECORD_VERSION: u32 = 34;
+/// The record version of a record whose process selects `file-watching`, so an older build
+/// refuses the box rather than resuming it with FSEvents refused.
+const FILE_WATCHING_RECORD_VERSION: u32 = 35;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -711,16 +736,21 @@ impl ExperimentalFeatures {
 /// The highest record version required by the features a record holds.
 #[allow(clippy::too_many_arguments)]
 fn record_version<'a>(
+    box_id: &str,
     file_attributes: bool,
     features: &ExperimentalFeatures,
     limits: &Limits,
-    specs: impl Iterator<Item = &'a ProcessSpec>,
+    specs: impl Iterator<Item = &'a ProcessSpec> + Clone,
     mcp: &[crate::record::config::mcp::McpServer],
     ingress: bool,
     has_backend: bool,
     gateway: &Gateway,
 ) -> u32 {
-    if limits.shell.has_stdin_limit() {
+    if specs.clone().any(|spec| spec.file_watching) {
+        FILE_WATCHING_RECORD_VERSION
+    } else if !generated_box_identity(box_id) {
+        SUPPLIED_IDENTITY_RECORD_VERSION
+    } else if limits.shell.has_stdin_limit() {
         SHELL_STDIN_LIMIT_RECORD_VERSION
     } else if !gateway.is_default() {
         UPGRADE_HTTP_RECORD_VERSION
@@ -1009,6 +1039,8 @@ impl Record {
             SHELL_SIZE_LIMITS_RECORD_VERSION,
             UPGRADE_HTTP_RECORD_VERSION,
             SHELL_STDIN_LIMIT_RECORD_VERSION,
+            SUPPLIED_IDENTITY_RECORD_VERSION,
+            FILE_WATCHING_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1022,7 +1054,13 @@ impl Record {
             path: path.to_path_buf(),
             source,
         })?;
+        if !valid_box_identity(&record.box_id) {
+            return Err(ConfigError::RecordIdentity {
+                found: record.box_id,
+            });
+        }
         let expected = record_version(
+            &record.box_id,
             record.file_attributes,
             &record.experimental_features,
             &record.limits,
@@ -1043,11 +1081,6 @@ impl Record {
             return Err(ConfigError::RecordVersion {
                 found: record.version,
                 expected,
-            });
-        }
-        if !valid_box_identity(&record.box_id) {
-            return Err(ConfigError::RecordIdentity {
-                found: record.box_id,
             });
         }
         BoxName::parse(&record.name)?;
@@ -1100,7 +1133,9 @@ impl Record {
         &self,
     ) -> Result<Vec<(DestinationPattern, Vec<EgressRoute>)>, BoxError> {
         let mut groups = Vec::new();
-        for entry in self.egress.values() {
+        // A remote MCP server re-routes through the same backend path as an `[egress.<name>]` entry,
+        // so both maps contribute here.
+        for entry in self.egress.values().chain(self.remote_mcp.values()) {
             let routes = entry.backend_credential_routes()?;
             if routes.is_empty() {
                 continue;
@@ -1123,7 +1158,9 @@ impl Record {
         &self,
     ) -> Result<Vec<(DestinationPattern, BackendTarget)>, BoxError> {
         let mut dials = Vec::new();
-        for entry in self.egress.values() {
+        // Both the operator's egress entries and the remote MCP servers re-route through the same
+        // backend dial path.
+        for entry in self.egress.values().chain(self.remote_mcp.values()) {
             dials.extend(entry.backend_dials()?);
         }
         Ok(dials)
@@ -1174,13 +1211,33 @@ impl Record {
     }
 }
 
-fn valid_box_identity(identity: &str) -> bool {
-    identity.strip_prefix("box-").is_some_and(|suffix| {
-        suffix.len() == 16
-            && suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+/// The lowercase hexadecimal digits that end every box identity.
+const BOX_IDENTITY_DIGITS: usize = 16;
+
+/// The longest prefix a caller-supplied identity may carry before its digits.
+pub(crate) const MAXIMUM_BOX_IDENTITY_PREFIX: usize = MAXIMUM_BOX_NAME - 1 - BOX_IDENTITY_DIGITS;
+
+/// Whether `identity` is one Box generates or one a caller may supply.
+pub(crate) fn valid_box_identity(identity: &str) -> bool {
+    identity.rsplit_once('-').is_some_and(|(prefix, digits)| {
+        identity_digits(digits)
+            && !prefix.is_empty()
+            && prefix.len() <= MAXIMUM_BOX_IDENTITY_PREFIX
+            && !prefix.starts_with(['.', '-'])
+            && prefix.chars().all(nameable)
     })
+}
+
+/// Whether `identity` has the form Box generates: `box-` and 16 lowercase hexadecimal digits.
+fn generated_box_identity(identity: &str) -> bool {
+    identity.strip_prefix("box-").is_some_and(identity_digits)
+}
+
+fn identity_digits(digits: &str) -> bool {
+    digits.len() == BOX_IDENTITY_DIGITS
+        && digits
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
 /// The policy that the configuration at `path` selects, read as `run` reads it, whether `run`
@@ -1249,7 +1306,7 @@ fn read_authored_policy(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BoxName(String);
 
-/// The longest box name that leaves room for the sockets under it.
+/// The longest box name, which also bounds a caller-supplied box identity.
 pub(crate) const MAXIMUM_BOX_NAME: usize = 32;
 
 /// Whether one character may appear in a box name, an MCP server name, or an alias filename.
@@ -1501,6 +1558,7 @@ mod tests {
                     stored.limits = limits;
                     assert_eq!(
                         record_version(
+                            "box-0123456789abcdef",
                             stored.file_attributes,
                             &stored.experimental_features,
                             &stored.limits,
@@ -1553,6 +1611,7 @@ mod tests {
         stored.mcp[0].argument_wildcards = true;
         assert_eq!(
             record_version(
+                "box-0123456789abcdef",
                 stored.file_attributes,
                 &stored.experimental_features,
                 &stored.limits,
@@ -1623,6 +1682,38 @@ mod tests {
             &["concrete"]
         );
     }
+
+    /// Offline `generate-schema` cannot discover a re-routed MCP server: the re-route and its backend
+    /// auth apply only at run time, in the gateway. `read_remote_mcp_servers` refuses by name rather
+    /// than silently discover the ORIGINAL host (wrong tools, and resolving the phantom-only secret
+    /// against that host). Without a backend the same entry is read normally.
+    #[test]
+    fn offline_schema_generation_refuses_a_re_routed_remote_mcp_server() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("box.toml");
+        let with_backend = "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+            [mcp.web]\ntype = \"http\"\ndestinations = [\"api.example.com\"]\n\
+            [[mcp.web.backends]]\nurl = \"https://gw.example.com/mcp\"\n";
+        std::fs::write(&path, with_backend).unwrap();
+        let error = match read_remote_mcp_servers(&path) {
+            Ok(_) => panic!("a re-routed server must be refused, not discovered"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("web") && error.contains("generate-schema cannot discover"),
+            "a re-routed server is refused by name: {error}"
+        );
+        // The same entry without a backend is read normally, on its original host.
+        std::fs::write(
+            &path,
+            "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+             [mcp.web]\ntype = \"http\"\ndestinations = [\"api.example.com\"]\n",
+        )
+        .unwrap();
+        let servers = read_remote_mcp_servers(&path).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].url, "https://api.example.com/mcp");
+    }
     // **The egress tests still live here.** They belong in `egress.rs` beside what they test;
     // moving them needs the `load` fixture below, which every other test also uses.
 
@@ -1666,6 +1757,7 @@ mod tests {
     /// One `[agent]` with the given command and nothing else.
     fn agent(command: &[&str]) -> ProcessSpec {
         ProcessSpec {
+            file_watching: false,
             native_filesystem_policy: None,
             command: command.iter().map(|word| (*word).to_string()).collect(),
             workspace: None,
@@ -1697,6 +1789,55 @@ mod tests {
             contained_mcp: BTreeMap::new(),
             telemetry: std::collections::BTreeMap::new(),
         }
+    }
+
+    /// **File watching is selected per local process and needs its record version.** Each
+    /// table stores only its own selection, a selected record refuses an older version, and a
+    /// remote MCP server refuses the key.
+    #[test]
+    fn file_watching_is_versioned_and_selected_per_process() {
+        for table in ["agent", "tool.watcher", "mcp.watcher"] {
+            for enabled in [false, true] {
+                let transport = if table.starts_with("mcp.") {
+                    "type = \"stdio\"\n"
+                } else {
+                    ""
+                };
+                let body = format!(
+                    "[{table}]\n{transport}command = [\"watcher\"]\n\
+                     file-watching = {enabled}\n\
+                     [tool.other]\ncommand = [\"other\"]\n"
+                );
+                let mut stored = pinned_record(&body);
+                let selected = match table {
+                    "agent" => stored.agent.as_ref().unwrap(),
+                    "tool.watcher" => &stored.tool["watcher"],
+                    _ => &stored.contained_mcp["watcher"].spec,
+                };
+                assert_eq!(selected.file_watching, enabled, "{table}");
+                assert!(!stored.tool["other"].file_watching);
+                let expected = if enabled { 35 } else { 21 };
+                assert_eq!(stored.version, expected, "{body}");
+                let text = stored.to_toml().unwrap();
+                assert_eq!(text.contains("file-watching"), enabled);
+                assert_eq!(
+                    Record::parse(&text, Path::new("record.toml")).unwrap(),
+                    stored
+                );
+                stored.version = if enabled { 34 } else { 35 };
+                assert!(matches!(
+                    Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion { expected: version, .. }) if version == expected
+                ));
+            }
+        }
+        let remote = "name = \"watcher\"\nbox_dir = \"/var/lib/boxes/watcher\"\n\
+                      [mcp.remote]\ntype = \"http\"\ndestinations = [\"example.com\"]\n\
+                      file-watching = false\n";
+        assert!(
+            toml::from_str::<ConfigFile>(remote).is_err(),
+            "a remote MCP server refuses the key"
+        );
     }
 
     #[test]
@@ -1814,6 +1955,7 @@ mod tests {
                         for servers in [&[][..], shared.mcp.as_slice()] {
                             assert_eq!(
                                 record_version(
+                                    "box-0123456789abcdef",
                                     file_attributes,
                                     &features,
                                     &limits,
@@ -2875,7 +3017,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, SHELL_STDIN_LIMIT_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, FILE_WATCHING_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -2895,12 +3037,64 @@ env = {}
     }
 
     #[test]
+    fn the_longest_supplied_box_identity_is_also_a_valid_box_name() {
+        let longest = format!("{}-0123456789abcdef", "a".repeat(15));
+        assert_eq!(longest.len(), MAXIMUM_BOX_NAME);
+        assert!(valid_box_identity(&longest));
+        BoxName::parse(&longest).expect("a caller can use its box ID as the name");
+        let too_long = format!("{}-0123456789abcdef", "a".repeat(16));
+        assert!(!valid_box_identity(&too_long));
+        let message = ConfigError::SuppliedIdentity { found: too_long }.to_string();
+        assert!(
+            message.contains(&format!("1 to {MAXIMUM_BOX_IDENTITY_PREFIX} letters")),
+            "the refusal names the limit that applies: {message}"
+        );
+    }
+
+    #[test]
+    fn a_supplied_box_identity_requires_its_own_record_version() {
+        let record = |version: u32, box_id: &str| {
+            format!(
+                "version = {version}\n\
+                 box_id = {box_id:?}\n\
+                 box_dir = \"/var/lib/box\"\n\
+                 name = \"codex\"\n"
+            )
+        };
+        let supplied = "claude-code-wit-0123456789abcdef";
+
+        let parsed = parsed_record(&record(SUPPLIED_IDENTITY_RECORD_VERSION, supplied))
+            .expect("a supplied identity at its version parses");
+        assert_eq!(parsed.box_id, supplied);
+        let error = parsed_record(&record(RECORD_VERSION, supplied))
+            .expect_err("a supplied identity at the base version must be refused");
+        assert!(
+            matches!(
+                error,
+                ConfigError::RecordVersion { found, expected }
+                    if found == RECORD_VERSION && expected == SUPPLIED_IDENTITY_RECORD_VERSION
+            ),
+            "{error}"
+        );
+
+        let generated = "box-0123456789abcdef";
+        parsed_record(&record(RECORD_VERSION, generated))
+            .expect("a generated identity keeps the base version");
+        assert!(
+            parsed_record(&record(SUPPLIED_IDENTITY_RECORD_VERSION, generated)).is_err(),
+            "a generated identity must not take the supplied identity's version"
+        );
+    }
+
+    #[test]
     fn a_record_with_an_invalid_box_identity_is_refused() {
         for found in [
             "",
             "box-0123456789abcde",
             "box-0123456789abcdeG",
-            "name-0123456789abcdef",
+            "name0123456789abcdef",
+            "-name-0123456789abcdef",
+            "claude-code-with-0123456789abcdef",
         ] {
             let text = format!(
                 "version = {RECORD_VERSION}\n\
@@ -3409,7 +3603,7 @@ env = {}
             let _lock = crate::run::lock::Lock::try_acquire(&root.lock())
                 .expect("lock opens")
                 .expect("box is free");
-            root.settle_identity().expect("identity settles");
+            root.settle_identity(None).expect("identity settles");
             RunContract::read(&config_path, &workspace)
                 .expect("run contract loads")
                 .into_request(&root)
@@ -3493,7 +3687,7 @@ env = {}
             let _lock = crate::run::lock::Lock::try_acquire(&root.lock())
                 .expect("lock opens")
                 .expect("box is free");
-            root.settle_identity().expect("identity settles");
+            root.settle_identity(None).expect("identity settles");
             RunContract::read(&config_path, &workspace)
                 .expect("run contract loads")
                 .into_request(&root)
@@ -3554,7 +3748,7 @@ env = {}
             let _lock = crate::run::lock::Lock::try_acquire(&root.lock())
                 .expect("lock opens")
                 .expect("box is free");
-            root.settle_identity().expect("identity settles");
+            root.settle_identity(None).expect("identity settles");
             let load = || {
                 RunContract::read(&config_path, &workspace)
                     .expect("run contract loads")
@@ -3636,7 +3830,7 @@ env = {}
             let _lock = crate::run::lock::Lock::try_acquire(&root.lock())
                 .expect("lock opens")
                 .expect("box is free");
-            root.settle_identity().expect("identity settles");
+            root.settle_identity(None).expect("identity settles");
             RunContract::read(&config_path, &workspace)
                 .expect("run contract loads")
                 .into_request(&root)
@@ -4045,6 +4239,181 @@ command = ["mcp-server-fetch"]
             routes.iter().any(|route| route.host() == host),
             "egress_routes() must include the remote MCP host: {:?}",
             routes.iter().map(EgressRoute::host).collect::<Vec<_>>()
+        );
+    }
+
+    /// A remote MCP server with a backend re-routes exactly as an egress entry does: the backend
+    /// threads into `remote_mcp`, the gateway still classifies the server on the ORIGINAL host, and
+    /// the dial targets the backend. One declaration proves the whole wiring.
+    #[test]
+    fn a_remote_mcp_backend_reroutes_through_the_egress_path() {
+        let record = record_from_config(
+            "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n\
+             [[mcp.github.backends]]\n\
+             url = \"https://abc.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp\"\n\
+             auth.ref = \"aws://bedrock\"\n\
+             auth.aws.service = \"bedrock-agentcore\"\nauth.aws.region = \"us-east-1\"\n",
+        )
+        .expect("a remote MCP server with an aws:// backend is a valid box");
+
+        // The backend threads into the stored remote_mcp entry, not an empty list.
+        let entry = record
+            .remote_mcp
+            .get("github")
+            .expect("the remote MCP server is stored");
+        assert_eq!(entry.backends.len(), 1, "the declared backend is carried");
+
+        // The gateway classifies EXACTLY the ORIGINAL host and nothing else: the re-route changes
+        // which bytes leave the box, not which `mcp:call`/`http:request` policy judges. Whole-value
+        // equality so a regression that also classified the backend host would fail here. See
+        // docs/design/decisions.md#a-re-route-is-authorized-on-the-original-destination.
+        assert_eq!(
+            record.mcp_servers(),
+            vec![("api.githubcopilot.com".to_string(), "github".to_string())],
+            "mcp_servers() names only the original host, never the backend"
+        );
+
+        // The dial targets the backend, keyed by the original destination. Whole-value equality so a
+        // wrong port or scheme is caught, not just the host.
+        assert_eq!(
+            record.backend_dials().expect("dials build"),
+            vec![(
+                DestinationPattern::parse("api.githubcopilot.com").expect("pattern"),
+                egress::BackendTarget {
+                    scheme: egress::BackendScheme::Https,
+                    host: "abc.gateway.bedrock-agentcore.us-east-1.amazonaws.com".to_string(),
+                    port: 443,
+                    path_prefix: "/mcp".to_string(),
+                },
+            )],
+            "one dial, keyed by the original destination, to the exact backend target"
+        );
+
+        // The backend's aws:// auth opens one box-owned credential vault, keyed by the original
+        // destination so the gateway finds it after the Host rewrite.
+        let credentials = record.backend_credentials().expect("credentials build");
+        assert_eq!(credentials.len(), 1, "one vault for the one re-route");
+        assert_eq!(
+            credentials[0].0,
+            DestinationPattern::parse("api.githubcopilot.com").expect("pattern")
+        );
+    }
+
+    /// A remote MCP server with no `backends` key keeps the direct behaviour: an empty backend list,
+    /// no dial, and no backend credential vault.
+    #[test]
+    fn a_remote_mcp_server_with_no_backend_does_not_reroute() {
+        let record = record_from_config(
+            "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n",
+        )
+        .expect("a remote MCP server with no backend is a valid box");
+        assert!(
+            record.remote_mcp["github"].backends.is_empty(),
+            "an absent backends key is an empty list"
+        );
+        assert!(
+            record.backend_dials().expect("dials build").is_empty(),
+            "no backend, no dial"
+        );
+        assert!(
+            record
+                .backend_credentials()
+                .expect("credentials build")
+                .is_empty(),
+            "no backend, no vault"
+        );
+        assert_eq!(
+            record.version, RECORD_VERSION,
+            "no re-route keeps the ordinary record version"
+        );
+    }
+
+    /// A remote MCP backend stores the existing `BACKEND_RECORD_VERSION`; no new version is minted.
+    #[test]
+    fn a_remote_mcp_backend_stores_the_backend_record_version() {
+        let record = record_from_config(
+            "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n\
+             [[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp\"\n",
+        )
+        .expect("a secretless remote MCP backend is complete");
+        assert_eq!(record.version, BACKEND_RECORD_VERSION);
+    }
+
+    /// The egress backend validation reaches a remote MCP entry through the fan-out, so every backend
+    /// refusal applies to `[mcp.<name>]` as it does to `[egress.<name>]`. One representative of each
+    /// class, routed through the MCP path, proves the wiring (the classes themselves are pinned in
+    /// `egress.rs`).
+    #[test]
+    fn a_remote_mcp_backend_inherits_every_egress_refusal() {
+        let backend = |body: &str| {
+            format!(
+                "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n{body}"
+            )
+        };
+        for (body, needle, why) in [
+            (
+                "[[mcp.github.backends]]\nurl = \"https://a.example.com/mcp\"\n\
+                 [[mcp.github.backends]]\nurl = \"https://b.example.com/mcp\"\n",
+                "at most one backend",
+                "more than one backend",
+            ),
+            (
+                "[[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp?x=1\"\n",
+                "query or fragment",
+                "a url with a query",
+            ),
+            (
+                "secret.ref = \"aws://profile\"\n\
+                 [[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp\"\n",
+                "must be env://",
+                "a signed entry secret beside a backend",
+            ),
+            (
+                "[[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp\"\n\
+                 auth.ref = \"credsd://prod\"\n",
+                "may not be credsd://",
+                "a credsd backend auth",
+            ),
+            (
+                "[[mcp.github.backends]]\nurl = \"http://gw.example.com/mcp\"\n\
+                 auth.ref = \"env://TOKEN\"\n",
+                "needs an https backend",
+                "a backend auth on a plaintext backend",
+            ),
+            (
+                "[[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp\"\n\
+                 auth.ref = \"aws://bedrock\"\n",
+                "aws.service",
+                "an aws:// backend auth with no explicit aws.service/region",
+            ),
+        ] {
+            let error = record_from_config(&backend(body))
+                .err()
+                .unwrap_or_else(|| panic!("{why} must be refused through the MCP path"));
+            assert!(
+                error.to_string().contains(needle),
+                "{why}: the refusal must name {needle:?}: {error}"
+            );
+        }
+    }
+
+    /// The backend-host-cover rule spans the `[egress.*]` + `[mcp.*]` union: an `[egress.<x>]`
+    /// wildcard that covers an `[mcp.<y>]` backend's re-route host is refused, exactly as an
+    /// egress-vs-egress cover is. The covering wildcard is on a NON-DEFAULT port, so the
+    /// port-sensitive overlap check lets it through and the port-blind cross-collection cover loop —
+    /// the one the re-route's host-alone match depends on — is what must catch it.
+    #[test]
+    fn an_egress_wildcard_covering_an_mcp_backend_host_is_refused() {
+        let error = record_from_config(
+            "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n\
+             [[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp\"\n\
+             [egress.wild]\ndestinations = [\"*.githubcopilot.com:8443\"]\n\
+             secret.ref = \"aws://prod\"\n",
+        )
+        .expect_err("an egress wildcard covering an MCP backend's re-route host is refused");
+        assert!(
+            error.to_string().contains("re-routes to a backend"),
+            "the refusal must name the re-route host-cover rule: {error}"
         );
     }
 }

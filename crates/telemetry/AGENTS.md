@@ -27,7 +27,7 @@ Decisions live in the
 | the HTTP server for the agent's port | `axum`, behind a one-permit decode bound |
 | the OTLP mapping | `opentelemetry-proto`'s `group_logs_by_resource_and_scope` |
 | encoding a payload | this crate, one mapping for both file and endpoint |
-| the HTTP client | `reqwest`, at the same version the vendored shell declares |
+| the HTTP client | `reqwest`, at the same version Strands Shell declares |
 | the receiver | this crate; the OpenTelemetry SDK emits and does not receive |
 | the file format | this crate; `opentelemetry-stdout` writes a debug format, not the Collector's |
 
@@ -36,7 +36,7 @@ that filters by signal and wraps `BatchLogProcessor`, which carries the queue, t
 bounded flush. Do not rebuild any of those here.
 
 **`opentelemetry-otlp` is NOT adopted, and that is the one line to keep.** It requires
-`reqwest 0.13.1` and the vendored `shell` declares `0.12`, so taking it puts two TLS stacks in the
+`reqwest 0.13.1` and Strands Shell declares `0.12`, so taking it puts two TLS stacks in the
 process that holds the CA private key. The SDK itself needs no new package: `opentelemetry`,
 `opentelemetry_sdk` and `tokio-stream` were already in `Cargo.lock`.
 
@@ -86,10 +86,12 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   **The deletion costs no audit data.** Measured on a real box: for
   `zsh -c 'cat $PWD/allowed.txt'`, `process.command_args` now holds `<redacted>` while the same
   command's own `fs:read` decision still carries the full path under `file.path`. The path was
-  recorded twice and is now recorded once, by the decision that authorized it. A LITERAL path is
-  unaffected and still reported whole, which is why
-  `box_telemetry.rs::a_shell_decision_states_its_arguments_and_its_directory` passes unchanged — the
-  outer bash expands `$BOX_HOME` there, so the Shell receives a literal word.
+  recorded twice and is now recorded once, by the decision that authorized it.
+- **The hosted Shell now marks no argument as literal**, because upstream Shell does not say which
+  words the script stated. So every Shell argument meets `reportable`, and a literal path is
+  `<redacted>` too; its `fs:read` decision still names it.
+  `box_telemetry.rs::a_shell_decision_states_its_arguments_and_its_directory` pins the redaction.
+  The mask and its pins stay, for a caller that can supply one.
 
   **`plain_flag` takes one letter after a single `-`, and a `--` name is lowercase and bounded.** The
   first version required only an alphanumeric first character and put no cap on the tail, so four

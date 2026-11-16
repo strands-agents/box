@@ -45,10 +45,10 @@ path, or resolved command. See [the policy attribute names are this product's
 own](decisions.md#the-policy-attribute-names-are-this-products-own). Box omits the full URL and full
 command line because both can contain credentials.
 
-A shell record includes literal arguments and redacts expanded arguments unless they are plain
-flags. The shell receives arguments after expansion, so recording `echo $(cat secret.txt)` without
-this check would expose the file's contents. See [a shell record names only a literal
-argument](decisions.md#a-shell-record-names-only-a-literal-argument).
+A shell record redacts every argument that is not a plain flag. The shell receives arguments after
+expansion, so recording `echo $(cat secret.txt)` without this check would expose the file's
+contents. See [a shell record names an argument only when it is a plain
+flag](decisions.md#a-shell-record-names-only-a-literal-argument).
 
 A decision also carries the caller's trace context, which connects it to the agent's work. The
 workload supplies that context. Box bounds and validates it but never treats it as evidence of

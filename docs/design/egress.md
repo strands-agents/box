@@ -7,11 +7,11 @@ this route unless the operator enables the network exception described below.
 
 | The gateway | What it does |
 |---|---|
-| Requests policy decisions | `net:connect` for each destination before DNS and again for each address it connects to; `http:request` for each request; `mcp:call` for each request to an HTTP MCP server. |
+| Requests policy decisions | `net:connect` for each destination before DNS and again for each address it connects to; `http:request` for each request; `mcp:call` for MCP requests whose host matches a configured HTTP MCP server, except the protocol methods that pass without an MCP decision. |
 | Adds | The secret an `[egress.<name>]` route binds to the destination. |
 | Removes | A copy of that secret from the response, before the process sees it. |
 
-[How Box runs MCP servers](./mcp.md) covers `mcp:call`.
+See [remote destination matching](../user/mcp.md#remote-destination-matching) for the host-based scope of MCP checks.
 
 ## How traffic reaches the gateway
 
@@ -37,7 +37,8 @@ The kernel restricts a contained process to two local ports, the gateway and the
 collector, so a client that ignores the proxy variables can't reach the network at all. See [macOS
 network restrictions](./macos-enforcement.md#network-connections-and-local-services). A stdio MCP
 server or declared tool with `contain_egress = false` connects directly. Its traffic bypasses the
-gateway. See [local MCP servers](./containment.md#local-mcp-servers).
+gateway, and it gets none of the proxy variables or CA names above; its own table may set them.
+See [local MCP servers](./containment.md#local-mcp-servers) and [a native-egress process keeps its own proxy and trust settings](./decisions.md#a-native-egress-process-keeps-its-own-proxy-and-trust-settings).
 
 Strands Shell's `curl` and Monty's `fetch()` run in the box's trusted process, and both send their
 requests through the same gateway, trusting only its certificate authority. Before they do, each
@@ -254,7 +255,7 @@ forward each request. The route specifies which credential to add and grants no 
 | Source | `secret.ref` | What the gateway does |
 |---|---|---|
 | An environment variable | `env://NAME` | Reads `NAME` from the environment of `box run` once, at startup, and swaps it in for a placeholder |
-| An AWS profile | `aws://PROFILE` | Signs each request with SigV4, from the profile's static keys |
+| An AWS profile | `aws://PROFILE` | Signs each request with SigV4, resolving the named profile through the AWS SDK |
 | The AWS default chain | `aws://` (no profile) | Signs each request with SigV4, from the AWS SDK default credential provider chain (the host's ambient identity), and warns on every signed request |
 
 ### The placeholder swap
@@ -307,10 +308,11 @@ region from the host, for example `bedrock` and `us-west-2` from
 gets placeholder `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` values, so an AWS SDK builds its
 request, and the gateway replaces the signature.
 
-`aws://PROFILE` resolves the named profile's static keys; a bare `aws://` resolves the AWS SDK
-default credential provider chain, the host's ambient identity, which the box warns about on every
-request. The decision
-[An AWS binding resolves a named profile's static keys, and a bare aws:// resolves the full chain](decisions.md#a-bare-aws-resolves-the-default-credential-chain)
+Both forms resolve through the AWS SDK: `aws://PROFILE` resolves only the named profile (never the
+ambient env keys or instance metadata, and a missing profile is refused), and a bare `aws://`
+resolves the default chain, the host's ambient identity, which the box warns about on every request.
+The decision
+[Both aws:// forms resolve through the AWS SDK and share one risk](decisions.md#a-bare-aws-resolves-the-default-credential-chain)
 states both forms and the writable-`~/.aws` cost.
 
 ## Example: a GitHub API request

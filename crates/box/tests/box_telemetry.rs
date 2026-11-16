@@ -139,9 +139,10 @@ fn a_shell_decision_states_its_arguments_and_its_directory() {
     });
     assert_eq!(args.first().map(String::as_str), Some("cat"), "{args:?}");
     assert_eq!(args.len(), 2, "the program and one path: {args:?}");
-    assert!(
-        args[1].ends_with("allowed.txt"),
-        "the expanded path, not the spelling: {args:?}"
+    assert_eq!(
+        args[1], "<redacted>",
+        "the Shell does not say which words the script stated, so every argument is redacted: \
+         {args:?}"
     );
     assert!(cwd.is_some(), "the directory the line ran in: {spans:?}");
 }

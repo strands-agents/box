@@ -6,7 +6,8 @@ Read the **"`strands-box` is interface-frozen"** section of the
 [repository guidance](../../AGENTS.md) before changing anything here. A change to an
 observable surface — the CLI verbs and flags, `box.toml`'s keys, the four box inputs, the
 on-disk records (`Record` at `RECORD_VERSION` and each later record version through
-`SHELL_SIZE_LIMITS_RECORD_VERSION`, `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
+`SUPPLIED_IDENTITY_RECORD_VERSION`, with the `box_id` grammar `valid_box_identity` accepts,
+`BoxLive` at `LIVE_VERSION`), the broker wire protocol at
 `PROTOCOL_VERSION`, the alias names and their socket derivation, the
 policy action vocabulary, the composed workload environment — or to a foundational premise,
 needs the user's explicit approval **before** the code is written. Fixing a defect behind the
@@ -183,7 +184,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   the box hands that process, and the box inherits nothing from the host. It grants no reach and
   cannot claim a name the box owns: `ProcessSpec` refuses every name in `box_owned_environment`, so
   proxy routing, CA trust, `PWD`, `USER`, and the OTLP exporter are out of its reach, and `compose`
-  applies the table *before* every box-owned name as a second line. It also refuses every
+  applies the table *before* every box-owned name as a second line. A `contain_egress = false`
+  table is the one exception: Core composes no `gateway_routing_environment` name for it, so its
+  `env` may state them (`refused_native_egress_name`). It also refuses every
   `dynamic_loader_environment` name (`LD_*`, `DYLD_*`), because Box's own aliases run in the box. A
   runtime's own option variable, such as `NODE_OPTIONS` or `PYTHONPATH`, is the operator's literal:
   it reaches only the process whose table names it, which
@@ -322,7 +325,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   meanings. What carries the boundary instead is the pair of floors below. Do not describe the
   mount set as a floor, and do not widen a mount to make something work. `verify_direct_binds`
   refuses startup unless every bind is exactly the declared one **and** `direct`, because `Copy`
-  is the vendored crate's default and the wrong spelling fails invisibly — reads keep working and
+  is the Shell's default and the wrong spelling fails invisibly — reads keep working and
   are only stale. It compares entry by entry rather than counting, because a count passed while a
   bind named the wrong directory.
 - **`HOME` is the operator's home, unless `[agent] env.HOME` names another directory.** There is no
@@ -615,7 +618,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   disconnect a history-clearing primitive the workload holds.
 - **The Shell concurrency limit is closed, and `Shell: Send` was not what closed it
   ([no state crosses a call](../../docs/design/decisions.md#no-state-crosses-a-call-boundary)).**
-  Every `Shell` is `!Send` — one `Rc` field in the vendored crate. What closed the limit is that
+  Every `Shell` is `!Send` — one `Rc` field in Strands Shell. What closed the limit is that
   **`ShellSpec` is `Send`**: `serve` moves the spec to `run_connection_on_own_thread`, which gives
   each connection its own thread and its own current-thread runtime, and the `Shell` is built on
   arrival. A non-yielding command — the embedded Lua interpreter — therefore pins its own thread
@@ -649,9 +652,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     environment and its VFS are why the secrets stay unreachable.
     `tests/box_credentials.rs::the_shell_cannot_read_the_daemons_resolved_secrets` is that proof
     and must not be deleted.
-  - **The vendored Shell embeds a Lua 5.4 C interpreter**, non-optionally (`mlua` with
+  - **Strands Shell embeds a Lua 5.4 C interpreter**, non-optionally (`mlua` with
     `lua54, async, vendored`), reachable as a `lua` builtin. Never describe the Shell as a small
-    `unsafe`-free parser: `grep unsafe shell/src/` returns zero and is misleading, because the
+    `unsafe`-free parser: a grep for `unsafe` in its `src/` returns zero and is misleading, because the
     interpreter is in the dependency graph.
   - **A `forbid` on command text is not a containment boundary.** Admission judges the **resolved**
     command in `run_pipeline`, after parsing, expansion, and resolution of the first word. So
@@ -741,21 +744,18 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   the Program's stdin channel stays open and any command that pre-reads stdin blocks to its
   deadline — the `lua` builtin does exactly that, so **every** `lua` call took 34–36s and came back
   as `the call exceeded its deadline`. Two things worth not repeating:
-  - **`close_stdin` must drop the sender, not send an empty frame.** The vendored `ChannelReader`
+  - **`close_stdin` must drop the sender, not send an empty frame.** The Shell's `ChannelReader`
     reaches end-of-stream only on `Poll::Ready(None)` — every sender gone. A zero-length recv is a
     successful 0-byte read, so `read_to_string_limited` loops on it forever. `ProgramControl` holds
     `Arc<Mutex<Option<Sender>>>` so one `StdinEof` closes the channel for every clone.
   - **When a bisect says "not mine", check which variable actually moved.** The control that called
-    this pre-existing varied the *vendored crate* while holding the box constant.
+    this pre-existing varied the *Shell crate* while holding the box constant.
 - **A Call's output streams.** `Program::adopt` installs a `ChannelWriter` on `STDOUT` and
   `STDERR`, and `run_call` drains them *inside* its `select!` loop so a chunk leaves while the Call
   is still running. Four things worth not rediscovering:
-  - **The cause was in the vendored crate**, not a missing setter: `set_channel_writer` is public
-    and `out_msg` checks it first, but the vendored single-builtin fork installed its own pipes over
-    both descriptors and discarded the caller's. Fixed in `shell/` — see its `UPSTREAM.md` — with
-    `shell/tests/channel_writer_inheritance.rs` as the proof, plus
-    `capture_is_unchanged_when_no_writer_is_installed`, which passed before and after and is what
-    makes the change additive.
+  - **The Shell captures some output instead of writing it to an installed writer.** Its own
+    diagnostics go to the captured `Output`, not to the `ChannelWriter`. `Program::call` forwards
+    the captured `stdout` and `stderr` to the Call's streams after the run, so no byte is lost.
   - **Draining after the Call returns is the defect, not a simplification.** A program that never
     exits would have its first byte delivered never. The post-loop drain exists only for what was
     written between the last poll and the Call ending, and it runs on the interrupted and expired
@@ -840,6 +840,14 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   every request is still judged by the gateway's policy interceptor. **Adding a destination check
   here would be a second authority beside the policy.** On macOS none of this runs, because
   Seatbelt's `network-outbound` rule pins the workload to the proxy port directly.
+- **The relay turns Nagle's algorithm off on both sockets of a splice (`pair_with_sink`).** The
+  relay writes what it reads, so a small write from the workload or from its sink stays a small
+  write. Nagle's algorithm holds a small write until the peer acknowledges the write before it. The
+  relay serves two sinks, the gateway port and the port of the telemetry collector, and the sockets
+  of both get the option. The gateway sets `TCP_NODELAY` on its own sockets for the same reason, and
+  [its guidance](../egress-gateway/AGENTS.md) records the measurement on Linux loopback. The
+  relay's sockets are not measured, for either sink. Each call is best-effort: after a failure, the
+  next read or write reports the dead socket.
 - **`run/broker/python/effects.rs` is the script's filesystem boundary, and its path-approval
   primitive is `Reach::approve` in `run/broker/reach.rs`. Treat any change to either as a change to
   the security boundary** — together they are the only thing between attacker-supplied Python and the
@@ -862,7 +870,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   on another. `python/effects.rs` keeps that value and acts on it; the Shell side still throws it
   away — the first open finding below.
 - **The script interpreter is a *weaker* memory-safety case than the Shell.** Monty carries **46
-  `unsafe` blocks including a hand-rolled raw-pointer heap**, against the vendored Shell's zero, and
+  `unsafe` blocks including a hand-rolled raw-pointer heap**, against the Shell's zero, and
   it runs beside the in-memory CA key and the resolved secrets. So the argument for hosting it there
   is not memory safety: it is the floors above, plus that Monty performs no I/O of its own — every
   effect, filesystem **and** network, arrives as a suspension the host answers. Egress
@@ -1047,7 +1055,7 @@ Do not treat any of these as settled by the code existing.
   stdio server's leaf: `a_grantless_stdio_entry_is_still_contained` pins that translation, not the
   kernel.
 - **The Shell floor does not keep the path it approved.** `ReachFloor::approve_one` ends
-  `.map(|_approved| ())`. The vendored kernel judges a path on its host identity, refuses an effect
+  `.map(|_approved| ())`. Box's kernel judges a path on its host identity, refuses an effect
   whose identity moved after that, and reaches the parent from the bind root with no symlink at any
   component. So open, create, `mkdir`, `rm`, `rmdir`, rename, symlink, and `chmod` stay on what the
   floor approved, which `a_pin_whose_host_identity_is_not_the_spelling_is_unavailable` and

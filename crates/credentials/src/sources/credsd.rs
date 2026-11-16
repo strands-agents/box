@@ -48,15 +48,60 @@ pub(crate) const CREDSD_SCHEME: &str = "credsd";
 /// The material tag an AWS credential carries.
 pub(crate) const SESSION_CREDENTIALS_TYPE: &str = "session_credentials";
 
-/// The default socket path when neither the caller nor `CREDSD_SOCKET` names one.
+/// The per-user tail beneath `HOME` for the macOS user-scoped install's socket (signed `.pkg` or
+/// `credsd install --user`).
 #[cfg(target_os = "macos")]
-const DEFAULT_SOCKET: &str = "/var/run/credsd/credsd.sock";
+const MACOS_USER_SOCKET_TAIL: &str = "Library/Application Support/credsd/credsd.sock";
+/// The macOS system install's socket (`sudo credsd install`, a LaunchDaemon), shared across users.
+#[cfg(target_os = "macos")]
+const MACOS_SYSTEM_SOCKET: &str = "/var/run/credsd/credsd.sock";
 /// The default socket path when neither the caller nor `CREDSD_SOCKET` names one.
 #[cfg(not(target_os = "macos"))]
 const DEFAULT_SOCKET: &str = "/run/credsd/credsd.sock";
 
 /// The environment variable naming the socket, read once at open.
 const SOCKET_VARIABLE: &str = "CREDSD_SOCKET";
+
+/// The macOS platform default, mirroring the daemon's own client dial order: the per-user socket
+/// when a socket exists beneath `HOME`, else the shared system socket. Probes the user socket, then
+/// defers the choice to the pure [`default_socket_from_home`].
+#[cfg(target_os = "macos")]
+fn default_socket() -> Result<PathBuf> {
+    let home = std::env::var_os("HOME");
+    let home = home.as_deref().filter(|value| !value.is_empty());
+    let user_present = home
+        .map(|home| PathBuf::from(home).join(MACOS_USER_SOCKET_TAIL))
+        .as_deref()
+        .map(path_is_socket)
+        .unwrap_or(false);
+    Ok(default_socket_from_home(home, user_present))
+}
+
+/// The macOS default socket for a given `home` and user-socket presence: the per-user socket beneath
+/// `home` when `user_present`, else the shared system socket. An absent or empty `home` falls back
+/// to the system socket, which does not depend on `HOME`. Pure, so every row pins without host state.
+#[cfg(target_os = "macos")]
+fn default_socket_from_home(home: Option<&std::ffi::OsStr>, user_present: bool) -> PathBuf {
+    match home.filter(|value| !value.is_empty()) {
+        Some(home) if user_present => PathBuf::from(home).join(MACOS_USER_SOCKET_TAIL),
+        _ => PathBuf::from(MACOS_SYSTEM_SOCKET),
+    }
+}
+
+/// Whether `path` names an existing Unix domain socket, following symlinks.
+#[cfg(target_os = "macos")]
+fn path_is_socket(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    std::fs::metadata(path)
+        .map(|meta| meta.file_type().is_socket())
+        .unwrap_or(false)
+}
+
+/// The platform default socket path when neither the caller nor `CREDSD_SOCKET` names one.
+#[cfg(not(target_os = "macos"))]
+fn default_socket() -> Result<PathBuf> {
+    Ok(PathBuf::from(DEFAULT_SOCKET))
+}
 
 /// Resolve the effective credsd socket path — the caller's path, else `CREDSD_SOCKET`, else the
 /// platform default — refusing a relative result with a configuration error.
@@ -65,7 +110,7 @@ pub(crate) fn resolve_credsd_socket(configured: Option<&Path>) -> Result<PathBuf
         Some(path) => path.to_path_buf(),
         None => match std::env::var_os(SOCKET_VARIABLE).filter(|value| !value.is_empty()) {
             Some(value) => PathBuf::from(value),
-            None => PathBuf::from(DEFAULT_SOCKET),
+            None => default_socket()?,
         },
     };
     if path.is_relative() {
@@ -610,11 +655,65 @@ mod tests {
         );
     }
 
-    /// With no configured path and `CREDSD_SOCKET` unset, the platform default (absolute) is used.
+    /// With no configured path and `CREDSD_SOCKET` unset, the non-macOS default is absolute.
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn the_default_socket_is_absolute() {
-        let path = PathBuf::from(DEFAULT_SOCKET);
+        let path = default_socket().expect("the platform default");
         assert!(path.is_absolute(), "the platform default must be absolute");
+    }
+
+    /// On macOS a present per-user socket wins, resolving beneath `HOME`.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_default_prefers_a_present_user_socket() {
+        let path = default_socket_from_home(Some(std::ffi::OsStr::new("/Users/example")), true);
+        assert_eq!(
+            path,
+            PathBuf::from("/Users/example/Library/Application Support/credsd/credsd.sock"),
+        );
+        assert!(path.is_absolute(), "the user socket is an absolute path");
+    }
+
+    /// On macOS an absent per-user socket falls back to the shared system socket.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_default_falls_back_to_the_system_socket() {
+        let path = default_socket_from_home(Some(std::ffi::OsStr::new("/Users/example")), false);
+        assert_eq!(path, PathBuf::from("/var/run/credsd/credsd.sock"));
+    }
+
+    /// On macOS an absent or empty `HOME` falls back to the system socket, which needs no `HOME`,
+    /// even when a user socket is claimed present.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_macos_default_without_home_uses_the_system_socket() {
+        for home in [None, Some(std::ffi::OsStr::new(""))] {
+            let path = default_socket_from_home(home, true);
+            assert_eq!(path, PathBuf::from("/var/run/credsd/credsd.sock"));
+        }
+    }
+
+    /// On macOS the probe recognises a bound socket, and rejects a regular file and a missing path,
+    /// so a stray file at the user path cannot be mistaken for a live user install.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn path_is_socket_recognises_only_a_bound_socket() {
+        let socket = socket_path();
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).expect("bind a socket");
+        assert!(path_is_socket(&socket), "a bound socket is a socket");
+
+        let regular = socket_path().with_extension("file");
+        std::fs::write(&regular, b"not a socket").expect("write a regular file");
+        assert!(!path_is_socket(&regular), "a regular file is not a socket");
+
+        let missing = socket_path().with_extension("missing");
+        assert!(!path_is_socket(&missing), "a missing path is not a socket");
+
+        drop(listener);
+        let _ = std::fs::remove_file(&socket);
+        let _ = std::fs::remove_file(&regular);
     }
 
     // --- the socket round trip -----------------------------------------------

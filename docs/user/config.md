@@ -275,6 +275,7 @@ Both tables hold one process, in one shape:
 | `env` | table | The literal environment. `HOME` and `PATH` default to the operator's own; every other variable is present only when `env` names it. |
 | `[<table>.filesystem]` | table | The path lists the process's own system calls reach. Eight for `[agent]`; six for a `[tool.<name>]`, which has no `metadata` or `exec` list. |
 | `native-filesystem-policy` | boolean | Optional override of the global experimental setting for this process and its descendants. See [workload selection](native-filesystem-policy.md#select-workloads). |
+| `file-watching` | boolean | `false` by default. On macOS, permit FSEvents for this process and its descendants, with the [metadata limitation](#file-watching). Linux ignores this setting. |
 | `[tool.<name>.grammar]` | table | Experimental, and `[tool.<name>]` only. The tool grammar for the program this tool runs. See [`[tool.<name>.grammar]`](#toolnamegrammar). |
 | `[[agent.ingress]]` | list of tables | `[agent]` only. Where callers reach the agent's servers, one entry per port. See [`[[agent.ingress]]`](#agentingress). |
 
@@ -310,7 +311,10 @@ Changing `env.PATH` in `box.toml` does not change this protection.
 - **Names Box sets itself, which a table cannot claim:** `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`,
   `https_proxy`, `NO_PROXY`, `no_proxy`, `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`,
   `NODE_USE_ENV_PROXY`, `CODEX_CA_CERTIFICATE`, `AWS_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`,
-  `GIT_SSL_CAINFO`, `PWD`, `USER`, and every name that starts with `OTEL_EXPORTER_OTLP_`.
+  `GIT_SSL_CAINFO`, `PWD`, `USER`, and every name that starts with `OTEL_EXPORTER_OTLP_`. A
+  `[tool.<name>]` or stdio `[mcp.<name>]` table with `contain_egress = false` may set the first
+  thirteen, because Box sets none of them there; see
+  [a native-egress process keeps its own proxy and trust settings](../design/decisions.md#a-native-egress-process-keeps-its-own-proxy-and-trust-settings).
 - **Names the dynamic loader reads, refused:** every name that starts with `LD_` or `DYLD_`. Box's
   own aliases run in the box, so their loader would read the value too. A runtime's own option
   variables, such as `NODE_OPTIONS`, `BASH_ENV`, `RUBYOPT`, `JAVA_TOOL_OPTIONS`, and `PYTHONPATH`,
@@ -344,6 +348,51 @@ egress route and starts no tool or MCP server of its own. All of them share one 
 the box is the credential boundary: a process that must not hold a credential goes in another box.
 Each tool and each `stdio` MCP server runs in its own separate sandbox (see
 [the sandboxes for tools and local MCP servers](../design/containment.md#the-agents-box-and-leaf-boxes)).
+
+### File watching
+
+`file-watching = true` permits macOS FSEvents for the selected process and its descendants.
+Set it on an existing `[agent]`, `[tool.<name>]`, or local stdio `[mcp.<name>]` table.
+Each table selects the setting independently; an agent's selection does not enable its tools or MCP servers.
+Omission and `false` keep FSEvents unavailable. The setting has no effect on Linux, which accepts the key.
+
+For a Node development server, add the setting to that tool's table:
+
+```toml
+[tool.dev]
+command = ["node", "/work/project/server.js"]
+workspace = "/work/project"
+file-watching = true
+
+[tool.dev.filesystem]
+read = ["/work/project"]
+write = ["/work/project"]
+deny = ["/work/project/private"]
+```
+
+The process still needs the filesystem grants required by its runtime and application.
+**FSEvents can disclose names and event metadata for denied paths.**
+This includes removed or renamed paths and some historical events.
+A subscription to an accessible ancestor can disclose paths outside the workspace.
+Filesystem `deny` entries do not fully filter this event stream.
+Direct file-content access and write restrictions still apply.
+FSEvents events do not pass through `fs:*` policy decisions, including experimental native filesystem policy checks.
+
+Use this option only when that metadata disclosure is acceptable.
+Keep it disabled when denied filenames or activity must remain confidential, and use the application's polling mode if available.
+Node directory watchers can report `EMFILE` when FSEvents is unavailable; this error does not necessarily mean that file descriptors are exhausted.
+
+On macOS, the startup disclosure names each selected process before the agent starts.
+This includes stdio MCP servers that remain unstarted; Box repeats their disclosure when they start.
+
+```text
+strands-box: [tool.dev] file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events; file-content and write restrictions still apply
+```
+
+A record with any selected process requires version 35.
+For rollback, remove the key from every process table, then follow the
+[rollback steps](native-filesystem-policy.md#stored-configuration-and-rollback).
+Older builds do not recognize the key, even when its value is `false`.
 
 ### Script commands on Linux
 
@@ -485,6 +534,9 @@ mounted aliases, and enclosing directories.
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
 
+On macOS, opting into [file watching](#file-watching) permits an event stream that can
+disclose denied names and activity despite these direct-access restrictions.
+
 On Linux, root and non-root launches support directory writes with explicit read and write grants.
 Permitted file creation retains the launcher's underlying file identity.
 Existing-file write grants permit writes to their named files.
@@ -551,6 +603,22 @@ and the refusal names what the link points at. Whether a path such as `/bin/sh` 
 on the surrounding OS, so the same `exec = ["/bin/sh"]` entry loads under one and is refused under
 another. Write the target the refusal names.
 
+A `read` or `read_file` entry is the one exception: it may name a symbolic link to a file, such as
+`/usr/bin/cc`. A program often runs a helper by that name, so the name has to be there too.
+
+- The grant is the file the link resolves to, checked like any other entry.
+- The box shows that file at the link's name as well, read-only.
+- The link must sit in its own real folder. A link reached through a linked folder is refused.
+- Two links to one file, such as `/usr/bin/cc` and `/usr/bin/gcc` on Ubuntu, are two entries. A
+  link beside a `read` folder that holds its file is kept too, because the link's name is outside
+  that folder. A link listed next to its own file is refused as granted twice.
+- A link inside a credential store, such as `~/.ssh/config`, is refused. Name the file itself.
+- The links in between, such as `/etc/alternatives/cc`, and the folders that hold them are not
+  granted.
+- A link to a directory, and a link in `write`, `write_file`, `exec`, `list` or `metadata`, is still
+  refused.
+- The disclosure shows the entry as `read_file   /usr/bin/cc -> /usr/bin/gcc`.
+
 **No policy decision covers a filesystem list**, so `run` discloses each entry on stderr before the
 workload starts, under `strands-box: [agent] runs <program> with no policy decision over these
 paths:`. Getting started shows the example's disclosure. A credential store, such as `~/.aws` or
@@ -588,7 +656,7 @@ happen after the box directory is created and before the workload starts.
 | A `..` component | ``` `filesystem.read` path "<entry>" carries `..`; name the path it means``` |
 | The same path twice in one list | ``` `filesystem.read` path <path> is duplicated``` |
 | A path that does not exist | `<path> is not there: No such file or directory (os error 2). A grant on a path that does not exist grants nothing and says so nowhere` |
-| A symbolic link | `<path> is a symbolic link to <target>. A grant carries the identity the kernel checks, so a link renders a rule that matches nothing; name <target> instead` |
+| A symbolic link, except a link to a file in `read` or `read_file` | `<path> is a symbolic link to <target>. A grant carries the identity the kernel checks, so a link renders a rule that matches nothing; name <target> instead` |
 | A spelling the kernel resolves elsewhere | `<path> is not the path the kernel checks, which is <path>. A grant carries the identity it acts on, so name that path instead` |
 | A directory in `read_file` or `write_file` | ``<path> is a directory; `read_file` names one file, and a tree belongs in `read` `` |
 | A file in `list` | ``<path> is a file, and `list` enumerates a directory tree`` |
@@ -816,7 +884,7 @@ requests out. The current reference for this table is
 |---|---|---|
 | `destinations` | string array | A host, `host:port`, a path prefix or `/*` suffix, or a `*.` wildcard. A pattern that matches every host is refused, and two entries may not overlap. |
 | `protocol` | string | `http`, the default and the only accepted value. |
-| `secret.ref` | string | `env://NAME` for a variable on the operator's side, `aws://PROFILE` for SigV4 signing with a named profile's static keys, or a bare `aws://` to sign with the AWS SDK default credential provider chain (the host's ambient identity). Required. A literal value, or any other scheme, is refused. |
+| `secret.ref` | string | `env://NAME` for a variable on the operator's side, `aws://PROFILE` to SigV4-sign as a named profile (resolved through the AWS SDK), or a bare `aws://` to sign with the AWS SDK default credential provider chain (the host's ambient identity). Required. A literal value, or any other scheme, is refused. |
 | `secret.placement` | string | `header` (default), `basic_auth`, or `query_param`. |
 | `secret.header` | string | The header the secret lands in. Defaults to `Authorization`. |
 | `secret.prefix` | string | Text before the secret in the header value. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |
@@ -892,8 +960,10 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | `argument_wildcards` | bool | For `stdio`: `false` by default. `true` lets this server's whole-argument `*` entries match and forward caller-supplied values. See [argument wildcards](mcp.md#argument-wildcards). |
 | `network.contain_egress` | bool | For `stdio`: `true` by default. `false` gives this one server direct network access, with no gateway, no policy decision per request, and no credential injection. |
 | `native-filesystem-policy` | boolean | For `stdio`: override the global experimental filesystem policy setting. Remote `http` entries refuse this field. See [workload selection](native-filesystem-policy.md#select-workloads). |
+| `file-watching` | boolean | For `stdio`: `false` by default. Permit macOS FSEvents with the [metadata limitation](#file-watching). Linux ignores this setting. Remote `http` entries refuse this field. |
 | `destinations` | string array | For `http`: the hosts the server answers on. |
 | `secret.ref` | string | For `http`: the credential the gateway attaches on the way out. |
+| `backends` | table array | For `http`: a backend to re-route the server's requests to, at most one. The same shape and rules as an `[egress.<name>]` backend; a `stdio` table refuses it. See [Backends](mcp.md#backends). |
 
 Without native filesystem mediation, no `fs:*` decision covers a `stdio` server's direct file operations.
 The experiment checks selected operations while retaining the server's filesystem grants.
