@@ -126,7 +126,7 @@ impl Authority {
             operator,
             sources,
             Vec::new(),
-            DogwoodEngine::open_for_staging(history)?,
+            DogwoodEngine::open_for_staging(history, operator.locations())?,
         )
     }
 
@@ -142,7 +142,7 @@ impl Authority {
             operator,
             sources,
             grammar_schemas,
-            DogwoodEngine::open_for_staging_file(history, label)?,
+            DogwoodEngine::open_for_staging_file(history, label, operator.locations())?,
         )
     }
 
@@ -164,7 +164,8 @@ impl Authority {
             retained: BTreeSet::new(),
         };
         let complete = proposal.complete_policy_set();
-        refuse_input_reads_before_discovery(&complete).map_err(Refused::into_error)?;
+        refuse_input_reads_before_discovery(&complete, operator.locations())
+            .map_err(Refused::into_error)?;
         let (readiness, pending_tools, warnings) = match validate_canonical_policy_set(
             &complete,
             &proposal.grammar_schemas,
@@ -198,11 +199,12 @@ impl Authority {
                 )?;
                 // The base is this build's Box actions and tool grammars, so an upgrade never
                 // lends this run a stale built-in declaration.
-                proposal.previous_schemas = composed_action_schema(&proposal.grammar_schemas, &[])
-                    .map(|base| engine.stored_mcp_schemas(&base.source))
-                    .unwrap_or_default()
-                    .into_iter()
-                    .collect();
+                proposal.previous_schemas =
+                    composed_action_schema(operator.locations(), &proposal.grammar_schemas, &[])
+                        .map(|base| engine.stored_mcp_schemas(&base.source))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .collect();
                 let retaining = proposal.retaining_install(&engine.stored_statements(), &[]);
                 commit_discovering(&mut engine, retaining, &subset, effective_schema)
                     .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
@@ -791,7 +793,9 @@ impl ProposalState {
         if named.is_empty() {
             return false;
         }
-        let Ok(schema) = composed_action_schema(&self.grammar_schemas, &[]) else {
+        let Ok(schema) =
+            composed_action_schema(self.operator.locations(), &self.grammar_schemas, &[])
+        else {
             return true;
         };
         named
@@ -949,7 +953,7 @@ fn pending_typed_tools(proposal: &ProposalState) -> BTreeSet<(String, String)> {
                 HistoryReferences::Skipped,
                 &mut out,
             );
-            out.extend(pinned_tool_action(candidate));
+            out.extend(pinned_tool_action(candidate, proposal.operator.locations()));
         }
     }
     out
@@ -961,13 +965,16 @@ fn pending_typed_tools(proposal: &ProposalState) -> BTreeSet<(String, String)> {
 /// reach and a pin beside it can only contradict it. `None` too unless one server and one tool
 /// survive, because any other count leaves the set of calls the rule decides wider than the pins
 /// state.
-fn pinned_tool_action(candidate: &CandidatePolicy) -> Option<(String, String)> {
+fn pinned_tool_action(
+    candidate: &CandidatePolicy,
+    locations: &crate::schema::Locations,
+) -> Option<(String, String)> {
     if !candidate.head_tools.is_empty() {
         return None;
     }
     let mut servers = BTreeSet::new();
     let mut tools = BTreeSet::new();
-    for condition in rule_conditions(&candidate.expanded_source) {
+    for condition in rule_conditions(&candidate.expanded_source, locations) {
         for atom in conjuncts(&condition) {
             if let Some(name) = pinned_literal(atom, "server") {
                 servers.insert(name.to_string());
@@ -1227,7 +1234,7 @@ pub(super) fn check_staged(
     let unlocated = |findings: Vec<Finding>| -> Vec<Finding> {
         findings.into_iter().map(Finding::without_span).collect()
     };
-    refuse_input_reads_before_discovery(&proposal.complete_policy_set())
+    refuse_input_reads_before_discovery(&proposal.complete_policy_set(), operator.locations())
         .map_err(|refused| unlocated(refused.findings))?;
     match check_canonical_policy_set(
         &proposal.complete_policy_set(),

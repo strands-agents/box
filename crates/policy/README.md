@@ -331,6 +331,32 @@ rule) loads and is statically false, because Cedar permits `==` across entity ty
 A temporal predicate names the coarse action and may bind `operation` to keep the fine
 distinction: `Box::Action::"fs:read"::response{ input.path: …, input.operation: Box::FsReadOperation::"read_content" }`.
 
+#### Named locations
+
+`Operator::with_locations` gives directories a name. Each name is a value of the generated enum
+`Box::Location`, and every filesystem input gains `locations: Set<Box::Location>`. The set holds
+each location that has the request's path as one of its directories or below one. The match uses
+whole path components, so `/work-old/notes.md` is not in `/work`. A path can be in several
+locations, and a path in none has an empty set.
+
+```text
+permit (principal, action == Box::Action::"fs:write", resource)
+when { context.input.locations.contains(Box::Location::"project") };
+```
+
+A location names directories and grants no reach. A rule that names an undeclared location is a
+load error in `open_staged`, `validate`, and `check`. A box that declares no location has neither
+the enum nor the field, so a rule that names `Box::Location` does not load there. `open` and
+`open_with_mcp_schemas` declare no location. These calls also refuse a bad declaration: a name
+that is not a letter followed by at most 63 letters, digits, `_`, or `-`, an empty directory
+list, or a directory that is relative or has a `.` or `..` component.
+
+The response of a filesystem request records the request's set. A temporal predicate cannot hold
+an array constant, and it compares a set as a whole. So
+`Box::Action::"fs:write"::response{ input.locations: context.input.locations }` matches the writes
+whose locations are the same as this request's. History keeps the names, so an event recorded
+before a location moved still counts under its name.
+
 How an effect ended is carried by the event kind: an effect that happened or may
 have happened records a `::response`, and one that definitely did not happen records
 a `::error`. A `read_metadata` that got an answer, in the Shell or in Python, has happened, even

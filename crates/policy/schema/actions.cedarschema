@@ -84,6 +84,11 @@ type FsResponseOutput = {
   result: FsResponseResult
 };
 
+// When the operator declares locations, Box generates the `Location` enum of their names here,
+// and adds `locations: Set<Location>` to each of the five filesystem inputs below: every
+// declared location whose directory is the path or holds it. A box that declares no location
+// has neither, so this file is its schema unchanged.
+
 type FsReadInput = {
   path: String, // the target, trusted-canonicalized before authorization
   operation: FsReadOperation

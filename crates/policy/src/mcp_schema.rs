@@ -1116,8 +1116,12 @@ mod tests {
         let alpha = generate_mcp_schema("alpha", TOOLS).expect("alpha generates");
         let beta =
             generate_mcp_schema("beta", &shared_type_tools("string")).expect("beta generates");
-        let composed = crate::schema::composed_action_schema(&[], &[alpha, beta])
-            .expect("the schemas compose");
+        let composed = crate::schema::composed_action_schema(
+            &crate::schema::NO_LOCATIONS,
+            &[],
+            &[alpha, beta],
+        )
+        .expect("the schemas compose");
 
         let recovered = mcp_schemas_in(&composed.source, SCHEMA_SRC);
         assert_eq!(
@@ -1131,8 +1135,9 @@ mod tests {
             .into_iter()
             .map(|(_, fragment)| fragment)
             .collect::<Vec<_>>();
-        let recomposed = crate::schema::composed_action_schema(&[], &fragments)
-            .expect("the recovered fragments compose");
+        let recomposed =
+            crate::schema::composed_action_schema(&crate::schema::NO_LOCATIONS, &[], &fragments)
+                .expect("the recovered fragments compose");
         let actions = |schema: &Schema| {
             schema
                 .actions()
@@ -1465,6 +1470,7 @@ namespace Box {
                 &request,
                 &identity,
                 &schema.cedar,
+                &schema.locations,
             )?;
             Ok::<_, crate::PolicyError>(conformed)
         };

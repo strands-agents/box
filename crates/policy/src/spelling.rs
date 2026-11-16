@@ -51,7 +51,6 @@ impl Operator {
     }
 
     /// The declared locations, by name.
-    #[expect(dead_code, reason = "the engine reads it once locations reach the schema")]
     pub(crate) fn locations(&self) -> &BTreeMap<String, Vec<PathBuf>> {
         &self.locations
     }

@@ -79,7 +79,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 ## Internal Ownership
 
 - `policy.rs` the lifecycle. `dogwood.rs` the private engine, event mapping, scope lock, and clock.
-  `schema.rs` the `.cedarschema`, the name constants, and the request gate. `request.rs`,
+  `schema.rs` the `.cedarschema`, the base schema that declared locations generate, the name
+  constants, and the request gate. `request.rs`,
   `outcome.rs`, `decision.rs`, `error.rs`, `check.rs` their public types. `path.rs` the path types.
   `adapters/` one module per enforcement point, each behind its own feature.
 - Put a new boundary in `adapters/`, not in a new root file. Keep a method with its type.
@@ -175,6 +176,16 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   base schema declares is never read as a server, which
   `mcp_schema::tests::a_previous_build_of_the_box_actions_is_not_read_as_a_server` pins.
 - `body_bytes` is the offer on a `::request` and the delivery on a `::response`.
+- `context.input.locations` is generated: `schema::base_schema` adds `Box::Location` and the field
+  only when the operator declares a location, so every composition takes the operator's
+  locations and a box with none stores `SCHEMA_SRC` unchanged. A filesystem outcome names its
+  path by the reported spelling, which can be `~/…`, so the engine keeps each allowed request's
+  set by offset and records it on the outcome. It keeps at most `MAXIMUM_AWAITED_LOCATIONS`; an
+  outcome past that, or a second outcome for one request, matches its reported path instead, and
+  a home-relative path then records an empty set. A temporal predicate refuses an array constant
+  and compares a set as an ordered whole, so a rule counts by `input.locations:
+  context.input.locations`. Pinned by `tests/path_locations.rs` and
+  `dogwood::tests::a_location_budget_holds_in_each_window_and_counts_each_location_set_apart`.
 - Sum an outbound budget over `http:request::response`, as `tests/policies/egress_byte_budget.dw`
   does. One exchange records one such event, at reply time, with the delivered request bytes and
   the reply's `output.status`. Pinned by
