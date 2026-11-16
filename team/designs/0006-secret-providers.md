@@ -55,10 +55,11 @@ type    = "program"
 program = "op"
 
 [secret-source.op]
-protocol = "box.secret-source.v1"
-command  = ["${{ inputs.onepassword.path }}", "read", "op://{ref}"]
-pass-env = ["OP_SERVICE_ACCOUNT_TOKEN"]
-reads    = ["~/.config/op"]
+protocol        = "box.secret-source.v1"
+command         = ["${{ inputs.onepassword.path }}", "read", "op://{ref}"]
+pass-env        = ["OP_ACCOUNT", "OP_CONNECT_HOST"]
+pass-secret-env = ["OP_SERVICE_ACCOUNT_TOKEN", "OP_CONNECT_TOKEN", "OP_SESSION_*"]
+reads           = ["~/.config/op"]
 # deny lists the desktop app's socket directories, after we verify them.
 ```
 
@@ -70,6 +71,7 @@ A plugin has its own rules:
 
 - Only the profile lists a plugin, in `plugins`. No pack can pull one in through `extends`.
 - Only a plugin, or the profile itself, can declare `[secret-source.<scheme>]`. Packs refuse it.
+- Only the profile can name a reference in a declared scheme, such as `secret.ref = "op://..."`. Box CLI refuses one in a pack, and names the pack. So a pack cannot choose which vault item Box reads.
 - `box profile show` prints each plugin, and Box prints each declared source at startup. Both name the program that runs.
 
 For operators the test is simple: if it makes Box run a program on their machine, outside the box, it is a plugin.
@@ -87,14 +89,18 @@ type    = "program"
 program = "aws"
 
 [secret-source.aws-secretsmanager]
-protocol = "box.secret-source.v1"
-command  = ["${{ inputs.aws.path }}", "secretsmanager", "get-secret-value",
-            "--secret-id", "{ref}", "--query", "SecretString", "--output", "text"]
-pass-env = ["AWS_PROFILE"]
-reads    = ["~/.aws"]
+protocol        = "box.secret-source.v1"
+command         = ["${{ inputs.aws.path }}", "secretsmanager", "get-secret-value",
+                   "--secret-id", "{ref}", "--query", "SecretString", "--output", "json"]
+output          = "json"
+pass-env        = ["AWS_PROFILE", "AWS_REGION", "AWS_DEFAULT_REGION"]
+pass-secret-env = ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]
+reads           = ["~/.aws"]
 ```
 
-The command prints the whole secret string. One secret in AWS Secrets Manager often holds a JSON object with several keys, so a reference can name one field with `#FIELD`. A profile then sends one key of that secret to a telemetry target:
+The command prints the secret string as JSON. A binary secret prints `null`, which Box refuses. The `aws` child finds its identity in the variables that it gets and in `~/.aws`. So exported keys, such as from `aws-vault exec`, and `~/.aws` profiles work. Container and web-identity credentials are not passed. Do not use a profile that sets `credential_process` with this plugin. Box does not refuse such a profile. A bare program name there fails on the fixed `PATH`. An absolute path runs outside every sandbox, and Box does not protect that program. Box does not check that this identity is the one a bare `aws://` route signs with.
+
+One secret in AWS Secrets Manager often holds a JSON object with several keys, so a reference can name one field with `#FIELD`. A profile then sends one key of that secret to a telemetry target:
 
 ```toml
 plugins = ["box/aws-secrets-manager"]
@@ -106,9 +112,9 @@ secret.ref = "aws-secretsmanager://box/telemetry#LANGSMITH_API_KEY"
 secret.header = "x-api-key"
 ```
 
-So AWS Secrets Manager needs no source of its own in Box Core.
+So the telemetry case of #448 needs no source of its own in Box Core.
 
-At startup, Box launches the CLI as a separate host process, once per distinct secret, before starting the workload. It passes arguments directly and composes the environment from `HOME`, a fixed `PATH`, and explicitly named host variables. Any failed fetch stops startup.
+At startup, Box launches the CLI as a separate host process, once per distinct secret, before starting the workload. It passes arguments directly and composes the environment from `HOME`, a fixed `PATH`, and the operator's variables that the declaration names. Box passes a named variable only when it is set. Any failed fetch stops startup.
 
 Box keeps the fetched secrets in the trusted run process’s memory until the run ends. It does not write them to disk or pass them to the agent. The agent, tools, and MCP servers receive placeholders. On a request that policy permits, the gateway substitutes the real secret using the existing destination and placement rules. Box does not refresh secrets during a run. That's an intentional limitation to keep this feature simple.
 
@@ -121,9 +127,9 @@ The plugin tells Box what to protect. For `box/1password`, this declaration cove
 - `command`: the `op` executable, which is its first entry.
 - `reads`: the CLI's configuration paths.
 - `deny`: other access paths, such as directories containing the desktop app's authentication sockets.
-- `pass-env`: host variables the provider needs, such as `OP_SERVICE_ACCOUNT_TOKEN`.
+- `pass-secret-env`: host credentials the provider needs, such as `OP_SERVICE_ACCOUNT_TOKEN`.
 
-Box keeps the declared files and sockets outside the agent's, tools', and MCP servers' reach. It refuses write grants that could let them replace the executable or its configuration. Variables named in `pass-env` can reach the provider, but Box refuses those names in workload environments. These protections must also cover the hosted Shell and Python paths.
+Box keeps the declared files and sockets outside the agent's, tools', and MCP servers' reach. It refuses a grant that gives a workload a path in `reads` or `deny`, and the refusal names the plugin and the entry. This also applies to a path that a workload can get by name today, such as `~/.aws`. It refuses write grants that could let them replace the executable or its configuration. A declaration passes host variables to the provider in two lists. `pass-env` holds plain settings, such as `AWS_REGION`, and a workload can set the same names. `pass-secret-env` holds credentials. Box refuses a workload environment that holds the operator's value of one of them, under any name. A placeholder under the same name is allowed, such as the `AWS_ACCESS_KEY_ID` placeholder of a signed `aws://` route. A name in either list can end with `*`, which passes each variable with that prefix. The 1Password plugin uses `OP_SESSION_*` for the token of a manual `op signin`, because that name holds the account ID. `OP_ACCOUNT` selects the account when the operator has more than one. These protections must also cover the hosted Shell and Python paths.
 
 Box does not discover these paths automatically, so protection depends on the plugin declaring every access path. On Linux, only paths present at configuration time are protected. Before shipping the plugin, we must verify the real 1Password authentication paths on Linux and macOS.
 
@@ -133,15 +139,19 @@ Existing configurations keep their behavior.
 
 #### box.toml
 
-We add `[secret-source.<scheme>]` with `protocol`, `command`, `pass-env`, `reads`, and `deny`. `command` is one array: the program first, then its arguments. `[agent]`, `[tool.<name>]`, and `[mcp.<name>]` already write it this way. The program is an absolute path, and Box refuses a bare name. The `reads` and `deny` fields identify paths to protect from workloads.
+We add `[secret-source.<scheme>]` with `protocol`, `command`, `output`, `pass-env`, `pass-secret-env`, `reads`, and `deny`. `command` is one array: the program first, then its arguments. `[agent]`, `[tool.<name>]`, and `[mcp.<name>]` already write it this way. The program is an absolute path, and Box refuses a bare name. The `reads` and `deny` fields identify paths to protect from workloads.
 
-A declaration names `op`, or a scheme that Box does not reserve. The reserved schemes are `env`, `file`, `aws`, `credsd`, `secret`, `cmd`, `oauth2`, and `aws-signed`, and the credentials crate owns this list. Box refuses a declaration for a reserved scheme. So a plugin cannot take over a built-in source.
+A declaration names `op`, or a scheme that Box does not reserve. The reserved schemes are `env`, `file`, `aws`, `credsd`, `secret`, `cmd`, `oauth2`, and `aws-signed`, and Box Core owns this list. Box refuses a declaration for a reserved scheme. So a plugin cannot take over a built-in source.
 
-Protocol `box.secret-source.v1` replaces `{ref}` in the arguments with the text after `scheme://` in the reference, and reads the secret from stdout. `aws ... --secret-id` takes the bare name, so that plugin writes `{ref}` alone. `op read` takes the whole reference, so the 1Password plugin writes `op://{ref}`.
+Protocol `box.secret-source.v1` replaces `{ref}` in the arguments with the text after `scheme://` in the reference, and reads the secret from stdout. `aws ... --secret-id` takes the bare name, so that plugin writes `{ref}` alone. `op read` takes the whole reference, so the 1Password plugin writes `op://{ref}`. Box refuses a reference whose text after `scheme://` starts with `-`, so that the program cannot read it as a flag.
 
-A reference can end with `#FIELD`. Box removes `#FIELD` before it fills `{ref}`. It then reads stdout as a JSON object and takes that one string field. Without `#FIELD`, Box refuses a secret that is a JSON object, so that one destination never gets every key in it.
+`output` says how Box reads stdout. With `text`, the default, stdout is the secret. With `json`, stdout must be one JSON string, and the decoded string is the secret. Box refuses any other JSON value, such as `null`.
 
-Two references that differ only in `#FIELD` name one secret, so Box runs the program once for both. Each place that uses the secret shares that fetch: an egress route, a remote MCP server, or a telemetry target.
+A reference can end with `#FIELD`. Box removes `#FIELD` before it fills `{ref}`. After Box reads the secret by `output`, it parses the secret as a JSON object and takes that one string field. Without `#FIELD`, Box refuses a secret that is a JSON object, so that one destination never gets every key in it.
+
+Two references that differ only in `#FIELD` name one secret, so Box runs the program once for both. Box keeps each fetched secret for the run. Each place that uses it shares that fetch: an egress route, a remote MCP server, a backend, or a telemetry target.
+
+Box fetches in two steps. First it fetches the secrets of telemetry targets, and opens the collector. Then it fetches the other secrets, and reuses a fetch that it already holds. A failed fetch in the first step goes to stderr only, because no collector exists yet.
 
 `protocol` names the version of this contract. In this version, Box fetches each secret once. A later version can return an expiry with the secret, so that Box can fetch it again during a run.
 
@@ -151,11 +161,13 @@ The command gets no stdin, has a timeout and output limits, and a non-zero exit 
 
 #### Egress, remote MCP, and telemetry secrets
 
-We add `secret.env` to name the placeholder variable. It is required for declared providers. On an `env://NAME` route, it is optional and must equal `NAME`.
+We add `secret.env` to name the placeholder variable. It is required on an egress route or a remote MCP server that names a declared provider. On an `env://NAME` route, it is optional and must equal `NAME`.
 
 One placeholder variable holds one secret. When Box loads the configuration, it refuses two entries that name one variable with different references, and it names both entries. An `env://NAME` entry counts under `NAME`. For a declared provider, the operator does not need to set that variable.
 
 A telemetry target's `secret.ref` also accepts a declared scheme. Box attaches that secret itself, in its trusted process. So the target holds no placeholder, and it takes no `secret.env`. The `a_secret_reference_is_normalized_and_a_literal_is_refused` test gains a case for a declared scheme.
+
+A backend's `auth.ref` also accepts a declared scheme. Box attaches that token itself at the backend connection, so it takes no `secret.env` either. A re-routed entry's own `secret.ref` stays `env://` only, because Box never reads that value.
 
 This revises the [current `op://` refusal](../../docs/design/decisions.md#an-undeliverable-credential-is-refused-at-load) and its `an_undeliverable_credential_scheme_is_refused` test: a provider route becomes valid only when its provider is declared.
 
@@ -163,12 +175,12 @@ This revises the [current `op://` refusal](../../docs/design/decisions.md#an-und
 
 The stored record gains provider declarations and the checked executable identity, which requires a record version change. Each run checks the executable afresh and records its identity, so a CLI update between runs does not require recreating the box. A replacement after that check stops the fetch.
 
-The credentials API adds `SecretSourceCommand`, the `{ref}` token constant, and a backend constructor for declared providers. That backend uses a declared `op` provider in place of the built-in `op://` source; it never registers both. Box's `policy generate-schema` uses the same provider declarations and checks for remote MCP authentication. A telemetry target's secret resolves through the same declarations and checks. `Backend::local()` keeps its built-in `op://` source for callers without provider declarations.
+The credentials API adds `SecretSourceCommand`, the `{ref}` token constant, and a backend constructor for declared providers. That backend uses a declared `op` provider in place of the built-in `op://` source; it never registers both. Box's `policy generate-schema` uses the same provider declarations and checks for remote MCP authentication. Telemetry targets and backend `auth.ref` resolve through the same declarations and checks. The declared backend keeps each fetched secret for the run, so every vault shares one fetch. `Backend::local()` keeps its built-in `op://` source for callers without provider declarations.
 
 #### Box CLI
 
-Box CLI adds plugins: the `plugins` list in a profile, and the `[plugin]` header with `name`, `version`, and `kind`. Only `plugins` accepts a plugin. One scheme has one declaration: Box CLI refuses a profile in which two plugins, or a plugin and the profile, declare the same scheme. Box CLI accepts provider declarations in profiles and plugins, refuses them in every pack, and shows each plugin and its program in `box profile show`. We ship `box/1password` as the first plugin. The profile supplies `secret.env`; existing model packs keep their defaults, so profiles that override `env://` references still work.
+Box CLI adds plugins: the `plugins` list in a profile, and the `[plugin]` header with `name`, `version`, and `kind`. Only `plugins` accepts a plugin. One scheme has one declaration: Box CLI refuses a profile in which two plugins, or a plugin and the profile, declare the same scheme. Box CLI accepts provider declarations in profiles and plugins, refuses them in every pack, and shows each plugin and its program in `box profile show`. It also refuses a reference in a declared scheme that a pack writes. We ship `box/1password` as the first plugin. The profile supplies `secret.env`; existing model packs keep their defaults, so profiles that override `env://` references still work.
 
 #### Telemetry
 
-Box records each fetch outcome with the provider, program, and redacted reference. Secret values stay out of records and errors.
+Box records each fetch outcome with the provider, program, and redacted reference, once the collector is open. A failed fetch for a telemetry target stops startup before that, so it goes to stderr only. Secret values stay out of records and errors.
