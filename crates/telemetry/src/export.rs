@@ -771,16 +771,21 @@ mod tests {
         const CHILD: &str = "STRANDS_BOX_TELEMETRY_FAILED_APPEND_CHILD";
         // The file-size limit is per process, so the test runs alone in a child process.
         if std::env::var_os(CHILD).is_none() {
-            let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
-                .args([
-                    "--exact",
-                    "export::tests::a_failed_append_leaves_no_fragment",
-                    "--test-threads=1",
-                ])
+            let module = module_path!();
+            let module = module.split_once("::").map_or(module, |(_, rest)| rest);
+            let name = format!("{module}::a_failed_append_leaves_no_fragment");
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args(["--exact", &name, "--test-threads=1"])
                 .env(CHILD, "1")
-                .status()
+                .output()
                 .expect("run the child");
-            assert!(status.success(), "the child failed: {status}");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(output.status.success(), "the child failed: {stdout}");
+            // A renamed or moved test matches nothing, and libtest still exits 0.
+            assert!(
+                stdout.contains("test result: ok. 1 passed"),
+                "the child ran no test named {name}: {stdout}"
+            );
             return;
         }
 
