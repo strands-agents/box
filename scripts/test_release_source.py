@@ -361,6 +361,13 @@ class ReleasePackageTests(unittest.TestCase):
         for name in ("box", "strands-box-sock-alias", "strands-box-contain-trampoline"):
             self.executable(self.package / name, '#!/bin/sh\nprintf "%s\\n" "$PACKAGE_VERSION"\n')
         self.executable(self.root / "readelf", '#!/bin/sh\nprintf "%s\\n" "$PACKAGE_HEADER"\n')
+        self.docker_arguments = self.root / "docker-arguments.json"
+        self.executable(self.root / "docker", "#!/usr/bin/env python3\n"
+                        "import json, os, sys\n"
+                        "from pathlib import Path\n"
+                        "Path(os.environ['DOCKER_ARGS']).write_text(json.dumps(sys.argv[1:]))\n"
+                        "command = sys.argv[sys.argv.index('box-linux-release') + 1:]\n"
+                        "os.execvp(command[0], command)\n")
 
     def executable(self, path, contents):
         path.write_text(contents)
@@ -370,7 +377,8 @@ class ReleasePackageTests(unittest.TestCase):
         return subprocess.run(
             ["bash", "-c", workflow_command(name)],
             cwd=self.root,
-            env={**os.environ, "PATH": f"{self.root}:{os.environ['PATH']}", **environment},
+            env={**os.environ, "PATH": f"{self.root}:{os.environ['PATH']}",
+                 "DOCKER_ARGS": str(self.docker_arguments), **environment},
             text=True,
             capture_output=True,
         )
@@ -378,9 +386,14 @@ class ReleasePackageTests(unittest.TestCase):
     def header(self, machine="Advanced Micro Devices X86-64", loader="/lib64/ld-linux-x86-64.so.2", version="2.34"):
         return f"Machine: {machine}\nRequesting program interpreter: {loader}]\nName: GLIBC_{version}\n"
 
-    def test_x86_package_step_checks_all_three_executables(self):
+    def test_x86_package_step_checks_all_three_executables_in_read_only_container(self):
         result = self.run_step("Check the x86-64 Linux package", PACKAGE_HEADER=self.header())
         self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.docker_arguments.read_text()), [
+            "run", "--rm", "--mount", f"type=bind,source={self.root},target=/src,readonly",
+            "box-linux-release", "python3", "scripts/check-linux-package.py", "stage/box-core",
+            "--target", "x86_64-unknown-linux-gnu",
+        ])
         report = json.loads(result.stdout)
         self.assertEqual([item["binary"] for item in report], [
             "box", "strands-box-sock-alias", "strands-box-contain-trampoline",

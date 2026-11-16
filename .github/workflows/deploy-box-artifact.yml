@@ -375,8 +375,11 @@ jobs:
       - name: Check the x86-64 Linux package
         if: matrix.target.triple == 'x86_64-unknown-linux-gnu'
         run: |
-          python3 scripts/check-linux-package.py stage/box-core \
-            --target x86_64-unknown-linux-gnu
+          docker run --rm \
+            --mount "type=bind,source=$PWD,target=/src,readonly" \
+            box-linux-release \
+            python3 scripts/check-linux-package.py stage/box-core \
+              --target x86_64-unknown-linux-gnu
 
       - name: Check and run the ARM64 Linux package
         if: matrix.target.triple == 'aarch64-unknown-linux-gnu'
