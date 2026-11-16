@@ -153,6 +153,7 @@ changes to them:
 - A new `box.toml` table, `[locations]`.
 - A new field, `locations`, on the five `fs:*` actions. It's an empty record unless `box.toml`
   declares locations.
+- What time-based rules see: each `fs:*` event in history records `locations`.
 - A newer stored record version for a box that declares locations, as other optional features do.
 
 ## 7. Key decisions
