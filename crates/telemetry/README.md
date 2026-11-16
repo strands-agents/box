@@ -60,13 +60,14 @@ A target names a **set**. No signal contains another, and there is no ordering.
 | `agent_metrics` | one metric the agent's own instrumentation exported |
 | `control_plane` | one change to the authority this box holds |
 | `mcp_unmatched` | one MCP alias invocation that matches no declared command |
+| `tool_calls` | one MCP tool call's fields, or how it ended |
 
-**A target naming none receives every one of the seven.** An empty set is refused.
+**A target naming none receives every one of the eight.** An empty set is refused.
 
-These seven are this crate's own vocabulary and the spelling a record carries. They are not what an
-operator writes: `box.toml` takes `include`, whose words are `deny`, `permit`, `trace`, `logs`, and
-`metrics`, and the box expands each word into this set. `trace` names both `agent_trace` and
-`control_plane`. `logs` names both `agent_logs` and `mcp_unmatched`.
+These eight are this crate's own vocabulary and the spelling a record carries. They are not what an
+operator writes: `box.toml` takes `include`, whose words are `deny`, `permit`, `trace`, `logs`,
+`metrics`, and `tool_calls`, and the box expands each word into this set. `trace` names both
+`agent_trace` and `control_plane`. `logs` names both `agent_logs` and `mcp_unmatched`.
 
 ## What a record carries
 
@@ -79,6 +80,21 @@ informational log in scope `strands-box.mcp`, with event name `strands.box.mcp.u
 The constructor bounds the program and redacts expanded arguments. `correlated` attaches the
 caller's available request context. This record has no policy verdict or execution outcome and
 produces no span.
+
+`Collector::tool_call` accepts `ToolCall::called(server, tool, arguments)` when a call is decided,
+and `ToolCall::completed(server, tool, reply, output)` when it ends, with the arguments and output
+as JSON values. It records each as a log in scope `strands-box.tool`, with event name
+`strands.box.tool.call` or `strands.box.tool.completion`, on the `tool_calls` signal. The arguments
+and the output are flattened into dotted field paths, and each value is bounded at construction.
+`correlated` attaches the call's request context, so the two records join by `jsonrpc.request.id`.
+Neither produces a span.
+
+**A target receives a tool-call value only for a field it names.**
+`Target::revealing_tool_fields(server, tool, ToolFieldList)` names one tool's argument and output
+paths, and the target's exporter writes every other value as `<redacted>`. `is_field_path` says which
+paths a list may name. `Collector::reveals_output_of(server, tool)` tells a caller whether reading
+that tool's output can reveal anything, and `Collector::accepts(signal)` whether any target receives a
+signal at all.
 
 ## The agent's own signals
 

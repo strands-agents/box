@@ -40,7 +40,7 @@ mod test_event_schema;
 mod test_history;
 
 #[cfg(feature = "egress-adapter")]
-pub use adapters::egress::EgressPolicyInterceptor;
+pub use adapters::egress::{EgressPolicyInterceptor, ReplyReader};
 #[cfg(feature = "script-adapter")]
 pub use adapters::script::{
     RenameDestination, ScriptPermit, ScriptPolicyInterceptor, ScriptRefusal,

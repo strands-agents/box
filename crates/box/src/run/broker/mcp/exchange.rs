@@ -105,6 +105,8 @@ struct RecordedCall {
     tool: Option<String>,
     prompt: Option<String>,
     uri: Option<String>,
+    /// The request's own MCP context, so this call's completion record joins its call record.
+    correlation: telemetry::Correlation,
 }
 
 /// A client's `tools/list` awaiting the server's reply.
@@ -807,6 +809,7 @@ async fn admit_client_request(
         &Principal::agent(),
         exchange.running.server(),
         frame,
+        recorder,
     )? {
         McpRequestAdmission::Undecided => Ok(ClientRequestAdmission::Undecided),
         McpRequestAdmission::Allowed(decision, request_id, tool_response) => Ok(
@@ -1002,6 +1005,16 @@ async fn handle_request(
                 policy::CatalogRefusal::NotListed => refusal.to_string(),
                 _ => policy::CatalogRefusal::NotAccepted.to_string(),
             };
+            // A call the catalog refuses still states its arguments, as one policy refuses does.
+            if let Some(target) = &target {
+                telemetry::Correlation::from_mcp(frame).during(|| {
+                    exchange.connection.recorder.tool_called(
+                        exchange.running.server(),
+                        tool,
+                        &target.arguments,
+                    );
+                });
+            }
             exchange
                 .connection
                 .recorder
@@ -1060,6 +1073,7 @@ async fn handle_request(
                     tool: target.tool().map(str::to_string),
                     prompt: target.prompt().map(str::to_string),
                     uri: target.uri().map(str::to_string),
+                    correlation: telemetry::Correlation::from_mcp(frame),
                 },
             );
         }
@@ -1211,6 +1225,25 @@ fn record_response_leg(
         },
         _ => Ok(()),
     };
+    // Every tool call states how it ended, whether or not a rule named the tool, so a reader
+    // learns the answer the agent got and not only that the call was permitted.
+    if let Some(tool) = call.tool.as_deref() {
+        let (reply, output) = match end {
+            CallEnd::Reply(frame) => (
+                McpReply::of_reply(frame),
+                frame.pointer("/result/structuredContent"),
+            ),
+            CallEnd::Ended(reply) => (reply, None),
+        };
+        call.correlation.during(|| {
+            exchange.connection.recorder.tool_completed(
+                exchange.running.server(),
+                tool,
+                reply.as_str(),
+                output,
+            );
+        });
+    }
     coarse.and(tool).map_err(|error| {
         eprintln!("[broker] failed to record mcp:call response leg: {error}");
         io::Error::other(format!("failed to record MCP response: {error}"))

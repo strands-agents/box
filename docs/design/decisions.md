@@ -2633,12 +2633,14 @@ replaces the default instead of adding to it. The file has no size bound or rota
 <a id="a-target-names-a-set-of-signals"></a>
 ### A target names a set of signals, an absent list takes every signal, and `accepts` narrows by payload
 
-`[telemetry.<label>] include` takes five words: `deny` and `permit` name the two effective verdicts,
+`[telemetry.<label>] include` takes six words: `deny` and `permit` name the two effective verdicts,
 `trace` names the agent's relayed spans and the box's own control-plane records. `logs` names the
 agent's relayed log records and the box's unmatched MCP routing diagnostics. `metrics` names the
-agent's relayed metric records. A target names a set, with no ordering, and no signal contains
+agent's relayed metric records. `tool_calls` names each MCP tool call's fields and how it ended. A target names a set, with no ordering, and no signal contains
 another. A target that names no `include` receives every signal, which
-`an_absent_include_takes_every_signal` pins. An empty list, a repeated word, and a misspelled word
+`an_absent_include_takes_every_signal` pins. A tool call's values stay redacted whatever the
+target's signals; see [tool-call values are revealed per field](#tool-call-values-are-revealed-per-field).
+An empty list, a repeated word, and a misspelled word
 are each refused before the box exists. The agent's log records and metrics reach every target
 whatever `include` names. `accepts` on an `otlp` target is a second filter, by OTLP payload and not
 by signal: the exporter sends no `traces`, `logs`, or `metrics` batch that the list leaves out,
@@ -2647,6 +2649,47 @@ a Langfuse target receives no log or metric batch, because Langfuse answers `404
 and each batch would count as a loss. The cost is that an operator who reads only `include` can
 expect a log record that an `accepts` list keeps out. The box relays harness signals without
 producing them. The harness's exporter settings determine whether those records exist.
+
+<a id="tool-call-values-are-revealed-per-field"></a>
+### Tool-call values are revealed per field, on their own record
+
+A policy author, or a tool that drafts policy from the decision log, learns rules from what an
+agent's tool calls carried and how they ended. So the box records each MCP tool call's arguments when
+the call is decided, and how it ended with its `structuredContent` when it ends, on stdio and http
+alike. These values are what the agent and the
+server chose, so either can hold a secret, and a target can be a vendor's endpoint. The shell
+argument rule already refuses to report an expanded value for that reason, and no rule of shape can
+tell a secret from a benign value. So Box reveals only what a target asks for.
+
+The values go on a `strands-box.tool` log record, never on a decision or its span, as maps of
+flattened fields. Each target's exporter replaces every value whose server, tool, and field path its
+`tool_fields` does not name with `<redacted>`. The paths always remain, and a key that is not a plain
+name becomes `*`, so a reader sees which fields each tool had without seeing data used as a key. A
+target with no `tool_fields`, including the box's own default file, receives no value. How a call
+ended holds no data, so every target that takes tool calls receives it.
+`each_target_receives_only_the_tool_fields_it_names` pins the redaction.
+
+Two costs are accepted. Field names reach every target, an OTLP vendor's included: they say which
+arguments a tool's calls had, never a value, a name that is not plain becomes `*`, and the decision
+already names the tool; a target that wants none leaves `tool_calls` out of its `include`. And a call
+refused before the per-tool check, by `mcp:call` or because the tool is not listed, is recorded
+too, because its fields show what the agent tried, not only what policy allowed.
+
+Values keep their JSON type, so `true` and `"true"` stay apart; a redacted value is the string
+`<redacted>` whatever its type.
+
+Over http, reading a reply costs the gateway's shared copy budget, so Box reads a reply only when the
+policy reads it already or a target names one of that tool's output fields. Naming an output field
+therefore has a cost on policy evidence: those copies share the budget with the replies per-tool
+rules read, so under many concurrent large replies a rule's read can be abandoned and record
+`indeterminate`, which fails closed.
+`no_reply_is_copied_when_no_target_reveals_the_tools_output` pins that.
+
+Rejected: putting the values on the decision record, because one record reaches every target that
+receives its verdict, and its span carries it too. One switch per target for all values, because a
+target that needs one field would then receive every field of every tool. A field list without the
+server and tool, because a field of the same name on another tool would be revealed too. A keyed
+hash, because a rule needs literal values such as `repo == "x"`.
 
 <a id="the-strands-box-namespace-is-reserved"></a>
 ### `strands.box.` is reserved, and the collector strips it from an agent's payload at every level
@@ -2721,8 +2764,10 @@ A decision uses caller-supplied context to join the caller's trace: the alias en
 Shell or Monty call, the request headers for HTTP egress, and `params._meta` for an MCP frame. Every
 box record carries `strands.box.run.id`, generated once per `run`. The box copies named fields only,
 bounds their size, and validates before it retains anything. Tool arguments, prompts, authorization
-headers, and arbitrary baggage are excluded, and a caller-supplied identifier is never evidence of
-caller identity. Roughly half of all decisions arrive unparented and join by `strands.box.run.id`
+headers, and arbitrary baggage are excluded from correlation context, and a caller-supplied
+identifier is never evidence of caller identity. A tool call's arguments are recorded only on its
+own record, redacted unless a target names the field; see [tool-call values are revealed per
+field](#tool-call-values-are-revealed-per-field). Roughly half of all decisions arrive unparented and join by `strands.box.run.id`
 alone.
 
 <a id="the-policy-attribute-names-are-this-products-own"></a>
@@ -2734,7 +2779,8 @@ authorization, so this namespace is authoritative here, and the set is fixed bec
 indexes on these keys. Standard keys identify the operation where one exists: `server.address`,
 `server.port`, `http.request.method`, `file.path`, `process.command`, `process.command_args`, and
 `process.working_directory`. `url.full` and `process.command_line` stay excluded, because each
-routinely carries a secret.
+routinely carries a secret. A tool call's arguments and answer stay off the decision for the same
+reason, and go on a tool-call record under `strands.box.tool.*`.
 
 `.cause` is mandatory and must agree with `.verdict`. `DecisionRecord` holds a `DecisionCause`
 rather than an option. A permit defaults to `Permitted`, a deny defaults to `Forbidden`, and

@@ -242,6 +242,12 @@ impl McpReply {
         "indeterminate",
     ];
 
+    /// The value as `output.reply` records it, which is also how a log record spells it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        self.eid()
+    }
+
     /// The value as `output.reply` records it.
     pub(crate) fn eid(self) -> &'static str {
         match self {

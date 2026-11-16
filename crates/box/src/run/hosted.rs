@@ -954,7 +954,7 @@ impl HostedBox {
             },
             capabilities,
             // The box every request is judged as, taken from the root this process opened.
-            telemetry::EgressDecisionInterceptor::over(egress_policy),
+            telemetry::EgressDecisionInterceptor::over(egress_policy, Arc::clone(&recorder)),
             Box::new(telemetry::EgressDecisionRecorder::over(Arc::clone(
                 &recorder,
             ))),

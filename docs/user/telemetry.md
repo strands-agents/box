@@ -45,7 +45,8 @@ A `file` table takes three keys. An unknown key is refused.
 |---|---|---|---|
 | `kind` | string | none, required | `file`. [Endpoints](#endpoints) lists the other kinds. |
 | `destination` | string | none, required | The file the records go to, as stated below. |
-| `include` | array of strings | every record | Which records reach this target: `deny`, `permit`, `trace`, `logs`, or `metrics`. |
+| `include` | array of strings | every record | Which records reach this target: `deny`, `permit`, `trace`, `logs`, `metrics`, or `tool_calls`. |
+| `tool_fields` | table | none | Which tool-call fields this target receives in clear text. See [a tool call](#a-tool-call). |
 
 ## `kind = "file"`
 
@@ -80,6 +81,7 @@ records the words in the list name:
 | `trace` | The workload's own spans, and this box's control-plane records. |
 | `logs` | Box's unmatched MCP routing diagnostics and the workload's log records. |
 | `metrics` | The workload's metrics. |
+| `tool_calls` | Each MCP tool call's argument and output fields, and how it ended. A value appears only where `tool_fields` names its field. |
 
 So `include = ["deny"]` writes a file of refusals, and leaves out the permits, control-plane records,
 and MCP routing diagnostics.
@@ -247,6 +249,70 @@ redaction rules above. The record includes request identifiers and parent trace 
 The diagnostic carries no policy verdict, action, or rule. Box writes it before replying to the
 alias, so it does not say whether ordinary execution starts or succeeds. It produces no span.
 Targets receive it when `include` is omitted or contains `logs`.
+
+### A tool call
+
+Each MCP tool call produces up to two log records in the `strands-box.tool` scope, over a stdio or
+an http server alike:
+
+| Event name | Written when | Keys |
+|---|---|---|
+| `strands.box.tool.call` | the call is decided, whether it is allowed or refused | `strands.box.tool.server`, `.name`, and `.arguments` |
+| `strands.box.tool.completion` | the call ends | `strands.box.tool.server`, `.name`, `.reply`, and `.output` when the reply carried `structuredContent` |
+
+`strands.box.tool.reply` holds one of `result`, `tool_error`, `protocol_error`, `cancelled`, or
+`indeterminate`, as [`output.reply`](policy/actions.md) defines them. A refused call has no completion.
+Both records carry `jsonrpc.request.id`, which joins them to each other and to the call's decision.
+
+`.arguments` and `.output` are maps of the call's fields, flattened into the paths a rule writes after
+`context.input.` or `output.structured.`: an object's member is `parent.member`, and an array's
+element is `parent.N`. So `{"profile": {"email": "a@b"}}` becomes the field `profile.email`.
+
+**Every value is `<redacted>` unless the target names its field.** The paths always arrive, so a reader
+sees which fields each tool's calls had and can choose which to reveal. Name fields per server and tool:
+
+```toml
+[telemetry.local]
+kind        = "file"
+destination = "~/boxes/helpdesk/records.jsonl"
+
+[telemetry.local.tool_fields."desk/verify_identity"]
+arguments = ["user_name"]
+output    = ["verified"]
+```
+
+This target receives `user_name` and `verified` from `desk`'s `verify_identity` tool in clear text, and
+every other value, including a `user_name` on another tool, as `<redacted>`. A target with no
+`tool_fields`, including the box's own default file, receives no value at all.
+
+An argument or an output can hold a secret, and Box can't tell which one does, so name only the fields
+your rules and your review need. A key that isn't a plain name of letters, digits, `_`, `-`, and `$`,
+at most 64 characters, is written as `*`, and its value stays redacted, so data a tool uses as a key,
+such as an email address, stays out of the record. At most 64 fields are reported per record, each
+value at most 4 KiB; when a call has more, the record also carries `strands.box.tool.arguments_omitted`
+or `strands.box.tool.output_omitted` with the count left out.
+
+A value keeps its JSON type: a string, `true` or `false`, or a number, so `true` and `"true"` stay
+apart. An integer too large for 64 bits arrives as its digits in a string, and a JSON `null` arrives
+as an empty array, which no flattened value can otherwise be. A redacted value is `<redacted>`
+whatever its type.
+
+**Field names reach every target, values only where named.** A target with no `tool_fields`, an OTLP
+vendor's included, still learns which fields each tool's calls had, though never their values. A
+call refused before it reaches the server, by the coarse `mcp:call` check or because the tool isn't
+listed, is recorded too, because its fields show what the agent tried. Leave `tool_calls` out of a
+target's `include` to send it no tool-call record at all.
+
+A `tool_fields` key that isn't `"<server>/<tool>"`, a table that names no field, a path that isn't a
+dotted path of plain names, and a repeated path are each refused.
+
+A tool-call record produces no span.
+
+**Over http, Box reads a reply only when it must.** Reading a reply copies it through the gateway's
+budget, which every reply being read at once shares (64 MiB). So Box reads a tool's reply only when
+the policy reads it anyway, which it does for every tool in the server's tool list once Box has read
+that list, or when a target names one of that tool's output fields. A call to a tool Box has not seen
+listed still gets its call record, and no completion.
 
 ### A control-plane record
 

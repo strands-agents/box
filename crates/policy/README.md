@@ -18,8 +18,8 @@ enforcement point.
 
 ## Public Interface
 
-A standalone build of this package exports **62 names with `--all-features`, and 54 by default.**
-The adapter features add six names. The `experimental-idle-flush` feature adds two timer types.
+A standalone build of this package exports **63 names with `--all-features`, and 54 by default.**
+The adapter features add seven names. The `experimental-idle-flush` feature adds two timer types.
 The Box package enables these features in its own composition; it does not change this
 package's default feature set.
 
@@ -37,7 +37,7 @@ package's default feature set.
 | `ApprovedPath`, `PathResolver`, `PathRefusal` | The resolved path a `Request::Fs` demands, the only public minter of one, and why a mint fails. |
 | `Decision`, `DenyReason`, `RuleId` | Authorization verdict and determining rule. |
 | `Outcome`, `Delivery`, `FsResult` | One completed effect, submitted as history. |
-| `PendingToolResponse`, `McpReply` | The per-tool `::response` an allowed `tools/call` owes, from `refine_tool_call` to `record_tool_response` (or `record_tool_reply`, which reads the reply frame and its `structuredContent`), and how the call ended. |
+| `PendingToolResponse`, `McpReply` | The per-tool `::response` an allowed `tools/call` owes, from `refine_tool_call` to `record_tool_response` (or `record_tool_reply`, which reads the reply frame and its `structuredContent`), and how the call ended. `McpReply::as_str` spells the end as `output.reply` does. |
 | `EffectivePolicy`, `ENGINE_ID` | Active engine and source identity. |
 | `PolicyError` | Startup, history-recording, and history-flush errors. |
 | `PolicyCheck`, `Finding`, `RuleRef`, `Location` | What `check` finds in a policy: each finding's message, rules, source location, and help. |
@@ -47,7 +47,7 @@ package's default feature set.
 | `DecisionObserver` | A synchronous sink for each policy verdict. |
 | `ToolGrammar`, `ToolGrammars`, `ToolGrammarError` | One checked tool grammar from its `box.toml` table, the set a box installs with no two that share a name or a program, the action schema with their actions, and why one is refused. |
 | `GrammarBindings`, `BindingRefusal` | The engine's tool grammars bound to each tool's opened program file and called name, which `PolicyEngine::bound_by` installs for the engine's life, and why declaring a tool or installing bindings from another engine is refused. |
-| `EgressPolicyInterceptor` (`egress-adapter`), `ShellPolicyInterceptor` (`shell-adapter`), `ScriptPolicyInterceptor`, `ScriptPermit`, `ScriptRefusal`, and `RenameDestination` (`script-adapter`) | One adapter per enforcement point, each behind its own feature. |
+| `EgressPolicyInterceptor` and `ReplyReader` (`egress-adapter`), `ShellPolicyInterceptor` (`shell-adapter`), `ScriptPolicyInterceptor`, `ScriptPermit`, `ScriptRefusal`, and `RenameDestination` (`script-adapter`) | One adapter per enforcement point, each behind its own feature. `ReplyReader` reads one remote `tools/call` reply body, plain JSON or Server-Sent Events, as it grows, and finds the JSON-RPC reply to its request. |
 | `HistoryFlusher`, `HistoryFlushSnapshot` (`experimental-idle-flush`) | Own one timer and observe its completed flush calls. |
 
 The lifecycle is:

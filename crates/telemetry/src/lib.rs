@@ -11,6 +11,7 @@ mod error;
 mod export;
 mod receive;
 mod record;
+mod tool;
 
 pub use collector::Collector;
 pub use config::{Payload, Target, TargetKind, TargetSecret, TelemetryConfig};
@@ -18,8 +19,9 @@ pub use correlation::Correlation;
 pub use error::{Result, TelemetryError};
 pub use record::{
     ControlOperation, ControlRecord, DecisionCause, DecisionRecord, DeterminingPolicy,
-    McpUnmatched, Signal, Subject,
+    McpUnmatched, Signal, Subject, ToolCall,
 };
+pub use tool::{ToolFieldList, is_field_path};
 
 /// Open the lane `config` describes.
 ///

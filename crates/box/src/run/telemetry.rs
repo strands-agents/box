@@ -86,6 +86,22 @@ struct PendingEgressDecision {
     identity: EgressIdentity,
     verdict: AuditDecision,
     effective: EffectiveDecision,
+    /// One remote `tools/call`'s server, tool, and raw arguments, held until the emitter knows
+    /// the request's own context.
+    tool_call: Option<RemoteToolCall>,
+}
+
+/// One remote `tools/call` as the gateway presented it.
+struct RemoteToolCall {
+    server: String,
+    tool: String,
+    arguments: String,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many permits this thread wrapped to observe a reply, for the tests that pin when.
+    static OBSERVING_PERMITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 thread_local! {
@@ -350,14 +366,137 @@ pub(crate) fn capture_policy_action(
 /// Preserve the remote MCP gate identity until the egress emitter runs.
 pub(crate) struct EgressDecisionInterceptor {
     inner: Arc<dyn EgressEffectInterceptor>,
+    recorder: Arc<DecisionRecorder>,
 }
 
 impl EgressDecisionInterceptor {
     /// Wrap the policy adapter without changing its public seam.
     pub(crate) fn over(
         inner: Arc<dyn EgressEffectInterceptor>,
+        recorder: Arc<DecisionRecorder>,
     ) -> Arc<dyn EgressEffectInterceptor> {
-        Arc::new(Self { inner })
+        Arc::new(Self { inner, recorder })
+    }
+}
+
+/// Observes one remote `tools/call` reply for the record, and passes it to the policy's own
+/// observer unchanged.
+struct ObservedToolReply {
+    inner: Option<Box<dyn egress_gateway::ReplyObserver>>,
+    reader: policy::ReplyReader,
+    recorder: Arc<DecisionRecorder>,
+    server: String,
+    tool: String,
+    /// The JSON text of the request's JSON-RPC `id`, which the reply must carry.
+    request_id: Option<String>,
+    /// Whether the completion is recorded, so `Drop` records one only for a reply never read.
+    recorded: bool,
+}
+
+impl ObservedToolReply {
+    /// Record how the call ended, from the reply body when one arrived.
+    fn completed(&mut self, body: Option<&[u8]>) {
+        if self.recorded {
+            return;
+        }
+        self.recorded = true;
+        let reply = body.and_then(|body| self.reader.reply_in(body));
+        let end = reply
+            .as_ref()
+            .map_or(policy::McpReply::Indeterminate, policy::McpReply::of_reply);
+        let output = reply
+            .as_ref()
+            .and_then(|reply| reply.pointer("/result/structuredContent"));
+        // The gateway names the id as JSON text, so a string id arrives quoted; the call record
+        // names it bare.
+        let id = self.request_id.as_deref().map(|text| {
+            serde_json::from_str::<serde_json::Value>(text)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_string))
+                .unwrap_or_else(|| text.to_string())
+        });
+        // The reply arrives on the gateway's own thread, so the JSON-RPC identifier is what joins
+        // this record to the call record and the decision.
+        let correlation = telemetry::Correlation::from_headers(None, None).mcp(id.as_deref());
+        self.recorder.for_request(correlation).tool_completed(
+            &self.server,
+            &self.tool,
+            end.as_str(),
+            output,
+        );
+    }
+}
+
+impl egress_gateway::ReplyObserver for ObservedToolReply {
+    fn complete(&mut self, reply: &[u8]) -> bool {
+        match self.inner.as_mut() {
+            // Defer to the policy's observer, so its early finish is unchanged.
+            Some(inner) => inner.complete(reply),
+            // With no policy observer, finish as soon as the reply has arrived, so a stream the
+            // server holds open releases its copy at the answer.
+            None => self.reader.holds_the_reply(reply),
+        }
+    }
+
+    fn finished(mut self: Box<Self>, reply: &[u8]) {
+        self.completed(Some(reply));
+        if let Some(inner) = self.inner.take() {
+            inner.finished(reply);
+        }
+    }
+
+    fn abandoned(mut self: Box<Self>) {
+        self.completed(None);
+        if let Some(inner) = self.inner.take() {
+            inner.abandoned();
+        }
+    }
+}
+
+impl Drop for ObservedToolReply {
+    // A reply the gateway never read, such as one refused before it streamed, still ends the
+    // call, as the stdio broker records a call whose connection ended.
+    fn drop(&mut self) {
+        self.completed(None);
+    }
+}
+
+/// One permit whose reply the box observes beside the policy's own observer.
+struct ObservingPermit {
+    inner: Box<dyn EgressEffectPermit>,
+    recorder: Arc<DecisionRecorder>,
+    server: String,
+    tool: String,
+}
+
+impl EgressEffectPermit for ObservingPermit {
+    fn record_outcome(self: Box<Self>, outcome: egress_gateway::EffectOutcome) -> io::Result<()> {
+        self.inner.record_outcome(outcome)
+    }
+
+    fn mark_indeterminate(self: Box<Self>) {
+        self.inner.mark_indeterminate();
+    }
+
+    fn reply_observer(
+        &mut self,
+        request_id: Option<&str>,
+    ) -> Option<Box<dyn egress_gateway::ReplyObserver>> {
+        let inner = self.inner.reply_observer(request_id);
+        // The copy counts against the gateway's shared budget. When the policy reads the reply
+        // anyway it costs nothing more; otherwise read it only for an output a target asked for.
+        if inner.is_none() && !self.recorder.reveals_output_of(&self.server, &self.tool) {
+            return None;
+        }
+        Some(Box::new(ObservedToolReply {
+            inner,
+            reader: policy::ReplyReader::for_request(request_id),
+            recorder: Arc::clone(&self.recorder),
+            server: self.server.clone(),
+            tool: self.tool.clone(),
+            request_id: request_id.map(str::to_string),
+            recorded: false,
+        }))
     }
 }
 
@@ -385,11 +524,45 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
             } => remote_mcp_decision(frame, refusal, &observations),
             _ => ordinary_egress_decision(&identity, refusal, &observations),
         };
+        let tool_call = match effect {
+            EgressEffectAttempt::HttpRequest {
+                mcp:
+                    Some(McpFrame::ToolCall {
+                        server,
+                        tool,
+                        arguments,
+                    }),
+                ..
+            } => Some(RemoteToolCall {
+                server: (*server).to_string(),
+                tool: (*tool).to_string(),
+                arguments: (*arguments).to_string(),
+            }),
+            _ => None,
+        };
+        // Observe every permitted remote `tools/call` reply, so a completion record states how
+        // the call ended whether or not a per-tool rule named the tool.
+        // Only when some target takes tool-call records: the copy counts against the gateway's
+        // shared budget, so reading a reply nobody records would cost the policy's own reads.
+        let result = match (result, &tool_call) {
+            (Ok(permit), Some(call)) if self.recorder.wants_tool_calls() => {
+                #[cfg(test)]
+                OBSERVING_PERMITS.with(|count| count.set(count.get() + 1));
+                Ok(Box::new(ObservingPermit {
+                    inner: permit,
+                    recorder: Arc::clone(&self.recorder),
+                    server: call.server.clone(),
+                    tool: call.tool.clone(),
+                }) as Box<dyn EgressEffectPermit>)
+            }
+            (result, _) => result,
+        };
         PENDING_EGRESS_DECISION.with(|pending| {
             pending.borrow_mut().replace(PendingEgressDecision {
                 identity,
                 verdict,
                 effective,
+                tool_call,
             });
         });
 
@@ -688,6 +861,49 @@ impl DecisionRecorder {
         }
     }
 
+    /// Whether any target takes tool-call records, so the box reads a remote reply only for one.
+    pub(crate) fn wants_tool_calls(&self) -> bool {
+        self.collector
+            .as_ref()
+            .is_some_and(|collector| collector.accepts(telemetry::Signal::ToolCalls))
+    }
+
+    /// Whether some target reveals an output field of `server`'s `tool`.
+    pub(crate) fn reveals_output_of(&self, server: &str, tool: &str) -> bool {
+        self.collector
+            .as_ref()
+            .is_some_and(|collector| collector.reveals_output_of(server, tool))
+    }
+
+    /// Submit one decided MCP tool call, with the arguments policy judged, as the call's JSON text.
+    ///
+    /// Text that does not parse records no field, since a target can name no path in it.
+    pub(crate) fn tool_called(&self, server: &str, tool: &str, arguments: &str) {
+        if let Some(collector) = &self.collector {
+            let arguments = serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
+            collector.tool_call(
+                telemetry::ToolCall::called(server, tool, &arguments)
+                    .correlated(self.request_context()),
+            );
+        }
+    }
+
+    /// Submit how one MCP tool call ended, with the tool's own answer when it declared one.
+    pub(crate) fn tool_completed(
+        &self,
+        server: &str,
+        tool: &str,
+        reply: &str,
+        output: Option<&serde_json::Value>,
+    ) {
+        if let Some(collector) = &self.collector {
+            collector.tool_call(
+                telemetry::ToolCall::completed(server, tool, reply, output)
+                    .correlated(self.request_context()),
+            );
+        }
+    }
+
     pub(crate) fn mcp_unmatched(&self, program: &str, arguments: &[String]) {
         if let Some(collector) = &self.collector {
             collector.mcp_unmatched(
@@ -742,13 +958,22 @@ impl Emitter for EgressDecisionRecorder {
         .mcp(request.context("jsonrpc_request_id"))
         .request(Some(request.as_str()));
         let identity = EgressIdentity::emitted(&decision);
-        if let Some(mut effective) = PENDING_EGRESS_DECISION.with(|pending| {
+        if let Some((mut effective, tool_call)) = PENDING_EGRESS_DECISION.with(|pending| {
             let held = pending.borrow_mut().take()?;
             (held.verdict == decision.decision && held.identity.is(&identity))
-                .then_some(held.effective)
+                .then_some((held.effective, held.tool_call))
         }) {
-            effective.correlation = correlation;
+            effective.correlation = correlation.clone();
             effective.subject = Some(identity.subject());
+            // Every decided remote `tools/call` states its own arguments, allowed or refused, so a
+            // reader learns what was asked for and not only what was judged.
+            if let Some(call) = tool_call {
+                self.recorder.for_request(correlation).tool_called(
+                    &call.server,
+                    &call.tool,
+                    &call.arguments,
+                );
+            }
             self.recorder.record(effective);
             return;
         }
@@ -1021,8 +1246,8 @@ mod tests {
             Principal::agent(),
             GovernedBox::assigned("test-box"),
         );
-        let interceptor = EgressDecisionInterceptor::over(policy);
         let recorder = DecisionRecorder::discarding();
+        let interceptor = EgressDecisionInterceptor::over(policy, Arc::clone(&recorder));
         let emitter = EgressDecisionRecorder::over(Arc::clone(&recorder));
 
         let permit = interceptor
@@ -1112,9 +1337,12 @@ mod tests {
     #[test]
     fn raw_verdict_capture_is_scoped_to_decided_egress_attempts() {
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let interceptor = EgressDecisionInterceptor::over(Arc::new(CaptureProbe {
-            observed: Arc::clone(&observed),
-        }));
+        let interceptor = EgressDecisionInterceptor::over(
+            Arc::new(CaptureProbe {
+                observed: Arc::clone(&observed),
+            }),
+            DecisionRecorder::discarding(),
+        );
 
         interceptor
             .intercept(&EgressEffectAttempt::Connect {
@@ -1183,12 +1411,15 @@ mod tests {
         )
         .expect("policy opens")
         .observed_by(Arc::new(PolicyDecisionObserver));
-        let interceptor = EgressDecisionInterceptor::over(EgressPolicyInterceptor::into_handle(
-            Arc::new(policy),
-            Principal::agent(),
-            GovernedBox::assigned("test-box"),
-        ));
         let recorder = DecisionRecorder::discarding();
+        let interceptor = EgressDecisionInterceptor::over(
+            EgressPolicyInterceptor::into_handle(
+                Arc::new(policy),
+                Principal::agent(),
+                GovernedBox::assigned("test-box"),
+            ),
+            Arc::clone(&recorder),
+        );
         let emitter = EgressDecisionRecorder::over(Arc::clone(&recorder));
 
         interceptor
@@ -1280,12 +1511,15 @@ mod tests {
         )
         .expect("policy opens")
         .observed_by(Arc::new(PolicyDecisionObserver));
-        let interceptor = EgressDecisionInterceptor::over(EgressPolicyInterceptor::into_handle(
-            Arc::new(policy),
-            Principal::agent(),
-            GovernedBox::assigned("test-box"),
-        ));
         let recorder = DecisionRecorder::discarding();
+        let interceptor = EgressDecisionInterceptor::over(
+            EgressPolicyInterceptor::into_handle(
+                Arc::new(policy),
+                Principal::agent(),
+                GovernedBox::assigned("test-box"),
+            ),
+            Arc::clone(&recorder),
+        );
         let emitter = EgressDecisionRecorder::over(Arc::clone(&recorder));
 
         // Intercepted: one request to `first.example`. Emitted: a different exchange every way it
@@ -1468,6 +1702,179 @@ mod tests {
         assert_eq!(absent, rule);
         let (empty, rule) = identifier(8443);
         assert_eq!(empty, rule);
+    }
+
+    /// A recorder over a real collector writing tool-call records to `path`, revealing the `demo`
+    /// server's `add` output field `sum` when `reveal` holds; or a target taking no tool calls.
+    fn tool_call_recorder(
+        path: Option<&std::path::Path>,
+        reveal: bool,
+    ) -> (Arc<Collector>, Arc<DecisionRecorder>) {
+        let mut config = telemetry::TelemetryConfig::for_box("demo");
+        if let Some(path) = path {
+            let mut target = telemetry::Target::new(
+                telemetry::TargetKind::File,
+                path.to_string_lossy().to_string(),
+            )
+            .receiving(vec![telemetry::Signal::ToolCalls]);
+            if reveal {
+                target = target.revealing_tool_fields(
+                    "demo",
+                    "add",
+                    telemetry::ToolFieldList {
+                        arguments: std::collections::BTreeSet::new(),
+                        output: ["sum".to_string()].into(),
+                    },
+                );
+            }
+            config = config.with_target(target);
+        } else {
+            config = config.with_target(
+                telemetry::Target::new(telemetry::TargetKind::File, "/dev/null".to_string())
+                    .receiving(vec![telemetry::Signal::PolicyDenied]),
+            );
+        }
+        let collector = Arc::new(telemetry::open(config).expect("open the collector"));
+        let recorder = DecisionRecorder::over(Arc::clone(&collector));
+        (collector, recorder)
+    }
+
+    fn capture_probe(recorder: Arc<DecisionRecorder>) -> Arc<dyn EgressEffectInterceptor> {
+        EgressDecisionInterceptor::over(
+            Arc::new(CaptureProbe {
+                observed: Arc::new(Mutex::new(Vec::new())),
+            }),
+            recorder,
+        )
+    }
+
+    /// A permit whose policy observer reads the reply, as a per-tool rule's does.
+    struct ObservedProbe;
+
+    impl EgressEffectInterceptor for ObservedProbe {
+        fn intercept(
+            &self,
+            _effect: &EgressEffectAttempt<'_>,
+        ) -> io::Result<Box<dyn EgressEffectPermit>> {
+            Ok(Box::new(ObservedPermit))
+        }
+    }
+
+    struct ObservedPermit;
+
+    impl EgressEffectPermit for ObservedPermit {
+        fn record_outcome(
+            self: Box<Self>,
+            _outcome: egress_gateway::EffectOutcome,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn mark_indeterminate(self: Box<Self>) {}
+
+        fn reply_observer(
+            &mut self,
+            _request_id: Option<&str>,
+        ) -> Option<Box<dyn egress_gateway::ReplyObserver>> {
+            Some(Box::new(SilentObserver))
+        }
+    }
+
+    struct SilentObserver;
+
+    impl egress_gateway::ReplyObserver for SilentObserver {
+        fn finished(self: Box<Self>, _reply: &[u8]) {}
+
+        fn abandoned(self: Box<Self>) {}
+    }
+
+    /// With no target taking tool calls, the box wraps no permit, even one whose policy observer
+    /// reads the reply: no tool-call record would be written, so the box does no work for it.
+    #[tokio::test]
+    async fn no_permit_is_wrapped_when_no_target_takes_tool_calls() {
+        let wrapped = |recorder: Arc<DecisionRecorder>| {
+            let before = OBSERVING_PERMITS.with(std::cell::Cell::get);
+            EgressDecisionInterceptor::over(Arc::new(ObservedProbe), recorder)
+                .intercept(&remote_tool_attempt(r#"{"a":1}"#))
+                .expect("the call is admitted");
+            OBSERVING_PERMITS.with(std::cell::Cell::get) - before
+        };
+        let (_none, nobody) = tool_call_recorder(None, false);
+        assert_eq!(
+            wrapped(nobody),
+            0,
+            "nobody takes tool calls, so nothing is wrapped"
+        );
+
+        // The paired positive, so the count above cannot pass on a wrap nothing counts.
+        let directory = tempfile::tempdir().expect("tempdir");
+        let (_some, somebody) = tool_call_recorder(Some(&directory.path().join("t.jsonl")), false);
+        assert_eq!(
+            wrapped(somebody),
+            1,
+            "a target takes tool calls, so the call is wrapped"
+        );
+    }
+
+    /// A target that takes tool calls but reveals none of this tool's output fields gets no copy
+    /// of a reply the policy does not read, since no value from it could reach that target.
+    #[tokio::test]
+    async fn no_reply_is_copied_when_no_target_reveals_the_tools_output() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let (_collector, recorder) =
+            tool_call_recorder(Some(&directory.path().join("tools.jsonl")), false);
+        let mut permit = capture_probe(recorder)
+            .intercept(&remote_tool_attempt(r#"{"a":1}"#))
+            .expect("the call is admitted");
+        assert!(permit.reply_observer(Some("1")).is_none());
+    }
+
+    /// With no policy observer, the box's own observer finishes at the reply, so a stream the
+    /// server holds open releases its copy at the answer rather than at the end.
+    #[tokio::test]
+    async fn the_box_observer_finishes_at_the_reply_on_a_held_open_stream() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("tools.jsonl");
+        let (collector, recorder) = tool_call_recorder(Some(&path), true);
+        let mut permit = capture_probe(recorder)
+            .intercept(&remote_tool_attempt(r#"{"a":1}"#))
+            .expect("the call is admitted");
+        let mut observer = permit
+            .reply_observer(Some("1"))
+            .expect("a target takes tool calls, so the box observes the reply");
+        let progress = b"data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\"}\n\n";
+        assert!(!observer.complete(progress), "progress is not the reply");
+        let replied = [
+            &progress[..],
+            b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":[]}}\n\n",
+        ]
+        .concat();
+        assert!(observer.complete(&replied), "the reply has arrived");
+        observer.finished(&replied);
+        collector.drained().await;
+        let text = std::fs::read_to_string(&path).expect("the tool-call records");
+        assert!(text.contains("strands.box.tool.completion"), "{text}");
+        assert!(text.contains(r#""stringValue":"result""#), "{text}");
+    }
+
+    /// A reply the gateway never read still ends the call, as `indeterminate`, once.
+    #[tokio::test]
+    async fn an_observer_dropped_before_its_reply_records_one_indeterminate_completion() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("tools.jsonl");
+        let (collector, recorder) = tool_call_recorder(Some(&path), true);
+        let mut permit = capture_probe(recorder)
+            .intercept(&remote_tool_attempt(r#"{"a":1}"#))
+            .expect("the call is admitted");
+        drop(permit.reply_observer(Some("1")).expect("an observer"));
+        collector.drained().await;
+        let text = std::fs::read_to_string(&path).expect("the tool-call records");
+        assert_eq!(
+            text.matches("strands.box.tool.completion").count(),
+            1,
+            "{text}"
+        );
+        assert!(text.contains(r#""stringValue":"indeterminate""#), "{text}");
     }
 
     struct CaptureProbe {

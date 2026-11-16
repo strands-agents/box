@@ -18,7 +18,7 @@ use crate::config::TelemetryConfig;
 use crate::error::Result;
 use crate::export::{BOX_ATTRIBUTE, SOURCE_ATTRIBUTE, SOURCE_BOX, TargetExporter};
 use crate::receive::Receiver;
-use crate::record::{ControlRecord, DecisionRecord, McpUnmatched, Signal};
+use crate::record::{ControlRecord, DecisionRecord, McpUnmatched, Signal, ToolCall};
 
 /// The scope every decision record carries.
 pub(crate) const SCOPE: &str = "strands-box.policy";
@@ -27,6 +27,10 @@ pub(crate) const SCOPE: &str = "strands-box.policy";
 pub(crate) const CONTROL_SCOPE: &str = "strands-box.control";
 
 const MCP_SCOPE: &str = "strands-box.mcp";
+
+/// The scope every tool-call record carries, so a reader filters a tool call's own values from the
+/// decision that judged it.
+const TOOL_SCOPE: &str = "strands-box.tool";
 
 /// The service every record names.
 const SERVICE: &str = "strands-box";
@@ -213,6 +217,7 @@ pub struct Collector {
     /// The control-plane scope's own logger, so a record names which plane it came from.
     control_logger: SdkLogger,
     mcp_logger: SdkLogger,
+    tool_logger: SdkLogger,
     /// Batches a target refused, counted by the exporters and never by the receiver.
     dropped: Arc<AtomicU64>,
     /// Agent payloads the receiver refused, which is not a loss of the box's own records.
@@ -223,6 +228,8 @@ pub struct Collector {
     cut: Arc<AtomicBool>,
     /// The union of every lane's signals, so a record nothing wants costs one load.
     accepts: [bool; Signal::SLOTS],
+    /// Every `(server, tool)` whose output some target that takes tool calls reveals a field of.
+    revealed_outputs: std::collections::BTreeSet<(String, String)>,
     port: u16,
 
     /// The one trace every control-plane operation of this run joins.
@@ -270,7 +277,18 @@ impl Collector {
         let mut logs = SdkLoggerProvider::builder().with_resource(resource(&box_name, &run_id));
         let mut relays = crate::receive::Relays::default();
         let mut accepts = [false; Signal::SLOTS];
+        let mut revealed_outputs = std::collections::BTreeSet::new();
         for target in config.targets() {
+            if target.signals().contains(&Signal::ToolCalls) {
+                revealed_outputs.extend(
+                    target
+                        .tool_fields()
+                        .tools
+                        .iter()
+                        .filter(|(_, list)| !list.output.is_empty())
+                        .map(|(key, _)| key.clone()),
+                );
+            }
             let exporter = Arc::new(
                 TargetExporter::open(target, Arc::clone(&dropped))?
                     .reporting_failures(config.reports_failures()),
@@ -325,6 +343,7 @@ impl Collector {
         let logger = logs.logger(SCOPE);
         let control_logger = logs.logger(CONTROL_SCOPE);
         let mcp_logger = logs.logger(MCP_SCOPE);
+        let tool_logger = logs.logger(TOOL_SCOPE);
 
         // An agent's span arrives already encoded, so it relays rather than going through the SDK.
         let receiving = tokio::spawn(inbound.serve_forever(
@@ -340,11 +359,13 @@ impl Collector {
             logger,
             control_logger,
             mcp_logger,
+            tool_logger,
             dropped,
             #[cfg(test)]
             refused,
             cut,
             accepts,
+            revealed_outputs,
             port,
             control_trace: ids.new_trace_id(),
             control_root: ids.new_span_id(),
@@ -438,6 +459,54 @@ impl Collector {
             emitted.add_attribute(key, value);
         }
         self.mcp_logger.emit(emitted);
+    }
+
+    /// Whether some target reveals an output field of `server`'s `tool`, so a caller reads that
+    /// tool's reply only when a value from it can reach a target.
+    #[must_use]
+    pub fn reveals_output_of(&self, server: &str, tool: &str) -> bool {
+        self.revealed_outputs
+            .contains(&(server.to_string(), tool.to_string()))
+    }
+
+    /// Whether any target receives `signal`, so a caller can skip work for a record nobody takes.
+    #[must_use]
+    pub fn accepts(&self, signal: Signal) -> bool {
+        self.accepts[signal.slot()]
+    }
+
+    /// Queue one MCP tool call's own arguments, or how it ended.
+    ///
+    /// Never blocks, never awaits, and never fails, on the same terms as [`Self::record`]. Each
+    /// target's exporter redacts every value whose field the target does not name.
+    pub fn tool_call(&self, record: ToolCall) {
+        let signal = Signal::ToolCalls;
+        if !self.accepts(signal) {
+            return;
+        }
+        let mut emitted = self.tool_logger.create_log_record();
+        emitted.set_event_name(record.phase().event_name());
+        let parent = record.correlation().parent();
+        if parent.is_valid() {
+            emitted.set_trace_context(
+                parent.trace_id(),
+                parent.span_id(),
+                Some(parent.trace_flags()),
+            );
+        }
+        for (key, value) in record.correlation().attributes() {
+            emitted.add_attribute(key, value);
+        }
+        emitted.set_timestamp(
+            std::time::UNIX_EPOCH
+                + Duration::from_nanos(u64::try_from(record.unix_nanos()).unwrap_or(u64::MAX)),
+        );
+        emitted.set_severity_number(signal.severity());
+        emitted.set_severity_text("info");
+        for (key, value) in record.attributes() {
+            emitted.add_attribute(key, value);
+        }
+        self.tool_logger.emit(emitted);
     }
 
     /// Queue one control-plane operation.
@@ -1800,6 +1869,227 @@ mod tests {
             !control.contains("rule-1"),
             "and no verdict reached it: {control}"
         );
+    }
+
+    /// One tool call reaches two targets, and each receives a value only for a field it names: the
+    /// paths always arrive, so a reader sees which fields the call had.
+    ///
+    /// Two targets, because one record reaches both and each exporter redacts on its own.
+    #[tokio::test]
+    async fn each_target_receives_only_the_tool_fields_it_names() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let revealing = directory.path().join("revealing.jsonl");
+        let plain = directory.path().join("plain.jsonl");
+        let collector = Collector::start(
+            TelemetryConfig::for_box("demo")
+                .with_target(
+                    Target::new(TargetKind::File, revealing.to_string_lossy().to_string())
+                        .revealing_tool_fields(
+                            "desk",
+                            "reset_password",
+                            crate::ToolFieldList {
+                                arguments: ["user_name".to_string()].into(),
+                                output: ["reset".to_string()].into(),
+                            },
+                        ),
+                )
+                .with_target(Target::new(
+                    TargetKind::File,
+                    plain.to_string_lossy().to_string(),
+                )),
+        )
+        .expect("open");
+
+        collector.tool_call(crate::ToolCall::called(
+            "desk",
+            "reset_password",
+            &serde_json::json!({"user_name": "ada", "token": "s3cret-token"}),
+        ));
+        collector.tool_call(crate::ToolCall::completed(
+            "desk",
+            "reset_password",
+            "result",
+            Some(&serde_json::json!({"reset": "done-now", "ticket": "T-998877"})),
+        ));
+        // The same field on another tool stays redacted, since the list names one tool.
+        collector.tool_call(crate::ToolCall::called(
+            "desk",
+            "lookup",
+            &serde_json::json!({"user_name": "grace"}),
+        ));
+        collector.drained().await;
+
+        let revealed = std::fs::read_to_string(&revealing).expect("the revealing target");
+        assert!(
+            revealed.contains("ada"),
+            "a named argument is revealed: {revealed}"
+        );
+        assert!(
+            revealed.contains("done-now"),
+            "a named output is revealed: {revealed}"
+        );
+        for hidden in ["s3cret-token", "T-998877", "grace"] {
+            assert!(
+                !revealed.contains(hidden),
+                "{hidden} was not named: {revealed}"
+            );
+        }
+        for path in ["token", "ticket"] {
+            assert!(
+                revealed.contains(path),
+                "the path {path} still arrives: {revealed}"
+            );
+        }
+
+        let redacted = std::fs::read_to_string(&plain).expect("the plain target");
+        assert!(redacted.contains("strands.box.tool.call"), "{redacted}");
+        assert!(
+            redacted.contains(r#""stringValue":"result""#),
+            "how it ended arrives: {redacted}"
+        );
+        for hidden in ["ada", "s3cret-token", "T-998877", "grace", "done-now"] {
+            assert!(
+                !redacted.contains(hidden),
+                "{hidden} reached a target that named nothing: {redacted}"
+            );
+        }
+        assert!(
+            redacted.contains("user_name"),
+            "the paths arrive: {redacted}"
+        );
+        assert!(collector.reveals_output_of("desk", "reset_password"));
+        assert!(!collector.reveals_output_of("desk", "lookup"));
+    }
+
+    /// Data can spell any path, including the box's own key names, and none of them escapes
+    /// redaction: a target that names nothing receives every value as `<redacted>`.
+    #[tokio::test]
+    async fn no_data_path_escapes_redaction() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("records.jsonl");
+        let collector = Collector::start(TelemetryConfig::for_box("demo").with_target(
+            Target::new(TargetKind::File, path.to_string_lossy().to_string()),
+        ))
+        .expect("open");
+        let spelled = serde_json::json!({
+            "strands": {"box": {"omitted": "LEAKED-SECRET-VALUE"}},
+            "token": "other-secret"
+        });
+        collector.tool_call(crate::ToolCall::called("desk", "lookup", &spelled));
+        collector.tool_call(crate::ToolCall::completed(
+            "desk",
+            "lookup",
+            "result",
+            Some(&spelled),
+        ));
+        collector.drained().await;
+
+        let text = std::fs::read_to_string(&path).expect("the records");
+        for secret in ["LEAKED-SECRET-VALUE", "other-secret"] {
+            assert!(!text.contains(secret), "{secret} escaped redaction: {text}");
+        }
+        assert!(
+            text.contains("strands.box.omitted"),
+            "the path still arrives: {text}"
+        );
+    }
+
+    /// A revealed value keeps its JSON type, so `true` and `"true"` stay apart, and a redacted
+    /// value is `<redacted>` whatever its type.
+    #[tokio::test]
+    async fn a_revealed_value_keeps_its_type_and_a_redacted_one_hides_it() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("records.jsonl");
+        let collector = Collector::start(
+            TelemetryConfig::for_box("demo").with_target(
+                Target::new(TargetKind::File, path.to_string_lossy().to_string())
+                    .revealing_tool_fields(
+                        "desk",
+                        "check",
+                        crate::ToolFieldList {
+                            arguments: ["flag", "text", "count", "ratio", "none"]
+                                .map(str::to_string)
+                                .into(),
+                            output: std::collections::BTreeSet::new(),
+                        },
+                    ),
+            ),
+        )
+        .expect("open");
+        collector.tool_call(crate::ToolCall::called(
+            "desk",
+            "check",
+            &serde_json::json!({
+                "flag": true, "text": "true", "count": 3, "ratio": 0.5, "none": null,
+                "hidden": false
+            }),
+        ));
+        collector.drained().await;
+
+        let text = std::fs::read_to_string(&path).expect("the records");
+        let request: serde_json::Value =
+            serde_json::from_str(text.lines().next().expect("one line")).expect("json");
+        let fields = request["resourceLogs"][0]["scopeLogs"][0]["logRecords"][0]["attributes"]
+            .as_array()
+            .expect("attributes")
+            .iter()
+            .find(|attribute| attribute["key"] == "strands.box.tool.arguments")
+            .expect("the arguments")["value"]["kvlistValue"]["values"]
+            .clone();
+        let value = |key: &str| {
+            fields
+                .as_array()
+                .expect("fields")
+                .iter()
+                .find(|field| field["key"] == key)
+                .expect("the field")["value"]
+                .clone()
+        };
+        assert_eq!(value("flag"), serde_json::json!({"boolValue": true}));
+        assert_eq!(value("text"), serde_json::json!({"stringValue": "true"}));
+        assert_eq!(value("count")["intValue"], serde_json::json!("3"));
+        assert_eq!(value("ratio"), serde_json::json!({"doubleValue": 0.5}));
+        assert!(
+            value("none").get("arrayValue").is_some(),
+            "{}",
+            value("none")
+        );
+        assert_eq!(
+            value("hidden"),
+            serde_json::json!({"stringValue": "<redacted>"})
+        );
+    }
+
+    /// A tool-call record is a log record and never a span, like an unmatched route.
+    #[tokio::test]
+    async fn tool_call_records_are_logs_and_not_spans() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("tools.jsonl");
+        let collector = Collector::start(
+            TelemetryConfig::for_box("demo").with_target(
+                Target::new(TargetKind::File, path.to_string_lossy().to_string())
+                    .receiving(vec![Signal::ToolCalls]),
+            ),
+        )
+        .expect("open");
+
+        // A valid parent, because a record without one exports no span whatever its scope.
+        collector.tool_call(
+            crate::ToolCall::called("desk", "lookup", &serde_json::json!({})).correlated(
+                crate::Correlation::from_headers(
+                    Some("00-11111111111111111111111111111111-aaaaaaaaaaaaaaaa-01"),
+                    None,
+                ),
+            ),
+        );
+        collector.drained().await;
+
+        let (spans, logs) = spans_and_logs(&path);
+        assert!(
+            spans.is_empty(),
+            "a tool call reports no policy verdict, so it exports no span: {spans:?}"
+        );
+        assert_eq!(logs.len(), 1, "{logs:?}");
     }
 
     /// **A target naming none receives the control plane too**, so an operator who declares nothing

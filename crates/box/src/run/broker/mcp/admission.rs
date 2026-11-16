@@ -108,12 +108,18 @@ pub(super) fn admit_tool_call(
     principal: &Principal,
     server: &str,
     frame: &str,
+    recorder: &crate::run::telemetry::DecisionRecorder,
 ) -> io::Result<McpRequestAdmission> {
     let correlation = telemetry::Correlation::from_mcp(frame);
     correlation.during(|| {
         let Some(target) = McpTarget::of_stdio_request(frame.as_bytes())? else {
             return Ok(McpRequestAdmission::Undecided);
         };
+        // Every decided `tools/call` states its own arguments, whichever gate refuses it, so a
+        // reader learns what was asked for and not only what was judged.
+        if let Some(tool) = target.tool() {
+            recorder.tool_called(server, tool, &target.arguments);
+        }
 
         let (decision, request_id) = policy.decide(
             governed,
@@ -677,6 +683,7 @@ mod tests {
             &Principal::agent(),
             "issues-mcp",
             frame,
+            &crate::run::telemetry::DecisionRecorder::discarding(),
         )? {
             McpRequestAdmission::Undecided => Ok(None),
             McpRequestAdmission::Allowed(..) => Ok(reported),
@@ -914,6 +921,7 @@ mod tests {
                 &Principal::agent(),
                 "issues-mcp",
                 SEARCH,
+                &crate::run::telemetry::DecisionRecorder::discarding(),
             )
             .expect("admit") else {
                 panic!("a call under the cap must be admitted");
@@ -929,7 +937,8 @@ mod tests {
                     &governed,
                     &Principal::agent(),
                     "issues-mcp",
-                    SEARCH
+                    SEARCH,
+                    &crate::run::telemetry::DecisionRecorder::discarding(),
                 )
                 .expect("admit"),
                 McpRequestAdmission::Denied { .. }
@@ -953,6 +962,7 @@ mod tests {
             &Principal::agent(),
             "issues-mcp",
             SEARCH,
+            &crate::run::telemetry::DecisionRecorder::discarding(),
         )
         .expect("the tool call is valid");
         let McpRequestAdmission::Allowed(decision, ..) = admission else {
@@ -1095,6 +1105,7 @@ mod tests {
             &Principal::agent(),
             "issues-mcp",
             SEARCH,
+            &crate::run::telemetry::DecisionRecorder::discarding(),
         )
         .expect("valid tool call") else {
             panic!("the tool permit admits the call");
@@ -1124,6 +1135,7 @@ mod tests {
             &Principal::agent(),
             "issues-mcp",
             SEARCH,
+            &crate::run::telemetry::DecisionRecorder::discarding(),
         )
         .expect("the tool call is valid");
         let McpRequestAdmission::Denied { decision, refusal } = admission else {

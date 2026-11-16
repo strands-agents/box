@@ -1902,7 +1902,22 @@ fn span_attribute<'a>(span: &'a Value, name: &str) -> &'a str {
 fn recorded_policy_spans(box_: &Configured) -> Vec<Value> {
     let records = std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl"))
         .expect("the real collector's records");
+    // The default file reveals no tool-call value anywhere, and no decision or span carries one.
     assert!(!records.contains("unrelated-private-payload"));
+    let mut decision_text = String::new();
+    for line in records.lines() {
+        let mut batch: Value = serde_json::from_str(line).expect("OTLP batch");
+        for resource in batch["resourceLogs"].as_array_mut().into_iter().flatten() {
+            if let Some(scopes) = resource["scopeLogs"].as_array_mut() {
+                scopes.retain(|scope| scope["scope"]["name"] != "strands-box.tool");
+            }
+        }
+        decision_text.push_str(&batch.to_string());
+    }
+    assert!(
+        !decision_text.contains("unrelated-private-payload"),
+        "a decision or span must not carry a tool call's arguments"
+    );
     let mut spans = Vec::new();
     let mut logs = Vec::new();
     for line in records.lines() {
@@ -2539,6 +2554,18 @@ when { context.input.text == "denied" };"#,
     }
     let spans = recorded_policy_spans(&box_);
     assert_eq!(spans.len(), 8, "{spans:#?}");
+    // The tool-call records name the arguments the decisions leave out, with values redacted.
+    let tools = tool_records(&box_.root().join("private/telemetry/records.jsonl"));
+    assert!(
+        tools
+            .iter()
+            .any(|(event, attributes)| event == "strands.box.tool.call"
+                && attributes
+                    .iter()
+                    .any(|(key, value)| key == "strands.box.tool.arguments.text"
+                        && value == "<redacted>")),
+        "the tool-call record names the argument with its value redacted: {tools:#?}"
+    );
     let mut request_ids = std::collections::HashSet::new();
     for (index, frame) in frames.iter().enumerate() {
         let id = frame["id"]
@@ -3070,4 +3097,227 @@ unless temporal { formerly within 1h ( demo::Action::"verify"::response{
         4,
         "the refused echo never reached origin"
     );
+
+    // Over http too, each call states its arguments and each one that ran states how it ended,
+    // with the tool's own answer, joined to its call by the JSON-RPC id.
+    let tools = tool_records(&box_.root().join("private/telemetry/records.jsonl"));
+    let event = |name: &str, id: &str| {
+        tools.iter().find(|(event, attributes)| {
+            event == name
+                && attributes
+                    .iter()
+                    .any(|(key, value)| key == "jsonrpc.request.id" && value == id)
+        })
+    };
+    for id in ["v1", "e1", "v2", "e2"] {
+        assert!(
+            event("strands.box.tool.call", id).is_some(),
+            "call {id} states its arguments: {tools:#?}"
+        );
+    }
+    let attribute = |record: &(String, Vec<(String, String)>), key: &str| {
+        record
+            .1
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.clone())
+    };
+    // The default file names no field, so the argument's path arrives and its value does not.
+    let first = event("strands.box.tool.call", "v1").expect("v1's call record");
+    assert_eq!(
+        attribute(first, "strands.box.tool.arguments.text").as_deref(),
+        Some("<redacted>")
+    );
+    for id in ["v1", "v2", "e2"] {
+        let ended = event("strands.box.tool.completion", id)
+            .unwrap_or_else(|| panic!("call {id} states how it ended: {tools:#?}"));
+        assert_eq!(
+            attribute(ended, "strands.box.tool.reply").as_deref(),
+            Some("result")
+        );
+    }
+    assert!(
+        event("strands.box.tool.completion", "e1").is_none(),
+        "the refused echo never ran, so it has no completion: {tools:#?}"
+    );
+    // A per-tool rule reads these replies, so Box reads them too, and a streamed reply's own
+    // answer arrives as a named, redacted field.
+    let verified = event("strands.box.tool.completion", "v2").expect("v2's completion");
+    assert_eq!(
+        attribute(verified, "strands.box.tool.output.verified").as_deref(),
+        Some("<redacted>"),
+        "{tools:#?}"
+    );
+}
+
+/// A target that names a tool's fields in `box.toml` receives those values in clear text, and
+/// every other value redacted, including the same field on another tool.
+#[test]
+fn a_target_receives_in_clear_text_only_the_tool_fields_its_box_toml_names() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let upstream = TraceUpstream::start();
+    let box_ = Request::with_config(
+        "remote-tool-reveal",
+        r#"permit(principal, action == Box::Action::"net:connect", resource);
+permit(principal, action == Box::Action::"http:request", resource);
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "demo" };"#,
+        &format!(
+            "[mcp.demo]\ntype = \"http\"\ndestinations = [\"{}\"]\n\n\
+             [telemetry.local]\nkind = \"file\"\n\
+             destination = \"{}/private/telemetry/revealed.jsonl\"\n\n\
+             [telemetry.local.tool_fields.\"demo/verify\"]\narguments = [\"text\"]\n\
+             output = [\"verified\"]\n",
+            upstream.authority,
+            fixture::BOX_DIR
+        ),
+    )
+    .expect();
+    let frame = |id: &str, method: &str, tool: &str, text: Option<&str>| {
+        let params = match text {
+            Some(text) => json!({"name": tool, "arguments": {"text": text}}),
+            None => json!({}),
+        };
+        json!({
+            "url": format!("http://{}/mcp", upstream.authority),
+            "headers": {},
+            "body": {"jsonrpc": "2.0", "id": id, "method": method, "params": params}
+        })
+    };
+    let statuses: Vec<u64> = trace_probe(
+        &box_,
+        &json!([
+            frame("list", "tools/list", "", None),
+            frame("v1", "tools/call", "verify", Some("sse-yes")),
+            frame("e1", "tools/call", "echo", Some("echo-private-text")),
+        ]),
+    )
+    .iter()
+    .map(|reply| reply["status"].as_u64().expect("a status"))
+    .collect();
+    assert_eq!(statuses, [200, 200, 200]);
+    upstream.finish();
+
+    let path = box_.root().join("private/telemetry/revealed.jsonl");
+    let tools = tool_records(&path);
+    let value = |event: &str, id: &str, key: &str| {
+        tools
+            .iter()
+            .find(|(name, attributes)| {
+                name == event
+                    && attributes
+                        .iter()
+                        .any(|(key, value)| key == "jsonrpc.request.id" && value == id)
+            })
+            .and_then(|(_, attributes)| {
+                attributes
+                    .iter()
+                    .find(|(name, _)| name == key)
+                    .map(|(_, value)| value.clone())
+            })
+    };
+    assert_eq!(
+        value(
+            "strands.box.tool.call",
+            "v1",
+            "strands.box.tool.arguments.text"
+        )
+        .as_deref(),
+        Some("sse-yes"),
+        "a named argument arrives in clear text: {tools:#?}"
+    );
+    assert_eq!(
+        value(
+            "strands.box.tool.completion",
+            "v1",
+            "strands.box.tool.output.verified"
+        )
+        .as_deref(),
+        Some("true"),
+        "a named output arrives in clear text: {tools:#?}"
+    );
+    assert_eq!(
+        value(
+            "strands.box.tool.call",
+            "e1",
+            "strands.box.tool.arguments.text"
+        )
+        .as_deref(),
+        Some("<redacted>"),
+        "the same field on another tool stays redacted: {tools:#?}"
+    );
+    // The policy reads every listed tool's reply, so echo's end is recorded too.
+    assert_eq!(
+        value(
+            "strands.box.tool.completion",
+            "e1",
+            "strands.box.tool.reply"
+        )
+        .as_deref(),
+        Some("result"),
+        "{tools:#?}"
+    );
+    let text = std::fs::read_to_string(&path).expect("the revealing target's records");
+    assert!(!text.contains("echo-private-text"), "{text}");
+}
+
+/// Every `strands-box.tool` log record in a records file, as its event name and string attributes.
+fn tool_records(path: &std::path::Path) -> Vec<(String, Vec<(String, String)>)> {
+    let text = std::fs::read_to_string(path).expect("read the drained telemetry");
+    let mut records = Vec::new();
+    for line in text.lines() {
+        let request: serde_json::Value =
+            serde_json::from_str(line).expect("a telemetry line is one OTLP request");
+        for resource in request["resourceLogs"].as_array().into_iter().flatten() {
+            for scope in resource["scopeLogs"].as_array().into_iter().flatten() {
+                if scope["scope"]["name"] != "strands-box.tool" {
+                    continue;
+                }
+                for record in scope["logRecords"].as_array().into_iter().flatten() {
+                    records.push((
+                        record["eventName"].as_str().unwrap_or_default().to_string(),
+                        record["attributes"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .flat_map(|attribute| {
+                                let Some(key) = attribute["key"].as_str() else {
+                                    return Vec::new();
+                                };
+                                if let Some(text) = attribute["value"]["stringValue"].as_str() {
+                                    return vec![(key.to_string(), text.to_string())];
+                                }
+                                attribute["value"]["kvlistValue"]["values"]
+                                    .as_array()
+                                    .into_iter()
+                                    .flatten()
+                                    .filter_map(|field| {
+                                        let value = &field["value"];
+                                        let text = value["stringValue"]
+                                            .as_str()
+                                            .map(str::to_string)
+                                            .or_else(|| {
+                                                value["boolValue"]
+                                                    .as_bool()
+                                                    .map(|flag| flag.to_string())
+                                            })
+                                            .or_else(|| {
+                                                value["intValue"].as_str().map(str::to_string)
+                                            })
+                                            .or_else(|| {
+                                                value["doubleValue"].as_f64().map(|n| n.to_string())
+                                            })?;
+                                        Some((format!("{key}.{}", field["key"].as_str()?), text))
+                                    })
+                                    .collect()
+                            })
+                            .collect(),
+                    ));
+                }
+            }
+        }
+    }
+    records
 }

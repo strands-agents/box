@@ -200,6 +200,7 @@ A box whose egress re-routes a destination to a [backend](egress.md) requires re
 An explicit `limits.shell.max_input` or `limits.shell.max_output` requires record version 31,
 including values equal to the defaults.
 A non-empty [`[gateway] upgrade_http`](config.md#gateway) requires record version 32.
+An explicit `limits.shell.max_stdin` requires record version 33.
 A box ID that a library caller supplied, other than `box-` and 16 hexadecimal digits, requires record
 version 34.
 Enabling [`file-watching`](config.md#file-watching) for any process requires record version 35.
@@ -209,6 +210,8 @@ Setting [`monty`](config.md#monty) to `false` requires record version 37.
 A box whose agent, tool, or local MCP server declares a [`deny_write`](config.md#agentfilesystem-and-toolnamefilesystem) list requires record version 38.
 A [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table, or a `secret.env` key on a route or a
 remote MCP server, requires record version 39.
+A [telemetry target](telemetry.md#include) that names `tool_calls` or a `tool_fields` table requires
+record version 40.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 

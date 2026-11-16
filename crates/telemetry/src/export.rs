@@ -65,6 +65,8 @@ pub(crate) struct TargetExporter {
     dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
     /// Whether a failed batch is also printed to stderr, as the config asks.
     reports_failures: bool,
+    /// The tool-call fields this target receives in clear text.
+    tool_fields: crate::tool::ToolFieldAllowlist,
 }
 
 impl TargetExporter {
@@ -95,6 +97,7 @@ impl TargetExporter {
                         resource: std::sync::OnceLock::new(),
                         dropped,
                         reports_failures: false,
+                        tool_fields: target.tool_fields().clone(),
                     });
                 }
                 // Only the parent chain; `O_NOFOLLOW` still guards the final component.
@@ -143,6 +146,7 @@ impl TargetExporter {
             resource: std::sync::OnceLock::new(),
             dropped,
             reports_failures: false,
+            tool_fields: target.tool_fields().clone(),
         })
     }
 
@@ -164,12 +168,14 @@ impl TargetExporter {
         let resource = self
             .resource
             .get_or_init(ResourceAttributesWithSchema::default);
-        let request = ExportLogsServiceRequest {
+        let mut request = ExportLogsServiceRequest {
             resource_logs:
                 opentelemetry_proto::transform::logs::tonic::group_logs_by_resource_and_scope(
                     &batch, resource,
                 ),
         };
+        // Redact before any copy leaves, so this target receives only the fields it named.
+        self.tool_fields.redact(&mut request);
         let traces = if self.accepts.contains(&Payload::Traces) {
             box_spans(&request)
         } else {

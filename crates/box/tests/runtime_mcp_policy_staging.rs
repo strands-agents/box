@@ -243,6 +243,99 @@ fn assert_telemetry_id(value: &Value, length: usize) {
     assert!(id.bytes().any(|byte| byte != b'0'), "{id}");
 }
 
+/// One `strands-box.tool` log record: its event name and its string attributes.
+#[derive(Debug)]
+struct ToolRecord {
+    event: String,
+    attributes: Vec<(String, String)>,
+}
+
+impl ToolRecord {
+    fn attribute(&self, key: &str) -> Option<&String> {
+        self.attributes
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value)
+    }
+}
+
+/// One attribute as `(key, text)` pairs: a string as itself, and a field map as
+/// `<key>.<path>` for each field.
+fn flattened_attribute(attribute: &Value) -> Vec<(String, String)> {
+    let Some(key) = attribute["key"].as_str() else {
+        return Vec::new();
+    };
+    if let Some(text) = attribute["value"]["stringValue"].as_str() {
+        return vec![(key.to_string(), text.to_string())];
+    }
+    attribute["value"]["kvlistValue"]["values"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|field| {
+            let value = &field["value"];
+            let text = value["stringValue"]
+                .as_str()
+                .map(str::to_string)
+                .or_else(|| value["boolValue"].as_bool().map(|flag| flag.to_string()))
+                .or_else(|| value["intValue"].as_str().map(str::to_string))
+                .or_else(|| value["doubleValue"].as_f64().map(|n| n.to_string()))?;
+            Some((format!("{key}.{}", field["key"].as_str()?), text))
+        })
+        .collect()
+}
+
+/// Every `strands-box.tool` log record in a records file, in order.
+fn tool_records(path: &Path) -> Vec<ToolRecord> {
+    let text = std::fs::read_to_string(path).expect("read the drained telemetry");
+    let mut records = Vec::new();
+    for line in text.lines() {
+        let request: Value =
+            serde_json::from_str(line).expect("a telemetry line is one OTLP request");
+        for resource in request["resourceLogs"].as_array().into_iter().flatten() {
+            for scope in resource["scopeLogs"].as_array().into_iter().flatten() {
+                if scope["scope"]["name"] != "strands-box.tool" {
+                    continue;
+                }
+                for record in scope["logRecords"].as_array().into_iter().flatten() {
+                    records.push(ToolRecord {
+                        event: record["eventName"].as_str().unwrap_or_default().to_string(),
+                        attributes: record["attributes"]
+                            .as_array()
+                            .into_iter()
+                            .flatten()
+                            .flat_map(flattened_attribute)
+                            .collect(),
+                    });
+                }
+            }
+        }
+    }
+    records
+}
+
+/// The records file split into its `strands-box.tool` log records and everything else, as text.
+fn split_tool_scope(text: &str) -> (String, String) {
+    let mut tool = String::new();
+    let mut other = String::new();
+    for line in text.lines() {
+        let mut request: Value =
+            serde_json::from_str(line).expect("a telemetry line is one OTLP request");
+        for resource in request["resourceLogs"].as_array_mut().into_iter().flatten() {
+            if let Some(scopes) = resource["scopeLogs"].as_array_mut() {
+                for scope in scopes.iter() {
+                    if scope["scope"]["name"] == "strands-box.tool" {
+                        tool.push_str(&scope.to_string());
+                    }
+                }
+                scopes.retain(|scope| scope["scope"]["name"] != "strands-box.tool");
+            }
+        }
+        other.push_str(&request.to_string());
+    }
+    (tool, other)
+}
+
 fn observed_linked_policy_spans(box_: &RuntimeMcpBox) -> Vec<Value> {
     let stored: toml::Value = toml::from_str(
         &std::fs::read_to_string(box_.stored_record()).expect("read the trusted box record"),
@@ -253,9 +346,17 @@ fn observed_linked_policy_spans(box_: &RuntimeMcpBox) -> Vec<Value> {
         .expect("the stored box has an identity");
     let text = std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl"))
         .expect("read the drained policy telemetry");
+    // The default file reveals no tool-call value: the tool-call record names the argument's
+    // path and redacts its value, and no decision or span carries either. Metadata and a forged
+    // name reach no record at all.
     assert!(!text.contains("fixture-private-argument"));
     assert!(!text.contains("fixture-private-metadata"));
     assert!(!text.contains("forged-tool"));
+    let (tool_scope, _) = split_tool_scope(&text);
+    assert!(
+        tool_scope.contains(r#""key":"value""#) && tool_scope.contains("<redacted>"),
+        "the tool-call record names the argument with its value redacted: {tool_scope}"
+    );
     let mut logs = Vec::new();
     let mut spans = Vec::new();
     let mut provenance = None;
@@ -739,6 +840,20 @@ fn an_absent_catalog_tool_reaches_neither_policy_observer_nor_server() {
         },
         "the absent tool must record the catalog denial instead of the policy candidate"
     );
+    // The refused call still states what it asked for, and only the call that ran has an end.
+    let tools = tool_records(&box_.root().join("private/telemetry/records.jsonl"));
+    let called: Vec<_> = tools
+        .iter()
+        .filter(|record| record.event == "strands.box.tool.call")
+        .filter_map(|record| record.attribute("strands.box.tool.name").cloned())
+        .collect();
+    assert_eq!(called, ["absent", "read"], "{tools:#?}");
+    let ended: Vec<_> = tools
+        .iter()
+        .filter(|record| record.event == "strands.box.tool.completion")
+        .filter_map(|record| record.attribute("strands.box.tool.name").cloned())
+        .collect();
+    assert_eq!(ended, ["read"], "{tools:#?}");
 }
 
 #[test]
@@ -1183,6 +1298,58 @@ fn concurrent_local_mcp_policy_spans_keep_each_messages_parent() {
     box_.release_workload();
     let output = run.wait(SHUTDOWN);
     assert!(output.status.success(), "{output:?}");
+    // Each call states its arguments, refused or not, and the one that ran states how it ended.
+    // Every record names the call's own JSON-RPC id, which joins it to its decision.
+    let tools = tool_records(&box_.root().join("private/telemetry/records.jsonl"));
+    let called: Vec<_> = tools
+        .iter()
+        .filter(|record| record.event == "strands.box.tool.call")
+        .collect();
+    assert_eq!(called.len(), 2, "{tools:#?}");
+    // The default file names no field, so each call names its argument and redacts the value.
+    for record in &called {
+        assert_eq!(
+            record
+                .attribute("strands.box.tool.arguments.value")
+                .map(String::as_str),
+            Some("<redacted>"),
+            "{tools:#?}"
+        );
+    }
+    let completed: Vec<_> = tools
+        .iter()
+        .filter(|record| record.event == "strands.box.tool.completion")
+        .collect();
+    assert_eq!(
+        completed.len(),
+        1,
+        "only the permitted call ended: {tools:#?}"
+    );
+    assert_eq!(
+        completed[0]
+            .attribute("strands.box.tool.reply")
+            .map(String::as_str),
+        Some("result")
+    );
+    for record in &tools {
+        assert_eq!(
+            record
+                .attribute("strands.box.tool.server")
+                .map(String::as_str),
+            Some("alpha")
+        );
+        assert_eq!(
+            record
+                .attribute("strands.box.tool.name")
+                .map(String::as_str),
+            Some("read")
+        );
+        assert_eq!(
+            record.attribute("jsonrpc.request.id").map(String::as_str),
+            Some("41"),
+            "{record:#?}"
+        );
+    }
     let spans = observed_linked_policy_spans(&box_);
     assert_eq!(
         spans.len(),

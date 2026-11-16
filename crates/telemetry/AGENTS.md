@@ -160,15 +160,16 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   context, so even a widened scope test would have skipped every control record for want of a span ID.
   The scope test is now `Plane::of`, an exhaustive match on the two scope constants, and the constants
   are `pub(crate)` so the two files cannot drift on the spelling. The agent's own scopes fall through to
-  `None` and relay untouched. MCP routing diagnostics in `strands-box.mcp` are log records only and
-  stay outside `Plane::of`.
+  `None` and relay untouched. MCP routing diagnostics in `strands-box.mcp` and tool-call records in
+  `strands-box.tool` are log records only and stay outside `Plane::of`.
 - **Severity is what routes a record to a lane, so two signals may never share one.** `TargetLane::emit`
   reads `Signal::of_severity` and nothing else — not the scope, not the attributes. So adding a signal
-  means adding a severity no other signal holds; `control_plane` took `Info2`. Sharing one would file a
+  means adding a severity no other signal holds; `control_plane` took `Info2`, and `tool_calls`
+  took `Info4`. Sharing one would file a
   control-plane record as a permit, silently. `no_two_signals_share_a_severity` is the pin.
 - **Box record kinds share one destination, and a reader must select a scope.** Decisions carry
-  `strands-box.policy`, control-plane records carry `strands-box.control`, and unmatched MCP routes
-  carry `strands-box.mcp`. Two box tests indexed
+  `strands-box.policy`, control-plane records carry `strands-box.control`, unmatched MCP routes
+  carry `strands-box.mcp`, and tool-call records carry `strands-box.tool`. Two box tests indexed
   `scopeLogs[0]` and broke the moment control records started arriving first — a box records that it
   started before it decides anything. A query over one file that does not name a scope will read the
   wrong record shape, and the shipped `jq` recipes had to gain a `select(.scope.name == …)` for that
@@ -187,8 +188,20 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   [a target names a set of signals](../../docs/design/decisions.md#a-target-names-a-set-of-signals) says it should.
   An absent list takes **every** signal, and a list that is written must name `trace` to keep
   the control plane, because `trace` expands to both `agent_trace` and `control_plane`. `logs` expands
-  to `agent_logs` and `mcp_unmatched`. The seven spellings here are this crate's own.
-  `box.toml` takes five words: `deny`, `permit`, `trace`, `logs`, and `metrics`. Box expands them.
+  to `agent_logs` and `mcp_unmatched`. The eight spellings here are this crate's own.
+  `box.toml` takes six words: `deny`, `permit`, `trace`, `logs`, `metrics`, and `tool_calls`. Box
+  expands them.
+- **A tool-call value reaches a target only when the target names its field, and the exporter is
+  where that holds.** A `ToolCall` carries every flattened argument and output value, because one
+  record reaches every target. `TargetExporter::export_logs` runs `ToolFieldAllowlist::redact` on the
+  encoded request before either copy leaves, keyed by the record's own `strands.box.tool.server` and
+  `.name`, so a field revealed for one tool stays redacted on another. A target with no list,
+  including the box's default file, receives every path and no value. Do not move the redaction
+  into `ToolCall` or into the box: a record that left already redacted could not serve a target that
+  asked for the value, and one that left unredacted from the box would reach every target.
+  `each_target_receives_only_the_tool_fields_it_names` is the two-target pin, and it fails when the
+  `redact` call is removed. A key that is not a plain name becomes `*`, because a key is never
+  redacted and a tool can use data, such as an email address, as one.
 - **`agent_logs` and `agent_metrics` are UNCONDITIONAL, and no list narrows them away.**
   `Collector::start` unions `Signal::always_received()` into every target's lane, by the maintainers'
   direction on 2026-09-29, so `include = ["deny"]` holds the refusals **and** the agent's own log
@@ -404,10 +417,10 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
 
 ## Public surface
 
-Seventeen names: `Collector`, `Target`, `TargetKind`, `TargetSecret`, `TelemetryConfig`, `Result`,
+Twenty names: `Collector`, `Target`, `TargetKind`, `TargetSecret`, `TelemetryConfig`, `Result`,
 `TelemetryError`, `DecisionRecord`, `DecisionCause`, `DeterminingPolicy`, `Subject`, `Correlation`,
-`ControlRecord`, `ControlOperation`, `Signal`, `McpUnmatched`, and `Payload`, reached through
-`telemetry::open`, then:
+`ControlRecord`, `ControlOperation`, `Signal`, `McpUnmatched`, `Payload`, `ToolCall`, `ToolFieldList`,
+and `is_field_path`, reached through `telemetry::open`, then:
 
 **Three of those carry one decision's context, and each exists because a caller holds the value and
 this crate must not re-derive it.** `Correlation` is the request's W3C parent, the transport request
