@@ -371,7 +371,7 @@ fn a_parent_of_a_granted_store_cannot_be_moved_out_through_either_interpreter() 
             "the parent moved with the store inside: {seen}"
         );
         assert!(
-            seen.contains("credential-store content"),
+            seen.contains("holds a credential store"),
             "the refusal must name the floor: {seen}"
         );
         assert!(

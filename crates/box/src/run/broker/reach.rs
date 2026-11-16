@@ -525,7 +525,7 @@ impl Reach {
         if mutates
             && !in_store
             && self
-                .stores_inside(approved)
+                .stores_inside(approved, false)
                 .iter()
                 .any(|store| self.store_grant(store, true).is_none())
         {
@@ -546,10 +546,10 @@ impl Reach {
         if !self.is_in_a_credential_store(source) {
             // A directory that holds a lifted store carries it along, and the store's own entry
             // does not cover the directory, so moving it takes the store out of that entry.
-            return if self.stores_inside(source).is_empty() {
+            return if self.stores_inside(source, true).is_empty() {
                 Ok(())
             } else {
-                Err(Refused::new(reported_as, CREDENTIAL_STORE_RELOCATION))
+                Err(Refused::new(reported_as, CREDENTIAL_STORE_PARENT_MOVE))
             };
         }
         let same_grant = match (self.store_grant(source, true), destination) {
@@ -565,16 +565,20 @@ impl Reach {
         }
     }
 
-    /// Every credential store inside `approved`, by folded spelling and, for a directory, by where
-    /// each existing store resolves now, whatever spelling made it.
-    fn stores_inside(&self, approved: &Path) -> Vec<PathBuf> {
+    /// Every credential store inside `approved`: by folded spelling (absent stores included, unless
+    /// `existing_only`) and, for a directory, by where each existing store resolves now, whatever
+    /// spelling made it.
+    fn stores_inside(&self, approved: &Path, existing_only: bool) -> Vec<PathBuf> {
         let spelled = folded(approved);
-        let mut inside: Vec<PathBuf> = self
-            .credential_stores
-            .iter()
-            .filter(|store| store.starts_with(&spelled))
-            .cloned()
-            .collect();
+        let mut inside: Vec<PathBuf> = if existing_only {
+            Vec::new()
+        } else {
+            self.credential_stores
+                .iter()
+                .filter(|store| store.starts_with(&spelled))
+                .cloned()
+                .collect()
+        };
         if std::fs::symlink_metadata(approved).is_ok_and(|metadata| metadata.is_dir()) {
             inside.extend(self.credential_store_paths.iter().filter_map(|store| {
                 store
@@ -663,6 +667,9 @@ const CREDENTIAL_STORE: &str = "resolves into a credential store, which no polic
 
 const ENCLOSES_CREDENTIAL_STORE: &str =
     "contains a credential store, so no policy may change this directory";
+
+const CREDENTIAL_STORE_PARENT_MOVE: &str = "holds a credential store, so no policy may move this \
+     directory; move its other contents instead";
 
 const CREDENTIAL_STORE_RELOCATION: &str = "would move credential-store content outside the \
      `[agent.filesystem]` `write` entry that names it";
@@ -1963,6 +1970,41 @@ mod credential_store_tests {
         reach
             .refuse_store_relocation(&notes, Some(&elsewhere), "project")
             .expect("a rename with no store inside it is not judged");
+    }
+
+    #[test]
+    fn a_directory_that_holds_no_store_yet_can_be_renamed_inside_its_entry() {
+        let fixture = fixture();
+        let agent_home = fixture.home.join("agent-home");
+        std::fs::create_dir_all(agent_home.join(".config/app")).expect("a config with no store");
+        let reach = crate::test_support::with_operator_home(&fixture.home, || {
+            Reach::over_box(
+                &agent_home,
+                Some(&fixture.home),
+                None,
+                &fixture.box_root,
+                &[],
+            )
+            .expect("the reachable set is declarable")
+            .with_credential_store_grants([
+                (Grant::Read, "~/agent-home".to_string()),
+                (Grant::Write, "~/agent-home".to_string()),
+            ])
+        });
+        let config = fixture
+            .change(&reach, "agent-home/.config")
+            .expect("the directory holds only absent store anchors");
+        let backup = fixture
+            .change(&reach, "agent-home")
+            .expect("a destination inside the entry");
+        reach
+            .refuse_store_relocation(&config, Some(&backup), "agent-home/.config.bak")
+            .expect("no store exists inside it, so nothing leaves its entry");
+        // Once a store exists inside it, the same rename is refused again.
+        std::fs::create_dir_all(agent_home.join(".config/gcloud")).expect("a store appears");
+        reach
+            .refuse_store_relocation(&config, Some(&backup), "agent-home/.config.bak")
+            .expect_err("a directory that now holds a store cannot be moved");
     }
 
     #[test]
