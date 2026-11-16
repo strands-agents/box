@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries twelve keys. `name` and `box_dir` are required.
+The file carries thirteen keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -83,9 +83,10 @@ The file carries twelve keys. `name` and `box_dir` are required.
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
 | `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, and ingress. Each is disabled by default. |
 | `[limits]` | table | Execution limits for Strands Shell. |
+| `monty` | boolean | Whether a bare `python3` or `python` in the Shell runs Monty, Box's built-in Python subset. `true` by default. With `false`, both names resolve like any other program: a `[tool.python3]` or `[tool.python]`, else the host's `PATH`. |
 | `[gateway]` | table | Settings for every request through the egress gateway: `upgrade_http`, the hosts whose plain `http://` on port 80 the gateway sends as `https://` on port 443. See [`[gateway]`](#gateway). |
 
-The example uses five of the twelve: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the thirteen: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its

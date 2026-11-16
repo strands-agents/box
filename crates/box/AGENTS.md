@@ -256,9 +256,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   about one box. **Do not reintroduce `--name`**; reconciling a flag against the file is the shape in
   which the file's key became silently dead once already.
 
-  **`box.toml` carries twelve top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
+  **`box.toml` carries thirteen top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
   `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
-  `[experimental-features]`, `file-attributes`, `[limits]`, and `[gateway]`.** The experimental settings select native file
+  `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`.** The experimental settings select native file
   checks and tool grammars. They add no authority beyond the authored policy. `file-attributes` adds
   no grant: it widens what the workload's own `write` lists allow on macOS, so it is part of the
   workload input, and each process discloses it. `[gateway] upgrade_http` adds no grant either:
