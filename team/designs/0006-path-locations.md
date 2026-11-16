@@ -143,7 +143,8 @@ One PR after this doc. It adds the `[locations]` table, the `locations` field, t
 - A location under a symlinked folder matches, whether or not it exists yet.
 - A time-based budget on `project` counts writes that are also in `docs`.
 - A rule using `has` loads when the location isn't declared, and matches when it is.
-- A history from the previous release opens, and its events still count toward budgets.
+- A history from the previous release opens. Its events still count toward budgets that don't name
+  a location, and are outside budgets that do (limitation 2).
 
 An existing box doesn't have to be created again. Its history records the new field the next time
 it opens, the same way it records any other change to the actions.
@@ -238,7 +239,9 @@ adding a location never changes what an existing rule matches.
 2. **A moved location keeps its old events.** Every record and history event still has the full
    path. `locations` is an extra field next to it, holding the names the path was in at the time.
    If a later run of the same box points `project` somewhere else, time-based rules still count
-   the earlier events as `project`.
+   the earlier events as `project`. In the same way, an event recorded before `project` was
+   declared, including by an earlier release of Box, isn't in `project`. So a budget on a new
+   location starts counting when the location is declared.
 3. **Only file rules.** Containment (the `filesystem` lists in `box.toml`) still uses paths.
 
 ## 9. Open questions
