@@ -67,6 +67,7 @@ enum Served {
 
 /// The `src` directory of the `strands-shell` package cargo resolved for this workspace.
 fn shell_src() -> PathBuf {
+    // Keep source inspection offline; run `cargo fetch --locked` before these guards.
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let output = std::process::Command::new(cargo)
         .args([

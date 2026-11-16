@@ -36,9 +36,16 @@ On Linux x86-64, run `export EXPERIMENTAL_X86_SUPPORT=TRUE` before testing to op
 Box's experimental runtime. The value must be exactly `TRUE`. Without it, the shared Box
 test helper reports a prerequisite skip.
 
+Prepare the dependency cache with `cargo fetch --locked` before running tests through
+`just` or Cargo. Repeat this step after `Cargo.lock` changes or cached dependencies
+are removed. The `shell_dependency_guard` tests inspect dependency sources without
+network access. Their metadata query needs archives for all target platforms; a build
+for the host platform alone may leave archives missing.
+
 Run the gates with [`just`](https://github.com/casey/just):
 
 ```console
+$ cargo fetch --locked
 $ just check
 ```
 
