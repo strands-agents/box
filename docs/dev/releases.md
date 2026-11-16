@@ -36,6 +36,20 @@ The [macOS release guide](macos-release.md) describes the signing prerequisites 
 A dry run with `sign_macos=false` omits signing and signed-package verification.
 It does not rehearse all publication prerequisites.
 
+Linux ARM64 and x86-64 build in the existing Amazon Linux 2023 container, which provides GNU C library (glibc) 2.34.
+Every build checks that the packaged `box --version` reports the selected release version.
+For Linux ARM64 and x86-64, the package checker inspects all three executables for the selected architecture,
+the matching program loader, and glibc requirements no newer than 2.34.
+To repeat the x86-64 check after extracting its workflow archive into `stage/box-core`, run this command
+from the repository root on a Linux host with Python 3 and `readelf` installed:
+
+```sh
+python3 scripts/check-linux-package.py stage/box-core --target x86_64-unknown-linux-gnu
+```
+
+Omit `--target` to check ARM64. These checks do not run workloads or qualify an installed x86-64 release.
+Box workloads on Linux x86-64 still require the `EXPERIMENTAL_X86_SUPPORT=TRUE` environment setting.
+
 ## Publish
 
 Complete security acceptance and target qualification before approving publication.
@@ -88,5 +102,5 @@ Keep `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` toget
 Verify the reported version, an allowed operation, and a denied operation using the approved test configuration.
 Record the release URL, source commit, archive hash, host baseline, commands, and results.
 
-Linux startup requires no environment opt-in.
+Linux ARM64 startup requires no environment opt-in.
 A stable version does not establish security acceptance.

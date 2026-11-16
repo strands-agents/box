@@ -12,7 +12,7 @@ name: Release Box
 #   SHA256SUMS.txt                    one aggregate file, `<sha256>  <asset>` per line
 #
 # Three targets build: macOS on Apple Silicon, and Linux (glibc) on x86_64 and
-# aarch64. The x86_64 Linux tarball stays a run artifact. ARM64 Linux builds
+# aarch64. The x86_64 Linux tarball stays a run artifact. Both Linux targets build
 # against Amazon Linux 2023. musl and native distro packages are not built here.
 #
 # Shape (mirrors the harness-sdk release workflows, retargeted to a binary
@@ -275,7 +275,7 @@ jobs:
           persist-credentials: false
 
       - name: Prepare the Amazon Linux 2023 builder
-        if: matrix.target.triple == 'aarch64-unknown-linux-gnu'
+        if: endsWith(matrix.target.triple, '-unknown-linux-gnu')
         run: |
           set -euo pipefail
           rust_version=$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)
@@ -312,7 +312,7 @@ jobs:
         # box, sock-alias, and contain-trampoline must ship together; the box
         # resolves the trampoline from beside its own executable and refuses
         # to start without it.
-        if: matrix.target.triple != 'aarch64-unknown-linux-gnu'
+        if: matrix.target.triple == 'aarch64-apple-darwin'
         env:
           TRIPLE: ${{ matrix.target.triple }}
         run: |
@@ -326,8 +326,10 @@ jobs:
             -p strands-box \
             -p strands-box-containment "${features[@]}"
 
-      - name: Build ARM64 Linux against glibc 2.34
-        if: matrix.target.triple == 'aarch64-unknown-linux-gnu'
+      - name: Build Linux against glibc 2.34
+        if: endsWith(matrix.target.triple, '-unknown-linux-gnu')
+        env:
+          TRIPLE: ${{ matrix.target.triple }}
         run: |
           set -euo pipefail
           mkdir -p target
@@ -336,7 +338,7 @@ jobs:
             --mount "type=bind,source=$PWD/target,target=/target" \
             --env CARGO_TARGET_DIR=/target \
             box-linux-release \
-            cargo build --release --locked --target aarch64-unknown-linux-gnu \
+            cargo build --release --locked --target "$TRIPLE" \
               -p strands-box -p strands-box-containment
 
       - name: Package tarball
@@ -358,8 +360,7 @@ jobs:
           tar -tzf "dist/${asset}"
 
       - name: Assert the packaged binary reports the stamped version
-        # Each leg stamps its own crates, so the released leg checks its own binary.
-        if: matrix.target.triple != 'x86_64-unknown-linux-gnu'
+        # Each leg stamps its own crates, so each leg checks its packaged binary.
         env:
           VERSION: ${{ inputs.version }}
         run: |
@@ -370,6 +371,12 @@ jobs:
             echo "::error::box --version ('$out') does not report $VERSION"
             exit 1
           fi
+
+      - name: Check the x86-64 Linux package
+        if: matrix.target.triple == 'x86_64-unknown-linux-gnu'
+        run: |
+          python3 scripts/check-linux-package.py stage/box-core \
+            --target x86_64-unknown-linux-gnu
 
       - name: Check and run the ARM64 Linux package
         if: matrix.target.triple == 'aarch64-unknown-linux-gnu'

@@ -279,6 +279,7 @@ is removed.
 Run `python3 -m unittest discover -s scripts -p 'test_*.py' -v` to test release packaging and the downloader.
 Continuous integration runs the downloader tests on Linux and macOS. These tests use local fixture archives
 and simulated HTTP clients; they do not qualify a published binary or its containment behavior.
+The [release guide](docs/dev/releases.md#rehearse) describes the architecture and system-library checks for Linux ARM64 and x86-64 packages.
 On Linux, the mount test requires util-linux and permission to create a user and mount namespace.
 It creates a `noexec` temporary mount only inside the test process's private namespace.
 
