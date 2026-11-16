@@ -250,8 +250,8 @@ its limits.
 ## `[locations]`
 
 Each key in `[locations]` is a location name, and its value lists one or more directories. A
-filesystem rule in the policy reads the names of the locations that hold a request's path as
-`context.input.locations`, so the rule does not spell the directory:
+filesystem rule in the policy reads `context.input.locations.<name>`, which is true when that
+location holds the request's path, so the rule does not spell the directory:
 
 ```toml
 [locations]
@@ -262,12 +262,12 @@ caches = ["~/.cache/my-agent", "~/.npm"]
 ```text
 @id("project_write")
 permit (principal, action == Box::Action::"fs:write", resource)
-when { context.input.locations.contains(Box::Location::"project") };
+when { context.input.locations.project };
 ```
 
 | Rule | Refusal |
 |---|---|
-| A name starts with an ASCII letter, and holds at most 64 ASCII letters, digits, `_`, or `-`. | ``` `[locations] <name>` is not a location name``` |
+| A name starts with an ASCII letter, holds at most 64 ASCII letters, digits, or `_`, and is not one of Cedar's reserved words (`true`, `false`, `if`, `then`, `else`, `in`, `is`, `like`, `has`). | ``` `[locations] <name>` is not a location name``` |
 | A location lists at least one directory. | ``` `[locations] <name>` lists no directory``` |
 | Each directory is absolute or starts with `~/`. | ``` `[locations] <name>` entry "<entry>" is refused: it is neither absolute nor `~/`-relative``` |
 | A directory has no `.` or `..` component. | ``` `[locations] <name>` entry "<entry>" is refused: it holds a `.` or `..` component``` |
@@ -290,7 +290,10 @@ components. A path can be in more than one location, and a rule on each of them 
 
 A location grants no access. The agent still reaches a directory only through
 [`[agent.filesystem]`](#agentfilesystem-and-toolnamefilesystem) and a policy permit. A rule that
-names a location this file does not declare refuses to load.
+reads `context.input.locations.<name>` for a location this file does not declare refuses to load.
+A rule that first tests `context.input.locations has <name>` loads in any box; use that form on a
+`permit` only, because a `forbid` written that way loads and protects nothing when this file
+misspells the name. [The filesystem actions](policy/actions.md#filesystem) show both forms.
 
 The startup disclosure prints one line for each location, after the agent's filesystem grants. A
 directory under the operator's home is spelled `~/…`:

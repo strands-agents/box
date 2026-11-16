@@ -16,7 +16,7 @@ permit(principal, action == Box::Action::"shell:exec", resource);
 permit(principal, action == Box::Action::"fs:read", resource);
 @id("project_write")
 permit(principal, action == Box::Action::"fs:write", resource)
-when { context.input.locations.contains(Box::Location::"project") };
+when { context.input.locations.project };
 "#;
 
 fn stderr(output: &Output) -> String {
@@ -83,7 +83,7 @@ fn a_forbid_on_a_nested_location_beats_a_permit_on_the_outer_one() {
         "{PROJECT_WRITES}\n\
          @id(\"no_docs_writes\")\n\
          forbid(principal, action == Box::Action::\"fs:write\", resource)\n\
-         when {{ context.input.locations.contains(Box::Location::\"docs\") }};\n"
+         when {{ context.input.locations.docs }};\n"
     );
     let box_ = Request::with_config(
         "locations-nested",
@@ -115,7 +115,7 @@ fn a_misspelled_location_stops_the_box_before_the_workload_starts() {
     }
     let (_box, output) = Request::with_config(
         "locations-typo",
-        &PROJECT_WRITES.replace("\"project\") }", "\"projcet\") }"),
+        &PROJECT_WRITES.replace("locations.project", "locations.projcet"),
         &format!("[locations]\nproject = [\"{}\"]\n", fixture::PROJECT),
     )
     .attempt();
@@ -135,8 +135,8 @@ fn a_policy_that_names_a_location_stops_a_box_that_declares_none() {
     let (_box, output) = Request::with_policy("locations-none", PROJECT_WRITES).attempt();
     assert!(!output.status.success(), "{output:?}");
     assert!(
-        stderr(&output).contains("Location"),
-        "the refusal names the undeclared type: {}",
+        stderr(&output).contains("input.locations.project"),
+        "the refusal names the undeclared location: {}",
         stderr(&output)
     );
 }

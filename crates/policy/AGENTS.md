@@ -176,23 +176,34 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   base schema declares is never read as a server, which
   `mcp_schema::tests::a_previous_build_of_the_box_actions_is_not_read_as_a_server` pins.
 - `body_bytes` is the offer on a `::request` and the delivery on a `::response`.
-- `context.input.locations` is generated: `schema::base_schema` adds `Box::Location` and the field
-  only when the operator declares a location, so every composition takes the operator's locations
-  and a box with none stores `SCHEMA_SRC` unchanged. `Operator::with_locations` resolves each root
-  with `path::resolve_host_directory`, the rule `approve_host` uses for a request, so roots and
-  request paths cannot drift. A root that is or crosses a dangling symbolic link, or that hits an
-  error other than an absent component, cannot be resolved, so the operator keeps the reason and the
-  load refuses it, as `approve_host` refuses such a path; keeping the link spelling instead would
-  leave every later request outside the location once the target appears. A filesystem outcome names
-  its path by the reported spelling, so the engine expands `~` and `~/…` under each spelling of the
+- `context.input.locations` is a closed record on every `fs:*` input: the shipped schema declares
+  the empty `FsLocations`, and `schema::base_schema` gives it one required `Bool` per declared name.
+  It is always present so that `context.input.locations has <name> &&
+  context.input.locations.<name>` loads in every box; Cedar types `has` on a closed record that
+  lacks the field as false and short-circuits `&&`, with only an impossible-policy warning. A
+  record, not a set, because Dogwood refuses a set constant in a temporal predicate and compares a
+  set field as a whole, so a budget keyed on a set undercounts a path that is also in a nested
+  location; a record field is matched by one key. Adding the field changes `SCHEMA_SRC`, so a
+  history from the previous release takes one `SetActionSchema` on its next open, keeps its temporal
+  state, and opens again under the previous release
+  (`dogwood::tests::a_history_from_the_previous_release_opens_with_the_locations_record_and_back`).
+  Names are Cedar identifiers that Cedar does not reserve, so `.name` parses in a rule and a
+  temporal field path. `Operator::with_locations` resolves each root with
+  `path::resolve_host_directory`, the rule `approve_host` uses for a request, so roots and request
+  paths cannot drift. A root that is or crosses a dangling symbolic link, or that hits an error
+  other than an absent component, cannot be resolved, so the operator keeps the reason and the load
+  refuses it, as `approve_host` refuses such a path; keeping the link spelling instead would leave
+  every later request outside the location once the target appears. A filesystem outcome names its
+  path by the reported spelling, so the engine expands `~` and `~/…` under each spelling of the
   operator home and matches that; it keeps nothing per request. The home spellings are paths, not
   strings, so a home that is not UTF-8 still expands. The load refuses locations for an operator
   with no home (`Operator::refuse_unusable_locations`), because such an outcome could not be
-  matched. `classify_naming` refuses an undeclared `Box::Location` literal before a rule may be held
-  for an MCP schema (`dogwood::refuse_undeclared_locations`), because no MCP schema can declare one.
-  A temporal predicate refuses an array constant and compares a set as an ordered whole, so a rule
-  counts by `input.locations: context.input.locations`. Pinned by `tests/path_locations.rs` and
-  `dogwood::tests::a_location_budget_holds_in_each_window_and_counts_each_location_set_apart`.
+  matched. Before `classify_naming` holds a rule for an MCP schema,
+  `dogwood::refuse_undeclared_locations` validates its Box-only condition against the base schema
+  when the rule reads `context.input.locations`, and checks each `input.locations.<name>` a
+  filesystem temporal predicate reads, because no MCP schema can declare a location. Pinned by
+  `tests/path_locations.rs` and
+  `dogwood::tests::a_location_budget_holds_in_each_window_and_counts_every_path_in_the_location`.
 - Sum an outbound budget over `http:request::response`, as `tests/policies/egress_byte_budget.dw`
   does. One exchange records one such event, at reply time, with the delivered request bytes and
   the reply's `output.status`. Pinned by

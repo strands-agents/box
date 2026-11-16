@@ -84,34 +84,41 @@ type FsResponseOutput = {
   result: FsResponseResult
 };
 
-// When the operator declares locations, Box generates the `Location` enum of their names here,
-// and adds `locations: Set<Location>` to each of the five filesystem inputs below: every
-// declared location whose directory is the path or holds it. A box that declares no location
-// has neither, so this file is its schema unchanged.
+// Which declared locations hold the path: one required Bool per name in `box.toml`'s
+// `[locations]`, true when the path is that location's directory or below it. Box generates the
+// attributes here; a box that declares no location keeps this empty record. The record is
+// closed, so `context.input.locations.<name>` for an undeclared name is a load error, while
+// `context.input.locations has <name> && context.input.locations.<name>` loads in every box.
+type FsLocations = {};
 
 type FsReadInput = {
   path: String, // the target, trusted-canonicalized before authorization
-  operation: FsReadOperation
+  operation: FsReadOperation,
+  locations: FsLocations
 };
 
 type FsWriteInput = {
   path: String,
-  operation: FsWriteOperation
+  operation: FsWriteOperation,
+  locations: FsLocations
 };
 
 type FsDeleteInput = {
   path: String,
-  operation: FsDeleteOperation
+  operation: FsDeleteOperation,
+  locations: FsLocations
 };
 
 type FsMoveInput = {
   path: String,
-  operation: FsMoveOperation
+  operation: FsMoveOperation,
+  locations: FsLocations
 };
 
 type FsOtherInput = {
   path: String,
-  operation: FsOtherOperation
+  operation: FsOtherOperation,
+  locations: FsLocations
 };
 
 // Read content or metadata, enumerate a directory, read a link, change directory, or

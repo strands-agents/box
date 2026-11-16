@@ -15,7 +15,7 @@ use policy::{
 const PROJECT_WRITE: &str = r#"
 @id("project_write")
 permit (principal, action == Box::Action::"fs:write", resource)
-when { context.input.locations.contains(Box::Location::"project") };
+when { context.input.locations.project };
 "#;
 
 fn sources(text: &str) -> Vec<Policy> {
@@ -91,23 +91,25 @@ fn complete_write(engine: &PolicyEngine, path: &str) -> bool {
     true
 }
 
-/// The `input.locations` of each recorded event, as location names.
+/// The names whose `input.locations` attribute is true on each recorded event, or `None` when an
+/// event has no `locations` record.
 fn recorded_locations(history: &Path) -> Vec<Option<Vec<String>>> {
     history::events(history)
         .iter()
         .map(
             |event| match event.field_path(&["input".to_string(), "locations".to_string()]) {
-                Some(Value::Array(values)) => Some(
-                    values
+                Some(Value::Object(attributes)) => Some(
+                    attributes
                         .iter()
-                        .map(|value| match value {
-                            Value::Entity { ty, id } if ty == "Box::Location" => id.clone(),
-                            other => panic!("a location is a Box::Location entity: {other:?}"),
+                        .filter_map(|(name, held)| match held {
+                            Value::Bool(true) => Some(name.clone()),
+                            Value::Bool(false) => None,
+                            other => panic!("a location attribute is a Bool: {other:?}"),
                         })
                         .collect(),
                 ),
                 None => None,
-                Some(other) => panic!("`locations` is a set: {other:?}"),
+                Some(other) => panic!("`locations` is a record: {other:?}"),
             },
         )
         .collect()
@@ -141,7 +143,7 @@ fn a_nested_path_is_in_both_locations_and_a_forbid_on_the_inner_one_wins() {
         r#"{PROJECT_WRITE}
 @id("no_docs")
 forbid (principal, action == Box::Action::"fs:write", resource)
-when {{ context.input.locations.contains(Box::Location::"docs") }};
+when {{ context.input.locations.docs }};
 "#
     );
     let engine = open(&nested, &text, &history);
@@ -166,12 +168,12 @@ when {{ context.input.locations.contains(Box::Location::"docs") }};
     assert_eq!(
         recorded_locations(&history),
         [project.clone(), project, both, Some(Vec::new())],
-        "the request and its response carry one sorted set, and a path in none an empty one"
+        "the request and its response carry one record, true for each location that holds the path"
     );
 }
 
 #[test]
-fn a_box_without_locations_records_no_locations_field() {
+fn a_box_without_locations_records_an_empty_locations_record() {
     let directory = tempfile::tempdir().expect("history directory");
     let history = directory.path().join("h.redb");
     let engine = open(
@@ -183,12 +185,15 @@ fn a_box_without_locations_records_no_locations_field() {
     assert!(complete_write(&engine, "/work/src/main.rs"));
     drop(engine);
 
-    assert_eq!(recorded_locations(&history), [None, None]);
+    assert_eq!(
+        recorded_locations(&history),
+        [Some(Vec::new()), Some(Vec::new())]
+    );
 }
 
 #[test]
 fn a_misspelled_location_refuses_to_load() {
-    let misspelled = PROJECT_WRITE.replace(r#"Location::"project""#, r#"Location::"projcet""#);
+    let misspelled = PROJECT_WRITE.replace("locations.project", "locations.projcet");
     let directory = tempfile::tempdir().expect("history directory");
 
     assert!(
@@ -199,7 +204,13 @@ fn a_misspelled_location_refuses_to_load() {
         )
         .is_err()
     );
-    assert!(PolicyEngine::validate(&project(), &sources(&misspelled)).is_err());
+    let Err(error) = PolicyEngine::validate(&project(), &sources(&misspelled)) else {
+        panic!("validate must refuse a misspelled location");
+    };
+    assert!(
+        error.to_string().contains("input.locations.projcet"),
+        "{error}"
+    );
     for complete in [true, false] {
         assert!(
             !PolicyEngine::check(&project(), &sources(&misspelled), complete)
@@ -220,7 +231,13 @@ fn a_policy_that_names_a_location_refuses_to_load_when_none_is_declared() {
             .is_err()
     );
     assert!(PolicyEngine::open(sources(PROJECT_WRITE), &directory.path().join("b")).is_err());
-    assert!(PolicyEngine::validate(&none, &sources(PROJECT_WRITE)).is_err());
+    let Err(error) = PolicyEngine::validate(&none, &sources(PROJECT_WRITE)) else {
+        panic!("validate must refuse an undeclared location");
+    };
+    assert!(
+        error.to_string().contains("input.locations.project"),
+        "{error}"
+    );
     for complete in [true, false] {
         assert!(
             !PolicyEngine::check(&none, &sources(PROJECT_WRITE), complete)
@@ -234,9 +251,13 @@ fn a_policy_that_names_a_location_refuses_to_load_when_none_is_declared() {
 fn a_bad_declaration_is_refused_by_open_validate_and_check() {
     let long = "a".repeat(65);
     let longest = "a".repeat(64);
-    let cases: [(&str, &[&str]); 8] = [
+    let cases: [(&str, &[&str]); 12] = [
         ("1project", &["/work"]),
         ("pro ject", &["/work"]),
+        ("my-project", &["/work"]),
+        ("in", &["/work"]),
+        ("true", &["/work"]),
+        ("has", &["/work"]),
         ("", &["/work"]),
         (&long, &["/work"]),
         ("project", &[]),
@@ -264,7 +285,7 @@ fn a_bad_declaration_is_refused_by_open_validate_and_check() {
             );
         }
     }
-    for accepted in ["P", "my_project-2", longest.as_str()] {
+    for accepted in ["P", "my_project_2", "permit", longest.as_str()] {
         assert!(
             PolicyEngine::validate(&operator(&[(accepted, &["/"])]), &sources(permit)).is_ok(),
             "{accepted:?} is a valid name"
@@ -303,63 +324,90 @@ when { context.input.path like "/work/*" };
     assert!(!allows(&engine, "/elsewhere/d"));
 }
 
-/// Dogwood refuses an array constant in a temporal predicate, so a rule cannot name a set of
-/// locations there.
+/// A budget keyed on one location attribute counts every write in that location, whatever other
+/// locations hold the path.
 #[test]
-fn a_temporal_predicate_cannot_name_a_set_of_locations() {
-    let literal = r#"
-permit (principal, action == Box::Action::"fs:write", resource)
-when temporal {
-    formerly within 1h (
-        Box::Action::"fs:write"::response{ input.locations: [Box::Location::"project"] }
-    )
-};
-"#;
-    let directory = tempfile::tempdir().expect("history directory");
-    let Err(error) =
-        PolicyEngine::open_staged(&project(), sources(literal), &directory.path().join("h"))
-    else {
-        panic!("an array constant refuses to load");
-    };
-    let error = error.to_string();
-    assert!(error.contains("array constants"), "{error}");
-}
-
-/// A temporal predicate compares a set field as an ordered whole, so a rule counts the writes
-/// whose locations equal the request's own.
-#[test]
-fn a_temporal_rule_counts_the_writes_in_the_requests_own_locations() {
+fn a_temporal_budget_on_one_location_counts_writes_that_are_also_in_another() {
     let directory = tempfile::tempdir().expect("history directory");
     let nested = operator(&[("project", &["/work"]), ("docs", &["/work/docs"])]);
     let budget = r#"
-@id("location_budget")
-permit (principal, action == Box::Action::"fs:write", resource)
+permit (principal, action == Box::Action::"fs:write", resource);
+@id("project_budget")
+forbid (principal, action == Box::Action::"fs:write", resource)
+when { context.input.locations.project }
 when temporal {
     exists (total: Long). (
         (count for (t: Timepoint). where (
             formerly within 1h (
-                Box::Action::"fs:write"::response{ input.locations: context.input.locations }
-                && tp(t)
+                Box::Action::"fs:write"::response{ input.locations.project: true } && tp(t)
             )
         )) == total
-        && total < 2
+        && total >= 3
     )
 };
 "#;
     let engine = open(&nested, budget, &directory.path().join("h.redb"));
 
-    assert!(complete_write(&engine, "/work/a"));
-    assert!(complete_write(&engine, "/work/b"));
-    assert!(
-        !allows(&engine, "/work/c"),
-        "two writes in `project` alone spend its budget"
-    );
+    assert!(complete_write(&engine, "/work/a"), "{{project}}: one");
     assert!(
         complete_write(&engine, "/work/docs/a.md"),
-        "a write in `docs` and `project` is counted apart from one in `project` alone"
+        "{{project, docs}}: two"
     );
-    assert!(complete_write(&engine, "/work/docs/b.md"));
-    assert!(!allows(&engine, "/work/docs/c.md"));
+    assert!(complete_write(&engine, "/work/b"), "{{project}}: three");
+    assert!(
+        !allows(&engine, "/work/c"),
+        "writes in {{project}} and in {{project, docs}} spend one budget"
+    );
+    assert!(!allows(&engine, "/work/docs/b.md"));
+    assert!(
+        complete_write(&engine, "/elsewhere/a"),
+        "a write in no location is outside the budget"
+    );
+}
+
+/// A rule that names a location with `has` loads in a box that does not declare it, and matches
+/// only where it is declared.
+#[test]
+fn a_portable_rule_loads_without_the_location_and_matches_with_it() {
+    let portable = r#"
+@id("secrets_read")
+permit (principal, action == Box::Action::"fs:read", resource)
+when { context.input.locations has secrets && context.input.locations.secrets };
+"#;
+    let read = |engine: &PolicyEngine, path: &str| {
+        let approved = approved(path);
+        engine
+            .decide(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                &Request::Fs {
+                    path: &approved,
+                    operation: FsOperation::ReadContent,
+                },
+            )
+            .0
+            .is_allow()
+    };
+    let directory = tempfile::tempdir().expect("history directory");
+    for (label, declared) in [("none", Operator::unanchored()), ("other", project())] {
+        let engine = open(&declared, portable, &directory.path().join(label));
+        assert!(
+            !read(&engine, "/work/a"),
+            "{label}: the rule matches nothing"
+        );
+        assert!(PolicyEngine::validate(&declared, &sources(portable)).is_ok());
+        for complete in [true, false] {
+            let check = PolicyEngine::check(&declared, &sources(portable), complete);
+            assert!(check.errors().is_empty(), "{label}: {:?}", check.errors());
+        }
+    }
+    let secrets = operator(&[("secrets", &["/vault"])]);
+    let engine = open(&secrets, portable, &directory.path().join("declared"));
+    assert!(
+        read(&engine, "/vault/key"),
+        "the rule matches where `secrets` is declared"
+    );
+    assert!(!read(&engine, "/work/a"));
 }
 
 #[test]
@@ -408,36 +456,48 @@ fn a_response_named_by_its_home_relative_spelling_carries_its_requests_locations
 }
 
 /// A rule that also names a per-tool MCP action is held pending until that server's schema
-/// stages; a location literal it names must still refuse at load.
+/// stages; a location it reads must still refuse at load when no location of that name exists.
 #[test]
 fn a_rule_held_for_an_mcp_schema_refuses_an_undeclared_location_at_load() {
-    let held = |location: &str| {
+    let held = |condition: &str| {
         format!(
             r#"
 permit (principal, action == Box::Action::"fs:write", resource);
 @id("guarded")
 forbid (principal, action == Box::Action::"fs:write", resource)
-when {{ context.input.locations.contains(Box::Location::"{location}") }}
+when {{ {condition} }}
 unless temporal {{ formerly within 1h alpha::Action::"deploy"::response{{}} }};
 "#
         )
     };
-    let in_history = r#"
+    let held_in_history = |name: &str| {
+        format!(
+            r#"
 permit (principal, action == Box::Action::"fs:write", resource);
 @id("guarded")
 forbid (principal, action == Box::Action::"fs:write", resource)
-unless temporal {
+unless temporal {{
     formerly within 1h (
-        alpha::Action::"deploy"::response{}
-        && Box::Action::"fs:write"::response{ input.locations: context.input.locations,
-                                              input.operation: Box::FsWriteOperation::"write_content" }
+        alpha::Action::"deploy"::response{{}}
+        && Box::Action::"fs:write"::response{{ input.locations.{name}: true }}
     )
-};
-"#;
+}};
+"#
+        )
+    };
     let directory = tempfile::tempdir().expect("history directory");
     let cases = [
-        ("misspelled", project(), held("projcet")),
-        ("undeclared", Operator::unanchored(), held("project")),
+        (
+            "misspelled",
+            project(),
+            held("context.input.locations.projcet"),
+        ),
+        (
+            "undeclared",
+            Operator::unanchored(),
+            held("context.input.locations.project"),
+        ),
+        ("history", project(), held_in_history("projcet")),
     ];
     for (label, declared, text) in cases {
         let opened =
@@ -446,7 +506,7 @@ unless temporal {
             panic!("{label}: open_staged must refuse the location");
         };
         assert!(
-            error.to_string().contains("Box::Location"),
+            error.to_string().contains("does not declare"),
             "{label}: {error}"
         );
         let check = PolicyEngine::check(&declared, &sources(&text), false);
@@ -457,25 +517,32 @@ unless temporal {
         );
     }
 
-    let engine = open(
-        &project(),
-        &held("project"),
-        &directory.path().join("valid"),
-    );
-    assert!(
-        allows(&engine, "/work/a"),
-        "a declared location loads, and the held rule waits"
-    );
-    let check = PolicyEngine::check(&project(), &sources(&held("project")), false);
-    assert!(check.errors().is_empty(), "{:?}", check.errors());
-    assert_eq!(check.unchecked().len(), 1);
-    drop(engine);
-
-    let engine = open(&project(), in_history, &directory.path().join("history"));
-    assert!(
-        allows(&engine, "/work/a"),
-        "a rule that names no location literal is held as before"
-    );
+    for (label, declared, text) in [
+        (
+            "declared",
+            project(),
+            held("context.input.locations.project"),
+        ),
+        ("history", project(), held_in_history("project")),
+        (
+            "portable",
+            Operator::unanchored(),
+            held("context.input.locations has secrets && context.input.locations.secrets"),
+        ),
+    ] {
+        let engine = open(
+            &declared,
+            &text,
+            &directory.path().join(format!("{label}-ok")),
+        );
+        assert!(
+            allows(&engine, "/work/a"),
+            "{label}: the rule loads and waits for its schema"
+        );
+        let check = PolicyEngine::check(&declared, &sources(&text), false);
+        assert!(check.errors().is_empty(), "{label}: {:?}", check.errors());
+        assert_eq!(check.unchecked().len(), 1, "{label}");
+    }
 }
 
 /// Every outcome names its path `~/…`, as the Shell and Python report one under the home, so

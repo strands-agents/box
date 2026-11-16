@@ -10,6 +10,11 @@ use crate::error::ConfigError;
 /// The longest location name.
 const MAXIMUM_LOCATION_NAME: usize = 64;
 
+/// The words Cedar reserves, which a rule cannot read as `context.input.locations.<name>`.
+const RESERVED_WORDS: [&str; 10] = [
+    "true", "false", "if", "then", "else", "in", "is", "like", "has", "__cedar",
+];
+
 /// The declared locations, each a name and the directories as written.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -32,8 +37,9 @@ impl Locations {
             };
             if let Some(reason) = invalid_name(name) {
                 return Err(refuse(format!(
-                    "is not a location name: {reason}; a name starts with a letter and holds at \
-                     most {MAXIMUM_LOCATION_NAME} letters, digits, '_', or '-'"
+                    "is not a location name: {reason}; a name starts with a letter, holds at most \
+                     {MAXIMUM_LOCATION_NAME} letters, digits, or '_', and is not a word Cedar \
+                     reserves"
                 )));
             }
             if directories.is_empty() {
@@ -92,9 +98,12 @@ fn invalid_name(name: &str) -> Option<&'static str> {
     }
     if !name
         .chars()
-        .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+        .all(|character| character.is_ascii_alphanumeric() || character == '_')
     {
-        return Some("it holds a character other than a letter, a digit, '_', or '-'");
+        return Some("it holds a character other than a letter, a digit, or '_'");
+    }
+    if RESERVED_WORDS.contains(&name) {
+        return Some("it is a word Cedar reserves");
     }
     None
 }
@@ -142,7 +151,8 @@ mod tests {
             ("project", &["/work/app"]),
             ("caches", &["~/.cache/my-agent", "~/.npm"]),
             ("a", &["/"]),
-            ("Build_output-2", &["/work/app/target/"]),
+            ("Build_output_2", &["/work/app/target/"]),
+            ("permit", &["/work/permit"]),
             (&"x".repeat(MAXIMUM_LOCATION_NAME), &["/x"]),
         ]);
         table.validate().expect("the table is valid");
@@ -159,7 +169,12 @@ mod tests {
             "-project",
             "pro ject",
             "pro.ject",
+            "my-project",
             "projé",
+            "true",
+            "in",
+            "has",
+            "like",
             &"x".repeat(MAXIMUM_LOCATION_NAME + 1),
         ] {
             let error = locations(&[(name, &["/work"])])

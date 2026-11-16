@@ -333,35 +333,38 @@ distinction: `Box::Action::"fs:read"::response{ input.path: …, input.operation
 
 #### Named locations
 
-`Operator::with_locations` gives directories a name. Each name is a value of the generated enum
-`Box::Location`, and every filesystem input gains `locations: Set<Box::Location>`. The set holds
-each location that has the request's path as one of its directories or below one. The match uses
-whole path components, so `/work-old/notes.md` is not in `/work`. A path can be in several
-locations, and a path in none has an empty set.
+`Operator::with_locations` gives directories a name. Every filesystem input carries
+`locations`, a closed record with one required `Bool` per declared name, true when that location
+has the request's path as one of its directories or below one. The record is empty for an operator
+with no location. The match uses whole path components, so `/work-old/notes.md` is not in `/work`.
+A path can be in several locations, and each of their fields is true.
 
 ```text
 permit (principal, action == Box::Action::"fs:write", resource)
-when { context.input.locations.contains(Box::Location::"project") };
+when { context.input.locations.project };
 ```
+
+`context.input.locations has secrets && context.input.locations.secrets` loads for any operator,
+because Cedar types `has` on a closed record that lacks the field as false. Write that form on a
+`permit` only: a `forbid` in it loads and matches nothing when the location name is misspelled.
 
 A location names directories and grants no reach. `with_locations` resolves each directory the
 way `PathResolver::approve_host` resolves a requested path, so a root spelled through a symbolic
 link, or one that does not exist yet below a linked parent, matches the canonical path a request
-carries. A rule that names an undeclared location is a load error in `open_staged`, `validate`,
-and `check`, also when the rule waits for an MCP schema. A box that declares no location has
-neither the enum nor the field, so a rule that names `Box::Location` does not load there. `open`
-and `open_with_mcp_schemas` declare no location. These calls also refuse a bad declaration: a
-name that is not a letter followed by at most 63 letters, digits, `_`, or `-`, an empty directory
+carries. A rule that reads an undeclared location without `has` is a load error in `open_staged`,
+`validate`, and `check`, also when the rule waits for an MCP schema. `open` and
+`open_with_mcp_schemas` declare no location. These calls also refuse a bad declaration: a name
+that is not a letter followed by at most 63 letters, digits, or `_`, or that Cedar reserves, an
+empty directory
 list, a directory that is relative or has a `.` or `..` component, or a directory that cannot be
 resolved, such as a broken symbolic link or one below a folder that refuses to be searched. They
 refuse locations for an operator with no home, too (see `Operator::anchored_at`), because an
 outcome names a path under the home as `~/…`.
 
-The response of a filesystem request records the set of the path it names, with `~/…` expanded
-under the operator's home. A temporal predicate cannot hold
-an array constant, and it compares a set as a whole. So
-`Box::Action::"fs:write"::response{ input.locations: context.input.locations }` matches the writes
-whose locations are the same as this request's. History keeps the names, so an event recorded
+The response of a filesystem request records the record of the path it names, with `~/…`
+expanded under the operator's home. A temporal predicate reads one location as a field, so
+`Box::Action::"fs:write"::response{ input.locations.project: true }` matches every write in
+`project`, whatever other location also holds it. History keeps the names, so an event recorded
 before a location moved still counts under its name.
 
 How an effect ended is carried by the event kind: an effect that happened or may

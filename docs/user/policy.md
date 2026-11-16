@@ -71,8 +71,7 @@ anywhere in the `project` location:
 ```text
 @id("no_env_in_project")
 forbid (principal, action == Box::Action::"fs:read", resource)
-when { context.input.locations.contains(Box::Location::"project") &&
-       context.input.path like "*/.env" };
+when { context.input.locations.project && context.input.path like "*/.env" };
 ```
 
 ## How a denial reads

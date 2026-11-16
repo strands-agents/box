@@ -761,14 +761,23 @@ impl ProposalState {
                         }
                         // No MCP schema can declare a location, so a rule that names an
                         // undeclared one is refused rather than held for a schema.
-                        if let Some(candidate) = self.candidates.get(ordinal)
-                            && let Err(undeclared) = refuse_undeclared_locations(
-                                &candidate.expanded_source,
+                        if let Some(candidate) = self.candidates.get(ordinal) {
+                            let checked = composed_action_schema(
                                 self.operator.locations(),
-                                ordinal,
+                                &self.grammar_schemas,
+                                &[],
                             )
-                        {
-                            return Err((ordinal, undeclared));
+                            .map_err(Refused::from)
+                            .and_then(|base| {
+                                refuse_undeclared_locations(
+                                    &candidate.expanded_source,
+                                    &base,
+                                    ordinal,
+                                )
+                            });
+                            if let Err(undeclared) = checked {
+                                return Err((ordinal, undeclared));
+                            }
                         }
                         self.pending.insert(ordinal, refused.error.to_string());
                     }

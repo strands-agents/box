@@ -24,9 +24,9 @@ use crate::error::{PolicyError, PolicyStagingError};
 use crate::outcome::Delivery;
 use crate::request::{ActionRequest, Principal, Request, RequestId};
 use crate::schema::{
-    AGENT_TYPE, ActionIdentity, ActionSchema, GovernedBox, LOCATION_TYPE, Locations, NO_LOCATIONS,
-    RESOURCE_TYPE, UNUSED_RESOURCE_ID, action, attr, base_schema, composed_action_schema,
-    locations_of, mcp_tool_action,
+    AGENT_TYPE, ActionIdentity, ActionSchema, GovernedBox, Locations, NO_LOCATIONS, RESOURCE_TYPE,
+    UNUSED_RESOURCE_ID, action, attr, base_schema, composed_action_schema, held_locations,
+    mcp_tool_action,
 };
 use crate::spelling::{Operator, PolicyWarning};
 use crate::{Decision, DenyReason, Outcome, PolicyAttribution, RuleId};
@@ -618,7 +618,7 @@ impl DogwoodEngine {
         }
         let fs_locations = match request {
             ActionRequest::Request(Request::Fs { path, .. }) => {
-                location_value(&self.locations, [path.as_path()])
+                Some(location_value(&self.locations, [path.as_path()]))
             }
             _ => None,
         };
@@ -681,7 +681,7 @@ impl DogwoodEngine {
     ) -> Result<(), PolicyError> {
         self.verify_request_id(request_id)?;
         let locations = match outcome {
-            Outcome::Fs { path, .. } => self.outcome_locations(path),
+            Outcome::Fs { path, .. } => Some(self.outcome_locations(path)),
             _ => None,
         };
         self.record_outcome(with_request_id(
@@ -690,9 +690,9 @@ impl DogwoodEngine {
         ))
     }
 
-    /// The `locations` of a filesystem outcome, whose path is the reported spelling: a `~` or
-    /// `~/…` path is matched under each spelling of the operator's home, and any other as given.
-    fn outcome_locations(&self, path: &Path) -> Option<Value> {
+    /// The `locations` of a filesystem outcome, matching a `~` or `~/…` path under each spelling of
+    /// the operator's home and any other path as given.
+    fn outcome_locations(&self, path: &Path) -> Value {
         let relative = match path.to_str() {
             Some("~") => Some(""),
             Some(text) => text.strip_prefix("~/"),
@@ -702,7 +702,7 @@ impl DogwoodEngine {
             return location_value(&self.locations, [path]);
         };
         // The load refuses declared locations without a home, so `homes` is empty only for a box
-        // that declares no location, and then this records no field.
+        // that declares no location, and then the record is empty.
         let expanded: Vec<PathBuf> = self
             .homes
             .iter()
@@ -1482,44 +1482,60 @@ fn reply_literals(condition: &dogwood_language::temporal_ast::Condition, out: &m
     }
 }
 
-/// Refuse a macro-expanded rule that names a `Box::Location` value `locations` does not declare,
-/// or any `Box::Location` when none is declared.
+/// Refuse a macro-expanded rule that reads a location `base` does not declare, judged without the
+/// MCP schemas the rule waits for.
 pub(crate) fn refuse_undeclared_locations(
     expanded: &str,
-    locations: &Locations,
+    base: &ActionSchema,
     index: usize,
 ) -> Result<(), Refused> {
-    let mut literals = Vec::new();
-    if let Ok(policies) = without_temporal(expanded).parse::<cedar_policy::PolicySet>() {
-        for policy in policies.policies() {
-            if let Ok(json) = policy.to_json() {
-                json_entity_literals(&json, &mut literals);
-            }
+    let mut problems = Vec::new();
+    let cedar_part = without_temporal(expanded);
+    if cedar_part
+        .parse::<cedar_policy::PolicySet>()
+        .ok()
+        .is_some_and(|policies| {
+            policies.policies().any(|policy| {
+                policy
+                    .to_json()
+                    .is_ok_and(|json| reads_locations_record(&json))
+            })
+        })
+    {
+        let policy_schema = PolicySchema::from_cedarschema_str(&base.source)
+            .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
+        if let Ok(parsed) =
+            dogwood_language::ParsedPolicySet::parse(&cedar_part, &service_schema()?)
+            && let Ok(lowered) = parsed.lower(&policy_schema)
+        {
+            let validation = Validator::new().validate(&lowered);
+            problems.extend(validation.validation_errors().map(ToString::to_string));
         }
     }
     if let Ok(parsed) = dogwood_language::ParsedPolicySet::parse(expanded, &service_schema()?) {
         for policy in parsed.policies() {
             for condition in policy.temporal_conditions() {
-                temporal_entity_literals(condition, &mut literals);
+                let mut names = Vec::new();
+                temporal_location_names(condition, &mut names);
+                problems.extend(
+                    names
+                        .into_iter()
+                        .filter(|name| !base.locations.contains_key(name))
+                        .map(|name| format!("`input.locations.{name}` names no declared location")),
+                );
             }
         }
     }
-    let mut undeclared: Vec<String> = literals
-        .into_iter()
-        .filter(|(ty, id)| ty == LOCATION_TYPE && !locations.contains_key(id))
-        .map(|(ty, id)| format!("{ty}::{id:?}"))
-        .collect();
-    undeclared.sort();
-    undeclared.dedup();
-    if undeclared.is_empty() {
+    problems.dedup();
+    if problems.is_empty() {
         return Ok(());
     }
     let id = annotated_id(expanded);
     let message = format!(
-        "{} (rule {}) names {}, which box.toml does not declare as a location",
+        "{} (rule {}) reads a location that box.toml does not declare: {}",
         parsed_rule_name(expanded, id.as_deref()),
         index.saturating_add(1),
-        undeclared.join(", ")
+        problems.join("; ")
     );
     Err(Refused::new(
         PolicyError::Schema(message.clone()),
@@ -1527,46 +1543,54 @@ pub(crate) fn refuse_undeclared_locations(
     ))
 }
 
-/// Collect the `(type, id)` of each entity literal in a Cedar policy's JSON form.
-fn json_entity_literals(value: &serde_json::Value, out: &mut Vec<(String, String)>) {
+/// Whether a Cedar policy's JSON form reads `context.input.locations`.
+fn reads_locations_record(value: &serde_json::Value) -> bool {
+    let is_chain =
+        |value: &serde_json::Value, attr: &str, inner: &dyn Fn(&serde_json::Value) -> bool| {
+            value.get(".").is_some_and(|access| {
+                access.get("attr").and_then(serde_json::Value::as_str) == Some(attr)
+                    && access.get("left").is_some_and(inner)
+            })
+        };
+    let is_context = |value: &serde_json::Value| {
+        value.get("Var").and_then(serde_json::Value::as_str) == Some("context")
+    };
+    let is_input = |value: &serde_json::Value| is_chain(value, "input", &is_context);
+    if is_chain(value, attr::LOCATIONS, &is_input) {
+        return true;
+    }
     match value {
-        serde_json::Value::Object(map) => {
-            if let Some(serde_json::Value::Object(entity)) = map.get("__entity")
-                && let (Some(ty), Some(id)) = (
-                    entity.get("type").and_then(serde_json::Value::as_str),
-                    entity.get("id").and_then(serde_json::Value::as_str),
-                )
-            {
-                out.push((ty.to_string(), id.to_string()));
-            }
-            map.values()
-                .for_each(|child| json_entity_literals(child, out));
-        }
-        serde_json::Value::Array(items) => {
-            items
-                .iter()
-                .for_each(|child| json_entity_literals(child, out));
-        }
-        _ => {}
+        serde_json::Value::Object(map) => map.values().any(reads_locations_record),
+        serde_json::Value::Array(items) => items.iter().any(reads_locations_record),
+        _ => false,
     }
 }
 
-/// Collect the `(type, id)` of each entity literal in a temporal condition.
-fn temporal_entity_literals(
+/// Collect the name of each `input.locations.<name>` field a filesystem predicate or a
+/// `context.input.locations.<name>` term in a temporal condition reads.
+fn temporal_location_names(
     condition: &dogwood_language::temporal_ast::Condition,
-    out: &mut Vec<(String, String)>,
+    out: &mut Vec<String>,
 ) {
     use dogwood_language::temporal_ast::{AggExprKind, ConditionKind, Term};
-    fn term_literals(term: &Term, out: &mut Vec<(String, String)>) {
+    fn location_name(path: &[String]) -> Option<String> {
+        match path {
+            [input, locations, name, ..] if input == "input" && locations == attr::LOCATIONS => {
+                Some(name.clone())
+            }
+            _ => None,
+        }
+    }
+    fn term_names(term: &Term, out: &mut Vec<String>) {
         match term {
-            Term::Entity { ty, id } => out.push((ty.clone(), id.clone())),
+            Term::ContextField(path) => out.extend(location_name(path)),
             Term::Agg(aggregate) => match &aggregate.kind {
                 AggExprKind::Sum { body, .. } | AggExprKind::Count { body, .. } => {
-                    temporal_entity_literals(body, out);
+                    temporal_location_names(body, out);
                 }
                 AggExprKind::Call(_) => {}
             },
-            Term::Array(items) => items.iter().for_each(|item| term_literals(item, out)),
+            Term::Array(items) => items.iter().for_each(|item| term_names(item, out)),
             _ => {}
         }
     }
@@ -1574,22 +1598,28 @@ fn temporal_entity_literals(
         ConditionKind::And { left, right }
         | ConditionKind::Or { left, right }
         | ConditionKind::Since { left, right, .. } => {
-            temporal_entity_literals(left, out);
-            temporal_entity_literals(right, out);
+            temporal_location_names(left, out);
+            temporal_location_names(right, out);
         }
         ConditionKind::Not { inner: body }
         | ConditionKind::Formerly { body, .. }
         | ConditionKind::Previous { body, .. }
         | ConditionKind::Exists { body, .. }
-        | ConditionKind::Refine { base: body, .. } => temporal_entity_literals(body, out),
+        | ConditionKind::Refine { base: body, .. } => temporal_location_names(body, out),
         ConditionKind::Predicate(predicate) => {
+            let filesystem = matches!(predicate.namespace.as_slice(), [box_namespace, kind]
+                if box_namespace == "Box" && kind == "Action")
+                && predicate.action.starts_with("fs:");
             for argument in &predicate.args {
-                term_literals(&argument.value, out);
+                if filesystem {
+                    out.extend(location_name(&argument.field_path()));
+                }
+                term_names(&argument.value, out);
             }
         }
         ConditionKind::Comparison { left, right, .. } => {
-            term_literals(left, out);
-            term_literals(right, out);
+            term_names(left, out);
+            term_names(right, out);
         }
         ConditionKind::Tp { .. } | ConditionKind::Call(_) | ConditionKind::SigilRef { .. } => {}
     }
@@ -2281,28 +2311,14 @@ fn fs_operation_value(operation: crate::request::FsOperation) -> Value {
     }
 }
 
-/// The `locations` value of a filesystem event, mirroring the Cedar mapping's `locations_expr`:
-/// the sorted names of the locations that hold any of `paths`, which spell one file, or `None` for
-/// a box that declares no location.
-fn location_value<'a>(
-    locations: &Locations,
-    paths: impl IntoIterator<Item = &'a Path>,
-) -> Option<Value> {
-    (!locations.is_empty()).then(|| {
-        let names: BTreeSet<&str> = paths
+/// The `locations` record of a filesystem event, mirroring the Cedar mapping's `locations_expr`.
+fn location_value<'a>(locations: &Locations, paths: impl IntoIterator<Item = &'a Path>) -> Value {
+    Value::Object(
+        held_locations(locations, paths)
             .into_iter()
-            .flat_map(|path| locations_of(locations, path))
-            .collect();
-        Value::Array(
-            names
-                .into_iter()
-                .map(|name| Value::Entity {
-                    ty: LOCATION_TYPE.to_string(),
-                    id: name.to_string(),
-                })
-                .collect(),
-        )
-    })
+            .map(|(name, held)| (name.to_string(), Value::Bool(held)))
+            .collect(),
+    )
 }
 
 /// The `input` fields of a request event. Same names and types the Cedar mapping
@@ -4136,15 +4152,14 @@ when temporal {
     /// A budget per location set over many windows, so a sawtooth that only the first window
     /// passes fails here.
     #[test]
-    fn a_location_budget_holds_in_each_window_and_counts_each_location_set_apart() {
+    fn a_location_budget_holds_in_each_window_and_counts_every_path_in_the_location() {
         let source = r#"
 permit (principal, action == Box::Action::"fs:write", resource)
 when temporal {
     exists (total: Long). (
         (count for (t: Timepoint). where (
             formerly within 60s (
-                Box::Action::"fs:write"::response{ input.locations: context.input.locations }
-                && tp(t)
+                Box::Action::"fs:write"::response{ input.locations.project: true } && tp(t)
             )
         )) == total
         && total < 2
@@ -4162,16 +4177,125 @@ when temporal {
         .expect("policy loads");
 
         for window in 0..6 {
+            assert!(located_write(&engine, &format!("/work/src/{window}-a")));
+            assert!(located_write(&engine, &format!("/work/docs/{window}-b")));
             for directory in ["/work/src", "/work/docs"] {
-                assert!(located_write(&engine, &format!("{directory}/{window}-a")));
-                assert!(located_write(&engine, &format!("{directory}/{window}-b")));
                 assert!(
                     !located_write(&engine, &format!("{directory}/{window}-c")),
-                    "window {window}: a third write in {directory} spends its set's budget"
+                    "window {window}: writes in {{project}} and {{project, docs}} spend one budget"
                 );
             }
             engine.advance_clock(61);
         }
+    }
+
+    /// The previous release's Box schema, which has no `locations` record.
+    const PREVIOUS_RELEASE: &str = include_str!("../tests/fixtures/actions-v0.2.2.cedarschema");
+
+    const WRITE_BUDGET: &str = r#"
+permit (principal, action == Box::Action::"fs:write", resource)
+when temporal {
+    exists (total: Long). (
+        (count for (t: Timepoint). where (
+            formerly within 1h (
+                Box::Action::"fs:write"::response{ input.path: _ } && tp(t)
+            )
+        )) == total
+        && total < 3
+    )
+};
+"#;
+
+    /// Submit a request and a completed response for one write, spelled as the previous release
+    /// records them, and return the request's verdict.
+    fn previous_release_write(engine: &mut DurableTemporalEngine, path: &str) -> Option<bool> {
+        let fields = || {
+            vec![
+                (attr::PATH, Value::String(path.to_string())),
+                (
+                    attr::OPERATION,
+                    fs_operation_value(crate::request::FsOperation::WriteContent),
+                ),
+            ]
+        };
+        let request = with_fields(
+            Event::builder_for(FIXED_ACTION_NAMESPACE, action::FS_WRITE, KIND_REQUEST),
+            &governed(),
+            &Principal::agent(),
+            fields(),
+        );
+        let verdict = match engine.submit(request).expect("the request submits").outcome {
+            DurableOutcome::Decision(response) => {
+                assert_eq!(
+                    response.diagnostics().errors().count(),
+                    0,
+                    "the decision evaluates"
+                );
+                Some(response.decision() == DogwoodDecision::Allow)
+            }
+            _ => None,
+        };
+        let response = with_output_fields(
+            with_fields(
+                Event::builder_for(FIXED_ACTION_NAMESPACE, action::FS_WRITE, KIND_RESPONSE),
+                &governed(),
+                &Principal::agent(),
+                fields(),
+            ),
+            vec![(
+                attr::RESULT,
+                Value::Entity {
+                    ty: crate::schema::FS_RESPONSE_RESULT_TYPE.to_string(),
+                    id: "completed".to_string(),
+                },
+            )],
+        );
+        engine.submit(response).expect("the response submits");
+        verdict
+    }
+
+    /// A box the previous release created opens under the always-present `locations` record with
+    /// its budget's history intact, and the previous release opens it again after.
+    #[test]
+    fn a_history_from_the_previous_release_opens_with_the_locations_record_and_back() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        let (canonical, _, _) = validate_and_expand(WRITE_BUDGET, &[], &Operator::unanchored())
+            .expect("the budget validates");
+        assert!(!PREVIOUS_RELEASE.contains("locations"));
+
+        let mut previous = open_history(&path, durable_config()).expect("history opens");
+        previous
+            .install(
+                &canonical.join("\n"),
+                PREVIOUS_RELEASE,
+                Some(EVENTS_DWSCHEMA),
+                None,
+            )
+            .expect("the previous release installs");
+        assert_eq!(previous_release_write(&mut previous, "/work/a"), Some(true));
+        drop(previous);
+
+        let current = DogwoodEngine::open(WRITE_BUDGET, &path).expect("this build opens it");
+        assert!(located_write(&current, "/work/b"));
+        assert!(located_write(&current, "/work/c"));
+        assert!(
+            !located_write(&current, "/work/d"),
+            "the previous release's write and this build's two count together"
+        );
+        drop(current);
+
+        let mut rolled_back = open_history(&path, durable_config()).expect("history opens");
+        rolled_back
+            .batch(vec![Verb::SetActionSchema {
+                action_schema: PREVIOUS_RELEASE.to_string(),
+            }])
+            .expect("the previous release restores its schema");
+        assert_eq!(
+            previous_release_write(&mut rolled_back, "/work/e"),
+            Some(false),
+            "the previous release counts the events this build recorded with `locations`"
+        );
     }
 }
 

@@ -110,8 +110,8 @@ path, a wildcard, or an IP address is a load error. See
 [upgrade plain HTTP to HTTPS](../../docs/user/egress.md#upgrade-plain-http-to-https).
 
 `[locations]` maps each location name to a non-empty list of absolute or `~/` directories. A
-filesystem rule reads the names that hold a request's path as `context.input.locations`, so the
-policy names a location and not its directories. A location grants no reach, and `run` discloses
+filesystem rule reads `context.input.locations.<name>`, true when that location holds the request's
+path, so the policy names a location and not its directories. A location grants no reach, and `run` discloses
 each one on stderr. See [`[locations]`](../../docs/user/config.md#locations).
 
 **`[agent]` and each `[tool.<label>]` hold the same four fields.** `[agent]` is the process the

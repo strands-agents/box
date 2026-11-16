@@ -64,26 +64,38 @@ Ten actions in four categories, and one generated action per MCP tool:
 
 ## Filesystem
 
-The five `fs:*` actions carry the same two fields, and a third when `box.toml` declares
-[`[locations]`](../config.md#locations):
+The five `fs:*` actions carry the same three fields:
 
 | Field | Type | Meaning |
 |---|---|---|
 | `path` | String | The resolved path, spelled `~/…` under the operator's home and absolute elsewhere. |
 | `operation` | `Box::Fs<Verb>Operation` | The exact verb. The table below gives the spelling and the values for each action. |
-| `locations` | `Set<Box::Location>` | Each declared location that holds `path`, spelled `Box::Location::"<name>"`. The set is empty for a path in no location. Present only when `box.toml` declares at least one location. |
+| `locations` | Record of Bool | One field for each location that [`[locations]`](../config.md#locations) in `box.toml` declares, `true` when that location holds `path`. The record is empty when `box.toml` declares none. |
 
 A path is in a location when it is one of the location's directories or below one, by whole path
 components, so `/work-old/notes.md` is not in `/work`. A path can be in more than one location.
-This rule permits a write anywhere in the `project` location:
+A rule reads a location in one of two ways:
+
+- **Strict:** `context.input.locations.project`. A rule that names a location `box.toml` does not
+  declare refuses to load, so a typo stops the box.
+- **Portable:** `context.input.locations has project && context.input.locations.project`. The
+  rule loads in every box and matches nothing where `project` is not declared.
 
 ```text
 @id("project_write")
 permit (principal, action == Box::Action::"fs:write", resource)
-when { context.input.locations.contains(Box::Location::"project") };
+when { context.input.locations.project };
 ```
 
-A rule that names a location `box.toml` does not declare refuses to load.
+Use the portable form on a `permit`, and never on a `forbid`. A portable `forbid` whose location
+`box.toml` misspells loads and protects nothing.
+
+A history rule reads one location as a field of the event, so a budget counts every write in
+`project`, whatever other locations also hold the path:
+
+```text
+formerly within 1h ( Box::Action::"fs:write"::response{ input.locations.project: true } )
+```
 
 A rule spells an operation with the action's own prefix, as `Box::FsReadOperation::"read_content"`:
 
