@@ -93,7 +93,8 @@ The Shell implements these, each in place of a program of the same name on the `
 - Text: `cat`, `grep`, `sed`, `head`, `tail`, `sort`, `uniq`, `cut`, `tr`, `wc`, `tee`.
 - Files: `ls`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `ln`, `chmod`, `touch`, `mktemp`, `readlink`.
 - Data and network: `jq`, `curl`.
-- Interpreters: `lua`, and `python` and `python3`, which run in Monty, Box's Python interpreter.
+- Interpreters: `sh` and `lash`, which run a script in the Shell, also when it is called as
+  `/bin/sh`; `lua`; and `python` and `python3`, which run in Monty, Box's Python interpreter.
 
 Paths outside the operator's home, the agent's home, and the workspace, such as `/tmp`, exist only
 in the Shell's memory, for one command. A file written to `/tmp` is gone when the command ends.

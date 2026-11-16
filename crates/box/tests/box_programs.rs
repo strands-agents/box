@@ -594,36 +594,17 @@ zsh -c 'cat {box_home}/shared/w1.txt {box_home}/shared/w2.txt {box_home}/shared/
 ///
 /// Every other test here exercises builtins Strands Shell implements. This one runs a script
 /// the *test* creates on the host, inside the box's mount, so the box has no knowledge of it — the
-/// closest reachable thing to "a fake command". It checks the parts an agent harness depends on: a
-/// shebang, an argument, stdout and stderr kept separate, and the tool's own exit code.
+/// closest reachable thing to "a fake command". It checks the parts an agent harness depends on: an
+/// argument, stdout and stderr kept separate, and the tool's own exit code.
 ///
-/// **Why this test has its own policy.** `sh` is not a program the Shell implements, so the
-/// resolved decision is `shell:spawn` and `PERMISSIVE` — which permits `shell:run` only — refuses
-/// it. Adding the spawn permit to `PERMISSIVE` instead would widen every other test in this file,
-/// including the ones whose subject is a denial, so the grant stays scoped to the one test that
-/// needs a host binary. The same reason `box_shell.rs` keeps `ONE_BINARY_POLICY` separate.
+/// `sh FILE` runs the file in the Shell, so the test needs no `shell:spawn` permit and no
+/// `[tool.sh]` table; `sh_script_admission.rs` pins that decision.
 #[test]
 fn a_program_the_box_never_saw_behaves_like_a_unix_program() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    /// `PERMISSIVE` plus the one host binary this test runs, and no other.
-    const PERMISSIVE_PLUS_SH: &str = r#"
-permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
-permit(principal == Box::Agent::"self", action == Box::Action::"shell:spawn", resource)
-when { context.input.program == "sh" };
-permit(principal, action == Box::Action::"fs:read", resource);
-permit(principal, action == Box::Action::"fs:write", resource);
-"#;
-
-    // The host `sh` is a declared tool with the agent home read-write, so it can run a script there.
-    let box_ = Request::with_config(
-        "prog-fake-cmd",
-        PERMISSIVE_PLUS_SH,
-        "[tool.sh]\ncommand = [\"sh\"]\n[tool.sh.filesystem]\nread = [\"{box_home}\"]\n\
-         write = [\"{box_home}\"]\n",
-    )
-    .expect();
+    let box_ = Request::with_policy("prog-fake-cmd", PERMISSIVE).expect();
 
     // Written from the host side into the box home, which the box mounts. Writing it here rather
     // than through a nested `zsh -c` keeps the shell quoting legible; the *use* of it below is
