@@ -241,6 +241,14 @@ to the server in both modes.
 With `secret.ref = "env://NAME"`, `box run` reads `NAME` from its own environment. The agent gets
 a placeholder in `NAME`, and the gateway swaps in the real value on each request to the server.
 
+Box keeps separate tool descriptions for each HTTP address and MCP session. The harness must
+list tools at the same address and session it uses to call them. A list from `/status` cannot
+change how Box checks calls to `/mcp`, even when both paths share a configured host. Existing
+`destinations` entries need no changes.
+
+The address includes the HTTP method, scheme, host, port, path, and query. If the harness changes
+that address or its `Mcp-Session-Id`, it must list tools there before calling them.
+
 ## Errors and exit codes
 
 `box run` exits with an error before the agent starts when a table breaks a rule on this page.
@@ -258,6 +266,17 @@ The harness gets these errors when it starts a server, and the box keeps running
 | `no MCP server declares "<command>"; servers on <program>: <name>, ...` | The harness ran a command that matches no `command` on that program. Set the harness's command and arguments to the `command` of one of the listed servers in `box.toml`. |
 | `` <name> (its `command` does not expand) `` in that list | The server's `command` holds a `${...}` name the box does not fill in. Use one of the three `OTEL_EXPORTER_OTLP_` names. |
 | ``no MCP server declares "<command>"; no `[mcp.<name>]` table in box.toml declares the program "<program>"`` | The harness ran a program that no `[mcp.<name>]` table names. |
+
+The gateway refuses an HTTP MCP request with a top-level `result` or `error`, even when it
+also names a `method`. It returns status 403 with `MCP frame refused` and does not forward the
+request. Remove these response fields from request messages, including fields set to `null`.
+A `tools/list` request must also have `jsonrpc = "2.0"`, a string or integer identifier, and a
+string cursor when present. A repeated or invalid `Mcp-Session-Id` header also causes refusal.
+
+If the tool catalog is not accepted, list tools again at the call's address and session. Box
+accepts a list only when its response identifier matches the request. A malformed refresh removes
+the accepted list for that source; other addresses and sessions keep their lists. Each configured
+server can retain up to 64 address/session combinations during one run.
 
 For a request the policy refuses, see [troubleshooting](./mcp-policy.md#troubleshooting).
 

@@ -83,6 +83,7 @@ impl AttemptSnapshot {
                 body_bytes,
                 intercepted: _,
                 mcp: _,
+                mcp_source: _,
             } => Self::HttpRequest {
                 host: (*host).to_string(),
                 port: *port,
@@ -1199,6 +1200,49 @@ fn response_release_denial_sends_no_upstream_head_or_body() {
 }
 
 #[test]
+fn malformed_catalog_requests_never_reach_the_upstream() {
+    let host = "catalog-request.test";
+    let upstream = TlsUpstream::start(host);
+    let shared = Arc::new(Mutex::new(Vec::new()));
+    let handle = MitmInterceptor::start(
+        MitmConfig {
+            mcp_servers: vec![(host.to_string(), "test-server".to_string())],
+            ..config_for(host, &upstream)
+        },
+        no_injection(),
+        Arc::new(RecordingInterceptor::allowing(shared)),
+    )
+    .unwrap();
+    let valid = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    for (body, extra_headers) in [
+        (r#"{"jsonrpc":"2.0","method":"tools/list"}"#, vec![]),
+        (
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"cursor":false}}"#,
+            vec![],
+        ),
+        (
+            valid,
+            vec![("Mcp-Session-Id", "first"), ("mcp-session-id", "second")],
+        ),
+    ] {
+        let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+        client.set_read_timeout(Duration::from_secs(3));
+        client.send_request("POST", "/mcp", &extra_headers, body.as_bytes());
+        assert_eq!(client.read_status(), 403);
+    }
+    assert_eq!(upstream.request_count(), 0);
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+    client.set_read_timeout(Duration::from_secs(3));
+    client.send_request("POST", "/mcp", &[], valid.as_bytes());
+    assert_eq!(client.read_status(), 200);
+    assert_eq!(
+        upstream.request_count(),
+        1,
+        "valid discovery reaches the same upstream"
+    );
+}
+
+#[test]
 fn mcp_calls_stream_but_tools_list_waits_for_catalog_staging() {
     use std::io::Read;
     use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
@@ -1207,10 +1251,21 @@ fn mcp_calls_stream_but_tools_list_waits_for_catalog_staging() {
         effects: RecordingInterceptor,
         staged: SyncSender<Vec<u8>>,
         proceed: Mutex<Receiver<()>>,
+        endpoint: Mutex<Option<[u8; 32]>>,
     }
 
     impl EffectInterceptor for CatalogInterceptor {
         fn intercept(&self, attempt: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>> {
+            if let EffectAttempt::HttpRequest {
+                mcp: Some(_),
+                mcp_source,
+                ..
+            } = attempt
+            {
+                let source = mcp_source.expect("the MCP request carries its source");
+                assert_eq!(source.session, Some("test-session"));
+                *self.endpoint.lock().unwrap() = Some(source.endpoint);
+            }
             self.effects.intercept(attempt)
         }
 
@@ -1220,6 +1275,8 @@ fn mcp_calls_stream_but_tools_list_waits_for_catalog_staging() {
             reply: egress_gateway::McpListReply<'_>,
         ) -> io::Result<()> {
             assert_eq!(server, "test-server");
+            assert_eq!(Some(reply.endpoint), *self.endpoint.lock().unwrap());
+            assert_eq!(reply.request_id, "1");
             assert_eq!(reply.session, Some("test-session"));
             assert_eq!(reply.cursor, Some("page-one"));
             self.staged.send(reply.body.to_vec()).unwrap();
@@ -1248,6 +1305,7 @@ fn mcp_calls_stream_but_tools_list_waits_for_catalog_staging() {
                 effects: RecordingInterceptor::allowing(shared.clone()),
                 staged: staged_tx,
                 proceed: Mutex::new(proceed_rx),
+                endpoint: Mutex::new(None),
             }),
         )
         .unwrap();
@@ -1869,6 +1927,7 @@ fn attempt_schema_never_carries_body_or_header_content() {
         body_bytes: 42,
         intercepted: true,
         mcp: None,
+        mcp_source: None,
     };
 
     let rendered = format!("{attempt:?}").to_ascii_lowercase();
@@ -1891,6 +1950,10 @@ fn attempt_schema_never_carries_body_or_header_content() {
                 server: "prod",
                 tool,
                 arguments: r#"{"password":"the-secret-value"}"#,
+            }),
+            mcp_source: Some(egress_gateway::McpSource {
+                endpoint: [7; 32],
+                session: Some("the-secret-value"),
             }),
         };
         let rendered = format!("{attempt:?}").to_ascii_lowercase();

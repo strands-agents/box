@@ -98,7 +98,7 @@ pub enum ListPage {
 /// One complete list, ready to stage.
 #[derive(Debug)]
 pub struct CompleteCatalog {
-    server: String,
+    key: Box<CatalogKey>,
     tools: BTreeSet<String>,
     merged: Value,
     identity: Value,
@@ -108,7 +108,7 @@ pub struct CompleteCatalog {
 impl CompleteCatalog {
     /// The server that listed the catalog.
     pub fn server(&self) -> &str {
-        &self.server
+        &self.key.server
     }
 
     /// The number of tools the list names.
@@ -164,9 +164,42 @@ pub struct ToolCatalogs {
     staging: Mutex<()>,
 }
 
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct CatalogKey {
+    server: String,
+    source: Option<([u8; 32], Option<String>)>,
+}
+
+impl fmt::Debug for CatalogKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CatalogKey")
+            .field("server", &self.server)
+            .field("remote", &self.source.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CatalogKey {
+    fn declared(server: &str) -> Self {
+        Self {
+            server: server.to_string(),
+            source: None,
+        }
+    }
+
+    #[cfg(feature = "egress-adapter")]
+    fn remote(server: &str, source: egress_gateway::McpSource<'_>) -> Self {
+        Self {
+            server: server.to_string(),
+            source: Some((source.endpoint, source.session.map(str::to_string))),
+        }
+    }
+}
+
 struct Catalogs {
-    servers: BTreeMap<String, ServerEntry>,
-    lists: BTreeMap<(String, String), PartialList>,
+    servers: BTreeMap<CatalogKey, ServerEntry>,
+    lists: BTreeMap<(CatalogKey, String), PartialList>,
     retained_bytes: usize,
     next_list: u64,
 }
@@ -182,6 +215,8 @@ struct AcceptedCatalog {
     tools: BTreeSet<String>,
     identity: Value,
     bytes: usize,
+    #[cfg(feature = "egress-adapter")]
+    fragment: Arc<str>,
 }
 
 struct PartialList {
@@ -273,7 +308,7 @@ impl PartialList {
         }
     }
 
-    fn complete(self, server: &str) -> CompleteCatalog {
+    fn complete(self, key: CatalogKey) -> CompleteCatalog {
         let mut by_name: Vec<&Value> = self.tools.iter().collect();
         by_name.sort_by(|left, right| {
             left.get("name")
@@ -299,7 +334,7 @@ impl PartialList {
             merged.insert("$defs".to_string(), Value::Object(self.definitions));
         }
         CompleteCatalog {
-            server: server.to_string(),
+            key: Box::new(key),
             tools: self.names,
             merged: serde_json::json!({ "result": merged }),
             identity,
@@ -321,7 +356,7 @@ impl ToolCatalogs {
                     .into_iter()
                     .map(|(name, kind)| {
                         (
-                            name,
+                            CatalogKey::declared(&name),
                             ServerEntry {
                                 kind,
                                 state: ServerDiscovery::Undiscovered,
@@ -351,20 +386,37 @@ impl ToolCatalogs {
         response: &Value,
         bytes: usize,
     ) -> Result<ListPage, DiscoveryFailure> {
+        self.observe_catalog_page(
+            CatalogKey::declared(server),
+            connection,
+            cursor,
+            response,
+            bytes,
+        )
+    }
+
+    fn observe_catalog_page(
+        &self,
+        catalog: CatalogKey,
+        connection: &str,
+        cursor: Option<&str>,
+        response: &Value,
+        bytes: usize,
+    ) -> Result<ListPage, DiscoveryFailure> {
         let mut inner = self.lock();
-        if !inner.servers.contains_key(server) {
+        if !inner.servers.contains_key(&catalog) {
             return Ok(ListPage::Ignored);
         }
-        let key = (server.to_string(), connection.to_string());
+        let key = (catalog.clone(), connection.to_string());
         let mut list = match cursor {
             None => {
                 if let Some(abandoned) = inner.lists.remove(&key) {
                     inner.retained_bytes = inner.retained_bytes.saturating_sub(abandoned.bytes);
                 }
-                let others: Vec<((String, String), u64)> = inner
+                let others: Vec<((CatalogKey, String), u64)> = inner
                     .lists
                     .iter()
-                    .filter(|((listed, _), _)| listed == server)
+                    .filter(|((listed, _), _)| listed.server == catalog.server)
                     .map(|(key, list)| (key.clone(), list.started))
                     .collect();
                 if others.len() >= MAXIMUM_CONCURRENT_LISTS
@@ -373,6 +425,13 @@ impl ToolCatalogs {
                     && let Some(evicted) = inner.lists.remove(&oldest)
                 {
                     inner.retained_bytes = inner.retained_bytes.saturating_sub(evicted.bytes);
+                    let still_listing = inner.lists.keys().any(|(source, _)| *source == oldest.0);
+                    if !still_listing
+                        && let Some(entry) = inner.servers.get_mut(&oldest.0)
+                        && entry.accepted.is_none()
+                    {
+                        entry.state = ServerDiscovery::Failed(DiscoveryFailure::RunRetention);
+                    }
                 }
                 inner.next_list += 1;
                 PartialList::new(inner.next_list)
@@ -394,20 +453,171 @@ impl ToolCatalogs {
         };
         match outcome {
             Err(failure) => {
-                Self::fail_locked(&mut inner, server, failure);
+                Self::fail_locked(&mut inner, &catalog, failure);
                 Err(failure)
             }
             Ok(Some(_)) => {
                 inner.retained_bytes = retained;
                 inner.lists.insert(key, list);
-                Self::begin_listing(&mut inner, server);
+                Self::begin_listing(&mut inner, &catalog);
                 Ok(ListPage::More)
             }
             Ok(None) => {
-                Self::begin_listing(&mut inner, server);
-                Ok(ListPage::Complete(list.complete(server)))
+                Self::begin_listing(&mut inner, &catalog);
+                Ok(ListPage::Complete(list.complete(catalog)))
             }
         }
+    }
+
+    #[cfg(feature = "egress-adapter")]
+    pub(crate) fn observe_remote_page(
+        &self,
+        server: &str,
+        source: egress_gateway::McpSource<'_>,
+        cursor: Option<&str>,
+        response: &Value,
+        bytes: usize,
+    ) -> Result<ListPage, DiscoveryFailure> {
+        let _staging = self
+            .staging
+            .lock()
+            .map_err(|_| DiscoveryFailure::PolicyStaging)?;
+        let key = CatalogKey::remote(server, source);
+        if !self.track_remote_source(&key, cursor.is_none())? {
+            return Ok(ListPage::Ignored);
+        }
+        self.observe_catalog_page(
+            key,
+            source.session.unwrap_or_default(),
+            cursor,
+            response,
+            bytes,
+        )
+    }
+
+    #[cfg(feature = "egress-adapter")]
+    fn track_remote_source(
+        &self,
+        key: &CatalogKey,
+        create: bool,
+    ) -> Result<bool, DiscoveryFailure> {
+        const MAXIMUM_REMOTE_SOURCES_PER_SERVER: usize = 64;
+        let mut inner = self.lock();
+        if !inner
+            .servers
+            .get(&CatalogKey::declared(&key.server))
+            .is_some_and(|entry| entry.kind == McpServerKind::Http)
+        {
+            return Ok(false);
+        }
+        if inner.servers.contains_key(key) {
+            return Ok(true);
+        }
+        if !create {
+            return Ok(false);
+        }
+        let source_bytes = std::mem::size_of::<CatalogKey>()
+            + std::mem::size_of::<ServerEntry>()
+            + key.server.len()
+            + key
+                .source
+                .as_ref()
+                .map_or(0, |(_, session)| session.as_ref().map_or(0, String::len));
+        if inner
+            .servers
+            .keys()
+            .filter(|other| other.source.is_some() && other.server == key.server)
+            .count()
+            >= MAXIMUM_REMOTE_SOURCES_PER_SERVER
+            || inner.retained_bytes.saturating_add(source_bytes) > MAXIMUM_RETAINED_BYTES
+        {
+            if let Some(declared) = inner.servers.get_mut(&CatalogKey::declared(&key.server))
+                && declared.accepted.is_none()
+            {
+                declared.state = ServerDiscovery::Failed(DiscoveryFailure::RunRetention);
+            }
+            return Err(DiscoveryFailure::RunRetention);
+        }
+        inner.retained_bytes += source_bytes;
+        inner.servers.insert(
+            key.clone(),
+            ServerEntry {
+                kind: McpServerKind::Http,
+                state: ServerDiscovery::Undiscovered,
+                accepted: None,
+                restages: 0,
+            },
+        );
+        Ok(true)
+    }
+
+    #[cfg(feature = "egress-adapter")]
+    pub(crate) fn remote_list_denied(&self, server: &str, source: egress_gateway::McpSource<'_>) {
+        let key = CatalogKey::remote(server, source);
+        if self.track_remote_source(&key, true) != Ok(true) {
+            return;
+        }
+        let mut inner = self.lock();
+        if let Some(entry) = inner.servers.get_mut(&key)
+            && entry.state == ServerDiscovery::Undiscovered
+        {
+            entry.state = ServerDiscovery::Failed(DiscoveryFailure::ToolsListDenied);
+        }
+    }
+
+    #[cfg(feature = "egress-adapter")]
+    pub(crate) fn remote_list_failed(
+        &self,
+        server: &str,
+        source: egress_gateway::McpSource<'_>,
+        failure: DiscoveryFailure,
+    ) {
+        let key = CatalogKey::remote(server, source);
+        if self.track_remote_source(&key, true) != Ok(true) {
+            return;
+        }
+        let Ok(_staging) = self.staging.lock() else {
+            return;
+        };
+        let mut inner = self.lock();
+        let list_key = (key.clone(), source.session.unwrap_or_default().to_string());
+        if let Some(list) = inner.lists.remove(&list_key) {
+            inner.retained_bytes = inner.retained_bytes.saturating_sub(list.bytes);
+        }
+        Self::fail_locked(&mut inner, &key, failure);
+    }
+
+    #[cfg(feature = "egress-adapter")]
+    pub(crate) fn refine_remote_tool_call(
+        &self,
+        governed: &crate::GovernedBox,
+        principal: &crate::Principal,
+        server: &str,
+        source: egress_gateway::McpSource<'_>,
+        tool: &str,
+        arguments: &Value,
+    ) -> Result<crate::Decision, CatalogRefusal> {
+        let Ok(_staging) = self.staging.lock() else {
+            return Ok(crate::Decision::internal_fault());
+        };
+        let fragment = {
+            let inner = self.lock();
+            if !inner.servers.contains_key(&CatalogKey::declared(server)) {
+                return Err(CatalogRefusal::Undeclared);
+            }
+            let entry = inner
+                .servers
+                .get(&CatalogKey::remote(server, source))
+                .ok_or(CatalogRefusal::NotAccepted)?;
+            let accepted = entry.accepted.as_ref().ok_or(CatalogRefusal::NotAccepted)?;
+            if !accepted.tools.contains(tool) {
+                return Err(CatalogRefusal::NotListed);
+            }
+            Arc::clone(&accepted.fragment)
+        };
+        Ok(self
+            .policy
+            .refine_tool_call_with_schema(governed, principal, server, tool, arguments, &fragment))
     }
 
     /// Stage one complete list's schema, and accept its tools once the schema commits.
@@ -419,10 +629,11 @@ impl ToolCatalogs {
             .staging
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let server = catalog.server.clone();
+        let key = *catalog.key;
+        let server = &key.server;
         {
             let mut inner = self.lock();
-            let Some(entry) = inner.servers.get_mut(&server) else {
+            let Some(entry) = inner.servers.get_mut(&key) else {
                 return Ok(CatalogStage::Rejected {
                     failure: DiscoveryFailure::PolicyStaging,
                     reason: format!("MCP server {server:?} is not declared"),
@@ -445,11 +656,11 @@ impl ToolCatalogs {
                 }
             }
         }
-        let fragment = match crate::generate_mcp_schema(&server, &catalog.merged.to_string()) {
+        let fragment = match crate::generate_mcp_schema(server, &catalog.merged.to_string()) {
             Ok(fragment) => fragment,
             Err(error) => {
                 return Ok(self.reject(
-                    &server,
+                    &key,
                     DiscoveryFailure::SchemaGeneration,
                     error.to_string(),
                 ));
@@ -460,7 +671,7 @@ impl ToolCatalogs {
             let inner = self.lock();
             let released = inner
                 .servers
-                .get(&server)
+                .get(&key)
                 .and_then(|entry| entry.accepted.as_ref())
                 .map_or(0, |accepted| accepted.bytes);
             if inner
@@ -471,7 +682,7 @@ impl ToolCatalogs {
             {
                 drop(inner);
                 return Ok(self.reject(
-                    &server,
+                    &key,
                     DiscoveryFailure::RunRetention,
                     "the run discovery retention budget is exhausted".to_string(),
                 ));
@@ -482,7 +693,7 @@ impl ToolCatalogs {
             let mut inner = self.lock();
             inner
                 .servers
-                .get_mut(&server)
+                .get_mut(&key)
                 .and_then(|entry| entry.accepted.as_mut())
                 .map(|accepted| {
                     let previous = accepted.tools.clone();
@@ -490,7 +701,7 @@ impl ToolCatalogs {
                     previous
                 })
         };
-        let staged = match self.policy.stage_mcp_schema(&server, fragment) {
+        let staged = match self.policy.stage_mcp_schema(server, fragment.clone()) {
             Ok(SchemaStage::Accepted { .. }) => Ok(()),
             Ok(SchemaStage::Rejected { reason }) => Err(Ok(reason)),
             Err(error) => Err(Err(error)),
@@ -500,7 +711,7 @@ impl ToolCatalogs {
             && let Some(accepted) = self
                 .lock()
                 .servers
-                .get_mut(&server)
+                .get_mut(&key)
                 .and_then(|entry| entry.accepted.as_mut())
         {
             accepted.tools = previous;
@@ -510,7 +721,7 @@ impl ToolCatalogs {
                 let mut inner = self.lock();
                 let released = inner
                     .servers
-                    .get(&server)
+                    .get(&key)
                     .and_then(|entry| entry.accepted.as_ref())
                     .map_or(0, |accepted| accepted.bytes);
                 inner.retained_bytes = inner
@@ -520,7 +731,7 @@ impl ToolCatalogs {
                 let tools = catalog.tools.len();
                 let entry = inner
                     .servers
-                    .get_mut(&server)
+                    .get_mut(&key)
                     .expect("a staged server is declared");
                 if entry.accepted.is_some() {
                     entry.restages += 1;
@@ -529,11 +740,13 @@ impl ToolCatalogs {
                     tools: catalog.tools,
                     identity: catalog.identity,
                     bytes: retained,
+                    #[cfg(feature = "egress-adapter")]
+                    fragment: Arc::from(fragment),
                 });
                 entry.state = ServerDiscovery::Ready;
                 Ok(CatalogStage::Accepted { tools })
             }
-            Err(Ok(reason)) => Ok(self.reject(&server, DiscoveryFailure::PolicyStaging, reason)),
+            Err(Ok(reason)) => Ok(self.reject(&key, DiscoveryFailure::PolicyStaging, reason)),
             Err(Err(error)) => Err(error),
         }
     }
@@ -541,14 +754,15 @@ impl ToolCatalogs {
     /// Whether a reply to a `tools/list` naming `cursor` on `connection` would be captured.
     pub fn captures(&self, server: &str, connection: &str, cursor: Option<&str>) -> bool {
         let inner = self.lock();
-        if !inner.servers.contains_key(server) {
+        let server = CatalogKey::declared(server);
+        if !inner.servers.contains_key(&server) {
             return false;
         }
         match cursor {
             None => true,
             Some(cursor) => inner
                 .lists
-                .get(&(server.to_string(), connection.to_string()))
+                .get(&(server, connection.to_string()))
                 .is_some_and(|list| list.next_cursor == cursor),
         }
     }
@@ -558,7 +772,7 @@ impl ToolCatalogs {
         let inner = self.lock();
         let entry = inner
             .servers
-            .get(server)
+            .get(&CatalogKey::declared(server))
             .ok_or(CatalogRefusal::Undeclared)?;
         match &entry.accepted {
             Some(accepted) if accepted.tools.contains(tool) => Ok(()),
@@ -570,7 +784,7 @@ impl ToolCatalogs {
     /// Record that policy refused a server's `tools/list`, so an undiscovered server is terminal.
     pub fn list_denied(&self, server: &str) {
         let mut inner = self.lock();
-        if let Some(entry) = inner.servers.get_mut(server)
+        if let Some(entry) = inner.servers.get_mut(&CatalogKey::declared(server))
             && entry.state == ServerDiscovery::Undiscovered
         {
             entry.state = ServerDiscovery::Failed(DiscoveryFailure::ToolsListDenied);
@@ -580,20 +794,20 @@ impl ToolCatalogs {
     /// Record that a captured list failed for a reason the server's reply does not show.
     pub fn list_failed(&self, server: &str, connection: &str, failure: DiscoveryFailure) {
         let mut inner = self.lock();
-        let key = (server.to_string(), connection.to_string());
+        let key = (CatalogKey::declared(server), connection.to_string());
         if let Some(list) = inner.lists.remove(&key) {
             inner.retained_bytes = inner.retained_bytes.saturating_sub(list.bytes);
         }
-        Self::fail_locked(&mut inner, server, failure);
+        Self::fail_locked(&mut inner, &key.0, failure);
     }
 
     /// Drop the unfinished lists of a closed connection.
     pub fn connection_closed(&self, connection: &str) {
         let mut inner = self.lock();
-        let closed: Vec<(String, String)> = inner
+        let closed: Vec<(CatalogKey, String)> = inner
             .lists
             .keys()
-            .filter(|(_, other)| other == connection)
+            .filter(|(key, other)| key.source.is_none() && other == connection)
             .cloned()
             .collect();
         for key in closed {
@@ -616,31 +830,59 @@ impl ToolCatalogs {
 
     /// Whether every declared server of `kind` is `Ready` or `Failed`.
     pub fn kind_done(&self, kind: McpServerKind) -> bool {
-        self.lock()
+        let inner = self.lock();
+        inner
             .servers
-            .values()
-            .filter(|entry| entry.kind == kind)
-            .all(|entry| {
+            .iter()
+            .filter(|(key, entry)| key.source.is_none() && entry.kind == kind)
+            .all(|(key, _)| {
                 matches!(
-                    entry.state,
-                    ServerDiscovery::Ready | ServerDiscovery::Failed(_)
+                    Self::server_state(&inner, &key.server),
+                    Some(ServerDiscovery::Ready | ServerDiscovery::Failed(_))
                 )
             })
     }
 
     /// Where one server's discovery stands, or `None` for an undeclared server.
     pub fn state(&self, server: &str) -> Option<ServerDiscovery> {
-        self.lock().servers.get(server).map(|entry| entry.state)
+        Self::server_state(&self.lock(), server)
     }
 
-    fn reject(&self, server: &str, failure: DiscoveryFailure, reason: String) -> CatalogStage {
+    fn server_state(inner: &Catalogs, server: &str) -> Option<ServerDiscovery> {
+        let declared = inner.servers.get(&CatalogKey::declared(server))?;
+        let mut state = declared.state;
+        for (_, entry) in inner.servers.iter().filter(|(key, _)| key.server == server) {
+            match entry.state {
+                ServerDiscovery::Ready => return Some(ServerDiscovery::Ready),
+                ServerDiscovery::Failed(_) if state != ServerDiscovery::Listing => {
+                    state = entry.state
+                }
+                ServerDiscovery::Listing => state = ServerDiscovery::Listing,
+                _ => {}
+            }
+        }
+        if matches!(
+            declared.state,
+            ServerDiscovery::Failed(DiscoveryFailure::RunRetention)
+        ) {
+            return Some(declared.state);
+        }
+        Some(state)
+    }
+
+    fn reject(
+        &self,
+        server: &CatalogKey,
+        failure: DiscoveryFailure,
+        reason: String,
+    ) -> CatalogStage {
         let mut inner = self.lock();
         Self::reject_locked(&mut inner, server, failure, reason)
     }
 
     fn reject_locked(
         inner: &mut Catalogs,
-        server: &str,
+        server: &CatalogKey,
         failure: DiscoveryFailure,
         reason: String,
     ) -> CatalogStage {
@@ -648,7 +890,7 @@ impl ToolCatalogs {
         CatalogStage::Rejected { failure, reason }
     }
 
-    fn begin_listing(inner: &mut Catalogs, server: &str) {
+    fn begin_listing(inner: &mut Catalogs, server: &CatalogKey) {
         if let Some(entry) = inner.servers.get_mut(server)
             && entry.accepted.is_none()
         {
@@ -656,7 +898,7 @@ impl ToolCatalogs {
         }
     }
 
-    fn fail_locked(inner: &mut Catalogs, server: &str, failure: DiscoveryFailure) {
+    fn fail_locked(inner: &mut Catalogs, server: &CatalogKey, failure: DiscoveryFailure) {
         let Some(entry) = inner.servers.get_mut(server) else {
             return;
         };
@@ -1189,5 +1431,115 @@ mod tests {
         ));
         assert_eq!(fixture.catalogs.state("demo"), Some(ServerDiscovery::Ready));
         assert_eq!(fixture.catalogs.require_listed("demo", "read"), Ok(()));
+    }
+
+    #[cfg(feature = "egress-adapter")]
+    #[test]
+    fn evicted_remote_pages_do_not_leave_discovery_pending() {
+        let fixture = fixture(McpServerKind::Http);
+        for index in 0..=MAXIMUM_CONCURRENT_LISTS {
+            let source = egress_gateway::McpSource {
+                endpoint: [index as u8; 32],
+                session: None,
+            };
+            assert!(matches!(
+                fixture.catalogs.observe_remote_page(
+                    "demo",
+                    source,
+                    None,
+                    &page(&["read"], Some("next")),
+                    100
+                ),
+                Ok(ListPage::More)
+            ));
+        }
+        let evicted = CatalogKey::remote(
+            "demo",
+            egress_gateway::McpSource {
+                endpoint: [0; 32],
+                session: None,
+            },
+        );
+        assert_eq!(
+            fixture.catalogs.lock().servers[&evicted].state,
+            ServerDiscovery::Failed(DiscoveryFailure::RunRetention)
+        );
+        for index in 1..=MAXIMUM_CONCURRENT_LISTS {
+            fixture.catalogs.remote_list_failed(
+                "demo",
+                egress_gateway::McpSource {
+                    endpoint: [index as u8; 32],
+                    session: None,
+                },
+                DiscoveryFailure::CatalogCapture,
+            );
+        }
+        assert!(fixture.catalogs.kind_done(McpServerKind::Http));
+    }
+
+    #[cfg(feature = "egress-adapter")]
+    #[test]
+    fn remote_source_limit_is_terminal_and_keeps_accepted_sources() {
+        let fixture = fixture(McpServerKind::Http);
+        for index in 0..64 {
+            let source = egress_gateway::McpSource {
+                endpoint: [index; 32],
+                session: None,
+            };
+            assert!(matches!(
+                fixture.catalogs.observe_remote_page(
+                    "demo",
+                    source,
+                    None,
+                    &page(&["read"], Some("next")),
+                    100
+                ),
+                Ok(ListPage::More)
+            ));
+        }
+        let new_source = egress_gateway::McpSource {
+            endpoint: [64; 32],
+            session: None,
+        };
+        assert!(matches!(
+            fixture.catalogs.observe_remote_page(
+                "demo",
+                new_source,
+                None,
+                &page(&["read"], None),
+                100
+            ),
+            Err(DiscoveryFailure::RunRetention)
+        ));
+        assert!(fixture.catalogs.kind_done(McpServerKind::Http));
+        let existing = egress_gateway::McpSource {
+            endpoint: [0; 32],
+            session: None,
+        };
+        let ListPage::Complete(catalog) = fixture
+            .catalogs
+            .observe_remote_page("demo", existing, None, &page(&["read"], None), 100)
+            .unwrap()
+        else {
+            panic!("existing source can complete");
+        };
+        assert!(matches!(
+            fixture.catalogs.stage(catalog),
+            Ok(CatalogStage::Accepted { .. })
+        ));
+        assert!(
+            fixture
+                .catalogs
+                .observe_remote_page("demo", new_source, None, &page(&["read"], None), 100)
+                .is_err()
+        );
+        assert_eq!(fixture.catalogs.state("demo"), Some(ServerDiscovery::Ready));
+        let inner = fixture.catalogs.lock();
+        assert!(
+            inner.servers[&CatalogKey::remote("demo", existing)]
+                .accepted
+                .is_some()
+        );
+        assert!(inner.servers.len() <= 65);
     }
 }

@@ -83,15 +83,15 @@ impl McpTarget {
                     .to_string(),
             ));
         };
+        if object.contains_key("result") || object.contains_key("error") {
+            return Err(refuse(
+                "a client-sent JSON-RPC response is refused: it answers no request the server \
+                 sent, and the box will not forward an unjudged frame"
+                    .to_string(),
+            ));
+        }
         let method = match object.get("method") {
             Some(Value::String(method)) => method.as_str(),
-            None if object.contains_key("result") || object.contains_key("error") => {
-                return Err(refuse(
-                    "a client-sent JSON-RPC response is refused: it answers no request the server \
-                     sent, and the box will not forward an unjudged frame"
-                        .to_string(),
-                ));
-            }
             _ => {
                 return Err(refuse(
                     "an MCP frame that is neither a request naming a string method nor a response \
@@ -349,6 +349,37 @@ mod tests {
             );
             assert!(classify(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#).is_err());
             assert!(classify(br#"{"jsonrpc":"2.0","id":1,"method":"resources/read"}"#).is_err());
+        }
+    }
+
+    #[test]
+    fn a_client_response_is_refused_even_when_it_names_a_method() {
+        for classify in [McpTarget::of_stdio_request, McpTarget::of_http_request] {
+            for method in [
+                "tools/list",
+                "resources/list",
+                "ping",
+                "notifications/initialized",
+            ] {
+                for response_field in ["result", "error"] {
+                    let mut frame = serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": method,
+                    });
+                    frame[response_field] = serde_json::json!({"tools": []});
+                    assert!(
+                        classify(frame.to_string().as_bytes()).is_err(),
+                        "a client-sent {response_field} must stay refused beside {method}"
+                    );
+                    frame.as_object_mut().unwrap().remove("id");
+                    frame[response_field] = Value::Null;
+                    assert!(
+                        classify(frame.to_string().as_bytes()).is_err(),
+                        "a null {response_field} must stay refused without an id beside {method}"
+                    );
+                }
+            }
         }
     }
 

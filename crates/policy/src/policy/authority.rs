@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::{Mutex, MutexGuard};
 
 use cedar_policy::EntityUid;
 use dogwood_local_engine::DurableError;
@@ -63,6 +63,11 @@ struct LiveAuthority {
     /// cannot ride the coarse `mcp:call` permit with its argument constraint unenforced. Empty
     /// until `finish_mcp_discovery` degrades, and empty again once a complete bundle installs.
     degraded_tools: BTreeSet<(String, String)>,
+}
+
+enum StagedAuthority<'a> {
+    Accepted(MutexGuard<'a, LiveAuthority>),
+    Rejected { reason: String },
 }
 
 pub(super) struct Authority {
@@ -270,20 +275,37 @@ impl Authority {
         server: &str,
         fragment: String,
     ) -> Result<SchemaStage, PolicyStagingError> {
-        let mut proposal_guard = self
+        let mut proposal = self
             .proposal
             .lock()
             .map_err(|_| PolicyStagingError::Durable("policy staging lock poisoned".to_string()))?;
-        let Some(current) = proposal_guard.as_ref() else {
-            return Ok(SchemaStage::Rejected {
+        match self.stage_mcp_schema_locked(&mut proposal, server, &fragment)? {
+            StagedAuthority::Accepted(live) => Ok(SchemaStage::Accepted {
+                authority_ready: live.readiness == Readiness::Ready,
+            }),
+            StagedAuthority::Rejected { reason } => Ok(SchemaStage::Rejected { reason }),
+        }
+    }
+
+    /// Returns the selected schema's authority while its live lock remains held.
+    fn stage_mcp_schema_locked<'a>(
+        &'a self,
+        proposal: &mut Option<ProposalState>,
+        server: &str,
+        fragment: &str,
+    ) -> Result<StagedAuthority<'a>, PolicyStagingError> {
+        let Some(current) = proposal.as_ref() else {
+            return Ok(StagedAuthority::Rejected {
                 reason: "the authority was not opened for runtime staging".to_string(),
             });
         };
         let mut proposed = current.clone();
-        proposed.schemas.insert(server.to_string(), fragment);
+        proposed
+            .schemas
+            .insert(server.to_string(), fragment.to_string());
         let named_schemas = proposed.named_schemas();
         if let Err(error) = crate::mcp_schema::validate_mcp_schema_composition(&named_schemas) {
-            return Ok(SchemaStage::Rejected {
+            return Ok(StagedAuthority::Rejected {
                 reason: error.to_string(),
             });
         }
@@ -304,15 +326,13 @@ impl Authority {
                 match live.engine.commit_staged(&complete, effective_schema) {
                     Ok(()) => {
                         proposed.mark_all_ready();
-                        *proposal_guard = Some(proposed);
+                        *proposal = Some(proposed);
                         live.readiness = Readiness::Ready;
                         live.pending_tools = BTreeSet::new();
                         live.degraded_tools.clear();
-                        Ok(SchemaStage::Accepted {
-                            authority_ready: true,
-                        })
+                        Ok(StagedAuthority::Accepted(live))
                     }
-                    Err(DurableError::Rejected(reason)) => Ok(SchemaStage::Rejected { reason }),
+                    Err(DurableError::Rejected(reason)) => Ok(StagedAuthority::Rejected { reason }),
                     Err(error) => Err(PolicyStagingError::Durable(error.to_string())),
                 }
             }
@@ -321,19 +341,19 @@ impl Authority {
                     PolicyStagingError::Durable("policy authority lock poisoned".to_string())
                 })?;
                 if live.readiness == Readiness::Ready {
-                    return Ok(SchemaStage::Rejected {
+                    return Ok(StagedAuthority::Rejected {
                         reason: complete_error.to_string(),
                     });
                 }
                 drop(live);
 
                 if let Err(error) = proposed.validate_ready(&schemas) {
-                    return Ok(SchemaStage::Rejected {
+                    return Ok(StagedAuthority::Rejected {
                         reason: error.to_string(),
                     });
                 }
                 if let Err(error) = proposed.classify(&schemas) {
-                    return Ok(SchemaStage::Rejected {
+                    return Ok(StagedAuthority::Rejected {
                         reason: error.to_string(),
                     });
                 }
@@ -356,11 +376,8 @@ impl Authority {
                     .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
                 live.pending_tools = pending_typed_tools(&proposed);
                 live.readiness = Readiness::Discovering;
-                drop(live);
-                *proposal_guard = Some(proposed);
-                Ok(SchemaStage::Accepted {
-                    authority_ready: false,
-                })
+                *proposal = Some(proposed);
+                Ok(StagedAuthority::Accepted(live))
             }
         }
     }
@@ -499,6 +516,49 @@ impl Authority {
         let Ok(live) = self.live.lock() else {
             return Decision::internal_fault();
         };
+        Self::refine_tool_call_locked(&live, governed, principal, request, identity)
+    }
+
+    /// Selects a tool schema and decides its call without another authority change between them.
+    pub(super) fn refine_tool_call_with_schema(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request: &Request<'_>,
+        identity: &ActionIdentity,
+        server: &str,
+        fragment: &str,
+    ) -> Decision {
+        let Ok(mut proposal) = self.proposal.lock() else {
+            return Decision::internal_fault();
+        };
+        let live = if proposal
+            .as_ref()
+            .and_then(|current| current.schemas.get(server))
+            .is_some_and(|current| current == fragment)
+        {
+            match self.live.lock() {
+                Ok(live) => live,
+                Err(_) => return Decision::internal_fault(),
+            }
+        } else {
+            match self.stage_mcp_schema_locked(&mut proposal, server, fragment) {
+                Ok(StagedAuthority::Accepted(live)) => live,
+                Ok(StagedAuthority::Rejected { .. }) | Err(_) => {
+                    return Decision::internal_fault();
+                }
+            }
+        };
+        Self::refine_tool_call_locked(&live, governed, principal, request, identity)
+    }
+
+    fn refine_tool_call_locked(
+        live: &LiveAuthority,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request: &Request<'_>,
+        identity: &ActionIdentity,
+    ) -> Decision {
         if let ActionIdentity::McpTool { namespace, tool } = identity {
             let key = (namespace.clone(), tool.clone());
             if live.degraded_tools.contains(&key) {
@@ -1226,6 +1286,90 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
             panic!("simulated state transition panic");
         }));
         assert!(result.is_err(), "the poison panic must occur");
+    }
+
+    fn refine_with_schema(
+        authority: &Authority,
+        fragment: &str,
+        arguments: &serde_json::Value,
+    ) -> Decision {
+        let request = Request::McpCall {
+            server: "alpha",
+            method: "tools/call",
+            tool: Some("read"),
+            prompt: None,
+            uri: None,
+            arguments: Some(arguments),
+        };
+        authority.refine_tool_call_with_schema(
+            &governed(),
+            &Principal::agent(),
+            &request,
+            &crate::schema::ActionIdentity::mcp_tool("alpha", "read"),
+            "alpha",
+            fragment,
+        )
+    }
+
+    #[test]
+    fn a_tool_call_selects_its_own_source_schema() {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = Authority::open_staged(
+            &Operator::unanchored(),
+            staged_source(),
+            &history.path().join("history.redb"),
+        )
+        .expect("the staged authority opens");
+        let first = generated("alpha", "read", "value");
+        let second = generated("alpha", "read", "label");
+        let first_arguments = serde_json::json!({"value": "first"});
+        let second_arguments = serde_json::json!({"label": "second"});
+
+        assert!(refine_with_schema(&authority, &first, &first_arguments).is_allow());
+        assert!(refine_with_schema(&authority, &second, &second_arguments).is_allow());
+        assert!(matches!(
+            refine_with_schema(&authority, &first, &second_arguments),
+            Decision::Deny {
+                reason: DenyReason::InternalFault,
+                ..
+            }
+        ));
+        assert!(refine_with_schema(&authority, &first, &first_arguments).is_allow());
+    }
+
+    #[test]
+    fn a_refused_source_schema_denies_the_call_and_keeps_the_live_schema() {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = Authority::open_staged(
+            &Operator::unanchored(),
+            staged_source(),
+            &history.path().join("history.redb"),
+        )
+        .expect("the staged authority opens");
+        let accepted = generated("alpha", "read", "value");
+        let wrong_server = generated("beta", "read", "value");
+        let arguments = serde_json::json!({"value": "ready"});
+
+        assert!(refine_with_schema(&authority, &accepted, &arguments).is_allow());
+        assert!(matches!(
+            refine_with_schema(&authority, &wrong_server, &arguments),
+            Decision::Deny {
+                reason: DenyReason::InternalFault,
+                ..
+            }
+        ));
+        assert_eq!(
+            authority
+                .proposal
+                .lock()
+                .expect("proposal lock")
+                .as_ref()
+                .expect("staged authority")
+                .schemas
+                .get("alpha"),
+            Some(&accepted)
+        );
+        assert!(refine_with_schema(&authority, &accepted, &arguments).is_allow());
     }
 
     #[test]

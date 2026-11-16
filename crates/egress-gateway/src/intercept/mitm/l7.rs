@@ -16,7 +16,7 @@ use crate::audit::Decision as AuditDecision;
 use crate::audit::EgressDecision;
 use crate::boundary::{HeaderMap, InterceptedRequest, Target};
 use crate::client::http::{ResponseCompletion, ResponseProgress, Upstream};
-use crate::effect::{ClaimedEffectPermit, EffectAttempt, McpFrame, McpListReply};
+use crate::effect::{ClaimedEffectPermit, EffectAttempt, McpFrame, McpListReply, McpSource};
 use crate::error::{ProxyError, Result};
 use crate::mcp::{
     McpTarget, McpTargetIdentity, canonicalize_mcp_frame, mcp_denial_response, normalize_path,
@@ -167,6 +167,40 @@ async fn run_l7_legs(
         None => None,
     };
 
+    let mcp_source = if mcp_target.is_some() {
+        let session = match mcp_request_session(&req.headers) {
+            Ok(session) => session,
+            Err(reason) => {
+                return Ok(refuse(
+                    reason,
+                    WorkloadResponse::refusal(403, b"MCP frame refused"),
+                ));
+            }
+        };
+        Some(McpSource {
+            endpoint: mcp_endpoint(connect, &req.target, &method, intercepted),
+            session,
+        })
+    } else {
+        None
+    };
+    let list_request = if mcp_target
+        .as_ref()
+        .is_some_and(|(_, target)| target.method() == "tools/list")
+    {
+        match parse_list_request(&req.body) {
+            Ok(request) => Some(request),
+            Err(reason) => {
+                return Ok(refuse(
+                    reason,
+                    WorkloadResponse::refusal(403, b"MCP frame refused"),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
     // The serialized request carries the credential the request leg just attached, so the buffer is
     // wiped on drop. This is the last copy on the byte path before the transport takes it (which is
     // not `Zeroize`-aware, a known residual).
@@ -212,6 +246,7 @@ async fn run_l7_legs(
                 },
             }
         }),
+        mcp_source,
     };
     let request_permit = match claim_effect(state, &request_attempt) {
         Ok(permit) => permit,
@@ -233,10 +268,6 @@ async fn run_l7_legs(
         correlation.clone(),
     );
     // The request permit follows the upstream exchange through its terminal response.
-    let cursor = mcp_target
-        .as_ref()
-        .filter(|(_, target)| target.method() == "tools/list")
-        .and_then(|_| list_cursor(&req.body));
     let forwarded_body = match forwarded_body {
         Cow::Owned(body) => body,
         Cow::Borrowed(_) => std::mem::take(&mut req.body),
@@ -294,15 +325,18 @@ async fn run_l7_legs(
     // the response catalog into the authority so the server's per-tool actions reach runtime
     // (docs/design/decisions.md#remote-tool-schemas-are-discovered-at-runtime-in-memory).
     // Best-effort: a staging failure warns and the catalog still returns.
-    if let Some((server, target)) = &mcp_target
-        && target.method() == "tools/list"
+    if let Some((server, _)) = &mcp_target
+        && let Some(source) = mcp_source
+        && let Some(request) = &list_request
     {
         let captured = http1::collect(body, state.config.response_limits.max_body_bytes).await?;
         if let Err(error) = state.effect_interceptor.stage_mcp_catalog(
             server,
             McpListReply {
-                session: req.headers.get("mcp-session-id"),
-                cursor: cursor.as_deref(),
+                endpoint: source.endpoint,
+                request_id: &request.id,
+                session: source.session,
+                cursor: request.cursor.as_deref(),
                 body: &captured,
             },
         ) {
@@ -540,14 +574,77 @@ fn canonicalize_request_path(path: &str) -> std::result::Result<String, String> 
     })
 }
 
-/// The `params.cursor` a `tools/list` request names.
-fn list_cursor(body: &[u8]) -> Option<String> {
-    let request: serde_json::Value = serde_json::from_slice(body).ok()?;
-    request
-        .get("params")?
-        .get("cursor")?
-        .as_str()
-        .map(str::to_string)
+struct ListRequest {
+    id: String,
+    cursor: Option<String>,
+}
+
+fn parse_list_request(body: &[u8]) -> std::result::Result<ListRequest, &'static str> {
+    let request: serde_json::Value =
+        serde_json::from_slice(body).map_err(|_| "MCP tools/list request is invalid JSON")?;
+    let object = request
+        .as_object()
+        .ok_or("MCP tools/list request must be an object")?;
+    if object.get("jsonrpc").and_then(serde_json::Value::as_str) != Some("2.0") {
+        return Err("MCP tools/list request must name JSON-RPC version 2.0");
+    }
+    let id = object
+        .get("id")
+        .filter(|id| id.is_string() || id.is_i64() || id.is_u64())
+        .ok_or("MCP tools/list request must carry a string or integer identifier")?
+        .to_string();
+    let cursor = match object.get("params") {
+        None => None,
+        Some(serde_json::Value::Object(params)) => match params.get("cursor") {
+            None => None,
+            Some(serde_json::Value::String(cursor)) => Some(cursor.clone()),
+            Some(_) => return Err("MCP tools/list cursor must be a string"),
+        },
+        Some(_) => return Err("MCP tools/list params must be an object"),
+    };
+    Ok(ListRequest { id, cursor })
+}
+
+fn mcp_request_session(headers: &HeaderMap) -> std::result::Result<Option<&str>, &'static str> {
+    let mut values = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("mcp-session-id"))
+        .map(|(_, value)| value);
+    let session = values.next();
+    if values.next().is_some() {
+        return Err("MCP request must carry at most one session identifier");
+    }
+    if session.is_some_and(|value| {
+        value.is_empty() || !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+    }) {
+        return Err("MCP session identifier must contain visible ASCII characters");
+    }
+    Ok(session)
+}
+
+fn mcp_endpoint(
+    connect: &ConnectRequest,
+    target: &Target,
+    method: &str,
+    intercepted: bool,
+) -> [u8; 32] {
+    let mut context = ring::digest::Context::new(&ring::digest::SHA256);
+    context.update(b"strands-box/mcp-endpoint/v1");
+    context.update(&[u8::from(intercepted)]);
+    context.update(&connect.port.to_be_bytes());
+    for value in [
+        method.as_bytes(),
+        connect.host.as_bytes(),
+        target.path.as_bytes(),
+        target.query.as_bytes(),
+    ] {
+        context.update(&(value.len() as u64).to_be_bytes());
+        context.update(value);
+    }
+    let digest = context.finish();
+    let mut endpoint = [0; 32];
+    endpoint.copy_from_slice(digest.as_ref());
+    endpoint
 }
 
 /// Split an origin-form request target into `(path, query)`.
@@ -616,6 +713,90 @@ fn validate_request_binding(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn catalog_endpoint_identity_separates_scheme_authority_path_and_query() {
+        let connection = connect("tools.example", 443);
+        let mut target = Target::new("tools.example", 443);
+        target.path = "/mcp".to_string();
+        target.query = "tenant=one".to_string();
+        let identity = mcp_endpoint(&connection, &target, "POST", true);
+        assert_eq!(identity, mcp_endpoint(&connection, &target, "POST", true));
+        assert_ne!(identity, mcp_endpoint(&connection, &target, "POST", false));
+        assert_ne!(identity, mcp_endpoint(&connection, &target, "GET", true));
+        assert_ne!(
+            identity,
+            mcp_endpoint(&connect("other.example", 443), &target, "POST", true)
+        );
+        assert_ne!(
+            identity,
+            mcp_endpoint(&connect("tools.example", 8443), &target, "POST", true)
+        );
+        let mut other = target.clone();
+        other.path = "/other".to_string();
+        assert_ne!(identity, mcp_endpoint(&connection, &other, "POST", true));
+        other = target.clone();
+        other.query = "tenant=two".to_string();
+        assert_ne!(identity, mcp_endpoint(&connection, &other, "POST", true));
+        other = target.clone();
+        other.path = "/mc".to_string();
+        other.query = "ptenant=one".to_string();
+        assert_ne!(identity, mcp_endpoint(&connection, &other, "POST", true));
+    }
+
+    #[test]
+    fn list_requests_retain_identifier_type_and_cursor() {
+        for (id, expected) in [
+            (serde_json::json!(1), "1"),
+            (serde_json::json!("1"), "\"1\""),
+        ] {
+            let body = serde_json::json!({"jsonrpc":"2.0", "id":id, "method":"tools/list", "params":{"cursor":"next"}});
+            let request = parse_list_request(&serde_json::to_vec(&body).unwrap()).unwrap();
+            assert_eq!(request.id, expected);
+            assert_eq!(request.cursor.as_deref(), Some("next"));
+        }
+        let request =
+            parse_list_request(br#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#).unwrap();
+        assert!(request.cursor.is_none());
+    }
+
+    #[test]
+    fn malformed_list_requests_cannot_become_catalog_discovery() {
+        for body in [
+            serde_json::json!({"id":1,"method":"tools/list"}),
+            serde_json::json!({"jsonrpc":"1.0","id":1,"method":"tools/list"}),
+            serde_json::json!({"jsonrpc":"2.0","method":"tools/list"}),
+            serde_json::json!({"jsonrpc":"2.0","id":null,"method":"tools/list"}),
+            serde_json::json!({"jsonrpc":"2.0","id":true,"method":"tools/list"}),
+            serde_json::json!({"jsonrpc":"2.0","id":[],"method":"tools/list"}),
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":null}),
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"cursor":null}}),
+            serde_json::json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"cursor":1}}),
+        ] {
+            assert!(
+                parse_list_request(&serde_json::to_vec(&body).unwrap()).is_err(),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn mcp_session_identity_refuses_ambiguous_or_invalid_headers() {
+        assert_eq!(mcp_request_session(&HeaderMap::new()).unwrap(), None);
+        let valid =
+            HeaderMap::from_pairs([("Mcp-Session-Id".to_string(), "opaque-value".to_string())]);
+        assert_eq!(mcp_request_session(&valid).unwrap(), Some("opaque-value"));
+        for value in ["", "with space", "with\tcontrol", "café"] {
+            let headers =
+                HeaderMap::from_pairs([("Mcp-Session-Id".to_string(), value.to_string())]);
+            assert!(mcp_request_session(&headers).is_err());
+        }
+        let duplicate = HeaderMap::from_pairs([
+            ("Mcp-Session-Id".to_string(), "first".to_string()),
+            ("mcp-session-id".to_string(), "second".to_string()),
+        ]);
+        assert!(mcp_request_session(&duplicate).is_err());
+    }
 
     /// **A gateway-originated refusal carries the marker.** The client turns the marker into a
     /// denial, so a refusal this gateway writes must name itself.

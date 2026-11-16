@@ -15,7 +15,7 @@ operators inspecting egress decisions.
 
 ## Public Interface
 
-The crate root is the complete public API — 34 names, 30 unconditional and 4
+The crate root is the complete public API — 35 names, 31 unconditional and 4
 behind the `tls-intercept` feature:
 
 | Area | Items |
@@ -24,7 +24,7 @@ behind the `tls-intercept` feature:
 | Boundary values | `HeaderMap`, `InterceptedRequest`, `InterceptedResponse`, `Mutation`, `MutationTarget`, `Target` |
 | Credential mutators | `CapabilitySet`, `CredentialCapability` |
 | Host spelling | `is_bindable_host`, `normalize_host` |
-| Effect lifecycle | `EffectAttempt`, `EffectInterceptor`, `EffectOutcome`, `EffectPermit`, `McpFrame`, `McpListReply` |
+| Effect lifecycle | `EffectAttempt`, `EffectInterceptor`, `EffectOutcome`, `EffectPermit`, `McpFrame`, `McpListReply`, `McpSource` |
 | Remote MCP | `McpTarget`, `McpTargetIdentity`, `canonicalize_mcp_frame`, `mcp_denial_response`, `refuse_duplicate_mcp_keys` |
 | Audit seam | `Emitter`, `StubEmitter` |
 | Errors | `PROXY_ORIGIN_HEADER`, `PROXY_ORIGIN_VALUE`, `ProxyError`, `Result` |
@@ -56,13 +56,25 @@ kinds, and the proxy presents each one immediately before its effect:
 | Attempt | Fields | Reported when |
 |---|---|---|
 | `EffectAttempt::Connect` | `host`, `port`, `address`, `http_visibility` | before one upstream socket opens, once per pinned address |
-| `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes` | after the request is serialized, before it is written |
+| `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes`, `intercepted`, `mcp`, `mcp_source` | after the request is serialized, before it is written |
 | `EffectAttempt::ResponseRelease` | `host`, `port`, `method`, `path`, `status` | after header controls and required catalog capture, before the workload receives bytes |
 
-No attempt carries a header, a body, or credential material. `path` excludes the
+HTTP routing fields carry no credential header or body content. `path` excludes the
 query string and is the path the workload sent, captured before any credential
 edit. `HttpRequest::body_bytes` is the complete request body length. Response release requires
 no upfront body length.
+
+For an MCP request, `HttpRequest::mcp_source` identifies the HTTP method, connected scheme, host, port,
+and the forwarded path and query after credential edits. The source metadata contains an endpoint
+digest rather than the forwarded path and query. The effect's existing `path` field still carries
+the original path. The source also carries the request's single
+`Mcp-Session-Id`, when present. Its `Debug` implementation redacts that value.
+
+The corresponding `McpListReply` carries the same endpoint digest and session, the request's
+JSON-RPC identifier as JSON text, and its pagination cursor. The consumer must match the reply
+identifier and keep catalogs separate by source. A `tools/list` request must name JSON-RPC 2.0,
+carry a string or integer identifier, and use a string cursor when present. The gateway refuses
+ambiguous or invalid session headers before forwarding the request.
 
 Both `EffectPermit` methods consume `self: Box<Self>`, so one permit reaches
 exactly one terminal transition. The proxy reports `EffectOutcome::Connected`,

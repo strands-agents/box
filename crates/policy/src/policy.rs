@@ -575,6 +575,39 @@ impl PolicyEngine {
         tool: &str,
         arguments: &serde_json::Value,
     ) -> Decision {
+        self.refine_tool_call_in_schema(governed, principal, server, tool, arguments, None)
+    }
+
+    /// Refines a tool call under its source's schema in one authority transaction.
+    #[cfg(feature = "egress-adapter")]
+    pub(crate) fn refine_tool_call_with_schema(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        server: &str,
+        tool: &str,
+        arguments: &serde_json::Value,
+        fragment: &str,
+    ) -> Decision {
+        self.refine_tool_call_in_schema(
+            governed,
+            principal,
+            server,
+            tool,
+            arguments,
+            Some(fragment),
+        )
+    }
+
+    fn refine_tool_call_in_schema(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        server: &str,
+        tool: &str,
+        arguments: &serde_json::Value,
+        fragment: Option<&str>,
+    ) -> Decision {
         let identity = crate::schema::ActionIdentity::mcp_tool(server, tool);
         let request = Request::McpCall {
             server,
@@ -584,9 +617,14 @@ impl PolicyEngine {
             uri: None,
             arguments: Some(arguments),
         };
-        let decision = self
-            .authority
-            .refine_tool_call(governed, principal, &request, &identity);
+        let decision = match fragment {
+            Some(fragment) => self.authority.refine_tool_call_with_schema(
+                governed, principal, &request, &identity, server, fragment,
+            ),
+            None => self
+                .authority
+                .refine_tool_call(governed, principal, &request, &identity),
+        };
         self.conclude(&identity, request.resource(), decision)
     }
 }

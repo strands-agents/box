@@ -9,7 +9,7 @@ use std::sync::Arc;
 use egress_gateway::{
     EffectAttempt as EgressEffectAttempt, EffectInterceptor as EgressEffectInterceptor,
     EffectOutcome as EgressEffectOutcome, EffectPermit as EgressEffectPermit, McpFrame,
-    McpListReply,
+    McpListReply, McpSource,
 };
 
 use crate::GovernedBox;
@@ -102,7 +102,11 @@ impl EgressPolicyInterceptor {
 
     /// The two MCP gates on an allowed `http:request`: `mcp:call` identity, then the per-tool typed
     /// refinement. A non-MCP request carries no frame and passes.
-    fn mcp_gates(&self, mcp: &Option<McpFrame<'_>>) -> Result<Option<RequestId>, String> {
+    fn mcp_gates(
+        &self,
+        mcp: &Option<McpFrame<'_>>,
+        source: Option<McpSource<'_>>,
+    ) -> Result<Option<RequestId>, String> {
         let Some(frame) = mcp else { return Ok(None) };
         // Gate one: `mcp:call` (identity). `{:?}` quotes the server and method, so a hostile
         // identity cannot forge a log line; identity and args are omitted from it.
@@ -115,7 +119,11 @@ impl EgressPolicyInterceptor {
                 if let McpFrame::List { server, method } = *frame
                     && method == "tools/list"
                 {
-                    self.catalogs.list_denied(server);
+                    if let Some(source) = source {
+                        self.catalogs.remote_list_denied(server, source);
+                    } else {
+                        self.catalogs.list_denied(server);
+                    }
                     self.report_if_remote_finished();
                 }
                 return Err(format!(
@@ -135,7 +143,6 @@ impl EgressPolicyInterceptor {
             arguments,
         } = *frame
         {
-            self.require_accepted_tool(server, tool)?;
             let identity = crate::schema::ActionIdentity::mcp_tool(server, tool);
             let action = identity.observer_action();
             // The raw `params.arguments` JSON, typed against the tool's generated schema. A parse
@@ -147,13 +154,46 @@ impl EgressPolicyInterceptor {
                         diagnostic_context(&action)
                     )
                 })?;
-            if let decision @ Decision::Deny { .. } = self.policy.refine_tool_call(
-                &self.governed,
-                &self.principal,
-                server,
-                tool,
-                &arguments,
-            ) {
+            let decision = match source {
+                Some(source) => match self.catalogs.refine_remote_tool_call(
+                    &self.governed,
+                    &self.principal,
+                    server,
+                    source,
+                    tool,
+                    &arguments,
+                ) {
+                    Ok(decision) => decision,
+                    Err(CatalogRefusal::Undeclared) => self.policy.refine_tool_call(
+                        &self.governed,
+                        &self.principal,
+                        server,
+                        tool,
+                        &arguments,
+                    ),
+                    Err(refusal) => {
+                        return Err(format!(
+                            "mcp-catalog (server {:?} tool {:?}): {refusal}",
+                            diagnostic_context(server),
+                            diagnostic_context(tool),
+                        ));
+                    }
+                },
+                None => {
+                    if self.catalogs.state(server).is_some() {
+                        return Err("mcp-catalog: the remote catalog source is missing".to_string());
+                    }
+                    self.require_accepted_tool(server, tool)?;
+                    self.policy.refine_tool_call(
+                        &self.governed,
+                        &self.principal,
+                        server,
+                        tool,
+                        &arguments,
+                    )
+                }
+            };
+            if let Decision::Deny { .. } = decision {
                 return Err(format!(
                     "per-tool gate ({}): {decision}",
                     diagnostic_context(&action)
@@ -211,6 +251,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                 body_bytes,
                 intercepted,
                 mcp,
+                mcp_source,
             } => {
                 // HTTP and MCP decisions are separate requests, even in one gateway exchange.
                 authorize(
@@ -228,7 +269,7 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                 )
                 .map_err(|reason| format!("http:request gate: {reason}"))
                 .and_then(|request_id| {
-                    self.mcp_gates(mcp)
+                    self.mcp_gates(mcp, *mcp_source)
                         .map(|mcp_request_id| (Some(request_id), mcp_request_id))
                 })
             }
@@ -262,21 +303,23 @@ impl EgressPolicyInterceptor {
     /// Observe one `tools/list` reply, and stage the catalog once its last page arrives
     /// (docs/design/decisions.md#remote-tool-schemas-are-discovered-at-runtime-in-memory).
     fn observe_list_reply(&self, server: &str, reply: McpListReply<'_>) -> io::Result<()> {
-        let connection = reply.session.unwrap_or_default();
+        let source = McpSource {
+            endpoint: reply.endpoint,
+            session: reply.session,
+        };
         let message = std::str::from_utf8(reply.body)
             .ok()
-            .and_then(tools_list_json)
-            .and_then(|json| serde_json::from_str::<serde_json::Value>(&json).ok());
+            .and_then(|body| tools_list_json(body, reply.request_id));
         let Some(message) = message else {
             self.catalogs
-                .list_failed(server, connection, DiscoveryFailure::CatalogCapture);
+                .remote_list_failed(server, source, DiscoveryFailure::CatalogCapture);
             return Err(io::Error::other(format!(
                 "no tools/list JSON in the {server:?} response"
             )));
         };
         let page = self
             .catalogs
-            .observe_page(server, connection, reply.cursor, &message, reply.body.len())
+            .observe_remote_page(server, source, reply.cursor, &message, reply.body.len())
             .map_err(|failure| {
                 io::Error::other(format!("{server:?} tools/list failed during {failure}"))
             })?;
@@ -295,43 +338,68 @@ impl EgressPolicyInterceptor {
     }
 }
 
-/// The tools/list JSON from a captured response body. A plain-JSON body is returned as-is; an MCP
-/// Streamable-HTTP body is Server-Sent Events, so the `data:` payload carrying `result.tools` is
-/// unwrapped. Returns `None` when no such payload is present.
-fn tools_list_json(body: &str) -> Option<String> {
+/// The one catalog response whose identifier matches the intercepted list request.
+fn tools_list_json(body: &str, request_id: &str) -> Option<serde_json::Value> {
+    let expected: serde_json::Value = serde_json::from_str(request_id).ok()?;
     if body.trim_start().starts_with('{') {
-        return Some(body.to_string());
+        return tools_list_event(body, &expected).ok().flatten();
     }
-    // Walk the SSE stream: `data:` lines within one event join with `\n`, and a blank line ends the
-    // event. Pick the first event whose JSON is a JSON-RPC message carrying `result.tools`.
     let mut data = String::new();
-    for line in body.lines() {
+    let mut response = None;
+    let stream = body
+        .strip_prefix('\u{feff}')
+        .unwrap_or(body)
+        .replace("\r\n", "\n")
+        .replace('\r', "\n");
+    for line in stream.split_terminator('\n') {
         if let Some(rest) = line.strip_prefix("data:") {
             if !data.is_empty() {
                 data.push('\n');
             }
             data.push_str(rest.strip_prefix(' ').unwrap_or(rest));
-        } else if line.trim().is_empty() {
-            if let Some(found) = tools_list_event(&data) {
-                return Some(found);
+        } else if line.is_empty() {
+            if let Some(found) = tools_list_event(&data, &expected).ok()? {
+                if response.is_some() {
+                    return None;
+                }
+                response = Some(found);
             }
             data.clear();
         }
     }
-    tools_list_event(&data)
+    response
 }
 
-/// One SSE event's data, when it is a JSON-RPC message carrying `result.tools`.
-fn tools_list_event(data: &str) -> Option<String> {
+fn tools_list_event(
+    data: &str,
+    expected: &serde_json::Value,
+) -> Result<Option<serde_json::Value>, ()> {
     if data.is_empty() {
-        return None;
+        return Ok(None);
     }
-    let value: serde_json::Value = serde_json::from_str(data).ok()?;
-    value
-        .get("result")
-        .and_then(|result| result.get("tools"))
-        .is_some()
-        .then(|| data.to_string())
+    egress_gateway::refuse_duplicate_mcp_keys(data.as_bytes()).map_err(|_| ())?;
+    let value: serde_json::Value = serde_json::from_str(data).map_err(|_| ())?;
+    let object = value.as_object().ok_or(())?;
+    if object.contains_key("method") {
+        return if object.contains_key("result") || object.contains_key("error") {
+            Err(())
+        } else {
+            Ok(None)
+        };
+    }
+    if object.get("id") != Some(expected) {
+        return Ok(None);
+    }
+    if object.get("jsonrpc").and_then(serde_json::Value::as_str) != Some("2.0")
+        || object.contains_key("error")
+        || !object
+            .get("result")
+            .and_then(|result| result.get("tools"))
+            .is_some_and(serde_json::Value::is_array)
+    {
+        return Err(());
+    }
+    Ok(Some(value))
 }
 
 /// What the permit must remember to build a history event.
@@ -665,6 +733,8 @@ mod tests {
 
     fn root_reply(body: &[u8]) -> McpListReply<'_> {
         McpListReply {
+            endpoint: [1; 32],
+            request_id: "1",
             session: None,
             cursor: None,
             body,
@@ -673,6 +743,8 @@ mod tests {
 
     fn page_reply<'a>(cursor: &'a str, body: &'a [u8]) -> McpListReply<'a> {
         McpListReply {
+            endpoint: [1; 32],
+            request_id: "1",
             session: None,
             cursor: Some(cursor),
             body,
@@ -747,7 +819,7 @@ mod tests {
     }
 
     /// The demo server's `tools/list`, which generates the typed `demo::Action::"add"` action.
-    const DEMO_TOOLS: &str = r#"{"result":{"tools":[
+    const DEMO_TOOLS: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[
       {"name":"add","description":"add","inputSchema":{"type":"object",
         "properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"]}}
     ]}}"#;
@@ -773,6 +845,10 @@ mod tests {
             path: "/mcp",
             body_bytes: 32,
             intercepted: false,
+            mcp_source: Some(McpSource {
+                endpoint: [1; 32],
+                session: None,
+            }),
             mcp: Some(McpFrame::List { server, method }),
         }
     }
@@ -790,6 +866,10 @@ mod tests {
             path: "/mcp",
             body_bytes: 64,
             intercepted: false,
+            mcp_source: Some(McpSource {
+                endpoint: [1; 32],
+                session: None,
+            }),
             mcp: Some(McpFrame::ToolCall {
                 server,
                 tool,
@@ -1165,7 +1245,7 @@ mod tests {
             vec!["demo".to_string()]
         );
 
-        let renamed = r#"{"result":{"tools":[{"name":"add","inputSchema":{"type":"object",
+        let renamed = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"add","inputSchema":{"type":"object",
           "properties":{"x":{"type":"integer"},"y":{"type":"integer"}},"required":["x","y"]}}]}}"#;
         let refused = interceptor
             .stage_mcp_catalog("demo", root_reply(renamed.as_bytes()))
@@ -1238,7 +1318,7 @@ mod tests {
     /// `data:` payload is unwrapped before generation, so staging an SSE body flips readiness too.
     #[test]
     fn staging_an_sse_framed_catalog_succeeds() {
-        let sse = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"tools\":[\
+        let sse = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[\
             {\"name\":\"add\",\"inputSchema\":{\"type\":\"object\",\
             \"properties\":{\"a\":{\"type\":\"integer\"},\"b\":{\"type\":\"integer\"}},\
             \"required\":[\"a\",\"b\"]}}]}}\n\n";
@@ -1260,12 +1340,12 @@ mod tests {
     #[test]
     fn a_paginated_catalog_stages_only_on_the_final_page() {
         // Page one: a `search` tool and a `nextCursor`. Nothing about `add` yet.
-        const PAGE_ONE: &str = r#"{"result":{"tools":[
+        const PAGE_ONE: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[
             {"name":"search","inputSchema":{"type":"object",
               "properties":{"q":{"type":"string"}}}}
         ],"nextCursor":"page-2"}}"#;
         // Page two: the `add` tool and no cursor, so the merged catalog is complete.
-        const PAGE_TWO: &str = r#"{"result":{"tools":[
+        const PAGE_TWO: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[
             {"name":"add","description":"add","inputSchema":{"type":"object",
               "properties":{"a":{"type":"integer"},"b":{"type":"integer"}},"required":["a","b"]}}
         ]}}"#;
@@ -1401,7 +1481,7 @@ mod tests {
 
     #[test]
     fn a_fresh_tools_list_replaces_the_accepted_names() {
-        const ECHO_ONLY: &str = r#"{"result":{"tools":[
+        const ECHO_ONLY: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[
             {"name":"echo","inputSchema":{"type":"object",
               "properties":{"text":{"type":"string"}}}}
         ]}}"#;
@@ -1431,7 +1511,10 @@ mod tests {
             .expect("the demo catalog stages");
         assert!(
             fixture
-                .stage_mcp_catalog("demo", root_reply(br#"{"result":{"tools":"not a list"}}"#))
+                .stage_mcp_catalog(
+                    "demo",
+                    root_reply(br#"{"jsonrpc":"2.0","id":1,"result":{"tools":"not a list"}}"#)
+                )
                 .is_err()
         );
         let reason = refusal(
@@ -1454,20 +1537,39 @@ mod tests {
 
     #[test]
     fn tools_list_json_unwraps_plain_json_and_sse() {
-        // Plain JSON passes through.
-        assert!(tools_list_json(r#"{"result":{"tools":[]}}"#).is_some());
-        // SSE with a `result.tools` event is unwrapped to its data payload.
-        let sse = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"result\":{\"tools\":[]}}\n\n";
-        assert_eq!(
-            tools_list_json(sse).as_deref(),
-            Some(r#"{"jsonrpc":"2.0","result":{"tools":[]}}"#)
-        );
-        // An SSE stream with no tools/list event yields nothing.
-        assert!(tools_list_json("event: ping\ndata: {\"jsonrpc\":\"2.0\"}\n\n").is_none());
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#;
+        let expected = serde_json::from_str::<serde_json::Value>(body).unwrap();
+        assert_eq!(tools_list_json(body, "1"), Some(expected.clone()));
+        let sse = format!("event: message\ndata: {body}\n\n");
+        assert_eq!(tools_list_json(&sse, "1"), Some(expected));
+        assert!(tools_list_json("event: ping\ndata: {}\n\n", "1").is_none());
     }
 
-    /// The bootstrap keys on `PolicyPending`, not on a frame being a list: a Ready authority that
-    /// does not permit the host denies a `tools/list` (a `NoMatch`) rather than bootstrapping it.
+    #[test]
+    fn a_catalog_reply_must_match_the_request_and_be_a_response() {
+        let body = serde_json::json!({"jsonrpc":"2.0","id":1,"result":{"tools":[]}});
+        for field in ["method", "error"] {
+            let mut invalid = body.clone();
+            invalid[field] = serde_json::Value::Null;
+            assert!(tools_list_json(&invalid.to_string(), "1").is_none());
+        }
+        assert!(tools_list_json(&body.to_string(), "2").is_none());
+        assert!(tools_list_json(&body.to_string(), "\"1\"").is_none());
+        let mut invalid = body.clone();
+        invalid["jsonrpc"] = serde_json::json!("1.0");
+        assert!(tools_list_json(&invalid.to_string(), "1").is_none());
+        let unrelated = serde_json::json!({"jsonrpc":"2.0","id":2,"result":{"tools":[]}});
+        let events = format!("data: {unrelated}\n\ndata: {body}\n\n");
+        assert_eq!(tools_list_json(&events, "1"), Some(body.clone()));
+        let duplicate = format!("data: {body}\n\ndata: {body}\n\n");
+        assert!(tools_list_json(&duplicate, "1").is_none());
+        let error = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32603,"message":"failed"}}"#;
+        let conflict = format!("data: {error}\n\ndata: {body}\n\n");
+        assert!(tools_list_json(&conflict, "1").is_none());
+        let repeated_id = r#"{"jsonrpc":"2.0","id":2,"id":1,"result":{"tools":[]}}"#;
+        assert!(tools_list_json(repeated_id, "1").is_none());
+    }
+
     #[test]
     fn a_ready_no_match_is_not_bootstrapped() {
         let fixture = interceptor(
@@ -1584,6 +1686,7 @@ mod tests {
                 path: "/v1/messages",
                 body_bytes: 42,
                 intercepted: true,
+                mcp_source: None,
                 mcp: None,
             })
             .expect("request is allowed")
@@ -1613,6 +1716,7 @@ mod tests {
             path: "/",
             body_bytes: 0,
             intercepted: true,
+            mcp_source: None,
             mcp: None,
         };
         let response = EgressEffectAttempt::ResponseRelease {
@@ -1703,6 +1807,7 @@ mod tests {
             path: "/",
             body_bytes: 0,
             intercepted: true,
+            mcp_source: None,
             mcp: None,
         };
         for _ in 0..3 {
@@ -1771,6 +1876,7 @@ mod tests {
             path: "/",
             body_bytes: 0,
             intercepted: true,
+            mcp_source: None,
             mcp: None,
         };
         for (source, admitted_after) in [(count_all, false), (count_errors, true)] {
@@ -1897,6 +2003,7 @@ mod tests {
             path: "/v1/messages",
             body_bytes,
             intercepted: true,
+            mcp_source: None,
             mcp: None,
         };
 
@@ -1928,6 +2035,7 @@ mod tests {
             path: "/v1/messages",
             body_bytes: 0,
             intercepted,
+            mcp_source: None,
             mcp: None,
         };
 
@@ -1967,6 +2075,7 @@ mod tests {
             path: "/v1/messages",
             body_bytes: 0,
             intercepted,
+            mcp_source: None,
             mcp: None,
         };
         let exchange = |fixture: &InterceptorFixture, intercepted| {
@@ -1993,5 +2102,347 @@ mod tests {
             tls.intercept(&request(true)).is_err(),
             "a TLS-intercepted response records intercepted: true, which arms the forbid"
         );
+    }
+    fn source_call(
+        source: McpSource<'static>,
+        arguments: &'static str,
+    ) -> EgressEffectAttempt<'static> {
+        let mut call = mcp_call_attempt("demo", "echo", arguments);
+        if let EgressEffectAttempt::HttpRequest { mcp_source, .. } = &mut call {
+            *mcp_source = Some(source);
+        }
+        call
+    }
+
+    fn source_catalog(kind: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "jsonrpc":"2.0", "id":1, "result":{"tools":[{
+                "name":"echo", "inputSchema":{"type":"object",
+                "properties":{"value":{"type":kind}}, "required":["value"]}
+            }]}
+        }))
+        .unwrap()
+    }
+
+    fn stage_source(
+        fixture: &InterceptorFixture,
+        source: McpSource<'_>,
+        body: &[u8],
+    ) -> io::Result<()> {
+        fixture.stage_mcp_catalog(
+            "demo",
+            McpListReply {
+                endpoint: source.endpoint,
+                session: source.session,
+                request_id: "1",
+                cursor: None,
+                body,
+            },
+        )
+    }
+
+    #[test]
+    fn remote_catalogs_keep_argument_types_separate_by_address_and_session() {
+        let first = McpSource {
+            endpoint: [1; 32],
+            session: Some("one"),
+        };
+        for second in [
+            McpSource {
+                endpoint: [2; 32],
+                session: Some("one"),
+            },
+            McpSource {
+                endpoint: [1; 32],
+                session: Some("two"),
+            },
+        ] {
+            let fixture = tracked_interceptor(DEMO_PERMITS);
+            stage_source(&fixture, first, &source_catalog("string")).unwrap();
+            stage_source(&fixture, second, &source_catalog("integer")).unwrap();
+            for _ in 0..3 {
+                assert!(
+                    fixture
+                        .intercept(&source_call(first, r#"{"value":"hello"}"#))
+                        .is_ok()
+                );
+                assert!(
+                    fixture
+                        .intercept(&source_call(first, r#"{"value":7}"#))
+                        .is_err()
+                );
+                assert!(
+                    fixture
+                        .intercept(&source_call(second, r#"{"value":7}"#))
+                        .is_ok()
+                );
+                assert!(
+                    fixture
+                        .intercept(&source_call(second, r#"{"value":"hello"}"#))
+                        .is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn remote_catalog_failure_and_refresh_affect_only_their_own_source() {
+        let first = McpSource {
+            endpoint: [1; 32],
+            session: None,
+        };
+        let second = McpSource {
+            endpoint: [2; 32],
+            session: None,
+        };
+        let fixture = tracked_interceptor(DEMO_PERMITS);
+        stage_source(&fixture, first, &source_catalog("string")).unwrap();
+        assert!(
+            fixture
+                .intercept(&source_call(second, r#"{"value":"hello"}"#))
+                .is_err()
+        );
+        stage_source(&fixture, second, &source_catalog("integer")).unwrap();
+        assert!(stage_source(&fixture, second, b"invalid response").is_err());
+        assert!(
+            fixture
+                .intercept(&source_call(first, r#"{"value":"hello"}"#))
+                .is_ok()
+        );
+        assert!(
+            fixture
+                .intercept(&source_call(second, r#"{"value":7}"#))
+                .is_err()
+        );
+        stage_source(&fixture, second, &source_catalog("string")).unwrap();
+        assert!(
+            fixture
+                .intercept(&source_call(second, r#"{"value":"hello"}"#))
+                .is_ok()
+        );
+        assert!(
+            fixture
+                .intercept(&source_call(first, r#"{"value":"hello"}"#))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn remote_catalog_call_without_source_is_refused() {
+        let (_, catalogs, fixture, _history) = tracked_demo(DEMO_PERMITS);
+        let source = McpSource {
+            endpoint: [1; 32],
+            session: None,
+        };
+        let response = serde_json::from_slice(&source_catalog("string")).unwrap();
+        let ListPage::Complete(catalog) = catalogs
+            .observe_page("demo", "legacy", None, &response, 100)
+            .unwrap()
+        else {
+            panic!("declared catalog is complete");
+        };
+        catalogs.stage(catalog).unwrap();
+        let mut call = source_call(source, r#"{"value":"hello"}"#);
+        if let EgressEffectAttempt::HttpRequest { mcp_source, .. } = &mut call {
+            *mcp_source = None;
+        }
+        assert!(fixture.intercept(&call).is_err());
+    }
+
+    #[test]
+    fn remote_catalog_pages_cannot_continue_another_address_or_session() {
+        let fixture = tracked_interceptor(DEMO_PERMITS);
+        let first = McpSource {
+            endpoint: [1; 32],
+            session: Some("one"),
+        };
+        let mut page: serde_json::Value =
+            serde_json::from_slice(&source_catalog("string")).unwrap();
+        page["result"]["nextCursor"] = serde_json::json!("next");
+        stage_source(&fixture, first, &serde_json::to_vec(&page).unwrap()).unwrap();
+        let last = br#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#;
+        for other in [
+            McpSource {
+                endpoint: [2; 32],
+                session: Some("one"),
+            },
+            McpSource {
+                endpoint: [1; 32],
+                session: Some("two"),
+            },
+        ] {
+            fixture
+                .stage_mcp_catalog(
+                    "demo",
+                    McpListReply {
+                        endpoint: other.endpoint,
+                        session: other.session,
+                        request_id: "1",
+                        cursor: Some("next"),
+                        body: last,
+                    },
+                )
+                .unwrap();
+            assert!(
+                fixture
+                    .intercept(&source_call(other, r#"{"value":"hello"}"#))
+                    .is_err()
+            );
+        }
+        fixture
+            .stage_mcp_catalog(
+                "demo",
+                McpListReply {
+                    endpoint: first.endpoint,
+                    session: first.session,
+                    request_id: "1",
+                    cursor: Some("next"),
+                    body: last,
+                },
+            )
+            .unwrap();
+        assert!(
+            fixture
+                .intercept(&source_call(first, r#"{"value":"hello"}"#))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn remote_catalog_switching_preserves_the_shared_call_budget() {
+        let source = format!(
+            r#"{DEMO_PERMITS}
+            forbid(principal, action == Box::Action::"mcp:call", resource)
+            when {{ context.input.server == "demo" && context.input.method == "tools/call" }}
+            when temporal {{
+              exists (n: Long). (
+                (count for (t: Timepoint). where (
+                  formerly within 3600s (
+                    Box::Action::"mcp:call"::response{{ input.server: "demo" }} && tp(t)
+                  )
+                )) == n && n >= 2
+              )
+            }};"#
+        );
+        let fixture = tracked_interceptor(&source);
+        let first = McpSource {
+            endpoint: [1; 32],
+            session: None,
+        };
+        let second = McpSource {
+            endpoint: [2; 32],
+            session: None,
+        };
+        stage_source(&fixture, first, &source_catalog("string")).unwrap();
+        stage_source(&fixture, second, &source_catalog("integer")).unwrap();
+        for call in [
+            source_call(first, r#"{"value":"hello"}"#),
+            source_call(second, r#"{"value":7}"#),
+        ] {
+            fixture
+                .intercept(&call)
+                .unwrap()
+                .record_outcome(EgressEffectOutcome::Completed(4))
+                .unwrap();
+        }
+        assert!(
+            fixture
+                .intercept(&source_call(first, r#"{"value":"hello"}"#))
+                .is_err()
+        );
+        assert!(
+            fixture
+                .intercept(&source_call(second, r#"{"value":7}"#))
+                .is_err()
+        );
+        let InterceptorFixture {
+            interceptor,
+            _history,
+        } = fixture;
+        drop(interceptor);
+        let policy = Arc::new(
+            PolicyEngine::open_staged(
+                &crate::Operator::unanchored(),
+                vec![Policy {
+                    origin: PathBuf::from("adapter-test.cedar"),
+                    text: source,
+                }],
+                &_history.path().join("dogwood.redb"),
+            )
+            .unwrap(),
+        );
+        let catalogs = demo_catalogs(&policy);
+        let interceptor = EgressPolicyInterceptor::into_handle_with_discovery(
+            policy,
+            Principal::agent(),
+            GovernedBox::assigned("test-box"),
+            vec![("mcp-fixture.demo".to_string(), "demo".to_string())],
+            catalogs,
+            Arc::new(|| {}),
+        );
+        let fixture = InterceptorFixture {
+            interceptor,
+            _history,
+        };
+        stage_source(&fixture, first, &source_catalog("string")).unwrap();
+        stage_source(&fixture, second, &source_catalog("integer")).unwrap();
+        assert!(
+            fixture
+                .intercept(&source_call(first, r#"{"value":"hello"}"#))
+                .is_err()
+        );
+        assert!(
+            fixture
+                .intercept(&source_call(second, r#"{"value":7}"#))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn concurrent_remote_calls_keep_their_own_argument_types() {
+        let fixture = tracked_interceptor(DEMO_PERMITS);
+        let first = McpSource {
+            endpoint: [1; 32],
+            session: None,
+        };
+        let second = McpSource {
+            endpoint: [2; 32],
+            session: None,
+        };
+        stage_source(&fixture, first, &source_catalog("string")).unwrap();
+        stage_source(&fixture, second, &source_catalog("integer")).unwrap();
+        std::thread::scope(|threads| {
+            for (source, arguments) in [(first, r#"{"value":"hello"}"#), (second, r#"{"value":7}"#)]
+            {
+                let fixture = &fixture;
+                threads.spawn(move || {
+                    for _ in 0..8 {
+                        fixture
+                            .intercept(&source_call(source, arguments))
+                            .unwrap()
+                            .record_outcome(EgressEffectOutcome::Completed(4))
+                            .unwrap();
+                    }
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn catalog_events_require_a_real_terminator_and_accept_sse_line_endings() {
+        let body = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#;
+        let expected: serde_json::Value = serde_json::from_str(body).unwrap();
+        for suffix in ["", "\n", "\r", "\r\n"] {
+            assert!(tools_list_json(&format!("data: {body}{suffix}"), "1").is_none());
+        }
+        let notice = r#"{"jsonrpc":"2.0","method":"notifications/message"}"#;
+        for newline in ["\n", "\r", "\r\n"] {
+            let stream = format!("data: {notice}{newline}{newline}data: {body}{newline}{newline}");
+            assert_eq!(tools_list_json(&stream, "1"), Some(expected.clone()));
+            assert_eq!(
+                tools_list_json(&format!("\u{feff}{stream}"), "1"),
+                Some(expected.clone())
+            );
+        }
     }
 }

@@ -1070,6 +1070,7 @@ mod tests {
                 path: "/",
                 body_bytes: 0,
                 intercepted: true,
+                mcp_source: None,
                 mcp: None,
             })
             .expect("ordinary HTTP is admitted")
@@ -1156,6 +1157,7 @@ mod tests {
                 path: "/v1/messages",
                 body_bytes: 0,
                 intercepted: true,
+                mcp_source: None,
                 mcp: None,
             })
             .err()
@@ -1234,6 +1236,7 @@ mod tests {
             path,
             body_bytes: 0,
             intercepted: true,
+            mcp_source: None,
             mcp: None,
         };
         let emitted = |host: &str, port, method: &str, path: &str| EgressDecision {
@@ -1445,6 +1448,10 @@ mod tests {
             path: "/mcp",
             body_bytes: arguments.len(),
             intercepted: false,
+            mcp_source: Some(egress_gateway::McpSource {
+                endpoint: [1; 32],
+                session: None,
+            }),
             mcp: Some(McpFrame::ToolCall {
                 server: "demo",
                 tool: "add",
