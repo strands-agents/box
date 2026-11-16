@@ -148,6 +148,12 @@ the same four plus `network`. One translator turns each of them into a set of sa
   both families, so `LD_BIND_NOW` gets `LoadsCode` even though that variable need not load code. `NotAbsolute` identifies a relative `HOME` or `TMPDIR`. Callers can use these kinds to drop
   Box-supplied names and reject names that load code without copying Box's lists. This check does
   not cover a credential's `env://` name, for which Box also refuses `HOME` and `PATH`.
+  `reserved_env(name)` returns the kind of a name Box reserves, as a `ReservedEnv`, or `None` for a
+  name it leaves to the operator. `GatewayProxy` is a proxy name and `GatewayCaFile` a CA file name.
+  Box sets both only in a process whose egress goes through the gateway, so a table with
+  `contain_egress = false` may set them, and it needs a `read_file` entry for a CA file. `SetByBox`
+  is `PWD`, `USER`, or an OTLP exporter name, which Box sets in every process. `LoadsCode` is a name
+  that loads code before a program's first line, which a credential cannot take.
 
 - `filesystem` lists name paths and their access modes. The agent takes eight: `read`, `write`,
   `read_file`, `write_file`, `list`, `metadata`, `exec`, and `deny`. A tool and a local MCP server

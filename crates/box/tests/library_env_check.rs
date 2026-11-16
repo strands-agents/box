@@ -1,7 +1,7 @@
 //! `strands_box::check_workload_env` judges an `env` entry as a box judges it when it loads
 //! `box.toml`.
 
-use strands_box::{EnvRefusal, check_workload_env};
+use strands_box::{EnvRefusal, ReservedEnv, check_workload_env, reserved_env};
 
 fn kind(name: &str, value: &str) -> Option<EnvRefusal> {
     check_workload_env(name, value)
@@ -171,5 +171,113 @@ fn the_check_and_a_box_load_refuse_the_same_entries_with_the_same_reason() {
                 "[{table}] {name} must load"
             );
         }
+    }
+}
+
+const GATEWAY_PROXY: [&str; 7] = [
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "NO_PROXY",
+    "no_proxy",
+    "NODE_USE_ENV_PROXY",
+];
+
+const GATEWAY_CA_FILE: [&str; 6] = [
+    "SSL_CERT_FILE",
+    "NODE_EXTRA_CA_CERTS",
+    "CODEX_CA_CERTIFICATE",
+    "AWS_CA_BUNDLE",
+    "REQUESTS_CA_BUNDLE",
+    "GIT_SSL_CAINFO",
+];
+
+#[test]
+fn reserved_env_names_the_kind_of_each_reserved_name() {
+    for name in GATEWAY_PROXY {
+        assert_eq!(
+            reserved_env(name),
+            Some(ReservedEnv::GatewayProxy),
+            "{name}"
+        );
+    }
+    for name in GATEWAY_CA_FILE {
+        assert_eq!(
+            reserved_env(name),
+            Some(ReservedEnv::GatewayCaFile),
+            "{name}"
+        );
+    }
+    for name in ["PWD", "USER", "OTEL_EXPORTER_OTLP_ENDPOINT"] {
+        assert_eq!(reserved_env(name), Some(ReservedEnv::SetByBox), "{name}");
+    }
+    for name in LOADS_CODE.iter().chain(RUNTIME_OPTIONS.iter()) {
+        assert_eq!(reserved_env(name), Some(ReservedEnv::LoadsCode), "{name}");
+    }
+    for (name, _) in ACCEPTED {
+        assert_eq!(reserved_env(name), None, "{name}");
+    }
+}
+
+#[test]
+fn reserved_env_agrees_with_the_env_check() {
+    for name in SET_BY_BOX.iter().chain(GATEWAY_PROXY.iter()) {
+        assert!(
+            matches!(
+                reserved_env(name),
+                Some(
+                    ReservedEnv::GatewayProxy | ReservedEnv::GatewayCaFile | ReservedEnv::SetByBox
+                )
+            ),
+            "{name}"
+        );
+        assert_eq!(kind(name, "x"), Some(EnvRefusal::SetByBox), "{name}");
+    }
+    for name in GATEWAY_CA_FILE {
+        assert_eq!(kind(name, "x"), Some(EnvRefusal::SetByBox), "{name}");
+    }
+}
+
+/// Load a `box.toml` whose stdio server has `contain_egress = false` and sets `name` to `value`.
+fn native_egress_load_refusal(name: &str, value: &str) -> Option<String> {
+    let directory = tempfile::tempdir().expect("a directory");
+    let config = directory.path().join("box.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "name = \"check\"\nbox_dir = \"{}\"\n[agent]\ncommand = [\"/bin/sh\"]\n\
+             [mcp.direct]\ntype = \"stdio\"\ncommand = [\"mcp-server\"]\n\
+             [mcp.direct.network]\ncontain_egress = false\n[mcp.direct.env]\n{name:?} = {value:?}\n",
+            directory.path().join("box").display()
+        ),
+    )
+    .expect("write box.toml");
+    strands_box::check_policy(config)
+        .err()
+        .map(|failed| failed.to_string())
+}
+
+#[test]
+fn a_direct_server_may_set_each_gateway_name_and_no_other_reserved_name() {
+    for name in GATEWAY_PROXY.iter().chain(GATEWAY_CA_FILE.iter()) {
+        assert!(
+            matches!(
+                reserved_env(name),
+                Some(ReservedEnv::GatewayProxy | ReservedEnv::GatewayCaFile)
+            ),
+            "{name}"
+        );
+        assert_eq!(
+            native_egress_load_refusal(name, "x"),
+            None,
+            "{name} must load"
+        );
+    }
+    for name in ["PWD", "USER", "OTEL_EXPORTER_OTLP_ENDPOINT", "LD_PRELOAD"] {
+        assert!(
+            native_egress_load_refusal(name, "x").is_some(),
+            "{name} must be refused"
+        );
     }
 }

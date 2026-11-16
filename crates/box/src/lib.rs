@@ -229,6 +229,34 @@ pub enum EnvRefusal {
     NotAbsolute,
 }
 
+/// The kind of environment variable name a box reserves, or `None` for a name it leaves to the
+/// operator, such as `HOME`, `PATH`, or `NODE_PATH`.
+///
+/// A caller that writes `box.toml` can use it to drop the names Box sets and refuse the names that
+/// load code, without copying Box's lists.
+pub fn reserved_env(name: &str) -> Option<ReservedEnv> {
+    record::config::env::reserved_kind(name)
+}
+
+/// The kind of a name [`reserved_env`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ReservedEnv {
+    /// A proxy setting, such as `HTTPS_PROXY` or `NO_PROXY`, that Box sets in a process whose
+    /// egress goes through the gateway. A table with `contain_egress = false` may set it in `env`.
+    GatewayProxy,
+    /// A CA file setting, such as `SSL_CERT_FILE` or `GIT_SSL_CAINFO`, that Box points at the
+    /// gateway's CA in a process whose egress goes through the gateway. A table with
+    /// `contain_egress = false` may set it in `env`, and also needs a `read_file` entry for the file.
+    GatewayCaFile,
+    /// A name Box sets in every process: `PWD`, `USER`, or an `OTEL_EXPORTER_OTLP_` name.
+    SetByBox,
+    /// A name that makes a program load code before its first line, such as `LD_PRELOAD`,
+    /// `DYLD_INSERT_LIBRARIES`, `NODE_OPTIONS`, or a `PYTHON` name. A credential cannot take it.
+    /// A table's `env` refuses only the `LD_` and `DYLD_` names, and may set the others.
+    LoadsCode,
+}
+
 /// Generate policy action and event schemas from a Box configuration.
 pub fn generate_policy_schema(config: PathBuf, output_dir: PathBuf) -> ExitCode {
     command::execute(
