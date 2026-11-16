@@ -10,7 +10,9 @@ use opentelemetry_proto::transform::common::tonic::ResourceAttributesWithSchema;
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::{OTelSdkError, OTelSdkResult};
 use opentelemetry_sdk::logs::LogBatch;
-use tokio::io::AsyncWriteExt as _;
+use std::io::Write as _;
+use std::sync::Arc;
+
 use tokio::sync::Mutex;
 
 use crate::config::{Payload, Target, TargetKind, TargetSecret};
@@ -42,7 +44,7 @@ pub(crate) const REQUEST_DEADLINE: Duration = Duration::from_secs(4);
 #[derive(Debug)]
 enum Wire {
     /// One OTLP-JSON request per line, appended through one handle held open.
-    File(Mutex<tokio::fs::File>),
+    File(Arc<Mutex<std::fs::File>>),
     /// OTLP over HTTP, protobuf.
     Otlp {
         base: String,
@@ -90,7 +92,7 @@ impl TargetExporter {
                         reason: format!("{} could not be cloned: {source}", target.destination()),
                     })?;
                     return Ok(Self {
-                        wire: Wire::File(Mutex::new(tokio::fs::File::from_std(file))),
+                        wire: Wire::File(Arc::new(Mutex::new(file))),
                         accepts,
                         resource: std::sync::OnceLock::new(),
                         dropped,
@@ -118,7 +120,7 @@ impl TargetExporter {
                     .map_err(|source| TelemetryError::Config {
                         reason: format!("{} could not be opened: {source}", target.destination()),
                     })?;
-                Wire::File(Mutex::new(tokio::fs::File::from_std(file)))
+                Wire::File(Arc::new(Mutex::new(file)))
             }
             TargetKind::Otlp => Wire::Otlp {
                 base: crate::config::dialed(target.destination())
@@ -236,12 +238,11 @@ impl TargetExporter {
         match &self.wire {
             Wire::File(handle) => {
                 let line = one_line(request)?;
-                let mut file = handle.lock().await;
-                file.write_all(&line)
+                // Waiting for the file stays cancellable; once held, the write runs to its end.
+                let mut file = Arc::clone(handle).lock_owned().await;
+                tokio::task::spawn_blocking(move || append(&mut file, &line))
                     .await
-                    .map_err(|source| OTelSdkError::InternalFailure(source.to_string()))?;
-                file.sync_all()
-                    .await
+                    .map_err(|source| OTelSdkError::InternalFailure(source.to_string()))?
                     .map_err(|source| OTelSdkError::InternalFailure(source.to_string()))
             }
             Wire::Otlp {
@@ -607,6 +608,12 @@ fn box_spans(logs: &ExportLogsServiceRequest) -> ExportTraceServiceRequest {
     ExportTraceServiceRequest { resource_spans }
 }
 
+/// Append one whole line and sync it.
+fn append(file: &mut std::fs::File, line: &[u8]) -> std::io::Result<()> {
+    file.write_all(line)?;
+    file.sync_all()
+}
+
 /// One request as one newline-terminated JSON line, so a reader never sees half a record.
 fn one_line<T: serde::Serialize>(request: &T) -> std::result::Result<Vec<u8>, OTelSdkError> {
     let mut line = serde_json::to_vec(request)
@@ -667,6 +674,139 @@ mod tests {
         assert_eq!(line.last(), Some(&b'\n'));
     }
 
+    /// A relay cancelled during its write still writes the whole line.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_relay_never_tears_the_file() {
+        use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
+        use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let destination = directory.path().join("records.jsonl");
+        let target = Target::new(TargetKind::File, destination.to_string_lossy().to_string());
+        let exporter = TargetExporter::open(&target, std::sync::Arc::default()).expect("open");
+
+        let large = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans {
+                    spans: vec![Span {
+                        attributes: vec![KeyValue {
+                            key: "padding".to_string(),
+                            value: Some(AnyValue {
+                                value: Some(any_value::Value::StringValue(
+                                    "x".repeat(3 * 1024 * 1024),
+                                )),
+                            }),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        // Poll the relay once, so its write starts, then drop it as the receiver's deadline does.
+        let cancelled = tokio::time::timeout(Duration::ZERO, exporter.relay_trace(&large)).await;
+        assert!(
+            cancelled.is_err(),
+            "the relay finished before it was cancelled"
+        );
+
+        exporter
+            .relay_trace(&ExportTraceServiceRequest {
+                resource_spans: Vec::new(),
+            })
+            .await
+            .expect("the next record is written");
+
+        let written = std::fs::read(&destination).expect("read the records");
+        assert_eq!(written.last(), Some(&b'\n'), "the file ends inside a line");
+        for line in written
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+        {
+            assert!(
+                serde_json::from_slice::<serde_json::Value>(line).is_ok(),
+                "a torn line of {} bytes",
+                line.len()
+            );
+        }
+    }
+
+    /// A relay cancelled while it waits for the file leaves no write behind.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_relay_cancelled_while_waiting_leaves_no_write_behind() {
+        use std::io::Read as _;
+
+        /// `O_NONBLOCK`, which the standard library does not name.
+        #[cfg(target_os = "linux")]
+        const NONBLOCK: i32 = 0o4000;
+        /// `O_NONBLOCK`, which the standard library does not name.
+        #[cfg(target_os = "macos")]
+        const NONBLOCK: i32 = 0x0004;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let fifo = directory.path().join("stalled");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("mkfifo runs");
+        assert!(made.success(), "mkfifo made the pipe");
+        // A read-write handle keeps a reader on the pipe, and the fill makes the next write block.
+        let mut pipe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(NONBLOCK)
+            .open(&fifo)
+            .expect("open the pipe");
+        let chunk = [0_u8; 4096];
+        loop {
+            match pipe.write(&chunk) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("fill the pipe: {error}"),
+            }
+        }
+
+        let target = Target::new(TargetKind::File, fifo.to_string_lossy().to_string());
+        let exporter = std::sync::Arc::new(
+            TargetExporter::open(&target, std::sync::Arc::default()).expect("open"),
+        );
+        let empty = || ExportTraceServiceRequest {
+            resource_spans: Vec::new(),
+        };
+        // The first relay holds the file inside a write the full pipe blocks.
+        let holder = {
+            let exporter = std::sync::Arc::clone(&exporter);
+            tokio::spawn(async move { exporter.relay_trace(&empty()).await })
+        };
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        for _ in 0..20 {
+            let waited =
+                tokio::time::timeout(Duration::from_millis(5), exporter.relay_trace(&empty()))
+                    .await;
+            assert!(waited.is_err(), "a relay finished while the file was held");
+        }
+
+        // Empty the pipe until the held write and anything queued behind it have arrived.
+        let mut received = Vec::new();
+        let mut buffer = [0_u8; 65536];
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(500);
+        while tokio::time::Instant::now() < deadline {
+            match pipe.read(&mut buffer) {
+                Ok(read) => received.extend_from_slice(&buffer[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                Err(error) => panic!("empty the pipe: {error}"),
+            }
+        }
+        let _ = holder.await.expect("the held relay ends");
+
+        let lines = received.iter().filter(|byte| **byte == b'\n').count();
+        assert_eq!(lines, 1, "a cancelled relay still wrote its line");
+    }
+
     /// **A redirect never carries the credential to the host it names.**
     ///
     /// `reqwest` follows ten redirects by default, and its own sensitive-header strip keys on
@@ -674,7 +814,7 @@ mod tests {
     /// vendor's own header name was never in that list at all.
     #[tokio::test]
     async fn a_redirect_never_carries_the_credential() {
-        use tokio::io::AsyncReadExt as _;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
         let second = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
