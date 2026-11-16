@@ -457,7 +457,8 @@ fn fs_action(operation: FsOperation) -> &'static str {
         | FsOperation::Exec => r#"Box::Action::"fs:read""#,
         FsOperation::WriteContent { .. }
         | FsOperation::CreateDir
-        | FsOperation::SetPermissions { .. } => r#"Box::Action::"fs:write""#,
+        | FsOperation::SetPermissions { .. }
+        | FsOperation::SetTimes => r#"Box::Action::"fs:write""#,
         FsOperation::RemoveFile | FsOperation::RemoveDir => r#"Box::Action::"fs:delete""#,
         _ => r#"Box::Action::"fs:other""#,
     }
@@ -842,6 +843,7 @@ mod tests {
             FsOperation::RemoveDir,
             FsOperation::CreateDir,
             FsOperation::SetPermissions { mode: 0o644 },
+            FsOperation::SetTimes,
             FsOperation::ChangeDir,
             FsOperation::ReadLink,
         ] {
@@ -1537,6 +1539,7 @@ mod tests {
                 },
             ),
             (directory.as_str(), box_shell::FsOperation::RemoveDir),
+            (policy.as_str(), box_shell::FsOperation::SetTimes),
             (
                 policy.as_str(),
                 box_shell::FsOperation::WriteContent {

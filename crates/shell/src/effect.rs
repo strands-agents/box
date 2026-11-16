@@ -37,6 +37,8 @@ pub enum FsOperation {
         /// The requested mode bits.
         mode: u32,
     },
+    /// Set the access and modification times.
+    SetTimes,
     /// Make a directory the process working directory.
     ChangeDir,
     /// Read a symlink's target without following it.

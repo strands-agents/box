@@ -11,7 +11,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use strands_shell::os::{DirEntry, Fd, FdKind, FileStat, OpenFlags, Process};
+use strands_shell::os::{
+    DirEntry, Fd, FdKind, FileStat, FileTimes, OpenFlags, Process, TimeChange,
+};
 
 use crate::kernel::Follow;
 
@@ -498,6 +500,7 @@ pub(super) fn stat(path: &Path, follow: Follow) -> FileStat {
         len: meta.len(),
         mode: meta.mode(),
         modified: meta.modified().ok(),
+        accessed: meta.accessed().ok(),
         ..FileStat::default()
     }
 }
@@ -698,6 +701,111 @@ pub(super) fn set_permissions(
             )
         })
     }
+}
+
+/// Set the access and modification times of the pinned object.
+pub(super) fn set_times(
+    host_path: &Path,
+    times: FileTimes,
+    expected: Option<&HostIdentity>,
+) -> io::Result<()> {
+    let expected = expected.ok_or_else(stale_resolution)?;
+    let (expected_device, expected_inode) = match expected {
+        HostIdentity::Present { device, inode, .. } => (*device, *inode),
+        HostIdentity::Missing { .. } | HostIdentity::Unavailable { .. } => {
+            return Err(stale_resolution());
+        }
+    };
+    let specification = [timespec(times.accessed)?, timespec(times.modified)?];
+    let (parent, leaf) = opened_parent(host_path, expected)?;
+    #[cfg(target_os = "linux")]
+    {
+        // As for `chmod`: `O_PATH` pins the leaf with no access check, and `/proc/self/fd` then
+        // names that exact descriptor, so a leaf swapped for a symlink cannot redirect the change.
+        let open_flags = libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_PATH;
+        // SAFETY: parent and leaf are owned, valid handles. The returned descriptor is checked.
+        let descriptor = unsafe { libc::openat(parent.as_raw_fd(), leaf.as_ptr(), open_flags, 0) };
+        if descriptor < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: openat returned this owned descriptor and File closes it once.
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        let metadata = file.metadata()?;
+        if metadata.dev() != expected_device || metadata.ino() != expected_inode {
+            return Err(stale_resolution());
+        }
+        let descriptor_path = CString::new(format!("/proc/self/fd/{}", file.as_raw_fd()))
+            .expect("a descriptor path has no NUL byte");
+        // SAFETY: the proc path names the exact open descriptor whose identity was verified, and
+        // specification holds the two timespec values utimensat reads.
+        last_result(unsafe {
+            libc::utimensat(
+                libc::AT_FDCWD,
+                descriptor_path.as_ptr(),
+                specification.as_ptr(),
+                0,
+            )
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // There is no `O_PATH` here, so open the leaf itself: the identity checked is then the
+        // object whose times change, and a leaf swapped after the check cannot be reached. Read
+        // access is tried first, as a directory opens only for reading.
+        let open_flags = libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY;
+        let open = |access: libc::c_int| {
+            // SAFETY: parent and leaf are owned, valid handles. The returned descriptor is checked.
+            unsafe { libc::openat(parent.as_raw_fd(), leaf.as_ptr(), open_flags | access, 0) }
+        };
+        let mut descriptor = open(libc::O_RDONLY);
+        if descriptor < 0 && io::Error::last_os_error().raw_os_error() == Some(libc::EACCES) {
+            descriptor = open(libc::O_WRONLY);
+        }
+        if descriptor < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: openat returned this owned descriptor and File closes it once.
+        let file = unsafe { File::from_raw_fd(descriptor) };
+        let metadata = file.metadata()?;
+        if metadata.dev() != expected_device || metadata.ino() != expected_inode {
+            return Err(stale_resolution());
+        }
+        // SAFETY: the descriptor is open and its identity was verified, and specification holds
+        // the two timespec values futimens reads.
+        last_result(unsafe { libc::futimens(file.as_raw_fd(), specification.as_ptr()) })
+    }
+}
+
+/// The `utimensat` value for one time change.
+fn timespec(change: TimeChange) -> io::Result<libc::timespec> {
+    let out_of_range = || io::Error::new(io::ErrorKind::InvalidInput, "time is out of range");
+    let (seconds, nanoseconds): (libc::time_t, libc::c_long) = match change {
+        TimeChange::Keep => (0, libc::UTIME_OMIT),
+        TimeChange::Now => (0, libc::UTIME_NOW),
+        TimeChange::To(time) => match time.duration_since(std::time::UNIX_EPOCH) {
+            Ok(after) => (
+                libc::time_t::try_from(after.as_secs()).map_err(|_| out_of_range())?,
+                libc::c_long::from(after.subsec_nanos() as i32),
+            ),
+            Err(before) => {
+                let before = before.duration();
+                let seconds =
+                    libc::time_t::try_from(before.as_secs()).map_err(|_| out_of_range())?;
+                match before.subsec_nanos() {
+                    0 => (-seconds, 0),
+                    nanoseconds => (
+                        -seconds - 1,
+                        libc::c_long::from(1_000_000_000 - nanoseconds as i32),
+                    ),
+                }
+            }
+        },
+    };
+    // SAFETY: timespec is plain data, and every field is set below.
+    let mut specification: libc::timespec = unsafe { std::mem::zeroed() };
+    specification.tv_sec = seconds;
+    specification.tv_nsec = nanoseconds;
+    Ok(specification)
 }
 
 #[cfg(test)]

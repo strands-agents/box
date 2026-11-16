@@ -185,6 +185,11 @@ link resolved.
 | `fs:delete` | `Box::FsDeleteOperation::"remove_file"`, `"remove_dir"` |
 | `fs:move` | `Box::FsMoveOperation::"rename"` |
 
+`touch` changes a file's times as a `write_content` write. It first reads the file's metadata to see
+whether the file exists, so it also needs `fs:read` with `read_metadata`. Without that, `touch` on
+an existing file exits `0` and changes nothing. The macOS `file-attributes` switch doesn't apply to
+`touch`, because the Shell runs outside the agent's sandbox.
+
 | Field | Type | Present | Value |
 |---|---|---|---|
 | `context.input.path` | String | Always | The resolved path. A path under the operator's home starts with `~/`, and the home itself is `~`. |
