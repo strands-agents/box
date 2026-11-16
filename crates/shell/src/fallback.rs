@@ -65,9 +65,56 @@ heredoc), and `python -`. See the box's docs for the subset.";
 /// Deliberately not a CPython version, so capability detection expects Monty.
 const PYTHON_VERSION: &str = "Monty (Strands-Box Python subset)";
 
+/// Whether CPython, given `args`, reads its program from stdin: no `-c`, no `-m`, no script file,
+/// or a script of `-`. `--version` and `--help` and their short forms print and exit, so they
+/// read nothing. `-W` and `-X` take a value, attached or as the next word, as does
+/// `--check-hash-based-pycs`.
+fn reads_program_from_stdin(args: &[String]) -> bool {
+    let mut words = args.iter();
+    while let Some(word) = words.next() {
+        let word = word.as_str();
+        if word == "-" {
+            return true;
+        }
+        if word == "--" {
+            return words.next().is_none_or(|script| script == "-");
+        }
+        if !word.starts_with('-') {
+            return false;
+        }
+        if word.starts_with("--") {
+            match word {
+                "--version" | "--help" | "--help-env" | "--help-xoptions" | "--help-all" => {
+                    return false;
+                }
+                "--check-hash-based-pycs" => {
+                    words.next();
+                }
+                _ => {}
+            }
+            continue;
+        }
+        let flags = &word[1..];
+        for (at, flag) in flags.char_indices() {
+            match flag {
+                'c' | 'm' | 'V' | 'h' | '?' => return false,
+                'W' | 'X' => {
+                    if at + 1 == flags.len() {
+                        words.next();
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    true
+}
+
 /// What Monty's refusals add, so an agent that wanted real Python can tell its operator how.
 pub const REAL_PYTHON_HINT: &str = "To run real Python, the operator sets monty = false in box.toml, \
-     declares [tool.python3], and permits shell:spawn on its file.";
+     declares a [tool] whose command file is named python3, grants it read on the venv and \
+     Python's install, and permits shell:spawn on its file (see the monty key in Box's config docs).";
 
 /// The program and its arguments as one line, for `context.input.command`.
 fn command_line(program: &str, args: &[String]) -> String {
@@ -281,6 +328,20 @@ impl CommandFallback for ShellKernel {
             }
             Decided::Spawn { permit, program } => (Unsettled(Some(permit)), program),
         };
+        // With Monty off, `python3` and `python` are host programs, and a host program receives no
+        // input. CPython would read an empty program from stdin and exit 0 having run nothing, so
+        // a heredoc or a pipe would look like success. Refuse that form the way Monty does.
+        if self.commands.script.is_none()
+            && matches!(program.as_str(), "python" | "python3")
+            && reads_program_from_stdin(&args)
+        {
+            let message = format!(
+                "{program}: reading a program from stdin is not supported: a program the Shell \
+                 starts receives no input yet; use -c SOURCE or a script file\n"
+            );
+            write_stderr(context, &message).await;
+            return Ok(Some(permit.finish(context, 2).await));
+        }
         let working_directory = match permit.spawn_working_directory() {
             Some(directory) if !directory.is_absolute() => {
                 write_stderr(
@@ -442,5 +503,54 @@ impl ShellKernel {
         let fd = self.open(&mut process, path, OpenFlags::read()).await?;
         let mut reader = process.take_reader(fd)?;
         strands_shell::os::read_to_string_limited(&mut reader, self.commands.max_script).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::reads_program_from_stdin;
+
+    fn reads(args: &[&str]) -> bool {
+        reads_program_from_stdin(
+            &args
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect::<Vec<_>>(),
+        )
+    }
+
+    /// The forms CPython reads its program from stdin for, and the ones it doesn't.
+    #[test]
+    fn a_program_from_stdin_is_told_from_one_named_on_the_command_line() {
+        for args in [
+            &[][..],
+            &["-"],
+            &["-u"],
+            &["-i"],
+            &["-I", "-"],
+            &["--", "-"],
+            &["--"],
+            &["-W", "ignore"],
+            &["-Wignore"],
+            &["-X", "utf8"],
+        ] {
+            assert!(reads(args), "{args:?} reads its program from stdin");
+        }
+        for args in [
+            &["-c", "print(1)"][..],
+            &["-cprint(1)"],
+            &["-uc", "print(1)"],
+            &["-m", "pytest"],
+            &["--version"],
+            &["-V"],
+            &["--help"],
+            &["-h"],
+            &["script.py"],
+            &["-u", "script.py", "-"],
+            &["-W", "ignore", "script.py"],
+            &["--", "script.py"],
+        ] {
+            assert!(!reads(args), "{args:?} names its program");
+        }
     }
 }

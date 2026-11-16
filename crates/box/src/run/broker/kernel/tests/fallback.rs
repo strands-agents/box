@@ -214,6 +214,29 @@ fn without_a_monty_runner_python3_runs_its_declared_program() {
         format!("spawned {} --version\n", python3.display())
     );
 
+    // A program from stdin would arrive empty, so these refuse before the spawn instead of
+    // succeeding with no output.
+    for command in [
+        "python3 <<'EOF'\nprint(1)\nEOF",
+        "printf 'print(1)' | python3",
+        "printf 'print(1)' | python3 -",
+    ] {
+        let refused = run(async { shell(None).run(command).await });
+        assert_eq!(refused.status, 2, "{command}: {}", refused.stderr);
+        assert!(
+            refused
+                .stderr
+                .contains("python3: reading a program from stdin is not supported"),
+            "{command}: {}",
+            refused.stderr
+        );
+        assert!(
+            !refused.stdout.contains("spawned"),
+            "{command} started nothing: {}",
+            refused.stdout
+        );
+    }
+
     let on = run(async { shell(Some(echoing())).run("python3 -c 'print(1)'").await });
     assert!(
         on.stdout.starts_with("ran "),

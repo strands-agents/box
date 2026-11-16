@@ -294,7 +294,9 @@ written into `site-packages`, such as a `.pth`, runs at every Python start, late
 box. Box refuses a write grant that can change the tool's command or its path
 ([Configured command integrity](#configured-command-integrity)), but not one that reaches the rest
 of the venv. A program the Shell starts receives no standard input yet, so a piped
-`printf x | python3 -c '...'` reads an empty stdin.
+`printf x | python3 -c '...'` reads an empty stdin. A `python3` that would read its program from
+stdin, such as `python3 <<'EOF'` or `printf 'print(1)' | python3`, exits 2 with
+`reading a program from stdin is not supported` instead of running an empty program.
 
 A box that sets `monty = false` stores its record at version 36, and an older build refuses it.
 
