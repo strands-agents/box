@@ -610,8 +610,40 @@ fn box_spans(logs: &ExportLogsServiceRequest) -> ExportTraceServiceRequest {
 
 /// Append one whole line and sync it.
 fn append(file: &mut std::fs::File, line: &[u8]) -> std::io::Result<()> {
-    file.write_all(line)?;
+    let before = file.metadata().map(|metadata| metadata.len()).ok();
+    let mut written = 0;
+    while written < line.len() {
+        match file.write(&line[written..]) {
+            Ok(0) => {
+                return Err(cut_back(
+                    file,
+                    before,
+                    written,
+                    std::io::ErrorKind::WriteZero.into(),
+                ));
+            }
+            Ok(count) => written += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(cut_back(file, before, written, error)),
+        }
+    }
     file.sync_all()
+}
+
+/// Remove the fragment a failed append left, when no other writer appended after it.
+fn cut_back(
+    file: &std::fs::File,
+    before: Option<u64>,
+    written: usize,
+    error: std::io::Error,
+) -> std::io::Error {
+    if let Some(before) = before
+        && written > 0
+        && file.metadata().map(|metadata| metadata.len()).ok() == Some(before + written as u64)
+    {
+        let _ = file.set_len(before);
+    }
+    error
 }
 
 /// One request as one newline-terminated JSON line, so a reader never sees half a record.
@@ -733,30 +765,76 @@ mod tests {
         }
     }
 
+    /// An append that fails partway leaves no fragment for the next record to join.
+    #[test]
+    fn a_failed_append_leaves_no_fragment() {
+        const CHILD: &str = "STRANDS_BOX_TELEMETRY_FAILED_APPEND_CHILD";
+        // The file-size limit is per process, so the test runs alone in a child process.
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    "--exact",
+                    "export::tests::a_failed_append_leaves_no_fragment",
+                    "--test-threads=1",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .expect("run the child");
+            assert!(status.success(), "the child failed: {status}");
+            return;
+        }
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let destination = directory.path().join("records.jsonl");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&destination)
+            .expect("open");
+        append(&mut file, b"{}\n").expect("the first line is written");
+
+        // SAFETY: plain libc calls on this single-threaded child process.
+        let limit = unsafe {
+            libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+            let mut limit = std::mem::zeroed::<libc::rlimit>();
+            assert_eq!(libc::getrlimit(libc::RLIMIT_FSIZE, &mut limit), 0);
+            let lowered = libc::rlimit {
+                rlim_cur: 4096,
+                rlim_max: limit.rlim_max,
+            };
+            assert_eq!(libc::setrlimit(libc::RLIMIT_FSIZE, &lowered), 0);
+            limit
+        };
+        let large = [b'x'; 8192];
+        let failed = append(&mut file, &large);
+        // SAFETY: restores the soft limit read above, which the hard limit still allows.
+        assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_FSIZE, &limit) }, 0);
+        assert!(failed.is_err(), "the append past the limit succeeded");
+
+        append(&mut file, b"{}\n").expect("the next line is written");
+        assert_eq!(
+            std::fs::read(&destination).expect("read"),
+            b"{}\n{}\n",
+            "a fragment stayed in the file"
+        );
+    }
+
     /// A relay cancelled while it waits for the file leaves no write behind.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_relay_cancelled_while_waiting_leaves_no_write_behind() {
         use std::io::Read as _;
 
-        /// `O_NONBLOCK`, which the standard library does not name.
-        #[cfg(target_os = "linux")]
-        const NONBLOCK: i32 = 0o4000;
-        /// `O_NONBLOCK`, which the standard library does not name.
-        #[cfg(target_os = "macos")]
-        const NONBLOCK: i32 = 0x0004;
-
         let directory = tempfile::tempdir().expect("tempdir");
         let fifo = directory.path().join("stalled");
-        let made = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .expect("mkfifo runs");
-        assert!(made.success(), "mkfifo made the pipe");
+        let named = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).expect("a C path");
+        // SAFETY: `named` is a valid NUL-terminated path that outlives the call.
+        let made = unsafe { libc::mkfifo(named.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
         // A read-write handle keeps a reader on the pipe, and the fill makes the next write block.
         let mut pipe = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .custom_flags(NONBLOCK)
+            .custom_flags(libc::O_NONBLOCK)
             .open(&fifo)
             .expect("open the pipe");
         let chunk = [0_u8; 4096];

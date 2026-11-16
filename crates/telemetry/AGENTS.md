@@ -414,6 +414,11 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   wrote its line later. Measured: 20 cancelled relays behind a stalled pipe wrote 21 lines, not 1.
   `a_cancelled_relay_never_tears_the_file` and
   `a_relay_cancelled_while_waiting_leaves_no_write_behind` are the pins.
+  **A failed append is cut back too.** `write_all` that stops on `ENOSPC`, `EDQUOT`, or `EFBIG`
+  left its fragment, and the next record joined it the same way. `append` now counts what it wrote
+  and `cut_back` restores the length from before the write, but only when the file grew by exactly
+  that count, so it never removes a line another writer appended. `a_failed_append_leaves_no_fragment`
+  is the pin; it lowers `RLIMIT_FSIZE` in a child process, because the limit is per process.
   Two boxes sharing one destination can still tear a line. Prefer one target per box.
 - **A telemetry secret must resolve through `credentials`.** `box`'s `telemetry_config` once read the
   variable with `std::env::var`, which bypassed the `env://` denylist — so
