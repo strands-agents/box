@@ -77,13 +77,15 @@ class ReleaseSourceTests(unittest.TestCase):
             ["git", "-C", str(self.root), *args], text=True, stderr=subprocess.DEVNULL
         ).strip()
 
-    def scan_source(self, dry_run, source="", dispatch=None, version="0.1.1", publish_linux="true"):
+    def scan_source(self, dry_run, source="", dispatch=None, version="0.1.1",
+                    publish_linux="true", publish_linux_x86="false"):
         output = self.root / "output"
         output.write_text("")
         environment = {
             **os.environ,
             "NEW_VERSION": version,
             "PUBLISH_LINUX": publish_linux,
+            "PUBLISH_LINUX_X86": publish_linux_x86,
             "SHA_INPUT": source,
             "DRY_RUN": dry_run,
             "DISPATCH_SHA": dispatch or self.candidate,
@@ -159,9 +161,14 @@ class ReleaseSourceTests(unittest.TestCase):
 
     def test_default_platform_selection_keeps_stable_macos_only(self):
         selection = workflow_input_default("publish_linux")
-        result, output = self.scan_source("false", publish_linux=selection)
+        x86_selection = workflow_input_default("publish_linux_x86")
+        self.assertEqual(x86_selection, "false")
+        result, output = self.scan_source(
+            "false", publish_linux=selection, publish_linux_x86=x86_selection
+        )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("publish_linux=false\n", output)
+        self.assertIn("publish_linux_x86=false\n", output)
         self.assertIn("linux_preview=false\n", output)
         result, output = self.scan_source(
             "true", version="0.1.1-linux-preview.1", publish_linux=selection
@@ -174,6 +181,7 @@ class ReleaseSourceTests(unittest.TestCase):
         result, output = self.scan_source("false", publish_linux="false")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("publish_linux=false\n", output)
+        self.assertIn("publish_linux_x86=false\n", output)
         self.assertIn("linux_preview=false\n", output)
         self.assertIn(f"release_sha={self.main}\n", output)
 
@@ -192,6 +200,52 @@ class ReleaseSourceTests(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("publish_linux must be true or false", result.stdout)
                 self.assertEqual(output, "")
+
+    def test_arm64_publication_does_not_require_x86_publication(self):
+        for version in ["0.1.1", "0.1.1-linux-preview.1"]:
+            for x86 in [workflow_input_default("publish_linux_x86"), "true"]:
+                with self.subTest(version=version, x86=x86):
+                    (self.root / "summary").write_text("")
+                    result, output = self.scan_source("true", version=version, publish_linux_x86=x86)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("publish_linux=true\n", output)
+                    self.assertIn(f"publish_linux_x86={x86}\n", output)
+                    summary = (self.root / "summary").read_text()
+                    self.assertIn("| Publish Linux ARM64 | true |", summary)
+                    self.assertIn(f"| Publish Linux x86-64 | {x86} |", summary)
+
+    def test_x86_publication_requires_linux_publication(self):
+        for version in ["0.1.1", "0.1.1-linux-preview.1"]:
+            with self.subTest(version=version):
+                result, output = self.scan_source(
+                    "true", version=version, publish_linux="false", publish_linux_x86="true"
+                )
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("publish_linux_x86=true requires publish_linux=true", result.stdout)
+                self.assertEqual(output, "")
+
+    def test_invalid_x86_selection_refuses_before_outputs(self):
+        for value in ["", "TRUE", "1", "yes"]:
+            with self.subTest(value=value):
+                result, output = self.scan_source("true", publish_linux_x86=value)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("publish_linux_x86 must be true or false", result.stdout)
+                self.assertEqual(output, "")
+
+    def test_x86_publication_selection_reaches_each_release_stage(self):
+        workflow = WORKFLOW.read_text()
+        self.assertIn("      publish_linux_x86: ${{ steps.scan.outputs.publish_linux_x86 }}", workflow)
+        stages = {
+            "Resolve SHA, find previous tag, validate version": "inputs.publish_linux_x86",
+            "Collect tarballs and compute SHA256SUMS.txt": "needs.scan.outputs.publish_linux_x86",
+            "Assert the expected tarballs, each carrying box": "needs.scan.outputs.publish_linux_x86",
+            "Compose release body (install block)": "needs.scan.outputs.publish_linux_x86",
+            "Poll the release for its tag and assets": "needs.scan.outputs.publish_linux_x86",
+        }
+        for name, source in stages.items():
+            with self.subTest(stage=name):
+                step = workflow.split(f"      - name: {name}\n", 1)[1].split("      - name:", 1)[0]
+                self.assertIn("          PUBLISH_LINUX_X86: ${{ " + source + " }}", step)
 
     def test_preview_cannot_publish_unmerged_source(self):
         result, output = self.scan_source(
@@ -221,25 +275,31 @@ class ReleaseSourceTests(unittest.TestCase):
 
 class ReleaseBundleTests(unittest.TestCase):
     def test_published_assets_and_prerelease_state_must_match_the_channel(self):
-        for preview, publish_linux, metadata_preview, arm_asset, x86_asset, extra_asset, success in [
-            (False, True, False, True, True, False, True),
-            (True, True, True, True, True, False, True),
-            (False, False, False, False, False, False, True),
-            (False, False, False, True, False, False, False),
-            (False, False, False, False, True, False, False),
-            (False, False, True, False, False, False, False),
-            (False, False, False, False, False, True, False),
-            (True, True, False, True, True, False, False),
-            (False, True, True, True, True, False, False),
-            (False, True, False, False, True, False, False),
-            (False, True, False, True, False, False, False),
-            (True, True, True, False, True, False, False),
-            (True, True, True, True, False, False, False),
-            (False, True, False, True, True, True, False),
-            (True, True, True, True, True, True, False),
+        for preview, publish_linux, publish_x86, metadata_preview, arm_asset, x86_asset, extra_asset, success in [
+            (False, False, False, False, False, False, False, True),
+            (False, True, False, False, True, False, False, True),
+            (True, True, False, True, True, False, False, True),
+            (False, True, True, False, True, True, False, True),
+            (True, True, True, True, True, True, False, True),
+            (False, False, False, False, True, False, False, False),
+            (False, False, False, False, False, True, False, False),
+            (False, False, False, True, False, False, False, False),
+            (False, False, False, False, False, False, True, False),
+            (False, True, False, False, True, True, False, False),
+            (True, True, False, True, True, True, False, False),
+            (False, True, False, False, False, False, False, False),
+            (True, True, False, True, False, False, False, False),
+            (True, True, True, False, True, True, False, False),
+            (False, True, True, True, True, True, False, False),
+            (False, True, True, False, False, True, False, False),
+            (False, True, True, False, True, False, False, False),
+            (True, True, True, True, False, True, False, False),
+            (True, True, True, True, True, False, False, False),
+            (False, True, True, False, True, True, True, False),
+            (True, True, True, True, True, True, True, False),
         ]:
             with self.subTest(
-                preview=preview, publish_linux=publish_linux, metadata=metadata_preview,
+                preview=preview, publish_linux=publish_linux, publish_x86=publish_x86, metadata=metadata_preview,
                 arm=arm_asset, x86=x86_asset, extra=extra_asset
             ), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
@@ -268,6 +328,7 @@ class ReleaseBundleTests(unittest.TestCase):
                         **os.environ, "PATH": f"{root}:{os.environ['PATH']}",
                         "NEW_TAG": tag, "LINUX_PREVIEW": str(preview).lower(),
                         "PUBLISH_LINUX": str(publish_linux).lower(),
+                        "PUBLISH_LINUX_X86": str(publish_x86).lower(),
                         "GITHUB_REPOSITORY": "example/box",
                         "FAKE_NAMES": "\n".join(names),
                         "FAKE_PREVIEW": str(metadata_preview).lower(),
@@ -305,6 +366,7 @@ class ReleaseBundleTests(unittest.TestCase):
                 environment = {
                     **os.environ, "PATH": f"{tools}:{os.environ['PATH']}",
                     "NEW_TAG": "v0.1.1", "LINUX_PREVIEW": "false", "PUBLISH_LINUX": "true",
+                    "PUBLISH_LINUX_X86": "true",
                     "FETCH_STATUS": str(fetch_status), "DOWNLOAD_STATUS": str(download_status),
                     "DOWNLOAD_FIXTURE": str(fixture), "DOWNLOAD_LOG": str(root / "download.log"),
                     "RUN_LOG": str(root / "run.log"),
@@ -331,9 +393,9 @@ class ReleaseBundleTests(unittest.TestCase):
 
     def test_collection_requires_all_built_archives(self):
         triples = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"]
-        for publish_linux in [False, True]:
+        for publish_linux, publish_x86 in [(False, False), (True, False), (True, True)]:
             for missing in triples:
-                with self.subTest(publish_linux=publish_linux, missing=missing), tempfile.TemporaryDirectory() as directory:
+                with self.subTest(publish_linux=publish_linux, publish_x86=publish_x86, missing=missing), tempfile.TemporaryDirectory() as directory:
                     root = Path(directory)
                     assets = root / "assets"
                     assets.mkdir()
@@ -346,6 +408,7 @@ class ReleaseBundleTests(unittest.TestCase):
                         env={
                             **os.environ, "NEW_TAG": "v0.1.1", "LINUX_PREVIEW": "false",
                             "PUBLISH_LINUX": str(publish_linux).lower(),
+                            "PUBLISH_LINUX_X86": str(publish_x86).lower(),
                         },
                         capture_output=True, text=True,
                     )
@@ -356,8 +419,11 @@ class ReleaseBundleTests(unittest.TestCase):
         import io
         import tarfile
 
-        for preview, publish_linux in [(False, False), (False, True), (True, True)]:
-            with self.subTest(preview=preview, publish_linux=publish_linux), tempfile.TemporaryDirectory() as directory:
+        for preview, publish_linux, publish_x86 in [
+            (False, False, False), (False, True, False), (True, True, False),
+            (False, True, True), (True, True, True),
+        ]:
+            with self.subTest(preview=preview, publish_linux=publish_linux, publish_x86=publish_x86), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory)
                 tag = "v0.1.1-linux-preview.1" if preview else "v0.1.1"
                 assets = root / "assets"
@@ -379,6 +445,7 @@ class ReleaseBundleTests(unittest.TestCase):
                     **os.environ, "NEW_TAG": tag,
                     "LINUX_PREVIEW": str(preview).lower(),
                     "PUBLISH_LINUX": str(publish_linux).lower(),
+                    "PUBLISH_LINUX_X86": str(publish_x86).lower(),
                 }
                 for step in [
                     "Collect tarballs and compute SHA256SUMS.txt",
@@ -393,10 +460,12 @@ class ReleaseBundleTests(unittest.TestCase):
                 release = root / "release"
                 expected = {f"box-{tag}-aarch64-apple-darwin.tar.gz", "SHA256SUMS.txt"}
                 if publish_linux:
-                    expected.update({f"box-{tag}-linux-arm64.tar.gz", f"box-{tag}-linux-x86_64.tar.gz"})
+                    expected.add(f"box-{tag}-linux-arm64.tar.gz")
+                if publish_x86:
+                    expected.add(f"box-{tag}-linux-x86_64.tar.gz")
                 self.assertEqual({path.name for path in release.iterdir()}, expected)
                 checksums = (release / "SHA256SUMS.txt").read_text()
-                self.assertEqual(len(checksums.splitlines()), 3 if publish_linux else 1)
+                self.assertEqual(len(checksums.splitlines()), 1 + publish_linux + publish_x86)
                 verified = subprocess.run(
                     ["sha256sum", "--check", "SHA256SUMS.txt"], cwd=release,
                     capture_output=True, text=True,
@@ -407,6 +476,7 @@ class ReleaseBundleTests(unittest.TestCase):
                         (release / f"box-{tag}-linux-arm64.tar.gz").read_bytes(),
                         (assets / f"box-{tag}-aarch64-unknown-linux-gnu.tar.gz").read_bytes(),
                     )
+                if publish_x86:
                     self.assertEqual(
                         (release / f"box-{tag}-linux-x86_64.tar.gz").read_bytes(),
                         (assets / f"box-{tag}-x86_64-unknown-linux-gnu.tar.gz").read_bytes(),
@@ -416,8 +486,8 @@ class ReleaseBundleTests(unittest.TestCase):
                 self.assertNotIn("unknown-linux", body)
                 self.assertNotIn("EXPERIMENTAL_LINUX_SUPPORT", body)
                 self.assertEqual(f"box-{tag}-linux-arm64.tar.gz" in body, publish_linux)
-                self.assertEqual(f"box-{tag}-linux-x86_64.tar.gz" in body, publish_linux)
-                self.assertEqual("EXPERIMENTAL_X86_SUPPORT=TRUE" in body, publish_linux)
+                self.assertEqual(f"box-{tag}-linux-x86_64.tar.gz" in body, publish_x86)
+                self.assertEqual("EXPERIMENTAL_X86_SUPPORT=TRUE" in body, publish_x86)
                 self.assertEqual("sha256sum --check box-linux.sha256" in body, publish_linux)
                 self.assertEqual("Package availability does not establish security acceptance" in body, publish_linux)
                 self.assertEqual("### Linux ARM64" in body, publish_linux)

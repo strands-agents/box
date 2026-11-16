@@ -4,7 +4,7 @@ name: Release Box
 # version and a commit; the workflow builds strands-box for each target below on
 # hosted runners, packages each binary set as a versioned tarball, and attaches
 # the macOS and Linux tarballs with SHA256SUMS.txt to a GitHub Release.
-# Stable releases can omit Linux. Linux previews include ARM64 and x86-64 Linux.
+# Stable releases can omit Linux. Linux previews require ARM64. x86-64 is opt-in.
 # That naming and layout is what download.sh (curl | sh) and a Homebrew tap both
 # consume:
 #
@@ -32,7 +32,12 @@ on:
         required: true
         type: string
       publish_linux:
-        description: 'Include the Linux ARM64 and x86-64 archives. Set false for a macOS-only stable release. Required for Linux previews.'
+        description: 'Include the Linux ARM64 archive. Set false for a macOS-only stable release. Required for Linux previews.'
+        required: true
+        default: false
+        type: boolean
+      publish_linux_x86:
+        description: 'Also include the experimental Linux x86-64 archive after qualification. Requires publish_linux=true.'
         required: true
         default: false
         type: boolean
@@ -83,6 +88,7 @@ jobs:
       new_tag: ${{ steps.scan.outputs.new_tag }}
       linux_preview: ${{ steps.scan.outputs.linux_preview }}
       publish_linux: ${{ steps.scan.outputs.publish_linux }}
+      publish_linux_x86: ${{ steps.scan.outputs.publish_linux_x86 }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -96,6 +102,7 @@ jobs:
         env:
           NEW_VERSION: ${{ inputs.version }}
           PUBLISH_LINUX: ${{ inputs.publish_linux }}
+          PUBLISH_LINUX_X86: ${{ inputs.publish_linux_x86 }}
           SHA_INPUT: ${{ inputs.sha }}
           DRY_RUN: ${{ inputs.dry_run }}
           DISPATCH_SHA: ${{ github.sha }}
@@ -115,6 +122,14 @@ jobs:
 
           if [ "$PUBLISH_LINUX" != "true" ] && [ "$PUBLISH_LINUX" != "false" ]; then
             echo "::error::publish_linux must be true or false."
+            exit 1
+          fi
+          if [ "$PUBLISH_LINUX_X86" != "true" ] && [ "$PUBLISH_LINUX_X86" != "false" ]; then
+            echo "::error::publish_linux_x86 must be true or false."
+            exit 1
+          fi
+          if [ "$PUBLISH_LINUX_X86" = "true" ] && [ "$PUBLISH_LINUX" != "true" ]; then
+            echo "::error::publish_linux_x86=true requires publish_linux=true."
             exit 1
           fi
           if [ "$LINUX_PREVIEW" = "true" ] && [ "$PUBLISH_LINUX" != "true" ]; then
@@ -195,6 +210,7 @@ jobs:
             echo "new_tag=$NEW_TAG"
             echo "linux_preview=$LINUX_PREVIEW"
             echo "publish_linux=$PUBLISH_LINUX"
+            echo "publish_linux_x86=$PUBLISH_LINUX_X86"
           } >> "$GITHUB_OUTPUT"
 
           {
@@ -206,6 +222,7 @@ jobs:
             echo "| Proposed tag | \`$NEW_TAG\` |"
             echo "| Experimental Linux prerelease | $LINUX_PREVIEW |"
             echo "| Publish Linux ARM64 | $PUBLISH_LINUX |"
+            echo "| Publish Linux x86-64 | $PUBLISH_LINUX_X86 |"
             echo "| Pinned SHA | \`$RELEASE_SHA\` |"
             echo "| Commits since prev tag | **$COUNT** |"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -603,6 +620,7 @@ jobs:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
           LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
           PUBLISH_LINUX: ${{ needs.scan.outputs.publish_linux }}
+          PUBLISH_LINUX_X86: ${{ needs.scan.outputs.publish_linux_x86 }}
         run: |
           set -euo pipefail
           mkdir -p built release
@@ -625,6 +643,8 @@ jobs:
           cp "$darwin" release/
           if [ "$PUBLISH_LINUX" = "true" ]; then
             cp "$linux" "release/box-${NEW_TAG}-linux-arm64.tar.gz"
+          fi
+          if [ "$PUBLISH_LINUX_X86" = "true" ]; then
             cp "$linux_x86" "release/box-${NEW_TAG}-linux-x86_64.tar.gz"
           fi
           (cd release && sha256sum -- *.tar.gz | sort -k 2 > SHA256SUMS.txt)
@@ -641,6 +661,7 @@ jobs:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
           LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
           PUBLISH_LINUX: ${{ needs.scan.outputs.publish_linux }}
+          PUBLISH_LINUX_X86: ${{ needs.scan.outputs.publish_linux_x86 }}
         run: |
           set -euo pipefail
           expected=(
@@ -669,7 +690,10 @@ jobs:
           released=$(cd release && printf '%s\n' *.tar.gz | sort)
           release_assets=("box-${NEW_TAG}-aarch64-apple-darwin.tar.gz")
           if [ "$PUBLISH_LINUX" = "true" ]; then
-            release_assets+=("box-${NEW_TAG}-linux-arm64.tar.gz" "box-${NEW_TAG}-linux-x86_64.tar.gz")
+            release_assets+=("box-${NEW_TAG}-linux-arm64.tar.gz")
+          fi
+          if [ "$PUBLISH_LINUX_X86" = "true" ]; then
+            release_assets+=("box-${NEW_TAG}-linux-x86_64.tar.gz")
           fi
           expected_release=$(printf '%s\n' "${release_assets[@]}" | sort)
           if [ "$released" != "$expected_release" ]; then
@@ -771,6 +795,7 @@ jobs:
           RELEASE_SHA: ${{ needs.scan.outputs.release_sha }}
           LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
           PUBLISH_LINUX: ${{ needs.scan.outputs.publish_linux }}
+          PUBLISH_LINUX_X86: ${{ needs.scan.outputs.publish_linux_x86 }}
         run: |
           set -euo pipefail
           cat > body.md <<EOF
@@ -817,6 +842,9 @@ jobs:
             ./box-core/box run --config ./box.toml
           \`\`\`
 
+          EOF
+          if [ "$PUBLISH_LINUX_X86" = "true" ]; then
+          cat >> body.md <<EOF
           ### Linux x86-64 (experimental)
 
           For Amazon Linux 2023 x86-64, use \`box-${NEW_TAG}-linux-x86_64.tar.gz\`. The downloader selects this archive and verifies its checksum. Download this exact release, then enable x86 support when starting a workload:
@@ -827,6 +855,9 @@ jobs:
             EXPERIMENTAL_X86_SUPPORT=TRUE ./box-core/box run --config ./box.toml
           \`\`\`
 
+          EOF
+          fi
+          cat >> body.md <<EOF
           The Linux builds require glibc 2.34 or newer, libgcc, and a host that permits Box's namespace, mount, and syscall-filter setup.
           EOF
           fi
@@ -900,6 +931,7 @@ jobs:
           NEW_TAG: ${{ needs.scan.outputs.new_tag }}
           LINUX_PREVIEW: ${{ needs.scan.outputs.linux_preview }}
           PUBLISH_LINUX: ${{ needs.scan.outputs.publish_linux }}
+          PUBLISH_LINUX_X86: ${{ needs.scan.outputs.publish_linux_x86 }}
         run: |
           set -euo pipefail
           expected=(
@@ -907,7 +939,10 @@ jobs:
             "SHA256SUMS.txt"
           )
           if [ "$PUBLISH_LINUX" = "true" ]; then
-            expected+=("box-${NEW_TAG}-linux-arm64.tar.gz" "box-${NEW_TAG}-linux-x86_64.tar.gz")
+            expected+=("box-${NEW_TAG}-linux-arm64.tar.gz")
+          fi
+          if [ "$PUBLISH_LINUX_X86" = "true" ]; then
+            expected+=("box-${NEW_TAG}-linux-x86_64.tar.gz")
           fi
           for i in $(seq 1 30); do
             if names=$(gh release view "$NEW_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' 2>/dev/null); then

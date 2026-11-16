@@ -6,9 +6,10 @@ The source must belong to `main` history for publication.
 
 ## Choose a version
 
-Both channels publish macOS Apple silicon. Set the workflow input `publish_linux=true` to include both Amazon Linux 2023 ARM64 and x86-64 archives.
+Both channels publish macOS Apple silicon. Set the workflow input `publish_linux=true` to include the Amazon Linux 2023 ARM64 archive.
 The default, `publish_linux=false`, keeps stable releases macOS-only. Linux preview versions require `publish_linux=true`.
-Linux x86-64 remains experimental and requires the startup opt-in described below.
+To add the x86-64 archive after target qualification, also set `publish_linux_x86=true`. This input defaults to `false` and requires `publish_linux=true`.
+Linux x86-64 remains experimental. Its separate runtime opt-in is described below.
 
 | Version input | GitHub release | Latest stable release |
 |---|---|---|
@@ -26,7 +27,8 @@ A Linux preview also includes the macOS archive. There is no separate macOS prev
 Run the workflow with the selected `version` and `sha`, and these inputs:
 
 - `dry_run=true`
-- `publish_linux=true` for a Linux release, or `false` for a macOS-only stable release
+- `publish_linux=true` for an ARM64 Linux release, or `false` for a macOS-only stable release
+- `publish_linux_x86=true` to include the qualified x86-64 package, or `false` to omit it
 - `sign_macos=true`
 - `premerge_signing_test=false`
 - `skip_tests=false`
@@ -53,18 +55,20 @@ Box workloads on Linux x86-64 still require the `EXPERIMENTAL_X86_SUPPORT=TRUE` 
 ## Publish
 
 Complete security acceptance and target qualification before approving publication.
-Run the same version, source, and `publish_linux` selection from upstream `main` with `dry_run=false` and `skip_tests=false`.
+Run the same version, source, `publish_linux`, and `publish_linux_x86` selections from upstream `main` with `dry_run=false` and `skip_tests=false`.
 Real releases require macOS signing and signed-package verification, including releases that introduce Linux support.
 Approve the protected signing environment when requested, then approve `release-gate` after the checks pass.
 The workflow creates the tag and publishes the verified bundle from that run.
 A new run rebuilds the package. Keep the hashes from the publication run.
 
-With `publish_linux=true`, both channels publish these files, with the selected tag in place of `<tag>`:
+With `publish_linux=true` and `publish_linux_x86=false`, both channels publish these files, with the selected tag in place of `<tag>`:
 
 - `box-<tag>-aarch64-apple-darwin.tar.gz`
 - `box-<tag>-linux-arm64.tar.gz`
-- `box-<tag>-linux-x86_64.tar.gz`
 - `SHA256SUMS.txt`
+
+Setting `publish_linux_x86=true` adds `box-<tag>-linux-x86_64.tar.gz` and its checksum entry.
+With the default `false`, the x86-64 package remains a workflow artifact.
 
 The Linux release archives use `linux-arm64` and `linux-x86_64` in their names.
 Compilation and intermediate workflow artifacts retain the Rust targets `aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu`, respectively.
@@ -80,7 +84,8 @@ It does not download and execute the published Linux packages.
 
 ## Verify the Linux download
 
-Run the downloader separately on qualified Amazon Linux 2023 ARM64 and x86-64 hosts.
+Run the downloader on the qualified Amazon Linux 2023 ARM64 host.
+If the release includes x86-64, repeat these checks on the qualified Amazon Linux 2023 x86-64 host.
 Set `release_tag` to the published tag you are verifying. The command below uses `v0.1.1` as an example.
 
 ```sh
@@ -104,7 +109,7 @@ The downloader does not fall back to an older release or a prerelease automatica
 For ARM64, manual checksum verification and extraction from the release notes remain an alternative.
 Keep `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` together.
 On x86-64, set `EXPERIMENTAL_X86_SUPPORT=TRUE` in the environment before running workloads.
-Verify the reported version, an allowed operation, and a denied operation on each architecture using the approved test configuration.
+Verify the reported version, an allowed operation, and a denied operation on each published Linux architecture using the approved test configuration.
 Record the release URL, source commit, archive hash, host baseline, commands, and results.
 
 Linux ARM64 startup requires no environment opt-in.
