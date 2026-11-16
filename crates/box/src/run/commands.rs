@@ -164,7 +164,11 @@ impl ConfiguredCommands {
             let (Some(name), Some(command)) = (bound_name(spec), self.tools.get(label)) else {
                 continue;
             };
-            if box_shell::implements_program(name) {
+            // `python3` and `python` are the Shell's own only while Monty answers them. With
+            // `monty = false` a tool declared under either name answers it like any other tool.
+            if box_shell::implements_program(name)
+                && (record.monty || !matches!(name, "python" | "python3"))
+            {
                 continue;
             }
             let declares = name == called_name(spec);
@@ -515,6 +519,7 @@ mod tests {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             box_id: "commands-test".to_string(),
@@ -1347,6 +1352,39 @@ mod tests {
         ConfiguredCommands::load(&record)
             .expect("the commands load")
             .bare_names(&record, std::ffi::OsStr::new(""))
+    }
+
+    /// **With `monty = false` a tool declared as `python3` or `python` answers the bare name**, the
+    /// way any tool answers to its command's file name. While Monty is on, the Shell keeps both
+    /// names and neither tool answers.
+    #[test]
+    fn with_monty_off_a_python_tool_answers_its_bare_name() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        std::fs::create_dir_all(root.join("venv/bin")).expect("folder");
+        let python3 = root.join("venv/bin/python3");
+        let python = root.join("venv/bin/python");
+        program(&python3);
+        program(&python);
+        for monty in [true, false] {
+            let mut record = record(&python3);
+            record.monty = monty;
+            record.tool = BTreeMap::from([
+                ("python3".to_string(), tool(&python3, None)),
+                ("python".to_string(), tool(&python, None)),
+            ]);
+            let names = ConfiguredCommands::load(&record)
+                .expect("the commands load")
+                .bare_names(&record, std::ffi::OsStr::new(""));
+            let answered: Vec<&str> = names.declared.keys().map(String::as_str).collect();
+            if monty {
+                assert!(answered.is_empty(), "Monty keeps both names: {answered:?}");
+            } else {
+                assert_eq!(answered, ["python", "python3"]);
+                assert_eq!(names.declared["python3"].0, python3);
+                assert_eq!(names.declared["python"].0, python);
+            }
+        }
     }
 
     /// **A tool answers to its command's file name, not its label**, and several tables that run

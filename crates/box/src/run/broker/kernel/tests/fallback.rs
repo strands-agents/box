@@ -166,3 +166,82 @@ fn a_piped_loop_is_decided_on_its_own_commands() {
     assert_eq!(output.status, 0, "{}", output.stderr);
     assert_eq!(output.stdout, "x\n");
 }
+
+/// **Without a Monty runner, a bare `python3` is a host program like any other.** With
+/// `monty = false` Box installs no runner, so the name reaches the file `[tool.python3]` declares,
+/// after its own `shell:spawn` decision. While a runner is installed, Monty answers the same name.
+#[test]
+fn without_a_monty_runner_python3_runs_its_declared_program() {
+    let directory = tempfile::tempdir().expect("tempdir");
+    let python3 = directory
+        .path()
+        .canonicalize()
+        .expect("canonical")
+        .join("python3");
+    std::fs::write(&python3, "").expect("a program file");
+    let programs: box_shell::HostPrograms = Arc::new(std::collections::BTreeMap::from([(
+        "python3".to_string(),
+        python3.clone(),
+    )]));
+    let spawner: box_shell::HostSpawner = Arc::new(|spawn: box_shell::HostSpawn| {
+        Box::pin(async move {
+            Ok(box_shell::HostSpawnOutcome {
+                status: 0,
+                stdout: format!(
+                    "spawned {} {}\n",
+                    spawn.program.display(),
+                    spawn.args.join(" ")
+                )
+                .into_bytes(),
+                stderr: Vec::new(),
+            })
+        })
+    });
+    let shell = |python: Option<ScriptRunner>| {
+        let kernel = ShellKernel::over(backend(&[]), adapter(policy(SPAWN_AND_EXEC)))
+            .programs(Arc::clone(&programs))
+            .spawner(Arc::clone(&spawner));
+        limited(match python {
+            Some(runner) => kernel.python(1024 * 1024, runner),
+            None => kernel,
+        })
+    };
+
+    let off = run(async { shell(None).run("python3 --version").await });
+    assert_eq!(off.status, 0, "{}", off.stderr);
+    assert_eq!(
+        off.stdout,
+        format!("spawned {} --version\n", python3.display())
+    );
+
+    let on = run(async { shell(Some(echoing())).run("python3 -c 'print(1)'").await });
+    assert!(
+        on.stdout.starts_with("ran "),
+        "Monty answers while a runner is installed: {} {}",
+        on.stdout,
+        on.stderr
+    );
+}
+
+/// **Monty's refusal of `-m` says how to run real Python**, since `python3 -m pytest` or `-m venv`
+/// is the usual first try at it.
+#[test]
+fn monty_refuses_dash_m_and_names_the_real_python_switch() {
+    let output = run(async {
+        shell_with(SPAWN_AND_EXEC, Some(echoing()))
+            .run("python3 -m pytest -q")
+            .await
+    });
+    assert_eq!(output.status, 1, "{}", output.stderr);
+    assert!(
+        output.stderr.contains("-m is not supported by Monty")
+            && output.stderr.contains(box_shell::REAL_PYTHON_HINT),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        !output.stdout.contains("ran "),
+        "nothing reached Monty: {}",
+        output.stdout
+    );
+}

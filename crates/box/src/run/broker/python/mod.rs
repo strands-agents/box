@@ -345,12 +345,22 @@ fn abort_error(aborted: Result<RunProgress, MontyException>) -> MontyException {
 }
 
 /// A script that raised, reported the way CPython reports one.
+///
+/// A failed import usually means the agent wanted a package Monty doesn't have, so its note says
+/// how the operator turns real Python on.
 fn raised(exception: &MontyException, captured: String) -> PythonOutcome {
+    let note = match exception.exc_type() {
+        ExcType::ModuleNotFoundError | ExcType::ImportError => format!(
+            "this box's Python is Monty, Box's built-in Python subset. {}",
+            box_shell::REAL_PYTHON_HINT
+        ),
+        _ => "this box's Python is Monty, a subset — see the box's docs".to_string(),
+    };
     PythonOutcome {
         status: SCRIPT_RAISED_STATUS,
         stdout: captured,
         stderr: format!(
-            "{}: {}\n(this box's Python is Monty, a subset — see the box's docs)\n",
+            "{}: {}\n({note})\n",
             exception.exc_type(),
             exception.message().unwrap_or_default()
         ),

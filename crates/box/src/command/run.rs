@@ -108,6 +108,38 @@ fn write_grammar_disclosures(
     Ok(())
 }
 
+/// What a bare `python3` or `python` runs when the bare-name lines don't already say it: with
+/// `monty = false`, each name no tool answers, which the host's `PATH` resolves; with Monty on,
+/// each tool declared under either name, which Monty leaves unused.
+fn write_monty_disclosures(
+    record: &Record,
+    names: &crate::run::commands::BareNames,
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    use crate::record::config::grammar::bound_name;
+    for name in ["python3", "python"] {
+        if !record.monty && !names.declared.contains_key(name) {
+            writeln!(
+                output,
+                "strands-box: monty = false and no [tool] answers `{name}`, so a bare `{name}` in \
+                 the Shell runs the file `PATH` finds"
+            )?;
+        }
+        if record.monty {
+            for (label, spec) in &record.tool {
+                if bound_name(spec) == Some(name) {
+                    writeln!(
+                        output,
+                        "strands-box: [tool.{label}]: not used for a bare `{name}`, because Monty \
+                         answers it; set monty = false at the top of box.toml to use the tool"
+                    )?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// One line for each bare name a `[tool]` answers to in the hosted Shell, and the file it runs.
 fn write_bare_name_disclosures(
     names: &crate::run::commands::BareNames,
@@ -241,14 +273,14 @@ async fn hosted(
     )?);
     write_grammar_disclosures(&locked.record, std::io::stderr().lock())
         .map_err(|source| ConfigError::Disclosure { source })?;
-    write_bare_name_disclosures(
-        &commands.bare_names(
-            &locked.record,
-            &crate::run::contain::executable::host_search_path(),
-        ),
-        std::io::stderr().lock(),
-    )
-    .map_err(|source| ConfigError::Disclosure { source })?;
+    let names = commands.bare_names(
+        &locked.record,
+        &crate::run::contain::executable::host_search_path(),
+    );
+    write_bare_name_disclosures(&names, std::io::stderr().lock())
+        .map_err(|source| ConfigError::Disclosure { source })?;
+    write_monty_disclosures(&locked.record, &names, std::io::stderr().lock())
+        .map_err(|source| ConfigError::Disclosure { source })?;
     eprintln!("strands-box: starting workload");
     let hosted = HostedBox::open(
         &locked.root,
@@ -420,6 +452,7 @@ mod tests {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
@@ -515,6 +548,44 @@ mod tests {
              `shell:spawn` rule applies to it\n\
              strands-box: [mcp.wrapped]: a spawn of `npm` is decided by its tool grammar, and no \
              `shell:spawn` rule applies to it\n"
+        );
+    }
+
+    /// **The startup notes say what a bare `python3` runs when the bare-name lines don't.** With
+    /// Monty on, a tool declared under the name is reported unused; with `monty = false`, a name no
+    /// tool answers is left to `PATH`; a name a tool answers gets only its bare-name line.
+    #[test]
+    fn startup_says_what_a_bare_python_runs() {
+        let tools = BTreeMap::from([("python3".to_string(), spec("/venv/bin/python3", &[], &[]))]);
+        let mut record = record_with(None, tools);
+        let none = crate::run::commands::BareNames::default();
+        let lines = |record: &Record, names: &crate::run::commands::BareNames| {
+            let mut output = Vec::new();
+            write_monty_disclosures(record, names, &mut output).expect("the notes write");
+            String::from_utf8(output).expect("UTF-8")
+        };
+
+        assert_eq!(
+            lines(&record, &none),
+            "strands-box: [tool.python3]: not used for a bare `python3`, because Monty answers \
+             it; set monty = false at the top of box.toml to use the tool\n"
+        );
+
+        record.monty = false;
+        let answered = crate::run::commands::BareNames {
+            declared: BTreeMap::from([(
+                "python3".to_string(),
+                (
+                    PathBuf::from("/venv/bin/python3"),
+                    vec!["[tool.python3]".to_string()],
+                ),
+            )]),
+            ..Default::default()
+        };
+        assert_eq!(
+            lines(&record, &answered),
+            "strands-box: monty = false and no [tool] answers `python`, so a bare `python` in \
+             the Shell runs the file `PATH` finds\n"
         );
     }
 

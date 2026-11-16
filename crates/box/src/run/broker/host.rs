@@ -196,6 +196,7 @@ impl BrokerHost {
         let spawn_credentials = record.tool_credential_paths();
         let phantoms = phantoms.to_vec();
         let shell_limits = record.limits.shell.clone();
+        let monty = record.monty;
         // Resolved here, where the `BoxRoot` is in hand. `BoxRoot::open` created it.
         let mcp_working_directory = layout.mcp_working_directory();
         let mcp_working_directory_handle = Arc::new(layout.open_mcp_working_directory()?);
@@ -229,6 +230,7 @@ impl BrokerHost {
                     recorder,
                     host_spawner,
                     host_programs,
+                    monty,
                     shell_limits,
                     &ready_sender,
                     shutdown_receiver,
@@ -511,6 +513,7 @@ fn host(
     recorder: Arc<crate::run::telemetry::DecisionRecorder>,
     host_spawner: Option<crate::run::hosted::ToolSpawner>,
     host_programs: box_shell::HostPrograms,
+    monty: bool,
     limits: ShellLimits,
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
     shutdown: oneshot::Receiver<()>,
@@ -534,6 +537,7 @@ fn host(
             max_input: limits.max_input(),
             max_stdin: limits.max_stdin(),
             max_output: limits.max_output(),
+            monty,
             command_timeout: limits.timeout(),
             request_timeout: limits
                 .timeout()
@@ -2053,6 +2057,7 @@ done"#;
             max_input: DEFAULT_SHELL_MAX_INPUT,
             max_stdin: DEFAULT_SHELL_MAX_STDIN,
             max_output: DEFAULT_SHELL_MAX_OUTPUT,
+            monty: true,
             command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
             request_timeout: Some(SERVE_REQUEST_TIMEOUT),
             reach: Arc::new(
@@ -2306,6 +2311,7 @@ done"#;
             max_input: DEFAULT_SHELL_MAX_INPUT,
             max_stdin: DEFAULT_SHELL_MAX_STDIN,
             max_output: DEFAULT_SHELL_MAX_OUTPUT,
+            monty: true,
             command_timeout: command_timeout.into(),
             request_timeout: request_timeout.into(),
             reach: Arc::new(
@@ -5130,6 +5136,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 max_input: DEFAULT_SHELL_MAX_INPUT,
                 max_stdin: DEFAULT_SHELL_MAX_STDIN,
                 max_output: DEFAULT_SHELL_MAX_OUTPUT,
+                monty: true,
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
@@ -5449,6 +5456,7 @@ done"#,
                 max_input: DEFAULT_SHELL_MAX_INPUT,
                 max_stdin: DEFAULT_SHELL_MAX_STDIN,
                 max_output: DEFAULT_SHELL_MAX_OUTPUT,
+                monty: true,
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
@@ -5611,6 +5619,7 @@ done"#;
                 max_input: DEFAULT_SHELL_MAX_INPUT,
                 max_stdin: DEFAULT_SHELL_MAX_STDIN,
                 max_output: DEFAULT_SHELL_MAX_OUTPUT,
+                monty: true,
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(

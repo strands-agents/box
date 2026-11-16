@@ -65,6 +65,10 @@ heredoc), and `python -`. See the box's docs for the subset.";
 /// Deliberately not a CPython version, so capability detection expects Monty.
 const PYTHON_VERSION: &str = "Monty (Strands-Box Python subset)";
 
+/// What Monty's refusals add, so an agent that wanted real Python can tell its operator how.
+pub const REAL_PYTHON_HINT: &str = "To run real Python, the operator sets monty = false in box.toml, \
+     declares [tool.python3], and permits shell:spawn on its file.";
+
 /// The program and its arguments as one line, for `context.input.command`.
 fn command_line(program: &str, args: &[String]) -> String {
     let mut line = String::with_capacity(program.len() + args.len() * 8);
@@ -371,6 +375,18 @@ impl ShellKernel {
                     }
                 },
                 attached if attached.starts_with("-c") => source = Some(attached[2..].to_string()),
+                // `python3 -m pytest` or `-m venv` is the usual first try at real Python.
+                module if module.starts_with("-m") => {
+                    write_stderr(
+                        context,
+                        &format!(
+                            "python: -m is not supported by Monty, Box's built-in Python subset. \
+                             {REAL_PYTHON_HINT}\n"
+                        ),
+                    )
+                    .await;
+                    return 1;
+                }
                 other => {
                     write_stderr(context, &format!("python: invalid option '{other}'\n")).await;
                     return 1;
@@ -383,8 +399,10 @@ impl ShellKernel {
             if path == "-" {
                 write_stderr(
                     context,
-                    "python: reading a script from stdin is not supported; use `-c SOURCE` or a \
-                     script file\n",
+                    &format!(
+                        "python: reading a script from stdin is not supported; use `-c SOURCE` or \
+                         a script file. {REAL_PYTHON_HINT}\n"
+                    ),
                 )
                 .await;
                 return 2;
@@ -399,8 +417,10 @@ impl ShellKernel {
         } else {
             write_stderr(
                 context,
-                "python: no script given; this box's Python runs only `-c SOURCE` or a script \
-                 file (no REPL, pipe, or heredoc)\n",
+                &format!(
+                    "python: no script given; this box's Python runs only `-c SOURCE` or a script \
+                     file (no REPL, pipe, or heredoc). {REAL_PYTHON_HINT}\n"
+                ),
             )
             .await;
             return 2;

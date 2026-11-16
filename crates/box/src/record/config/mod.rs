@@ -504,6 +504,7 @@ impl RunContract {
                 version: record_version(
                     root.box_id(),
                     self.file.file_attributes,
+                    self.file.monty,
                     &self.file.experimental_features,
                     &self.file.limits,
                     self.file
@@ -521,6 +522,7 @@ impl RunContract {
                 ),
                 experimental_features: self.file.experimental_features.clone(),
                 file_attributes: self.file.file_attributes,
+                monty: self.file.monty,
                 gateway: self.file.gateway.clone(),
                 limits: self.file.limits.clone(),
                 box_id: root.box_id().to_string(),
@@ -588,6 +590,10 @@ pub(crate) struct Record {
         skip_serializing_if = "std::ops::Not::not"
     )]
     pub(crate) file_attributes: bool,
+    /// Whether a bare `python3` or `python` in the Shell runs Monty. `false` leaves both names to
+    /// resolve like any other program the Shell starts.
+    #[serde(default = "monty_default", skip_serializing_if = "is_true")]
+    pub(crate) monty: bool,
     /// The box-wide egress gateway settings.
     #[serde(default, skip_serializing_if = "Gateway::is_default")]
     pub(crate) gateway: Gateway,
@@ -692,6 +698,19 @@ pub(crate) const SUPPLIED_IDENTITY_RECORD_VERSION: u32 = 34;
 /// The record version of a record whose process selects `file-watching`, so an older build
 /// refuses the box rather than resuming it with FSEvents refused.
 const FILE_WATCHING_RECORD_VERSION: u32 = 35;
+/// The record version of a record with `monty = false`, so an older build refuses the box rather
+/// than resuming it with a bare `python3` running Monty again.
+const MONTY_OFF_RECORD_VERSION: u32 = 36;
+
+/// Monty is on unless the operator turns it off.
+fn monty_default() -> bool {
+    true
+}
+
+/// A record leaves `monty` out while it holds the default.
+fn is_true(value: &bool) -> bool {
+    *value
+}
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -738,6 +757,7 @@ impl ExperimentalFeatures {
 fn record_version<'a>(
     box_id: &str,
     file_attributes: bool,
+    monty: bool,
     features: &ExperimentalFeatures,
     limits: &Limits,
     specs: impl Iterator<Item = &'a ProcessSpec> + Clone,
@@ -746,7 +766,9 @@ fn record_version<'a>(
     has_backend: bool,
     gateway: &Gateway,
 ) -> u32 {
-    if specs.clone().any(|spec| spec.file_watching) {
+    if !monty {
+        MONTY_OFF_RECORD_VERSION
+    } else if specs.clone().any(|spec| spec.file_watching) {
         FILE_WATCHING_RECORD_VERSION
     } else if !generated_box_identity(box_id) {
         SUPPLIED_IDENTITY_RECORD_VERSION
@@ -1041,6 +1063,7 @@ impl Record {
             SHELL_STDIN_LIMIT_RECORD_VERSION,
             SUPPLIED_IDENTITY_RECORD_VERSION,
             FILE_WATCHING_RECORD_VERSION,
+            MONTY_OFF_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1062,6 +1085,7 @@ impl Record {
         let expected = record_version(
             &record.box_id,
             record.file_attributes,
+            record.monty,
             &record.experimental_features,
             &record.limits,
             record
@@ -1374,6 +1398,10 @@ struct ConfigFile {
     /// and ACLs. Linux accepts the key and renders nothing for it.
     #[serde(default, rename = "file-attributes")]
     file_attributes: bool,
+    /// Whether a bare `python3` or `python` in the Shell runs Monty, Box's built-in Python subset.
+    /// `false` turns Monty off, and both names then resolve like any other program.
+    #[serde(default = "monty_default")]
+    monty: bool,
     /// The box-wide egress gateway settings.
     #[serde(default)]
     gateway: Gateway,
@@ -1560,6 +1588,7 @@ mod tests {
                         record_version(
                             "box-0123456789abcdef",
                             stored.file_attributes,
+                            true,
                             &stored.experimental_features,
                             &stored.limits,
                             std::iter::empty(),
@@ -1613,6 +1642,7 @@ mod tests {
             record_version(
                 "box-0123456789abcdef",
                 stored.file_attributes,
+                true,
                 &stored.experimental_features,
                 &stored.limits,
                 std::iter::empty(),
@@ -1775,6 +1805,7 @@ mod tests {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
@@ -1957,6 +1988,7 @@ mod tests {
                                 record_version(
                                     "box-0123456789abcdef",
                                     file_attributes,
+                                    true,
                                     &features,
                                     &limits,
                                     std::iter::once(&spec),
@@ -3017,7 +3049,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, FILE_WATCHING_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, MONTY_OFF_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -3850,6 +3882,35 @@ env = {}
         record.box_dir = PathBuf::from("/var/lib/boxes/codex");
         record.policy = Some(PathBuf::from("/etc/boxes/policy.dw"));
         record
+    }
+
+    /// **`monty` is on by default, and only `monty = false` changes the record.** An absent key and
+    /// an explicit `true` store the same record, which leaves the key out. `false` is stored, round
+    /// trips, and needs version 36, so a build that would run Monty refuses the box.
+    #[test]
+    fn monty_off_is_stored_at_its_own_record_version() {
+        let tool = "[tool.python3]\ncommand = [\"python3\"]\n";
+        let absent = pinned_record(tool);
+        assert!(absent.monty);
+        assert_eq!(absent.version, RECORD_VERSION);
+        assert_eq!(pinned_record(&format!("monty = true\n{tool}")), absent);
+        assert!(!absent.to_toml().unwrap().contains("monty"));
+
+        let mut off = pinned_record(&format!("monty = false\n{tool}"));
+        assert!(!off.monty);
+        assert_eq!(off.version, MONTY_OFF_RECORD_VERSION);
+        let text = off.to_toml().unwrap();
+        assert!(text.contains("monty = false"), "{text}");
+        assert_eq!(Record::parse(&text, Path::new("record.toml")).unwrap(), off);
+
+        off.version = FILE_WATCHING_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&off.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                expected: MONTY_OFF_RECORD_VERSION,
+                ..
+            })
+        ));
     }
 
     /// Servers on distinct programs store the record an earlier build stored.
