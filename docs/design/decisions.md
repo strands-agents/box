@@ -458,6 +458,22 @@ move executed outside the workload's mount namespace.
 A path these lists name does not join the Shell's reachable set, so `read = ["~/vendor/sdk"]` makes
 the agent's own read work while `cat` through the Shell stays refused.
 
+<a id="a-read-entry-may-name-a-link-to-a-file"></a>
+### A read entry may name a link to a file
+
+A `read` or `read_file` entry may name a symbolic link to a file, such as `/usr/bin/cc`. The grant is
+the file the link resolves to, and the box also shows that file at the link's name, read-only. A
+program runs a helper by the name `PATH` finds. Granting only the target left that name missing,
+so cargo failed with `linker 'cc' not found` on Linux. The links in between, such as
+`/etc/alternatives/cc`, are not granted: Linux binds the file at the named path, and macOS allows
+the link nodes on the way. We rejected granting the folders that hold the links, such as
+`/usr/bin` or `/etc/alternatives`, because that grants every file in them. The link must sit in its
+own real folder, and every other list still refuses a link. A link inside a credential store is
+refused, because the store exception resolves the entry again at each spawn, and the link could be
+pointed at another file of the store during a run. A write, exec, list or metadata grant
+through a link would act on a name the operator did not state as that file.
+`a_read_entry_naming_a_link_to_a_file_reads_by_both_names` pins it.
+
 <a id="the-runtime-minimum-is-two-sets-and-the-agent-takes-the-smaller-one"></a>
 ### The runtime minimum is two sets, and the agent takes only the smaller one
 

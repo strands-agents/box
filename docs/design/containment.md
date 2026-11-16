@@ -227,7 +227,8 @@ The credential store and system tree paths are listed in
 list for every platform. The other floors depend on the run.
 
 A library caller can check a path with `check_read_grant`. It uses the same function that checks a
-`read` entry in `box.toml`. It refuses an absent path, a symbolic link, a noncanonical spelling, or
+`read` entry in `box.toml`. It refuses an absent path, a symbolic link to a directory or through a
+linked folder, a noncanonical spelling, or
 a path rejected by a deny-only check. It reports that a credential-store path needs an explicit
 grant. The caller receives the decision without the underlying list, whose rows contain a class and
 an `exact` or `overlap` rule.

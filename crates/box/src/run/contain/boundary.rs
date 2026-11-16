@@ -677,7 +677,13 @@ impl Boundary {
                 guard.judge(&grant.resolved, grant.operation, grant.scope)?;
                 containment.allow_credential_store(&grant.lexical, grant.operation, grant.scope)?
             } else {
-                allow_operator(containment, &grant.resolved, grant.operation, grant.scope)?
+                // A link entry is granted by its own name, so the box shows the file there too.
+                let path = if grant.is_link() {
+                    &grant.lexical
+                } else {
+                    &grant.resolved
+                };
+                allow_operator(containment, path, grant.operation, grant.scope)?
             };
         }
 
