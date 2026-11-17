@@ -1067,7 +1067,10 @@ mod tests {
             ("/x/../%61dmin?token=1", "/admin"),
             ("https://169.254.169.254/latest/../meta-data", "/meta-data"),
             ("http://other.example", "/"),
-            ("/web/2020/https://example.com/a", "/web/2020/https://example.com/a"),
+            (
+                "/web/2020/https://example.com/a",
+                "/web/2020/https://example.com/a",
+            ),
             ("/proxy/http://x/y?q=1", "/proxy/http://x/y"),
             ("/a%zz", "/a%zz"),
             ("*", "*"),
