@@ -79,7 +79,9 @@ narrow what the rule lifts: `when { context.input.path like "~/.aws/*" } unless 
 reach it. Write a `forbid` for a file that must stay closed. An `fs:read` permit lifts the
 refusal for reads, and an `fs:write` permit lifts it for changes. A rule that permits only
 `fs:delete` or `fs:move` lifts nothing. A change still can't move the store's content outside the
-store, and renaming a directory that holds an existing store is refused too. The refusal tells you to
+store, or onto a path an `fs:read` permit opens when no `fs:read` permit opens it where it is now.
+A directory inside a store doesn't move while any `fs:read` permit opens a path in that store.
+Renaming a directory that holds an existing store is refused too, and the refusal tells you to
 move the directory's other contents instead. To change the store directory itself, the rule must name
 it, as in `context.input.path == "~/.aws"`. `box run` prints each such rule at startup. Your
 `[agent.filesystem]` lists don't lift this refusal: they decide what the agent's own system calls
@@ -99,6 +101,10 @@ contains a credential store, so no policy may change this directory
 
 ```text
 would move credential-store content outside the store that a `permit` opened it in
+```
+
+```text
+would move credential-store content to a path that an `fs:read` permit opens, which no `fs:read` permit opens where it is now
 ```
 
 ```text

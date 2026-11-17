@@ -1036,6 +1036,10 @@ through this path. Security finding disposition remains separate from this behav
   determining rules at the floor, which the adapters do not return. A lift reads the class, not the
   verb: an `fs:write` permit lifts every change, because `approve_mutation` does not carry which
   verb asks, so a broad `fs:delete` or `fs:move` permit reaches what an `fs:write` rule names.
+  **A rename inside a store must not raise what reads it.** `refuse_store_relocation` refuses a file
+  rename onto a path an `fs:read` permit lifts when none lifts the source, and any directory rename
+  inside a store that an `fs:read` permit opens, because a directory carries paths no one check
+  names. `a_rename_inside_a_store_cannot_make_write_only_content_readable` pins the file case.
 
 Do not treat any of these as settled by the code existing.
 

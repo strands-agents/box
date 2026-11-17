@@ -490,24 +490,38 @@ impl Reach {
         reported_as: &str,
     ) -> Result<(), Refused> {
         if !self.is_in_a_credential_store(source) {
-            // A directory that holds a lifted store carries it along, and the store's own entry
-            // does not cover the directory, so moving it takes the store out of that entry.
+            // A directory that holds a lifted store carries it along, and no rule that names a path
+            // inside the store covers the directory, so moving it takes the store out of the floor.
             return if self.stores_inside(source, true).is_empty() {
                 Ok(())
             } else {
                 Err(Refused::new(reported_as, CREDENTIAL_STORE_PARENT_MOVE))
             };
         }
-        let same_store = match (self.store_lift(source, true), destination) {
-            (Some(store), Some(destination)) => self
-                .store_lift(destination, true)
-                .is_some_and(|other| other == store),
-            _ => false,
+        let (Some(store), Some(destination)) = (self.store_lift(source, true), destination) else {
+            return Err(Refused::new(reported_as, CREDENTIAL_STORE_RELOCATION));
         };
-        if same_store {
-            Ok(())
+        if self
+            .store_lift(destination, true)
+            .is_none_or(|other| other != store)
+        {
+            return Err(Refused::new(reported_as, CREDENTIAL_STORE_RELOCATION));
+        }
+        // A rename inside the store must not make content readable that no `fs:read` permit opens
+        // where it is now. A directory carries paths no single check names, so it moves only while
+        // no `fs:read` permit opens anything in its store.
+        let exposes = if std::fs::symlink_metadata(source).is_ok_and(|metadata| metadata.is_dir()) {
+            self.store_permits().iter().any(|(permit, named)| {
+                *named == store && permit.actions().iter().any(|action| action == "fs:read")
+            })
         } else {
-            Err(Refused::new(reported_as, CREDENTIAL_STORE_RELOCATION))
+            self.store_lift(destination, false).is_some()
+                && self.store_lift(source, false).is_none()
+        };
+        if exposes {
+            Err(Refused::new(reported_as, CREDENTIAL_STORE_EXPOSURE))
+        } else {
+            Ok(())
         }
     }
 
@@ -661,6 +675,9 @@ const CREDENTIAL_STORE_PARENT_MOVE: &str = "holds a credential store, so no poli
 
 const CREDENTIAL_STORE_RELOCATION: &str = "would move credential-store content outside the \
      store that a `permit` opened it in";
+
+const CREDENTIAL_STORE_EXPOSURE: &str = "would move credential-store content to a path that an \
+     `fs:read` permit opens, which no `fs:read` permit opens where it is now";
 
 /// `path` case-folded, with each letter that Unicode case folding maps to ASCII replaced by that
 /// ASCII, so a store matches every spelling a case-insensitive volume treats as the same name.
@@ -2193,6 +2210,78 @@ mod credential_store_tests {
         reach
             .refuse_store_relocation(&notes, Some(&outside), "stolen.json")
             .expect("an ordinary rename is not judged");
+    }
+
+    #[test]
+    fn a_rename_inside_a_store_cannot_make_write_only_content_readable() {
+        let fixture = fixture();
+        let cache = fixture.home.join(".aws/sso/cache");
+        std::fs::create_dir_all(&cache).expect("a cache");
+        std::fs::write(cache.join("token.json"), "token").expect("a token");
+        let text = format!(
+            "{HOME_WIDE}{}{}",
+            permit(WRITE, r#"context.input.path like "~/.aws/sso/cache/*""#),
+            permit(
+                &format!("{READ}, {WRITE}"),
+                r#"context.input.path == "~/.aws/config""#
+            ),
+        );
+        let reach = fixture.reach(&text);
+        refused_as(
+            fixture.read(&reach, ".aws/sso/cache/token.json"),
+            CREDENTIAL_STORE,
+            "the token is write-only",
+        );
+        let source = fixture
+            .change(&reach, ".aws/sso/cache/token.json")
+            .expect("the source");
+        let readable = fixture
+            .change(&reach, ".aws/config")
+            .expect("a destination a read permit opens");
+        let refusal = reach
+            .refuse_store_relocation(&source, Some(&readable), ".aws/config")
+            .expect_err("the rename would make the token readable");
+        assert!(
+            refusal.to_string().contains(CREDENTIAL_STORE_EXPOSURE),
+            "{refusal}"
+        );
+        let unread = fixture
+            .change(&reach, ".aws/sso/cache/renamed.json")
+            .expect("a destination no read permit opens");
+        reach
+            .refuse_store_relocation(&source, Some(&unread), "renamed.json")
+            .expect("a rename that exposes nothing stays allowed");
+        let readable_source = fixture
+            .change(&reach, ".aws/config")
+            .expect("a readable file");
+        reach
+            .refuse_store_relocation(&readable_source, Some(&unread), "renamed.json")
+            .expect("readable content may move where it is not readable");
+    }
+
+    #[test]
+    fn a_directory_inside_a_store_with_a_read_permit_cannot_be_renamed() {
+        let fixture = fixture();
+        std::fs::create_dir_all(fixture.home.join(".aws/sso/cache")).expect("a cache");
+        let text = format!(
+            "{HOME_WIDE}{}{}",
+            permit(WRITE, r#"context.input.path like "~/.aws/sso/*""#),
+            permit(READ, r#"context.input.path like "~/.aws/cli/*""#),
+        );
+        let reach = fixture.reach(&text);
+        let directory = fixture
+            .change(&reach, ".aws/sso/cache")
+            .expect("the directory");
+        let destination = fixture
+            .change(&reach, ".aws/sso/moved")
+            .expect("a destination");
+        let refusal = reach
+            .refuse_store_relocation(&directory, Some(&destination), ".aws/sso/moved")
+            .expect_err("a directory could carry content to a readable path");
+        assert!(
+            refusal.to_string().contains(CREDENTIAL_STORE_EXPOSURE),
+            "{refusal}"
+        );
     }
 
     #[test]

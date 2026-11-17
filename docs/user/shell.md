@@ -374,6 +374,7 @@ refuses makes `curl` exit non-zero.
 | Any other | The path is in a credential store that no `permit` names. [Name the path in a `permit`](security.md#what-box-always-enforces) or select another path. | ``<path>: resolves into a credential store, which no policy may open unless a `permit` names this path inside the store, with no wildcard above it`` |
 | Any other | The operation would change a directory that holds a credential store. Change a path inside the directory instead. | `<path>: contains a credential store, so no policy may change this directory` |
 | Any other | A rename would move a credential store's content outside the store. Select a destination inside the store that an `fs:write` `permit` names. | ``<path>: would move credential-store content outside the store that a `permit` opened it in`` |
+| Any other | A rename inside a credential store would make content readable that no `fs:read` `permit` opens where it is now, or would move a directory in a store that an `fs:read` `permit` opens anything in. Select a destination no `fs:read` `permit` opens. | ``<path>: would move credential-store content to a path that an `fs:read` permit opens, which no `fs:read` permit opens where it is now`` |
 | Any other | A rename of a directory that holds an existing credential store. Move the directory's other contents instead. | ``<path>: holds a credential store, so no policy may move this directory; move its other contents instead`` |
 
 ## See also
