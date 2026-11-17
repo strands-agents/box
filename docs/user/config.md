@@ -537,6 +537,7 @@ mounted aliases, and enclosing directories.
 
 On macOS, opting into [file watching](#file-watching) permits an event stream that can
 disclose denied names and activity despite these direct-access restrictions.
+A root process can also delete any volume's event history.
 
 On Linux, root and non-root launches support directory writes with explicit read and write grants.
 Permitted file creation retains the launcher's underlying file identity.

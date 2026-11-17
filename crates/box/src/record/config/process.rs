@@ -22,7 +22,9 @@ use super::grammar::GrammarTable;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProcessSpec {
-    /// Permit macOS FSEvents, including possible disclosure of denied names and event metadata.
+    /// Permit macOS FSEvents, including possible disclosure of denied names, event metadata, the
+    /// host-wide event count, and each volume's history identifier. A root process can also delete
+    /// any volume's event history.
     #[serde(
         default,
         rename = "file-watching",
