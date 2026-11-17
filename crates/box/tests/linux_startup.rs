@@ -141,3 +141,78 @@ fn linux_help_and_version_remain_available_without_opt_in() {
         assert!(!output.stdout.is_empty());
     }
 }
+
+#[cfg(all(target_arch = "x86_64", feature = "native-filesystem-policy"))]
+#[test]
+fn x86_native_policy_is_refused_before_state_or_schema_creation() {
+    let directory = tempfile::tempdir().expect("create the native-selection fixture");
+    let config = directory.path().join("box.toml");
+    let state = directory.path().join("state");
+    let schema = directory.path().join("schema");
+    let config_text = config.to_str().expect("UTF-8 configuration path");
+    let schema_text = schema.to_str().expect("UTF-8 schema path");
+    for selection in ["", "native-filesystem-policy = false\n"] {
+        std::fs::write(
+            &config,
+            format!(
+                "name = \"native-x86-refusal\"\nbox_dir = {state:?}\n\
+                 [experimental-features]\nnative-filesystem-policy = true\n\
+                 [agent]\ncommand = [\"/bin/true\"]\n{selection}"
+            ),
+        )
+        .expect("write the enabled native policy configuration");
+        for args in [
+            vec!["run", "--config", config_text],
+            vec![
+                "policy",
+                "generate-schema",
+                "--config",
+                config_text,
+                "--output-dir",
+                schema_text,
+            ],
+        ] {
+            let output = command(None, Some(OsStr::new("TRUE")), &args);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                !output.status.success(),
+                "native x86 selection must be refused"
+            );
+            assert!(
+                stderr.contains("experimental feature `native-filesystem-policy` requires"),
+                "{stderr}"
+            );
+            assert!(!state.exists(), "refusal must precede state creation");
+            assert!(!schema.exists(), "refusal must precede schema creation");
+        }
+    }
+    std::fs::write(
+        &config,
+        format!(
+            "name = \"native-x86-refusal\"\nbox_dir = {state:?}\n\
+             [experimental-features]\nnative-filesystem-policy = false\n"
+        ),
+    )
+    .expect("write the disabled native policy control");
+    let output = command(
+        None,
+        Some(OsStr::new("TRUE")),
+        &[
+            "policy",
+            "generate-schema",
+            "--config",
+            config_text,
+            "--output-dir",
+            schema_text,
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        schema.exists(),
+        "the disabled-feature control must generate a schema"
+    );
+}

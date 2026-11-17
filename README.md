@@ -48,8 +48,8 @@ through Shell or Python can cause the gateway to deny a later outbound HTTP requ
 
 **Preview:** Box supports local execution on Linux ARM64 and macOS with Apple silicon.
 Linux x86-64 is experimental and requires `EXPERIMENTAL_X86_SUPPORT=TRUE` in the
-environment of the Box process. See [building from source](docs/user/getting-started.md#build-from-source)
-for the x86-64 opt-in; release downloads remain ARM64-only on Linux.
+environment of the box's trusted process. See the [Linux download instructions](docs/user/getting-started.md#linux)
+for release selection and the x86-64 startup opt-in.
 We welcome feedback through [GitHub issues](https://github.com/strands-agents/box/issues).
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 
@@ -178,7 +178,7 @@ For each part, where it runs, what it decides, and how one request moves through
 
 ## Getting started
 
-Follow the [getting-started guide](docs/user/getting-started.md) to download Box for macOS or Linux ARM64.
+Follow the [getting-started guide](docs/user/getting-started.md) to download Box for macOS, Linux ARM64, or experimental Linux x86-64.
 The Strands CLI walkthrough uses macOS.
 For that walkthrough, you need macOS 15 or later on Apple silicon and Node.js 22.21 or later from Homebrew.
 You also need access to Claude Opus 5 on Amazon Bedrock in `us-west-2`.
@@ -191,10 +191,11 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh
 ./box-core/box --version
 ```
 
-The downloader selects macOS Apple silicon or Linux ARM64 archives. For Linux, select a release
-that includes `box-<version>-linux-arm64.tar.gz` and its `SHA256SUMS.txt` entry.
+The downloader selects the archive for your operating system and CPU architecture. For Linux, select a release
+that includes `box-<tag>-linux-arm64.tar.gz` or `box-<tag>-linux-x86_64.tar.gz` for your CPU, with its `SHA256SUMS.txt` entry.
 Set `BOX_VERSION` to that release tag when running the script. Set `BOX_DOWNLOAD_DIR` to change
-the destination. A release can contain macOS assets only; check its assets if a Linux download fails.
+the destination. A release can omit Linux or x86-64 assets. If the x86-64 archive or its checksum is missing,
+the download stops; the script does not substitute an ARM64 archive.
 
 The script verifies the checksum and extracts into temporary storage before changing destination files.
 Linux packages must contain executable `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` files.
@@ -243,7 +244,7 @@ cargo build --release -p strands-box -p strands-box-containment
 Run the compiled binary as `./target/release/strands-box`. Keep its helper
 binaries in the same directory.
 
-The [release guide](docs/dev/releases.md) covers version selection and publication for macOS and Linux ARM64.
+The [release guide](docs/dev/releases.md) covers version selection and publication for macOS, Linux ARM64, and experimental Linux x86-64.
 
 Linux workspace tests run on Ubuntu ARM64 and x86-64 with user, mount, and process namespaces enabled.
 The x86-64 jobs set `EXPERIMENTAL_X86_SUPPORT=TRUE` to test the experimental runtime.
@@ -257,6 +258,9 @@ automated signing, notarization, package verification, and release gates.
 The [fuzzing guide](docs/dev/fuzzing.md) covers the long libFuzzer run of the tool grammar shell
 parser.
 
+Before testing, [prepare the dependency cache](CONTRIBUTING.md#before-you-open-a-pull-request)
+for the offline dependency guards.
+
 Common tasks run through [`just`](https://github.com/casey/just):
 
 ```sh
@@ -266,9 +270,11 @@ just check         # pre-push gate: fmt-check + clippy + test
 just test-all      # workspace tests and box example checks
 ```
 
-`cargo test --workspace --all-features` runs the full suite. Include
+`cargo test --workspace --all-features` runs the workspace suite. Include
 `--all-features` to run the `box_shell` and `box_credentials` suites, which require
-the `test-support` feature.
+the `test-support` feature. Linux CI also runs the three native filesystem forwarding tests
+with a private build switch. See the [Linux native test guide](docs/dev/linux-native-tests.md#forwarding-buffer-tests)
+for that command and the other native test prerequisites.
 
 In pull-request CI, changes to `docs/site-manifest.json`,
 `docs/site-manifest-retirements.json`, or a publishable page under `docs/user/` run the focused

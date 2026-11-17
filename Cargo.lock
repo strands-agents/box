@@ -4396,6 +4396,7 @@ name = "strands-box-telemetry"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64 0.23.1",
  "libc",
  "opentelemetry",
  "opentelemetry-proto",
@@ -4404,6 +4405,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "strands-box-credentials",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -4415,7 +4417,7 @@ dependencies = [
 [[package]]
 name = "strands-shell"
 version = "0.0.0"
-source = "git+https://github.com/strands-agents/shell?rev=20c642b0634e9f1a752fa884d9b21d0aadf40b33#20c642b0634e9f1a752fa884d9b21d0aadf40b33"
+source = "git+https://github.com/strands-agents/shell?rev=39daa83d7f155d5b164f794f783e35598f49064e#39daa83d7f155d5b164f794f783e35598f49064e"
 dependencies = [
  "async-trait",
  "bytes",
@@ -4424,6 +4426,7 @@ dependencies = [
  "jaq-json",
  "jaq-std",
  "lexopt",
+ "libc",
  "mlua",
  "regex",
  "reqwest",
@@ -4439,7 +4442,7 @@ dependencies = [
 [[package]]
 name = "strands-shell-macros"
 version = "0.1.0"
-source = "git+https://github.com/strands-agents/shell?rev=20c642b0634e9f1a752fa884d9b21d0aadf40b33#20c642b0634e9f1a752fa884d9b21d0aadf40b33"
+source = "git+https://github.com/strands-agents/shell?rev=39daa83d7f155d5b164f794f783e35598f49064e#39daa83d7f155d5b164f794f783e35598f49064e"
 dependencies = [
  "proc-macro2",
  "quote",

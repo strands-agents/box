@@ -1,13 +1,14 @@
 #!/bin/sh
 # Box release downloader.
 #
-# Downloads the prebuilt box tarball for macOS on Apple silicon or Linux ARM64 from the
-# strands-agents/box GitHub Release, verifies it against SHA256SUMS.txt, and
-# unpacks its files into a local directory (./box-core by default).
+# Downloads a prebuilt box tarball from strands-agents/box GitHub Releases for
+# macOS on Apple silicon or Linux on ARM64 or x86-64. Verifies it against
+# SHA256SUMS.txt and unpacks its files into a local directory (./box-core by default).
 #
 # It does not install anything: nothing is copied to a system directory, your
 # PATH is not changed, and no shell startup file is edited. To run the box,
-# call the downloaded binary by path, for example ./box-core/box run --config ./box.toml.
+# call the downloaded binary by path. Linux x86-64 requires
+# EXPERIMENTAL_X86_SUPPORT=TRUE when running box run.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | sh
@@ -32,7 +33,8 @@ host_arch="$(uname -m)"
 case "$host_os:$host_arch" in
     Darwin:arm64|Darwin:aarch64) package="aarch64-apple-darwin"; platform="macOS ARM64" ;;
     Linux:arm64|Linux:aarch64) package="linux-arm64"; platform="Linux ARM64" ;;
-    *) die "unsupported platform: ${host_os}/${host_arch}. Downloads support macOS on Apple silicon and Linux ARM64." ;;
+    Linux:x86_64|Linux:amd64) package="linux-x86_64"; platform="Linux x86-64" ;;
+    *) die "unsupported platform: ${host_os}/${host_arch}. Downloads support macOS on Apple silicon and Linux on ARM64 or x86-64." ;;
 esac
 
 if command -v curl >/dev/null 2>&1; then
@@ -94,8 +96,8 @@ checksum_for() {
     awk -v a="$1" '{n=$2; sub(/^\*/, "", n); if (n==a) print $1}' "${tmp}/SHA256SUMS.txt"
 }
 expected="$(checksum_for "$asset")"
-# Older releases use the Rust target name for the Linux archive.
-if [ -z "$expected" ] && [ "$host_os" = Linux ]; then
+# Older releases use the Rust target name for the Linux ARM64 archive.
+if [ -z "$expected" ] && [ "$package" = linux-arm64 ]; then
     legacy_asset="box-${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
     expected="$(checksum_for "$legacy_asset")"
     if [ -n "$expected" ]; then
@@ -169,7 +171,12 @@ log "Downloaded box ${VERSION} (${platform}) into ${DOWNLOAD_DIR}."
 log "Nothing was installed: your PATH and system directories are untouched."
 log ""
 log "Write a box.toml and a policy, then run the box by path:"
-log "  ${DOWNLOAD_DIR}/box run --config ./box.toml"
+if [ "$package" = linux-x86_64 ]; then
+    log "Linux x86-64 support is experimental. Enable it for this command:"
+    log "  EXPERIMENTAL_X86_SUPPORT=TRUE ${DOWNLOAD_DIR}/box run --config ./box.toml"
+else
+    log "  ${DOWNLOAD_DIR}/box run --config ./box.toml"
+fi
 
 if [ "$host_os" = Darwin ]; then
     "${DOWNLOAD_DIR}/box" --version 2>/dev/null || true

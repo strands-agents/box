@@ -22,7 +22,9 @@ use super::grammar::GrammarTable;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProcessSpec {
-    /// Permit macOS FSEvents, including possible disclosure of denied names and event metadata.
+    /// Permit macOS FSEvents, including possible disclosure of denied names, event metadata, the
+    /// host-wide event count, and each volume's history identifier. A root process can also delete
+    /// any volume's event history.
     #[serde(
         default,
         rename = "file-watching",
@@ -64,6 +66,20 @@ pub(crate) struct ProcessSpec {
     /// Where callers reach the agent's servers, from `[[agent.ingress]]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) ingress: Vec<super::ingress::Ingress>,
+}
+
+#[cfg(all(
+    target_os = "linux",
+    feature = "native-filesystem-policy",
+    box_native_adapter_tests
+))]
+pub(crate) fn uses_native_filesystem<'a>(
+    processes: impl IntoIterator<Item = &'a ProcessSpec>,
+    default: bool,
+) -> bool {
+    processes
+        .into_iter()
+        .any(|spec| spec.native_filesystem_policy.unwrap_or(default))
 }
 
 /// The eight path lists. A directory entry is recursive, and a file entry is exact.

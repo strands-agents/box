@@ -75,6 +75,41 @@ fn write_credential_stores(
     Ok(())
 }
 
+#[cfg(all(
+    target_os = "linux",
+    feature = "native-filesystem-policy",
+    box_native_adapter_tests
+))]
+pub(crate) struct NativeSetup {
+    contract: Option<RunContract>,
+    guard: std::io::Result<Option<Arc<crate::run::native_enforcement::EntryGuard>>>,
+}
+
+#[cfg(all(
+    target_os = "linux",
+    feature = "native-filesystem-policy",
+    box_native_adapter_tests
+))]
+pub(super) fn prepare_native(config: &Path, has_callback: bool) -> Result<NativeSetup, BoxError> {
+    let contract = if has_callback {
+        None
+    } else {
+        Some(read_contract(config)?)
+    };
+    let enabled = contract
+        .as_ref()
+        .is_none_or(RunContract::uses_native_filesystem);
+    let guard = crate::run::native_enforcement::EntryGuard::prepare(enabled);
+    if guard.is_err() {
+        crate::run::native_enforcement::EntryGuard::prepare(false).map_err(|source| {
+            crate::error::SuperviseError::Control {
+                reason: format!("native filesystem capability removal failed: {source}"),
+            }
+        })?;
+    }
+    Ok(NativeSetup { contract, guard })
+}
+
 /// One line for each `[tool]` and stdio `[mcp]` whose program a tool grammar decides in place of
 /// `shell:spawn`.
 fn write_grammar_disclosures(
@@ -103,6 +138,48 @@ fn write_grammar_disclosures(
                 "strands-box: {table}: a spawn of `{program}` is decided by its tool grammar, and \
                  no `shell:spawn` rule applies to it"
             )?;
+        }
+    }
+    Ok(())
+}
+
+/// What a bare `python3` or `python` runs when the bare-name lines don't already say it: with
+/// `monty = false`, each name no tool answers, which the host's `PATH` resolves; with Monty on,
+/// each tool declared under either name, which Monty leaves unused.
+fn write_monty_disclosures(
+    record: &Record,
+    names: &crate::run::commands::BareNames,
+    search_path: &std::ffi::OsStr,
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    use crate::record::config::grammar::bound_name;
+    let escaped = |text: &str| -> String { text.chars().flat_map(char::escape_default).collect() };
+    for name in ["python3", "python"] {
+        if !record.monty && !names.declared.contains_key(name) {
+            match crate::run::contain::executable::find_on(name, search_path) {
+                Some(path) => writeln!(
+                    output,
+                    "strands-box: monty = false and no [tool] answers `{name}`, so a bare \
+                     `{name}` in the Shell runs {}, the file `PATH` finds",
+                    escaped(&path.to_string_lossy())
+                )?,
+                None => writeln!(
+                    output,
+                    "strands-box: monty = false and neither a [tool] nor `PATH` has `{name}`, so \
+                     a bare `{name}` in the Shell is not found"
+                )?,
+            }
+        }
+        if record.monty {
+            for (label, spec) in &record.tool {
+                if bound_name(spec) == Some(name) {
+                    writeln!(
+                        output,
+                        "strands-box: [tool.{label}]: not used for a bare `{name}`, because Monty \
+                         answers it; set monty = false at the top of box.toml to use the tool"
+                    )?;
+                }
+            }
         }
     }
     Ok(())
@@ -152,7 +229,46 @@ pub(crate) async fn execute(
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
     box_id: Option<&str>,
+    #[cfg(all(
+        target_os = "linux",
+        feature = "native-filesystem-policy",
+        box_native_adapter_tests
+    ))]
+    native_setup: NativeSetup,
 ) -> Result<ExitCode, BoxError> {
+    #[cfg(all(
+        target_os = "linux",
+        feature = "native-filesystem-policy",
+        box_native_adapter_tests
+    ))]
+    let (locked, entry_guard) = {
+        let NativeSetup { contract, guard } = native_setup;
+        let contract = match contract {
+            Some(contract) => contract,
+            None => read_contract(config)?,
+        };
+        let guard = if contract.uses_native_filesystem() {
+            Some(
+                guard
+                    .map_err(|source| crate::error::SuperviseError::Control {
+                        reason: format!("native filesystem setup failed: {source}"),
+                    })?
+                    .ok_or_else(|| crate::error::SuperviseError::Control {
+                        reason: "native filesystem interception requires CAP_BPF and CAP_PERFMON"
+                            .to_string(),
+                    })?,
+            )
+        } else {
+            drop(guard);
+            None
+        };
+        (prepare_contract(contract, config, argv, box_id)?, guard)
+    };
+    #[cfg(not(all(
+        target_os = "linux",
+        feature = "native-filesystem-policy",
+        box_native_adapter_tests
+    )))]
     let locked = prepare(config, argv, box_id)?;
     locked.announce_credential_stores()?;
     let collector = telemetry::open(&locked.root, &locked.record)?;
@@ -162,7 +278,19 @@ pub(crate) async fn execute(
         &name,
     ));
 
-    let outcome = hosted(locked, Arc::clone(&collector), terminal, signals).await;
+    let outcome = hosted(
+        locked,
+        Arc::clone(&collector),
+        terminal,
+        signals,
+        #[cfg(all(
+            target_os = "linux",
+            feature = "native-filesystem-policy",
+            box_native_adapter_tests
+        ))]
+        entry_guard,
+    )
+    .await;
 
     // The one teardown point, so every exit above records the stop and every queued record
     // reaches its target. `drained` is the only route out of the collector's queue, and the
@@ -188,6 +316,12 @@ async fn hosted(
     collector: Arc<telemetry::Collector>,
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
+    #[cfg(all(
+        target_os = "linux",
+        feature = "native-filesystem-policy",
+        box_native_adapter_tests
+    ))]
+    entry_guard: Option<std::sync::Arc<crate::run::native_enforcement::EntryGuard>>,
 ) -> Result<ExitCode, BoxError> {
     let sources: Vec<Policy> = locked.policy.into_iter().collect();
     let subject = telemetry::policy_subject(&sources);
@@ -214,17 +348,20 @@ async fn hosted(
         }
     };
 
-    // Validate any declared credsd credential before the workload starts, so a missing daemon or an
-    // unusable environment fails here rather than at the first signed request. The check does
-    // blocking socket I/O with a per-environment deadline, so run it off the async worker: a slow or
-    // hung daemon then delays this startup alone and never stalls the runtime.
+    // Validate any declared credsd credential, and sign once with each telemetry `aws://` profile,
+    // before the workload starts, so a missing daemon, an unusable environment, or a profile that
+    // cannot sign fails here rather than at the first signed request. The checks do blocking I/O
+    // with a per-environment deadline, so run them off the async worker: a slow or hung daemon then
+    // delays this startup alone and never stalls the runtime.
     let egress = locked.record.egress.clone();
     let remote_mcp = locked.record.remote_mcp.clone();
+    let telemetry_targets = locked.record.telemetry.clone();
     tokio::task::spawn_blocking(move || {
-        crate::run::credential::preflight_credsd(&egress, &remote_mcp)
+        crate::run::credential::preflight_credsd(&egress, &remote_mcp, &telemetry_targets)?;
+        crate::record::config::telemetry::preflight_aws(&telemetry_targets)
     })
     .await
-    .expect("the credsd preflight task panicked")?;
+    .expect("the credential preflight task panicked")?;
 
     let agent = locked
         .record
@@ -241,11 +378,14 @@ async fn hosted(
     )?);
     write_grammar_disclosures(&locked.record, std::io::stderr().lock())
         .map_err(|source| ConfigError::Disclosure { source })?;
-    write_bare_name_disclosures(
-        &commands.bare_names(
-            &locked.record,
-            &crate::run::contain::executable::host_search_path(),
-        ),
+    let search_path = crate::run::contain::executable::host_search_path();
+    let names = commands.bare_names(&locked.record, &search_path);
+    write_bare_name_disclosures(&names, std::io::stderr().lock())
+        .map_err(|source| ConfigError::Disclosure { source })?;
+    write_monty_disclosures(
+        &locked.record,
+        &names,
+        &search_path,
         std::io::stderr().lock(),
     )
     .map_err(|source| ConfigError::Disclosure { source })?;
@@ -260,6 +400,12 @@ async fn hosted(
         locked.owned,
         &locked.workspace,
         &home,
+        #[cfg(all(
+            target_os = "linux",
+            feature = "native-filesystem-policy",
+            box_native_adapter_tests
+        ))]
+        entry_guard,
     )?;
     let site = Site {
         attachment: hosted.attachment(),
@@ -331,15 +477,40 @@ fn agent_home(agent: &ProcessSpec) -> Result<PathBuf, BoxError> {
     }
 }
 
-fn prepare(config: &Path, argv: &[OsString], box_id: Option<&str>) -> Result<LockedRun, BoxError> {
+fn read_contract(config: &Path) -> Result<RunContract, BoxError> {
     let invocation = std::env::current_dir().map_err(|source| ConfigError::Read {
         path: PathBuf::from("."),
         source,
     })?;
-    let contract = RunContract::read(config, &invocation)?;
+    RunContract::read(config, &invocation)
+}
+
+#[cfg(not(all(
+    target_os = "linux",
+    feature = "native-filesystem-policy",
+    box_native_adapter_tests
+)))]
+fn prepare(config: &Path, argv: &[OsString], box_id: Option<&str>) -> Result<LockedRun, BoxError> {
+    prepare_contract(read_contract(config)?, config, argv, box_id)
+}
+
+fn prepare_contract(
+    contract: RunContract,
+    config: &Path,
+    argv: &[OsString],
+    box_id: Option<&str>,
+) -> Result<LockedRun, BoxError> {
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     if contract.experimental_features().native_filesystem_policy {
-        crate::run::macos_enforcement::preflight()?;
+        crate::run::native_enforcement::preflight()?;
+    }
+    #[cfg(all(
+        target_os = "linux",
+        feature = "native-filesystem-policy",
+        box_native_adapter_tests
+    ))]
+    if contract.uses_native_filesystem() {
+        crate::run::native_enforcement::preflight()?;
     }
     contract.validate_declared_directory()?;
     let (mut root, root_lock) = BoxRoot::lock_directory(contract.box_directory())?;
@@ -420,6 +591,7 @@ mod tests {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
@@ -515,6 +687,63 @@ mod tests {
              `shell:spawn` rule applies to it\n\
              strands-box: [mcp.wrapped]: a spawn of `npm` is decided by its tool grammar, and no \
              `shell:spawn` rule applies to it\n"
+        );
+    }
+
+    /// **The startup notes say what a bare `python3` runs when the bare-name lines don't.** With
+    /// Monty on, a tool declared under the name is reported unused; with `monty = false`, a name no
+    /// tool answers is left to `PATH`; a name a tool answers gets only its bare-name line.
+    #[test]
+    fn startup_says_what_a_bare_python_runs() {
+        let tools = BTreeMap::from([("python3".to_string(), spec("/venv/bin/python3", &[], &[]))]);
+        let mut record = record_with(None, tools);
+        let none = crate::run::commands::BareNames::default();
+        let lines = |record: &Record,
+                     names: &crate::run::commands::BareNames,
+                     search_path: &std::ffi::OsStr| {
+            let mut output = Vec::new();
+            write_monty_disclosures(record, names, search_path, &mut output)
+                .expect("the notes write");
+            String::from_utf8(output).expect("UTF-8")
+        };
+        let empty = std::ffi::OsStr::new("");
+
+        assert_eq!(
+            lines(&record, &none, empty),
+            "strands-box: [tool.python3]: not used for a bare `python3`, because Monty answers \
+             it; set monty = false at the top of box.toml to use the tool\n"
+        );
+
+        record.monty = false;
+        let answered = crate::run::commands::BareNames {
+            declared: BTreeMap::from([(
+                "python3".to_string(),
+                (
+                    PathBuf::from("/venv/bin/python3"),
+                    vec!["[tool.python3]".to_string()],
+                ),
+            )]),
+            ..Default::default()
+        };
+        assert_eq!(
+            lines(&record, &answered, empty),
+            "strands-box: monty = false and neither a [tool] nor `PATH` has `python`, so a bare \
+             `python` in the Shell is not found\n"
+        );
+
+        let bin = tempfile::tempdir().expect("a PATH folder");
+        let python = bin.path().join("python");
+        std::fs::write(&python, "").expect("a python file");
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&python, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+        assert_eq!(
+            lines(&record, &answered, bin.path().as_os_str()),
+            format!(
+                "strands-box: monty = false and no [tool] answers `python`, so a bare `python` in \
+                 the Shell runs {}, the file `PATH` finds\n",
+                python.display()
+            )
         );
     }
 

@@ -46,6 +46,7 @@ const KERNEL_METHODS: &[(&str, Served)] = &[
     ("symlink", Served::Box),
     ("read_link", Served::Box),
     ("set_permissions", Served::Box),
+    ("set_times", Served::Box),
     ("now", Served::Box),
     ("check_url", Served::Box),
     ("resolve_credential", Served::Default),
@@ -67,6 +68,7 @@ enum Served {
 
 /// The `src` directory of the `strands-shell` package cargo resolved for this workspace.
 fn shell_src() -> PathBuf {
+    // Keep source inspection offline; run `cargo fetch --locked` before these guards.
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let output = std::process::Command::new(cargo)
         .args([
