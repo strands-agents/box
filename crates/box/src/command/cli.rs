@@ -44,31 +44,16 @@ pub(crate) enum Command {
         workload: Vec<OsString>,
     },
 
-    /// Work with policy schemas and saved policy history.
+    /// Work with the policy artifacts in this workspace.
     Policy {
         #[command(subcommand)]
         command: PolicyCommand,
     },
 }
 
-/// Operations on policy schemas and saved policy history.
+/// Operations on a workspace's policy artifacts.
 #[derive(Debug, Subcommand)]
 pub(crate) enum PolicyCommand {
-    /// Prepare or apply an offline conversion of one box's saved policy history.
-    MigrateHistory {
-        /// The configuration of the stopped, existing box.
-        #[arg(long, value_name = "FILE", required = true)]
-        config: PathBuf,
-
-        /// The Dogwood version that will read the converted history.
-        #[arg(long, value_name = "VERSION", value_parser = ["1.0.0", "1.1.2"], required = true)]
-        to: String,
-
-        /// Apply the prepared conversion after validating private copies.
-        #[arg(long)]
-        apply: bool,
-    },
-
     /// Generate the action and event schemas for policy authoring.
     GenerateSchema {
         /// The Box configuration whose MCP servers supply the schema.
@@ -79,101 +64,4 @@ pub(crate) enum PolicyCommand {
         #[arg(long, value_name = "OUTPUT_DIR", required = true)]
         output_dir: PathBuf,
     },
-}
-
-#[cfg(test)]
-mod history_migration_tests {
-    use super::*;
-
-    #[test]
-    fn history_migration_requires_an_explicit_config_and_supported_target() {
-        for args in [
-            vec!["strands-box", "policy", "migrate-history", "--to", "1.0.0"],
-            vec![
-                "strands-box",
-                "policy",
-                "migrate-history",
-                "--config",
-                "box.toml",
-            ],
-            vec![
-                "strands-box",
-                "policy",
-                "migrate-history",
-                "--config",
-                "box.toml",
-                "--to",
-                "1.1.1",
-            ],
-            vec![
-                "strands-box",
-                "policy",
-                "migrate-history",
-                "--config",
-                "box.toml",
-                "--to",
-                "1.0.0",
-                "--history",
-                "other.redb",
-            ],
-            vec![
-                "strands-box",
-                "policy",
-                "migrate-history",
-                "--config",
-                "box.toml",
-                "--to",
-                "1.0.0",
-                "--helper",
-                "other",
-            ],
-        ] {
-            assert!(Cli::try_parse_from(args).is_err());
-        }
-    }
-
-    #[test]
-    fn history_migration_prepares_by_default_and_apply_is_explicit() {
-        for target in ["1.0.0", "1.1.2"] {
-            for apply in [false, true] {
-                let mut args = vec![
-                    "strands-box",
-                    "policy",
-                    "migrate-history",
-                    "--config",
-                    "box.toml",
-                    "--to",
-                    target,
-                ];
-                if apply {
-                    args.push("--apply");
-                }
-                let parsed = Cli::try_parse_from(args).expect("supported offline command");
-                let Command::Policy {
-                    command:
-                        PolicyCommand::MigrateHistory {
-                            config,
-                            to,
-                            apply: found,
-                        },
-                } = parsed.command
-                else {
-                    panic!("migration command was not selected");
-                };
-                assert_eq!(config, PathBuf::from("box.toml"));
-                assert_eq!(to, target);
-                assert_eq!(found, apply);
-            }
-        }
-    }
-
-    #[test]
-    fn history_migration_help_explains_target_and_apply() {
-        let help = Cli::try_parse_from(["strands-box", "policy", "migrate-history", "--help"])
-            .expect_err("clap returns its help as a display result")
-            .to_string();
-        for expected in ["--config", "--to", "1.0.0", "1.1.2", "--apply", "stopped"] {
-            assert!(help.contains(expected), "missing {expected}: {help}");
-        }
-    }
 }

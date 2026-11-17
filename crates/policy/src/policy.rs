@@ -623,7 +623,7 @@ impl PolicyEngine {
 }
 
 /// The text the engine loads, shared by [`PolicyEngine::open`] and [`PolicyEngine::validate`].
-pub(crate) fn authored(sources: &[Policy]) -> String {
+fn authored(sources: &[Policy]) -> String {
     sources
         .iter()
         .map(|source| source.text.as_str())

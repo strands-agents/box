@@ -240,14 +240,6 @@ Dogwood's default, and a longer window refuses to load.
 
 ## Durable history
 
-*Figure: the Box process uses Dogwood 1.1.2 after the upgrade. Offline migration also invokes a
-separate validator built with Dogwood 1.0.0; that process is not shown. The event commit mode
-remains unchanged.*
-
-![Before the upgrade, the Box policy adapter uses dogwood-language and dogwood-local-engine 1.0.0. After the upgrade, the adapter includes explicit migration and uses both packages at 1.1.2. The language package also uses dogwood-syntax 1.1.2. Migration preserves saved history before Box starts. Cedar and redb versions remain fixed, and events still commit individually.](images/dogwood-upgrade.png)
-
-[Editable figure](images/dogwood-upgrade.drawio)
-
 Each box keeps one history file, `<box_dir>/private/dogwood.redb`, and a restart reuses it. See
 [history is durable per box](decisions.md#history-is-durable-per-box-and-has-no-rewind). That's what
 stops a restart from resetting a budget. The history follows these rules:
@@ -288,29 +280,23 @@ History is not an audit record and has no tamper evidence. It cannot be rewound 
 The operation and its recorded outcome do not commit together. If the process stops between them,
 the history omits that outcome and a `::response` count is too low.
 
-### Explicit version conversion
+### Dogwood upgrades
 
-`policy migrate-history` converts the history of one existing, stopped box. It selects that box
-through `--config`, holds the operation lock used by `run`, and retains the original history
-descriptor. It does not initialize a box or refresh policy through runtime startup.
+Box pins the Dogwood language and local engine packages to 1.1.2. Histories created by this
+adapter carry a version record. The adapter refuses previously used history without a supported
+version record before recovery or policy reconciliation. The workload does not start.
 
-The policy library validates original policy inputs, schemas, and current rule identities. For a
-downgrade, the bundled `strands-box-dogwood-1-0-migrate` process recovers and validates private
-copies with the exact Dogwood 1.0.0 engine and language. The current process uses Dogwood 1.1.2.
-The initial upgrade translates supported saved statements in a private copy, then recovers and
-checkpoints it with Dogwood 1.1.2. For later downgrades and upgrades, the source engine first
-checkpoints through the latest event; the converter then changes the saved statements. In both
-paths, the destination engine must recover the candidate snapshot with event replay unavailable.
-Rule identities, accumulated state, timestamps, and existing event records remain preserved.
+The operator can keep the old box directory and select a new directory for the new build. The
+new directory has no earlier activity, so counts reset and history-based prerequisites must be
+satisfied again. Box does not erase or convert the old directory's history. See
+[start with fresh history](../user/policy.md#start-with-fresh-history-after-a-dogwood-upgrade).
 
-Each later conversion commits its snapshot, direction, and new generation together. An old forward receipt does not prove a later conversion. The 1.1.2 adapter refuses a
-history explicitly converted for 1.0.0 until it is converted forward again. The command changes
-history format, not the installed executable.
+*Figure: the Box policy adapter uses Dogwood 1.1.2 in a new box directory. The old history stays
+with the old directory. Events still commit individually.*
 
-Downgrade conversion requires a validated mapping back to the original rules. Later policy edits,
-missing historical schemas, or unsupported mappings cause a refusal. Box does not erase newer
-activity or restore deleted rules to make a downgrade succeed. Ordinary policy-edit behavior
-remains unchanged. See [the operator procedure](../user/policy.md#saved-history-requires-migration).
+![Before the upgrade, the Box policy adapter uses dogwood-language and dogwood-local-engine 1.0.0. After the upgrade, it uses both packages at 1.1.2 and dogwood-language depends on dogwood-syntax 1.1.2. The new box directory starts with fresh history; the old history remains separate. Cedar and redb versions remain fixed, and each event still commits individually.](images/dogwood-upgrade.png)
+
+[Editable figure](images/dogwood-upgrade.drawio)
 
 ## What refuses to load
 
@@ -327,8 +313,8 @@ temporal predicate on `mcp:call::error` or a per-tool `::error`, because an MCP 
 `::response`.
 
 The `run` verb validates the policy before it writes any box state. A box with no local MCP server
-validates against the complete action schema, and that check accepts and refuses exactly what the
-later load does, so a policy that passes it loads at the next run.
+validates against the complete action schema. Passing this check confirms the policy text;
+opening or recovering saved history can still prevent startup.
 
 A box with a local MCP server can finish the check only after the server reports its tools. Up
 front, `run` checks syntax, macro expansion, provider use, MCP `::error` predicates, and the action
@@ -415,12 +401,6 @@ has these limits:
 - A temporal macro can lose its history. In Dogwood 1.1.2, a rule that calls a temporal macro such
   as `count_within` loses its accumulated state when the text before the call changes, even by a
   comment. A rule written inline keeps its state. Nothing Box ships calls a macro.
-- Upgrading saved Dogwood 1.0.0 history requires an explicit migration. Normal startup refuses an
-  unmarked history before engine recovery or policy reconciliation. The migration records
-  original policy inputs, validates retained state on private copies, and commits a replacement
-  snapshot and version record together. Unsupported histories remain unavailable until a supported
-  migration exists; Box never starts them with empty history. See the
-  [migration interface and limits](../../crates/policy/README.md#upgrade-saved-history-from-dogwood-100).
 - A verdict is allow or deny. No rule can pause a request for human approval. See [there is no
   approval verdict](decisions.md#there-is-no-approval-verdict).
 - A refusal reveals policy details. It names the component, the reason, and the rule, so a workload

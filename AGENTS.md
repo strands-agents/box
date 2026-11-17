@@ -147,14 +147,6 @@ A local build workaround, relaxed version, or bypass of Box configuration is div
 
 ## Verify before commit
 
-The offline history migration command also ships `strands-box-dogwood-1-0-migrate`.
-Its package, `crates/dogwood-legacy-migration`, is an independent workspace with exact
-Dogwood 1.0.0 engine and language pins. Keep its lockfile separate; aliases in the root
-workspace do not isolate compatible-major versions. `just build`, `just test`, and `just check`
-include this helper. Direct Cargo checks must build it into the same target directory first
-and run its format, Clippy, and test gates through its own manifest. Release archives and
-source-install instructions must ship the helper beside Box. Ordinary runs do not invoke it.
-
 For each changed Rust package, run:
 
 ```sh

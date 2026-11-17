@@ -94,21 +94,6 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
     }
 }
 
-/// Run an offline history conversion after the same platform admission check as other verbs.
-pub(crate) fn migrate_policy_history(config: &std::path::Path, to: &str, apply: bool) -> ExitCode {
-    if let Err(error) = platform::preflight() {
-        eprintln!("strands-box: refusing to run: {error}");
-        return ExitCode::FAILURE;
-    }
-    match policy::migrate_history(config, to, apply) {
-        Ok(code) => code,
-        Err(error) => {
-            eprintln!("strands-box: error: {error}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
 /// Route one invocation to the verb it named.
 async fn dispatch(
     cli: Cli,
@@ -142,8 +127,5 @@ async fn dispatch(
         Command::Policy {
             command: PolicyCommand::GenerateSchema { config, output_dir },
         } => policy::generate_schema(config, output_dir).await,
-        Command::Policy {
-            command: PolicyCommand::MigrateHistory { config, to, apply },
-        } => policy::migrate_history(config, to, *apply),
     }
 }

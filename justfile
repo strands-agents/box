@@ -10,17 +10,14 @@ default:
 test-all:
     ./scripts/test-all.sh
 
-# Build the independently resolved Dogwood 1.0.0 migration validator.
-legacy-helper:
-    cargo build --locked --manifest-path crates/dogwood-legacy-migration/Cargo.toml --target-dir "${CARGO_TARGET_DIR:-target}"
-
-# Build the CLI, runtime helpers, and history migration validator together.
-build: legacy-helper
+# Build every binary the box needs: the CLI, the alias image, and the containment
+# trampoline. Two packages, because the trampoline is containment's own contract and
+# `cargo build -p strands-box` builds containment's library but not its binaries.
+build:
     cargo build -p strands-box -p strands-box-containment --all-features
 
 # Build the release binaries into target/release, where they run in place.
 release:
-    cargo build --release --locked --manifest-path crates/dogwood-legacy-migration/Cargo.toml --target-dir "${CARGO_TARGET_DIR:-target}"
     cargo build --release -p strands-box -p strands-box-containment
 
 # The full pre-push gate for the Rust crates: format check, clippy, and tests.
@@ -29,23 +26,19 @@ check: fmt-check clippy test
 # ── Rust ───────────────────────────────────────────────────────────────────────
 
 # Test the whole Rust workspace.
-test: legacy-helper
-    cargo test --locked --manifest-path crates/dogwood-legacy-migration/Cargo.toml --target-dir "${CARGO_TARGET_DIR:-target}"
+test:
     cargo test --workspace --all-features
 
 # Lint every crate/target; warnings are errors.
 clippy:
-    cargo clippy --locked --manifest-path crates/dogwood-legacy-migration/Cargo.toml --target-dir "${CARGO_TARGET_DIR:-target}" --all-targets -- -D warnings
     cargo clippy --workspace --all-targets --all-features -- -D warnings
 
 # Format all Rust code in place.
 fmt:
-    cargo fmt --manifest-path crates/dogwood-legacy-migration/Cargo.toml
     cargo fmt --all
 
 # Check formatting without modifying files (CI gate).
 fmt-check:
-    cargo fmt --manifest-path crates/dogwood-legacy-migration/Cargo.toml --check
     cargo fmt --all --check
 
 # ── Test-harness crates (excluded from the workspace) ──────────────────────────

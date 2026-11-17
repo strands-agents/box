@@ -32,8 +32,6 @@ pub(crate) mod gateway;
 pub(crate) mod grammar;
 pub(crate) mod ingress;
 pub(crate) mod limits;
-mod migration;
-pub(crate) use migration::HistoryMigrationConfig;
 pub(crate) mod mcp;
 pub(crate) mod process;
 pub(crate) mod telemetry;
@@ -3600,7 +3598,7 @@ env = {}
         ));
     }
 
-    /// The top-level surface is `run` plus policy schemas and saved policy history.
+    /// The top-level surface is `run` plus the approved policy-artifact group.
     #[test]
     fn the_command_surface_is_run_and_the_policy_group() {
         use clap::CommandFactory as _;
@@ -3618,8 +3616,7 @@ env = {}
             "`run` is the one verb that starts a box, from the complete configuration the \
              operator wrote and `--config` names; it writes no configuration of its own. `policy \
              generate-schema` writes schema artifacts from the workspace's declared MCP servers \
-             and installs no authority. `policy migrate-history` converts an existing stopped box's \
-             history and starts no workload. `ls`, `stop`, `rm`, and `reset` are withdrawn with the \
+             and installs no authority. `ls`, `stop`, `rm`, and `reset` are withdrawn with the \
              `~/.strands-box/b/` namespace they enumerated: a caller supplies `box_dir`, so Box \
              cannot locate a box it was not handed, and the caller that created the directory \
              owns its lifecycle. `init`, `create`, `update`, `configure`, `inspect`, `exec`, \
@@ -3639,12 +3636,11 @@ env = {}
             .get_subcommands()
             .find(|command| command.get_name() == "policy")
             .expect("the approved policy group");
-        let mut policy_commands: Vec<&str> = policy
+        let policy_commands: Vec<&str> = policy
             .get_subcommands()
             .map(clap::Command::get_name)
             .collect();
-        policy_commands.sort_unstable();
-        assert_eq!(policy_commands, ["generate-schema", "migrate-history"]);
+        assert_eq!(policy_commands, ["generate-schema"]);
 
         let parsed = Cli::try_parse_from([
             "strands-box",

@@ -1,2 +1,0 @@
-permit (principal, action, resource)
-when { ((context.note == "has \"literal\".path") && (context has "input".x)) };

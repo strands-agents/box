@@ -18,7 +18,8 @@ enforcement point.
 
 ## Public Interface
 
-The façade exposes the types and functions below. Adapter features add the six names in the last row.
+The façade exports **60 names with `--all-features`, and 54 by default.** The adapter features add
+the six names in the last row.
 
 `PrincipalKind` left on 2026-08-18. The three enforcement-point principals collapsed into one
 `Agent`, so a kind enum named a distinction that no longer exists.
@@ -27,7 +28,6 @@ The façade exposes the types and functions below. Adapter features add the six 
 |---|---|
 | `Policy` | One authored policy document: caller-trusted text with a diagnostic origin. |
 | `PolicyEngine` | One loaded, strict-validated authority. It carries the lifecycle. |
-| `MigrationInput`, `MigrationTarget`, `PolicyMigration`, `MigrationSummary` | Prepare and apply an explicit saved-history conversion between Dogwood 1.0.0 and 1.1.2 while Box is stopped. |
 | `Principal` | Integration metadata for the fixed `Box::Agent::"self"` identity. |
 | `GovernedBox` | Integration metadata for the box that owns the authority. |
 | `Request`, `FsAccess`, `FsOperation` | Typed authorization request. |
@@ -488,101 +488,16 @@ Rules written against history:
   engine attempts a checkpoint. A successful checkpoint snapshots monitor state and removes
   the covered log records. A failed checkpoint increases the durable log replay depth.
 
-## Upgrade saved history from Dogwood 1.0.0
+## Dogwood 1.1.2 history
 
-Stop Box before migration and keep it stopped until migration finishes. A normal engine open
-refuses previously used history without a recorded Dogwood version. It never treats an older
-rule as a new rule merely to make the upgrade succeed.
+The runtime pins both `dogwood-language` and `dogwood-local-engine` to `1.1.2`.
+`PolicyEngine::open` records this version when it creates a history. It refuses previously used
+history without a supported version record before recovery or policy reconciliation.
 
-Use `PolicyMigration::prepare` with the already-open history file, the unchanged original policy
-files in their original order, and the original grammar and discovered Model Context Protocol
-(MCP) action schemas. Preparation holds the database lock and returns reviewable counts. It
-changes no policy or event record, though opening the database can update database metadata.
-It does not create a policy authority or prove that application will succeed.
-
-`PolicyMigration::apply` validates two private copies, then commits the saved state and migration
-record together. The original event records, rule identities, and history offsets remain unchanged.
-A saved-state syntax correction can change a rule's stored text; its accumulated history stays with
-its original identity. Normal startup still recovers and validates the completed store.
-
-Operators use the shipped `box policy migrate-history` command with the existing configuration.
-See [the operator procedure](../../docs/user/policy.md#saved-history-requires-migration).
-It verifies that Box is stopped, locates the existing history, and opens the installed validator.
-The source example remains available for library integration testing; its caller must establish
-exclusive ownership of the stopped box.
-
-The library sequence is:
-
-```rust
-use std::fs::File;
-use policy::{MigrationInput, MigrationSummary, Policy, PolicyError, PolicyMigration};
-
-fn upgrade(
-    history: File,
-    original_policies: Vec<Policy>,
-    grammar_schemas: Vec<String>,
-    mcp_schemas: Vec<String>,
-    private_prepare: File,
-    private_validate: File,
-) -> Result<MigrationSummary, PolicyError> {
-    let migration = PolicyMigration::prepare(
-        MigrationInput::new(history, original_policies)
-            .with_grammar_schemas(grammar_schemas)
-            .with_mcp_schemas(mcp_schemas),
-    )?;
-    migration.apply(private_prepare, private_validate)
-}
-```
-
-Both scratch files must be empty private regular files with different file identities and one
-hardlink each. The example creates them in a private temporary directory beside the history.
-Callers must retain exclusive ownership of the stopped history throughout preparation and apply.
-
-This migration deliberately supports a limited set of inputs:
-
-- The original authored policies must parse and pass Box's checks with Dogwood 1.1.2. The converter
-  repairs supported old static `has` paths in saved statements; it does not rewrite authored files.
-- Every installed rule must match one original rule. Missing originals, extra rules, conflicting
-  duplicate mappings, changed schemas, custom event schemas, and unsafe generated-name collisions
-  are refused. Information-provider rules and custom macro libraries are not supported.
-- A complete retained log can be replayed on a private copy. When earlier records were pruned,
-  migration uses the saved state and its remaining events. A rule-add or rule-update record replayed after the saved-state boundary is refused if it
-  needs syntax conversion.
-- The history image is limited to 1 GiB; captured records to 256 MiB and 1,000,000 records; a saved
-  state to 64 MiB; and the migration plan to 8 MiB. These limits bound this implementation's work.
-
-Preparation counts describe the proposed migration. Successful application returns the same counts.
-A retry with identical original inputs verifies the saved receipt and reports `already_completed`;
-its rule and record counts describe the migration when it completed. It does not reset later history.
-If application reports that a commit might have completed, retry with the same original inputs.
-Do not restore an older backup over history that might contain newer activity.
-
-For a downgrade, use `PolicyMigration::prepare_for(input, MigrationTarget::Dogwood1_0_0)`.
-Before returning to the new build, select `MigrationTarget::Dogwood1_1_2`.
-`PolicyMigration::prepare` refuses a history with directional conversion records; use
-`prepare_for` for that history, including a retry. Supply the installed
-legacy validator as an open `File` through `MigrationInput::with_legacy_validator`. It uses exact
-Dogwood 1.0.0 engine and language dependencies in a separate workspace. Its versioned protocol
-accepts only private scratch copies; it never receives the original database.
-
-The initial upgrade translates supported saved statements in a private copy before recovering
-and checkpointing it with Dogwood 1.1.2. Later downgrades and upgrades first recover activity
-through the current end of history with the source engine, then convert the saved statements.
-The destination engine validates each candidate snapshot without replaying original events.
-Later conversions retain rule identities and accumulated state and record a fresh direction and
-generation. Historical migration receipts are provenance, not proof of a later conversion.
-Changed rules and mappings that cannot be validated are refused. Later edits are not silently undone.
-
-Do not open a converted 1.1.2 history directly with Box using Dogwood 1.0.0. The older Box adapter
-can treat generated text differences as policy edits and replace a rule, losing its accumulated
-history. Run the explicit conversion first. A pre-upgrade backup omits newer activity and is not a
-safe replacement for the current history.
-
-Later policy edits retain the existing Box rule: unchanged rules keep their state; new or changed
-rules start with empty state. Migration records one approved current spelling for each retained
-rule. Deleting or replacing a rule removes that identity from active use; editing it back does not
-recover its deleted history. Editing a macro into an equivalent expanded expression does not receive
-special history retention.
+To adopt this build, deliberately select a new history file. Box operators select a new box
+directory through `box_dir`; see [the upgrade procedure](../../docs/user/policy.md#start-with-fresh-history-after-a-dogwood-upgrade).
+Earlier activity does not carry over: counts start at zero, and prior events no longer satisfy
+history-based prerequisites. The adapter does not erase or convert existing history.
 
 ## Effective Policy
 

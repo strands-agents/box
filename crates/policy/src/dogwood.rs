@@ -16,12 +16,11 @@ use dogwood_language::{
 use dogwood_local_engine::Clock as DurableClock;
 use dogwood_local_engine::{
     DurableConfig, DurableError, DurableLog, DurableTemporalEngine, Outcome as DurableOutcome,
-    PolicyToken, Verb,
+    PolicyToken, Verb, Write,
 };
 
 use crate::check::{Finding, Refused, RuleRef, annotated_id};
 use crate::error::{PolicyError, PolicyStagingError};
-use crate::migration::MigrationBindings;
 use crate::outcome::Delivery;
 use crate::request::{ActionRequest, Principal, Request, RequestId};
 use crate::schema::{
@@ -73,7 +72,6 @@ const SNAPSHOT_INTERVAL: u64 = 10_000;
 /// One loaded Dogwood policy authority over a single temporal history.
 pub(crate) struct DogwoodEngine {
     engine: Mutex<DurableTemporalEngine>,
-    migration_bindings: MigrationBindings,
     request_scope: Arc<()>,
     rule_ids: HashMap<PolicyToken, RuleId>,
     request_schema: cedar_policy::Schema,
@@ -135,10 +133,7 @@ impl Drop for DogwoodEngine {
 const EVENTS_DWSCHEMA: &str = include_str!("../schema/events.dwschema");
 
 /// Open durable history at `path`.
-fn open_history(
-    path: &Path,
-    config: DurableConfig,
-) -> Result<(DurableTemporalEngine, MigrationBindings), DurableError> {
+fn open_history(path: &Path, config: DurableConfig) -> Result<DurableTemporalEngine, DurableError> {
     let log = DurableLog::open(path).map_err(|error| DurableError::Log(error.to_string()))?;
     recover_history(log, path.to_path_buf(), config, SNAPSHOT_INTERVAL)
 }
@@ -149,8 +144,8 @@ fn recover_history(
     label: PathBuf,
     config: DurableConfig,
     interval: u64,
-) -> Result<(DurableTemporalEngine, MigrationBindings), DurableError> {
-    let bindings = MigrationBindings::read_or_mark_fresh(&log)?;
+) -> Result<DurableTemporalEngine, DurableError> {
+    check_history_version(&log)?;
     let summarized = log
         .get_snapshot()
         .map_err(|error| DurableError::Log(error.to_string()))?
@@ -160,7 +155,40 @@ fn recover_history(
     if replayed >= interval {
         let _ = engine.checkpoint();
     }
-    Ok((engine, bindings))
+    Ok(engine)
+}
+
+/// The Dogwood version that initialized this history.
+const HISTORY_VERSION_KEY: &str = "box.dogwood.history-version";
+const HISTORY_VERSION: &[u8] = b"1.1.2";
+const SERVICE_SCHEMA_KEY: &str = "dogwood_server_service_schema";
+
+/// Accept current history or mark a store that has no saved policy or activity.
+fn check_history_version(log: &DurableLog) -> Result<(), DurableError> {
+    let log_error = |error: dogwood_local_engine::LogError| DurableError::Log(error.to_string());
+    match log.get_meta(HISTORY_VERSION_KEY).map_err(log_error)? {
+        Some(version) if version == HISTORY_VERSION => Ok(()),
+        Some(_) => Err(DurableError::Log(
+            "unsupported Dogwood history version; stop Box and start with a new Box directory; earlier activity will not carry over".to_owned(),
+        )),
+        None => {
+            if log.next_offset() != 0
+                || log.base_offset() != 0
+                || log.get_snapshot().map_err(log_error)?.is_some()
+                || log.get_meta(SERVICE_SCHEMA_KEY).map_err(log_error)?.is_some()
+            {
+                return Err(DurableError::Log(
+                    "existing history has no supported Dogwood version; stop Box and start with a new Box directory; earlier activity will not carry over".to_owned(),
+                ));
+            }
+            log.commit(&[Write::Meta {
+                key: HISTORY_VERSION_KEY,
+                value: HISTORY_VERSION,
+            }])
+            .map_err(log_error)?;
+            Ok(())
+        }
+    }
 }
 
 /// A path that names the open file itself, so no directory entry is resolved again.
@@ -225,11 +253,9 @@ impl DogwoodEngine {
             check_against(source, effective_schema, operator, true, &[])
                 .map_err(Refused::into_error)?;
         let fragments: Vec<String> = grammar_schemas.iter().chain(mcp_schemas).cloned().collect();
-        let (mut engine, migration_bindings) =
-            open_history(history, durable_config()).map_err(durable_history_error)?;
+        let mut engine = open_history(history, durable_config()).map_err(durable_history_error)?;
         reconcile_policy_set(
             &mut engine,
-            &migration_bindings,
             &canonical_policies,
             &fragments,
             &effective_schema.source,
@@ -237,7 +263,6 @@ impl DogwoodEngine {
 
         Ok((
             Self {
-                migration_bindings,
                 rule_ids: rule_ids(&engine),
                 engine: Mutex::new(engine),
                 request_scope: Arc::new(()),
@@ -255,11 +280,10 @@ impl DogwoodEngine {
     /// Open durable history without changing its installed authority.
     pub(crate) fn open_for_staging(history: &Path) -> Result<Self, PolicyStagingError> {
         let effective_schema = action_schema(&[])?;
-        let (engine, migration_bindings) = open_history(history, durable_config())
+        let engine = open_history(history, durable_config())
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
         Self::from_staging_engine(
             engine,
-            migration_bindings,
             effective_schema.cedar,
             effective_schema.tool_actions,
             effective_schema.tool_inputs,
@@ -274,12 +298,10 @@ impl DogwoodEngine {
         let log = DurableLog::open(opened_file_path(&history))
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
         drop(history);
-        let (engine, migration_bindings) =
-            recover_history(log, label, durable_config(), SNAPSHOT_INTERVAL)
-                .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
+        let engine = recover_history(log, label, durable_config(), SNAPSHOT_INTERVAL)
+            .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
         Self::from_staging_engine(
             engine,
-            migration_bindings,
             effective_schema.cedar,
             effective_schema.tool_actions,
             effective_schema.tool_inputs,
@@ -293,11 +315,10 @@ impl DogwoodEngine {
     ) -> Result<Self, PolicyStagingError> {
         let effective_schema = action_schema(&[])?;
         let config = durable_config().with_fault_injector(faults);
-        let (engine, migration_bindings) = open_history(history, config)
+        let engine = open_history(history, config)
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
         Self::from_staging_engine(
             engine,
-            migration_bindings,
             effective_schema.cedar,
             effective_schema.tool_actions,
             effective_schema.tool_inputs,
@@ -306,7 +327,6 @@ impl DogwoodEngine {
 
     fn from_staging_engine(
         engine: DurableTemporalEngine,
-        migration_bindings: MigrationBindings,
         request_schema: cedar_policy::Schema,
         tool_actions: std::collections::HashSet<cedar_policy::EntityUid>,
         tool_inputs: crate::mcp_input::ToolInputs,
@@ -318,7 +338,6 @@ impl DogwoodEngine {
         }
 
         Ok(Self {
-            migration_bindings,
             rule_ids: rule_ids(&engine),
             engine: Mutex::new(engine),
             request_scope: Arc::new(()),
@@ -414,12 +433,7 @@ impl DogwoodEngine {
             .engine
             .lock()
             .map_err(|_| DurableError::Log("dogwood durable engine lock poisoned".to_string()))?;
-        reconcile_staged_policy_set(
-            &mut engine,
-            &self.migration_bindings,
-            canonical_policies,
-            installed_schema,
-        )?;
+        reconcile_staged_policy_set(&mut engine, canonical_policies, installed_schema)?;
         self.rule_ids = rule_ids(&engine);
         drop(engine);
         self.request_schema = request_schema.cedar;
@@ -436,7 +450,7 @@ impl DogwoodEngine {
                 engine
                     .list()
                     .into_iter()
-                    .map(|entry| self.migration_bindings.current_statement(&entry).to_owned())
+                    .map(|entry| entry.statement)
                     .collect()
             })
             .unwrap_or_default()
@@ -462,18 +476,15 @@ impl DogwoodEngine {
         let (canonical_policies, effective_schema, _) =
             validate_and_expand(source, &[], &Operator::unanchored())?;
         let config = durable_config().with_fault_injector(faults);
-        let (mut engine, migration_bindings) =
-            open_history(history, config).map_err(durable_history_error)?;
+        let mut engine = open_history(history, config).map_err(durable_history_error)?;
         reconcile_policy_set(
             &mut engine,
-            &migration_bindings,
             &canonical_policies,
             &[],
             &effective_schema.source,
         )?;
 
         Ok(Self {
-            migration_bindings,
             rule_ids: rule_ids(&engine),
             engine: Mutex::new(engine),
             request_scope: Arc::new(()),
@@ -509,18 +520,15 @@ impl DogwoodEngine {
         let config = durable_config().with_clock(Box::new(FixedClock {
             now: Arc::clone(&now),
         }));
-        let (mut engine, migration_bindings) =
-            open_history(history, config).map_err(durable_history_error)?;
+        let mut engine = open_history(history, config).map_err(durable_history_error)?;
         reconcile_policy_set(
             &mut engine,
-            &migration_bindings,
             &canonical_policies,
             mcp_schemas,
             &effective_schema.source,
         )?;
 
         Ok(Self {
-            migration_bindings,
             rule_ids: rule_ids(&engine),
             engine: Mutex::new(engine),
             request_scope: Arc::new(()),
@@ -1780,7 +1788,6 @@ fn term_actions(term: &dogwood_language::temporal_ast::Term, out: &mut Vec<(Stri
 
 fn reconcile_staged_policy_set(
     engine: &mut DurableTemporalEngine,
-    bindings: &MigrationBindings,
     canonical_policies: &[String],
     effective_schema: &str,
 ) -> Result<(), DurableError> {
@@ -1798,7 +1805,7 @@ fn reconcile_staged_policy_set(
         ));
     }
 
-    let (additions, mut changes) = policy_set_change_parts(engine, bindings, canonical_policies);
+    let (additions, mut changes) = policy_set_change_parts(engine, canonical_policies);
     if engine.action_schema().as_deref() != Some(effective_schema) {
         changes.push(Verb::SetActionSchema {
             action_schema: effective_schema.to_string(),
@@ -1813,7 +1820,6 @@ const EMPTY_POLICY_SOURCE: &str = "";
 
 fn reconcile_policy_set(
     engine: &mut DurableTemporalEngine,
-    bindings: &MigrationBindings,
     canonical_policies: &[String],
     mcp_schemas: &[String],
     effective_schema: &str,
@@ -1845,7 +1851,7 @@ fn reconcile_policy_set(
                 .map(|fragment| Verb::AppendActionSchema { fragment }),
         );
     }
-    changes.extend(policy_set_changes(engine, bindings, canonical_policies));
+    changes.extend(policy_set_changes(engine, canonical_policies));
     if !changes.is_empty() {
         engine.batch(changes).map_err(durable_history_error)?;
     }
@@ -1853,28 +1859,27 @@ fn reconcile_policy_set(
     Ok(())
 }
 
-fn policy_set_changes(
-    engine: &DurableTemporalEngine,
-    bindings: &MigrationBindings,
-    canonical_policies: &[String],
-) -> Vec<Verb> {
-    let (mut additions, deletions) = policy_set_change_parts(engine, bindings, canonical_policies);
+fn policy_set_changes(engine: &DurableTemporalEngine, canonical_policies: &[String]) -> Vec<Verb> {
+    let (mut additions, deletions) = policy_set_change_parts(engine, canonical_policies);
     additions.extend(deletions);
     additions
 }
 
 fn policy_set_change_parts(
     engine: &DurableTemporalEngine,
-    bindings: &MigrationBindings,
     canonical_policies: &[String],
 ) -> (Vec<Verb>, Vec<Verb>) {
     let existing = engine.list();
-    let matched = bindings.retained_indices(canonical_policies, &existing);
     let mut retained = vec![false; existing.len()];
     let mut additions = Vec::new();
-    for (policy, index) in canonical_policies.iter().zip(matched) {
-        match index {
-            Some(index) => retained[index] = true,
+
+    for policy in canonical_policies {
+        match existing
+            .iter()
+            .enumerate()
+            .find(|(index, entry)| !retained[*index] && entry.statement == *policy)
+        {
+            Some((index, _)) => retained[index] = true,
             None => additions.push(Verb::Add {
                 policy: policy.clone(),
             }),
@@ -2500,13 +2505,173 @@ when temporal {
     }
 
     #[test]
+    fn fresh_history_keeps_its_version_and_activity_after_restart() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        let engine = DogwoodEngine::open(BUDGET, &path).expect("fresh history opens");
+        let request_id = permitted_http_request(&engine);
+        engine
+            .observe_outcome(
+                &governed(),
+                &Principal::agent(),
+                &request_id,
+                &delivered(150),
+            )
+            .expect("activity records");
+        drop(engine);
+        for _ in 0..2 {
+            let log = DurableLog::open(&path).expect("history log opens");
+            assert_eq!(
+                log.get_meta(HISTORY_VERSION_KEY).unwrap(),
+                Some(HISTORY_VERSION.to_vec())
+            );
+            drop(log);
+            let engine = DogwoodEngine::open(BUDGET, &path).expect("current history reopens");
+            assert!(
+                !engine
+                    .decide(
+                        &governed(),
+                        &Principal::agent(),
+                        ActionRequest::Request(&http())
+                    )
+                    .0
+                    .is_allow()
+            );
+        }
+    }
+
+    #[test]
+    fn old_history_is_refused_without_changing_records_through_path_or_file() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        std::fs::write(
+            &path,
+            include_bytes!("../tests/fixtures/history_1_0_0.redb"),
+        )
+        .unwrap();
+        let saved = || {
+            let log = DurableLog::open(&path).unwrap();
+            let mut records = Vec::new();
+            log.scan_from(0, |offset, bytes| records.push((offset, bytes.to_vec())))
+                .unwrap();
+            (
+                records,
+                log.get_snapshot().unwrap(),
+                log.base_offset(),
+                log.next_offset(),
+            )
+        };
+        let before = saved();
+        assert!(!before.0.is_empty(), "fixture contains actual old records");
+        for through_file in [false, true] {
+            let result = if through_file {
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .unwrap();
+                DogwoodEngine::open_for_staging_file(file, path.clone())
+            } else {
+                DogwoodEngine::open_for_staging(&path)
+            };
+            let error = match result {
+                Ok(_) => panic!("old history returned an authority"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("existing history has no supported Dogwood version"),
+                "{error}"
+            );
+            assert_eq!(saved(), before, "refusal changed old history");
+            let log = DurableLog::open(&path).unwrap();
+            assert_eq!(log.get_meta(HISTORY_VERSION_KEY).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn unmarked_state_is_never_treated_as_a_fresh_history() {
+        for case in ["record", "pruned", "snapshot", "schema"] {
+            let history = tempfile::tempdir().expect("history directory");
+            let path = history.path().join("dogwood.redb");
+            let log = DurableLog::open(&path).unwrap();
+            match case {
+                "record" => {
+                    log.append(b"old record").unwrap();
+                }
+                "pruned" => {
+                    log.append(b"old record").unwrap();
+                    log.prune_below(1, 10).unwrap();
+                }
+                "snapshot" => {
+                    log.commit(&[Write::Snapshot(&dogwood_local_engine::Snapshot {
+                        up_to_offset: 0,
+                        payload: b"old snapshot".to_vec(),
+                    })])
+                    .unwrap();
+                }
+                "schema" => {
+                    log.commit(&[Write::Meta {
+                        key: SERVICE_SCHEMA_KEY,
+                        value: b"old schema",
+                    }])
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let error = check_history_version(&log).expect_err("existing state is refused");
+            assert!(
+                error.to_string().contains("start with a new Box directory"),
+                "{case}: {error}"
+            );
+            assert_eq!(log.get_meta(HISTORY_VERSION_KEY).unwrap(), None, "{case}");
+        }
+    }
+
+    #[test]
+    fn unsupported_history_versions_are_refused_without_overwriting_them() {
+        for version in [
+            b"".as_slice(),
+            b"1.0.0",
+            b"1.1.1",
+            b"2.0.0",
+            b"1.1.2\0",
+            b"\xff",
+        ] {
+            let history = tempfile::tempdir().expect("history directory");
+            let path = history.path().join("dogwood.redb");
+            let log = DurableLog::open(&path).unwrap();
+            log.commit(&[Write::Meta {
+                key: HISTORY_VERSION_KEY,
+                value: version,
+            }])
+            .unwrap();
+            drop(log);
+            let error = match DogwoodEngine::open_for_staging(&path) {
+                Ok(_) => panic!("unsupported history returned an authority"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("unsupported Dogwood history version"),
+                "{error}"
+            );
+            let log = DurableLog::open(&path).unwrap();
+            assert_eq!(
+                log.get_meta(HISTORY_VERSION_KEY).unwrap().as_deref(),
+                Some(version)
+            );
+        }
+    }
+
+    #[test]
     fn staged_open_reports_an_incompatible_history_schema_as_durable() {
         let history = tempfile::tempdir().expect("history directory");
         let path = history.path().join("dogwood.redb");
-        // This fixture uses the current Dogwood engine with an incompatible event schema.
-        // Record its current version while empty so the test reaches schema validation.
         let log = DurableLog::open(&path).expect("empty history opens");
-        MigrationBindings::read_or_mark_fresh(&log).expect("current version recorded");
+        check_history_version(&log).expect("current version recorded");
         drop(log);
         {
             let mut durable =
@@ -3680,31 +3845,23 @@ when temporal {{
 
         faults.arm(FaultPoint::CheckpointBeforePrune);
         let worker = std::thread::spawn(move || {
-            let result = reconcile_policy_set(
-                &mut engine,
-                &MigrationBindings::default(),
-                &policies,
-                &[],
-                &schema.source,
-            )
-            .and_then(|()| {
-                reconcile_policy_set(
-                    &mut engine,
-                    &MigrationBindings::default(),
-                    &changed_policies,
-                    &[],
-                    &changed_schema.source,
-                )
-            })
-            .and_then(|()| {
-                reconcile_policy_set(
-                    &mut engine,
-                    &MigrationBindings::default(),
-                    &changed_policies,
-                    &[],
-                    &changed_schema.source,
-                )
-            });
+            let result = reconcile_policy_set(&mut engine, &policies, &[], &schema.source)
+                .and_then(|()| {
+                    reconcile_policy_set(
+                        &mut engine,
+                        &changed_policies,
+                        &[],
+                        &changed_schema.source,
+                    )
+                })
+                .and_then(|()| {
+                    reconcile_policy_set(
+                        &mut engine,
+                        &changed_policies,
+                        &[],
+                        &changed_schema.source,
+                    )
+                });
             (result, engine)
         });
         let checkpointed_before_release = faults.wait_until_reached(Duration::from_millis(250));

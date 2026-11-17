@@ -138,12 +138,7 @@ jobs:
           node-version: '22'
 
       - name: Build
-        run: |
-          cargo build --locked --manifest-path crates/dogwood-legacy-migration/Cargo.toml --target-dir target
-          cargo build --workspace --locked --all-targets --all-features --verbose
-
-      - name: Test the legacy migration validator
-        run: cargo test --locked --manifest-path crates/dogwood-legacy-migration/Cargo.toml --target-dir target
+        run: cargo build --workspace --locked --all-targets --all-features --verbose
 
       - name: Install launcher images beside unit-test binaries
         if: runner.os == 'Linux'
@@ -256,11 +251,6 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
-      - name: Check the independently resolved migration validator
-        run: |
-          cargo fmt --manifest-path crates/dogwood-legacy-migration/Cargo.toml --check
-          cargo clippy --locked --manifest-path crates/dogwood-legacy-migration/Cargo.toml --target-dir target --all-targets -- -D warnings
 
       - name: cargo fmt
         run: cargo fmt --all --check

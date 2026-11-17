@@ -435,7 +435,6 @@ class ReleaseBundleTests(unittest.TestCase):
                     with tarfile.open(assets / f"box-{tag}-{triple}.tar.gz", "w:gz") as archive:
                         for name in [
                             "box", "strands-box-sock-alias", "strands-box-contain-trampoline",
-                            "strands-box-dogwood-1-0-migrate",
                         ]:
                             entry = tarfile.TarInfo(name)
                             payload = f"{triple}:{name}".encode()
@@ -517,8 +516,7 @@ class ReleasePackageTests(unittest.TestCase):
             WORKFLOW.parents[2] / "scripts/check-linux-package.py",
             scripts / "check-linux-package.py",
         )
-        for name in ("box", "strands-box-sock-alias", "strands-box-contain-trampoline",
-                     "strands-box-dogwood-1-0-migrate"):
+        for name in ("box", "strands-box-sock-alias", "strands-box-contain-trampoline"):
             self.executable(self.package / name, '#!/bin/sh\nprintf "%s\\n" "$PACKAGE_VERSION"\n')
         self.executable(self.root / "readelf", '#!/bin/sh\nprintf "%s\\n" "$PACKAGE_HEADER"\n')
         self.docker_arguments = self.root / "docker-arguments.json"
@@ -546,7 +544,7 @@ class ReleasePackageTests(unittest.TestCase):
     def header(self, machine="Advanced Micro Devices X86-64", loader="/lib64/ld-linux-x86-64.so.2", version="2.34"):
         return f"Machine: {machine}\nRequesting program interpreter: {loader}]\nName: GLIBC_{version}\n"
 
-    def test_x86_package_step_checks_all_required_executables_in_read_only_container(self):
+    def test_x86_package_step_checks_all_three_executables_in_read_only_container(self):
         result = self.run_step("Check the x86-64 Linux package", PACKAGE_HEADER=self.header())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(self.docker_arguments.read_text()), [
@@ -557,7 +555,6 @@ class ReleasePackageTests(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual([item["binary"] for item in report], [
             "box", "strands-box-sock-alias", "strands-box-contain-trampoline",
-            "strands-box-dogwood-1-0-migrate",
         ])
         self.assertEqual({item["architecture"] for item in report}, {"x86_64"})
 
@@ -588,24 +585,21 @@ class ReleasePackageTests(unittest.TestCase):
                 self.assertEqual({target for target in targets if condition_selects_target(condition, target)}, selected)
 
     def test_linux_build_uses_the_container_for_each_native_target(self):
-        arguments = self.root / "docker-arguments.jsonl"
+        arguments = self.root / "docker-arguments.json"
         self.executable(self.root / "docker", "#!/usr/bin/env python3\n"
                         "import json, os, sys\n"
-                        "with open(os.environ['DOCKER_ARGS'], 'a') as output:\n"
-                        "    output.write(json.dumps(sys.argv[1:]) + '\\n')\n")
+                        "from pathlib import Path\n"
+                        "Path(os.environ['DOCKER_ARGS']).write_text(json.dumps(sys.argv[1:]))\n")
         for target in ("aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"):
             with self.subTest(target=target):
-                arguments.write_text("")
                 result = self.run_step("Build Linux against glibc 2.34", TRIPLE=target,
                                        DOCKER_ARGS=str(arguments))
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-                invocations = [json.loads(line) for line in arguments.read_text().splitlines()]
-                commands = [actual[actual.index("box-linux-release"):] for actual in invocations]
-                self.assertEqual(commands, [
-                    ["box-linux-release", "cargo", "build", "--release", "--locked", "--target", target,
-                     "-p", "strands-box", "-p", "strands-box-containment"],
-                    ["box-linux-release", "cargo", "build", "--release", "--locked", "--target", target,
-                     "--manifest-path", "crates/dogwood-legacy-migration/Cargo.toml"],
+                actual = json.loads(arguments.read_text())
+                command = actual[actual.index("box-linux-release"):]
+                self.assertEqual(command, [
+                    "box-linux-release", "cargo", "build", "--release", "--locked", "--target", target,
+                    "-p", "strands-box", "-p", "strands-box-containment",
                 ])
 
     def test_all_builds_check_the_packaged_version(self):

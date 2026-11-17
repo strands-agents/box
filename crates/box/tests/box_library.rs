@@ -71,18 +71,6 @@ fn main() {
             ),
             std::process::ExitCode::FAILURE
         );
-        for target in ["1.0.0", "1.1.2"] {
-            for apply in [false, true] {
-                assert_eq!(
-                    strands_box::migrate_policy_history(
-                        "/missing-linux-migration.toml".into(),
-                        target,
-                        apply,
-                    ),
-                    std::process::ExitCode::FAILURE
-                );
-            }
-        }
         return;
     }
     if let [_, mode, config, malformed, valid] = std::env::args().collect::<Vec<_>>().as_slice()
@@ -215,7 +203,6 @@ fn main() {
         assert!(output.status.success(), "{stderr}");
         assert!(stderr.contains("missing-linux-library.toml"), "{stderr}");
         assert!(stderr.contains("missing-linux-schema.toml"), "{stderr}");
-        assert!(stderr.contains("missing-linux-migration.toml"), "{stderr}");
         assert!(!stderr.contains("EXPERIMENTAL_LINUX_SUPPORT"), "{stderr}");
     }
     #[cfg(target_os = "linux")]
@@ -374,11 +361,10 @@ fn x86_startup_matrix() {
         if admitted {
             assert!(stderr.contains("missing-linux-library.toml"), "{stderr}");
             assert!(stderr.contains("missing-linux-schema.toml"), "{stderr}");
-            assert!(stderr.contains("missing-linux-migration.toml"), "{stderr}");
             assert!(!stderr.contains("EXPERIMENTAL_X86_SUPPORT"), "{stderr}");
         } else {
             let refusal = "strands-box: refusing to run: x86 support on Linux is experimental. Set EXPERIMENTAL_X86_SUPPORT=TRUE to enable it.";
-            assert_eq!(stderr.lines().collect::<Vec<_>>(), [refusal; 6]);
+            assert_eq!(stderr.lines().collect::<Vec<_>>(), [refusal, refusal]);
         }
         assert!(!stderr.contains("EXPERIMENTAL_LINUX_SUPPORT"), "{stderr}");
     }

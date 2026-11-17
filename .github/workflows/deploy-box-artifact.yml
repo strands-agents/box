@@ -316,7 +316,6 @@ jobs:
         run: |
           set -euo pipefail
           cargo set-version -p strands-box -p strands-box-containment "$VERSION"
-          cargo set-version --manifest-path crates/dogwood-legacy-migration/Cargo.toml "$VERSION"
 
       - name: Require the native macOS SDK
         if: matrix.target.triple == 'aarch64-apple-darwin'
@@ -326,8 +325,9 @@ jobs:
           test "${sdk%%.*}" -ge 27
 
       - name: Build strands-box (release)
-        # Package runtime helpers and the separately resolved migration validator
-        # beside Box. The validator is used only by the offline migration command.
+        # box, sock-alias, and contain-trampoline must ship together; the box
+        # resolves the trampoline from beside its own executable and refuses
+        # to start without it.
         if: matrix.target.triple == 'aarch64-apple-darwin'
         env:
           TRIPLE: ${{ matrix.target.triple }}
@@ -341,8 +341,6 @@ jobs:
             --target "$TRIPLE" \
             -p strands-box \
             -p strands-box-containment "${features[@]}"
-          cargo build --release --locked --target "$TRIPLE" --target-dir target \
-            --manifest-path crates/dogwood-legacy-migration/Cargo.toml
 
       - name: Build Linux against glibc 2.34
         if: endsWith(matrix.target.triple, '-unknown-linux-gnu')
@@ -358,13 +356,6 @@ jobs:
             box-linux-release \
             cargo build --release --locked --target "$TRIPLE" \
               -p strands-box -p strands-box-containment
-          docker run --rm \
-            --mount "type=bind,source=$PWD,target=/src,readonly" \
-            --mount "type=bind,source=$PWD/target,target=/target" \
-            --env CARGO_TARGET_DIR=/target \
-            box-linux-release \
-            cargo build --release --locked --target "$TRIPLE" \
-              --manifest-path crates/dogwood-legacy-migration/Cargo.toml
 
       - name: Package tarball
         # Stage the exact ./box-core layout, then tar its contents. Add a file
@@ -380,7 +371,6 @@ jobs:
           cp "target/${TRIPLE}/release/strands-box" "$stage/box"
           cp "target/${TRIPLE}/release/strands-box-sock-alias" "$stage/strands-box-sock-alias"
           cp "target/${TRIPLE}/release/strands-box-contain-trampoline" "$stage/strands-box-contain-trampoline"
-          cp "target/${TRIPLE}/release/strands-box-dogwood-1-0-migrate" "$stage/strands-box-dogwood-1-0-migrate"
           chmod 0755 "$stage"/*
           tar -C "$stage" -czf "dist/${asset}" .
           tar -tzf "dist/${asset}"

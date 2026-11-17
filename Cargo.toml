@@ -24,9 +24,6 @@ members = [
 # --all-targets` (which is what the unit-test CI leg runs). It carries its own
 # Cargo.lock for the same reason. See test-integ/README.md.
 exclude = [
-    # Migration validates old snapshots with the exact 1.0.0 engine and language.
-    # Its compatible-major dependencies require a separate resolution and lockfile.
-    "crates/dogwood-legacy-migration",
     ".agents/pocs",
     # The test suites and the reader they share. Excluded for the same reason as
     # `test-integ`: they read the BUILT box's artefacts as data rather than linking

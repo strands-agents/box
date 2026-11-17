@@ -422,6 +422,38 @@ policy denied this operation on 'example.com:443' [default-deny]: No permit poli
 A `[egress.<name>]` table with no matching permit leaves the host unreachable. A permit with no
 binding sends the request with a placeholder in place of the secret, which the provider rejects.
 
+## Start with fresh history after a Dogwood upgrade
+
+Box using Dogwood 1.1.2 refuses older history without a supported version record. No workload
+starts. The error directs you to start with a new box directory; Box does not erase or convert
+the old history.
+
+A new directory starts with no recorded activity. Counts and usage budgets start over. An earlier
+read no longer satisfies a rule that requires that read before a write. If those resets are not
+acceptable, keep using the existing build and box directory.
+
+To use the new build with fresh history:
+
+1. Stop the old Box run.
+2. Copy its configuration beside the original as `box-1.1.2.toml`. Keep the original configuration
+   and the complete old box directory intact.
+3. In the copy, set `box_dir` to a new absolute path outside the workload workspace. Its parent
+   directory must exist. Keep the policy, tool grammar, credential references, and workload settings.
+4. Run the new Box executable with the copied configuration:
+
+   ```sh
+   ./box-core/box run --config /absolute/path/to/box-1.1.2.toml
+   ```
+
+Replace the configuration path with your copy's absolute path. `run` creates the new box state
+and starts the configured workload. Keeping the configuration beside the original preserves
+relative policy paths. Credential references must still resolve in the operator environment.
+If `[agent] workspace` is absent, run from the same working directory as before.
+
+Do not copy generated box state or `private/dogwood.redb` into the new directory. Retaining the
+old directory keeps its history available to the old build. Activity in the new directory does
+not appear in the old one; there is no conversion between them.
+
 ## Troubleshooting load failures
 
 The box validates `policy.dw` before it starts. It refuses to start on a policy it cannot read, or
@@ -445,52 +477,6 @@ When the box suspects a rule is inert but cannot prove it, it prints a warning a
 ```text
 strands-box: warning: <finding>
 ```
-
-### Saved history requires migration
-
-A Box build using Dogwood 1.1.2 refuses previously used Dogwood 1.0.0 history until an explicit
-migration records the original policies and converts the saved state. No workload starts.
-Do not delete history or edit a rule to bypass this refusal: earlier activity must continue to count.
-
-Stop the Box process. Use the new Box executable and the configuration that selects the existing
-box directory. Keep the original policy and tool grammar files unchanged. First prepare the upgrade:
-
-```sh
-./box-core/box policy migrate-history --config /absolute/path/to/box.toml --to 1.1.2
-```
-
-Preparation reports the proposed conversion without changing policy or event records. Opening the
-database can update its internal metadata. To validate the complete conversion and apply it, run:
-
-```sh
-./box-core/box policy migrate-history --config /absolute/path/to/box.toml --to 1.1.2 --apply
-```
-
-The command holds the same operation lock as a Box run. If Box is still running, migration fails.
-It uses private copies to validate recovery and retains the original history file and its events.
-It does not start a workload, contact MCP servers, or resolve credentials. Missing original policies
-or historical tool schemas cause a refusal; discovering the tools again does not recover the old schemas.
-See the [migration interface and limits](../../crates/policy/README.md#upgrade-saved-history-from-dogwood-100).
-
-To return to a Box build using Dogwood 1.0.0, stop Box and convert the same history first:
-
-```sh
-./box-core/box policy migrate-history --config /absolute/path/to/box.toml --to 1.0.0 --apply
-```
-
-Keep the new Box executable and its `strands-box-dogwood-1-0-migrate` helper together for this step.
-The command converts saved history; it does not install the older Box build. Only switch binaries
-after conversion succeeds. The converter preserves activity recorded before and after the upgrade.
-A later rule edit, missing original input, or unsupported policy mapping can prevent conversion.
-
-Before using the new build again, stop the older Box process and run the upgrade command against
-that same history. This preserves activity recorded while the older build was running. Do not copy
-a pre-upgrade backup over a history file that contains newer activity.
-
-Without conversion, Box using Dogwood 1.0.0 can treat a generated spelling change as a policy edit
-and replace an unchanged rule. The replacement loses that rule's accumulated history. The explicit
-conversion prevents that replacement for the rules it validates; it does not change how later
-policy edits reset history.
 
 ### The rule does not parse
 

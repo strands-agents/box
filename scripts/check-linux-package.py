@@ -9,10 +9,7 @@ import subprocess
 import sys
 
 
-BINARIES = (
-    "box", "strands-box-sock-alias", "strands-box-contain-trampoline",
-    "strands-box-dogwood-1-0-migrate",
-)
+BINARIES = ("box", "strands-box-sock-alias", "strands-box-contain-trampoline")
 GLIBC_LIMIT = (2, 34)
 DEFAULT_TARGET = "aarch64-unknown-linux-gnu"
 TARGETS = {

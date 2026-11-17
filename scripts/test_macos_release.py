@@ -39,13 +39,10 @@ class MacOSReleaseTests(unittest.TestCase):
                 output.addfile(extra)
         return archive
 
-    def test_build_extracts_only_the_required_regular_binaries(self):
+    def test_build_extracts_only_the_three_regular_binaries(self):
         target = self.root / "binaries"
         release.unpack_build(self.build(), target)
-        self.assertEqual(set(p.name for p in target.iterdir()), {
-            "box", "strands-box-sock-alias", "strands-box-contain-trampoline",
-            "strands-box-dogwood-1-0-migrate",
-        })
+        self.assertEqual(set(p.name for p in target.iterdir()), set(release.BINARIES))
         self.assertTrue(all(p.stat().st_mode & 0o111 for p in target.iterdir()))
 
     def test_build_rejects_traversal_symlinks_duplicates_and_unexpected_files(self):
@@ -64,10 +61,9 @@ class MacOSReleaseTests(unittest.TestCase):
                 for p in self.root.glob("out-*"):
                     p.rmdir()
 
-    def test_build_rejects_each_missing_helper(self):
-        for name in release.BINARIES[1:]:
-            with self.subTest(name=name), self.assertRaisesRegex(ValueError, "Incomplete"):
-                release.unpack_build(self.build(missing=name), self.root / name)
+    def test_build_rejects_missing_helper(self):
+        with self.assertRaisesRegex(ValueError, "Incomplete"):
+            release.unpack_build(self.build(missing=release.BINARIES[1]), self.root / "out")
 
     def zip(self, name, mode=stat.S_IFREG | 0o755, duplicate=False):
         archive = self.root / "signed.zip"

@@ -198,9 +198,7 @@ the destination. A release can omit Linux or x86-64 assets. If the x86-64 archiv
 the download stops; the script does not substitute an ARM64 archive.
 
 The script verifies the checksum and extracts into temporary storage before changing destination files.
-The downloader requires executable `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` files.
-Current packages also include `strands-box-dogwood-1-0-migrate` for explicit history migration.
-Keep all package files together. Older releases can omit that validator.
+Linux packages must contain executable `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` files.
 The Linux package requires glibc 2.34 or newer and the GCC runtime library (`libgcc_s.so.1`).
 Before replacing files, the downloader runs the candidate's `box --version` in a private directory inside an existing destination.
 For a new destination, it uses the parent directory. This staging location must be writable and allow execution.
@@ -241,13 +239,10 @@ installs it on the first build. Build the box binaries from a clone with
 git clone https://github.com/strands-agents/box.git
 cd box
 cargo build --release -p strands-box -p strands-box-containment
-cargo build --release --locked --manifest-path crates/dogwood-legacy-migration/Cargo.toml --target-dir target
 ```
 
 Run the compiled binary as `./target/release/strands-box`. Keep its helper
-binaries in the same directory. The migration validator uses a separate Cargo lockfile to
-retain the exact Dogwood 1.0.0 engine and language. It runs only for an explicit
-[history migration](docs/user/policy.md#saved-history-requires-migration).
+binaries in the same directory.
 
 The [release guide](docs/dev/releases.md) covers version selection and publication for macOS, Linux ARM64, and experimental Linux x86-64.
 
@@ -269,19 +264,16 @@ for the offline dependency guards.
 Common tasks run through [`just`](https://github.com/casey/just):
 
 ```sh
-just build         # the CLI, runtime helpers, and history migration validator
-just test          # workspace and migration validator tests
+just build         # the CLI, the alias image, and the containment trampoline
+just test          # workspace tests
 just check         # pre-push gate: fmt-check + clippy + test
 just test-all      # workspace tests and box example checks
 ```
 
-`just test` builds the separately resolved validator and runs both Cargo test suites.
-For direct Cargo commands, build the validator first as shown above, using the debug profile
-for debug tests. `cargo test --workspace --all-features` then runs the main workspace.
-The `box_shell` and `box_credentials` suites require the `test-support` feature, which
-`--all-features` enables.
-Linux CI also runs the three native filesystem forwarding tests with a private build switch.
-See the [Linux native test guide](docs/dev/linux-native-tests.md#forwarding-buffer-tests)
+`cargo test --workspace --all-features` runs the workspace suite. Include
+`--all-features` to run the `box_shell` and `box_credentials` suites, which require
+the `test-support` feature. Linux CI also runs the three native filesystem forwarding tests
+with a private build switch. See the [Linux native test guide](docs/dev/linux-native-tests.md#forwarding-buffer-tests)
 for that command and the other native test prerequisites.
 
 In pull-request CI, changes to `docs/site-manifest.json`,

@@ -140,7 +140,7 @@ It waits up to 30 minutes for the result, and continues only when Apple accepts 
 Apple then issues a notarization ticket, which is a signed record of the accepted submission.
 The job staples the ticket to `Box.app`, so Gatekeeper can check the ticket without a network connection.
 The ticket is sometimes not available immediately, so the job makes up to five stapling attempts, 30 seconds apart.
-It confirms the stapled ticket, then confirms Apple's notarization of the bundle and its four executables, including the history migration validator.
+It confirms the stapled ticket, then confirms Apple's notarization of the bundle and its three executables.
 Then it creates the archive.
 
 The signing and verification jobs cannot read or write GitHub Actions caches.

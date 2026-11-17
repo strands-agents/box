@@ -12,7 +12,6 @@ system described above and the runtime opt-in below. For a source build, build t
 
 ```sh
 cargo build --release --locked -p strands-box -p strands-box-containment --features native-filesystem-policy
-cargo build --release --locked --manifest-path crates/dogwood-legacy-migration/Cargo.toml --target-dir target
 ```
 
 Sign the product bundle with an identity and provisioning profile that permit `com.apple.developer.endpoint-security.client`.

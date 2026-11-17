@@ -21,10 +21,7 @@ HEADERS = {
     ARM64: ("AArch64", "/lib/ld-linux-aarch64.so.1"),
     X86_64: ("Advanced Micro Devices X86-64", "/lib64/ld-linux-x86-64.so.2"),
 }
-BINARIES = (
-    "box", "strands-box-sock-alias", "strands-box-contain-trampoline",
-    "strands-box-dogwood-1-0-migrate",
-)
+BINARIES = ("box", "strands-box-sock-alias", "strands-box-contain-trampoline")
 
 
 def readelf_output(target, *requirements, machine=None, loader=None):
@@ -98,8 +95,8 @@ class LinuxPackageTests(unittest.TestCase):
         self.assertEqual(stderr, "")
         records = json.loads(stdout)
         self.assertEqual([record["binary"] for record in records], list(BINARIES))
-        self.assertEqual([record["architecture"] for record in records], [architecture] * len(BINARIES))
-        self.assertEqual([record["loader"] for record in records], [loader] * len(BINARIES))
+        self.assertEqual([record["architecture"] for record in records], [architecture] * 3)
+        self.assertEqual([record["loader"] for record in records], [loader] * 3)
         self.assertEqual(
             [call.args[0][-1] for call in run.call_args_list],
             [str(Path("package") / name) for name in BINARIES],
@@ -136,8 +133,6 @@ class LinuxPackageTests(unittest.TestCase):
         for name, headers, message in [
             ("strands-box-sock-alias", {"machine": "AArch64"}, "expected an .* executable"),
             ("strands-box-contain-trampoline", {"loader": HEADERS[ARM64][1]}, "expected loader"),
-            ("strands-box-dogwood-1-0-migrate", {"machine": "AArch64"}, "expected an .* executable"),
-            ("strands-box-dogwood-1-0-migrate", {"loader": HEADERS[ARM64][1]}, "expected loader"),
         ]:
             with self.subTest(binary=name):
                 def readelf(command, **kwargs):

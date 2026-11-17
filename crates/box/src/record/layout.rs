@@ -773,45 +773,6 @@ impl BoxRoot {
             .expect("creating a private state file returns one file"))
     }
 
-    /// Open existing history without creating a replacement for a missing file.
-    pub(crate) fn open_existing_dogwood_database(&self) -> Result<std::fs::File, BoxError> {
-        let path = self.dogwood_database();
-        let file = self.open_private_state_file(&path, false)?.ok_or_else(|| {
-            crate::error::HistoryMigrationError::MissingHistory { path: path.clone() }
-        })?;
-        if file
-            .metadata()
-            .map_err(|source| LayoutError::ReadDirectory {
-                path: path.clone(),
-                source,
-            })?
-            .len()
-            == 0
-        {
-            return Err(crate::error::HistoryMigrationError::MissingHistory { path }.into());
-        }
-        Ok(file)
-    }
-
-    /// Two private scratch files whose names stay alive through offline conversion.
-    pub(crate) fn history_migration_scratch(
-        &self,
-    ) -> Result<(tempfile::NamedTempFile, tempfile::NamedTempFile), BoxError> {
-        self.verify_identity()?;
-        let directory = self.private_directory();
-        let create = || {
-            tempfile::NamedTempFile::new_in(&directory).map_err(|source| {
-                crate::error::HistoryMigrationError::Scratch {
-                    path: directory.clone(),
-                    source,
-                }
-            })
-        };
-        let files = (create()?, create()?);
-        self.verify_identity()?;
-        Ok(files)
-    }
-
     /// This box's live record: the port it is served on, while it is loaded.
     pub(crate) fn live_record(&self) -> PathBuf {
         self.private_directory().join(LIVE_FILE)

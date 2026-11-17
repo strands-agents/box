@@ -1,8 +1,4 @@
-//! Commands for workspace policy artifacts and offline history conversion.
-
-mod migration;
-
-pub(crate) use migration::migrate_history;
+//! Commands that produce workspace policy artifacts.
 
 use std::io::Write as _;
 use std::path::Path;

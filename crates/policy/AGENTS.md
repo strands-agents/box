@@ -31,10 +31,6 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 
 - The lifecycle is `PolicyEngine::open` → `decide` → `record` → `effective`.
   `PolicyEngine::validate` and `PolicyEngine::check` sit off it and return no authority.
-  `PolicyMigration` prepares and applies explicit history conversions while Box is stopped; it returns no authority.
-  `MigrationTarget` selects Dogwood 1.0.0 or 1.1.2 storage, not the installed Box binary.
-  The independent legacy validator receives only scratch copies. Preserve its exact old engine and
-  language pins, the retained executable identity, and fresh conversion-generation validation.
 - The root `pub use` set is the whole API: `EgressPolicyInterceptor`, `RenameDestination`,
   `ScriptPermit`, `ScriptPolicyInterceptor`, `ScriptRefusal`, `ShellPolicyInterceptor`,
   `CatalogRefusal`, `CatalogStage`, `CompleteCatalog`, `DiscoveryFailure`, `ListPage`,
@@ -42,13 +38,12 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `Finding`, `Location`, `PolicyCheck`, `RuleRef`, `Decision`, `DenyReason`, `PolicyAttribution`,
   `RuleId`, `event_schema_source`, `PolicyDiagnostic`, `PolicyError`, `PolicyStagingError`,
   `McpSchemaError`, `compose_action_schema`, `generate_mcp_schema`,
-  `validate_mcp_schema_composition`, `MigrationInput`, `MigrationSummary`, `MigrationTarget`, `PolicyMigration`,
-  `DecisionObserver`, `Delivery`, `FsResult`, `McpReply`,
+  `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `McpReply`,
   `Outcome`, `PendingToolResponse`, `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`,
   `EffectivePolicy`, `Policy`, `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`,
   `FsOperation`, `Principal`, `Request`, `RequestId`, `GovernedBox`, `Operator`, `PolicyWarning`,
-  `ToolGrammar`, `ToolGrammars`, `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`. That is 64
-  names with `--all-features` and 58 by default; recompute it when you touch the façade.
+  `ToolGrammar`, `ToolGrammars`, `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`. That is 60
+  names with `--all-features` and 54 by default; recompute it when you touch the façade.
 - `check` and `validate` share one composition (`check_and_expand`), and the staged check repeats
   the steps of `open_staged_with_engine` with no engine. A finding keeps a span only when the span
   is an offset into the authored text: a Dogwood parse error and a Cedar validation error over

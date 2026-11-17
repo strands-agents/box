@@ -23,10 +23,7 @@ import zipfile
 
 IDENTIFIER = "com.amazon.strands.box"
 ENTITLEMENT = "com.apple.developer.endpoint-security.client"
-BINARIES = (
-    "box", "strands-box-sock-alias", "strands-box-contain-trampoline",
-    "strands-box-dogwood-1-0-migrate",
-)
+BINARIES = ("box", "strands-box-sock-alias", "strands-box-contain-trampoline")
 LAUNCHER = '''#!/bin/sh
 set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)

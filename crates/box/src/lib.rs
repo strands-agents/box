@@ -270,13 +270,3 @@ pub fn generate_policy_schema(config: PathBuf, output_dir: PathBuf) -> ExitCode 
         RunOptions::default(),
     )
 }
-
-/// Prepare or apply a stopped Box's saved policy history conversion.
-///
-/// `config` selects an existing configured Box. `to` must be `"1.0.0"` or `"1.1.2"`,
-/// the Dogwood version that will read its history. `apply = false` reports the plan;
-/// `apply = true` converts it after validation. A running Box is refused.
-/// This function starts no workload, server discovery, or credential initialization.
-pub fn migrate_policy_history(config: PathBuf, to: &str, apply: bool) -> ExitCode {
-    command::migrate_policy_history(&config, to, apply)
-}

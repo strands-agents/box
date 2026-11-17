@@ -40,7 +40,7 @@ It does not rehearse all publication prerequisites.
 
 Linux ARM64 and x86-64 build in the existing Amazon Linux 2023 container, which provides GNU C library (glibc) 2.34.
 Every build checks that the packaged `box --version` reports the selected release version.
-For Linux ARM64 and x86-64, the package checker inspects all four packaged executables for the selected architecture,
+For Linux ARM64 and x86-64, the package checker inspects all three executables for the selected architecture,
 the matching program loader, and glibc requirements no newer than 2.34.
 To repeat the x86-64 check after extracting its workflow archive into `stage/box-core`, run this command
 from the repository root on a Linux host with Python 3 and `readelf` installed:
@@ -107,12 +107,7 @@ If execution fails after final extraction, the downloader reports failure and wa
 If the release omits your Linux architecture, select a tag that includes its archive and checksum entry.
 The downloader does not fall back to an older release or a prerelease automatically.
 For ARM64, manual checksum verification and extraction from the release notes remain an alternative.
-Keep the entire package together, including `box`, `strands-box-sock-alias`,
-`strands-box-contain-trampoline`, and the current package's `strands-box-dogwood-1-0-migrate`.
-The validator is built from its own locked workspace, staged in Linux archives, and signed
-with the other helper executables in the macOS bundle. Older archives can omit it.
-Use a fresh download directory when retaining an older installation; overlay extraction
-does not remove files that are absent from the selected archive.
+Keep `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` together.
 On x86-64, set `EXPERIMENTAL_X86_SUPPORT=TRUE` in the environment before running workloads.
 Verify the reported version, an allowed operation, and a denied operation on each published Linux architecture using the approved test configuration.
 Record the release URL, source commit, archive hash, host baseline, commands, and results.

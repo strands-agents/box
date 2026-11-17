@@ -86,16 +86,15 @@ now, because `run` takes one `--config` path and searches nowhere. **That direct
   claiming otherwise. Both are known debt, not oversights.
 - **`error` holds the typed taxonomy**, one variant group per owner above. Every module needs
   it, so it must not live inside one of them.
-- **The composition stays thin.** `main.rs` parses argv and calls one library entry point per
-  command. `run` and schema generation use `command::execute`; it applies platform admission,
-  hardens `run`, creates the runtime, and dispatches. `migrate_policy_history` uses the synchronous
-  offline command path with the same platform admission before opening configuration or history.
-  It creates no workload runtime. Configuration, migration, and recovery logic belong in their
-  owning modules, not in the executable or library facade.
+- **The composition stays thin.** `main.rs` declares the four modules and calls
+  `command::cli_main()`; `cli_main` parses argv, applies the hardening for `run`, builds a runtime,
+  and hands off to `dispatch`, which takes one verb per arm. A fifth step, or an inline
+  `insert`/`join`/`if let`, belongs in a phase. If either file grows, the phase boundary is
+  wrong.
 - **Linux x86 command execution requires explicit operator consent.** `command::execute` calls
   `platform::preflight` before hardening, runtime creation, host callbacks, or configuration reads.
   The operator must set `EXPERIMENTAL_X86_SUPPORT` to the exact value `TRUE`. This check covers
-  the CLI and the library's `run`, `generate_policy_schema`, and `migrate_policy_history` calls. Help and version output
+  the CLI and the library's `run` and `generate_policy_schema` calls. Help and version output
   finish during argument parsing, before this check. ARM and other targets retain their startup
   behavior. `EXPERIMENTAL_LINUX_SUPPORT` remains unused. The opt-in changes no containment
   control and is not inherited into the workload environment.

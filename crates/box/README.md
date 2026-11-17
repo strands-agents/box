@@ -36,17 +36,16 @@ state and starts the workload.
 ```text
 strands-box run    --config <file> [-- <args>...]
 strands-box policy generate-schema --config <file> --output-dir <dir>
-strands-box policy migrate-history --config <file> --to <1.0.0|1.1.2> [--apply]
 ```
 
-On Linux x86-64, these commands require the operator environment variable
+On Linux x86-64, both verbs require the operator environment variable
 `EXPERIMENTAL_X86_SUPPORT=TRUE`. If the variable is unset or has any other value,
 Box refuses execution before reading the configuration or starting a workload. `--help` and `--version`
-remain available. The same check applies to the Rust library functions `run`,
-`generate_policy_schema`, and `migrate_policy_history`; set the variable before starting the host application.
+remain available. The same check applies to the Rust library functions `run` and
+`generate_policy_schema`; set the variable before starting the host application.
 ARM64 does not require the flag. This startup opt-in does not change sandbox permissions.
 
-The top-level verbs are `run` and `policy`. The caller that created `box_dir` owns its lifecycle: it holds the path, so it
+There are two verbs. The caller that created `box_dir` owns its lifecycle: it holds the path, so it
 stops a box by ending the `run` process and deletes one by removing the directory.
 
 `policy generate-schema` reads the MCP servers that `--config` declares and requests each one's tool
@@ -55,19 +54,6 @@ grammar the configuration installs, and each generated server schema, and `event
 `--output-dir`. A configuration with zero declared servers receives both canonical files. It starts
 each `stdio` server outside containment, from the trusted process, which `run` never does. Runtime
 policy staging uses live server discovery.
-
-`policy migrate-history` prepares a conversion of an existing box's saved history for the
-selected Dogwood version. Preparation changes no policy or event record; opening the database
-can update database metadata. Add `--apply` to validate private copies and commit the conversion.
-The command requires Box to be stopped and holds the same operation lock as `run`. It never
-creates a box, starts a workload, contacts an MCP server, or resolves credentials. It uses the
-original policy and schema inputs and refuses missing or changed inputs. Keep the matching
-`strands-box-dogwood-1-0-migrate` validator beside the Box executable.
-
-`--to` selects the saved-history format. It does not install a different Box binary. After a
-successful downgrade conversion, open the history with a Box build using Dogwood 1.0.0. Before
-returning to this build, convert that same history with `--to 1.1.2 --apply`. See
-[the migration procedure](../../docs/user/policy.md#saved-history-requires-migration).
 
 Authority reaches a box through the exact configuration and policy sources that `run` loads. A
 relative policy path resolves beside the selected configuration. The policy governs **that box

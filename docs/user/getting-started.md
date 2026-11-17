@@ -96,8 +96,8 @@ To run Box on x86-64, set its experimental startup opt-in in the same terminal:
 export EXPERIMENTAL_X86_SUPPORT=TRUE
 ```
 
-Box requires the exact value `TRUE` for `run`, `policy generate-schema`, and
-`policy migrate-history`, including their Rust library entry points. Help and version output do not require the flag.
+Box requires the exact value `TRUE` for `run` and `policy generate-schema`, including
+their Rust library entry points. Help and version output do not require the flag.
 ARM64 does not require the flag. It does not change the sandbox permissions.
 
 After installation, continue with the [Amazon EKS coding example](tutorials/eks.md) or the [AgentCore Runtime shipment example](tutorials/agentcore-runtime.md).
@@ -115,11 +115,9 @@ To build Box yourself, install [rustup](https://rustup.rs/). Build it and copy t
 ```sh
 git clone https://github.com/strands-agents/box.git box-src
 cargo build --release --manifest-path box-src/Cargo.toml -p strands-box -p strands-box-containment
-cargo build --release --locked --manifest-path box-src/crates/dogwood-legacy-migration/Cargo.toml --target-dir box-src/target
 mkdir box-core
 cp box-src/target/release/strands-box box-core/box
 cp box-src/target/release/strands-box-sock-alias box-src/target/release/strands-box-contain-trampoline box-core/
-cp box-src/target/release/strands-box-dogwood-1-0-migrate box-core/
 ```
 
 The x86-64 startup opt-in above also applies to builds from source.
