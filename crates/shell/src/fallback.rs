@@ -106,6 +106,15 @@ fn refusal(error: &io::Error) -> (i32, String) {
     (status, format!("strands-shell: {label}: {error}\n"))
 }
 
+/// The diagnostic for a name that no program in this box answers to.
+fn not_found(program: &str) -> String {
+    format!(
+        "strands-shell: {program}: command not found\n\
+         strands-shell: {program}: not a program in this box. The box fixes its programs when it \
+         starts, so a program installed during the run does not run\n"
+    )
+}
+
 async fn write_stderr(context: &mut CommandContext, text: &str) {
     if let (_, _, Some(stderr)) = context.stdio() {
         let _ = stderr.write_all(text.as_bytes()).await;
@@ -273,7 +282,8 @@ impl CommandFallback for ShellKernel {
             }
             Decided::NotFound(permit) => {
                 finish(context, permit, 127).await;
-                return Ok(None);
+                write_stderr(context, &not_found(&program)).await;
+                return Ok(Some(127));
             }
             Decided::Spawn { permit, program } => (Unsettled(Some(permit)), program),
         };
@@ -292,7 +302,8 @@ impl CommandFallback for ShellKernel {
         };
         if !resolved.bound {
             permit.finish(context, 127).await;
-            return Ok(None);
+            write_stderr(context, &not_found(&program)).await;
+            return Ok(Some(127));
         }
         let spawn = HostSpawn {
             program: resolved.path.into(),

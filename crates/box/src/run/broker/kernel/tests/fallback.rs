@@ -76,6 +76,19 @@ fn a_command_found_nowhere_keeps_status_127() {
         "{}",
         output.stderr
     );
+    assert!(
+        output
+            .stderr
+            .contains("a program installed during the run does not run"),
+        "the refusal says that the box fixes its programs at start: {}",
+        output.stderr
+    );
+    assert_eq!(
+        output.stderr.matches("command not found").count(),
+        1,
+        "the Shell adds no second diagnostic: {}",
+        output.stderr
+    );
 }
 
 #[test]

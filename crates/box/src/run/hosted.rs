@@ -214,7 +214,11 @@ fn select_tool_with_commands(
             trailing: args.to_vec(),
             shebang_interpreters: ShebangInterpreters::MustBeListed,
         }),
-        None => Err(no_match()),
+        None => Err(refuse(
+            "no `[tool.<name>] command` matches this program and its leading arguments. The box \
+             fixes its tools when it starts, so a program installed during the run is not a tool"
+                .to_string(),
+        )),
     }
 }
 
@@ -3649,6 +3653,10 @@ while :; do :; done"#
                 .contains("no `[tool.<name>] command` matches this program"),
             "{error}"
         );
+        assert!(
+            !error.to_string().contains("installed during the run"),
+            "a program a table names is a tool, so its refusal is about arguments: {error}"
+        );
     }
 
     /// **A program under a caller `deny` entry is refused** even inside a caller `exec` entry.
@@ -3736,6 +3744,12 @@ while :; do :; done"#
                 .to_string()
                 .contains("no `[tool.<name>] command` matches this program"),
             "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("a program installed during the run is not a tool"),
+            "a program no table names says that tools are fixed at start: {error}"
         );
     }
 
