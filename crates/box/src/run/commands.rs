@@ -65,13 +65,17 @@ pub(crate) struct LeftOut {
 /// Remove from `record` each `[tool.<name>]` whose program is not installed, so no later step of the
 /// run sees it, and answer with those tables, refusing one whose `command` no run can expand.
 pub(crate) fn leave_out_absent(record: &mut Record) -> Result<Vec<LeftOut>, BoxError> {
+    use super::contain::boundary::environment;
+
     let mut left_out = Vec::new();
     for (label, spec) in &record.tool {
         if !super::contain::executable::is_absent(spec.program(), &spec.search_path()) {
             continue;
         }
         let table = format!("[tool.{label}]");
-        if let Some(reason) = super::contain::boundary::environment::argument_refusal(spec) {
+        if let Some(reason) =
+            environment::program_refusal(spec).or_else(|| environment::argument_refusal(spec))
+        {
             return Err(ConfigError::Process { table, reason }.into());
         }
         left_out.push((label.clone(), table, spec.program().to_string()));
@@ -1768,8 +1772,9 @@ mod left_out_tests {
         assert!(commands.get("bare").is_none());
     }
 
-    /// **Every other check on a tool's file still stops the box**: a file that is not executable,
-    /// a directory, and a relative path stay in the record, so the load refuses them.
+    /// **Every other check on a tool's file still stops the box**: a file that is not executable
+    /// and a directory, by path and by bare name, and a relative path stay in the record, so the
+    /// load refuses them.
     #[test]
     fn a_program_that_exists_is_never_left_out() {
         let root = tempfile::tempdir().expect("root");
@@ -1778,12 +1783,18 @@ mod left_out_tests {
         executable(&plain, 0o644);
         let directory = root.join("directory");
         std::fs::create_dir(&directory).expect("directory");
-        for (label, command) in [
-            ("plain", plain.display().to_string()),
-            ("directory", directory.display().to_string()),
-            ("relative", "bin/tool".to_string()),
+        for (label, command, path) in [
+            ("plain", plain.display().to_string(), None),
+            ("directory", directory.display().to_string(), None),
+            ("bare_plain", "plain".to_string(), Some(root.as_path())),
+            (
+                "bare_directory",
+                "directory".to_string(),
+                Some(root.as_path()),
+            ),
+            ("relative", "bin/tool".to_string(), None),
         ] {
-            let mut record = with_tools(vec![(label, spec(&[&command], None))]);
+            let mut record = with_tools(vec![(label, spec(&[&command], path))]);
 
             let left_out = leave_out_absent(&mut record).expect("nothing is refused here");
 
@@ -1793,10 +1804,10 @@ mod left_out_tests {
         }
     }
 
-    /// **A left-out tool whose `command` holds an argument no run can expand still stops the box**,
-    /// so a typo in a token is reported whether or not the program is installed.
+    /// **A tool whose program holds a token, or whose argument holds one no run can expand, still
+    /// stops the box**, so a typo in a token is reported whether or not the program is installed.
     #[test]
-    fn a_left_out_tool_with_an_unexpandable_argument_is_refused() {
+    fn a_left_out_tool_with_an_unexpandable_token_is_refused() {
         let mut record = with_tools(vec![(
             "tsx",
             spec(&["/nonexistent/strands-box/tsx", "${NOT_A_VALUE}"], None),
@@ -1808,6 +1819,16 @@ mod left_out_tests {
 
         assert!(refusal.contains("[tool.tsx]"), "{refusal}");
         assert!(refusal.contains("NOT_A_VALUE"), "{refusal}");
+        for program in ["/nonexistent/${USER}/tsx", "${TSX}"] {
+            let mut record = with_tools(vec![("tsx", spec(&[program], None))]);
+
+            let refusal = leave_out_absent(&mut record)
+                .expect_err("a program is never expanded")
+                .to_string();
+
+            assert!(refusal.contains("[tool.tsx]"), "{refusal}");
+            assert!(refusal.contains("a program is never expanded"), "{refusal}");
+        }
         let mut record = with_tools(vec![(
             "tsx",
             spec(

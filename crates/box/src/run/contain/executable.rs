@@ -104,19 +104,20 @@ impl Resolver<'_> {
     }
 }
 
-/// Whether `program` is not installed: a bare name with no executable match on `search_path`, or an
-/// absolute path at which no file exists after every symbolic link is followed.
+/// Whether `program` is not installed: nothing exists, after every symbolic link is followed, at an
+/// absolute path or at a bare name in any absolute `search_path` entry.
 pub(crate) fn is_absent(program: &str, search_path: &OsStr) -> bool {
+    let nothing_at = |path: &Path| {
+        std::fs::metadata(path).is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+    };
     let path = Path::new(program);
     if path.is_absolute() {
-        return std::fs::metadata(path)
-            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+        return nothing_at(path);
     }
     path.components().count() == 1
-        && matches!(
-            Resolver { search_path }.resolve(path),
-            Err(ExecutableError::NotOnPath { .. })
-        )
+        && std::env::split_paths(search_path)
+            .filter(|directory| directory.is_absolute())
+            .all(|directory| nothing_at(&directory.join(path)))
 }
 
 /// The search path that the hosted Shell finds a bare program name on: this process's `PATH`, else

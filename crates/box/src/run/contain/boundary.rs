@@ -374,14 +374,10 @@ impl Boundary {
         // is the one exec grant every profile carries. It is the identity the profile grants and the
         // string the box execs, so no token expands there, and one that appears is refused rather
         // than left to fail as a search miss.
-        if spec.program().contains(environment::OPENING) {
+        if let Some(reason) = environment::program_refusal(spec) {
             return Err(ConfigError::Process {
                 table: table.to_string(),
-                reason: format!(
-                    "`command` names the program as {:?}, and a program is never expanded; \
-                     write the path",
-                    spec.program()
-                ),
+                reason,
             }
             .into());
         }
@@ -1600,6 +1596,17 @@ pub(crate) mod environment {
                 OTLP_PROTOCOL.to_string(),
             ),
         ])
+    }
+
+    /// The refusal a `${...}` in `spec`'s program meets, because a program is never expanded.
+    pub(crate) fn program_refusal(spec: &ProcessSpec) -> Option<String> {
+        spec.program().contains(OPENING).then(|| {
+            format!(
+                "`command` names the program as {:?}, and a program is never expanded; \
+                 write the path",
+                spec.program()
+            )
+        })
     }
 
     /// The refusal that expanding `spec`'s fixed arguments meets in every run, if any.

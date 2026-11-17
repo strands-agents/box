@@ -773,8 +773,10 @@ own `exec` entries needs no table of its own.
 When a tool's program is not installed, Box leaves that tool out and the box still starts. The
 program is not installed when:
 
-- a bare name has no executable match on the tool's search path, or
-- nothing exists at an absolute path. A symbolic link to a file that doesn't exist counts.
+- nothing with a bare name's spelling exists in any directory on the tool's search path, or
+- nothing exists at an absolute path.
+
+A symbolic link to a file that doesn't exist counts as nothing.
 
 `run` prints one line for each tool it leaves out, before the workload starts:
 
@@ -789,8 +791,10 @@ during the run, or a file that appears later at the tool's path, does not run wi
 grants.
 
 Box still refuses to start when the program exists and fails a check: it is not executable, it is
-not a regular file, a write grant reaches it, or a `command` argument names no value Box can expand
-in `${NAME}`. So a typo in a `command` path does not stop the box; check the `left out` lines.
+not a regular file, or a write grant reaches it. A bare name counts as existing when any directory
+on the search path holds something with that name. Box also refuses a program that holds `${`,
+because a program is never expanded, and a `command` argument that names no value Box can expand in
+`${NAME}`. So a typo in a `command` path does not stop the box; check the `left out` lines.
 
 The example box declares no tool, so a program its shell names is a `shell:spawn` decision with no
 table behind it, and the example policy permits none. A git tool for the CLI's shell, with git from
