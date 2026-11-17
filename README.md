@@ -257,6 +257,9 @@ automated signing, notarization, package verification, and release gates.
 The [fuzzing guide](docs/dev/fuzzing.md) covers the long libFuzzer run of the tool grammar shell
 parser.
 
+Before testing, [prepare the dependency cache](CONTRIBUTING.md#before-you-open-a-pull-request)
+for the offline dependency guards.
+
 Common tasks run through [`just`](https://github.com/casey/just):
 
 ```sh
