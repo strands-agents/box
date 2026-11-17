@@ -421,13 +421,14 @@ A target that fails while the box runs loses the record, and Box does not retry.
 Box prints one line on stderr if any of these happened:
 
 - The telemetry queue was full and refused a record, or a record was still queued when the final
-  export stopped. This count is records.
+  export stopped. This count is records, counted once for each target that missed them: a record
+  that two targets missed counts twice.
 - An export to a configured target failed. This count is exports, not records: one export can carry
   many records.
 - The final export did not finish in time.
 
 ```text
-strands-box: warning: telemetry records were lost: 441 records were dropped before export
+strands-box: warning: telemetry records were lost: 441 records were dropped before export to the configured targets
 strands-box: warning: telemetry records were lost: 2 exports to the configured targets failed
 ```
 

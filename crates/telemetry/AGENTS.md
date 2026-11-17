@@ -275,9 +275,12 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   in a burst behind an OTLP target answering after 300 ms, 2560 landed (512 in flight plus 2048
   queued), 441 were lost, `dropped` was 0, the drain `Completed`, and no line printed.
   So each lane owns one `Backlog`: `TargetLane::emit` counts each record it hands to the SDK, and
-  `SharedTarget::export` counts each record that reaches the exporter. At the drain, the difference
-  is the records no exporter received: refused by the full queue, or still queued when the drain
-  ended. `drain_warning` names it as the first cause. The count needs no new dependency and does
+  `SharedTarget::export` counts each record that reaches the exporter. At the drain, the sum over
+  the lanes is the records no exporter received: refused by the full queue, or still queued when the
+  drain ended. **The sum is per target**, so a record two lanes missed counts twice, and the line says
+  "to the configured targets" as the failed-export cause does;
+  `a_record_two_targets_missed_counts_once_for_each` pins it. `drain_warning` names it as the first
+  cause. The count needs no new dependency and does
   not read SDK internals. `a_record_the_full_queue_refuses_is_counted_and_reported` (landed plus
   counted equals submitted), `a_burst_the_queue_holds_reports_no_loss`, and
   `a_dropped_record_is_named_in_the_loss_line` are the pins; the first fails when the `handed` count

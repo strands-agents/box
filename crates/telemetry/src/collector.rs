@@ -56,8 +56,10 @@ fn drain_warning(unexported_records: u64, failed_exports: u64, finished: bool) -
     let mut causes = Vec::new();
     match unexported_records {
         0 => {}
-        1 => causes.push("1 record was dropped before export".to_owned()),
-        records => causes.push(format!("{records} records were dropped before export")),
+        1 => causes.push("1 record was dropped before export to a configured target".to_owned()),
+        records => causes.push(format!(
+            "{records} records were dropped before export to the configured targets"
+        )),
     }
     match failed_exports {
         0 => {}
@@ -2276,7 +2278,8 @@ mod tests {
             .expect("a refused record is a loss");
         assert!(
             warning.ends_with(&format!(
-                "telemetry records were lost: {unexported} records were dropped before export"
+                "telemetry records were lost: {unexported} records were dropped before export to the \
+                 configured targets"
             )),
             "{warning}"
         );
@@ -2310,27 +2313,77 @@ mod tests {
     #[test]
     fn a_dropped_record_is_named_in_the_loss_line() {
         for (unexported, failed, finished, cause) in [
-            (1, 0, true, "lost: 1 record was dropped before export"),
-            (441, 0, true, "lost: 441 records were dropped before export"),
+            (
+                1,
+                0,
+                true,
+                "lost: 1 record was dropped before export to a configured target",
+            ),
+            (
+                441,
+                0,
+                true,
+                "lost: 441 records were dropped before export to the configured targets",
+            ),
             (
                 441,
                 0,
                 false,
-                "lost: 441 records were dropped before export, and the final export did not \
-                 finish in time",
+                "lost: 441 records were dropped before export to the configured targets, and the \
+                 final export did not finish in time",
             ),
             (
                 2,
                 3,
                 false,
-                "lost: 2 records were dropped before export, 3 exports to the configured targets \
-                 failed, and the final export did not finish in time",
+                "lost: 2 records were dropped before export to the configured targets, 3 exports \
+                 to the configured targets failed, and the final export did not finish in time",
             ),
         ] {
             let warning = drain_warning(unexported, failed, finished).expect("a loss is reported");
             assert!(warning.ends_with(cause), "{warning}");
             assert_eq!(warning.lines().count(), 1, "one line: {warning}");
         }
+    }
+
+    /// **A record two targets missed counts once for each**, which is why the line names the
+    /// configured targets rather than distinct records.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_record_two_targets_missed_counts_once_for_each() {
+        const BURST: u64 = 4000;
+        if queue_is_resized() {
+            return;
+        }
+        let directory = tempfile::tempdir().expect("tempdir");
+        let target = |name: &str| {
+            Target::new(
+                TargetKind::File,
+                directory.path().join(name).to_string_lossy().to_string(),
+            )
+        };
+        let collector = Collector::start(
+            TelemetryConfig::for_box("demo")
+                .with_target(target("one.jsonl"))
+                .with_target(target("two.jsonl")),
+        )
+        .expect("open");
+
+        burst(&collector, usize::try_from(BURST).expect("fits"));
+        // A shutdown sent to a full queue is refused, so wait until both lanes have room.
+        let full = *crate::export::FULL_BATCH;
+        until("both lanes export their full batches", || {
+            collector
+                .backlogs
+                .iter()
+                .all(|backlog| backlog.unexported() <= BURST - 3 * full && !backlog.busy())
+        })
+        .await;
+        let ended = shut_down_off_the_runtime_thread(&collector).await;
+        assert_eq!(ended, Shutdown::Completed);
+        let [one, two] = [0, 1].map(|lane| collector.backlogs[lane].unexported());
+        assert!(one > 0, "the burst overflowed the first lane");
+        assert_eq!(one, two, "the same burst overflowed both lanes equally");
+        assert_eq!(collector.unexported(), one + two);
     }
 
     /// One agent log record, as the agent's own exporter posts it.
