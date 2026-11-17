@@ -657,6 +657,7 @@ fn one_line<T: serde::Serialize>(request: &T) -> std::result::Result<Vec<u8>, OT
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncWriteExt as _;
 
     /// A file target opens under a directory that does not exist yet.
     #[test]
@@ -897,7 +898,7 @@ mod tests {
     /// vendor's own header name was never in that list at all.
     #[tokio::test]
     async fn a_redirect_never_carries_the_credential() {
-        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        use tokio::io::AsyncReadExt as _;
 
         let second = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
