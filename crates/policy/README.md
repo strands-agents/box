@@ -341,7 +341,7 @@ answer; any other one that the reach floor or
 a guard against a changed path refuses records a `::error`. Every filesystem response also carries `output.result`, one of three
 `Box::FsResponseResult` values: `"completed"`, `"descriptor_issued"` (an open issued a
 descriptor whose bytes move later), or `"indeterminate"` (a permit was dropped
-without reporting). A rule that counts certain completions matches
+without reporting, or a write failed after part of it landed). A rule that counts certain completions matches
 `output.result: Box::FsResponseResult::"completed"`, which excludes the other two.
 
 `fs:other` is its own action, so a permit for `fs:read`, `fs:write`, `fs:delete`, or
@@ -447,8 +447,9 @@ A response names the same action whose request was authorized, so a rule joins a
 
 `FsResult` reports how a filesystem operation ended: `Completed`,
 `DescriptorIssued`, `Failed`, or `Indeterminate`. `DescriptorIssued` is distinct on
-purpose — an open issues a descriptor, and the transfer it enables happens outside the
-admitted call, so a rule counting completed writes must exclude it.
+purpose — an open that only issues a descriptor, such as a read or a Python `open()`,
+records it, and the transfer it enables happens outside the admitted call, so a rule
+counting completed writes must exclude it.
 
 `Delivery` reports how much of a message left: `Completed { bytes }`,
 `Partial { accepted_bytes }`, `Failed`, or `Indeterminate { accepted_bytes }`.

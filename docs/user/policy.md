@@ -169,6 +169,11 @@ strands-shell: tee: policy denied this operation on '~/project/notes.md' [policy
 - The rule counts `fs:write::response` events with result `completed`, which the box records when a
   content write finishes. A refused write does not count, and a write still in flight does not count
   yet, so a burst of writes started together can exceed the budget by the size of the burst.
+  A write that fails after part of it lands, such as one cut off by the Shell's file size limit,
+  records `indeterminate` and does not count.
+- The unit differs by interpreter. In the Shell, one write is one file opened for writing and
+  closed, so `{ printf a; printf b; } > notes.md` counts once. In Python, each `write()` on an
+  open file counts once.
 - The `when` clause limits the `forbid` to content writes. A `mkdir` is `fs:write` with operation
   `create_dir`, so the budget leaves it alone. A rename is `fs:move`, and a delete is `fs:delete`;
   each needs its own rule.

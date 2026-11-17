@@ -352,6 +352,54 @@ when temporal {{
     );
 }
 
+/// The write budget from `docs/user/policy.md` counts each Shell write, one call at a time.
+///
+/// Each `zsh -lc` is its own connection with its own Shell, so a write counts only when the call
+/// records it before it answers. The writes go to the Shell's own `/tmp`, which needs no grant.
+#[test]
+fn a_write_budget_counts_each_calls_shell_write() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    const CAP: usize = 3;
+    let policy = format!(
+        r#"{PERMISSIVE_POLICY}
+@id("write_budget")
+forbid (principal, action == Box::Action::"fs:write", resource)
+when {{ context.input.operation == Box::FsWriteOperation::"write_content" }}
+when temporal {{
+  exists (total: Long). (
+    (count for (t: Timepoint). where (
+      formerly within 1h (
+        Box::Action::"fs:write"::response{{ input.path: _, input.operation: Box::FsWriteOperation::"write_content", output.result: Box::FsResponseResult::"completed" }} && tp(t)
+      )
+    )) == total && total >= {CAP}
+  )
+}};
+"#
+    );
+    let box_ = box_under(&policy, "shell-write-budget");
+
+    let attempts = CAP + 2;
+    let output = box_.bash(&format!(
+        r#"permitted=0
+           denied=0
+           for (( i = 0; i < {attempts}; i++ )); do
+               if zsh -lc "printf x > /tmp/written-$i" >/dev/null 2>&1; then
+                   permitted=$(( permitted + 1 ))
+               else
+                   denied=$(( denied + 1 ))
+               fi
+           done
+           echo "permitted=$permitted denied=$denied""#
+    ));
+
+    assert!(
+        stdout(&output).contains(&format!("permitted={CAP} denied=2")),
+        "the budget must permit exactly {CAP} writes and then deny: {output:?}"
+    );
+}
+
 #[test]
 fn a_temporal_rule_reads_the_exit_status_of_an_earlier_command() {
     if !fixture::namespace_launcher_is_usable() {

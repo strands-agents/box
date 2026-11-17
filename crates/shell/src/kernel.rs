@@ -21,6 +21,7 @@ use crate::fallback::{self, Commands, ScriptRunner};
 use crate::host::{self, Mounts};
 use crate::program::{HostPrograms, HostSpawner};
 use crate::resolve;
+use crate::writer::{ServedWriter, Writes};
 use crate::{Network, memory};
 
 /// Whether an operation acts on a symlink's target or on the link itself.
@@ -83,6 +84,8 @@ pub struct ShellKernel {
     running: StdMutex<Vec<(CommandKey, Box<dyn EffectPermit>)>>,
     /// Commands for the fallback, decided before their pipeline started.
     decided: StdMutex<Vec<(CommandKey, fallback::Decided)>>,
+    /// Served writes whose outcome is recorded when their last copy closes.
+    writes: Writes,
 }
 
 type CommandKey = (String, Vec<String>, PathBuf);
@@ -108,6 +111,7 @@ impl ShellKernel {
             commands: Commands::default(),
             running: StdMutex::new(Vec::new()),
             decided: StdMutex::new(Vec::new()),
+            writes: Writes::default(),
         }
     }
 
@@ -149,7 +153,21 @@ impl ShellKernel {
         Ok(network)
     }
 
+    /// Wait until each write of this Call whose every copy is closed has recorded its outcome, and
+    /// return the oldest recording failure not yet reported.
+    ///
+    /// Each command, network request, and Call reports through this, so a closed write counts
+    /// before the next one is decided, and its failure reaches the workload on the next command.
+    pub async fn record_closed_writes(&self) -> io::Result<()> {
+        self.writes.record_closed(true).await
+    }
+
+    /// Decide one filesystem effect after closed writes are recorded.
+    ///
+    /// The Shell discards the errors of many filesystem calls, such as a command lookup's, so a
+    /// recording failure is left for the next command to report.
     async fn admit(&self, attempt: &EffectAttempt<'_>) -> io::Result<Permit> {
+        self.writes.record_closed(false).await?;
         self.interceptor.intercept(attempt).await.map(Permit::new)
     }
 
@@ -288,7 +306,7 @@ impl ShellKernel {
         proc: &mut Process,
         path: &Resolved,
         flags: OpenFlags,
-    ) -> io::Result<Fd> {
+    ) -> io::Result<(Fd, Option<ServedWriter>)> {
         let mut generation = self.guard(path).await?;
         let result = if self.backend.mounts.serves(&path.path) {
             match self.backend.mounts.resolve_host(&path.path) {
@@ -304,6 +322,30 @@ impl ShellKernel {
             *generation = generation.wrapping_add(1);
         }
         result
+    }
+
+    /// Record a write open's outcome: a served writer's when its last copy closes, and any other
+    /// descriptor's now.
+    async fn record_write(
+        &self,
+        permit: Permit,
+        path: &str,
+        opened: io::Result<(Fd, Option<ServedWriter>)>,
+    ) -> io::Result<Fd> {
+        match opened {
+            Ok((fd, Some(writer))) => {
+                self.writes.record_at_close(writer, permit, path);
+                Ok(fd)
+            }
+            Ok((fd, None)) => {
+                permit.record(EffectResult::DescriptorIssued).await?;
+                Ok(fd)
+            }
+            Err(error) => {
+                permit.record(EffectResult::Failed(error.kind())).await?;
+                Err(error)
+            }
+        }
     }
 
     async fn rename_effect(
@@ -375,14 +417,14 @@ fn not_found() -> io::Error {
 }
 
 /// One admitted filesystem effect, marked indeterminate unless its outcome is recorded.
-struct Permit(Option<Box<dyn EffectPermit>>);
+pub(crate) struct Permit(Option<Box<dyn EffectPermit>>);
 
 impl Permit {
     fn new(permit: Box<dyn EffectPermit>) -> Self {
         Self(Some(permit))
     }
 
-    async fn record(mut self, result: EffectResult) -> io::Result<()> {
+    pub(crate) async fn record(mut self, result: EffectResult) -> io::Result<()> {
         match self.0.take() {
             Some(permit) => permit.record_outcome(EffectOutcome::Kernel(result)).await,
             None => Ok(()),
@@ -431,7 +473,7 @@ impl Drop for Permit {
     }
 }
 
-fn open_outcome(opened: &io::Result<Fd>) -> EffectResult {
+fn open_outcome<T>(opened: &io::Result<T>) -> EffectResult {
     match opened {
         Ok(_) => EffectResult::DescriptorIssued,
         Err(error) => EffectResult::Failed(error.kind()),
@@ -445,7 +487,8 @@ impl Kernel for ShellKernel {
     }
 
     /// A read-write open (`<>`) is admitted as a read and as a write, because it discloses
-    /// content.
+    /// content. A read records a descriptor at the open; a write the box serves records its
+    /// outcome when its last copy closes.
     async fn open(&self, proc: &mut Process, path: &str, flags: OpenFlags) -> io::Result<Fd> {
         let writes = flags.write || flags.create || flags.truncate;
         let write_operation = FsOperation::WriteContent {
@@ -463,20 +506,26 @@ impl Kernel for ShellKernel {
                 })
                 .await?;
             let opened = self.open_effect(proc, &resolved, flags).await;
-            let result = open_outcome(&opened);
-            read_permit.record(result).await?;
-            write_permit.record(result).await?;
+            let read_result = open_outcome(&opened);
+            let opened = self
+                .record_write(write_permit, &resolved.path, opened)
+                .await;
+            read_permit.record(read_result).await?;
             return opened;
         }
-        let operation = if writes {
-            write_operation
-        } else {
-            FsOperation::ReadContent
-        };
-        let (resolved, permit) = self.admit_path(proc, path, Follow::Yes, operation).await?;
+        if writes {
+            let (resolved, permit) = self
+                .admit_path(proc, path, Follow::Yes, write_operation)
+                .await?;
+            let opened = self.open_effect(proc, &resolved, flags).await;
+            return self.record_write(permit, &resolved.path, opened).await;
+        }
+        let (resolved, permit) = self
+            .admit_path(proc, path, Follow::Yes, FsOperation::ReadContent)
+            .await?;
         let opened = self.open_effect(proc, &resolved, flags).await;
         permit.record(open_outcome(&opened)).await?;
-        opened
+        opened.map(|(fd, _)| fd)
     }
 
     async fn list_dir(&self, proc: &Process, path: &str) -> io::Result<Vec<DirEntry>> {
@@ -906,6 +955,7 @@ impl Kernel for ShellKernel {
     }
 
     async fn http_request(&self, req: HttpRequest) -> io::Result<HttpResponse> {
+        self.record_closed_writes().await?;
         self.route(&req.url)?.send(req).await
     }
 
@@ -915,6 +965,7 @@ impl Kernel for ShellKernel {
 
     /// A denial reads `effect denied`, as a denied host program does.
     async fn check_command(&self, request: &CommandRequest) -> io::Result<()> {
+        self.record_closed_writes().await?;
         let permit = fallback::admit_run(
             self.interceptor.as_ref(),
             request.program(),

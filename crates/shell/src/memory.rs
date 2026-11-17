@@ -8,6 +8,9 @@ use strands_shell::os::{Fd, FdKind, Kernel as _, OpenFlags, Process};
 use strands_shell::vfs::{InodeData, LASH_GID, LASH_UID, Vfs};
 use strands_shell::vfs_kernel::VfsKernel;
 
+use crate::effect::EffectResult;
+use crate::writer::ServedWriter;
+
 /// The channel depth of one writer, in chunks.
 const WRITER_DEPTH: usize = 16;
 
@@ -29,23 +32,23 @@ fn check_parent_write(vfs: &Vfs, abs: &str) -> io::Result<()> {
     Ok(())
 }
 
-/// Open `abs`; a write-only open of a regular file is served here and every other open by the
-/// Shell's own kernel.
+/// Open `abs`; a write-only open of a regular file is served here, with its drain, and every other
+/// open by the Shell's own kernel.
 pub(super) async fn open(
     memory: &VfsKernel,
     proc: &mut Process,
     abs: &str,
     flags: OpenFlags,
-) -> io::Result<Fd> {
+) -> io::Result<(Fd, Option<ServedWriter>)> {
     if !flags.write || flags.read {
-        return memory.open(proc, abs, flags).await;
+        return Ok((memory.open(proc, abs, flags).await?, None));
     }
     let mut vfs = memory.vfs.lock().await;
     let ino = match vfs.resolve(abs, true) {
         Ok(ino) => {
             if !matches!(vfs.get(ino)?.data, InodeData::File(_)) {
                 drop(vfs);
-                return memory.open(proc, abs, flags).await;
+                return Ok((memory.open(proc, abs, flags).await?, None));
             }
             if !vfs.check_permission(ino, LASH_UID, LASH_GID, 2) {
                 return Err(permission_denied());
@@ -73,29 +76,32 @@ pub(super) async fn open(
     drop(vfs);
     let (tx, rx) = strands_shell::os::pipe(WRITER_DEPTH);
     let failed = Arc::new(AtomicBool::new(false));
+    let sender = tx.downgrade();
     let fd = proc.alloc_fd(FdKind::ChannelWriter {
         tx,
         error_flag: Some(Arc::clone(&failed)),
     })?;
-    tokio::task::spawn_local(drain(
+    let drain = Box::pin(drain(
         Arc::clone(&memory.vfs),
         ino,
         rx,
         failed,
         flags.append,
     ));
-    Ok(fd)
+    Ok((fd, Some(ServedWriter { sender, drain })))
 }
 
 /// Write each chunk as it arrives at this writer's own position, or at the end for an append,
 /// keeping the prefix that fits under the cap.
+///
+/// A refused chunk leaves the file holding part of the write, so the write is indeterminate.
 async fn drain(
     vfs: Arc<tokio::sync::Mutex<Vfs>>,
     ino: strands_shell::vfs::Ino,
     mut rx: tokio::sync::mpsc::Receiver<bytes::Bytes>,
     failed: Arc<AtomicBool>,
     append: bool,
-) {
+) -> EffectResult {
     let mut position = 0;
     while let Some(chunk) = rx.recv().await {
         let mut vfs = match vfs.try_lock() {
@@ -105,11 +111,11 @@ async fn drain(
         let cap = vfs.max_file_size;
         let Ok(inode) = vfs.get_mut(ino) else {
             failed.store(true, Ordering::Relaxed);
-            return;
+            return EffectResult::Indeterminate;
         };
         let InodeData::File(data) = &mut inode.data else {
             failed.store(true, Ordering::Relaxed);
-            return;
+            return EffectResult::Indeterminate;
         };
         if append {
             position = data.len();
@@ -132,7 +138,8 @@ async fn drain(
         }
         if fits < chunk.len() {
             failed.store(true, Ordering::Relaxed);
-            return;
+            return EffectResult::Indeterminate;
         }
     }
+    EffectResult::Completed
 }

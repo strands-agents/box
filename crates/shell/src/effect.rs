@@ -131,7 +131,7 @@ pub enum EffectResult {
     DescriptorIssued,
     /// The effect was attempted and did not happen.
     Failed(io::ErrorKind),
-    /// The effect ended with no recorded outcome.
+    /// The effect ended with no known outcome: its permit was dropped, or only part of it happened.
     Indeterminate,
 }
 

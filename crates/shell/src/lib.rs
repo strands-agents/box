@@ -18,6 +18,7 @@ mod memory;
 mod network;
 mod program;
 mod resolve;
+mod writer;
 
 pub use effect::{
     EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, EffectResult, FsOperation,

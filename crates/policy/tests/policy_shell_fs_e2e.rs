@@ -865,3 +865,115 @@ fn a_plain_mkdir_after_a_refused_probe_is_still_decided() {
         );
     }
 }
+
+/// The budget from `docs/user/policy.md` ("A budget over time"), spent after one completed write.
+const WRITE_BUDGET_OF_ONE: &str = r#"
+@id("write_budget")
+@description("At most 1 content write completed in one hour.")
+forbid (principal, action == Box::Action::"fs:write", resource)
+when { context.input.operation == Box::FsWriteOperation::"write_content" }
+when temporal {
+  exists (total: Long). (
+    (count for (t: Timepoint). where (
+      formerly within 1h (
+        Box::Action::"fs:write"::response{ input.path: _, input.operation: Box::FsWriteOperation::"write_content", output.result: Box::FsResponseResult::"completed" } && tp(t)
+      )
+    )) == total && total >= 1
+  )
+};
+"#;
+
+/// Run `write` under a budget of one completed write, then return a second write's output.
+fn after_one_budgeted_write(
+    filesystem: &std::sync::Arc<box_shell::Filesystem>,
+    setup: &str,
+    write: &str,
+    next: &str,
+) -> strands_shell::Output {
+    let mut fixture = fixture_on(filesystem);
+    let mut shell = shell_on(
+        filesystem,
+        adapter(policy(&format!("{PERMIT_ALL}{WRITE_BUDGET_OF_ONE}")), None),
+    );
+    run(async {
+        if !setup.is_empty() {
+            let prepared = fixture.run(setup).await;
+            assert_eq!(prepared.status, 0, "setup: {}", prepared.stderr);
+        }
+        let first = shell.run(write).await;
+        assert_eq!(
+            first.status, 0,
+            "`{write}` must be allowed: {}",
+            first.stderr
+        );
+        shell.run(next).await
+    })
+}
+
+/// A Shell content write records a completed `fs:write`, so the documented write budget counts it.
+#[test]
+fn a_shell_content_write_is_counted_by_a_write_budget() {
+    let host = tempfile::tempdir().expect("a host folder");
+    let host_path = host.path().to_str().expect("a UTF-8 path").to_string();
+    let cases: [(&str, std::sync::Arc<box_shell::Filesystem>, &str, &str); 5] = [
+        ("redirect", backend(&[]), "", "printf x > /tmp/a.txt"),
+        ("append", backend(&[]), "", "printf x >> /tmp/a.txt"),
+        ("tee", backend(&[]), "", "printf x | tee /tmp/a.txt"),
+        (
+            "cp",
+            backend(&[]),
+            "printf x > /tmp/source.txt",
+            "cp /tmp/source.txt /tmp/a.txt",
+        ),
+        (
+            "host redirect",
+            backend(&[(host_path.as_str(), "/workspace")]),
+            "",
+            "printf x > /workspace/a.txt",
+        ),
+    ];
+    for (name, filesystem, setup, write) in cases {
+        let next = after_one_budgeted_write(&filesystem, setup, write, "printf y > /tmp/next.txt");
+        assert_ne!(
+            next.status, 0,
+            "{name}: `{write}` must count toward the budget, so the next write is refused"
+        );
+        assert!(
+            next.stderr.contains("[policy: write_budget]"),
+            "{name}: the refusal must name the budget: {}",
+            next.stderr
+        );
+    }
+}
+
+/// Over a loop of 25 writes in one script, the documented budget of 20 admits exactly 20.
+#[test]
+fn a_loop_of_writes_spends_the_budget_exactly() {
+    let budget_of_twenty = WRITE_BUDGET_OF_ONE
+        .replace("total >= 1", "total >= 20")
+        .replace("At most 1 content write", "At most 20 content writes");
+    let filesystem = backend(&[]);
+    let mut fixture = fixture_on(&filesystem);
+    let mut shell = shell_on(
+        &filesystem,
+        adapter(policy(&format!("{PERMIT_ALL}{budget_of_twenty}")), None),
+    );
+    let names: Vec<String> = (0..25).map(|index| format!("w{index:02}")).collect();
+    let (out, listing) = run(async {
+        let out = shell
+            .run(&format!(
+                "mkdir /tmp/loop; for name in {}; do printf x > /tmp/loop/$name; done",
+                names.join(" ")
+            ))
+            .await;
+        (out, fixture.run("ls /tmp/loop").await)
+    });
+    assert_eq!(
+        out.stderr.matches("[policy: write_budget]").count(),
+        5,
+        "{}",
+        out.stderr
+    );
+    let written: Vec<&str> = listing.stdout.split_whitespace().collect();
+    assert_eq!(written, names[..20], "{}", listing.stderr);
+}
