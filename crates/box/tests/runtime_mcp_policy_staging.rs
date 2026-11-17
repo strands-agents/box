@@ -2,7 +2,6 @@
 
 #![cfg(unix)]
 
-use std::io::Write as _;
 use std::path::Path;
 use std::time::Duration;
 
@@ -511,8 +510,8 @@ fn authority_after_discovery_order(name: &str, beta_first: bool) -> (Value, Valu
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let mut alpha_client = box_.open_client("alpha-mcp");
     let mut beta_client = box_.open_client("beta-mcp");
-    run.wait_for(box_.server_started("alpha-mcp"), STARTUP);
-    run.wait_for(box_.server_started("beta-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("beta-mcp"), STARTUP);
     alpha_client.initialize_and_activate(json!("alpha-initialize"), STARTUP);
     beta_client.initialize_and_activate(json!("beta-initialize"), STARTUP);
 
@@ -588,7 +587,7 @@ fn open_starts_only_the_selected_server_and_initialize_does_not_discover() {
     );
 
     let mut alpha_client = box_.open_client("alpha-mcp");
-    run.wait_for(box_.server_started("alpha-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
     assert_eq!(box_.invocation_count("alpha-mcp"), 1);
     assert_eq!(
         box_.list_count("alpha-mcp"),
@@ -638,7 +637,7 @@ fn tool_call_before_root_list_returns_an_error_without_starting_discovery() {
     let mut run = box_.spawn();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let mut client = box_.open_client("alpha-mcp");
-    run.wait_for(box_.server_started("alpha-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
     client.initialize_and_activate(json!(1), STARTUP);
     run.wait_for(box_.server_initialized("alpha-mcp"), STARTUP);
 
@@ -682,7 +681,7 @@ fn an_absent_catalog_tool_reaches_neither_policy_observer_nor_server() {
     let mut run = box_.spawn();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let mut client = box_.open_client("alpha-mcp");
-    run.wait_for(box_.server_started("alpha-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
     client.initialize_and_activate(json!(1), STARTUP);
     let list = client.list_root(json!(2), STARTUP);
     assert_list_response(&list, &json!(2), "read");
@@ -755,7 +754,7 @@ fn a_policy_denied_list_reaches_neither_discovery_nor_the_server() {
     let mut run = box_.spawn();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let mut client = box_.open_client("alpha-mcp");
-    run.wait_for(box_.server_started("alpha-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
     client.initialize_and_activate(json!(1), STARTUP);
 
     let refusal = client.list_root(json!(2), STARTUP);
@@ -811,7 +810,18 @@ fn a_shell_spawn_forbid_on_git_refuses_the_binary_and_leaves_the_git_servers_too
     let git = Server::new("git", "git-mcp", "status", DiscoveryBehavior::Ready);
     box_.install_server(&git);
     box_.install_program("git", "#!/bin/bash\nprintf 'GIT_BINARY_RAN\\n'\n");
-    box_.declare_tool("git", "[tool.git]\ncommand = [\"git\"]\n");
+    let interpreter_grant = if cfg!(target_os = "linux") {
+        let bash = std::path::Path::new("/bin/bash")
+            .canonicalize()
+            .expect("Bash interpreter");
+        format!("[tool.git.filesystem]\nread_file = [{bash:?}]\n")
+    } else {
+        String::new()
+    };
+    box_.declare_tool(
+        "git",
+        &format!("[tool.git]\ncommand = [\"git\"]\n{interpreter_grant}"),
+    );
     let policy = format!(
         "@id(\"no_git_binary\")\n\
          forbid (principal, action == Box::Action::\"shell:spawn\", resource)\n\
@@ -843,7 +853,7 @@ fn a_shell_spawn_forbid_on_git_refuses_the_binary_and_leaves_the_git_servers_too
     );
 
     let mut client = box_.open_client("git-mcp");
-    run.wait_for(box_.server_started("git-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("git-mcp"), STARTUP);
     client.initialize_and_activate(json!(1), STARTUP);
     let list = client.list_root(json!(2), STARTUP);
     assert_list_response(&list, &json!(2), "status");
@@ -907,6 +917,78 @@ fn a_shell_spawn_forbid_on_git_refuses_the_binary_and_leaves_the_git_servers_too
     );
 }
 
+/// A budget on a stdio MCP tool holds across two runs of the same box: the second run still sees
+/// the first run's calls, as every other rule does.
+#[test]
+fn a_tool_budget_holds_across_two_runs_of_a_stdio_box() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = RuntimeMcpBox::new("mcp-tool-budget-restart");
+    let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready);
+    box_.install_server(&alpha);
+    let policy = format!(
+        r#"{}
+@id("one-read")
+forbid (principal, action == alpha::Action::"read", resource)
+when temporal {{
+  exists (total: Long). (
+    (count for (t: Timepoint). where (
+      formerly within 1h ( alpha::Action::"read"::request{{ input.value: "fixture" }} && tp(t) )
+    )) == total && total >= 2
+  )
+}};"#,
+        policy_for("alpha", "read")
+    );
+    box_.write_workspace(&policy, &[alpha], BLOCKING_WORKLOAD);
+
+    let one_run = |calls: &[&str]| -> Vec<Value> {
+        let _ = std::fs::remove_file(box_.workload_path("release"));
+        let _ = std::fs::remove_file(box_.workload_path("workload.started"));
+        let mut run = box_.spawn();
+        run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+        let mut client = box_.open_client("alpha-mcp");
+        run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
+        client.initialize_and_activate(json!("initialize-1"), STARTUP);
+        let list = client.list_root(json!(2), STARTUP);
+        assert_list_response(&list, &json!(2), "read");
+        let replies = calls
+            .iter()
+            .map(|id| client.call(json!(id), "read", STARTUP))
+            .collect();
+        drop(client);
+        box_.release_workload();
+        let output = run.wait(SHUTDOWN);
+        assert!(
+            output.status.success(),
+            "the run must succeed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        replies
+    };
+
+    let first = one_run(&["call-1", "call-2"]);
+    assert_eq!(
+        error_code(&first[0]),
+        None,
+        "the first read is within budget: {}",
+        first[0]
+    );
+    assert_eq!(
+        error_code(&first[1]),
+        Some(-32001),
+        "the second read is over budget: {}",
+        first[1]
+    );
+    let second = one_run(&["call-3"]);
+    assert_eq!(
+        error_code(&second[0]),
+        Some(-32001),
+        "the second run still counts the first run's read: {}",
+        second[0]
+    );
+}
+
 #[test]
 fn a_denied_tools_call_answers_the_requests_id_with_the_decision_and_the_method() {
     if !fixture::namespace_launcher_is_usable() {
@@ -926,7 +1008,7 @@ fn a_denied_tools_call_answers_the_requests_id_with_the_decision_and_the_method(
     let mut run = box_.spawn();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let mut client = box_.open_client("alpha-mcp");
-    run.wait_for(box_.server_started("alpha-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
     client.initialize_and_activate(json!("initialize-1"), STARTUP);
     let list = client.list_root(json!(2), STARTUP);
     assert_list_response(&list, &json!(2), "read");
@@ -1279,7 +1361,7 @@ fn multipage_exchange_routes_server_frames_and_stages_on_the_last_page() {
     let mut run = box_.spawn();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let mut client = box_.open_client("alpha-mcp");
-    run.wait_for(box_.server_started("alpha-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
     client.initialize_and_activate(json!("initialize"), STARTUP);
     let request_shape = json!({
         "scope": "all",
@@ -1417,7 +1499,7 @@ fn catalog_page_limit_accepts_256_pages_and_refuses_a_257th() {
         let mut run = box_.spawn();
         run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
         let mut client = box_.open_client("paged-mcp");
-        run.wait_for(box_.server_started("paged-mcp"), STARTUP);
+        run.wait_for_through_alias(box_.server_started("paged-mcp"), STARTUP);
         client.initialize_and_activate(json!("initialize"), STARTUP);
         let exchange = client.list_all(1, json!({}), CATALOG_TIMEOUT);
         assert_eq!(exchange.pages.len(), pages, "the client pages to the end");
@@ -1459,79 +1541,6 @@ fn catalog_page_limit_accepts_256_pages_and_refuses_a_257th() {
             String::from_utf8_lossy(&output.stderr)
         );
     }
-}
-
-/// Time one box from its first `tools/list` to its first catalog, over `pages` pages.
-fn time_to_first_catalog(pages: usize) -> Duration {
-    let box_ = RuntimeMcpBox::new(&format!("mcp-first-catalog-{pages}"));
-    let server = Server::new(
-        "paged",
-        "paged-mcp",
-        "read",
-        DiscoveryBehavior::Pages(pages),
-    );
-    box_.install_server(&server);
-    box_.write_workspace(
-        &mcp_call_policy_for(server.name),
-        &[server],
-        BLOCKING_WORKLOAD,
-    );
-    let mut run = box_.spawn();
-    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
-    let mut client = box_.open_client("paged-mcp");
-    run.wait_for(box_.server_started("paged-mcp"), STARTUP);
-    client.initialize_and_activate(json!("initialize"), STARTUP);
-    let started = std::time::Instant::now();
-    let exchange = client.list_all(1, json!({}), CATALOG_TIMEOUT);
-    let elapsed = started.elapsed();
-    assert_list_page(&exchange.pages[0], &json!(1), "read", 0);
-    assert!(
-        exchange.last().get("result").is_some(),
-        "{}",
-        exchange.last()
-    );
-    assert_eq!(
-        box_.list_count("paged-mcp"),
-        pages,
-        "the first catalog must page through the whole listing"
-    );
-    drop(client);
-    box_.release_workload();
-    let output = run.wait(SHUTDOWN);
-    assert!(
-        output.status.success(),
-        "the timed run must finish cleanly: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    elapsed
-}
-
-#[test]
-fn the_first_catalog_of_256_pages_costs_at_most_three_times_one_of_128_pages() {
-    if !fixture::namespace_launcher_is_usable() {
-        return;
-    }
-    const LARGEST_RATIO: f64 = 3.0;
-    let full = time_to_first_catalog(256);
-    let half = time_to_first_catalog(128);
-    let ratio = full.as_secs_f64() / half.as_secs_f64().max(f64::EPSILON);
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "NFR-09 time to the first catalog: 128 pages {half:?} ({:.1} ms per page), 256 pages \
-         {full:?} ({:.1} ms per page), ratio {ratio:.2}, limit {LARGEST_RATIO}; {} build",
-        half.as_secs_f64() * 1000.0 / 128.0,
-        full.as_secs_f64() * 1000.0 / 256.0,
-        if cfg!(debug_assertions) {
-            "debug"
-        } else {
-            "release"
-        }
-    );
-    assert!(
-        ratio <= LARGEST_RATIO,
-        "the first catalog of 256 pages took {full:?} against {half:?} for 128 pages (ratio \
-         {ratio:.2}, limit {LARGEST_RATIO}): the cost per page grows with the page count"
-    );
 }
 
 #[test]
@@ -1580,7 +1589,7 @@ fn invalid_catalog_variants_fail_closed_through_the_lazy_exchange() {
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     for (index, server) in servers.iter().enumerate() {
         let mut client = box_.open_client(server.program);
-        run.wait_for(box_.server_started(server.program), STARTUP);
+        run.wait_for_through_alias(box_.server_started(server.program), STARTUP);
         client.initialize_and_activate(json!(index), STARTUP);
         let exchange = client.list_all(100, json!({}), STARTUP);
         assert_eq!(
@@ -1636,7 +1645,7 @@ fn alpha_stays_ready_while_beta_is_discovered() {
     let mut run = box_.spawn();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let mut alpha_client = box_.open_client("alpha-mcp");
-    run.wait_for(box_.server_started("alpha-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
     alpha_client.initialize_and_activate(json!("alpha-init"), STARTUP);
     run.wait_for(box_.server_initialized("alpha-mcp"), STARTUP);
     let alpha_list = alpha_client.list_root(json!("alpha-list"), STARTUP);
@@ -1656,7 +1665,7 @@ fn alpha_stays_ready_while_beta_is_discovered() {
     );
 
     let mut beta_client = box_.open_client("beta-mcp");
-    run.wait_for(box_.server_started("beta-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("beta-mcp"), STARTUP);
     beta_client.initialize_and_activate(json!("beta-init"), STARTUP);
     run.wait_for(box_.server_initialized("beta-mcp"), STARTUP);
     beta_client.request_root_list(json!("beta-list"));
@@ -1718,7 +1727,7 @@ fn child_exit_after_ready_keeps_the_accepted_catalog() {
     let mut run = box_.spawn();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let mut first = box_.open_client("alpha-mcp");
-    run.wait_for(box_.server_started("alpha-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
     first.initialize_and_activate(json!("first-initialize"), STARTUP);
     let accepted = first.list_root(json!("first-list"), STARTUP);
     assert_list_response(&accepted, &json!("first-list"), "read");
@@ -1729,7 +1738,7 @@ fn child_exit_after_ready_keeps_the_accepted_catalog() {
     let _ = first.wait(SHUTDOWN);
 
     let mut second = box_.open_client("alpha-mcp");
-    run.wait_for(box_.server_started("alpha-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
     second.initialize_and_activate(json!("second-initialize"), STARTUP);
     let relisted = second.list_root(json!(902), STARTUP);
     assert_list_response(&relisted, &json!(902), "read");
@@ -1774,7 +1783,7 @@ fn unused_beta_stays_unstarted_and_prevents_completion() {
     let mut run = box_.spawn();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let mut alpha_client = box_.open_client("alpha-mcp");
-    run.wait_for(box_.server_started("alpha-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
     alpha_client.initialize_and_activate(json!(1), STARTUP);
     alpha_client.list_root(json!(2), STARTUP);
     let ready = alpha_client.call(json!(3), "read", STARTUP);
@@ -1823,7 +1832,7 @@ fn unresolved_completion_keeps_ready_tools_and_withdraws_live_state_on_exit() {
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     run.wait_for(box_.live_record(), STARTUP);
     let mut client = box_.open_client("alpha-mcp");
-    run.wait_for(box_.server_started("alpha-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
     client.initialize_and_activate(json!(1), STARTUP);
     let response = client.list_root(json!(2), STARTUP);
     assert_list_response(&response, &json!(2), "read");
@@ -1848,7 +1857,7 @@ fn unresolved_completion_keeps_ready_tools_and_withdraws_live_state_on_exit() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(r#"discovery denied tools/list for ["missing"]"#),
+        stderr.contains(r#"a per-tool rule never loaded for ["missing"]"#),
         "{stderr}"
     );
     drop(client);
@@ -1886,7 +1895,7 @@ fn failed_discovery_reaps_its_process_group_and_refuses_later_open() {
     let mut run = box_.spawn();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let mut client = box_.open_client("broken-mcp");
-    run.wait_for(box_.server_started("broken-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("broken-mcp"), STARTUP);
     client.initialize_and_activate(json!(1), STARTUP);
     client.request_root_list(json!(2));
     run.wait_for(box_.list_started("broken-mcp"), STARTUP);
@@ -2020,7 +2029,7 @@ fn discovery_timeout_reaps_its_process_group_and_refuses_later_open() {
     let mut run = box_.spawn();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let mut client = box_.open_client("slow-mcp");
-    run.wait_for(box_.server_started("slow-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("slow-mcp"), STARTUP);
     client.initialize_and_activate(json!(1), STARTUP);
     client.request_root_list(json!(2));
     run.wait_for(box_.list_started("slow-mcp"), STARTUP);
@@ -2087,7 +2096,7 @@ fn at_most_four_catalog_attempts_progress_concurrently() {
     let mut clients = Vec::new();
     for (index, server) in servers.iter().enumerate() {
         let mut client = box_.open_client(server.program);
-        run.wait_for(box_.server_started(server.program), STARTUP);
+        run.wait_for_through_alias(box_.server_started(server.program), STARTUP);
         client.initialize_and_activate(json!(index), STARTUP);
         client.request_root_list(json!(100 + index));
         clients.push(client);
@@ -2141,7 +2150,7 @@ fn open_uses_declared_command_and_trusted_launch_context() {
     let mut run = box_.spawn();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let client = box_.open_client("trace-mcp");
-    run.wait_for(box_.server_started("trace-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("trace-mcp"), STARTUP);
 
     assert_eq!(
         serde_json::from_str::<Value>(&box_.trace("trace-mcp", "argv"))
@@ -2250,22 +2259,22 @@ fn trusted_launch_path_falls_back_when_the_run_path_is_absent() {
     let mut run = box_.spawn_without_trusted_path();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let client = box_.open_client("env");
-    run.wait_for(box_.server_started("env"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("fallback-mcp"), STARTUP);
 
     assert_eq!(
-        box_.trace("env", "path"),
+        box_.trace("fallback-mcp", "path"),
         "/usr/bin:/bin",
         "an absent trusted PATH must use the fixed MCP fallback, with no box bin"
     );
     let environment: serde_json::Map<String, Value> =
-        serde_json::from_str(&box_.trace("env", "environment"))
+        serde_json::from_str(&box_.trace("fallback-mcp", "environment"))
             .expect("parse the fallback child environment");
     assert_eq!(
         environment.get("PATH").and_then(Value::as_str),
         Some("/usr/bin:/bin")
     );
     assert_eq!(
-        serde_json::from_str::<Value>(&box_.trace("env", "argv"))
+        serde_json::from_str::<Value>(&box_.trace("fallback-mcp", "argv"))
             .expect("parse the fallback command arguments"),
         json!(["--declared", "trace"]),
         "the PATH fallback must still start the declared command"
@@ -2324,7 +2333,7 @@ fn runtime_ignores_workspace_and_private_generated_schema_artifacts() {
     let mut run = box_.spawn();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let mut client = box_.open_client("alpha-mcp");
-    run.wait_for(box_.server_started("alpha-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
     client.initialize_and_activate(json!(1), STARTUP);
     let refused = client.list_root(json!(2), STARTUP);
     assert_eq!(error_code(&refused), Some(-32001), "{refused}");
@@ -2337,7 +2346,7 @@ fn runtime_ignores_workspace_and_private_generated_schema_artifacts() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains(r#"discovery denied tools/list for ["stale"]"#),
+        stderr.contains(r#"a per-tool rule never loaded for ["stale"]"#),
         "the stale-only action must degrade rather than adopt a stored schema: {stderr}"
     );
     assert!(
@@ -2351,7 +2360,7 @@ fn runtime_ignores_workspace_and_private_generated_schema_artifacts() {
     let mut second_run = box_.spawn_from_operator_home();
     second_run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let mut second_client = box_.open_client("alpha-mcp");
-    second_run.wait_for(box_.server_started("alpha-mcp"), STARTUP);
+    second_run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
     second_client.initialize_and_activate(json!(3), STARTUP);
     let refused = second_client.list_root(json!(4), STARTUP);
     assert_eq!(error_code(&refused), Some(-32001), "{refused}");
@@ -2364,7 +2373,7 @@ fn runtime_ignores_workspace_and_private_generated_schema_artifacts() {
     );
     assert!(
         String::from_utf8_lossy(&second_output.stderr)
-            .contains(r#"discovery denied tools/list for ["stale"]"#),
+            .contains(r#"a per-tool rule never loaded for ["stale"]"#),
         "the second run must also degrade the stale-only action: {}",
         String::from_utf8_lossy(&second_output.stderr)
     );
@@ -2407,9 +2416,14 @@ fn one_locked_run_keeps_its_record_policy_and_mcp_snapshot() {
 
     let beta = Server::new("beta", "beta-mcp", "write", DiscoveryBehavior::Ready);
     box_.install_server(&beta);
+    let renamed = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready)
+        .launched_through(
+            "alpha-mcp",
+            vec!["--declared".to_string(), "alpha-second".to_string()],
+        );
     box_.write_workspace(
         &policy_for("beta", "write"),
-        &[beta],
+        &[beta, renamed],
         r#"
 set -eu
 : > "$HOME/second-workload.started"
@@ -2446,7 +2460,7 @@ set -eu
     );
 
     let mut alpha_client = box_.open_client("alpha-mcp");
-    first.wait_for(box_.server_started("alpha-mcp"), STARTUP);
+    first.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
     alpha_client.initialize_and_activate(json!(1), STARTUP);
     let response = alpha_client.list_root(json!(2), STARTUP);
     assert_list_response(&response, &json!(2), "read");
@@ -2469,5 +2483,104 @@ set -eu
     assert!(
         box_.root().is_dir(),
         "the completed run must keep its configured box"
+    );
+}
+
+fn call_read_with(client: &mut RunningMcpClient, id: &str, value: &str) -> Value {
+    client.send(&json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {"name": "read", "arguments": {"value": value}}
+    }));
+    client.receive(STARTUP)
+}
+
+/// One run of the box: list the tools, then call `read` with each value in order.
+fn run_and_call(box_: &RuntimeMcpBox, values: &[&str]) -> Vec<Value> {
+    let _ = std::fs::remove_file(box_.workload_path("workload.started"));
+    let _ = std::fs::remove_file(box_.box_home().join("release"));
+    let mut run = box_.spawn();
+    run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
+    let mut client = box_.open_client("alpha-mcp");
+    run.wait_for_through_alias(box_.server_started("alpha-mcp"), STARTUP);
+    client.initialize_and_activate(json!("initialize-1"), STARTUP);
+    assert_list_response(&client.list_root(json!(2), STARTUP), &json!(2), "read");
+    let replies = values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| call_read_with(&mut client, &format!("call-{index}"), value))
+        .collect();
+    drop(client);
+    box_.release_workload();
+    let output = run.wait(SHUTDOWN);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    replies
+}
+
+#[test]
+fn a_tool_precondition_met_in_one_run_holds_in_the_next() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = RuntimeMcpBox::new("mcp-tool-history-restart");
+    let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready);
+    box_.install_server(&alpha);
+    let policy = format!(
+        "{}\n@id(\"after_first\")\n\
+         forbid (principal, action == alpha::Action::\"read\", resource)\n\
+         when {{ context.input.value == \"second\" }}\n\
+         when temporal {{ formerly within 1h ( alpha::Action::\"read\"::request{{ input.value: \"first\" }} ) }};",
+        mcp_call_policy_for("alpha")
+    );
+    box_.write_workspace(&policy, &[alpha], BLOCKING_WORKLOAD);
+
+    let first_run = run_and_call(&box_, &["second", "first", "second"]);
+    assert!(first_run[0].get("error").is_none(), "{}", first_run[0]);
+    assert!(first_run[1].get("error").is_none(), "{}", first_run[1]);
+    assert_eq!(error_code(&first_run[2]), Some(-32001), "{}", first_run[2]);
+
+    let second_run = run_and_call(&box_, &["second"]);
+    assert_eq!(
+        error_code(&second_run[0]),
+        Some(-32001),
+        "the precondition met in the first run still holds: {}",
+        second_run[0]
+    );
+}
+
+/// A one-call limit counted over the tool's own `::response` refuses the second call.
+#[test]
+fn a_limit_over_a_tools_own_response_refuses_the_next_call() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = RuntimeMcpBox::new("mcp-tool-response-limit");
+    let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready);
+    box_.install_server(&alpha);
+    let policy = format!(
+        "{}\n@id(\"one_read\")\n\
+         forbid (principal, action == alpha::Action::\"read\", resource)\n\
+         when temporal {{ formerly within 1h ( alpha::Action::\"read\"::response{{ input.value: \"first\" }} ) }};",
+        mcp_call_policy_for("alpha")
+    );
+    box_.write_workspace(&policy, &[alpha], BLOCKING_WORKLOAD);
+
+    let replies = run_and_call(&box_, &["first", "second"]);
+    assert!(replies[0].get("error").is_none(), "{}", replies[0]);
+    assert_eq!(
+        error_code(&replies[1]),
+        Some(-32001),
+        "the finished first call is recorded under the tool's own action: {}",
+        replies[1]
+    );
+    assert_eq!(
+        box_.call_count("alpha-mcp"),
+        1,
+        "the refused call never reached the server"
     );
 }

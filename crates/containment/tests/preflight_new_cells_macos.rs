@@ -259,3 +259,52 @@ fn all_three_cells_compose_in_one_profile() {
     println!("{text}");
     assert_eq!(output.status.code(), Some(0), "{text}");
 }
+
+/// The kernel admits a listen on the granted port and refuses one on any other port.
+#[test]
+fn a_listen_port_is_the_only_port_the_workload_can_listen_on() {
+    let fixture = Fixture::new();
+    let granted = free_port();
+    let other = free_port();
+    let config = probe_runs(fixture.baseline())
+        .set_network(Network::localhost().connect(43123).listen(granted))
+        .expect("a listen port");
+    let output = fixture.self_contained(
+        &config,
+        &[
+            format!("expect-ok:listen:127.0.0.1:{granted}"),
+            format!("expect-ok:listen:0.0.0.0:{granted}"),
+            format!("expect-deny:listen:127.0.0.1:{other}"),
+        ],
+    );
+    assert!(output.status.success(), "{}", report("listen", &output));
+
+    let without = fixture.self_contained(
+        &probe_runs(fixture.baseline()),
+        &[format!("expect-deny:listen:127.0.0.1:{granted}")],
+    );
+    assert!(
+        without.status.success(),
+        "{}",
+        report("no listen", &without)
+    );
+}
+
+/// `config` with the probe's own exec grant, so the probe can contain itself.
+fn probe_runs(config: ContainmentConfig) -> ContainmentConfig {
+    config
+        .allow(
+            PathBuf::from(env!("CARGO_BIN_EXE_containment-test-probe")),
+            Operation::Exec,
+            Scope::File,
+        )
+        .expect("exec the probe")
+}
+
+/// A port that is free now.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .expect("a free port")
+        .port()
+}

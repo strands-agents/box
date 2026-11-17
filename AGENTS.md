@@ -1,218 +1,153 @@
 # AGENTS.md
 
-Guidance for coding agents. `CLAUDE.md` symlinks to this file, here and in `box`, `containment`,
-`credentials`, and `policy`. Edit the `AGENTS.md`.
+Instructions for changing Box. Edit this file only when the user explicitly asks.
+`CLAUDE.md` is a symlink; edit its `AGENTS.md` source.
 
-**To run Box, not to change it**, follow [`docs/user/getting-started.md`](docs/user/getting-started.md),
-or use the `setting-up-a-box` skill.
+**To run Box**, use the `setting-up-a-box` skill or follow
+[getting started](docs/user/getting-started.md).
 
-## Commit and pull request flow
+## `strands-box` is interface-frozen
 
-Open the pull request against `main`, and paste its URL in the chat response. The merge squashes
-the branch, and the pull request title becomes the subject of the commit on `main`. Do not
-squash the branch yourself.
+Get the user's explicit approval **before writing code** that changes either:
 
-**Add a commit for each change, and do not rewrite history that a reviewer saw.** Do not amend,
-squash, or force-push after you open the pull request, because a rewritten branch removes the
-reviewer's view of what changed since their last review. Rebase onto `main` only to resolve a
-conflict.
+- **An interface:** anything an external party observes or depends on. Additions, renames, and
+  narrowings count, including changes made during a refactor or to simplify a test.
+- **A foundational premise:** anything that changes why the box is safe.
 
-**The first commit message has three sections, in this order, and no fourth.** The subject line
-comes first, then:
+An agent cannot approve its own change. Fix defects within the current contract. If the contract
+must change, name the affected surface or premise and what breaks when you ask for approval.
+`feature-critic` treats an unapproved change in either class as a BLOCKER.
 
-1. **Problem.** What is wrong today, and what it costs. State it before any solution. A commit that
-   cannot name a problem is a commit nobody asked for.
-2. **Solution.** What the change does about it, and every interface that moved. Name a rejected
-   alternative only when a reader would otherwise ask why.
-3. **Tests.** What was run and what it proved. Name the test that pins each claim. State what you
-   did **not** run, and what is still broken, in this section rather than nowhere.
+The frozen surfaces include the CLI verbs and flags; `box.toml` keys and filesystem lists; the four
+inputs (policy, credentials, name, workload); stored records; the broker protocol; aliases and their
+socket derivation; policy actions, attributes, and temporal observations; each mechanism crate's
+`pub use` set; and the composed environment, including `reserved_workload_environment`.
+Read [the box contract](crates/box/AGENTS.md#the-box-contract) before changing any of these.
 
-Write each section under its own `## ` heading. Keep the whole message in Simplified Technical
-English. **A claim about behaviour needs a test named beside it, or it is not a claim.** A later
-commit needs only a subject line that names the feedback or the defect it addresses.
+`docs/site-manifest.json` is a separate frozen external publication surface, and
+`docs/site-manifest-retirements.json` permanently reserves removed identities and routes. Their
+schema, field meanings, stable page identities and routes, and compatibility rules are in
+[the site manifest contract](docs/dev/site-manifest.md).
 
-**A pull request description follows `.github/PULL_REQUEST_TEMPLATE.md`.** Lead with the problem and
-the reasoning a reviewer cannot read off the diff. State each load-bearing decision, anything verified
-in a way continuous integration cannot catch, and each follow-up you deferred and why. Do not restate
-the file list.
+After approval, bump `RECORD_VERSION`, `LIVE_VERSION`, or `PROTOCOL_VERSION` when its shape changes.
+An approved interface change carries its reference page in the same commit; apply
+[What a change updates](#what-a-change-updates).
 
-Write all pull-request prose in ASD-STE100 Simplified Technical English.
+## Foundational premises
 
-## STOP — `strands-box` is interface-frozen
+Preserve these premises and the tests that enforce them. Do not delete or `#[ignore]` a security
+test to make a suite pass.
 
-Two classes of change need the user's explicit approval **before** you write code, and an agent
-may not grant it to itself:
+- **Policy is the only authorizer.** Absent policy is default-deny. Deny-only floors stay beneath
+  policy. The egress gateway has no independent authorization authority. A credential capability
+  returns edits or a refusal, never an allow. A credential binding is not an authorization.
+- **The workload is untrusted.** It writes only where a filesystem list grants a write.
+  Validate once, then act on the identity you approved.
+- **Compose the environment; never inherit it.** Harden the box's trusted process. It holds only
+  its own box's plaintext secrets.
+- **One `run` owns one box directory and one policy engine.** Shell, Python, and egress share that
+  engine and its temporal history. Box is a binary with no library target or daemon. See
+  [one trusted process](docs/design/decisions.md#one-trusted-process-per-box),
+  [one directory owner](docs/design/decisions.md#one-run-owns-one-box-directory), and
+  [one policy engine](docs/design/decisions.md#one-policy-engine-per-box).
+- **Strands Shell and Monty run in the trusted process, outside the agent's sandbox.**
+  Create one Shell and one Monty VM per request; no state crosses a call boundary.
+  The `zsh`, `bash`, `sh`, `python3`, and `python` aliases reach one `run/box.sock`.
+  Each alias derives the socket from its own path; `argv[0]` selects the interpreter before connection.
+  See [request isolation](docs/design/decisions.md#no-state-crosses-a-call-boundary).
+- **A workload-named program runs only inside a sandbox.** Never execute it directly from the
+  trusted process. A policy permit decides whether it runs; the sandbox bounds what it can do.
+  Every declared stdio MCP server also starts in its own sandbox, after `shell:spawn` permits it,
+  or, when a tool grammar binds the server's program, after its grammar action does. Preserve
+  `runtime_mcp_start.rs::absent_start_permit_refuses_the_server_and_it_never_runs` and
+  `host.rs::an_mcp_start_of_a_bound_program_is_decided_as_its_grammar_action`.
 
-1. **An interface change** — anything an external party observes or depends on.
-2. **A foundational-premise change** — anything that alters *why* the box is safe.
+### Filesystem reach
 
-The freeze is a scrutiny gate, not a prohibition. What is forbidden is making one
-**incidentally**: during a refactor, during a cleanup, or to make a test easier to write. A
-rename counts, and so does an addition. The test is not "is this source-compatible" but **"can
-an external party observe this."** `feature-critic` treats both classes as BLOCKER-tier.
+`HOME` defaults to the operator's home unless `[agent] env.HOME` names another directory.
+The box directory is not a home; no verb copies configuration into a private home.
+Neither `HOME` nor `workspace` grants filesystem reach. `workspace` sets the initial working
+directory, which remains unreadable until a filesystem list names it.
 
-**Frozen surfaces**, each stated in full in `box/AGENTS.md`: the CLI verbs and their flags
-(`run` and `policy generate-schema` — `stop`, `ls`, `rm`, and `reset` are deleted with the
-`~/.strands-box/b/` namespace they enumerated, because a caller supplies `box_dir` and Box cannot
-locate a box it was not handed);
-the eight `box.toml` top-level keys (`name`, `box_dir`, `policy`, `agent`, `tool`,
-`egress`, `mcp`, `telemetry`), of which `name` and `box_dir` are required; the four fields that `[agent]` and each `[tool.<name>]` hold
-(`command`, `workspace`, `env`, `filesystem`); the filesystem lists — `[agent.filesystem]`
-holds eight, and a `[tool.<name>.filesystem]` holds six, because `metadata` and `exec` are refused on a tool
-(a leaf discovers metadata across the operator home, and runs its toolchain through broad exec on
-macOS); the four box inputs (policy,
-credentials, name, workload); `Record`, `LiveRecord`, and their versions; the broker protocol at `PROTOCOL_VERSION`; the alias names and
-the rule deriving a socket from an alias's own path; the policy action vocabulary and what
-`when temporal` observes; each mechanism crate's `pub use` set; and
-`reserved_workload_environment`.
+The agent's filesystem lists govern its sandbox alone. Each tool gets its reach from its own
+`[tool.<name>]` table. An absent filesystem section grants no direct reach. These grants bypass
+`fs:*` decisions, so disclose each grant on stderr at startup. `write` does not imply `read`;
+on Linux, a writable bind also reads, and its disclosure must state that limit.
+Keep the box's own state unreachable from both the agent and its tools.
+Preserve `box_filesystem.rs::the_boxs_own_private_tree_is_unreachable_from_inside` and
+`run_config.rs::a_tool_grant_cannot_expose_the_box_directory`.
 
-**Premises.** Each has a test pinning it. Do not weaken one to land a change, and do not delete
-or `#[ignore]` its test to green a suite.
+**Before changing filesystem reach**, read the HOME, workspace, and filesystem rules and their
+named tests in [the box contract](crates/box/AGENTS.md#the-box-contract).
+**Before changing tool or MCP startup**, also read
+[sandboxes for tools and MCP servers](docs/design/decisions.md#sandboxes-for-tools-and-mcp-servers)
+and the [box's open findings](crates/box/AGENTS.md#open-findings--divergences-no-decision-covers).
+`contain_egress = false` bypasses the gateway; preserve its disclosure as residual risk.
 
-- The authored policy is the only authorizer, and absent policy is default-deny.
-- Deny-only floors stay *beneath* policy, never beside it.
-- The workload is untrusted, and it writes only where a list grants a write.
-- Validate once, then act on the identity you approved.
-- The environment is composed, never inherited.
-- A credential binding is not an authorization.
-- A box's trusted process is hardened and holds only its own box's plaintext secrets.
-- `HOME` is the operator's own home, unless `[agent] env.HOME` names another directory. There is no
-  private box home, and no verb copies configuration into one. The box directory holds `bin`,
-  `run`, `trust`, and `private`, and none of them is a home.
-  `box_filesystem.rs::home_is_the_operators_unless_the_agent_declares_one` pins the default.
-  **A home grants no reach.** The workload reaches a path under the home only when a list in
-  `[agent.filesystem]` names it, which
-  `reach_under_the_operator_home_is_only_what_is_listed` and
-  `a_harness_configuration_directory_reads_when_listed_and_not_otherwise` pin. The lists
-  (`read`, `write`, `read_file`, `write_file`, `list`, `metadata`, `exec`, `deny`) are where an
-  operator states direct reach for the workload's own syscalls, and `write` does not imply `read`.
-  `[agent.filesystem]` holds all eight; a `[tool.<name>.filesystem]` holds six, because a tool
-  discovers existence and metadata across the operator home and runs its toolchain
-  through broad exec on macOS, and so states no
-  `metadata` and no `exec` list — the leaf renders the inverse of the agent box's existence-denied home
-  and runs its toolchain via `process-exec*`, on macOS, keeping content gated and the credential floor
-  and box state refused; the agent box keeps enumerated exec and full W^X and is byte-identical.
-  Linux is the residual: a writable bind reads there, and the startup disclosure says so on that
-  entry's line.
-  Each grant is disclosed on stderr at startup, because no `fs:*` decision covers one. An absent
-  section grants none of it. `workspace` names the initial working directory and grants nothing: the
-  box enters it, and the workload cannot read it until a list names it, which
-  `the_workspace_is_enterable_and_unreadable_until_listed` pins.
-  **`[agent.filesystem]` and `[agent] workspace` govern the agent's box alone.** A tool gets its
-  reach from its own `[tool.<name>]` table, through the same translation. No box's own
-  `.strands-box` is reachable from either, which
-  `the_boxs_own_private_tree_is_unreachable_from_inside` and
-  `run_config.rs::a_tool_grant_cannot_expose_the_box_directory` pin.
-- The trusted half is the `run` process
-  ([decisions](docs/design/decisions.md#one-trusted-process-per-box)), and one `run` owns a box
-  ([decisions](docs/design/decisions.md#one-run-owns-one-box-directory)).
-  `serve/` is gone: the broker moved to `run/broker/`, `serve/daemon/` and the `daemon` verb are
-  deleted, and box has no library target. Do not reintroduce a daemon.
-- Every declared stdio MCP server runs in its own contained leaf box, and `shell:spawn` decides
-  whether it starts. `mcp.rs::a_grantless_stdio_entry_is_still_contained` and
-  `runtime_mcp_start.rs::absent_start_permit_refuses_the_server_and_it_never_runs` pin the two
-  halves. A leaf that sets `contain_egress = false` bypasses the gateway, and that downgrade is
-  residual risk.
+### macOS execution
 
-**Instead of changing an interface:** fix the defect behind it, because most findings are a
-missing refusal. If one must change, ask first and name what breaks. Bump `RECORD_VERSION`,
-`LIVE_VERSION`, or `PROTOCOL_VERSION` when its shape changes. Add no doc obligation to a code
-change.
+Keep the agent's exec grants enumerated: one `process-exec` rule for its command, each `exec` entry,
+and each interpreter or MCP alias in `bin/`. Pair each with `file-read-metadata`, never `file-read*`.
+A file uses a literal; a directory uses a subpath.
+Keep `process-fork` unscoped; a generic filter compiles and authorizes nothing.
+Its fork-bomb risk remains a stated limit.
+Do not grant the agent `process-exec*`, the host OS's shell, or an inherited `PATH` tree.
 
-## Agent process boundary — DO NOT BROADEN
+**Before changing exec or fork grants**, read
+[minimum process authority](crates/containment/README.md#the-minimum-process-authority-the-profile-grants)
+for metadata pairing and fork-filter limits.
 
-Every interpreter stays outside the Agent's Seatbelt domain. Preserve this shape:
+The broader execution and metadata grants for a tool or MCP server apply only to its own sandbox.
+Keep the agent's profile unchanged by those exceptions, including its write-xor-execute restrictions.
+**Before changing a profile**, read [macOS measurements](crates/containment/AGENTS.md#macos-measured)
+and the tool and MCP rules linked above. Preserve
+`the_agent_profile_never_carries_broad_exec` and `a_leaf_carries_broad_exec_and_the_main_box_does_not`.
 
-```text
-strands-box run  (the box's TCB)       trusted, outside Agent SBPL
-|-- Policy  (ONE per box)              the only authority; one temporal history
-|-- egress gateway  ------------------> that Policy
-|-- Strands Shell   (one per REQUEST) -> that Policy
-|-- Monty / Python  (one per REQUEST) -> that Policy
-`-- strands-box-contain-trampoline -> contained Agent
-                      `-- private zsh / bash / sh / python3 / python aliases -> box.sock
-```
+## Read before implementation
 
-All five aliases reach one `run/box.sock`, and `argv[0]` selects the interpreter before the
-client connects.
+Read the `AGENTS.md` for each crate you change or integrate. Read the relevant code and tests before
+choosing a solution. Code and tests own behaviour; design decisions own why. Existing code or stale
+prose does not approve a change to the frozen contract.
 
-- **One `Policy` per box**
-  ([decisions](docs/design/decisions.md#one-policy-engine-per-box)), in the box's own process. Two instances mean two temporal
-  histories, so a rule spanning `fs:*` and `net:*` enforces nothing.
-- **One Shell and one Monty VM per request**
-  ([decisions](docs/design/decisions.md#no-state-crosses-a-call-boundary)).
-- **The interpreters run outside the cage**, reached only over a pathname socket.
+| Task | Required context |
+| --- | --- |
+| Change sandbox grants or operating system enforcement | [Containment guidance](crates/containment/AGENTS.md) |
+| Change policy integration, events, or temporal history | [Policy guidance](crates/policy/AGENTS.md); its code and tests own commit, recovery, policy-change, and time behaviour |
+| Build on telemetry or change its lifecycle | [Telemetry guidance](crates/telemetry/AGENTS.md); the workload can reach its receiver |
+| Add a crate or change a public surface after approval | [Conventions](docs/conventions.md); use `containment` as the reference implementation |
 
-The macOS minimum for an agent invoking Shell as a child:
+Keep `Cargo.lock` unchanged. Do not relax version requirements.
 
-```scheme
-(allow process-exec (literal "<agent>"))
-(allow file-read-metadata (literal "<agent>"))
-(allow process-exec (literal "<shell alias>"))
-(allow file-read-metadata (literal "<shell alias>"))
-(allow process-fork)
-```
+## Design and implementation
 
-- The paired `file-read-metadata` is required, because a `PATH` search stats each candidate
-  before it execs. Grant metadata only, never `file-read*`.
-- `posix_spawn` and `fork` need the unscoped `process-fork`. SBPL has no path, argv, or
-  child-count filter for it, so a generic filter compiles and authorizes nothing.
-- Never use `process-exec*`, a host shell, or an inherited `PATH` tree **in the agent box**. The
-  agent has no broad-exec carve-out: it gets one `process-exec` rule for its own command, and one
-  more for each `exec` entry — a literal for a file, and a subpath for a directory — each paired with
-  a metadata read and never with `file-read*`. The operator-authorized **leaf** is the one carve-out
-  ([decisions](docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds),
-  macOS-only): it renders `process-exec*` so a tool runs its whole toolchain
-  after `shell:spawn` admits the top-level program, and one `(allow file-map-executable …)` over its
-  writable grants so a build loads what it compiles, while the agent keeps full W^X.
-  `seatbelt.rs::the_agent_profile_never_carries_broad_exec` pins the agent's count and the absence of
-  the broad form, and `a_leaf_carries_broad_exec_and_the_main_box_does_not` pins the leaf exception.
-- `process-fork` leaves fork-bomb risk as stated residual risk.
-- **Never execute a workload-named program from the box's trusted process.** That process is
-  outside the cage, so `Command::new(name)` there is arbitrary code execution, and a `permit`
-  covers *whether* a program runs and never *where*. A real binary belongs inside the cage,
-  exec'd by the shim, one `process-exec` literal plus its paired metadata read per allowlisted
-  binary, on a read-only bind. Then `fs:*` stops firing, and one decision covers a process tree.
+For an architecture choice, research first, use `/kd` to compare the options, and let the user
+decide before `/spec` and implementation. A candidate is not a decision.
+Store research in `.agents/explorations/{topic}.exp.md`, prototypes in `.agents/pocs/`, and local
+decision and spec drafts in `.agents/drafts/`. Keep drafts, explorations, and prototypes out of commits.
+Product code belongs in `crates/`.
 
-## Current state
+Name types after their role in the product. Use `workload`, never `session`, in new public names.
+Avoid abbreviations. Follow [terminology](docs/design/terminology.md) when naming or writing.
 
-`crates/box` is the box, and its mechanism crates sit beside it — `credentials`, `containment`,
-`egress-gateway`, `policy`, `telemetry`. `box` is `[[bin]]`-only. Vendored: `shell`, with an `UPSTREAM.md`. `.agents/pocs/` is outside the workspace. Read `members` in `Cargo.toml`.
+Comments state what an item is. An item `///` is one sentence; a module `//!` is one sentence plus
+a table when needed. Omit a comment that repeats the name or explains Rust syntax.
+Put change rationale in the commit message. Put measurements, past defects, rejected alternatives,
+and implementation caveats in the crate's `AGENTS.md`. Cite a decision's stable anchor for its rationale.
 
-**Read `telemetry`'s own `AGENTS.md` before you build on it.** Its receiver is reachable by the
-workload, and it carries an open defect that hangs a box on exit.
+### Upstream Shell
 
-`egress-gateway` is the outbound boundary and holds no allow/deny authority. Two things there
-are deliberately not authorization: the SSRF floor, which is deny-only, and `CapabilityOutcome`,
-which has no `Allow` variant. `policy` exposes one facade: `PolicyEngine::open`, `decide`, `record`,
-`effective`.
+Box builds against Strands Shell at a pinned upstream revision, and holds no copy of its source.
+For a Shell defect, ask whether upstream would call the issue a bug: a wrong result, lost error, hang,
+unsound check, or unreportable suspension. Fix an upstream bug there, move the pin to the revision
+that holds the fix, and explain its ownership in the diff. Put Box composition in `crates/box/`.
 
-`policy` embeds the durable Dogwood engine through the published `dogwood-language` and
-`dogwood-local-engine` crates. Its commit, recovery, policy-change, and time contract is owned by
-the policy crate's tests, and
-[history is durable per box](docs/design/decisions.md#history-is-durable-per-box-and-has-no-rewind)
-records why.
+Make an invalid state impossible by construction, or refuse it at startup. Prove the guard fires:
+introduce the defect, observe the refusal, then restore the fix. Box carries no patch on the Shell.
+A local build workaround, relaxed version, or bypass of Box configuration is divergence.
 
-## Vendored upstreams
+## Verify before commit
 
-The vendored crate is pinned but **not** frozen. Ask: *would upstream call this a bug?*
-Yes means fix it there and say in the diff why it is upstream's — a wrong result, a lost error, a
-hang, an unsound check, or a suspension its API cannot report. No means orchestrate it in `box/`,
-which owns composition.
-
-1. **Assert the requirement; do not merely satisfy it.** Prefer impossible by construction, and
-   settle for refuses at startup.
-2. **A vendored fix keeps its suite green and adds no lints.** These crates carry upstream lint
-   failures, so the check is *unchanged warning count*. Record divergence in `UPSTREAM.md`.
-3. **Prove the guard fires.** Introduce the defect, watch the refusal, restore.
-
-A change that makes a local build work, relaxes a version, or routes around something the box
-should configure is divergence.
-
-## Building and testing
-
-`rust-toolchain.toml` pins the compiler, and rustup installs it on the first build. Never edit
-`Cargo.lock` and never relax a version requirement:
+For each changed Rust package, run:
 
 ```sh
 cargo build   -p <package> --all-features
@@ -221,85 +156,74 @@ cargo clippy  -p <package> --all-targets --all-features
 cargo fmt     -p <package> --check
 ```
 
-- **`--all-features` is not optional.** `box_shell` and `box_credentials` sit behind
-  `test-support`, so a plain `cargo test` skips them and reports success.
-- **Interpreter-dependent tests skip rather than fail.** Watch for `skipping: ...`.
-- **Owned clippy warnings are not expected; vendored ones are.** Check your crate:
-  `cargo clippy ... 2>&1 | grep -c -- '--> crates/<your-crate>'` must print `0`.
+`--all-features` is required: `box_shell` and `box_credentials` need `test-support`, so a plain
+`cargo test` skips them. Report interpreter-dependent `skipping: ...` messages.
+Owned clippy warnings must be zero. Check warning locations
+against `crates/<changed-crate>/`. Use `just --list` for workspace gates and
+[README.md](README.md) for prerequisites.
 
-`just --list` holds the workspace-wide equivalents, and [README.md](README.md) what they need.
+For a change to `docs/site-manifest.json`, `docs/site-manifest-retirements.json`, a publishable page
+under `docs/user/`, or the manifest validator and its CI wiring, run:
 
-## Working principles
+```sh
+cargo test -p strands-box --test site_manifest --locked --all-features
+```
 
-- **Understand the problem before you reach for a solution.** Nothing is decided yet, so never
-  present a candidate as chosen.
-- **Workflow: research, key decisions, align, spec and build.** Research goes to
-  `.agents/explorations/` as `{topic}.exp.md`, prototypes to `.agents/pocs/`, and each
-  architecture choice to a local `/kd` draft before a spec. A decided choice becomes one entry in
-  `docs/design/decisions.md`. A spec is a local `/spec` draft and is never committed. Code lands in
-  `crates/`.
-- **House style is [docs/conventions.md](docs/conventions.md)**, a checklist to run before you
-  commit a new crate or new public surface.
-- **Write few comments, or none.** A comment names what an item is. It never argues for a change.
-  The rationale belongs in the commit message.
+**For code changes, run [feature-critic](.agents/agents/feature-critic.md) once, immediately before
+commit**, after implementation is complete. It reviews code, runs the required gates, and checks
+docs against [What a change updates](#what-a-change-updates).
+Finish only when the gates pass and every finding is fixed or has a stated reason for leaving it.
+[Decision-critic](.agents/agents/decision-critic.md) reviews a decision or spec; it is not a code gate.
+A doc review reports only prose the diff makes wrong, or missing pages for surfaces the diff adds
+and the update table covers. It does not require new decision entries or general doc cleanup.
 
-  **One line, and stop.** A `///` gets one sentence. A `//!` gets one sentence, plus a table when
-  the module has parts worth listing. Delete the `///` when the name already says it. Nothing in a
-  doc comment may state a measurement, a defect it once had, a rejected alternative, or a reason.
-  Those go in the crate's `AGENTS.md`. A second copy inline is how the two came to disagree.
+## Commit and pull request
 
-  **Do not restate a decision beside the code that implements it.** Cite its
-  `docs/design/decisions.md` anchor instead, because a reader who needs the signature must not
-  scroll past the argument.
+Open the pull request against `main` and paste its URL in chat. The merge squashes the branch;
+the pull request title becomes the commit subject on `main`. Leave that squash to the merge.
 
-  **Assume a reader who knows the language.** Never explain what a `Vec`, a `match`, or an `Option`
-  does.
-- **`containment` is the reference public surface — copy it.** Private modules so the `pub use`
-  facade bounds the API, `#![warn(missing_docs, unreachable_pub)]`, one root noun reached by one
-  verb taking one config value, a fluent consuming builder with no `XBuilder` and no `.build()`,
-  `pub(crate)` provider traits, and a sealed named-profile constructor.
-- **Name a type after what it is in this product**, not the mechanism and not an abstract shape.
-  **`session` is banned in new public names**; say `workload`. Avoid abbreviations. A name that
-  needs a gloss at a call site is wrong.
-- **Adversarial review is mandatory for code, once, immediately before commit** — a gate beside
-  build, clippy, fmt, and test. Never run one mid-task on work still being shaped.
-  `feature-critic` reviews code and runs the gates, and does not judge whether a doc matches the
-  diff. `decision-critic` reviews a decision or a spec and is not a gate. **No review asks a code
-  change to carry a doc change.** Triage every finding: fix it, or say why you left it.
+Add a commit for each change. After opening a pull request, preserve reviewed history: no amend,
+squash, or force-push. Rebase onto `main` only to resolve a conflict.
 
-### Docs
+The first commit has a subject, then exactly these three sections in order:
 
-1. **Two places hold committed prose, and there is no third.** `docs/user/` answers "how do I use
-   it?", `docs/design/` answers "how does it work, and why trust it?". The `docs-writer`,
-   `docs-reviewer`, `docs-audit`, and `docs-planner` skills apply `.agents/references/voice-guide.md`
-   to both. `.agents/explorations/` and `.agents/drafts/` hold local working material that
-   is never committed. Add no doc a reader
-   did not ask for. A decision that reaches shipped code gets one entry in
-   `docs/design/decisions.md`, under a stable anchor that code cites by relative link.
-   A change to behaviour that `docs/user/getting-started.md` describes updates that page.
-2. **A decision enters `docs/design/decisions.md` through `/kd`, and only once the user decides
-   it.** The analysis stays in the local draft. An entry states the answer, the alternative that
-   lost, and the cost, in the shape its neighbours use. It carries no status line and no date.
-3. **A decision that moves rewrites the entry it moves.** Rewrite its title, its answer, and every
-   cost the change makes false, and keep its `<a id>` anchor, because code cites it. Never leave a
-   stale entry beside a second entry that corrects it.
-   **No committed doc links a local draft or an exploration note**, because `.gitignore` holds
-   `/.agents/drafts/` and `/.agents/explorations/`, so the link is dead in every clone.
-4. **One fact has one owner.** The code and its tests own behaviour, and a decision owns why.
-   Never cite a `file.rs:LINE`: name the symbol or the test. Never cite a spec, a requirement
-   number, or a draft's `KD-N` from code, because none of them is committed.
-5. **Mermaid: quote every edge label** as `A -.->|"source kind"| B`, and compile each block with
-   `mmdc`. A grep check misses these lexer errors.
-6. **Use one word for one thing.** [docs/design/terminology.md](docs/design/terminology.md) gives
-   the term to use and the words not to use. It is a rule, not a suggestion. Do not introduce a
-   synonym because it reads better in one sentence.
-7. **Write every prose artifact in ASD-STE100 Simplified Technical English**, including code
-   comments, commit messages, and code-review text. The rules are in the
-   [ASD-STE100 specification](https://www.asd-ste100.org/). The style controls the sentences and this
-   repository controls the structure. Identifiers are not prose. **The pages in `docs/user/` and
-   `docs/design/` are the exception:** they use the plain-English voice in
-   `.agents/references/voice-guide.md`, because a reader of a guide must be able to read it aloud.
+- `## Problem` — what is wrong and what it costs, before describing a solution.
+- `## Solution` — what changed and every interface that moved. Name a rejected alternative only
+  when a reviewer needs the reason.
+- `## Tests` — what ran and what it proved. Put a named test beside each behaviour claim.
+  State what did not run and what remains broken.
 
-## AGENTS.md maintenance
+Later commits need only a subject that names the feedback or defect addressed.
+Follow [the pull request template](.github/PULL_REQUEST_TEMPLATE.md).
+Lead with the problem and reasoning the diff cannot show. State each decision the change depends on,
+checks continuous integration cannot perform, and deferred follow-ups with their reasons.
+Do not repeat the file list.
 
-Do NOT update this file unless explicitly asked.
+## Docs
+
+Docs ship with the code they describe, in the same commit. Use `docs-writer` to draft,
+`docs-reviewer` to review a draft, `docs-audit` to check an existing page, and `docs-planner` to plan
+a backlog. Keep human-authored snapshots in `team/designs/` outside agent writing, audits, and updates.
+
+### What a change updates
+
+**Before writing or reviewing docs, or committing a code change**, read
+[the documentation update rules](.agents/references/doc-updates.md).
+They own the prose locations, the complete surface-to-page table, and the limits for features still
+in flux. Apply every matching row; use `docs-sync` to check the docs against the diff.
+Committed examples must still work.
+
+### Decisions and prose
+
+**Before creating or updating a decision entry**, use [kd](.agents/skills/kd/SKILL.md) for its format
+and rewrite rules. Record an entry in `docs/design/decisions.md` only after the user decides it.
+A code change adds no obligation to create an entry.
+
+Cite behaviour by symbol or test name, and decisions by stable relative links. Keep file line numbers,
+local specs, requirement numbers, and draft `KD-N` identifiers out of code citations.
+Committed docs must not link to local drafts or explorations.
+For Mermaid, quote every edge label as `A -.->|"source kind"| B` and compile every block with `mmdc`.
+
+Use ASD-STE100 Simplified Technical English for prose, including comments, commits, and reviews.
+Pages in `docs/user/` and `docs/design/` instead follow
+[the plain-English voice guide](.agents/references/voice-guide.md).

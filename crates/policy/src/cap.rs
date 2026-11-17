@@ -8,6 +8,7 @@ use cedar_policy::{
 use dogwood_language::{LoweredPolicySet, ParsedPolicySet};
 
 use crate::PolicyError;
+use crate::check::{Finding, Refused, RuleRef};
 use crate::spelling::{PolicyWarning, rule_name};
 
 /// What a permit's `when`/`unless` clauses hold.
@@ -29,6 +30,13 @@ impl Permit<'_> {
     fn name(&self) -> String {
         format!("{} (rule {})", rule_name(self.policy), self.position)
     }
+
+    fn rule(&self) -> RuleRef {
+        RuleRef::new(
+            self.position.saturating_sub(1),
+            self.policy.annotation("id").map(str::to_string),
+        )
+    }
 }
 
 /// Whether one rule's resource scope lexically covers another's.
@@ -43,12 +51,13 @@ enum Coverage {
 pub(crate) fn judge(
     parsed: &ParsedPolicySet,
     lowered: &LoweredPolicySet,
-) -> Result<Vec<PolicyWarning>, PolicyError> {
+    positions: &[usize],
+) -> Result<Vec<PolicyWarning>, Refused> {
     let temporal: Vec<bool> = parsed
         .policies()
         .map(|policy| policy.uses_temporal())
         .collect();
-    let permits = permits(lowered, &temporal)?;
+    let permits = permits(lowered, &temporal, positions)?;
     let budgets = permits
         .iter()
         .filter(|permit| permit.condition == Condition::Temporal);
@@ -57,21 +66,30 @@ pub(crate) fn judge(
             permits
                 .iter()
                 .filter(|other| other.position != budget.position)
-                .filter_map(|other| finding(budget, other))
+                .filter_map(|other| {
+                    finding(budget, other)
+                        .map(|(refused, text)| (refused, text, vec![budget.rule(), other.rule()]))
+                })
         })
-        .partition(|(refused, _)| *refused);
+        .partition(|(refused, _, _)| *refused);
     if !refusals.is_empty() {
-        return Err(PolicyError::InertTemporalPermit(
-            refusals
-                .into_iter()
-                .map(|(_, text)| text)
-                .collect::<Vec<_>>()
-                .join("; "),
+        let joined = refusals
+            .iter()
+            .map(|(_, text, _)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let findings = refusals
+            .into_iter()
+            .map(|(_, text, rules)| Finding::new(text).with_rules(rules))
+            .collect();
+        return Err(Refused::new(
+            PolicyError::InertTemporalPermit(joined),
+            findings,
         ));
     }
     Ok(warnings
         .into_iter()
-        .map(|(_, text)| PolicyWarning::InertTemporalPermit { finding: text })
+        .map(|(_, text, _)| PolicyWarning::InertTemporalPermit { finding: text })
         .collect())
 }
 
@@ -79,6 +97,7 @@ pub(crate) fn judge(
 fn permits<'a>(
     lowered: &'a LoweredPolicySet,
     temporal: &[bool],
+    positions: &[usize],
 ) -> Result<Vec<Permit<'a>>, PolicyError> {
     let cedar: &PolicySet = lowered.as_cedar();
     lowered
@@ -106,7 +125,8 @@ fn permits<'a>(
                 (false, Err(error)) => return Some(Err(error)),
             };
             Some(Ok(Permit {
-                position: rule.rule_index.saturating_add(1),
+                position: crate::dogwood::authored_index(positions, rule.rule_index)
+                    .saturating_add(1),
                 policy,
                 condition,
             }))

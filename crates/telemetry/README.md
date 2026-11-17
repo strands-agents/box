@@ -1,6 +1,6 @@
 # `strands-box-telemetry`
 
-Where one box's decision records go.
+Where one box's decisions, control operations, and MCP routing diagnostics go.
 
 ## Known limitations
 
@@ -57,19 +57,26 @@ A target names a **set**. No signal contains another, and there is no ordering.
 | `agent_logs` | one log record the agent's own instrumentation exported |
 | `agent_metrics` | one metric the agent's own instrumentation exported |
 | `control_plane` | one change to the authority this box holds |
+| `mcp_unmatched` | one MCP alias invocation that matches no declared command |
 
-**A target naming none receives every one of the six.** An empty set is refused.
+**A target naming none receives every one of the seven.** An empty set is refused.
 
-These six are this crate's own vocabulary and the spelling a record carries. They are not what an
+These seven are this crate's own vocabulary and the spelling a record carries. They are not what an
 operator writes: `box.toml` takes `include`, whose words are `deny`, `permit`, `trace`, `logs`, and
 `metrics`, and the box expands each word into this set. `trace` names both `agent_trace` and
-`control_plane`.
+`control_plane`. `logs` names both `agent_logs` and `mcp_unmatched`.
 
 ## What a record carries
 
 Each decision record names the principal, action, resource, policy rule or enforcement gate, and
 verdict. A refusal also carries its reason. The shape is OTLP: `resourceLogs` for the box's own
 records and `resourceSpans` for an agent trace.
+
+`Collector::mcp_unmatched` accepts `McpUnmatched::new(program, arguments)` and records it as an
+informational log in scope `strands-box.mcp`, with event name `strands.box.mcp.unmatched`.
+The constructor bounds the program and redacts expanded arguments. `correlated` attaches the
+caller's available request context. This record has no policy verdict or execution outcome and
+produces no span.
 
 ## The agent's own signals
 
@@ -95,8 +102,8 @@ Three properties are intended:
 
 **Shape no longer distinguishes a box record from an agent's.** The box writes `resourceLogs` for
 every decision, and `/v1/logs` now accepts `resourceLogs` from the agent. So a consumer must select on
-`strands.box.source`, or on the `strands-box.policy` and `strands-box.control` scopes. Severity is the
-box's own routing and is not a filter for a reader.
+`strands.box.source`, or on the `strands-box.policy`, `strands-box.control`, and `strands-box.mcp`
+scopes. Severity is the box's own routing and is not a filter for a reader.
 
 The box **relays** each of these and produces none of them, so a harness that exports no metric
 delivers no metric, whatever `include` names.

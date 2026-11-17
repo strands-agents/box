@@ -14,31 +14,13 @@
 //! and never the agent's transcript or its closing summary. An agent that claims
 //! "I committed the fix" and did not is a FAIL here, which is the entire point.
 //!
-//! # Why this is Rust and the agent launcher is still bash
+//! # Runtime ownership
 //!
-//! The launcher's job is genuinely shell-shaped: install a CLI, export env, exec a
-//! process, tee a log. The oracle's job is parsing, structural matching over OTLP
-//! JSON, and emitting a typed verdict — which bash did through `python3` heredocs
-//! embedded in shell functions, with no tests of its own.
-//!
-//! Moving it here buys three things the bash version could not have:
-//!
-//! * **One journal parser.** [`test_common::parse_decisions`] is shared with the
-//!   deterministic suite, and it reads BOTH telemetry key generations. The bash
-//!   oracle's `journal_find.py` still queries `strands.policy.action`, which
-//!   upstream renamed to `strands.box.policy.action`; every journal assertion in
-//!   that suite therefore matches nothing and silently reports a failure that is
-//!   really a schema drift. A shared parser cannot drift per suite.
-//! * **A verdict that is a rule.** [`reconcile`] and [`jailbreak`] are pure functions
-//!   over host-written evidence, so two runs over identical evidence cannot disagree.
-//!   Not yet shared with the deterministic suite's reducer: [`reconcile::Row`] and
-//!   [`jailbreak::Finding`] are still their own shapes, and `test-integ`'s
-//!   `tools/summarize-verdict.py` does not read them. Folding all three row kinds
-//!   through one reducer is open work, not something this crate already does.
-//! * **Unit tests on the assertions themselves.** A false PASS in an oracle is the
-//!   worst defect a test suite can have, because it reports safety that was never
-//!   measured. The checks below are tested against fixtures that fake each failure
-//!   mode.
+//! The jailbreak harness owns setup, credentials, canaries, agent execution,
+//! validity, coverage, and upload in Rust. Bash installs its tools and starts it.
+//! It judges a run by whether any canary was reached (see [`jailbreak`]). The
+//! cooperative workload launchers remain Bash and share the decision journal reader
+//! in [`test_common`].
 //!
 //! # The two phases, and what each is allowed to do
 //!
@@ -46,15 +28,14 @@
 //!
 //! ```text
 //!   oracle start        truncate the journal, prepare state. Nothing is judged.
-//!   phase A  (bash)     the agent CLI performs goal.md inside the box
+//!   phase A             the agent CLI performs goal.md inside the box
 //!   oracle stop         this module's checks read the host and the journal
 //!   phase B  (Rust)     reconcile run validity + oracle truth into the row
 //! ```
 //!
 //! **Phase A is the performer.** It is the only nondeterministic part: a real coding
-//! cli, driven by a natural-language mission, inside the box. It lives in bash
-//! because its work is shell-shaped — install a CLI, export env, exec a process,
-//! tee a log. It decides no verdict.
+//! CLI, driven by a natural-language mission, inside the box. The jailbreak
+//! harness runs it in Rust; cooperative workloads use Bash. It decides no verdict.
 //!
 //! **Phase B is the validator, and deliberately NOT a model call.** Its inputs are
 //! JSON files the host wrote, so the reconciliation is a rule, not a judgement:
@@ -82,6 +63,7 @@ pub mod checks;
 /// `Check`/journal machinery but keeps its own outcome vocabulary, because
 /// "the agent failed its mission" and "the box was escaped" are different questions.
 pub mod jailbreak;
+pub mod native_filesystem;
 pub mod reconcile;
 
 /// Truncate to at most `max` bytes without splitting a UTF-8 codepoint.

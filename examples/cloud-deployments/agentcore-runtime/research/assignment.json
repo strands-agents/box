@@ -1,0 +1,23 @@
+{
+  "synthetic": true,
+  "customer_problem": "A launch writer needs a sourced product brief without unlimited enrichment calls.",
+  "audience": "Explain the fictional TrailNotes Demo app to field technicians.",
+  "queries": [
+    {
+      "topic": "offline",
+      "question": "Can technicians use notes offline?"
+    },
+    {
+      "topic": "export",
+      "question": "What can teams export?"
+    },
+    {
+      "topic": "platforms",
+      "question": "Which devices are listed?"
+    },
+    {
+      "topic": "languages",
+      "question": "Which interface languages are listed?"
+    }
+  ]
+}

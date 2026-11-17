@@ -177,6 +177,24 @@ impl Summary {
         manifest: &[CaseSpec],
         cargo_status: Option<i32>,
     ) -> Self {
+        Self::build_with_quarantine(
+            platform,
+            box_commit,
+            rows,
+            manifest,
+            cargo_status,
+            crate::quarantine::TEMPORARY_QUARANTINE,
+        )
+    }
+
+    fn build_with_quarantine(
+        platform: &str,
+        box_commit: &str,
+        rows: Rows,
+        manifest: &[CaseSpec],
+        cargo_status: Option<i32>,
+        quarantines: &[crate::quarantine::Quarantine],
+    ) -> Self {
         let Rows {
             mut rows,
             malformed,
@@ -250,7 +268,9 @@ impl Summary {
                 ));
             }
             let applies = spec.applies_to(platform);
-            let quarantined = crate::quarantine::lookup(&r.id, platform);
+            let quarantined = quarantines
+                .iter()
+                .find(|q| q.id == r.id && q.platform == platform);
             if r.result == "SKIP" {
                 if applies {
                     match quarantined {
@@ -313,21 +333,21 @@ impl Summary {
         };
 
         // The exact coverage gap this platform's GREEN would carry, named for reviewers.
-        let quarantine: Vec<crate::quarantine::QuarantineReport> =
-            crate::quarantine::for_platform(platform)
-                .into_iter()
-                .map(|q| crate::quarantine::QuarantineReport {
-                    id: q.id,
-                    platform: q.platform,
-                    reason: q.reason,
-                    issue: q.issue,
-                    owner: q.owner,
-                    restore_when: q.restore_when,
-                    applied: rows.iter().any(|r| {
-                        r.id == q.id && r.result == "SKIP" && r.note == crate::quarantine::note(q)
-                    }),
-                })
-                .collect();
+        let quarantine: Vec<crate::quarantine::QuarantineReport> = quarantines
+            .iter()
+            .filter(|q| q.platform == platform)
+            .map(|q| crate::quarantine::QuarantineReport {
+                id: q.id,
+                platform: q.platform,
+                reason: q.reason,
+                issue: q.issue,
+                owner: q.owner,
+                restore_when: q.restore_when,
+                applied: rows.iter().any(|r| {
+                    r.id == q.id && r.result == "SKIP" && r.note == crate::quarantine::note(q)
+                }),
+            })
+            .collect();
         let coverage_gate = if quarantine.is_empty() {
             "full".to_string()
         } else {
@@ -760,8 +780,64 @@ mod tests {
         }
     }
 
+    #[test]
+    fn restored_workloads_require_results_without_quarantine() {
+        let cases = [
+            CaseSpec {
+                id: "CN-W-05",
+                category: "containment",
+                platforms: &["linux"],
+            },
+            CaseSpec {
+                id: "CN-W-06",
+                category: "containment",
+                platforms: &["linux"],
+            },
+        ];
+        let build = |rows| {
+            Summary::build(
+                "linux",
+                "abc",
+                Rows {
+                    rows,
+                    malformed: vec![],
+                },
+                &cases,
+                Some(0),
+            )
+        };
+        let passing = || {
+            vec![
+                row("CN-W-05", "containment", "PASS", ""),
+                row("CN-W-06", "containment", "PASS", ""),
+            ]
+        };
+        let good = build(passing());
+        assert_eq!(good.verdict, "GREEN");
+        assert_eq!(good.coverage_gate, "full");
+        assert!(good.quarantine.is_empty());
+        for (index, id) in ["CN-W-05", "CN-W-06"].into_iter().enumerate() {
+            for result in ["SKIP", "FAIL", "ERROR"] {
+                let mut rows = passing();
+                rows[index] = row(
+                    id,
+                    "containment",
+                    result,
+                    "TEMPORARY QUARANTINE: obsolete workload exception",
+                );
+                assert_eq!(build(rows).verdict, "RED", "{id}: {result}");
+            }
+            let mut missing = passing();
+            missing.remove(index);
+            assert_eq!(build(missing).verdict, "RED");
+            let mut duplicate = passing();
+            duplicate.push(row(id, "containment", "PASS", ""));
+            assert_eq!(build(duplicate).verdict, "RED");
+        }
+    }
+
     // ── TEMPORARY QUARANTINE: the reducer side (test-integ/QUARANTINE.md) ─────────────────────
-    // The quarantined cells are declared linux-only, like the real CN-W-05/CN-W-06.
+    // Synthetic exceptions exercise the reduced gate without skipping real cases.
     const QUARANTINE_SUITE: &[CaseSpec] = &[
         CaseSpec {
             id: "PO-1",
@@ -774,33 +850,38 @@ mod tests {
             platforms: &[],
         },
         CaseSpec {
-            id: "CN-W-05",
+            id: "CN-Q-01",
             category: "containment",
             platforms: &["linux"],
         },
         CaseSpec {
-            id: "CN-W-06",
+            id: "CN-W-05",
             category: "containment",
             platforms: &["linux"],
         },
     ];
 
     fn qnote(id: &str) -> String {
-        crate::quarantine::note(crate::quarantine::lookup(id, "linux").expect("listed"))
+        crate::quarantine::note(
+            crate::quarantine::TEST_QUARANTINE
+                .iter()
+                .find(|q| q.id == id)
+                .expect("synthetic entry"),
+        )
     }
 
-    /// A complete linux run with both quarantined cells recorded as authorized SKIPs.
+    /// A complete linux run with the remaining quarantined cell recorded as authorized SKIPs.
     fn complete_linux_quarantined() -> Vec<Row> {
         vec![
             row("PO-1", "policy", "PASS", ""),
             row("CN-E-01", "containment", "PASS", ""),
-            row("CN-W-05", "containment", "SKIP", &qnote("CN-W-05")),
-            row("CN-W-06", "containment", "SKIP", &qnote("CN-W-06")),
+            row("CN-Q-01", "containment", "SKIP", &qnote("CN-Q-01")),
+            row("CN-W-05", "containment", "PASS", ""),
         ]
     }
 
     fn build_on(platform: &str, rows: Vec<Row>, status: Option<i32>) -> Summary {
-        Summary::build(
+        Summary::build_with_quarantine(
             platform,
             "abc",
             Rows {
@@ -809,6 +890,7 @@ mod tests {
             },
             QUARANTINE_SUITE,
             status,
+            crate::quarantine::TEST_QUARANTINE,
         )
     }
 
@@ -820,20 +902,21 @@ mod tests {
             s.counts,
             Counts {
                 total: 4,
-                pass: 2,
+                pass: 3,
                 fail: 0,
                 error: 0,
-                skip: 2
+                skip: 1
             }
         );
         assert_eq!(
             s.coverage_gate,
-            "reduced: 2 quarantined cell(s) on this platform"
+            "reduced: 1 quarantined cell(s) on this platform"
         );
         let applied: Vec<(&str, bool)> = s.quarantine.iter().map(|q| (q.id, q.applied)).collect();
-        assert_eq!(applied, vec![("CN-W-05", true), ("CN-W-06", true)]);
-        assert!(s.quarantine.iter().all(|q| q.owner == "box-maintainers"
-            && q.restore_when.contains("broad exec for a Linux tool leaf")));
+        assert_eq!(applied, vec![("CN-Q-01", true)]);
+        assert!(s.quarantine.iter().all(
+            |q| q.owner == "box-maintainers" && q.restore_when.contains("synthetic exception")
+        ));
         let json = serde_json::to_string(&s).unwrap();
         assert!(
             json.contains("\"coverage_gate\"")
@@ -849,13 +932,13 @@ mod tests {
             row("PO-1", "policy", "PASS", ""),
             row("CN-E-01", "containment", "PASS", ""),
             row(
-                "CN-W-05",
+                "CN-Q-01",
                 "containment",
                 "SKIP",
                 &format!("{SKIP_NOTE_PREFIX}macos: declared for [linux]"),
             ),
             row(
-                "CN-W-06",
+                "CN-W-05",
                 "containment",
                 "SKIP",
                 &format!("{SKIP_NOTE_PREFIX}macos: declared for [linux]"),
@@ -874,7 +957,7 @@ mod tests {
                 platforms: &[],
             },
             CaseSpec {
-                id: "CN-W-05",
+                id: "CN-Q-01",
                 category: "containment",
                 platforms: &[],
             },
@@ -885,7 +968,7 @@ mod tests {
             Rows {
                 rows: vec![
                     row("PO-1", "policy", "PASS", ""),
-                    row("CN-W-05", "containment", "SKIP", &qnote("CN-W-05")),
+                    row("CN-Q-01", "containment", "SKIP", &qnote("CN-Q-01")),
                 ],
                 malformed: vec![],
             },
@@ -895,7 +978,7 @@ mod tests {
         assert_eq!(s.verdict, "RED");
         assert!(
             s.integrity.problems.iter().any(|p| p
-                .starts_with("CN-W-05: SKIP on macos, but the case is declared for this platform")),
+                .starts_with("CN-Q-01: SKIP on macos, but the case is declared for this platform")),
             "{:?}",
             s.integrity.problems
         );
@@ -908,7 +991,7 @@ mod tests {
             "CN-E-01",
             "containment",
             "SKIP",
-            &qnote("CN-W-05").replace("CN-W-05", "CN-E-01"),
+            &qnote("CN-Q-01").replace("CN-Q-01", "CN-E-01"),
         );
         let s = build_on("linux", rows, Some(0));
         assert_eq!(s.verdict, "RED");
@@ -925,19 +1008,19 @@ mod tests {
         for note in [
             "",
             "SKIP",
-            "TEMPORARY QUARANTINE: CN-W-05 on linux: something else",
-            &qnote("CN-W-05").replace("owner: box-maintainers", "owner: nobody"),
+            "TEMPORARY QUARANTINE: CN-Q-01 on linux: something else",
+            &qnote("CN-Q-01").replace("owner: box-maintainers", "owner: nobody"),
             &format!("{}{}", SKIP_NOTE_PREFIX, "linux: declared for [macos]"),
         ] {
             let mut rows = complete_linux_quarantined();
-            rows[2] = row("CN-W-05", "containment", "SKIP", note);
+            rows[2] = row("CN-Q-01", "containment", "SKIP", note);
             let s = build_on("linux", rows, Some(0));
             assert_eq!(s.verdict, "RED", "note {note:?} must not be accepted");
-            assert!(s.integrity.problems.iter().any(|p| p.starts_with("CN-W-05: SKIP on linux with a note that is not the authorized TEMPORARY QUARANTINE note")), "{note:?}: {:?}", s.integrity.problems);
+            assert!(s.integrity.problems.iter().any(|p| p.starts_with("CN-Q-01: SKIP on linux with a note that is not the authorized TEMPORARY QUARANTINE note")), "{note:?}: {:?}", s.integrity.problems);
             assert!(
                 !s.quarantine
                     .iter()
-                    .find(|q| q.id == "CN-W-05")
+                    .find(|q| q.id == "CN-Q-01")
                     .unwrap()
                     .applied,
                 "not applied when the note is wrong"
@@ -949,7 +1032,7 @@ mod tests {
     fn a_quarantined_cell_that_ran_anyway_is_red_because_runner_and_reducer_disagree() {
         for result in ["PASS", "FAIL", "ERROR"] {
             let mut rows = complete_linux_quarantined();
-            rows[2] = row("CN-W-05", "containment", result, "ran");
+            rows[2] = row("CN-Q-01", "containment", result, "ran");
             let s = build_on("linux", rows, Some(0));
             assert_eq!(s.verdict, "RED", "{result}");
             assert!(
@@ -980,14 +1063,14 @@ mod tests {
         );
         // Duplicate quarantined row.
         let mut rows = complete_linux_quarantined();
-        rows.push(row("CN-W-05", "containment", "SKIP", &qnote("CN-W-05")));
+        rows.push(row("CN-Q-01", "containment", "SKIP", &qnote("CN-Q-01")));
         let s = build_on("linux", rows, Some(0));
         assert_eq!(s.verdict, "RED");
         assert!(
             s.integrity
                 .problems
                 .iter()
-                .any(|p| p.contains("CN-W-05: 2 rows recorded (duplicate id)"))
+                .any(|p| p.contains("CN-Q-01: 2 rows recorded (duplicate id)"))
         );
         // Cargo failure and unreported cargo status.
         assert_eq!(
@@ -1030,7 +1113,7 @@ mod tests {
     fn a_quarantined_cell_missing_its_row_is_still_a_missing_row() {
         let rows: Vec<Row> = complete_linux_quarantined()
             .into_iter()
-            .filter(|r| r.id != "CN-W-05")
+            .filter(|r| r.id != "CN-Q-01")
             .collect();
         let s = build_on("linux", rows, Some(0));
         assert_eq!(s.verdict, "RED");
@@ -1038,14 +1121,14 @@ mod tests {
             s.integrity
                 .problems
                 .iter()
-                .any(|p| p.starts_with("CN-W-05: no row recorded")),
+                .any(|p| p.starts_with("CN-Q-01: no row recorded")),
             "{:?}",
             s.integrity.problems
         );
         assert!(
             !s.quarantine
                 .iter()
-                .find(|q| q.id == "CN-W-05")
+                .find(|q| q.id == "CN-Q-01")
                 .unwrap()
                 .applied
         );

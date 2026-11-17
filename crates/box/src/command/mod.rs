@@ -9,22 +9,23 @@
 //! caller.
 
 pub(crate) mod cli;
+mod platform;
 pub(crate) mod policy;
 pub(crate) mod run;
 
 use std::process::ExitCode;
 
-use clap::Parser as _;
-
 use crate::command::cli::{Cli, Command, PolicyCommand};
 use crate::error::BoxError;
 use crate::run::hardening::Hardening;
 
-pub(crate) fn cli_main() -> ExitCode {
-    let cli = Cli::parse();
+pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
+    if let Err(error) = platform::preflight() {
+        eprintln!("strands-box: refusing to run: {error}");
+        return ExitCode::FAILURE;
+    }
 
-    // Harden before the runtime exists, so the call is single-threaded and precedes every secret
-    // this process will hold (`run::hardening`).
+    // Disable core dumps and restrict process-memory inspection before Box starts its runtime or loads credentials.
     if matches!(cli.command, Command::Run { .. })
         && let Err(error) = Hardening::apply()
     {
@@ -42,7 +43,19 @@ pub(crate) fn cli_main() -> ExitCode {
 
     // A plain multi-threaded runtime. The Shell is `!Send` and needs a `LocalSet`, but it builds its
     // own runtime on its own thread, so a non-yielding Lua loop cannot pin the thread serving
-    match runtime.block_on(dispatch(cli)) {
+    match runtime.block_on(async {
+        let signals = if options.on_ready.is_some() {
+            Some(crate::run::contain::supervise::Signals::listen()?)
+        } else {
+            None
+        };
+        if let Some(on_ready) = options.on_ready {
+            on_ready().map_err(|source| crate::error::SuperviseError::Control {
+                reason: format!("on_ready callback failed: {source}"),
+            })?;
+        }
+        dispatch(cli, options.terminal, signals, options.box_id.as_deref()).await
+    }) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("strands-box: error: {error}");
@@ -52,9 +65,16 @@ pub(crate) fn cli_main() -> ExitCode {
 }
 
 /// Route one invocation to the verb it named.
-async fn dispatch(cli: Cli) -> Result<ExitCode, BoxError> {
+async fn dispatch(
+    cli: Cli,
+    terminal: Option<std::fs::File>,
+    signals: Option<crate::run::contain::supervise::Signals>,
+    box_id: Option<&str>,
+) -> Result<ExitCode, BoxError> {
     match &cli.command {
-        Command::Run { config, workload } => run::execute(config, workload).await,
+        Command::Run { config, workload } => {
+            run::execute(config, workload, terminal, signals, box_id).await
+        }
         Command::Policy {
             command: PolicyCommand::GenerateSchema { config, output_dir },
         } => policy::generate_schema(config, output_dir).await,

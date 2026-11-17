@@ -31,9 +31,9 @@
 # codex-arg0-staging-intermittent, and asserts the rest of the workload, which
 # does complete. A run that trips it is evidence for whoever takes the cause on.
 #
-# Reference: artifact section 4. Two residuals shape the Linux spelling: the box
-# refuses a memory permission change that adds execution and NODE_OPTIONS is a
-# refused name (F29/F64), so npm runs as `node --jitless <npm-cli.js>` rather than
+# Reference: artifact section 4. A residual shapes the Linux spelling: the box
+# refuses a memory permission change that adds execution (F29/F64), so npm runs
+# as `node --jitless <npm-cli.js>` rather than
 # through the `npm` launcher, and the agent must spell that prefix for the table
 # to select. npm runs package scripts through a shell, and /bin/sh is a link on
 # Amazon Linux 2023, so npm_config_script_shell names the canonical bash.

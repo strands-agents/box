@@ -57,6 +57,12 @@ for line in open(manifest_path):
     k, v = line.split("=", 1)
     man[k.strip()] = v.strip()
 
+native = man.get("native_filesystem_policy", "0")
+if native not in ("0", "1"):
+    raise SystemExit("boxgen: native_filesystem_policy must be 0 or 1")
+if native == "1" and PLAT != "macos":
+    raise SystemExit("boxgen: native filesystem policy requires macOS")
+
 
 def subst(s):
     """Expand the placeholders a manifest and a goal may use."""
@@ -141,13 +147,13 @@ MANTLE_HOST = "bedrock-mantle.%s.api.aws" % REGION
 MODEL_HOST = {"claude": BEDROCK_HOST,
               "strands": BEDROCK_HOST,
               "codex": MANTLE_HOST}[AGENT]
+codex_binary = ""
 
 if AGENT == "claude":
     allowed = man.get("tools_allow", "Glob,Grep,Read,Write,Edit,Bash")
-    # A dimension may run the agent through a launcher instead of the binary: on
-    # Amazon Linux 2023 a hook execs /bin/sh, which is a symbolic link no grant may
-    # name, and a `#!/bin/sh` launcher's own interpreter chain brings it into the
-    # view under the spelling the child asks for.
+    # A dimension may run the agent through a launcher instead of the binary.
+    # Its manifest grants each interpreter's canonical path; Linux translation
+    # preserves the shebang spelling the agent's hook uses.
     prog = (plat_items("agent_program") or [P["CLAUDE"]])[0]
     agent_cmd = [prog, "--allowedTools", allowed] + plat_items("agent_args")
     agent_env = {
@@ -186,9 +192,8 @@ elif AGENT == "strands":
         "PATH": man.get("agent_path", "/usr/bin:/bin"),
         "AWS_REGION": REGION,
         "TMPDIR": TMP,
-        # The box reserves every loader hook, PYTHONPATH included, and it refuses a
-        # table that claims one. So the SDK directory travels under a name of this
-        # suite, and the entry script puts it on sys.path itself.
+        # The SDK directory travels under a name of this suite, and the entry
+        # script puts it on sys.path itself.
         "STRANDS_LIB_DIR": P["STRANDS_LIB"],
         # The model id and the scratch directory travel in the environment, so the
         # agent needs no configuration file and the pair names no extra path.
@@ -198,16 +203,21 @@ elif AGENT == "strands":
 elif AGENT == "codex":
     # The npm package ships a Node shim that starts the vendored native binary.
     # On Linux the shim runs under node, which the box stops without --jitless
-    # (F29/F64: an executable memory permission is refused and NODE_OPTIONS is a
-    # refused name), so the flag sits in `command` here too.
+    # (F29/F64: an executable memory permission is refused), so the flag sits in
+    # `command` here too.
     launcher = plat_items("agent_program")
+    if not launcher and os.environ.get("WL_CODEX_BINARY"):
+        codex_binary = os.path.realpath(os.environ["WL_CODEX_BINARY"])
     if launcher:
-        # A dimension may run the agent through a launcher — a hook execs /bin/sh,
-        # which is a symbolic link on Amazon Linux 2023 that no grant may name, and
-        # a `#!/bin/sh` launcher's own interpreter chain brings it into the view
-        # (F49). When a launcher is named it carries the fixed arguments itself, so
-        # `command` is the launcher alone and `run -- …` still appends the prompt.
+        # A dimension may run the agent through a launcher. Its manifest grants
+        # the canonical interpreter; Linux translation preserves the /bin/sh
+        # spelling a hook uses (F49). The launcher carries the fixed arguments,
+        # so `command` is the launcher alone and `run -- …` appends the prompt.
         agent_cmd = [launcher[0]]
+    elif codex_binary:
+        agent_cmd = [codex_binary, "exec",
+                     "--dangerously-bypass-approvals-and-sandbox",
+                     "--skip-git-repo-check"] + plat_items("agent_args")
     else:
         agent_cmd = [P["NODE"]]
         if P["NODE_JITLESS"]:
@@ -240,8 +250,12 @@ if AGENT == "codex":
     # The node binary is named explicitly, not left implicit: when a dimension
     # runs the agent through a launcher the launcher is element 0 of `command`, so
     # the interpreter it execs is no longer the implicitly granted program.
-    agent_read += [P["TOOLS"], P["NODE_TREE"], P["NODE"]]
-    agent_exec += [P["TOOLS"], P["NODE_TREE"], P["NODE"]]
+    if codex_binary:
+        agent_read += [codex_binary]
+        agent_exec += [codex_binary]
+    else:
+        agent_read += [P["TOOLS"], P["NODE_TREE"], P["NODE"]]
+        agent_exec += [P["TOOLS"], P["NODE_TREE"], P["NODE"]]
     # Node is dynamically linked, and the Linux agent minimum states no loader
     # directory: the operator grants it. The real directory, not `/lib64`, which
     # is a symbolic link on AL2023 and so refused in a grant.
@@ -255,7 +269,7 @@ if AGENT == "codex":
     # launcher warns that the project is both writable and executable; that pair
     # is what this agent needs, and it is a Box CLI default for Codex.
     agent_exec += [PROJECT]
-    if PLAT == "macos":
+    if PLAT == "macos" and not codex_binary:
         agent_read += P["BREW_READ"].split()
         agent_exec += [P["NODE_FORMULA"]]
 elif AGENT == "claude":
@@ -368,6 +382,10 @@ b.append("# dimension=%s agent=%s platform=%s" % (man.get("dimension", "?"), AGE
 b.append('name = "%s"' % NAME)
 b.append('box_dir = "%s"' % BOXDIR)
 b.append('policy = "policy.dw"')
+if native == "1":
+    b.append("")
+    b.append("[experimental-features]")
+    b.append("native-filesystem-policy = true")
 b.append("")
 b.append("# The one process the box runs. `command` is the program and its fixed leading")
 b.append("# arguments; the runner appends the agent's non-interactive flags and the prompt")
@@ -392,7 +410,7 @@ for t in TOOL_NAMES:
         # policy refusal is involved, which is why the journal recorded nothing.
         # Read resolves the link and reads its target; the leaf's broad exec runs
         # it on macOS.
-        d["read"] = d["read"] + [P["TOOLS"]]
+        d["read"] = d["read"] + [codex_binary or P["TOOLS"]]
     elif AGENT in ("claude", "strands"):
         # Neither agent stages a helper into the install prefix and then execs it
         # from inside a tool boundary, so no tool table needs that prefix. The arm

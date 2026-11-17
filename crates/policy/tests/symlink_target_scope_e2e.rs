@@ -5,41 +5,19 @@
 
 mod support;
 
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::Path;
 
-use policy::{GovernedBox, Policy, Principal, ShellPolicyInterceptor};
 use strands_shell::{Output, Shell};
 
-/// A Shell over `project`, bound directly at `/work`, governed by `source`.
-fn shell_over(project: &Path, source: &str) -> Shell {
-    let policy = support::open_policy(vec![Policy {
-        origin: PathBuf::from("symlink-target-scope.dw"),
-        text: source.to_string(),
-    }])
-    .expect("policy opens");
-    let interceptor = ShellPolicyInterceptor::into_handle(
-        Arc::new(policy),
-        Principal::agent(),
-        GovernedBox::assigned("test-box"),
-    );
-    Shell::builder()
-        .bind_direct(project.display().to_string(), "/work")
-        .effect_interceptor(interceptor)
-        .build()
-        .expect("shell builds")
-}
+use support::shell::{adapter, backend, policy, run, shell_on};
 
-fn run<F, T>(body: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime builds");
-    let local = tokio::task::LocalSet::new();
-    runtime.block_on(local.run_until(body))
+/// A Shell over `project`, served at `/work`, governed by `source`.
+fn shell_over(project: &Path, source: &str) -> Shell {
+    let source_path = project.display().to_string();
+    shell_on(
+        &backend(&[(&source_path, "/work")]),
+        adapter(policy(source), None),
+    )
 }
 
 /// A project directory that holds two regular files, `file` and `secret`.
@@ -224,10 +202,9 @@ fn a_relative_symlink_target_from_a_nested_link_resolves_from_the_links_director
     assert!(judged, "the fs:write symlink request names /work/file");
 }
 
-/// LIVE GAP, pinned as it stands: on a direct bind the kernel reports a read through a host
-/// symlink by the alias spelling, so a link to a directory carries a subtree read forbid away.
+/// A read through a host symlink on a direct bind is judged on its target, so a subtree read forbid holds.
 #[test]
-fn a_directory_symlink_on_a_direct_bind_is_not_defended_by_a_subtree_read_forbid() {
+fn a_directory_symlink_on_a_direct_bind_is_defended_by_a_subtree_read_forbid() {
     let project = project();
     std::fs::create_dir(project.path().join("private")).expect("a private directory");
     std::fs::write(project.path().join("private/secret"), "hidden").expect("the private secret");
@@ -254,10 +231,13 @@ when {{
         rendered(&direct)
     );
     assert_eq!(linked.status, 0, "{}", rendered(&linked));
-    assert_eq!(
-        (aliased.status, aliased.stdout.as_str()),
-        (0, "hidden"),
-        "the alias read is judged on /work/sub/secret, not /work/private/secret: {}",
+    assert_ne!(aliased.status, 0, "{}", rendered(&aliased));
+    assert!(
+        aliased
+            .stderr
+            .contains("'/work/private/secret' [policy: no-private]"),
+        "the alias read is judged on /work/private/secret: {}",
         rendered(&aliased)
     );
+    assert!(!aliased.stdout.contains("hidden"), "{}", rendered(&aliased));
 }

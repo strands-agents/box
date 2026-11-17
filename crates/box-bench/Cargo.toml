@@ -1,0 +1,20 @@
+[package]
+name = "box-bench"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Measures fresh Box startup against a direct workload."
+default-run = "box-bench"
+
+[workspace]
+
+[[bin]]
+name = "box-bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "box-bench-probe"
+path = "src/bin/probe.rs"
+
+[lints.rust]
+unused_must_use = "deny"

@@ -12,6 +12,7 @@ mod legs;
 mod model;
 mod opened;
 mod preflight;
+mod redaction;
 mod sources;
 mod vault;
 
@@ -22,6 +23,7 @@ pub use error::{CredentialError, Result};
 pub use model::{Destination, DestinationPattern, InjectMode, Locator, PhantomCheck, RouteSpec};
 pub use opened::{Opened, Phantom, Skipped};
 pub use preflight::credsd_preflight;
+pub use redaction::ResponseRedactor;
 pub use vault::Vault;
 
 // Crate-internal. Each of these was public until 2026-08-07 and is now reached only from inside:

@@ -1,0 +1,19 @@
+# An action flag can spell the flag of an `anywhere` global option when its usage has no
+# `[global options]`. This fixture models no git behaviour.
+
+name    = "git_anywhere_quiet"
+program = "git"
+format  = 1
+version = 1
+
+[global]
+options.quiet = { flag = "-q", anywhere = true }
+
+[shell.commit]
+usage = "git [global options] commit [options] [--] [<pathspec>...]"
+options.message = { flag = ["-m", "--message"], value = "required", repeated = true }
+
+[shell.status]
+usage = "git status [options] [--] [<pathspec>...]"
+options.short  = { flag = ["-s", "--short"] }
+options.silent = { flag = ["-q"] }

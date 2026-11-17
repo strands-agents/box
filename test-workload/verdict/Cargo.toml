@@ -17,8 +17,7 @@ publish = false
 name = "workload_verdict"
 path = "src/lib.rs"
 
-# What the bash launcher calls. The launcher installs a CLI, exports env, execs the
-# agent and tees a log; it decides no verdict.
+# The host-side workload judge and jailbreak harness.
 [[bin]]
 name = "workload-oracle"
 path = "src/bin/workload-oracle.rs"

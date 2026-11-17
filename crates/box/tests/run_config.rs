@@ -138,6 +138,15 @@ fn text(output: &Output) -> String {
     )
 }
 
+// Matching Linux read access lets the fixture reach the protected-directory guard.
+fn linux_read_grant(entry: &Path) -> String {
+    if cfg!(target_os = "linux") {
+        format!("read = [{:?}]\n", entry.display().to_string())
+    } else {
+        String::new()
+    }
+}
+
 /// **A box survives its first use, and a later run recovers from a partial private record.**
 ///
 /// The interrupted shapes are a `private/` left at each mode an earlier build wrote, holding a
@@ -525,12 +534,13 @@ fn an_agent_entry_naming_a_box_directory_child_is_refused() {
             .join(child)
             .canonicalize()
             .expect("the child resolves");
+        let read = linux_read_grant(&entry);
         fixture.write_document(
             None,
             no_op_program(),
             "",
             &format!(
-                "[agent.filesystem]\nwrite = [{:?}]\n",
+                "[agent.filesystem]\n{read}write = [{:?}]\n",
                 entry.display().to_string()
             ),
         );
@@ -576,12 +586,13 @@ fn a_symlinked_box_directory_still_guards_its_children() {
         .join("bin")
         .canonicalize()
         .expect("the canonical child resolves");
+    let read = linux_read_grant(&entry);
     fixture.write_document(
         None,
         no_op_program(),
         "",
         &format!(
-            "[agent.filesystem]\nwrite = [{:?}]\n",
+            "[agent.filesystem]\n{read}write = [{:?}]\n",
             entry.display().to_string()
         ),
     );
@@ -839,6 +850,63 @@ fn path_relationship_refusals_create_no_box_state() {
         text(&output)
     );
     assert_eq!(std::fs::read_dir(&nested).expect("box reads").count(), 0);
+}
+
+/// **The macOS data-volume spelling places no box state against the workspace or an authority
+/// source**: each refusal fires as it does for the ordinary spelling.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_data_volume_spelling_is_refused_against_the_workspace_and_the_authority_sources() {
+    let data_volume =
+        |path: &Path| Path::new("/System/Volumes/Data").join(path.strip_prefix("/").unwrap());
+    let fixture = ContractFixture::new();
+    let nested = fixture.workspace.join("box");
+    std::fs::create_dir(&nested).expect("nested box directory");
+    make_private(&nested);
+    let document = |box_directory: &Path, policy: &str| {
+        format!(
+            "name = \"contract\"\nbox_dir = {:?}\n{policy}[agent]\ncommand = [{:?}]\nworkspace = {:?}\n",
+            box_directory.display().to_string(),
+            no_op_program(),
+            fixture.workspace_text()
+        )
+    };
+
+    std::fs::write(&fixture.config, document(&data_volume(&nested), "")).expect("configuration");
+    let output = fixture.run(&fixture.config, &[]);
+    assert!(
+        !output.status.success() && text(&output).contains("equal to or below"),
+        "{}",
+        text(&output)
+    );
+
+    let inside_config = fixture.box_directory.join("control.any");
+    std::fs::write(&inside_config, document(&fixture.box_directory, ""))
+        .expect("inside configuration");
+    let output = fixture.run(&data_volume(&inside_config), &[]);
+    assert!(
+        text(&output).contains("configuration source")
+            && text(&output).contains("inside `box_dir`"),
+        "{}",
+        text(&output)
+    );
+    std::fs::remove_file(&inside_config).expect("clear root");
+
+    let inside_policy = fixture.box_directory.join("rules.any");
+    std::fs::write(&inside_policy, "").expect("inside policy");
+    let policy = format!(
+        "policy = {:?}\n",
+        data_volume(&inside_policy).display().to_string()
+    );
+    std::fs::write(&fixture.config, document(&fixture.box_directory, &policy))
+        .expect("configuration");
+    let output = fixture.run(&fixture.config, &[]);
+    assert!(
+        text(&output).contains("policy source") && text(&output).contains("inside `box_dir`"),
+        "{}",
+        text(&output)
+    );
+    assert!(!fixture.box_directory.join("private").exists());
 }
 
 #[test]

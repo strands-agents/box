@@ -1,0 +1,56 @@
+# git-push-commit-status grammar corpus
+#
+# Each case is one argv, and what the shell grammar of `../valid/git-push-commit-status.grammar.toml`
+# reads it as. `fields` lists each field that does not hold its default: a Bool `false`, an
+# empty set, or an absent string. An `unmodeled` case has no fields and no effects.
+
+# A dry run still contacts the remote and runs the pre-push hook (verified)
+[[case]]
+argv = ["git", "push", "-n", "ssh://host/r.git", "main"]
+action = "push"
+fields = { dry_run = true, refspec = ["main"], remote = "ssh://host/r.git" }
+effects = ["network"]
+
+[[case]]
+argv = ["git", "push", "-n", "-f", "origin", "main"]
+action = "push"
+fields = { dry_run = true, force = true, refspec = ["main"], remote = "origin" }
+effects = ["network"]
+
+# `:<ref>` deletes the remote ref, and does not force a push
+[[case]]
+argv = ["git", "push", "origin", ":old-topic"]
+action = "push"
+fields = { refspec = [":old-topic"], remote = "origin" }
+effects = ["delete_remote_ref", "network"]
+
+[[case]]
+argv = ["git", "push", "origin", "+:old-topic"]
+action = "push"
+fields = { refspec = ["+:old-topic"], remote = "origin" }
+effects = ["delete_remote_ref", "force_push", "network"]
+
+[[case]]
+argv = ["git", "-c", "core.hooksPath=/var/empty", "commit", "-m", "x"]
+action = "commit"
+fields = { config = ["core.hooksPath=/var/empty"], message = ["x"] }
+effects = ["override_config", "run_program", "skip_hooks"]
+
+# `-C` makes git read the configuration and run the hooks of another repository (verified)
+[[case]]
+argv = ["git", "-C", "/tmp/other", "commit", "-m", "x"]
+action = "commit"
+fields = { directory = "/tmp/other", message = ["x"] }
+effects = ["run_program", "write_file"]
+
+# A dry run pushes nothing, so the pre-push hook that `--no-verify` skips guards nothing
+[[case]]
+argv = ["git", "push", "-n", "--no-verify", "origin", "main"]
+action = "push"
+fields = { dry_run = true, no_verify = true, refspec = ["main"], remote = "origin" }
+effects = ["network"]
+
+# `ci` is not a git command, only a configuration alias (verified)
+[[case]]
+argv = ["git", "ci", "-m", "x"]
+action = "unmodeled"

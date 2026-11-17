@@ -16,16 +16,18 @@ fn engine(source: &str) -> PolicyEngine {
 }
 
 fn decide(source: &str) -> Decision {
-    engine(source).decide(
-        &GovernedBox::assigned("denial-messages"),
-        &Principal::agent(),
-        &Request::ShellExec {
-            command: "echo hello",
-            program: "echo",
-            args: &["hello".to_string()],
-            cwd: "/workspace",
-        },
-    )
+    engine(source)
+        .decide(
+            &GovernedBox::assigned("denial-messages"),
+            &Principal::agent(),
+            &Request::ShellExec {
+                command: "echo hello",
+                program: "echo",
+                args: &["hello".to_string()],
+                cwd: "/workspace",
+            },
+        )
+        .0
 }
 
 /// Decide a content read of `~/notes.txt`, reported under the home `/home/lash`.
@@ -35,14 +37,16 @@ fn decide_read(source: &str) -> Decision {
         .reporting_under("/home/lash")
         .approve_virtual(Path::new("/home/lash/notes.txt"))
         .expect("the path is under the root");
-    engine(source).decide(
-        &GovernedBox::assigned("denial-messages"),
-        &Principal::agent(),
-        &Request::Fs {
-            path: &path,
-            operation: FsOperation::ReadContent,
-        },
-    )
+    engine(source)
+        .decide(
+            &GovernedBox::assigned("denial-messages"),
+            &Principal::agent(),
+            &Request::Fs {
+                path: &path,
+                operation: FsOperation::ReadContent,
+            },
+        )
+        .0
 }
 
 #[test]

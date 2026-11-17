@@ -15,14 +15,12 @@ pub(super) const FETCH_NAME: &str = "fetch";
 /// Cap on a response body handed back to a script.
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
-/// Per-request bound on the gateway call, below the transport's request timeout so a hung fetch
-/// surfaces as a fetch error rather than the transport deadline.
+/// Bound on one Python fetch through the gateway.
 const NETWORK_TIMEOUT: Duration = Duration::from_secs(60);
 
 const _: () = assert!(
-    NETWORK_TIMEOUT.as_nanos() < crate::run::broker::host::SERVE_REQUEST_TIMEOUT.as_nanos(),
-    "a fetch's own timeout must fire before the transport's request timeout, so a hung request \
-     reports as a fetch error rather than the transport's generic kill"
+    NETWORK_TIMEOUT.as_nanos() < super::REQUEST_TIMEOUT.as_nanos(),
+    "a fetch's own timeout must fire before the direct Python request timeout"
 );
 
 /// The parsed shape of one `fetch` call, at parity with the gateway's `InterceptedRequest`:
@@ -162,10 +160,10 @@ pub(super) async fn fetch_through_gateway(
         Err(type_error) => return type_error,
     };
     // The Shell's own pre-transport SSRF check, reused (not copied) so the floor list cannot drift:
-    // a scheme allowlist plus a literal private/loopback/link-local/IMDS refusal, before any client
-    // is built. Parity with the Shell; the gateway floor remains the authority for
-    // DNS-resolved destinations.
-    if let Err(error) = strands_shell::vfs_kernel::check_url_safe(&request.url) {
+    // a scheme allowlist plus a literal private/loopback/link-local/metadata refusal, before any
+    // client is built. Parity with the Shell. The gateway has no compiled floor: authored
+    // `net:connect` policy decides every DNS-resolved destination.
+    if let Err(error) = box_shell::check_url_safe(&request.url) {
         // This floor fires before the gateway is contacted, so the gateway journals nothing for it;
         // record the deny to the operator's stderr so it stays reconstructable (Tenet 4). A gateway
         // net:connect/http:request denial is journaled by the gateway itself.
@@ -766,6 +764,35 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
         );
     }
 
+    /// The floor unwraps the IPv4 address a NAT64 or IPv4-translated literal carries and refuses
+    /// the platform metadata addresses outside `169.254.0.0/16`, all before transport.
+    #[tokio::test]
+    async fn a_fetch_to_a_translated_or_platform_metadata_literal_is_refused_before_transport() {
+        for url in [
+            "http://[64:ff9b::a9fe:a9fe]/latest/meta-data/",
+            "http://[::ffff:0:a9fe:a9fe]/latest/meta-data/",
+            "http://168.63.129.16/",
+            "http://100.100.100.200/latest/meta-data/",
+        ] {
+            let (proxy_url, rx) = proxy_returning(200, "OK", "OK");
+            let (_dir, routing) = routing_with_proxy(proxy_url);
+
+            let result =
+                fetch_through_gateway(&routing, &[MontyObject::string(url.to_string())], &[]).await;
+
+            match result {
+                ExtFunctionResult::Error(exception) => {
+                    assert_eq!(exception.exc_type(), ExcType::OSError, "{url}");
+                }
+                _ => panic!("{url} must be refused before transport"),
+            }
+            assert!(
+                rx.recv_timeout(Duration::from_millis(300)).is_err(),
+                "{url}: no request should reach the proxy"
+            );
+        }
+    }
+
     /// A response body over `MAX_RESPONSE_BYTES` is a catchable error, not a truncated value — the
     /// streaming cap bounds the trusted process's memory.
     #[tokio::test]
@@ -818,7 +845,7 @@ dI3BXhTI3m9FbDOav3znV09ITinjJLABCQ87LQH+RbyY
         );
     }
 
-    /// A `bytes` body is sent as-is (not just a `str`), at parity with the gateway's `BodyRef`.
+    /// A `bytes` body is sent as-is (not just a `str`), at parity with the gateway's request body.
     #[tokio::test]
     async fn a_bytes_body_is_sent_as_is() {
         let (proxy_url, rx) = proxy_returning(200, "OK", "OK");

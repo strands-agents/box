@@ -27,22 +27,81 @@ use crate::error::{BoxError, SetupStage, TrampolineError};
 const EXECUTABLE_MARKER: &[u8] =
     b"STRANDS_BOX_CONTAIN_EXECUTABLE_IDENTITY_8E313B0F21A04D3BA52C4E87D493E6C2";
 
+/// A private handshake that holds the trusted trampoline before workload execution.
+#[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+pub(crate) struct LaunchGate {
+    parent: std::os::unix::net::UnixStream,
+    child: std::os::unix::net::UnixStream,
+}
+
+#[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+impl LaunchGate {
+    pub(crate) fn attach(command: &mut Command) -> std::io::Result<Self> {
+        let (parent, child) = std::os::unix::net::UnixStream::pair()?;
+        parent.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+        parent.set_write_timeout(Some(std::time::Duration::from_secs(5)))?;
+        attach_descriptor(command, &child, "--launch-gate-fd").map_err(std::io::Error::other)?;
+        Ok(Self { parent, child })
+    }
+
+    pub(crate) fn release(
+        mut self,
+        register: impl FnOnce() -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        drop(self.child);
+        let mut ready = [0];
+        self.parent.read_exact(&mut ready)?;
+        if ready != *b"R" {
+            return Err(std::io::Error::other("invalid launch handshake"));
+        }
+        register()?;
+        self.parent.write_all(b"G")
+    }
+}
+
 /// The trampoline's filename, which must sit beside the box executable.
 const HELPER_NAME: &str = "strands-box-contain-trampoline";
 
 /// What the box must hold until the child is reaped.
 pub(crate) struct Trampoline {
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    bootstrap: Option<File>,
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    launch_gate: Option<LaunchGate>,
     setup_status: SetupStatusPipe,
 }
 
 impl Trampoline {
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    pub(crate) fn bootstrap(&self) -> std::io::Result<&File> {
+        self.bootstrap
+            .as_ref()
+            .ok_or_else(|| std::io::Error::other("missing bootstrap image"))
+    }
+
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    pub(crate) fn take_launch_gate(&mut self) -> Option<LaunchGate> {
+        self.launch_gate.take()
+    }
+
     /// Build a trampoline whose setup status is already complete.
     #[cfg(all(test, unix))]
     pub(crate) fn testing_complete() -> Result<Self, BoxError> {
-        let [reader, writer] =
+        let [reader, mut writer] =
             close_on_exec_pipe().map_err(|source| TrampolineError::StatusPipe { source })?;
+        #[cfg(target_os = "linux")]
+        writer
+            .write_all(&[REAPER_READY_BYTE])
+            .map_err(|source| TrampolineError::StatusRead { source })?;
+        writer
+            .write_all(&[SETUP_COMPLETE_BYTE])
+            .map_err(|source| TrampolineError::StatusRead { source })?;
         drop(writer);
         Ok(Self {
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            bootstrap: None,
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            launch_gate: None,
             setup_status: SetupStatusPipe {
                 reader,
                 writer: None,
@@ -59,8 +118,8 @@ impl Trampoline {
     }
 
     /// The stage containment failed at, or `None` when it never failed.
-    pub(crate) fn setup_failure(&mut self) -> Result<Option<SetupStage>, BoxError> {
-        Ok(self.setup_status.read_failure()?)
+    pub(crate) fn setup_failure(&mut self) -> Result<Option<SetupStage>, TrampolineError> {
+        self.setup_status.read_failure()
     }
 }
 
@@ -94,6 +153,8 @@ pub(crate) type ImageName<'a> = &'a dyn Fn(&str) -> Result<ImageCache, BoxError>
 
 /// Everything the trampoline needs to launch one workload.
 pub(crate) struct Launch<'a> {
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    pub(crate) hold_for_registration: bool,
     /// The serialized containment config, and the digest of the exact bytes written.
     pub(crate) config_path: &'a Path,
     pub(crate) config_file: &'a File,
@@ -119,20 +180,45 @@ pub(crate) struct Launch<'a> {
 }
 
 /// Build the command that runs the workload under containment.
-pub(crate) fn command(launch: Launch<'_>) -> Result<(Command, Trampoline), BoxError> {
-    let helper = locate()?;
-    let mut command = identity_bound_command(&helper, launch.image_name)?;
+pub(crate) fn command(
+    launch: Launch<'_>,
+    installation: &crate::run::installation::TrustedInstallation,
+) -> Result<(Command, Trampoline), BoxError> {
+    let _preparation = installation.prepare();
+    installation.verify()?;
+    let (helper, opened) = installation.launcher();
+    let prepared = identity_bound_command(helper, opened, launch.image_name)?;
+    let mut command = prepared.command;
+    crate::run::descriptor_limit::restore_in_child(&mut command);
     let setup_status = SetupStatusPipe::attach(&mut command)?;
     attach_descriptor(&mut command, launch.config_file, "--config-fd")?;
     #[cfg(target_os = "linux")]
     if let Some(control) = launch.relay_control {
         attach_relay_control(&mut command, control)?;
     }
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    let launch_gate = if launch.hold_for_registration {
+        Some(
+            LaunchGate::attach(&mut command)
+                .map_err(|source| TrampolineError::StatusPipe { source })?,
+        )
+    } else {
+        None
+    };
     command
         .args(workload_argv(&launch))
         .env_clear()
         .current_dir(launch.working_directory);
-    Ok((command, Trampoline { setup_status }))
+    Ok((
+        command,
+        Trampoline {
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            bootstrap: Some(prepared.bootstrap),
+            setup_status,
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            launch_gate,
+        },
+    ))
 }
 
 /// The trampoline's own arguments, in order, after the descriptors are attached.
@@ -191,13 +277,13 @@ fn attach_descriptor(
 }
 
 /// Find `strands-box-contain-trampoline` beside the box's own executable, and nowhere else.
-fn locate() -> Result<PathBuf, BoxError> {
-    let current = std::env::current_exe().map_err(|source| TrampolineError::Missing {
-        path: PathBuf::from(HELPER_NAME),
-        source,
-    })?;
-    let helper = current
-        .parent()
+pub(crate) fn locate() -> Result<PathBuf, BoxError> {
+    let current =
+        crate::run::installation::executable().map_err(|source| TrampolineError::Missing {
+            path: PathBuf::from(HELPER_NAME),
+            source,
+        })?;
+    let helper = crate::run::installation::directory(&current)
         .map(|directory| directory.join(HELPER_NAME))
         .ok_or_else(|| TrampolineError::NotExecutable {
             path: current.clone(),
@@ -235,13 +321,28 @@ fn validate_installed(candidate: &Path) -> Result<(), TrampolineError> {
 // ═══════════════════════════════════════════════════════════════════════════════
 // Identity-bound exec: validate what is open, run what was validated.
 
+struct PreparedCommand {
+    command: Command,
+    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+    bootstrap: File,
+}
+
 #[cfg(target_os = "linux")]
-fn identity_bound_command(path: &Path, _image_name: ImageName<'_>) -> Result<Command, BoxError> {
-    let (executable, mut identity_reader) = open_without_following(path)?;
-    validate_opened(path, &executable, &mut identity_reader)?;
+fn identity_bound_command(
+    path: &Path,
+    executable: &File,
+    _image_name: ImageName<'_>,
+) -> Result<PreparedCommand, BoxError> {
+    let mut identity_reader = executable
+        .try_clone()
+        .map_err(|error| TrampolineError::Open {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    validate_opened(path, executable, &mut identity_reader)?;
     // A fresh descriptor for the same open file, above stdio so `Command`'s own
     // stdio setup cannot claim it.
-    let for_exec = duplicate_above_stdio(path, &executable)?;
+    let for_exec = duplicate_above_stdio(path, executable)?;
     let descriptor = for_exec.as_raw_fd();
     let mut command = Command::new(format!("/proc/self/fd/{descriptor}"));
     // SAFETY: the closure only retains an already-open descriptor until exec.
@@ -251,7 +352,7 @@ fn identity_bound_command(path: &Path, _image_name: ImageName<'_>) -> Result<Com
             Ok(())
         });
     }
-    Ok(command)
+    Ok(PreparedCommand { command })
 }
 
 #[cfg(target_os = "linux")]
@@ -278,9 +379,18 @@ fn duplicate_above_stdio(path: &Path, executable: &File) -> Result<File, BoxErro
 /// macOS cannot exec `/dev/fd/<n>` (`ENOTSUP`), so the validated bytes are copied
 /// into a private image and only that image is executed.
 #[cfg(target_os = "macos")]
-fn identity_bound_command(path: &Path, image_name: ImageName<'_>) -> Result<Command, BoxError> {
-    let (executable, mut identity_reader) = open_without_following(path)?;
-    validate_opened(path, &executable, &mut identity_reader)?;
+fn identity_bound_command(
+    path: &Path,
+    executable: &File,
+    image_name: ImageName<'_>,
+) -> Result<PreparedCommand, BoxError> {
+    let mut identity_reader = executable
+        .try_clone()
+        .map_err(|error| TrampolineError::Open {
+            path: path.to_path_buf(),
+            reason: error.to_string(),
+        })?;
+    validate_opened(path, executable, &mut identity_reader)?;
     let materialize = |reason: String| TrampolineError::Materialize {
         path: path.to_path_buf(),
         reason,
@@ -315,7 +425,19 @@ fn identity_bound_command(path: &Path, image_name: ImageName<'_>) -> Result<Comm
         )?;
     }
 
-    Ok(command_in_directory(image.directory, &image_name))
+    #[cfg(feature = "native-filesystem-policy")]
+    let bootstrap = open_at(
+        &image.directory,
+        &image_name,
+        libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        0,
+    )
+    .map_err(|error| materialize(error.to_string()))?;
+    Ok(PreparedCommand {
+        command: command_in_directory(image.directory, &image_name),
+        #[cfg(feature = "native-filesystem-policy")]
+        bootstrap,
+    })
 }
 
 /// Write the validated bytes to `image_path`, atomically and executable.
@@ -508,7 +630,11 @@ fn rename_at(
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn identity_bound_command(_path: &Path, _image_name: ImageName<'_>) -> Result<Command, BoxError> {
+fn identity_bound_command(
+    _path: &Path,
+    _executable: &File,
+    _image_name: ImageName<'_>,
+) -> Result<PreparedCommand, BoxError> {
     Err(TrampolineError::UnsupportedPlatform {
         os: std::env::consts::OS,
     }
@@ -516,7 +642,7 @@ fn identity_bound_command(_path: &Path, _image_name: ImageName<'_>) -> Result<Co
 }
 
 /// Open `path` for reading without following a final symlink.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn open_without_following(path: &Path) -> Result<(File, File), TrampolineError> {
     let open = |reason: String| TrampolineError::Open {
         path: path.to_path_buf(),
@@ -632,13 +758,14 @@ fn reader_contains_marker(reader: &mut File, marker: &[u8]) -> std::io::Result<b
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// The setup-status pipe: one byte, so a setup failure is not a workload exit.
+// The setup-status pipe keeps setup failures separate from workload exits.
 
 #[cfg(unix)]
-/// The status byte the reaper writes once containment is up and the workload is about to run — the
-/// explicit "reached exec" signal for a long-lived leaf whose pipe never EOFs during setup. Must
-/// stay distinct from every `SetupStage` failure byte (`1..=5`). Mirrored by the trampoline's writer.
-const SETUP_SUCCESS_BYTE: u8 = 0;
+/// The trampoline completed preparation and will attempt executable launch.
+const SETUP_COMPLETE_BYTE: u8 = 128;
+
+#[cfg(target_os = "linux")]
+const REAPER_READY_BYTE: u8 = 6;
 
 struct SetupStatusPipe {
     reader: File,
@@ -686,19 +813,23 @@ impl SetupStatusPipe {
 
     #[cfg(unix)]
     fn read_failure(&mut self) -> Result<Option<SetupStage>, TrampolineError> {
-        // Read exactly one status byte, not to EOF. A long-lived leaf (a contained streaming MCP
-        // server) keeps a writer copy open in the reaper for its whole life, so the pipe never EOFs
-        // during setup — waiting for EOF would hang. So the reaper writes an explicit success byte
-        // (`0`) once containment is up; a failure writes its stage byte (`1..=5`); and a bare EOF
-        // (no byte, writer closed at a successful `exec`) still means success, as macOS and the
-        // buffered path have always signalled it.
-        let mut byte = [0u8; 1];
-        let read = std::io::Read::read(&mut self.reader, &mut byte)
-            .map_err(|source| TrampolineError::StatusRead { source })?;
-        match (read, byte[0]) {
-            // EOF with nothing written, or the explicit success marker: containment reached exec.
-            (0, _) | (_, SETUP_SUCCESS_BYTE) => Ok(None),
-            (_, stage) => SetupStage::decode(stage).map(Some),
+        let mut complete = false;
+        #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+        let mut reaper_ready = !cfg!(target_os = "linux");
+        loop {
+            let mut byte = [0u8; 1];
+            let read = match self.reader.read(&mut byte) {
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                result => result.map_err(|source| TrampolineError::StatusRead { source })?,
+            };
+            match (read, byte[0]) {
+                (0, _) if complete && reaper_ready => return Ok(None),
+                (0, _) => return Err(TrampolineError::SetupIncomplete),
+                (_, SETUP_COMPLETE_BYTE) if !complete => complete = true,
+                #[cfg(target_os = "linux")]
+                (_, REAPER_READY_BYTE) if !reaper_ready => reaper_ready = true,
+                (_, stage) => return SetupStage::decode(stage).map(Some),
+            }
         }
     }
 
@@ -776,6 +907,8 @@ mod tests {
         image_name: ImageName<'a>,
     ) -> Launch<'a> {
         Launch {
+            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            hold_for_registration: false,
             config_path: config,
             config_file: file,
             config_sha256: "0".repeat(64).leak(),
@@ -1067,16 +1200,173 @@ mod tests {
 
     // ── The setup-status pipe ──────────────────────────────────────────────────
 
-    /// Silence means the workload ran: whatever status came back is authentically
-    /// the workload's.
+    #[tokio::test]
+    async fn cancelling_before_the_launch_gate_preserves_the_signal_exit() {
+        use crate::run::contain::supervise::{ProcessGroup, contained_exit_code};
+        use std::os::unix::net::UnixStream;
+        use std::os::unix::process::ExitStatusExt as _;
+        use std::time::Duration;
+
+        for signal in [libc::SIGINT, libc::SIGTERM, libc::SIGHUP, libc::SIGKILL] {
+            let (mut parent, gate) = UnixStream::pair().unwrap();
+            parent
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut command = Command::new(locate().unwrap());
+            command.args([
+                "--config",
+                "/dev/null",
+                "--config-sha256",
+                &"0".repeat(64),
+                "--target-env-json",
+                "{}",
+            ]);
+            let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
+            attach_descriptor(&mut command, &gate, "--launch-gate-fd").unwrap();
+            command.args(["--", "/bin/sh", "-c", "printf WORKLOAD_RAN"]);
+            let mut stdout_file = tempfile::tempfile().unwrap();
+            command.stdout(stdout_file.try_clone().unwrap());
+            let mut group = ProcessGroup::spawn(command).await.unwrap();
+            drop(gate);
+            pipe.writer.take();
+            let mut ready = [0];
+            parent.read_exact(&mut ready).unwrap();
+            assert_eq!(ready, *b"R");
+            group.signal(signal).unwrap();
+            let status = tokio::time::timeout(Duration::from_secs(5), group.wait())
+                .await
+                .unwrap()
+                .unwrap();
+            group.release().await.unwrap();
+            assert_eq!(status.signal(), Some(signal));
+            let setup = pipe.read_failure();
+            assert!(matches!(setup, Err(TrampolineError::SetupIncomplete)));
+            let code = contained_exit_code(status, setup).unwrap();
+            assert_eq!(
+                format!("{code:?}"),
+                format!("{:?}", std::process::ExitCode::from((128 + signal) as u8))
+            );
+            let mut stdout = String::new();
+            stdout_file.rewind().unwrap();
+            stdout_file.read_to_string(&mut stdout).unwrap();
+            assert!(stdout.is_empty());
+        }
+    }
+
     #[test]
-    fn no_status_byte_means_the_workload_ran() {
+    fn closure_without_setup_completion_is_incomplete() {
         let mut command = Command::new("/bin/true");
         let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
 
         pipe.writer.take();
 
-        assert_eq!(pipe.read_failure().unwrap(), None);
+        assert!(matches!(
+            pipe.read_failure(),
+            Err(TrampolineError::SetupIncomplete)
+        ));
+    }
+
+    #[test]
+    fn setup_completion_does_not_hide_a_later_exec_failure() {
+        let mut command = Command::new("/bin/true");
+        let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
+        pipe.writer
+            .as_mut()
+            .unwrap()
+            .write_all(&[SETUP_COMPLETE_BYTE, 5])
+            .unwrap();
+        pipe.writer.take();
+        assert_eq!(pipe.read_failure().unwrap(), Some(SetupStage::Exec));
+    }
+
+    #[test]
+    fn setup_completion_waits_for_all_setup_writers_to_close() {
+        let mut command = Command::new("/bin/true");
+        let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
+        let mut writer = pipe.writer.take().unwrap();
+        writer.write_all(&[SETUP_COMPLETE_BYTE]).unwrap();
+        #[cfg(target_os = "linux")]
+        writer.write_all(&[REAPER_READY_BYTE]).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || sent.send(pipe.read_failure()).unwrap());
+        assert!(
+            received
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err()
+        );
+        drop(writer);
+        assert_eq!(
+            received
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+                .unwrap(),
+            None
+        );
+        reader.join().unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn setup_completion_requires_both_workload_and_reaper() {
+        for bytes in [&[128][..], &[6][..], &[6, 6][..], &[128, 6, 6][..]] {
+            let mut command = Command::new("/bin/true");
+            let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
+            pipe.writer.as_mut().unwrap().write_all(bytes).unwrap();
+            pipe.writer.take();
+            let failure = pipe.read_failure();
+            if bytes.len() == 1 {
+                assert!(matches!(failure, Err(TrampolineError::SetupIncomplete)));
+            } else {
+                assert!(matches!(
+                    failure,
+                    Err(TrampolineError::StatusProtocol { .. })
+                ));
+            }
+        }
+        for bytes in [[128, 6], [6, 128]] {
+            let mut command = Command::new("/bin/true");
+            let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
+            pipe.writer.as_mut().unwrap().write_all(&bytes).unwrap();
+            pipe.writer.take();
+            assert_eq!(pipe.read_failure().unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn setup_completion_rejects_the_legacy_marker_without_waiting_for_closure() {
+        let mut command = Command::new("/bin/true");
+        let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
+        let mut writer = pipe.writer.take().unwrap();
+        writer.write_all(&[0]).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || sent.send(pipe.read_failure()).unwrap());
+        let result = received.recv_timeout(std::time::Duration::from_secs(2));
+        drop(writer);
+        reader.join().unwrap();
+        assert!(matches!(
+            result.unwrap(),
+            Err(TrampolineError::StatusProtocol { .. })
+        ));
+    }
+
+    #[test]
+    fn setup_completion_rejects_duplicate_or_unknown_markers() {
+        for bytes in [&[128, 128][..], &[128, 99][..], &[99, 128][..]] {
+            let mut command = Command::new("/bin/true");
+            let mut pipe = SetupStatusPipe::attach(&mut command).unwrap();
+            pipe.writer.as_mut().unwrap().write_all(bytes).unwrap();
+            #[cfg(target_os = "linux")]
+            pipe.writer
+                .as_mut()
+                .unwrap()
+                .write_all(&[REAPER_READY_BYTE])
+                .unwrap();
+            pipe.writer.take();
+            assert!(matches!(
+                pipe.read_failure(),
+                Err(TrampolineError::StatusProtocol { .. })
+            ));
+        }
     }
 
     /// One byte means containment failed at that stage, and the box reports the

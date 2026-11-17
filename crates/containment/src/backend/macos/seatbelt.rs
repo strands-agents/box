@@ -12,7 +12,7 @@
 //! | `Read` + `Root`    | ancestor metadata, and `file-read*` over the subtree |
 //! | `List` + `Root`    | ancestor metadata, `file-read-metadata` over the subtree, and `file-read-data` on its directory vnodes alone; rendered in the read-root block |
 //! | `Write` + `File`   | `file-write*` on the literal, and denies leaving its contents alone: its flags, its identity, its ACL, its mode, its owner, and its executable mapping |
-//! | `Write` + `Root`   | `file-write*` over the subtree, two denies fixing the root's own identity, and denies on the subtree's flags, ACL, owner, and executable mappings |
+//! | `Write` + `Root`   | the `WRITE_ROOT_LEAVES` over the subtree, two denies fixing the root's own identity, and a deny on the subtree's executable mappings; `allow_file_attributes` adds `file-write*` over the subtree and denies the `FILE_ATTRIBUTE_WITHHELD_LEAVES` again |
 //! | `Connect` + `File` | `network-outbound` on the path |
 //!
 //! A write cell ends with one executable-mapping allow per exec grant it reaches, so the pair the
@@ -78,6 +78,9 @@ const LEAF_OVERLAY: &str = "{{LEAF_OVERLAY}}";
 /// The `mDNSResponder` socket that `getaddrinfo` connects to.
 const SYSTEM_RESOLVER: &str = "/private/var/run/mDNSResponder";
 
+/// The services Apple's certificate trust evaluation asks, granted to native egress alone.
+const TRUST_SERVICES: [&str; 2] = ["com.apple.trustd.agent", "com.apple.SecurityServer"];
+
 /// The `file-write*` leaves a write root grants, and the set every overriding deny must also name.
 pub(crate) const WRITE_ROOT_LEAVES: [&str; 6] = [
     "file-write-data",
@@ -94,6 +97,24 @@ fn write_leaf_allows(filter: &str, path: &str) -> String {
         .iter()
         .map(|leaf| format!("(allow {leaf} ({filter} \"{path}\"))\n"))
         .collect()
+}
+
+/// The `file-write*` members that `WRITE_ROOT_LEAVES` withholds, which a write root denies again when
+/// the file-attributes switch grants the wildcard.
+pub(crate) const FILE_ATTRIBUTE_WITHHELD_LEAVES: [&str; 4] = [
+    "file-write-flags",
+    "file-write-owner",
+    "file-write-acl",
+    "file-write-finderinfo",
+];
+
+/// The wildcard allow and the denies that take the withheld leaves back, at subtree scope.
+fn file_attribute_rules(path: &str) -> String {
+    let withheld: String = FILE_ATTRIBUTE_WITHHELD_LEAVES
+        .iter()
+        .map(|leaf| format!("(deny {leaf} (subpath \"{path}\"))\n"))
+        .collect();
+    format!("(allow file-write* (subpath \"{path}\"))\n{withheld}")
 }
 
 /// One `deny` per leaf in `WRITE_ROOT_LEAVES`, at `filter` scope.
@@ -121,6 +142,9 @@ fn inside_operator_home(path: &std::path::Path, homes: &[std::path::PathBuf]) ->
 /// Group grants by resolved path, so a duplicate operation and a scope disagreement are structural.
 fn group_by_path(config: &ContainmentConfig) -> Result<Vec<(&PathGrant, BTreeSet<Operation>)>> {
     let mut groups: Vec<(&PathGrant, BTreeSet<Operation>)> = Vec::new();
+    // Each spelling granted per operation. Two links to one file are two spellings of one grant:
+    // the renderer walks each grant, so each spelling gets its own traversal rules.
+    let mut spellings: BTreeSet<(&std::path::Path, Operation)> = BTreeSet::new();
     for granted in config.authorizations() {
         // Breadth first, and independent of the cell: the widest possible grant is also a
         // well-formed one, so recognizing the cell would accept it.
@@ -142,7 +166,8 @@ fn group_by_path(config: &ContainmentConfig) -> Result<Vec<(&PathGrant, BTreeSet
                         granted.scope,
                     )));
                 }
-                if !operations.insert(granted.operation) {
+                operations.insert(granted.operation);
+                if !spellings.insert((granted.original.as_path(), granted.operation)) {
                     return Err(unsupported(format!(
                         "{} is granted {:?} twice",
                         granted.resolved.display(),
@@ -150,7 +175,10 @@ fn group_by_path(config: &ContainmentConfig) -> Result<Vec<(&PathGrant, BTreeSet
                     )));
                 }
             }
-            None => groups.push((granted, BTreeSet::from([granted.operation]))),
+            None => {
+                spellings.insert((granted.original.as_path(), granted.operation));
+                groups.push((granted, BTreeSet::from([granted.operation])));
+            }
         }
     }
     Ok(groups)
@@ -168,9 +196,9 @@ fn require_expressible(config: &ContainmentConfig) -> Result<()> {
         ));
     }
     match config.network() {
-        // Localhost with no inbound bind (the mediated default), or AllowAll (operator-declared
-        // native egress, contain_egress = false). A `listen` port is still unsupported on macOS.
-        Network::Localhost { listen, .. } if listen.is_empty() => {}
+        // Localhost, with or without inbound ports, or AllowAll (operator-declared native egress,
+        // contain_egress = false).
+        Network::Localhost { .. } => {}
         Network::AllowAll => {}
         _ => {
             return Err(unsupported(
@@ -448,6 +476,7 @@ pub(crate) fn render_profile_with_streams(
 
     let mut cells: BTreeMap<&str, String> = BTreeMap::new();
     let mut loaded_images: BTreeSet<std::path::PathBuf> = BTreeSet::new();
+    let mut missing = crate::backend::dependencies::MissingReads::default();
 
     for granted in config.authorizations() {
         let path = escaped(&granted.resolved)?;
@@ -462,18 +491,8 @@ pub(crate) fn render_profile_with_streams(
                 cells.entry(EXEC_FILE).or_default().push_str(&rules);
                 // The images the program loads from outside the shared cache are read-file cells:
                 // `file-read*` on each identity, and metadata on the spelling the load requests.
-                for image in super::macho::dylib_closure(&granted.resolved)? {
-                    let loaded = PathGrant::new(&image, Operation::Read, Scope::File)?;
-                    require_bounded_grant(&loaded, config.operator_home(), false).map_err(
-                        |error| ContainmentError::ApplyFailed {
-                            backend: MECHANISM.to_string(),
-                            reason: format!(
-                                "'{}' loads '{}', which the floor refuses: {error}",
-                                granted.resolved.display(),
-                                image.display()
-                            ),
-                        },
-                    )?;
+                for loaded in super::macho::collect_dylibs(&granted.resolved, config, &mut missing)? {
+                    let image = &loaded.original;
                     if !loaded_images.insert(loaded.resolved.clone()) {
                         continue;
                     }
@@ -481,7 +500,7 @@ pub(crate) fn render_profile_with_streams(
                         "(allow file-read* (literal \"{}\"))\n{}{}",
                         escaped(&loaded.resolved)?,
                         other_spelling_metadata(&loaded)?,
-                        linked_directory_metadata(&image)?
+                        linked_directory_metadata(image)?
                     ));
                 }
             }
@@ -541,8 +560,13 @@ pub(crate) fn render_profile_with_streams(
             // and not on the file cell, because a workload tightens a file it creates in its own
             // tree.
             (Operation::Write, Scope::Root) => {
+                let file_attributes = if config.file_attributes() {
+                    file_attribute_rules(&path)
+                } else {
+                    String::new()
+                };
                 cells.entry(WRITE_ROOT).or_default().push_str(&format!(
-                    "{}(deny file-write-unlink (literal \"{path}\"))\n\
+                    "{}{file_attributes}(deny file-write-unlink (literal \"{path}\"))\n\
                      (deny file-write-create (literal \"{path}\"))\n\
                      (deny file-map-executable (subpath \"{path}\"))\n{}",
                     write_leaf_allows("subpath", &path),
@@ -583,6 +607,7 @@ pub(crate) fn render_profile_with_streams(
         }
     }
 
+    missing.require_complete(MECHANISM)?;
     let write_roots = config.grants_in(Operation::Write, Scope::Root);
     let mut fixed_ancestors = BTreeSet::new();
     for protected in config.write_protections() {
@@ -763,15 +788,24 @@ pub(crate) fn render_profile_with_streams(
         }
     }
 
-    // Each refused tree or file keeps both spellings closed to content reads, writes, and
-    // execution, whether or not the path exists.
+    // Each refused tree or file keeps every spelling, its data-volume twin included, closed to
+    // content reads, writes, and execution, whether or not the path exists.
     for refused in config.refusals() {
         let filter = if refused.scope == Scope::File {
             "literal"
         } else {
             "subpath"
         };
-        for spelling in refused.reachable_paths() {
+        let mut spellings: Vec<std::path::PathBuf> = Vec::new();
+        for path in refused.reachable_paths() {
+            let twin = data_volume_spelling(&path);
+            for spelling in std::iter::once(path).chain(twin) {
+                if !spellings.contains(&spelling) {
+                    spellings.push(spelling);
+                }
+            }
+        }
+        for spelling in spellings {
             let path = escaped(&spelling)?;
             cells.entry(DENY_REFUSED).or_default().push_str(&format!(
                 "(deny file-read* ({filter} \"{path}\"))\n\
@@ -793,6 +827,7 @@ pub(crate) fn render_profile_with_streams(
         .identity_requirements()
         .iter()
         .chain(config.write_protections())
+        .chain(config.command_identities())
         .flat_map(|required| required.path().ancestors())
         .collect();
     for path in identity_paths {
@@ -801,6 +836,15 @@ pub(crate) fn render_profile_with_streams(
             "(allow file-read-metadata (literal \"{path}\"))\n\
              (allow file-test-existence (literal \"{path}\"))\n"
         ));
+    }
+
+    // Opt-in: FSEvents serves directory watchers. The stream can name denied paths and past
+    // events, so only a process that selects `file-watching` gets the lookup.
+    if config.file_watching() {
+        cells
+            .entry(RUNTIME_SERVICES)
+            .or_default()
+            .push_str("(allow mach-lookup (global-name \"com.apple.FSEvents\"))\n");
     }
 
     // Leaf-only: a bundled JS/Node runtime calls `getifaddrs` at startup. It reads the `net.*`
@@ -822,10 +866,16 @@ pub(crate) fn render_profile_with_streams(
     }
 
     match config.network() {
-        Network::Localhost { connect, .. } => {
+        Network::Localhost { connect, listen } => {
             for port in connect {
                 cells.entry(CONNECT_PORTS).or_default().push_str(&format!(
                     "(allow network-outbound\n    (remote tcp \"localhost:{port}\"))\n"
+                ));
+            }
+            for port in listen {
+                cells.entry(CONNECT_PORTS).or_default().push_str(&format!(
+                    "(allow network-bind\n    (local tcp \"localhost:{port}\"))\n\
+                     (allow network-inbound\n    (local tcp \"localhost:{port}\"))\n"
                 ));
             }
         }
@@ -835,6 +885,16 @@ pub(crate) fn render_profile_with_streams(
                 "(allow network-outbound\n    (remote ip \"*:*\"))\n\
                  (allow network-outbound\n    (literal \"{SYSTEM_RESOLVER}\"))\n"
             ));
+            // The system's certificate check, which a direct connection meets the real server
+            // with. Through the gateway these add nothing: the gateway's CA is not in the keychain.
+            for service in TRUST_SERVICES {
+                cells
+                    .entry(RUNTIME_SERVICES)
+                    .or_default()
+                    .push_str(&format!(
+                        "(allow mach-lookup (global-name \"{service}\"))\n"
+                    ));
+            }
         }
         Network::Blocked => {}
     }
@@ -991,6 +1051,7 @@ impl ContainmentBackend for SeatbeltBackend {
         // Seatbelt execs in place, so a successful `exec` closes the status pipe (EOF); there is no
         // reaper to write a byte, and none is needed.
         _confirm_fd: Option<std::os::fd::RawFd>,
+        _native_filesystem_handoff: Option<&std::os::unix::net::UnixStream>,
     ) -> Result<()> {
         apply_validated_profile(config, apply_current_process)
     }
@@ -1098,6 +1159,43 @@ mod tests {
             .expect("read tree again");
         assert!(matches!(
             group_by_path(&twice),
+            Err(ContainmentError::UnsupportedCapability { .. })
+        ));
+
+        // Two links to one file are two spellings, so both render; one link twice is refused.
+        let file = root.join("gcc");
+        std::fs::write(&file, "").expect("a file");
+        for name in ["cc", "c99"] {
+            std::os::unix::fs::symlink(&file, root.join(name)).expect("a link");
+        }
+        let two_names = ContainmentConfig::new()
+            .allow(root.join("cc"), Operation::Read, Scope::File)
+            .expect("cc")
+            .allow(root.join("c99"), Operation::Read, Scope::File)
+            .expect("c99");
+        let groups = group_by_path(&two_names).expect("two names for one file");
+        assert_eq!(groups.len(), 1);
+        let program = root.join("agent");
+        std::fs::write(&program, "agent").expect("program fixture");
+        let rendered = two_names
+            .set_network(Network::localhost().connect(33085))
+            .expect("localhost")
+            .allow(&program, Operation::Exec, Scope::File)
+            .expect("exec");
+        let profile = render_profile(&rendered).expect("a profile");
+        for name in ["cc", "c99"] {
+            assert!(
+                profile.contains(&format!("{}\")", root.join(name).display())),
+                "{name} must have its own rule: {profile}"
+            );
+        }
+        let one_name_twice = ContainmentConfig::new()
+            .allow(root.join("cc"), Operation::Read, Scope::File)
+            .expect("cc")
+            .allow(root.join("cc"), Operation::Read, Scope::File)
+            .expect("cc again");
+        assert!(matches!(
+            group_by_path(&one_name_twice),
             Err(ContainmentError::UnsupportedCapability { .. })
         ));
     }
@@ -1628,6 +1726,48 @@ mod tests {
         );
     }
 
+    /// **Native egress, and only native egress, reaches the system's certificate check.** The same
+    /// leaf renders `com.apple.trustd.agent` and `com.apple.SecurityServer` with `AllowAll` and
+    /// neither through the gateway's localhost port.
+    #[test]
+    fn the_trust_services_render_only_with_native_egress() {
+        let home = tempfile::tempdir().expect("an operator home");
+        let home_path = home.path().canonicalize().expect("the home resolves");
+        let program = home_path.join("tool");
+        std::fs::write(&program, "tool").expect("an executable fixture");
+        let leaf = |network: Network| {
+            let config = ContainmentConfig::new()
+                .set_network(network)
+                .expect("the network")
+                .anchored_at(&home_path)
+                .allow(&program, Operation::Exec, Scope::File)
+                .expect("an executable")
+                .allow_runtime_services()
+                .allow_broad_exec();
+            render_profile(&config).expect("the leaf profile renders")
+        };
+        let rules: Vec<String> = TRUST_SERVICES
+            .iter()
+            .map(|service| format!("(allow mach-lookup (global-name \"{service}\"))"))
+            .collect();
+
+        let native = leaf(Network::AllowAll);
+        for rule in &rules {
+            assert_eq!(
+                native.matches(rule.as_str()).count(),
+                1,
+                "native egress renders {rule} once: {native}"
+            );
+        }
+        let gateway = leaf(Network::localhost().connect(33085));
+        for rule in &rules {
+            assert!(
+                !gateway.contains(rule.as_str()),
+                "gateway egress renders no {rule}: {gateway}"
+            );
+        }
+    }
+
     /// **The map-exec allow is additive and wins by last-match.** The write cell's
     /// `file-map-executable` deny still renders; the leaf overlay adds an allow AFTER it, so a build
     /// loads what it compiles. The agent carries the deny and no allow (write-xor-execute).
@@ -1811,6 +1951,123 @@ mod tests {
             assert!(
                 profile.contains(&format!("(allow {leaf} (subpath \"{escaped_output}\"))")),
                 "the inner root names every write leaf: {profile}"
+            );
+        }
+    }
+
+    /// The configuration both file-attribute render tests share: one write root, optionally with
+    /// the switch, plus the paths the overrides name.
+    fn file_attribute_config(
+        home_path: &std::path::Path,
+        switch_on: bool,
+    ) -> (ContainmentConfig, std::path::PathBuf, std::path::PathBuf) {
+        let agent = home_path.join("agent");
+        std::fs::write(&agent, "agent").expect("an executable fixture");
+        let state = home_path.join("state");
+        let refused = state.join("private");
+        std::fs::create_dir_all(&refused).expect("a write root with a refused corner");
+        let protected = state.join("authority");
+        std::fs::write(&protected, "authority").expect("an authority fixture");
+        let opened = std::fs::File::open(&protected).expect("an opened authority");
+        let config = ContainmentConfig::new()
+            .set_network(Network::localhost().connect(33085))
+            .expect("localhost")
+            .anchored_at(home_path)
+            .allow(&agent, Operation::Exec, Scope::File)
+            .expect("an executable")
+            .refuse(&refused, Scope::Root)
+            .expect("a refused corner")
+            .allow(&state, Operation::Write, Scope::Root)
+            .expect("a write root")
+            .protect_write(&protected, &opened)
+            .expect("a protected object");
+        let config = if switch_on {
+            config.allow_file_attributes()
+        } else {
+            config
+        };
+        (config, state, protected)
+    }
+
+    #[test]
+    fn a_write_root_without_the_file_attributes_switch_renders_no_wildcard_allow() {
+        let home = tempfile::tempdir().expect("an operator home");
+        let home_path = home.path().canonicalize().expect("the home resolves");
+        let (config, state, _) = file_attribute_config(&home_path, false);
+        let profile = render_profile(&config).expect("the profile renders");
+        let escaped_state = escaped(&state).expect("the root escapes");
+        assert!(
+            !profile.contains(&format!(
+                "(allow file-write* (subpath \"{escaped_state}\"))"
+            )),
+            "the switch is off, so the root names its six leaves alone: {profile}"
+        );
+        for leaf in FILE_ATTRIBUTE_WITHHELD_LEAVES {
+            assert!(
+                !profile.contains(&format!("(deny {leaf} (subpath \"{escaped_state}\"))")),
+                "the switch is off, so no withheld leaf is denied at the root: {leaf}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_write_root_with_the_file_attributes_switch_renders_the_wildcard_and_every_withheld_leaf_deny()
+     {
+        let home = tempfile::tempdir().expect("an operator home");
+        let home_path = home.path().canonicalize().expect("the home resolves");
+        let (config, state, _) = file_attribute_config(&home_path, true);
+        let profile = render_profile(&config).expect("the profile renders");
+        let escaped_state = escaped(&state).expect("the root escapes");
+        let wildcard = profile
+            .find(&format!(
+                "(allow file-write* (subpath \"{escaped_state}\"))"
+            ))
+            .expect("the switch renders the wildcard allow");
+        for leaf in FILE_ATTRIBUTE_WITHHELD_LEAVES {
+            let deny = profile
+                .find(&format!("(deny {leaf} (subpath \"{escaped_state}\"))"))
+                .unwrap_or_else(|| panic!("the root denies {leaf}: {profile}"));
+            assert!(deny > wildcard, "{leaf} is denied after the wildcard allow");
+        }
+        for kept in [
+            format!("(deny file-write-unlink (literal \"{escaped_state}\"))"),
+            format!("(deny file-write-create (literal \"{escaped_state}\"))"),
+            format!("(deny file-map-executable (subpath \"{escaped_state}\"))"),
+        ] {
+            assert!(profile.contains(&kept), "the root keeps {kept}");
+        }
+        for leaf in WRITE_ROOT_LEAVES {
+            assert!(
+                profile.contains(&format!("(allow {leaf} (subpath \"{escaped_state}\"))")),
+                "the six leaves stay named beside the wildcard: {leaf}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_overrides_render_after_the_file_attributes_wildcard() {
+        let home = tempfile::tempdir().expect("an operator home");
+        let home_path = home.path().canonicalize().expect("the home resolves");
+        let (config, state, protected) = file_attribute_config(&home_path, true);
+        let profile = render_profile(&config).expect("the profile renders");
+        let escaped_state = escaped(&state).expect("the root escapes");
+        let wildcard = profile
+            .find(&format!(
+                "(allow file-write* (subpath \"{escaped_state}\"))"
+            ))
+            .expect("the wildcard allow");
+        let escaped_protected = escaped(&protected).expect("the object escapes");
+        let escaped_refused = escaped(&state.join("private")).expect("the corner escapes");
+        for override_rule in [
+            format!("(deny file-write* (literal \"{escaped_protected}\"))"),
+            format!("(deny file-write* (subpath \"{escaped_refused}\"))"),
+        ] {
+            let position = profile
+                .find(&override_rule)
+                .unwrap_or_else(|| panic!("the override {override_rule} renders: {profile}"));
+            assert!(
+                position > wildcard,
+                "{override_rule} must follow the wildcard so the last matching rule is the deny"
             );
         }
     }
@@ -2268,6 +2525,32 @@ mod tests {
             .refuse(&secret, Scope::File)
             .expect("the file refusal");
         (temp, root, config)
+    }
+
+    /// **A refusal renders its data-volume spelling beside its own, after every allow.**
+    #[test]
+    fn a_refusal_renders_its_data_volume_spelling_after_every_allow() {
+        let (_temp, _root, config) = refusal_fixture();
+        let profile = render_profile(&config).expect("profile");
+        let last_allow = profile.rfind("(allow ").expect("an allow renders");
+        for refused in config.refusals() {
+            let filter = if refused.scope == Scope::File {
+                "literal"
+            } else {
+                "subpath"
+            };
+            let twin = data_volume_spelling(&refused.resolved).expect("the fixture has a twin");
+            for spelling in [&refused.resolved, &twin] {
+                let path = escaped(spelling).expect("the spelling escapes");
+                for operation in ["file-read*", "file-write*", "process-exec"] {
+                    let rule = format!("(deny {operation} ({filter} \"{path}\"))");
+                    assert!(
+                        profile.find(&rule).is_some_and(|at| at > last_allow),
+                        "{rule} renders after every allow: {profile}"
+                    );
+                }
+            }
+        }
     }
 
     /// **A refusal strictly inside a write root fixes every directory between the two**, with the

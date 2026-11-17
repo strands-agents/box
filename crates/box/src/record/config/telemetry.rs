@@ -50,7 +50,9 @@ fn refuse_a_workload_reachable_destination(
     for root in &roots {
         let private = root.join(crate::record::layout::PRIVATE_DIRECTORY);
         for spelling in &spellings {
-            if spelling.starts_with(root) && !spelling.starts_with(&private) {
+            if crate::record::layout::lies_within(spelling, root)
+                && !crate::record::layout::lies_within(spelling, &private)
+            {
                 return Err(format!(
                     "{expanded:?} is inside the box directory {} but outside its private tree, \
                      where a process could truncate it; name a destination under `private/`, or \
@@ -88,7 +90,7 @@ pub(crate) enum SignalGroup {
     Permit,
     /// The agent's own spans, and this box's control-plane operations.
     Trace,
-    /// The agent's own log records.
+    /// The agent's log records and unmatched MCP routing diagnostics.
     Logs,
     /// The agent's own metrics.
     Metrics,
@@ -101,7 +103,7 @@ impl SignalGroup {
             Self::Deny => vec![Signal::PolicyDenied],
             Self::Permit => vec![Signal::PolicyPermitted],
             Self::Trace => vec![Signal::AgentTrace, Signal::ControlPlane],
-            Self::Logs => vec![Signal::AgentLogs],
+            Self::Logs => vec![Signal::AgentLogs, Signal::McpUnmatched],
             Self::Metrics => vec![Signal::AgentMetrics],
         }
     }
@@ -408,6 +410,39 @@ mod tests {
             .expect("a destination outside the box directory is allowed");
     }
 
+    /// **A destination in the macOS data-volume spelling of the box directory is refused** outside
+    /// its private tree, and accepted inside it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_data_volume_destination_outside_private_is_refused() {
+        let scratch = tempfile::tempdir().expect("a scratch directory");
+        let box_directory = scratch
+            .path()
+            .canonicalize()
+            .expect("resolves")
+            .join("codex");
+        std::fs::create_dir_all(box_directory.join("private")).expect("the box directory");
+        let data_volume =
+            Path::new("/System/Volumes/Data").join(box_directory.strip_prefix("/").unwrap());
+
+        refuse_a_workload_reachable_destination(
+            data_volume
+                .join("bin/records.jsonl")
+                .to_str()
+                .expect("UTF-8"),
+            &box_directory,
+        )
+        .expect_err("a destination outside private/ is refused in either spelling");
+        refuse_a_workload_reachable_destination(
+            data_volume
+                .join("private/records.jsonl")
+                .to_str()
+                .expect("UTF-8"),
+            &box_directory,
+        )
+        .expect("a destination under private/ is accepted in either spelling");
+    }
+
     /// A sibling whose path merely *starts with* the box directory's spelling is not inside it.
     #[test]
     fn a_sibling_sharing_the_box_directorys_prefix_is_not_inside_it() {
@@ -479,13 +514,16 @@ mod tests {
             signals_for(&[SignalGroup::Trace]),
             vec![Signal::AgentTrace, Signal::ControlPlane]
         );
-        assert_eq!(signals_for(&[SignalGroup::Logs]), vec![Signal::AgentLogs]);
+        assert_eq!(
+            signals_for(&[SignalGroup::Logs]),
+            vec![Signal::AgentLogs, Signal::McpUnmatched]
+        );
         assert_eq!(
             signals_for(&[SignalGroup::Metrics]),
             vec![Signal::AgentMetrics]
         );
 
-        // Counted against the crate's own set, so a seventh signal no word reaches fails here.
+        // Every signal is reachable through an include word.
         let every = signals_for(&SignalGroup::every());
         assert_eq!(every.len(), Signal::every().len(), "{every:?}");
     }
@@ -512,7 +550,12 @@ mod tests {
             "an absent include must reach every signal: {:?}",
             target.signals()
         );
-        for expected in [Signal::AgentLogs, Signal::AgentMetrics, Signal::AgentTrace] {
+        for expected in [
+            Signal::AgentLogs,
+            Signal::AgentMetrics,
+            Signal::AgentTrace,
+            Signal::McpUnmatched,
+        ] {
             assert!(
                 target.signals().contains(&expected),
                 "{} must arrive with no include written",

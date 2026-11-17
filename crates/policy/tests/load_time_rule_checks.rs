@@ -1,5 +1,5 @@
-//! A rule whose only action is reserved, two rules with one `@id`, or a cap written as a permit
-//! beside a broader permit, refuse the load.
+//! A rule whose only action is reserved, two rules with one `@id`, a cap written as a permit
+//! beside a broader permit, or a read of the input across action families refuses the load.
 
 mod support;
 
@@ -390,4 +390,76 @@ fn a_temporal_permit_beside_an_unconditioned_permit_for_another_principal_loads_
     validate(&source).expect("another principal does not cover the budget");
     let engine = open(&source).expect("another principal loads");
     assert!(engine.warnings().is_empty(), "{:?}", engine.warnings());
+}
+
+#[test]
+fn a_read_of_the_input_across_families_refuses_validate_and_open() {
+    let source = r#"@id("across")
+forbid(principal, action in [Box::Action::"fs:read", Box::Action::"net:connect"], resource)
+when { context.input has host };"#;
+    for (path, result) in [
+        ("validate", validate(source)),
+        ("open", open(source).map(|_| ())),
+    ] {
+        match result {
+            Err(PolicyError::InputAcrossFamilies(reason)) => assert!(
+                reason.contains("rule @id(\"across\") reads context.input.host"),
+                "{path}: {reason}"
+            ),
+            Err(other) => panic!("{path}: expected an action-family refusal, got {other}"),
+            Ok(()) => panic!("{path}: a read of the input across families must refuse the load"),
+        }
+    }
+}
+
+/// A `net:connect` no longer carries `ip`, so a rule that names it is refused rather than loaded
+/// and left to match nothing.
+///
+/// `context.input has ip` is statically false, so strict validation never typechecks the
+/// comparison behind it: without this check the rule loads and silently enforces nothing.
+#[test]
+fn a_rule_naming_the_removed_ip_attribute_refuses_validate_and_open() {
+    let source = r#"permit(principal == Box::Agent::"self", action == Box::Action::"net:connect", resource);
+@id("metadata_addresses")
+forbid(principal, action == Box::Action::"net:connect", resource)
+when { context.input has ip && context.input.ip like "169.254.*" };"#;
+    for (path, result) in [
+        ("validate", validate(source)),
+        ("open", open(source).map(|_| ())),
+    ] {
+        match result {
+            Err(PolicyError::Schema(reason)) => {
+                assert!(
+                    reason.contains(
+                        "rule @id(\"metadata_addresses\") reads context.input.ip, which no action \
+                         carries"
+                    ),
+                    "{path}: {reason}"
+                );
+                assert!(
+                    reason.contains(
+                        "context.input.ip4 for the IPv4 address it is or carries, and as \
+                         context.input.ip6 for the IPv6 wire form"
+                    ),
+                    "{path}: {reason}"
+                );
+            }
+            Err(other) => panic!("{path}: expected a schema refusal, got {other}"),
+            Ok(()) => panic!("{path}: a rule naming ip must refuse the load"),
+        }
+    }
+}
+
+/// The replacement of that rule loads, so the refusal above names a rule an operator can write.
+#[test]
+fn a_clause_per_address_family_loads() {
+    let source = r#"permit(principal == Box::Agent::"self", action == Box::Action::"net:connect", resource);
+@id("metadata_addresses")
+forbid(principal, action == Box::Action::"net:connect", resource)
+when {
+  (context.input has ip4 && context.input.ip4 like "169.254.*") ||
+  (context.input has ip6 && context.input.ip6 like "fe8*")
+};"#;
+    validate(source).expect("a clause per family validates");
+    open(source).expect("a clause per family opens");
 }

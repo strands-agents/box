@@ -414,10 +414,9 @@ fn no_error_message_names_a_removed_verb() {
 /// mtime made a copied alias permanently stale, and comparing each alias's contents read about
 /// 105 MB per run on a host where the install and `$HOME` are on different filesystems.
 ///
-/// It is answered from a stamp of the **install's** identity instead. This asserts both halves of
-/// that: the stamp is written, and a reused run reports no refresh. The unit tests for
-/// `aliases::is_stale` skip whenever no image sits beside the test binary, which is every
-/// `cargo test --lib` run, so this is where the behaviour is actually observed.
+/// It is answered from a stamp of the **install's** content digest instead. This asserts both
+/// halves of that: the stamp is written, and a reused run reports no refresh, through the real
+/// `run` verb and the image installed beside it.
 #[test]
 fn the_alias_stamp_is_written_and_a_reused_run_does_not_refresh() {
     let (home, workspace) = workspace();
@@ -434,8 +433,8 @@ fn the_alias_stamp_is_written_and_a_reused_run_does_not_refresh() {
         )
     });
     assert!(
-        recorded.split_whitespace().count() == 2,
-        "the stamp is the image's length and modification time: {recorded:?}"
+        recorded.len() == 64 && recorded.chars().all(|c| c.is_ascii_hexdigit()),
+        "the stamp is the SHA-256 of the installed image: {recorded:?}"
     );
 
     let second = run_in(home.path(), &workspace, &[]);
@@ -458,6 +457,96 @@ fn the_alias_stamp_is_written_and_a_reused_run_does_not_refresh() {
         std::fs::read_to_string(&stamp).expect("the stamp is rewritten"),
         "0 0.000000000",
         "the refresh must rewrite the stamp, or every later run refreshes again"
+    );
+}
+
+/// **A second `run` on a running box is refused before it can touch an alias name.**
+///
+/// The run lock is taken before the alias image is judged stale, so a box whose workload is
+/// executing its aliases never has one unlinked under it, however stale the stamp reads.
+#[test]
+fn a_run_on_a_running_box_is_refused_before_it_touches_an_alias() {
+    if !namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = Request::with_policy("project-locked-alias", FORBIDDING_POLICY).expect();
+    let home = box_.box_home();
+    let mut run = box_.command_for("/bin/bash");
+    run.arg("-c")
+        .arg(WAIT_FOR_THE_EDIT_THEN_ASK.replace(BOX_HOME, &home.display().to_string()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut running = run.spawn().expect("spawn strands-box run");
+    wait_for_file(&home.join("started"), &mut running, Duration::from_secs(60));
+
+    let identity = |path: &Path| {
+        use std::os::unix::fs::MetadataExt as _;
+        let metadata = std::fs::metadata(path)
+            .unwrap_or_else(|error| panic!("{} must exist: {error}", path.display()));
+        (
+            metadata.dev(),
+            metadata.ino(),
+            metadata.ctime(),
+            metadata.ctime_nsec(),
+        )
+    };
+    let image = box_.root().join("bin/.alias-image");
+    let alias = box_.root().join("bin/zsh");
+    let image_before = identity(&image);
+    let alias_before = identity(&alias);
+    assert_eq!(
+        (image_before.0, image_before.1),
+        (alias_before.0, alias_before.1),
+        "the alias is a link to the box's own image"
+    );
+    let stamp = box_.root().join("private/alias-image.stamp");
+    std::fs::write(&stamp, "0 0.000000000").expect("stand in for an older image");
+
+    let second = box_
+        .command_for("/bin/bash")
+        .arg("-c")
+        .arg("true")
+        .output()
+        .expect("spawn the second run");
+    assert!(
+        !second.status.success() && text(&second).contains("is already running"),
+        "the second run must be refused because one run owns the box: {}",
+        text(&second)
+    );
+    assert_eq!(
+        std::fs::read_to_string(&stamp).expect("the stamp is readable"),
+        "0 0.000000000",
+        "the refused run must not have re-materialized: the stamp it would rewrite is untouched"
+    );
+    assert_eq!(
+        identity(&image),
+        image_before,
+        "the refused run must not have unlinked or relinked a name of the image"
+    );
+    assert_eq!(
+        identity(&alias),
+        alias_before,
+        "the alias name is untouched"
+    );
+
+    std::fs::write(home.join("edited"), "").expect("release the workload");
+    let first = running.wait_with_output().expect("the run ends");
+    assert!(
+        !text(&first).contains("alias image refreshed"),
+        "the running box must not refresh its own aliases: {}",
+        text(&first)
+    );
+
+    let next = box_.bash("true");
+    assert!(
+        text(&next).contains("alias image refreshed"),
+        "once the run has exited, the next run refreshes the stale aliases: {}",
+        text(&next)
+    );
+    assert_ne!(
+        std::fs::read_to_string(&stamp).expect("the stamp is rewritten"),
+        "0 0.000000000"
     );
 }
 

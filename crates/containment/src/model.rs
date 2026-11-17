@@ -93,6 +93,10 @@ pub struct PreparedFilesystemPath {
     original: PathBuf,
     resolved: PathBuf,
     is_file: bool,
+    #[cfg(target_os = "linux")]
+    identity: ObjectIdentity,
+    #[cfg(target_os = "linux")]
+    pin: ObjectPin,
 }
 
 impl PreparedFilesystemPath {
@@ -100,11 +104,20 @@ impl PreparedFilesystemPath {
         let path = path.as_ref();
         let original = absolute_path(path)?;
         let resolved = canonicalize_existing(&original)?;
+        #[cfg(target_os = "linux")]
+        let pin = ObjectPin::open(&resolved)?;
+        #[cfg(target_os = "linux")]
+        let is_file = pin.0.identity.kind != libc::S_IFDIR;
+        #[cfg(not(target_os = "linux"))]
         let is_file = !resolved.is_dir();
         Ok(Self {
             original,
             resolved,
             is_file,
+            #[cfg(target_os = "linux")]
+            identity: pin.0.identity,
+            #[cfg(target_os = "linux")]
+            pin,
         })
     }
 
@@ -121,6 +134,82 @@ impl PreparedFilesystemPath {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ObjectIdentity {
+    device: u64,
+    inode: u64,
+    kind: u32,
+}
+
+#[cfg(target_os = "linux")]
+impl ObjectIdentity {
+    pub(crate) fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            kind: metadata.mode() & libc::S_IFMT,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+pub(crate) struct ObjectPin(std::sync::Arc<PinnedObject>);
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct PinnedObject {
+    identity: ObjectIdentity,
+    file: std::sync::Mutex<Option<File>>,
+}
+
+#[cfg(target_os = "linux")]
+impl PartialEq for ObjectPin {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.identity == other.0.identity
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Eq for ObjectPin {}
+
+#[cfg(target_os = "linux")]
+impl ObjectPin {
+    fn open(path: &Path) -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let open = || -> std::io::Result<_> {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+                .open(path)?;
+            let identity = ObjectIdentity::from_metadata(&file.metadata()?);
+            Ok(Self(std::sync::Arc::new(PinnedObject {
+                identity,
+                file: std::sync::Mutex::new(Some(file)),
+            })))
+        };
+        open().map_err(|source| ContainmentError::PathCanonicalization {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    pub(crate) fn release(&self) -> Result<()> {
+        self.0
+            .file
+            .lock()
+            .map_err(|_| {
+                ContainmentError::ConfigValidation("grant object pin lock is poisoned".to_string())
+            })?
+            .take();
+        Ok(())
+    }
+}
+
 /// One opened regular file whose identity must remain unavailable to writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "WriteProtectionWire")]
@@ -130,10 +219,19 @@ pub(crate) struct WriteProtection {
     device: u64,
     #[cfg(unix)]
     inode: u64,
+    #[cfg(unix)]
+    #[serde(skip_serializing_if = "is_one_link")]
+    links: u64,
 }
 
 impl WriteProtection {
     pub(crate) fn new(path: impl AsRef<Path>, opened: &File) -> Result<Self> {
+        let protected = Self::opened_now(path, opened)?;
+        protected.require_one_name()?;
+        Ok(protected)
+    }
+
+    fn opened_now(path: impl AsRef<Path>, opened: &File) -> Result<Self> {
         let path = canonicalize_existing(&absolute_path(path.as_ref())?)?;
         let opened_metadata = opened.metadata().map_err(|source| {
             ContainmentError::ConfigValidation(format!(
@@ -144,24 +242,45 @@ impl WriteProtection {
         if !opened_metadata.is_file() {
             return Err(ContainmentError::ExpectedFile(path));
         }
-        #[cfg(unix)]
-        if opened_metadata.nlink() != 1 {
-            return Err(ContainmentError::ConfigValidation(format!(
-                "write-protected file {} has {} hard links, so one pathname cannot protect the \
-                 opened object",
-                path.display(),
-                opened_metadata.nlink()
-            )));
-        }
         let protected = Self {
             path,
             #[cfg(unix)]
             device: opened_metadata.dev(),
             #[cfg(unix)]
             inode: opened_metadata.ino(),
+            #[cfg(unix)]
+            links: opened_metadata.nlink(),
         };
         protected.validate_live_identity()?;
         Ok(protected)
+    }
+
+    fn from_wire(wire: WriteProtectionWire) -> Result<Self> {
+        require_absolute("write-protected", &wire.path)?;
+        let protected = Self {
+            path: wire.path,
+            #[cfg(unix)]
+            device: wire.device,
+            #[cfg(unix)]
+            inode: wire.inode,
+            #[cfg(unix)]
+            links: wire.links,
+        };
+        protected.validate_live_identity()?;
+        Ok(protected)
+    }
+
+    fn require_one_name(&self) -> Result<()> {
+        #[cfg(unix)]
+        if self.links != 1 {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "write-protected file {} has {} hard links, so one pathname cannot protect the \
+                 opened object",
+                self.path.display(),
+                self.links
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -197,7 +316,10 @@ impl WriteProtection {
             return Err(ContainmentError::ExpectedFile(self.path.clone()));
         }
         #[cfg(unix)]
-        if metadata.dev() != self.device || metadata.ino() != self.inode || metadata.nlink() != 1 {
+        if metadata.dev() != self.device
+            || metadata.ino() != self.inode
+            || metadata.nlink() != self.links
+        {
             return Err(ContainmentError::ConfigValidation(format!(
                 "write-protected file identity changed before apply: {}",
                 self.path.display()
@@ -215,22 +337,64 @@ struct WriteProtectionWire {
     device: u64,
     #[cfg(unix)]
     inode: u64,
+    #[cfg(unix)]
+    #[serde(default = "one_link")]
+    links: u64,
+}
+
+#[cfg(unix)]
+const fn one_link() -> u64 {
+    1
+}
+
+#[cfg(unix)]
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes the field by reference"
+)]
+const fn is_one_link(links: &u64) -> bool {
+    *links == 1
 }
 
 impl TryFrom<WriteProtectionWire> for WriteProtection {
     type Error = ContainmentError;
 
     fn try_from(wire: WriteProtectionWire) -> Result<Self> {
-        require_absolute("write-protected", &wire.path)?;
-        let protected = Self {
-            path: wire.path,
-            #[cfg(unix)]
-            device: wire.device,
-            #[cfg(unix)]
-            inode: wire.inode,
-        };
-        protected.validate_live_identity()?;
+        let protected = Self::from_wire(wire)?;
+        protected.require_one_name()?;
         Ok(protected)
+    }
+}
+
+/// One opened program file that keeps its path, its identity, and the link count it had when opened.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "WriteProtectionWire")]
+pub(crate) struct CommandIdentity(WriteProtection);
+
+impl CommandIdentity {
+    pub(crate) fn new(path: impl AsRef<Path>, opened: &File) -> Result<Self> {
+        WriteProtection::opened_now(path, opened).map(Self)
+    }
+
+    pub(crate) const fn file(&self) -> &WriteProtection {
+        &self.0
+    }
+}
+
+impl Serialize for CommandIdentity {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl TryFrom<WriteProtectionWire> for CommandIdentity {
+    type Error = ContainmentError;
+
+    fn try_from(wire: WriteProtectionWire) -> Result<Self> {
+        WriteProtection::from_wire(wire).map(Self)
     }
 }
 
@@ -251,8 +415,7 @@ pub enum Network {
         /// handed out per port in this order, because one `recvmsg` carries one descriptor and
         /// that order is the wire contract. An empty list or a duplicate is refused.
         connect: Vec<u16>,
-        /// Ports the workload may bind. Empty by default. The Linux namespace backend refuses a
-        /// non-empty list: it has no lowering for an inbound bind.
+        /// Ports the workload may bind, each reachable from the box. Empty by default.
         listen: Vec<u16>,
     },
 }
@@ -366,6 +529,12 @@ pub(crate) struct PathGrant {
     /// Every node a lookup of this grant traverses, resolved once when the grant is built.
     #[serde(skip)]
     nodes: Vec<PathBuf>,
+    #[cfg(target_os = "linux")]
+    #[serde(skip)]
+    pub(crate) identity: Option<ObjectIdentity>,
+    #[cfg(target_os = "linux")]
+    #[serde(skip)]
+    pub(crate) pin: Option<ObjectPin>,
 }
 
 impl PathGrant {
@@ -412,6 +581,10 @@ impl PathGrant {
             operation: Operation::Deny,
             scope,
             nodes: Vec::new(),
+            #[cfg(target_os = "linux")]
+            identity: None,
+            #[cfg(target_os = "linux")]
+            pin: None,
         };
         granted.nodes = granted.walk_traversal_nodes();
         Ok(granted)
@@ -452,6 +625,10 @@ impl PathGrant {
             operation,
             scope,
             nodes: Vec::new(),
+            #[cfg(target_os = "linux")]
+            identity: Some(path.identity),
+            #[cfg(target_os = "linux")]
+            pin: Some(path.pin),
         };
         granted.nodes = granted.walk_traversal_nodes();
         Ok(granted)
@@ -531,6 +708,13 @@ impl PathGrant {
             return Ok(());
         }
         let live = PreparedFilesystemPath::new(&self.original)?;
+        #[cfg(target_os = "linux")]
+        if self.identity != Some(live.identity) {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "filesystem grant object changed before apply: {}",
+                self.original.display(),
+            )));
+        }
         if live.resolved != self.resolved || live.is_directory() != self.is_directory() {
             return Err(ContainmentError::ConfigValidation(format!(
                 "filesystem grant changed before apply: original={}, recorded resolved={}, \

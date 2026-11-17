@@ -104,11 +104,13 @@ fn decide_once(engine: &PolicyEngine, program: &str) -> Duration {
         cwd: "/tmp",
     };
     let started = Instant::now();
-    let decision = engine.decide(
-        &GovernedBox::assigned("perf"),
-        &Principal::agent(),
-        &request,
-    );
+    let decision = engine
+        .decide(
+            &GovernedBox::assigned("perf"),
+            &Principal::agent(),
+            &request,
+        )
+        .0;
     let elapsed = started.elapsed();
     assert!(
         decision.is_allow(),

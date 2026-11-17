@@ -27,7 +27,7 @@ impl NetnsRelay {
     }
 
     /// Receive one listening descriptor per port, in order, and relay each to its port.
-    pub(crate) fn start_each(control: UnixStream, ports: &[u16]) -> Result<Vec<Self>, BoxError> {
+    pub(crate) fn start_each(control: &UnixStream, ports: &[u16]) -> Result<Vec<Self>, BoxError> {
         // A receive timeout, because this blocking `recvmsg` runs on a runtime worker.
         control
             .set_read_timeout(Some(std::time::Duration::from_secs(30)))
@@ -35,7 +35,7 @@ impl NetnsRelay {
 
         let mut relays = Vec::with_capacity(ports.len());
         for port in ports {
-            relays.push(Self::start_one(&control, *port)?);
+            relays.push(Self::start_one(control, *port)?);
         }
         Ok(relays)
     }
@@ -96,9 +96,8 @@ impl Drop for NetnsRelay {
 }
 
 /// Copy one accepted connection to the gateway and back, streaming.
-async fn splice(mut workload_side: tokio::net::TcpStream, proxy_port: u16) {
-    let Ok(mut gateway_side) =
-        tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, proxy_port)).await
+async fn splice(workload_side: tokio::net::TcpStream, proxy_port: u16) {
+    let Ok((mut workload_side, mut gateway_side)) = pair_with_sink(workload_side, proxy_port).await
     else {
         // The gateway is the box's own daemon. If it is unreachable the workload's
         // request fails, which is the correct outcome — closing this side reports
@@ -106,6 +105,18 @@ async fn splice(mut workload_side: tokio::net::TcpStream, proxy_port: u16) {
     };
 
     let _ = tokio::io::copy_bidirectional(&mut workload_side, &mut gateway_side).await;
+}
+
+/// Connect `workload_side` to its sink on `port`, and turn Nagle's algorithm off on both sockets.
+async fn pair_with_sink(
+    workload_side: tokio::net::TcpStream,
+    port: u16,
+) -> std::io::Result<(tokio::net::TcpStream, tokio::net::TcpStream)> {
+    let sink_side = tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).await?;
+    // Best-effort. The crate's `AGENTS.md` records why the relay sets the option.
+    let _ = workload_side.set_nodelay(true);
+    let _ = sink_side.set_nodelay(true);
+    Ok((workload_side, sink_side))
 }
 
 /// Receive one descriptor sent with `SCM_RIGHTS`.
@@ -187,7 +198,7 @@ mod tests {
         send_descriptor(&child_side, &OwnedFd::from(workload_listener));
 
         // Through the public entry point, so this exercises what `supervise` calls.
-        let mut relays = NetnsRelay::start_each(box_side, &[proxy_port]).expect("start relay");
+        let mut relays = NetnsRelay::start_each(&box_side, &[proxy_port]).expect("start relay");
         let _relay = relays.pop().expect("one relay for one port");
 
         // The workload's request, on a blocking thread so the runtime's workers stay
@@ -213,6 +224,34 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn both_sockets_of_a_splice_have_tcp_nodelay_set() {
+        let sink = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind sink");
+        let port = sink.local_addr().expect("sink address").port();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener");
+        let _workload = tokio::net::TcpStream::connect(listener.local_addr().expect("addr"))
+            .await
+            .expect("connect to the relay endpoint");
+        let (accepted, _peer) = listener.accept().await.expect("accept");
+
+        let (workload_side, sink_side) = pair_with_sink(accepted, port)
+            .await
+            .expect("the sink connects");
+
+        assert_eq!(
+            (
+                workload_side.nodelay().expect("workload side"),
+                sink_side.nodelay().expect("sink side"),
+            ),
+            (true, true),
+            "Nagle's algorithm is off on the workload side and on the sink side"
+        );
+    }
+
     /// A control socket that carries no descriptor is refused rather than left to
     /// hang: with no listener there is no egress route, and the box must say so.
     #[tokio::test]
@@ -223,7 +262,7 @@ mod tests {
         (&child_side).write_all(b"x").expect("write payload");
 
         let error =
-            NetnsRelay::start_each(box_side, &[1]).expect_err("a missing descriptor must refuse");
+            NetnsRelay::start_each(&box_side, &[1]).expect_err("a missing descriptor must refuse");
         assert!(
             error.to_string().contains("descriptor"),
             "the refusal must name what was missing: {error}"

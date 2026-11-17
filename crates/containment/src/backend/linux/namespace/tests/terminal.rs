@@ -1,0 +1,491 @@
+//! Disposable-terminal checks for both installed workload filters.
+
+use super::super::{Network, install_syscall_filters, syscall::SyscallPolicy};
+use super::in_child;
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+fn terminal() -> (OwnedFd, OwnedFd) {
+    let (mut master, mut slave) = (-1, -1);
+    // SAFETY: openpty initializes both descriptors and creates no controlling terminal.
+    assert_eq!(
+        unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        },
+        0
+    );
+    // SAFETY: these are distinct descriptors returned by openpty.
+    unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) }
+}
+
+fn child(filtered: bool, probe: impl FnOnce() -> i32) -> i32 {
+    let filters = SyscallPolicy::for_config(&Network::Blocked)
+        .compile()
+        .unwrap();
+    in_child(|| {
+        // SAFETY: terminate a stuck disposable probe instead of hanging the test runner.
+        unsafe { libc::alarm(5) };
+        if filtered && install_syscall_filters(&filters).is_err() {
+            90
+        } else {
+            probe()
+        }
+    })
+}
+
+fn discipline(fd: i32) -> i32 {
+    let mut value = -1;
+    // SAFETY: value is an initialized integer output and fd stays open.
+    assert_eq!(unsafe { libc::ioctl(fd, libc::TIOCGETD, &mut value) }, 0);
+    value
+}
+
+#[test]
+fn terminal_requests_are_denied_with_kernel_argument_truncation() {
+    for request in [libc::TIOCSTI, libc::TIOCLINUX, libc::TIOCSETD] {
+        for high in [0, 1_u64 << 32, 0xffff_ffff_0000_0000] {
+            let request = high | u64::from(request as u32);
+            for filtered in [false, true] {
+                let expected = if filtered { libc::EPERM } else { libc::EBADF };
+                assert_eq!(
+                    child(filtered, || {
+                        // SAFETY: an invalid descriptor prevents all terminal side effects.
+                        let result = unsafe { libc::syscall(libc::SYS_ioctl, -1, request, 0) };
+                        i32::from(result != -1 || unsafe { *libc::__errno_location() } != expected)
+                    }),
+                    0,
+                    "request {request:#x}, filtered {filtered}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn console_mutations_are_refused_before_device_dispatch() {
+    // Independent Linux UAPI values also catch a wrong constant in the filter.
+    for (name, request) in [
+        ("KDSETMODE", 0x4b3a_u32),
+        ("KDSKBMODE", 0x4b45),
+        ("KDSKBMETA", 0x4b63),
+        ("KDSKBLED", 0x4b65),
+        ("KDSETLED", 0x4b32),
+        ("KDSKBDIACR", 0x4b4b),
+        ("KDSKBDIACRUC", 0x4bfb),
+        ("KDFONTOP", 0x4b72),
+        ("PIO_CMAP", 0x4b71),
+        ("PIO_SCRNMAP", 0x4b41),
+        ("PIO_UNISCRNMAP", 0x4b6a),
+        ("PIO_UNIMAPCLR", 0x4b68),
+        ("PIO_UNIMAP", 0x4b67),
+        ("VT_SETMODE", 0x5602),
+        ("VT_ACTIVATE", 0x5606),
+        ("VT_SETACTIVATE", 0x560f),
+        ("VT_RELDISP", 0x5605),
+        ("VT_DISALLOCATE", 0x5608),
+        ("VT_RESIZE", 0x5609),
+        ("VT_RESIZEX", 0x560a),
+    ] {
+        for high in [0, 1_u64 << 32, 0xffff_ffff_0000_0000] {
+            let (_master, slave) = terminal();
+            for fd in [-1, slave.as_raw_fd()] {
+                for filtered in [false, true] {
+                    let expected = if filtered {
+                        libc::EPERM
+                    } else if fd == -1 {
+                        libc::EBADF
+                    } else {
+                        libc::ENOTTY
+                    };
+                    assert_eq!(
+                        child(filtered, || {
+                            // SAFETY: only an invalid descriptor or a private PTY is reachable.
+                            let result = unsafe {
+                                libc::syscall(libc::SYS_ioctl, fd, high | u64::from(request), 0)
+                            };
+                            i32::from(
+                                result != -1 || unsafe { *libc::__errno_location() } != expected,
+                            )
+                        }),
+                        0,
+                        "{name} request {request:#x}, high {high:#x}, fd {fd}, filtered {filtered}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn read_only_console_requests_reach_device_dispatch() {
+    // Independent Linux UAPI values also catch a wrong constant in the filter.
+    for (name, request) in [
+        ("KDGETMODE", 0x4b3b_u32),
+        ("KDGKBMODE", 0x4b44),
+        ("KDGKBMETA", 0x4b62),
+        ("KDGKBLED", 0x4b64),
+        ("KDGETLED", 0x4b31),
+        ("KDGKBDIACR", 0x4b4a),
+        ("KDGKBDIACRUC", 0x4bfa),
+        ("GIO_CMAP", 0x4b70),
+        ("GIO_SCRNMAP", 0x4b40),
+        ("GIO_UNISCRNMAP", 0x4b69),
+        ("GIO_UNIMAP", 0x4b66),
+        ("VT_GETMODE", 0x5601),
+        ("VT_GETSTATE", 0x5603),
+        ("VT_OPENQRY", 0x5600),
+        ("VT_GETHIFONTMASK", 0x560d),
+    ] {
+        assert_eq!(
+            child(true, || {
+                // SAFETY: the invalid descriptor prevents a device operation.
+                let result = unsafe { libc::syscall(libc::SYS_ioctl, -1, request, 0) };
+                i32::from(result != -1 || unsafe { *libc::__errno_location() } != libc::EBADF)
+            }),
+            0,
+            "{name} query {request:#x}"
+        );
+    }
+}
+
+#[test]
+fn terminal_discipline_cannot_change_or_break_input() {
+    for high in [0, 1_u64 << 32, 0xffff_ffff_0000_0000] {
+        for filtered in [false, true] {
+            let (master, slave) = terminal();
+            let fd = slave.as_raw_fd();
+            assert_eq!(discipline(fd), 0);
+            let outcome = child(filtered, || {
+                let null_discipline: libc::c_int = 27;
+                // SAFETY: only this disposable terminal can change its line discipline.
+                let result = unsafe {
+                    libc::syscall(
+                        libc::SYS_ioctl,
+                        fd,
+                        high | u64::from(libc::TIOCSETD as u32),
+                        &null_discipline,
+                    )
+                };
+                if filtered {
+                    i32::from(result != -1 || unsafe { *libc::__errno_location() } != libc::EPERM)
+                } else {
+                    i32::from(result != 0)
+                }
+            });
+            // Observe the shared terminal from outside the filtered process.
+            let observed = discipline(fd);
+            // SAFETY: inspect input processing without blocking on an empty terminal.
+            let (read_result, read_error) = unsafe {
+                let flags = libc::fcntl(fd, libc::F_GETFL);
+                assert!(flags >= 0);
+                assert_eq!(libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK), 0);
+                let mut byte = 0u8;
+                let result = libc::read(fd, (&mut byte as *mut u8).cast(), 1);
+                let error = *libc::__errno_location();
+                assert_eq!(libc::fcntl(fd, libc::F_SETFL, flags), 0);
+                (result, error)
+            };
+            let normal: libc::c_int = 0;
+            // SAFETY: restore only the terminal created in this iteration, even after failure.
+            assert_eq!(unsafe { libc::ioctl(fd, libc::TIOCSETD, &normal) }, 0);
+            eprintln!(
+                "line discipline: high={high:#x}, filtered={filtered}, observed={observed}, outcome={outcome}"
+            );
+            assert_eq!(
+                outcome, 0,
+                "line discipline operation: filtered={filtered}, observed={observed}"
+            );
+            assert_eq!(observed, if filtered { 0 } else { 27 });
+            assert_eq!(read_result, -1);
+            assert_eq!(
+                read_error,
+                if filtered {
+                    libc::EAGAIN
+                } else {
+                    libc::EOPNOTSUPP
+                }
+            );
+            let bytes = b"input still works\n";
+            // SAFETY: both buffers and terminal descriptors are valid.
+            assert_eq!(
+                unsafe { libc::write(master.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) },
+                bytes.len() as isize
+            );
+            let mut poll = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: poll names one live descriptor and has a bounded timeout.
+            assert_eq!(unsafe { libc::poll(&mut poll, 1, 1000) }, 1);
+            let mut buffer = [0u8; 64];
+            // SAFETY: buffer has the advertised size.
+            let n = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+            assert_eq!(n, bytes.len() as isize);
+            assert_eq!(&buffer[..n as usize], bytes);
+        }
+    }
+}
+
+#[test]
+fn terminal_injection_requests_leave_the_input_queue_empty() {
+    for request in [libc::TIOCSTI, libc::TIOCLINUX] {
+        for high in [0, 1_u64 << 32, 0xffff_ffff_0000_0000] {
+            let (_master, slave) = terminal();
+            let fd = slave.as_raw_fd();
+            let mut raw = std::mem::MaybeUninit::<libc::termios>::uninit();
+            // SAFETY: initialize terminal settings, then disable canonical buffering on this PTY.
+            unsafe {
+                assert_eq!(libc::tcgetattr(fd, raw.as_mut_ptr()), 0);
+                let mut raw = raw.assume_init();
+                libc::cfmakeraw(&mut raw);
+                assert_eq!(libc::tcsetattr(fd, libc::TCSANOW, &raw), 0);
+            }
+            // Subcode 3 is console paste. A PTY cannot exercise console selection/paste.
+            let byte = if request == libc::TIOCLINUX {
+                3u8
+            } else {
+                b'X'
+            };
+            assert_eq!(
+                child(true, || {
+                    // SAFETY: the kernel receives one initialized input byte on a private PTY.
+                    let result = unsafe {
+                        libc::syscall(libc::SYS_ioctl, fd, high | u64::from(request as u32), &byte)
+                    };
+                    i32::from(result != -1 || unsafe { *libc::__errno_location() } != libc::EPERM)
+                }),
+                0
+            );
+            let mut poll = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: allow queued input to arrive without an unbounded read.
+            assert_eq!(unsafe { libc::poll(&mut poll, 1, 100) }, 0);
+            let mut count: libc::c_int = -1;
+            // SAFETY: count is a valid output integer.
+            assert_eq!(unsafe { libc::ioctl(fd, libc::FIONREAD, &mut count) }, 0);
+            assert_eq!(count, 0);
+        }
+    }
+}
+
+#[test]
+fn terminal_modes_size_input_output_and_restoration_remain_available() {
+    let (master, slave) = terminal();
+    let fd = slave.as_raw_fd();
+    let mut original = std::mem::MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: original points to sufficient output storage.
+    assert_eq!(unsafe { libc::tcgetattr(fd, original.as_mut_ptr()) }, 0);
+    // SAFETY: tcgetattr initialized original.
+    let original = unsafe { original.assume_init() };
+    let input = b"hello\n";
+    // SAFETY: input and master are live for the write.
+    assert_eq!(
+        unsafe { libc::write(master.as_raw_fd(), input.as_ptr().cast(), input.len()) },
+        input.len() as isize
+    );
+    assert_eq!(
+        child(true, || {
+            let mut buffer = [0u8; 6];
+            // SAFETY: bounded buffer and live slave descriptor.
+            if unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) } != 6
+                || &buffer != input
+            {
+                return 1;
+            }
+            let size = libc::winsize {
+                ws_row: 39,
+                ws_col: 107,
+                ws_xpixel: 808,
+                ws_ypixel: 592,
+            };
+            let mut observed = libc::winsize {
+                ws_row: 0,
+                ws_col: 0,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            };
+            // SAFETY: both window-size objects have the required layout.
+            if unsafe { libc::ioctl(fd, libc::TIOCSWINSZ, &size) } != 0 {
+                return 2;
+            }
+            if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut observed) } != 0 {
+                return 3;
+            }
+            if (
+                observed.ws_row,
+                observed.ws_col,
+                observed.ws_xpixel,
+                observed.ws_ypixel,
+            ) != (size.ws_row, size.ws_col, size.ws_xpixel, size.ws_ypixel)
+            {
+                return 4;
+            }
+            let mut settings = std::mem::MaybeUninit::<libc::termios>::uninit();
+            // SAFETY: settings has enough output storage for the open terminal.
+            if unsafe { libc::tcgetattr(fd, settings.as_mut_ptr()) } != 0 {
+                return 8;
+            }
+            let mut raw = original;
+            // SAFETY: raw is initialized, and both termios calls target the private slave.
+            unsafe { libc::cfmakeraw(&mut raw) };
+            if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &raw) } != 0 {
+                return 5;
+            }
+            if unsafe { libc::write(fd, b"output".as_ptr().cast(), 6) } != 6 {
+                return 6;
+            }
+            if unsafe { libc::tcsetattr(fd, libc::TCSANOW, &original) } != 0 {
+                return 7;
+            }
+            0
+        }),
+        0
+    );
+    let mut restored = original;
+    // SAFETY: restored is valid output storage for the private slave.
+    assert_eq!(unsafe { libc::tcgetattr(fd, &mut restored) }, 0);
+    assert_eq!(restored.c_iflag, original.c_iflag);
+    assert_eq!(restored.c_oflag, original.c_oflag);
+    assert_eq!(restored.c_cflag, original.c_cflag);
+    assert_eq!(restored.c_lflag, original.c_lflag);
+    assert_eq!(restored.c_cc, original.c_cc);
+    let fd = master.as_raw_fd();
+    // SAFETY: this descriptor belongs only to the disposable terminal.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    assert!(flags >= 0);
+    // SAFETY: nonblocking reads keep the output deadline effective.
+    assert_eq!(
+        unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) },
+        0
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+    let mut output = Vec::new();
+    let mut buffer = [0u8; 3];
+    let mut poll = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    while !output.windows(6).any(|part| part == b"output") {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "terminal output timed out: {output:?}"
+        );
+        let timeout = i32::try_from(remaining.as_millis().max(1)).unwrap();
+        // SAFETY: poll names one live descriptor and uses the remaining deadline.
+        let ready = unsafe { libc::poll(&mut poll, 1, timeout) };
+        if ready < 0 {
+            assert_eq!(
+                std::io::Error::last_os_error().kind(),
+                std::io::ErrorKind::Interrupted
+            );
+            continue;
+        }
+        if ready == 0 {
+            continue;
+        }
+        // SAFETY: buffer has the advertised size and fd remains open and nonblocking.
+        let n = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+        if n < 0 {
+            let error = std::io::Error::last_os_error();
+            assert!(
+                matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ),
+                "terminal read failed: {error}; received {output:?}"
+            );
+            continue;
+        }
+        assert!(n > 0, "terminal output ended: {output:?}");
+        output.extend_from_slice(&buffer[..n as usize]);
+        assert!(
+            output.len() <= 128,
+            "unexpected terminal output: {output:?}"
+        );
+    }
+}
+
+#[test]
+fn terminal_interrupt_reaches_the_filtered_foreground_process() {
+    let (master, slave) = terminal();
+    let filters = SyscallPolicy::for_config(&Network::Blocked)
+        .compile()
+        .unwrap();
+    let mut ready = [-1; 2];
+    // SAFETY: ready holds storage for both returned descriptors.
+    assert_eq!(unsafe { libc::pipe(ready.as_mut_ptr()) }, 0);
+    // SAFETY: pipe returned two distinct descriptors.
+    let (reader, writer) = unsafe {
+        (
+            OwnedFd::from_raw_fd(ready[0]),
+            OwnedFd::from_raw_fd(ready[1]),
+        )
+    };
+    // SAFETY: child uses only syscalls and exits without unwinding.
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0);
+    if pid == 0 {
+        // SAFETY: establish a new session with only the disposable terminal attached.
+        unsafe {
+            libc::alarm(5);
+            if libc::setsid() < 0 || libc::ioctl(slave.as_raw_fd(), libc::TIOCSCTTY, 0) != 0 {
+                libc::_exit(91);
+            }
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            let mut mask = std::mem::zeroed::<libc::sigset_t>();
+            libc::sigemptyset(&mut mask);
+            libc::sigaddset(&mut mask, libc::SIGINT);
+            if libc::sigprocmask(libc::SIG_UNBLOCK, &mask, std::ptr::null_mut()) != 0 {
+                libc::_exit(92);
+            }
+        }
+        if install_syscall_filters(&filters).is_err() {
+            // SAFETY: leave the probe process on filter installation failure.
+            unsafe { libc::_exit(90) };
+        }
+        // SAFETY: notify the parent only after the terminal and filters are ready.
+        unsafe {
+            libc::write(writer.as_raw_fd(), b"R".as_ptr().cast(), 1);
+            let mut buffer = [0u8; 8];
+            libc::read(slave.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len());
+            libc::_exit(93);
+        }
+    }
+    let mut poll = libc::pollfd {
+        fd: reader.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: bounded readiness wait on the pipe owned by this test.
+    let ready_result = unsafe { libc::poll(&mut poll, 1, 2000) };
+    if ready_result == 1 {
+        // SAFETY: only the new session's foreground process can receive this interrupt.
+        assert_eq!(
+            unsafe { libc::write(master.as_raw_fd(), b"\x03".as_ptr().cast(), 1) },
+            1
+        );
+    }
+    let mut status = 0;
+    // SAFETY: reap the child even when readiness fails; its alarm bounds the wait.
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid);
+    assert_eq!(
+        ready_result, 1,
+        "foreground probe never became ready: {status}"
+    );
+    assert!(
+        libc::WIFSIGNALED(status),
+        "interrupt did not terminate the child: {status}"
+    );
+    assert_eq!(libc::WTERMSIG(status), libc::SIGINT);
+}

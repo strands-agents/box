@@ -18,7 +18,7 @@ det_case! {
         b.apply_policy(
             r#"@id("workspace_spawn") permit (principal, action == Box::Action::"shell:spawn", resource);"#,
         );
-        // A binary no table names, built beside the declared tool by the same compiler, so only the
+        // A binary no table names, built in the writable output tree by the same compiler, so only the
         // agent's own `exec` entry can carry it. Canonical, because a grant names the identity the
         // kernel checks.
         let out = b

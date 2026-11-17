@@ -1,4 +1,4 @@
-# The Strands Box workspace and its vendored dependencies.
+# The Strands Box workspace.
 
 [workspace]
 resolver = "2"
@@ -9,12 +9,12 @@ resolver = "2"
 #
 members = [
     "crates/box",
+    "crates/shell",
     "crates/credentials",
     "crates/policy",
     "crates/containment",
     "crates/egress-gateway",
-    "crates/shell",
-    "crates/shell/strands-shell-macros",
+    "crates/ingress",
     "crates/telemetry",
 ]
 # `test-integ` is the black-box deterministic containment suite. It is excluded
@@ -31,7 +31,10 @@ exclude = [
     # `cargo build --workspace --all-targets` (the unit-test CI leg).
     "test-common",
     "test-integ",
+    "test-native-filesystem",
     "test-workload/verdict",
+    # A small perf benchmark. It is test code, not part of the shipped artifact
+    "crates/box-bench",
 ]
 
 # Profiles are workspace-wide (they can only be set at the workspace root). By

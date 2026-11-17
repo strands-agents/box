@@ -26,6 +26,30 @@ const AGENT_HOME: &str = "agent-home";
 const UNRELATED_SENTINEL: &str = "STRANDS_BOX_DISCOVERY_SENTINEL";
 const POLL: Duration = Duration::from_millis(20);
 
+fn fixture_python() -> PathBuf {
+    if cfg!(target_os = "linux") {
+        Path::new("/usr/bin/python3")
+            .canonicalize()
+            .expect("resolve the fixture script interpreter")
+    } else {
+        PathBuf::from("/usr/bin/python3")
+    }
+}
+
+fn fixture_sleep() -> PathBuf {
+    Path::new("/bin/sleep")
+        .canonicalize()
+        .expect("resolve the fixture's descendant helper")
+}
+
+/// What the first exec of a fresh box's own alias image may add on macOS, where the system assesses
+/// the new file once and serializes that assessment across every box starting on the host.
+const FIRST_ALIAS_EXEC: Duration = if cfg!(target_os = "macos") {
+    Duration::from_secs(30)
+} else {
+    Duration::ZERO
+};
+
 #[derive(Clone, Copy)]
 pub enum DiscoveryBehavior {
     Ready,
@@ -131,6 +155,9 @@ impl<'a> Server<'a> {
     }
 }
 
+/// One workspace's stdio servers, each as `(program, arguments)`.
+type DeclaredCommands = Vec<(String, Vec<String>)>;
+
 pub struct RuntimeMcpBox {
     home: tempfile::TempDir,
     workspace: PathBuf,
@@ -139,6 +166,12 @@ pub struct RuntimeMcpBox {
     name: String,
     /// `[tool.<label>]` tables the box declares, as `(label, table)`.
     tools: Vec<(String, String)>,
+    /// `[agent] env` entries beside `HOME`, as `(name, value)`.
+    agent_env: Vec<(String, String)>,
+    /// Each written workspace's stdio servers, oldest first.
+    declared: std::cell::RefCell<Vec<DeclaredCommands>>,
+    /// The index in `declared` of the workspace the run that owns the box started from.
+    addressed: std::cell::Cell<Option<usize>>,
 }
 
 impl RuntimeMcpBox {
@@ -166,6 +199,9 @@ impl RuntimeMcpBox {
             control,
             name: name.to_string(),
             tools: Vec::new(),
+            agent_env: Vec::new(),
+            declared: std::cell::RefCell::new(Vec::new()),
+            addressed: std::cell::Cell::new(None),
         }
     }
 
@@ -178,6 +214,11 @@ impl RuntimeMcpBox {
         path
     }
 
+    /// Add one `[agent] env` entry beside `HOME`.
+    pub fn set_agent_env(&mut self, name: &str, value: &str) {
+        self.agent_env.push((name.to_string(), value.to_string()));
+    }
+
     /// Declare one `[tool.<label>]` table.
     pub fn declare_tool(&mut self, label: &str, table: &str) {
         self.tools.push((label.to_string(), table.to_string()));
@@ -185,10 +226,12 @@ impl RuntimeMcpBox {
 
     pub fn install_server(&self, server: &Server<'_>) {
         if server.behavior.uses_release_fifo() {
-            make_fifo(&self.release_path(server.program));
+            make_fifo(&self.release_path(server.executable));
         }
+        let python = fixture_python();
+        let sleep = fixture_sleep();
         let script = format!(
-            r#"#!/usr/bin/python3
+            r#"#!{python}
 import json
 import os
 import pathlib
@@ -237,11 +280,12 @@ write("home", os.environ.get("HOME", "<absent>"))
 write("path", os.environ.get("PATH", "<absent>"))
 write("cwd", pathlib.Path.cwd().resolve())
 write("sentinel", "present" if {sentinel:?} in os.environ else "absent")
+write("program", sys.argv[0])
 write("argv", json.dumps(sys.argv[1:], separators=(",", ":")))
 write("environment", json.dumps(dict(sorted(os.environ.items())), separators=(",", ":")))
 if behavior in ("fail", "hang"):
     descendant = subprocess.Popen(
-        ["/bin/sleep", "3600"],
+        [{sleep:?}, "3600"],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL
@@ -281,7 +325,7 @@ while True:
                 release.readline()
         elif behavior == "hang":
             while True:
-                subprocess.run(["/bin/sleep", "3600"], check=False)
+                subprocess.run([{sleep:?}, "3600"], check=False)
         if behavior == "fail":
             sys.exit(17)
         if behavior == "exchange":
@@ -430,7 +474,9 @@ while True:
         }})
 "#,
             control = self.control.to_string_lossy(),
-            program = server.program,
+            python = python.display(),
+            sleep = sleep.to_string_lossy(),
+            program = server.executable,
             server = server.name,
             tool = server.tool,
             behavior = server.behavior.as_str(),
@@ -468,6 +514,11 @@ while True:
         // a directory of the fixture's, granted read and write, where the workload leaves its
         // markers.
         let agent_home = self.box_home().display().to_string();
+        let agent_env: String = self
+            .agent_env
+            .iter()
+            .map(|(name, value)| format!(", {name} = {value:?}"))
+            .collect();
         // The contained MCP leaf must READ its own server script (it lives in operator-bin, which the
         // shebang's python opens) and WRITE its lifecycle markers into the control dir. Without these
         // grants the leaf dies at startup under macOS Seatbelt ("Operation not permitted" opening the
@@ -485,7 +536,7 @@ while True:
             .expect("control dir resolves")
             .display()
             .to_string();
-        // The leaf's cwd (the workspace) must be listable, or getcwd()/uv_cwd fails EPERM at startup.
+        // The macOS leaf's cwd must be listable, or getcwd()/uv_cwd fails EPERM at startup.
         let workspace_path = self
             .workspace
             .canonicalize()
@@ -495,7 +546,7 @@ while True:
         let mut config = format!(
             "name = {:?}\nbox_dir = {:?}\npolicy = \"policy.dw\"\n\n\
              [agent]\ncommand = [\"/bin/bash\", \"-c\", {workload}]\nworkspace = {:?}\n\
-             env = {{ HOME = {agent_home:?} }}\n\
+             env = {{ HOME = {agent_home:?}{agent_env} }}\n\
              [agent.filesystem]\nread = [{agent_home:?}]\nwrite = [{agent_home:?}]\n",
             self.name,
             self.root().display().to_string(),
@@ -509,6 +560,12 @@ while True:
             config.push('\n');
             config.push_str(table);
         }
+        self.declared.borrow_mut().push(
+            servers
+                .iter()
+                .map(|server| (server.program.to_string(), server.arguments.clone()))
+                .collect(),
+        );
         for server in servers {
             let command = std::iter::once(server.program.to_string())
                 .chain(server.arguments.iter().cloned())
@@ -540,18 +597,64 @@ while True:
                     config.push_str(&format!("{key} = {value:?}\n"));
                 }
             }
-            // Grant the leaf read of its script's dir (operator-bin), the toolchain behind the
-            // `#!/usr/bin/python3` stub, and write+list of the control dir for its markers.
+            // Grant read of the script and its toolchain, and read/write of the control directory.
             let read = std::iter::once(operator_bin.clone())
                 .chain(std::iter::once(control.clone()))
                 .chain(toolchain.read)
                 .collect::<Vec<_>>();
+            // Linux enters the workspace without a list-only grant.
+            let list = if cfg!(target_os = "linux") {
+                String::new()
+            } else {
+                format!("list = [{control:?}, {workspace_path:?}]\n")
+            };
             config.push_str(&format!(
-                "[mcp.{}.filesystem]\nread = {read:?}\nwrite = [{control:?}]\nlist = [{control:?}, {workspace_path:?}]\n",
+                "[mcp.{}.filesystem]\nread = {read:?}\nwrite = [{control:?}]\n{list}",
                 server.name,
             ));
+            if cfg!(target_os = "linux") {
+                let mut files = vec![fixture_python()];
+                if matches!(
+                    server.behavior,
+                    DiscoveryBehavior::FailAfterRelease | DiscoveryBehavior::Hang
+                ) {
+                    files.push(fixture_sleep());
+                }
+                if server.contain_egress == Some(false) {
+                    files.extend(
+                        ["/etc/hosts", "/etc/resolv.conf", "/etc/nsswitch.conf"]
+                            .into_iter()
+                            .map(Path::new)
+                            .filter(|path| path.is_file())
+                            .map(|path| path.canonicalize().expect("resolve resolver file")),
+                    );
+                }
+                if !files.is_empty() {
+                    config.push_str(&format!("read_file = {files:?}\n"));
+                }
+            }
         }
         std::fs::write(dot.join("box.toml"), config).expect("write box.toml");
+    }
+
+    pub fn set_argument_wildcards(&self, server: &str, enabled: bool) {
+        let path = self.workspace.join(".strands-box").join("box.toml");
+        let mut config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        config["mcp"][server]
+            .as_table_mut()
+            .unwrap()
+            .insert("argument_wildcards".into(), toml::Value::Boolean(enabled));
+        std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
+    }
+
+    pub fn set_server_executable(&self, server: &str, executable: &Path) {
+        let path = self.workspace.join(".strands-box").join("box.toml");
+        let mut config: toml::Value =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        config["mcp"][server]["command"][0] =
+            toml::Value::String(executable.to_str().unwrap().to_string());
+        std::fs::write(path, toml::to_string(&config).unwrap()).unwrap();
     }
 
     pub fn plant_generated_schema_artifacts(&self, schema: &str) -> (PathBuf, PathBuf, PathBuf) {
@@ -575,32 +678,60 @@ while True:
     }
 
     pub fn spawn(&self) -> RunningBox {
-        let child = self.command().spawn().expect("spawn strands-box run");
-        RunningBox::new(child, self.home.path().to_path_buf(), self.name.clone())
+        self.address_the_newest_workspace();
+        self.spawn_attempt()
+    }
+
+    /// Prepare an owning run whose standard streams the test supplies.
+    pub fn command_for_run(&self) -> Command {
+        self.address_the_newest_workspace();
+        self.command()
     }
 
     pub fn spawn_from_operator_home(&self) -> RunningBox {
         let mut command = self.command();
         command.current_dir(self.home.path());
+        self.address_the_newest_workspace();
         let child = command
             .spawn()
             .expect("spawn strands-box run outside the workspace");
         RunningBox::new(child, self.home.path().to_path_buf(), self.name.clone())
     }
 
+    /// Start a run that is not expected to own the box.
     pub fn spawn_attempt(&self) -> RunningBox {
-        self.spawn()
+        let child = self.command().spawn().expect("spawn strands-box run");
+        RunningBox::new(child, self.home.path().to_path_buf(), self.name.clone())
+    }
+
+    /// Mark the newest written workspace as the one the owning run starts from.
+    fn address_the_newest_workspace(&self) {
+        self.addressed
+            .set(self.declared.borrow().len().checked_sub(1));
     }
 
     pub fn spawn_without_trusted_path(&self) -> RunningBox {
         let mut command = self.command();
         command.env_remove("PATH");
+        self.address_the_newest_workspace();
         let child = command.spawn().expect("spawn strands-box run without PATH");
         RunningBox::new(child, self.home.path().to_path_buf(), self.name.clone())
     }
 
+    /// Launch the one server declared on `program` the way a harness does, with its full command.
     pub fn open_client(&self, program: &str) -> RunningMcpClient {
+        let arguments = self.declared_arguments(program);
+        self.open_client_with(program, &arguments)
+    }
+
+    /// Launch `bin/<program>` with exactly `arguments`.
+    pub fn open_client_with(
+        &self,
+        program: &str,
+        arguments: &[impl AsRef<std::ffi::OsStr>],
+    ) -> RunningMcpClient {
         let mut command = self.alias_command(program);
+        command.args(arguments);
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -655,6 +786,38 @@ while True:
         self.open_client(program).wait(timeout)
     }
 
+    /// Launch `bin/<program>` with exactly `arguments`, and wait for the refusal.
+    pub fn invoke_refused_open_with(
+        &self,
+        program: &str,
+        arguments: &[impl AsRef<std::ffi::OsStr>],
+        timeout: Duration,
+    ) -> ClientExit {
+        self.open_client_with(program, arguments).wait(timeout)
+    }
+
+    /// The arguments of the one server on `program` in the workspace of the owning run.
+    fn declared_arguments(&self, program: &str) -> Vec<String> {
+        let workspaces = self.declared.borrow();
+        let addressed = self
+            .addressed
+            .get()
+            .or_else(|| workspaces.len().checked_sub(1));
+        let Some(declared) = addressed.and_then(|index| workspaces.get(index)) else {
+            return Vec::new();
+        };
+        let mut on_program = declared.iter().filter(|(declared, _)| declared == program);
+        let arguments = on_program
+            .next()
+            .map(|(_, arguments)| arguments.clone())
+            .unwrap_or_default();
+        assert!(
+            on_program.next().is_none(),
+            "two servers are declared on {program}; launch one with open_client_with"
+        );
+        arguments
+    }
+
     pub fn release_server(&self, program: &str) {
         write_fifo_before(&self.release_path(program), Duration::from_secs(3));
     }
@@ -681,11 +844,60 @@ while True:
     }
 
     pub fn server_pid(&self, program: &str) -> u32 {
-        read_pid(&self.event_path(program, "pid"))
+        let pid = read_pid(&self.event_path(program, "pid"));
+        #[cfg(target_os = "linux")]
+        {
+            let processes = host_processes();
+            let servers = self.host_servers(program, &[pid], &processes);
+            assert_eq!(
+                servers.len(),
+                1,
+                "identify one live host server: {servers:?}"
+            );
+            servers[0].pid
+        }
+        #[cfg(not(target_os = "linux"))]
+        pid
     }
 
     pub fn descendant_pid(&self, program: &str) -> u32 {
-        read_pid(&self.event_path(program, "descendant.pid"))
+        let pid = read_pid(&self.event_path(program, "descendant.pid"));
+        #[cfg(target_os = "linux")]
+        {
+            let leader = self.server_pid(program);
+            let children: Vec<_> = host_processes()
+                .into_iter()
+                .filter(|process| process.parent == leader && process.namespace_pid == pid)
+                .collect();
+            assert_eq!(
+                children.len(),
+                1,
+                "identify one live host child: {children:?}"
+            );
+            children[0].pid
+        }
+        #[cfg(not(target_os = "linux"))]
+        pid
+    }
+
+    #[cfg(target_os = "linux")]
+    fn host_servers<'a>(
+        &self,
+        program: &str,
+        namespace_pids: &[u32],
+        processes: &'a [HostProcess],
+    ) -> Vec<&'a HostProcess> {
+        let script = self.server_executable(program);
+        processes
+            .iter()
+            .filter(|process| {
+                namespace_pids.contains(&process.namespace_pid)
+                    && process
+                        .command
+                        .split(|byte| *byte == 0)
+                        .any(|argument| argument == script.as_os_str().as_bytes())
+            })
+            .collect()
     }
 
     pub fn trace(&self, program: &str, field: &str) -> String {
@@ -731,6 +943,31 @@ while True:
             let leaders = self.event_process_ids(program, "pids");
             let descendants = self.event_process_ids(program, "descendant.pids");
             if leaders.len() == count && descendants.len() == count {
+                #[cfg(target_os = "linux")]
+                {
+                    let processes = host_processes();
+                    let servers = self.host_servers(program, &leaders, &processes);
+                    let groups: Vec<_> = servers
+                        .iter()
+                        .filter_map(|server| {
+                            let children: Vec<_> = processes
+                                .iter()
+                                .filter(|child| {
+                                    child.parent == server.pid
+                                        && descendants.contains(&child.namespace_pid)
+                                })
+                                .collect();
+                            match children.as_slice() {
+                                [child] => Some((server.pid, child.pid)),
+                                _ => None,
+                            }
+                        })
+                        .collect();
+                    if servers.len() == count && groups.len() == count {
+                        return groups;
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
                 return leaders.into_iter().zip(descendants).collect();
             }
             std::thread::sleep(POLL);
@@ -1086,6 +1323,8 @@ pub struct RunningBox {
     name: String,
     stdout: CapturedOutput,
     stderr: CapturedOutput,
+    /// Whether a program reached through this box's alias has been awaited once already.
+    alias_exec_awaited: bool,
 }
 
 impl RunningBox {
@@ -1098,6 +1337,7 @@ impl RunningBox {
             name,
             stdout,
             stderr,
+            alias_exec_awaited: false,
         }
     }
 
@@ -1108,6 +1348,18 @@ impl RunningBox {
             .try_wait()
             .expect("inspect strands-box run")
             .is_none()
+    }
+
+    /// Wait for a marker a program reached through this box's alias writes: the first such wait
+    /// on a run carries the one-time cost of the box's own alias image, and later ones do not.
+    pub fn wait_for_through_alias(&mut self, path: impl AsRef<Path>, timeout: Duration) {
+        let allowance = if self.alias_exec_awaited {
+            Duration::ZERO
+        } else {
+            FIRST_ALIAS_EXEC
+        };
+        self.alias_exec_awaited = true;
+        self.wait_for(path, timeout + allowance);
     }
 
     pub fn wait_for(&mut self, path: impl AsRef<Path>, timeout: Duration) {
@@ -1163,6 +1415,42 @@ impl Drop for RunningBox {
         }
         let _ = child.wait();
     }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct HostProcess {
+    pid: u32,
+    parent: u32,
+    namespace_pid: u32,
+    command: Vec<u8>,
+}
+
+#[cfg(target_os = "linux")]
+fn host_processes() -> Vec<HostProcess> {
+    std::fs::read_dir("/proc")
+        .expect("inspect the host process view")
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let pid = entry.file_name().to_str()?.parse().ok()?;
+            let status = std::fs::read_to_string(entry.path().join("status")).ok()?;
+            let number = |field| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix(field))?
+                    .split_whitespace()
+                    .last()?
+                    .parse::<u32>()
+                    .ok()
+            };
+            Some(HostProcess {
+                pid,
+                parent: number("PPid:")?,
+                namespace_pid: number("NSpid:")?,
+                command: std::fs::read(entry.path().join("cmdline")).ok()?,
+            })
+        })
+        .collect()
 }
 
 pub fn wait_for_process_exit(pid: u32, timeout: Duration) {

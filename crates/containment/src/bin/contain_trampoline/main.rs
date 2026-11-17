@@ -4,7 +4,7 @@
 //! ```text
 //! strands-box-contain-trampoline --config <containment-config.json> [--config-fd <fd>] \
 //!   --config-sha256 <digest> --target-env-json <json> [--argv0 <spelling>] \
-//!   [--setup-status-fd <fd>] [--relay-control-fd <fd>] -- <interp> [args...]
+//!   [--setup-status-fd <fd>] [--relay-control-fd <fd>] [--launch-gate-fd <fd>] -- <interp> [args...]
 //! ```
 
 use std::process::ExitCode;
@@ -13,6 +13,9 @@ use std::process::ExitCode;
 // `cfg` gate and is unit-tested on every target.
 mod args;
 use args::Args;
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_failure_tests;
 
 #[cfg(any(unix, test))]
 type TargetEnvironment = std::collections::BTreeMap<String, String>;
@@ -26,7 +29,7 @@ static EXECUTABLE_IDENTITY_MARKER: [u8; 72] =
 const USAGE: &str = "usage: strands-box-contain-trampoline --config <containment-config.json> \
      [--config-fd <fd>] \
      --config-sha256 <64-lowercase-hex> --target-env-json <json-object> \
-     [--argv0 <spelling>] [--setup-status-fd <fd>] [--relay-control-fd <fd>] \
+     [--argv0 <spelling>] [--setup-status-fd <fd>] [--relay-control-fd <fd>] [--launch-gate-fd <fd>] \
      -- <command> [args...]\n\
      \n\
      Verifies and applies <containment-config.json>, then installs only the target\n\
@@ -76,15 +79,29 @@ fn run(args: &Args) -> ExitCode {
     };
     // Both the status pipe and the relay control socket must survive: the first reports a setup
     // failure, and the second is how the workload's egress listener gets back to the box.
-    let preserved: Vec<libc::c_int> = [args.setup_status_fd, args.relay_control_fd, args.config_fd]
-        .into_iter()
-        .flatten()
-        .collect();
+    let preserved: Vec<libc::c_int> = [
+        args.setup_status_fd,
+        args.relay_control_fd,
+        args.config_fd,
+        args.launch_gate_fd,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
     if let Err(error) = close_inherited_descriptors(&preserved) {
         return setup_status.fail(
             SetupStage::ConfigRead,
             2,
             format_args!("cannot close inherited descriptors: {error}"),
+        );
+    }
+    if let Some(descriptor) = args.launch_gate_fd
+        && let Err(error) = wait_for_launch(descriptor)
+    {
+        return setup_status.fail(
+            SetupStage::ConfigRead,
+            2,
+            format_args!("launch gate refused: {error}"),
         );
     }
     // Phase 1: contain THIS process while single-threaded, before any `exec`.
@@ -94,6 +111,25 @@ fn run(args: &Args) -> ExitCode {
     // Phase 2: hand off — `exec` replaces this (now-contained) image with the
     // command, which is therefore born contained. On success this never returns.
     exec_command(args, &setup_status)
+}
+
+/// The parent must acknowledge setup before any workload code can execute.
+#[cfg(unix)]
+fn wait_for_launch(descriptor: i32) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+    use std::os::fd::FromRawFd;
+    use std::os::unix::net::UnixStream;
+    // SAFETY: the trusted launcher supplies one owned descriptor, above the standard streams.
+    let mut gate = unsafe { UnixStream::from_raw_fd(descriptor) };
+    gate.set_read_timeout(Some(std::time::Duration::from_secs(10)))?;
+    gate.set_write_timeout(Some(std::time::Duration::from_secs(10)))?;
+    gate.write_all(b"R")?;
+    let mut reply = [0];
+    gate.read_exact(&mut reply)?;
+    if reply != *b"G" {
+        return Err(std::io::Error::other("parent refused launch"));
+    }
+    Ok(())
 }
 
 /// Close every inherited descriptor except the standard streams and `preserve`.
@@ -221,17 +257,19 @@ fn apply_containment(args: &Args, setup_status: &SetupStatus) -> Result<(), Exit
 
     // An unsupported platform is a setup error (2); anything else means apply ran and refused, which
     // is incomplete containment (3).
-    // Pass the setup-status writer so the Linux reaper can signal "reached exec" with one byte: a
-    // long-lived leaf (a streaming MCP server) never lets the pipe EOF during its life, so the
-    // supervisor cannot rely on EOF alone to know containment came up.
-    Containment::apply(&config, egress_handoff.as_deref(), args.setup_status_fd).map_err(
-        |error| match error {
-            error @ ContainmentError::PlatformUnsupported { .. } => {
-                setup_status.fail(SetupStage::Apply, 2, error)
-            }
-            error => setup_status.fail(SetupStage::Apply, 3, format_args!("apply failed: {error}")),
-        },
-    )?;
+    // The Linux launcher preserves this writer until all setup processes finish.
+    Containment::apply(
+        &config,
+        egress_handoff.as_deref(),
+        args.setup_status_fd,
+        None,
+    )
+    .map_err(|error| match error {
+        error @ ContainmentError::PlatformUnsupported { .. } => {
+            setup_status.fail(SetupStage::Apply, 2, error)
+        }
+        error => setup_status.fail(SetupStage::Apply, 3, format_args!("apply failed: {error}")),
+    })?;
     // Enforcement is kernel-side and survives `exec`.
     Ok(())
 }
@@ -302,11 +340,18 @@ fn exec_command(args: &Args, setup_status: &SetupStatus) -> ExitCode {
     if let Some(argv0) = &args.argv0 {
         command.arg0(argv0);
     }
-    let err = command
+    command
         .args(&args.command[1..])
         .env_clear()
-        .envs(target_env)
-        .exec();
+        .envs(target_env);
+    if let Err(error) = setup_status.complete() {
+        return setup_status.fail(
+            SetupStage::Exec,
+            4,
+            format_args!("cannot report setup completion: {error}"),
+        );
+    }
+    let err = command.exec();
     // Only reached when exec failed, so the target never ran.
     setup_status.fail(
         SetupStage::Exec,
@@ -314,6 +359,9 @@ fn exec_command(args: &Args, setup_status: &SetupStatus) -> ExitCode {
         format_args!("exec {program:?} failed: {err}"),
     )
 }
+
+#[cfg(unix)]
+const SETUP_COMPLETE_BYTE: u8 = 128;
 
 /// Stable one-byte setup-failure protocol shared with the supervisor.
 #[cfg(unix)]
@@ -327,8 +375,7 @@ enum SetupStage {
     Exec = 5,
 }
 
-/// The inherited setup-status writer. It is close-on-exec before containment is
-/// applied, so a successful target exec is observed by the parent as EOF.
+/// The close-on-exec writer reports setup completion before the executable launch attempt.
 #[cfg(unix)]
 struct SetupStatus {
     descriptor: Option<libc::c_int>,
@@ -364,25 +411,36 @@ impl SetupStatus {
         ExitCode::from(code)
     }
 
+    fn complete(&self) -> std::io::Result<()> {
+        self.write_byte(SETUP_COMPLETE_BYTE)
+    }
+
     fn report(&self, stage: SetupStage) {
+        let _ = self.write_byte(stage as u8);
+    }
+
+    fn write_byte(&self, byte: u8) -> std::io::Result<()> {
         let Some(descriptor) = self.descriptor else {
-            return;
+            return Ok(());
         };
-        let byte = stage as u8;
         loop {
-            // SAFETY: byte points to one readable byte and descriptor is the inherited status
-            // writer.
-            let written =
-                unsafe { libc::write(descriptor, (&byte as *const u8).cast::<libc::c_void>(), 1) };
+            // SAFETY: byte is readable and descriptor is the inherited status writer.
+            let written = unsafe { libc::write(descriptor, (&byte as *const u8).cast(), 1) };
             if written == 1 {
-                return;
+                return Ok(());
             }
-            if written == -1
-                && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
-            {
+            let error = std::io::Error::last_os_error();
+            if written == -1 && error.kind() == std::io::ErrorKind::Interrupted {
                 continue;
             }
-            return;
+            return Err(if written == 0 {
+                std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "setup status writer returned zero",
+                )
+            } else {
+                error
+            });
         }
     }
 }
@@ -483,10 +541,212 @@ mod descriptor_tests {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    #[test]
+    fn launch_gate_requires_parent_acknowledgment_and_refuses_eof() {
+        use std::io::{Read, Write};
+        use std::os::fd::IntoRawFd;
+        use std::os::unix::net::UnixStream;
+        for acknowledgment in [Some(b'G'), Some(b'X'), None] {
+            let (mut parent, child) = UnixStream::pair().unwrap();
+            parent
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let descriptor = child.into_raw_fd();
+            let (finished, observed) = std::sync::mpsc::channel();
+            let worker = std::thread::spawn(move || {
+                finished
+                    .send(super::wait_for_launch(descriptor).is_ok())
+                    .unwrap()
+            });
+            let mut ready = [0];
+            parent.read_exact(&mut ready).unwrap();
+            assert_eq!(ready, *b"R");
+            assert!(
+                observed.try_recv().is_err(),
+                "workload released before acknowledgment"
+            );
+            if let Some(byte) = acknowledgment {
+                parent.write_all(&[byte]).unwrap();
+            }
+            drop(parent);
+            assert_eq!(
+                observed
+                    .recv_timeout(std::time::Duration::from_secs(2))
+                    .unwrap(),
+                acknowledgment == Some(b'G')
+            );
+            worker.join().unwrap();
+        }
+    }
+
     use std::collections::BTreeMap;
     use std::os::fd::IntoRawFd as _;
 
     use super::{Args, decode_target_environment, disclose_warnings, read_config};
+
+    fn request_at(path: &std::path::Path) -> Args {
+        Args {
+            config: path.to_owned(),
+            config_fd: None,
+            config_sha256: [0; 32],
+            target_env_json: "{}".into(),
+            setup_status_fd: None,
+            relay_control_fd: None,
+            launch_gate_fd: None,
+            command: vec!["/containment-test-no-such-program".into()],
+            argv0: None,
+        }
+    }
+
+    #[test]
+    fn config_failures_report_the_stage_before_applying_containment() {
+        use sha2::{Digest as _, Sha256};
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::net::UnixStream;
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config");
+        for (bytes, correct_digest, expected_stage) in [
+            (None, false, 1),
+            (Some(b"{}".as_slice()), false, 2),
+            (Some(b"\xff".as_slice()), true, 2),
+            (Some(b"{".as_slice()), true, 2),
+            (Some(b"{}".as_slice()), true, 2),
+        ] {
+            let mut args = request_at(&path);
+            if let Some(bytes) = bytes {
+                std::fs::write(&path, bytes).unwrap();
+                if correct_digest {
+                    args.config_sha256 = Sha256::digest(bytes).into();
+                }
+            }
+            let (mut reader, writer) = UnixStream::pair().unwrap();
+            reader
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let status = super::SetupStatus::arm(Some(writer.as_raw_fd())).unwrap();
+            assert_eq!(
+                super::apply_containment(&args, &status),
+                Err(std::process::ExitCode::from(2))
+            );
+            let mut stage = [0];
+            reader.read_exact(&mut stage).unwrap();
+            assert_eq!(stage, [expected_stage]);
+            assert_eq!(
+                unsafe { libc::fcntl(writer.as_raw_fd(), libc::F_GETFD) } & libc::FD_CLOEXEC,
+                libc::FD_CLOEXEC
+            );
+        }
+    }
+
+    #[test]
+    fn a_write_only_config_descriptor_reports_a_read_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("config");
+        let mut args = request_at(&path);
+        args.config_fd = Some(std::fs::File::create(&path).unwrap().into_raw_fd());
+        assert!(matches!(
+            read_config(&args),
+            Err(super::ConfigFileError::Read(_))
+        ));
+        assert_eq!(std::fs::read(path).unwrap(), b"");
+    }
+
+    #[test]
+    fn target_setup_failures_report_environment_or_exec_stage() {
+        use std::io::Read as _;
+        use std::os::fd::AsRawFd as _;
+        use std::os::unix::net::UnixStream;
+
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing");
+        let bad_cwd = serde_json::json!({"PWD": missing}).to_string();
+        for (environment, argv0, stage) in [
+            ("{", None, 4),
+            (bad_cwd.as_str(), None, 5),
+            ("{}", None, 5),
+            ("{}", Some("chosen-name"), 5),
+        ] {
+            let mut args = request_at(&missing);
+            args.target_env_json = environment.into();
+            args.argv0 = argv0.map(str::to_owned);
+            let (mut reader, writer) = UnixStream::pair().unwrap();
+            reader
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let status = super::SetupStatus::arm(Some(writer.as_raw_fd())).unwrap();
+            assert_eq!(
+                super::exec_command(&args, &status),
+                std::process::ExitCode::from(4)
+            );
+            let mut observed = [0];
+            reader.read_exact(&mut observed).unwrap();
+            if observed == [super::SETUP_COMPLETE_BYTE] {
+                reader.read_exact(&mut observed).unwrap();
+            }
+            assert_eq!(observed, [stage]);
+        }
+    }
+
+    #[test]
+    fn absent_and_unwritable_status_channels_do_not_mask_failure() {
+        let status = super::SetupStatus::arm(None).unwrap();
+        assert_eq!(
+            status.fail(super::SetupStage::Apply, 3, "test refusal"),
+            std::process::ExitCode::from(3)
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let reader = std::fs::File::open(directory.path()).unwrap();
+        use std::os::fd::AsRawFd as _;
+        let status = super::SetupStatus::arm(Some(reader.as_raw_fd())).unwrap();
+        assert_eq!(
+            status.fail(super::SetupStage::Apply, 3, "unwritable status"),
+            std::process::ExitCode::from(3)
+        );
+        assert!(super::SetupStatus::arm(Some(-1)).is_err());
+        let mut args = request_at(directory.path());
+        args.setup_status_fd = Some(-1);
+        assert_eq!(super::run(&args), std::process::ExitCode::from(2));
+    }
+
+    #[test]
+    fn launch_gate_refuses_a_non_socket_descriptor() {
+        let file = std::fs::File::open("/dev/null").unwrap();
+        assert!(super::wait_for_launch(file.into_raw_fd()).is_err());
+    }
+
+    #[test]
+    fn closing_an_already_closed_descriptor_succeeds() {
+        assert!(super::close_ignoring_ebadf(-1).is_ok());
+    }
+
+    #[test]
+    fn run_refuses_missing_configuration_in_a_fresh_process() {
+        const CHILD: &str = "BOX_UNIT_TRAMPOLINE_MISSING_CONFIG";
+        if let Some(path) = std::env::var_os(CHILD) {
+            let args = request_at(std::path::Path::new(&path));
+            let result = super::run(&args);
+            std::process::exit(if result == std::process::ExitCode::from(2) {
+                0
+            } else {
+                99
+            });
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::run_refuses_missing_configuration_in_a_fresh_process",
+                "--nocapture",
+            ])
+            .env(CHILD, directory.path().join("absent-config"))
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stderr).contains("cannot read config file"));
+    }
 
     /// The one warning the floors carry reaches stderr before apply, and a disjoint pair says nothing.
     #[test]
@@ -538,6 +798,7 @@ mod tests {
         let expected = b"\x00exact config bytes\xff";
         std::fs::write(&path, expected).expect("write config");
         let args = Args {
+            launch_gate_fd: None,
             config: path.clone(),
             config_fd: None,
             config_sha256: [0; 32],
@@ -563,6 +824,7 @@ mod tests {
         std::fs::remove_file(&path).expect("remove opened name");
         std::fs::write(&path, b"replacement").expect("replacement config");
         let args = Args {
+            launch_gate_fd: None,
             config: path.clone(),
             config_fd: Some(descriptor),
             config_sha256: [0; 32],

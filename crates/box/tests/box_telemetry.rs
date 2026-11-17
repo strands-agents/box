@@ -139,9 +139,10 @@ fn a_shell_decision_states_its_arguments_and_its_directory() {
     });
     assert_eq!(args.first().map(String::as_str), Some("cat"), "{args:?}");
     assert_eq!(args.len(), 2, "the program and one path: {args:?}");
-    assert!(
-        args[1].ends_with("allowed.txt"),
-        "the expanded path, not the spelling: {args:?}"
+    assert_eq!(
+        args[1], "<redacted>",
+        "the Shell does not say which words the script stated, so every argument is redacted: \
+         {args:?}"
     );
     assert!(cwd.is_some(), "the directory the line ran in: {spans:?}");
 }
@@ -489,25 +490,45 @@ when {{ context.input.path == {denied_path:?} }};"#
         let begin = format!("\nCASE_{name}_BEGIN\n");
         let end = format!("\nCASE_{name}_END=");
         let block = stdout.split_once(&begin).expect("case begins").1;
-        let (reply, tail) = block.split_once(&end).expect("case ends");
-        assert_eq!(tail.lines().next(), Some("0"), "{name}: {output:?}");
-        let reply = reply.trim_start_matches('\n').replace("\r\n", "\n");
-        let (status, body) = if *monty {
-            let (status, body) = reply.split_once('\n').expect("Monty status and body");
-            (status.trim().parse::<u16>().unwrap(), body.trim())
+        let (raw_reply, tail) = block.split_once(&end).expect("case ends");
+        let exit_code = tail
+            .lines()
+            .next()
+            .expect("case exit code")
+            .parse::<i32>()
+            .expect("numeric exit code");
+        let reply = raw_reply.trim_start_matches('\n').replace("\r\n", "\n");
+        let (status, body) = if !*monty && !*allowed {
+            assert_ne!(exit_code, 0, "{name}: {output:?}");
+            assert!(raw_reply.is_empty(), "{name}: {raw_reply:?}");
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                stderr.contains(&format!(
+                    "curl: http:request gate: policy denied this operation on '{host}:{port}{denied_path}' [policy: deny-hosted-http]."
+                )),
+                "{name}: {stderr}"
+            );
+            (None, "")
         } else {
-            let (head, body) = reply
-                .split_once("\n\n")
-                .expect("curl includes response headers");
-            let status = head
-                .split_whitespace()
-                .nth(1)
-                .unwrap()
-                .parse::<u16>()
-                .unwrap();
-            (status, body.trim())
+            assert_eq!(exit_code, 0, "{name}: {output:?}");
+            let (status, body) = if *monty {
+                let (status, body) = reply.split_once('\n').expect("Monty status and body");
+                (status.trim().parse::<u16>().unwrap(), body.trim())
+            } else {
+                let (head, body) = reply
+                    .split_once("\n\n")
+                    .expect("curl includes response headers");
+                let status = head
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap()
+                    .parse::<u16>()
+                    .unwrap();
+                (status, body.trim())
+            };
+            assert_eq!(status, if *allowed { 200 } else { 403 }, "{name}: {reply}");
+            (Some(status), body)
         };
-        assert_eq!(status, if *allowed { 200 } else { 403 }, "{name}: {reply}");
         let (parent, state) = if index == 4 {
             (&parents[5], "explicit=header")
         } else {
@@ -539,7 +560,7 @@ when {{ context.input.path == {denied_path:?} }};"#
                     .unwrap();
                 assert_eq!(value, expected, "{origin}");
             }
-        } else {
+        } else if *monty {
             assert!(body.contains("deny-hosted-http"), "{name}: {body}");
         }
         let fields: Vec<_> = parent.split('-').collect();
@@ -569,7 +590,8 @@ when {{ context.input.path == {denied_path:?} }};"#
             "{span}"
         );
         results.push(serde_json::json!({
-            "case": name, "status": status, "parent": parent, "tracestate": state,
+            "case": name, "exit_code": exit_code, "status": status,
+            "parent": parent, "tracestate": state,
             "policy_span_id": span["spanId"], "verdict": verdict,
             "origin_echo_verified": allowed,
         }));
@@ -824,7 +846,13 @@ fn a_declared_file_target_is_where_the_records_go() {
         "[telemetry.decisions]\nkind = \"file\"\ndestination = \"~/declared.jsonl\"\ninclude = [\"deny\", \"permit\"]\n",
     )
     .expect();
-    assert!(configured.bash("zsh -c 'true'").status.success());
+    let output = configured.bash("zsh -c 'true'");
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("telemetry records were lost"),
+        "a target that took every record reports no loss: {stderr}"
+    );
 
     let declared = configured.operator_home().join("declared.jsonl");
     let text = std::fs::read_to_string(&declared)
@@ -833,6 +861,48 @@ fn a_declared_file_target_is_where_the_records_go() {
     assert!(
         !default_records(&configured.root()).exists(),
         "a declared target replaces the default rather than adding to it"
+    );
+}
+
+/// **A target that refuses every export is reported once on stderr, and the run still succeeds.**
+#[test]
+fn an_unreachable_target_reports_the_lost_records_once() {
+    needs_a_box!("an_unreachable_target_reports_the_lost_records_once");
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+        listener.local_addr().expect("its port").port()
+    };
+    let configured = Request::with_config(
+        "telemetry-unreachable",
+        READ_ONE_FILE,
+        &format!(
+            "[telemetry.decisions]\nkind = \"otlp\"\ndestination = \"http://127.0.0.1:{port}\"\n"
+        ),
+    )
+    .expect();
+    let output = configured.bash("zsh -c 'true'");
+
+    assert!(
+        output.status.success(),
+        "a lost record does not fail the run: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("telemetry records were lost"))
+        .collect();
+    assert_eq!(lines.len(), 1, "exactly one loss line: {stderr}");
+    assert!(
+        lines[0].starts_with("strands-box: warning: telemetry records were lost: "),
+        "{stderr}"
+    );
+    assert!(
+        lines[0].contains("failed"),
+        "the cause is a failed export: {stderr}"
+    );
+    assert!(
+        !lines[0].contains("did not finish"),
+        "a final export that failed at once is not a drain that ran out of time: {stderr}"
     );
 }
 

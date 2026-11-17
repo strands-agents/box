@@ -1,4 +1,4 @@
-//! The request-leg boundary types: [`InterceptedRequest`], [`Target`], [`HeaderMap`], [`BodyRef`].
+//! The request-leg boundary types: [`InterceptedRequest`], [`Target`], [`HeaderMap`].
 
 use zeroize::Zeroizing;
 
@@ -89,31 +89,6 @@ impl HeaderMap {
     }
 }
 
-/// The request body, borrowed or owned.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum BodyRef {
-    /// No body (or a body not yet read).
-    #[default]
-    Empty,
-    /// A fully-materialized body.
-    Bytes(Vec<u8>),
-}
-
-impl BodyRef {
-    /// The body bytes, or an empty slice when [`Empty`](Self::Empty).
-    pub fn as_bytes(&self) -> &[u8] {
-        match self {
-            BodyRef::Empty => &[],
-            BodyRef::Bytes(b) => b,
-        }
-    }
-
-    /// Whether the body is empty.
-    pub fn is_empty(&self) -> bool {
-        self.as_bytes().is_empty()
-    }
-}
-
 /// The outbound destination the request targets — built by the adapter from the connection + request
 /// line.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -183,11 +158,11 @@ pub struct InterceptedRequest {
     /// The destination (host, port, path, query) built by the adapter.
     pub target: Target,
     /// The HTTP method.
-    pub method: Option<String>,
+    pub method: String,
     /// The request headers.
     pub headers: HeaderMap,
-    /// The request body (borrowed/streamed).
-    pub body: BodyRef,
+    /// The request body.
+    pub body: Vec<u8>,
     /// A non-secret note a capability attaches for the driver to journal on the allow decision, never
     /// applied to the wire.
     pub advisory_note: Option<String>,
@@ -200,7 +175,7 @@ impl std::fmt::Debug for InterceptedRequest {
             .field("target", &self.target)
             .field("method", &self.method)
             .field("headers", &self.headers)
-            .field("body_bytes", &self.body.as_bytes().len())
+            .field("body_bytes", &self.body.len())
             .finish()
     }
 }
@@ -246,9 +221,9 @@ mod tests {
 
         let req = InterceptedRequest {
             target: Target::new("api.example.test", 443),
-            method: Some("POST".to_string()),
+            method: "POST".to_string(),
             headers,
-            body: BodyRef::Bytes(b"{\"prompt\":\"secret user content\"}".to_vec()),
+            body: b"{\"prompt\":\"secret user content\"}".to_vec(),
             advisory_note: None,
         };
         let rendered = format!("{req:?}");

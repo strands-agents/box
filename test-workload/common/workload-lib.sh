@@ -88,6 +88,9 @@ wl_resolve_paths() {
   if [ -d "$WL_HOME/.local/share/claude/versions" ]; then
     WL_CLAUDE="$(ls -dt "$WL_HOME/.local/share/claude/versions"/* 2>/dev/null | head -1)"
   fi
+  if [ -n "${WL_CLAUDE_BINARY:-}" ]; then
+    WL_CLAUDE="$(wl_canon "$WL_CLAUDE_BINARY")"
+  fi
 
   # Codex: the npm package ships a Node shim plus a vendored native binary. The
   # shim is the route this suite measures (see docs in the dimension goals), so
@@ -179,8 +182,8 @@ wl_resolve_paths() {
     WL_NODE="$(wl_canon "$(wl_first /usr/bin/node-20 /usr/bin/node || echo /usr/bin/node)")"
     WL_NODE_TREE="$(wl_first /usr/lib/nodejs20 /usr/lib/nodejs || echo /usr/lib/nodejs20)"
     WL_NPM_CLI="$WL_NODE_TREE/lib/node_modules/npm/bin/npm-cli.js"
-    # F29/F64: the box refuses a memory permission change that adds execution and
-    # NODE_OPTIONS is a refused name, so V8 needs the flag in `command` itself.
+    # F29/F64: the box refuses a memory permission change that adds execution, so
+    # V8 needs --jitless, and the suite puts it in `command` itself.
     WL_NODE_JITLESS="--jitless"
     WL_SCRIPT_SHELL="$WL_BASH"
   fi
@@ -252,7 +255,9 @@ wl_agent_host() {
 wl_agent_available() {
   case "$1" in
     claude) [ -n "${WL_CLAUDE:-}" ] && [ -x "$WL_CLAUDE" ] ;;
-    codex)  [ -n "${WL_CODEX_SHIM:-}" ] && [ -f "$WL_CODEX_SHIM" ] && [ -x "${WL_NODE:-/nonexistent}" ] ;;
+    codex)
+      if [ -n "${WL_CODEX_BINARY:-}" ]; then [ -x "$WL_CODEX_BINARY" ]
+      else [ -n "${WL_CODEX_SHIM:-}" ] && [ -f "$WL_CODEX_SHIM" ] && [ -x "${WL_NODE:-/nonexistent}" ]; fi ;;
     strands) [ -n "${WL_STRANDS:-}" ] && [ -f "$WL_STRANDS" ] \
                && [ -n "${WL_STRANDS_LIB:-}" ] && [ -d "$WL_STRANDS_LIB" ] \
                && [ -x "${WL_PYTHON:-/nonexistent}" ] ;;

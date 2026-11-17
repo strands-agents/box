@@ -1,0 +1,4 @@
+strands-agents==1.63.0
+aws-bedrock-token-generator==1.1.0
+boto3==1.43.123
+botocore==1.43.123

@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 
 use containment::{Operation, Scope};
 
-use crate::error::ConfigError;
+use crate::GrantRefusal;
+use crate::error::{BoxError, ConfigError};
 use crate::record::config::process::{Filesystem, Grant};
 
 /// One host path a process's own syscalls reach, with no policy decision in the path.
@@ -33,6 +34,7 @@ pub(crate) struct DirectGrant {
     pub(crate) scope: Scope,
     /// Whether the entry names a credential store exactly, which is the one way through the floor.
     pub(crate) credential_store: bool,
+    access: &'static str,
 }
 
 impl DirectGrant {
@@ -43,20 +45,35 @@ impl DirectGrant {
         } else {
             ""
         };
-        // A writable bind reads on Linux, so a `write` tree is disclosed as the reach it is there.
-        let reads_too = if cfg!(target_os = "linux")
-            && self.operation == Operation::Write
-            && self.scope == Scope::Root
-        {
-            "  (readable too: a writable bind reads)"
+        let access = if self.access.is_empty() {
+            String::new()
         } else {
-            ""
+            format!("  ({})", self.access)
+        };
+        let link = if self.is_link() {
+            format!("{} -> ", self.lexical.display())
+        } else {
+            String::new()
         };
         format!(
-            "  {:<10}  {}{store}{reads_too}",
+            "  {:<10}  {link}{}{store}{access}",
             self.kind.key(),
             self.resolved.display()
         )
+    }
+
+    /// Whether the entry names a link to the file it grants.
+    pub(crate) fn is_link(&self) -> bool {
+        self.lexical != self.resolved
+    }
+
+    /// Each path the box shows this grant at: its file, and a link's own name.
+    fn names(&self) -> Vec<&Path> {
+        if self.is_link() {
+            vec![self.resolved.as_path(), self.lexical.as_path()]
+        } else {
+            vec![self.resolved.as_path()]
+        }
     }
 }
 
@@ -93,6 +110,8 @@ impl FileIdentity {
 /// the grant without them is the configuration these keys must never produce.
 #[derive(Debug)]
 pub(crate) struct DirectReach {
+    pub(crate) command: Option<std::sync::Arc<crate::run::commands::ConfiguredCommand>>,
+    pub(crate) installation: Option<std::sync::Arc<crate::run::installation::TrustedInstallation>>,
     /// What the process's own syscalls reach.
     pub(crate) grants: Vec<DirectGrant>,
     /// What stays unreachable inside those grants: `deny` entries, and the directory holding each
@@ -131,7 +150,7 @@ pub(crate) fn direct_grants(
     for (kind, entry) in lists.entries() {
         match kind {
             Grant::Deny => refusals.push(denial(entry, context)?),
-            _ => grants.push(entry_grant(kind, entry, context)?),
+            _ => grants.push(entry_grant(kind, entry, context).map_err(|(_, error)| error)?),
         }
     }
     require_no_overlap(&grants, context)?;
@@ -173,7 +192,87 @@ pub(crate) fn direct_grants(
     }
     require_no_grant_is_wholly_refused(&grants, &refusals, context)?;
     require_nothing_sensitive_stays_reachable(&grants, &refusals, context)?;
-    Ok(DirectReach { grants, refusals })
+    require_supported_grants(&grants, context)?;
+    let access: Vec<_> = grants
+        .iter()
+        .map(|grant| effective_access(grant, &grants))
+        .collect();
+    for (grant, access) in grants.iter_mut().zip(access) {
+        grant.access = access;
+    }
+    Ok(DirectReach {
+        grants,
+        refusals,
+        command: None,
+        installation: None,
+    })
+}
+
+fn covers(outer: &DirectGrant, inner: &DirectGrant) -> bool {
+    // Disclosure compares validated file/tree grants, which exclude directory-entry grants.
+    outer.resolved == inner.resolved
+        || outer.scope == Scope::Root && inner.resolved.starts_with(&outer.resolved)
+}
+
+fn require_supported_grants(
+    grants: &[DirectGrant],
+    context: &FilesystemContext<'_>,
+) -> Result<(), ConfigError> {
+    containment::validate_grants(
+        &grants
+            .iter()
+            .map(|grant| (grant.resolved.as_path(), grant.operation, grant.scope))
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| {
+        if let containment::ContainmentError::WriteOnlyUnsupported { ref path, .. } = error
+            && let Some(write) = grants
+                .iter()
+                .find(|grant| grant.operation == Operation::Write && grant.resolved == *path)
+        {
+            return refuse(
+                context,
+                &write.authored,
+                &format!(
+                    "Linux cannot enforce write-only access for `{}` at {}. \
+                     Add an explicit `read` or `read_file` grant covering the entire write scope \
+                     to request read-write access, or remove the write grant",
+                    write.kind.key(),
+                    write.resolved.display()
+                ),
+            );
+        }
+        refuse(context, "filesystem", &error.to_string())
+    })
+}
+
+fn effective_access(grant: &DirectGrant, grants: &[DirectGrant]) -> &'static str {
+    let (opposite, only, mixed) = match grant.operation {
+        Operation::Read => (
+            Operation::Write,
+            "read-only",
+            "read-only except read-write at overlapping write grants",
+        ),
+        Operation::Write => (
+            Operation::Read,
+            "write-only",
+            "write-only except read-write at overlapping read grants",
+        ),
+        _ => return "",
+    };
+    if grants
+        .iter()
+        .any(|other| other.operation == opposite && covers(other, grant))
+    {
+        "read-write"
+    } else if grants
+        .iter()
+        .any(|other| other.operation == opposite && covers(grant, other))
+    {
+        mixed
+    } else {
+        only
+    }
 }
 
 /// Refuse a spawn when a granted path no longer has the identity the run judged.
@@ -205,6 +304,18 @@ pub(crate) fn require_judged_identities(
             .map_err(|source| changed(&format!("cannot be resolved ({source})")))?;
         if now != grant.resolved {
             return Err(changed(&format!("resolves to {}", now.display())));
+        }
+        if grant.is_link() {
+            let named = grant
+                .lexical
+                .canonicalize()
+                .map_err(|source| changed(&format!("lost its link ({source})")))?;
+            if named != grant.resolved {
+                return Err(changed(&format!(
+                    "is no longer what {} points at",
+                    grant.lexical.display()
+                )));
+            }
         }
     }
     for (refusal, judged) in reach
@@ -264,45 +375,107 @@ fn denial(entry: &Path, context: &FilesystemContext<'_>) -> Result<Refusal, Conf
     })
 }
 
-/// One authorizing entry as a grant, refused by name for each class it falls in.
+/// Judge a read grant on `path` as a box judges a `read` entry, and return whether it lies in a
+/// credential store.
+pub(crate) fn judge_read_grant(path: &Path) -> Result<bool, (GrantRefusal, BoxError)> {
+    let home = crate::record::layout::canonical(
+        &crate::record::layout::operator_home_directory()
+            .map_err(|error| (GrantRefusal::Other, error))?,
+    );
+    let context = FilesystemContext {
+        table: "check_read_grant",
+        operator_home: &home,
+        policy: None,
+        authority_directories: Vec::new(),
+        program_search_directories: Vec::new(),
+    };
+    entry_grant(Grant::Read, path, &context)
+        .map(|grant| grant.credential_store)
+        .map_err(|(kind, error)| (kind, BoxError::from(error)))
+}
+
+/// One authorizing entry as a grant, refused by name for each class it falls in, with the kind of
+/// each refusal.
 fn entry_grant(
     kind: Grant,
     entry: &Path,
     context: &FilesystemContext<'_>,
-) -> Result<DirectGrant, ConfigError> {
+) -> Result<DirectGrant, (GrantRefusal, ConfigError)> {
     let authored = entry.display().to_string();
-    let named = |reason: &str| refuse(context, &authored, reason);
-    let lexical = expand_home(entry, &authored, context)?;
+    let refused = |kind, reason: &str| (kind, refuse(context, &authored, reason));
+    let other = |reason: &str| refused(GrantRefusal::Other, reason);
+    let lexical = expand_home(entry, &authored, context)
+        .map_err(|error| (GrantRefusal::NotAbsolute, error))?;
 
     // **An authored grant on an absent path is refused, never skipped.** A grant that silently
     // does nothing is the defect class this repository has recorded twice.
-    let metadata = std::fs::symlink_metadata(&lexical).map_err(|source| {
-        named(&format!(
-            "{} is not there: {source}. A grant on a path that does not exist grants nothing \
-             and says so nowhere",
-            lexical.display()
-        ))
+    let metadata = std::fs::symlink_metadata(&lexical).map_err(|source| match source.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory => refused(
+            GrantRefusal::Absent,
+            &format!(
+                "{} is not there: {source}. A grant on a path that does not exist grants nothing \
+                 and says so nowhere",
+                lexical.display()
+            ),
+        ),
+        _ => other(&format!("cannot read {}: {source}", lexical.display())),
     })?;
+    // **A read-only entry may name a link to a file**, such as `/usr/bin/cc`, because a program
+    // runs a helper by the name `PATH` finds. The grant is the file the link resolves to, and the
+    // box shows that file under the link's own name as well. The link must sit in its real folder,
+    // so the name is the one the program opens.
+    let link = metadata.is_symlink()
+        && matches!(kind, Grant::Read | Grant::ReadFile)
+        && lexical
+            .parent()
+            .is_some_and(|folder| folder.canonicalize().is_ok_and(|real| real == folder))
+        && lexical.canonicalize().is_ok_and(|target| target.is_file());
+    let metadata = if link {
+        std::fs::metadata(&lexical)
+            .map_err(|source| other(&format!("cannot read {}: {source}", lexical.display())))?
+    } else {
+        metadata
+    };
     if metadata.is_symlink() {
-        return Err(named(&format!(
-            "{} is a symbolic link. A grant carries the identity the kernel checks, so a link \
-             renders a rule that matches nothing; name what it points at",
-            lexical.display()
-        )));
+        // Name the target so the operator can paste it into the grant. A missing target and a
+        // resolve failure (permission, link loop) are different problems; say which one it is.
+        let named = |reason: &str| refuse(context, &authored, reason);
+        return Err((
+            GrantRefusal::Link,
+            match lexical.canonicalize() {
+                Ok(target) => named(&format!(
+                    "{} is a symbolic link to {}. A grant carries the identity the kernel checks,                  so a link renders a rule that matches nothing; name {} instead",
+                    lexical.display(),
+                    target.display(),
+                    target.display()
+                )),
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => named(&format!(
+                    "{} is a symbolic link whose target is missing. A grant carries the identity                  the kernel checks, so a link renders a rule that matches nothing; repair the                  link or name a path that exists",
+                    lexical.display()
+                )),
+                Err(source) => named(&format!(
+                    "{} is a symbolic link that cannot be resolved: {source}. A grant carries the                  identity the kernel checks, so a link renders a rule that matches nothing;                  repair the link or name a path that exists",
+                    lexical.display()
+                )),
+            },
+        ));
     }
     let resolved = lexical
         .canonicalize()
-        .map_err(|source| named(&format!("cannot resolve {}: {source}", lexical.display())))?;
-    if resolved != lexical {
+        .map_err(|source| other(&format!("cannot resolve {}: {source}", lexical.display())))?;
+    if resolved != lexical && !link {
         // Not necessarily a link: `canonicalize` also folds `.` and `..`, so the message names
         // what is actually wrong, which is that the authored spelling is not the identity the kernel
         // checks.
-        return Err(named(&format!(
-            "{} is not the path the kernel checks, which is {}. A grant carries the identity it \
-             acts on, so name that path instead",
-            lexical.display(),
-            resolved.display()
-        )));
+        return Err(refused(
+            GrantRefusal::NotCanonical,
+            &format!(
+                "{} is not the path the kernel checks, which is {}. A grant carries the identity it \
+                 acts on, so name that path instead",
+                lexical.display(),
+                resolved.display()
+            ),
+        ));
     }
 
     let is_directory = metadata.is_dir();
@@ -315,7 +488,7 @@ fn entry_grant(
         (Grant::ReadFile, false) => (Operation::Read, Scope::File),
         (Grant::WriteFile, false) => (Operation::Write, Scope::File),
         (Grant::ReadFile | Grant::WriteFile, true) => {
-            return Err(named(&format!(
+            return Err(other(&format!(
                 "{} is a directory; `{key}` names one file, and a tree belongs in `{}`",
                 resolved.display(),
                 if kind == Grant::ReadFile {
@@ -327,7 +500,7 @@ fn entry_grant(
         }
         (Grant::List, true) => {
             if cfg!(target_os = "linux") {
-                return Err(named(&format!(
+                return Err(other(&format!(
                     "{} cannot be listed without its contents on Linux: the namespace backend \
                      has no lowering for `list`; grant `read` instead",
                     resolved.display()
@@ -336,14 +509,14 @@ fn entry_grant(
             (Operation::List, Scope::Root)
         }
         (Grant::List, false) => {
-            return Err(named(&format!(
+            return Err(other(&format!(
                 "{} is a file, and `list` enumerates a directory tree",
                 resolved.display()
             )));
         }
         (Grant::Metadata, true) => (Operation::Metadata, Scope::Root),
         (Grant::Metadata, false) => {
-            return Err(named(&format!(
+            return Err(other(&format!(
                 "{} is a file, and a file's metadata comes with the `read_file` or `exec` grant \
                  that names it",
                 resolved.display()
@@ -352,7 +525,7 @@ fn entry_grant(
         (Grant::Exec, true) => (Operation::Exec, Scope::Root),
         (Grant::Exec, false) => {
             if !crate::run::contain::executable::is_executable(&resolved) {
-                return Err(named(&format!(
+                return Err(other(&format!(
                     "{} is not an executable regular file",
                     resolved.display()
                 )));
@@ -368,7 +541,7 @@ fn entry_grant(
     if kind.writes() {
         for directory in &context.program_search_directories {
             if directory.starts_with(&resolved) {
-                return Err(named(&format!(
+                return Err(other(&format!(
                     "{} is at or above {}, which is on the search path this box resolves a \
                      bare-name MCP program against. That program starts outside containment at \
                      the operator's identity, so a writable directory there is a program the \
@@ -385,12 +558,29 @@ fn entry_grant(
     let credential_store =
         containment::validate_grant(&lexical, context.operator_home, operation, scope).map_err(
             |error| {
-                named(&format!(
+                let (_, refused) = other(&format!(
                     "{} is refused beneath every grant: {error}",
                     resolved.display()
-                ))
+                ));
+                let kind = error
+                    .forbidden_class()
+                    .map_or(GrantRefusal::Other, GrantRefusal::Forbidden);
+                (kind, refused)
             },
         )?;
+    // **A link inside a credential store stays refused.** The store exception re-resolves the
+    // entry at each spawn, so a link there could be pointed at another file of the store during a
+    // run, such as `~/.ssh/config` at `~/.ssh/id_ed25519`.
+    if link && credential_store {
+        return Err(refused(
+            GrantRefusal::Link,
+            &format!(
+                "{} is a symbolic link in a credential store. A store entry must name the file                  itself, so name {} instead",
+                lexical.display(),
+                resolved.display()
+            ),
+        ));
+    }
 
     Ok(DirectGrant {
         kind,
@@ -400,6 +590,7 @@ fn entry_grant(
         operation,
         scope,
         credential_store,
+        access: "",
     })
 }
 
@@ -514,7 +705,12 @@ fn require_no_overlap(
             if grant.operation != other.operation {
                 continue;
             }
-            if grant.resolved == other.resolved {
+            // A link adds its own name, so two names for one file are two grants. A grant whose
+            // every name the other already has adds nothing, such as a link listed beside its file.
+            let adds = |one: &DirectGrant, two: &DirectGrant| {
+                one.names().iter().any(|name| !two.names().contains(name))
+            };
+            if grant.resolved == other.resolved && !(adds(grant, other) && adds(other, grant)) {
                 return Err(refuse(
                     context,
                     &other.authored,
@@ -535,6 +731,11 @@ fn require_no_overlap(
                 continue;
             };
             if outer.scope != Scope::Root {
+                continue;
+            }
+            // A link whose own name lies outside the tree reaches the file at a name the tree
+            // does not, such as `/usr/bin/java` beside the JDK folder it points into.
+            if inner.is_link() && !inner.lexical.starts_with(&outer.resolved) {
                 continue;
             }
             return Err(refuse(
@@ -659,15 +860,118 @@ mod tests {
         assert!(reach.refusals.is_empty());
     }
 
+    #[test]
+    fn linux_write_access_requires_explicit_read_coverage() {
+        let fixture = Fixture::new();
+        let context = fixture.context();
+        for (body, accepted) in [
+            ("write_file = ['~/notes/api.md']", false),
+            ("write = ['~/notes/api.md']", false),
+            ("write = ['~/project']", false),
+            ("read = ['~/notes']\nwrite = ['~/project']", false),
+            ("read = ['~/project/src']\nwrite = ['~/project']", false),
+            ("read_file = ['~/notes/api.md']\nwrite = ['~/notes']", false),
+            (
+                "exec = ['~/tools/run']\nwrite_file = ['~/tools/run']",
+                false,
+            ),
+            ("read = ['~/project']\nwrite = ['~/project']", true),
+            ("read = ['~/project']\nwrite = ['~/project/src']", true),
+            ("read = ['~/notes']\nwrite_file = ['~/notes/api.md']", true),
+            (
+                "read_file = ['~/notes/api.md']\nwrite_file = ['~/notes/api.md']",
+                true,
+            ),
+            (
+                "read = ['~/notes/api.md']\nwrite = ['~/notes/api.md']",
+                true,
+            ),
+            ("read = ['~/project']", true),
+        ] {
+            let grants: Vec<_> = lists(body)
+                .entries()
+                .map(|(kind, path)| {
+                    entry_grant(kind, path, &context)
+                        .map_err(|(_, error)| error)
+                        .unwrap()
+                })
+                .collect();
+            let result = require_supported_grants(&grants, &context);
+            assert_eq!(
+                result.is_ok(),
+                accepted || !cfg!(target_os = "linux"),
+                "{body}: {result:?}"
+            );
+            if let Err(error) = result {
+                let error = error.to_string();
+                assert!(error.contains("Linux cannot enforce write-only"), "{error}");
+                assert!(error.contains("[agent]"), "{error}");
+                assert!(error.contains("explicit `read` or `read_file`"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn disclosures_distinguish_complete_and_partial_access() {
+        let fixture = Fixture::new();
+        for (body, modes) in [
+            ("read = ['~/notes']", vec!["read-only"]),
+            (
+                "read_file = ['~/notes/api.md']\nwrite_file = ['~/notes/api.md']",
+                vec!["read-write", "read-write"],
+            ),
+            (
+                "read = ['~/project']\nwrite = ['~/project/src']",
+                vec![
+                    "read-only except read-write at overlapping write grants",
+                    "read-write",
+                ],
+            ),
+            (
+                "read = ['~/notes']\nwrite_file = ['~/notes/api.md']",
+                vec![
+                    "read-only except read-write at overlapping write grants",
+                    "read-write",
+                ],
+            ),
+        ] {
+            let reach = fixture.reach(&fixture.context(), body);
+            let actual: Vec<_> = reach.grants.iter().map(|grant| grant.access).collect();
+            assert_eq!(actual, modes, "{body}");
+            for grant in &reach.grants {
+                assert!(grant.disclosure().contains(&format!("({})", grant.access)));
+                assert!(!grant.disclosure().contains("readable too"));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_preserves_write_only_and_partial_read_grants() {
+        let fixture = Fixture::new();
+        let reach = fixture.reach(&fixture.context(), "write_file = ['~/notes/api.md']");
+        assert_eq!(reach.grants[0].access, "write-only");
+        let reach = fixture.reach(
+            &fixture.context(),
+            "read_file = ['~/notes/api.md']\nwrite = ['~/notes']",
+        );
+        assert_eq!(
+            reach.grants[0].access,
+            "write-only except read-write at overlapping read grants"
+        );
+        assert_eq!(reach.grants[1].access, "read-write");
+    }
+
     /// **Each list maps to its cell**, on a directory and on a file where both are legal.
     #[test]
     fn every_list_translates_to_its_cell() {
         let fixture = Fixture::new();
         let home = &fixture.home;
         let body = format!(
-            "read = [{:?}]\nwrite = [{:?}]\nread_file = [{:?}]\nwrite_file = [{:?}]\n\
+            "read = [{:?}, {:?}]\nwrite = [{:?}]\nread_file = [{:?}]\nwrite_file = [{:?}]\n\
              metadata = [{:?}]\nexec = [{:?}, {:?}]\ndeny = [{:?}]",
             text(&home.join("vendor")),
+            text(&home.join("scratch")),
             text(&home.join("scratch")),
             text(&home.join("notes/api.md")),
             text(&home.join("notes/api.md")),
@@ -685,6 +989,7 @@ mod tests {
         assert_eq!(
             cells,
             [
+                (Grant::Read, Operation::Read, Scope::Root),
                 (Grant::Read, Operation::Read, Scope::Root),
                 (Grant::Write, Operation::Write, Scope::Root),
                 (Grant::ReadFile, Operation::Read, Scope::File),
@@ -784,10 +1089,155 @@ mod tests {
 
         // A symlinked entry, whose authored spelling and identity differ.
         let link = home.join("vendor-link");
-        std::os::unix::fs::symlink(home.join("vendor/sdk"), &link).expect("a link");
+        let target = home.join("vendor/sdk");
+        std::os::unix::fs::symlink(&target, &link).expect("a link");
         let refusal = fixture.refusal(&context, &format!("read = [{:?}]", text(&link)));
         assert!(
-            refusal.contains("symbolic link") && refusal.contains(&text(&link)),
+            refusal.contains("symbolic link")
+                && refusal.contains(&text(&link))
+                && refusal.contains(&text(&target))
+                && refusal.contains("instead"),
+            "{refusal}"
+        );
+
+        // A read-only entry may name a link to a file. It grants the file, and keeps the link's
+        // own name so the box shows the file there too.
+        let file_link = home.join("api-link.md");
+        let file = home.join("notes/api.md");
+        std::os::unix::fs::symlink(&file, &file_link).expect("a link to a file");
+        for (list, kind) in [("read", Grant::Read), ("read_file", Grant::ReadFile)] {
+            let reach = fixture.reach(&context, &format!("{list} = [{:?}]", text(&file_link)));
+            let grant = &reach.grants[0];
+            assert_eq!(
+                grant,
+                &DirectGrant {
+                    kind,
+                    authored: text(&file_link),
+                    lexical: file_link.clone(),
+                    resolved: file.clone(),
+                    operation: Operation::Read,
+                    scope: Scope::File,
+                    credential_store: false,
+                    access: "read-only",
+                },
+                "{list}"
+            );
+            assert!(grant.is_link(), "{list}");
+            assert!(
+                grant
+                    .disclosure()
+                    .contains(&format!("{} -> {}", text(&file_link), text(&file))),
+                "{}",
+                grant.disclosure()
+            );
+        }
+
+        // Two links to one file are two names, and a link beside the tree its file is in reaches a
+        // name the tree does not: both are granted.
+        let second_link = home.join("api-other.md");
+        std::os::unix::fs::symlink(&file, &second_link).expect("a second link");
+        let reach = fixture.reach(
+            &context,
+            &format!(
+                "read_file = [{:?}, {:?}]",
+                text(&file_link),
+                text(&second_link)
+            ),
+        );
+        assert_eq!(reach.grants.len(), 2);
+        let reach = fixture.reach(
+            &context,
+            &format!("read = ['~/notes']\nread_file = [{:?}]", text(&file_link)),
+        );
+        assert_eq!(reach.grants.len(), 2);
+        // A link inside the tree it points into adds no name the tree lacks.
+        let inner_link = home.join("notes/api-alias.md");
+        std::os::unix::fs::symlink(&file, &inner_link).expect("a link inside the tree");
+        let refusal = fixture.refusal(
+            &context,
+            &format!("read = ['~/notes']\nread_file = [{:?}]", text(&inner_link)),
+        );
+        assert!(refusal.contains("lies inside"), "{refusal}");
+
+        // Only a read: a write, an exec or a metadata entry naming a link stays refused.
+        for list in ["write_file", "metadata"] {
+            let refusal = fixture.refusal(
+                &context,
+                &format!("read = ['~/notes']\n{list} = [{:?}]", text(&file_link)),
+            );
+            assert!(refusal.contains("symbolic link"), "{list}: {refusal}");
+        }
+        let run_link = home.join("run-link");
+        std::os::unix::fs::symlink(home.join("tools/run"), &run_link).expect("a link to a script");
+        let refusal = fixture.refusal(&context, &format!("exec = [{:?}]", text(&run_link)));
+        assert!(refusal.contains("symbolic link"), "{refusal}");
+
+        // A link reached through a linked folder is refused: the name must be the one opened.
+        let linked_folder = home.join("notes-link");
+        std::os::unix::fs::symlink(home.join("notes"), &linked_folder).expect("a linked folder");
+        let through = linked_folder.join("api.md");
+        let refusal = fixture.refusal(&context, &format!("read = [{:?}]", text(&through)));
+        assert!(
+            refusal.contains("not the path the kernel checks"),
+            "{refusal}"
+        );
+        let inner_link = home.join("notes/api-link.md");
+        std::os::unix::fs::symlink(&file, &inner_link).expect("a link beside its file");
+        let refusal = fixture.refusal(
+            &context,
+            &format!("read = [{:?}]", text(&linked_folder.join("api-link.md"))),
+        );
+        assert!(refusal.contains("symbolic link"), "{refusal}");
+
+        // A link inside a credential store is refused: the store exception would follow it again
+        // at each spawn.
+        std::fs::create_dir_all(home.join(".ssh")).expect("an SSH directory");
+        std::fs::write(home.join(".ssh/config.real"), "").expect("a real config");
+        std::os::unix::fs::symlink(home.join(".ssh/config.real"), home.join(".ssh/config"))
+            .expect("a link in the store");
+        let refusal = fixture.refusal(&context, "read_file = ['~/.ssh/config']");
+        assert!(
+            refusal.contains("symbolic link in a credential store"),
+            "{refusal}"
+        );
+        let refused = entry_grant(Grant::ReadFile, Path::new("~/.ssh/config"), &context)
+            .expect_err("a store link");
+        assert_eq!(refused.0, GrantRefusal::Link);
+
+        // A link into a credential store is judged by the store it reaches.
+        std::fs::create_dir_all(home.join(".ssh")).expect("an SSH directory");
+        std::fs::write(home.join(".ssh/id_ed25519"), "").expect("a key");
+        let key_link = home.join("key-link");
+        std::os::unix::fs::symlink(home.join(".ssh/id_ed25519"), &key_link).expect("a key link");
+        let refusal = fixture.refusal(&context, &format!("read = [{:?}]", text(&key_link)));
+        assert!(refusal.contains("refused"), "{refusal}");
+
+        // A link and its file in one list grant one file twice.
+        let refusal = fixture.refusal(
+            &context,
+            &format!("read_file = [{:?}, {:?}]", text(&file_link), text(&file)),
+        );
+        assert!(refusal.contains("twice"), "{refusal}");
+
+        // A broken symlink has no canonical target; the refusal must still name the link.
+        let broken = home.join("broken-link");
+        std::os::unix::fs::symlink(home.join("no-such-target"), &broken).expect("a broken link");
+        let refusal = fixture.refusal(&context, &format!("read = [{:?}]", text(&broken)));
+        assert!(
+            refusal.contains("symbolic link")
+                && refusal.contains(&text(&broken))
+                && refusal.contains("target is missing"),
+            "{refusal}"
+        );
+
+        // A link that points at itself fails canonicalize with a loop, not NotFound.
+        let looped = home.join("loop-link");
+        std::os::unix::fs::symlink(&looped, &looped).expect("a self link");
+        let refusal = fixture.refusal(&context, &format!("read = [{:?}]", text(&looped)));
+        assert!(
+            refusal.contains("symbolic link")
+                && refusal.contains(&text(&looped))
+                && refusal.contains("cannot be resolved"),
             "{refusal}"
         );
 
@@ -876,12 +1326,12 @@ mod tests {
         let reach = fixture.reach(
             &fixture.context(),
             &format!(
-                "read = [{0:?}]\nwrite = [{0:?}, {1:?}]",
+                "read = [{0:?}, {1:?}]\nwrite = [{0:?}, {1:?}]",
                 text(&home.join("scratch")),
                 text(&home.join("notes"))
             ),
         );
-        assert_eq!(reach.grants.len(), 3);
+        assert_eq!(reach.grants.len(), 4);
         let reach = fixture.reach(
             &fixture.context(),
             &format!(
@@ -940,7 +1390,10 @@ mod tests {
         };
         let reach = fixture.reach(
             &context,
-            &format!("write = [{:?}]", text(&home.join("project"))),
+            &format!(
+                "read = [{0:?}]\nwrite = [{0:?}]",
+                text(&home.join("project"))
+            ),
         );
         assert_eq!(
             reach
@@ -974,7 +1427,10 @@ mod tests {
 
         let reach = fixture.reach(
             &context,
-            &format!("write = [{:?}]", text(&home.join("elsewhere"))),
+            &format!(
+                "read = [{0:?}]\nwrite = [{0:?}]",
+                text(&home.join("elsewhere"))
+            ),
         );
         assert_eq!(
             reach
@@ -988,7 +1444,10 @@ mod tests {
         // A grant that IS the directory, or lies inside it, is not subtracted: the sources keep
         // their identity protection, and a grant may not be refused whole and enforce nothing.
         for granted in [authority.clone(), authority.join("deeper")] {
-            let reach = fixture.reach(&context, &format!("write = [{:?}]", text(&granted)));
+            let reach = fixture.reach(
+                &context,
+                &format!("read = [{0:?}]\nwrite = [{0:?}]", text(&granted)),
+            );
             assert!(
                 reach.refusals.is_empty(),
                 "{granted:?}: {:?}",

@@ -7,6 +7,15 @@ use std::path::PathBuf;
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ContainmentError {
+    /// The backend cannot isolate a write grant from content reads.
+    #[error("backend '{backend}' cannot enforce write-only access at {}", path.display())]
+    WriteOnlyUnsupported {
+        /// The writable path without sufficient read authority.
+        path: PathBuf,
+        /// The backend that requires read authority.
+        backend: String,
+    },
+
     /// Requested mechanism not available on this platform.
     #[error("mechanism '{requested}' is not available on {platform:?}")]
     MechanismUnavailable {
@@ -101,4 +110,62 @@ pub enum ContainmentError {
         /// Why this path is refused.
         reason: &'static str,
     },
+}
+
+impl ContainmentError {
+    /// The class of the floor row that refused a grant, or `None` for any other error.
+    pub fn forbidden_class(&self) -> Option<crate::ForbiddenClass> {
+        match self {
+            Self::GrantTooBroad { reason, .. } => crate::ForbiddenClass::ALL
+                .into_iter()
+                .find(|class| class.reason() == *reason),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ForbiddenClass;
+
+    #[test]
+    fn a_floor_refusal_names_its_class_and_any_other_refusal_names_none() {
+        for class in ForbiddenClass::ALL {
+            let refused = ContainmentError::GrantTooBroad {
+                path: PathBuf::from("/a"),
+                reason: class.reason(),
+            };
+            assert_eq!(refused.forbidden_class(), Some(class), "{class:?}");
+        }
+        let box_state = ContainmentError::GrantTooBroad {
+            path: PathBuf::from("/a"),
+            reason: "a reason no floor row states",
+        };
+        assert_eq!(box_state.forbidden_class(), None);
+        assert_eq!(
+            ContainmentError::PathNotFound(PathBuf::from("/a")).forbidden_class(),
+            None
+        );
+    }
+
+    #[test]
+    fn every_class_is_listed_once_and_states_its_own_reason() {
+        let position = |class: ForbiddenClass| match class {
+            ForbiddenClass::WholeFilesystem => 0,
+            ForbiddenClass::HomeNamespace => 1,
+            ForbiddenClass::SystemTree => 2,
+            ForbiddenClass::LoaderDirectory => 3,
+            ForbiddenClass::CredentialStore => 4,
+            ForbiddenClass::PasswordDatabase => 5,
+            ForbiddenClass::MachineCredential => 6,
+            ForbiddenClass::PrivilegeConfiguration => 7,
+        };
+        for (index, class) in ForbiddenClass::ALL.into_iter().enumerate() {
+            assert_eq!(position(class), index, "{class:?}");
+            for other in &ForbiddenClass::ALL[index + 1..] {
+                assert_ne!(class.reason(), other.reason(), "{class:?} and {other:?}");
+            }
+        }
+    }
 }

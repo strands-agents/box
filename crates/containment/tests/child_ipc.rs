@@ -52,8 +52,11 @@ fn launch(root: &Path, config: &ContainmentConfig, args: &[&str]) -> Output {
 }
 
 fn supported() -> bool {
-    if cfg!(all(target_os = "linux", not(target_arch = "aarch64"))) {
-        eprintln!("skipping: Linux containment requires ARM64");
+    if cfg!(all(
+        target_os = "linux",
+        not(any(target_arch = "aarch64", target_arch = "x86_64"))
+    )) {
+        eprintln!("skipping: Linux containment requires ARM64 or x86-64");
         return false;
     }
     #[cfg(target_os = "linux")]
@@ -126,6 +129,10 @@ fn a_write_root_permits_a_unix_listener_and_roundtrip() {
     let config = config()
         .allow(&writable, Operation::Write, Scope::Root)
         .unwrap();
+    #[cfg(target_os = "linux")]
+    let config = config
+        .allow(&writable, Operation::Read, Scope::Root)
+        .unwrap();
     let socket = writable.join("peer.sock");
     let output = launch(
         &root,
@@ -162,6 +169,10 @@ fn unix_sockets_outside_grants_and_under_deny_stay_unreachable() {
         .allow(&writable, Operation::Write, Scope::Root)
         .unwrap()
         .refuse(&denied, Scope::Root)
+        .unwrap();
+    #[cfg(target_os = "linux")]
+    let config = config
+        .allow(&writable, Operation::Read, Scope::Root)
         .unwrap();
     for socket in [&outside, &outside_alias, &denied_socket] {
         assert!(std::os::unix::net::UnixStream::connect(socket).is_ok());
@@ -215,6 +226,10 @@ fn native_shell_children_need_exec_grants_and_keep_the_parent_boundary() {
     std::fs::write(&secret, "outside\n").unwrap();
     let config = config()
         .allow(&writable, Operation::Write, Scope::Root)
+        .unwrap();
+    #[cfg(target_os = "linux")]
+    let config = config
+        .allow(&writable, Operation::Read, Scope::Root)
         .unwrap();
     let args = [
         "--shell-child",

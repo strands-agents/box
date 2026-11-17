@@ -2,12 +2,10 @@
 
 use zeroize::Zeroizing;
 
-use crate::sources::{EnvSource, FileSource, OnePasswordSource, SecretSource, SourceRegistry};
+use crate::sources::{
+    AWS_SCHEME, EnvSource, FileSource, OnePasswordSource, SecretSource, SourceRegistry,
+};
 use crate::{CredentialError, Locator, Result, Secret};
-
-/// The structured-config routing tag the AWS source owns. A locator carrying it resolves to
-/// structured session credentials, so it is refused by [`Backend::resolve`].
-const AWS_SCHEME: &str = "aws";
 
 /// Which compiled source set a [`Backend`] is.
 #[derive(Debug)]

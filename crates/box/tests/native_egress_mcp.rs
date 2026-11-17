@@ -91,7 +91,7 @@ fn call_fetch_tool(box_: &RuntimeMcpBox) -> String {
     let mut run = box_.spawn();
     run.wait_for(box_.workload_path("workload.started"), BOX_STARTUP);
     let mut client = box_.open_client("fetch-mcp");
-    run.wait_for(box_.server_started("fetch-mcp"), STARTUP);
+    run.wait_for_through_alias(box_.server_started("fetch-mcp"), STARTUP);
     client.initialize_and_activate(json!("init"), STARTUP);
     client.list_root(json!("list"), STARTUP);
     let result = client.call(json!("call"), "reach", FETCH);

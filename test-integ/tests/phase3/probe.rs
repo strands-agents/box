@@ -47,11 +47,18 @@ fn marker(args: &[String]) {
             "DET_ERROR: marker name"
         );
         if args[4] == "trace" {
-            assert_eq!(
-                unsafe { prctl(0x59616d61, usize::MAX, 0, 0, 0) },
-                0,
-                "DET_ERROR: allow tracing this synthetic marker"
-            );
+            let rc = unsafe { prctl(0x59616d61, usize::MAX, 0usize, 0usize, 0usize) };
+            if rc != 0 {
+                let error = std::io::Error::last_os_error();
+                // Some Linux kernels do not support this tracing permission option.
+                // The caller must still prove a successful host attach and detach.
+                assert_eq!(
+                    error.raw_os_error(),
+                    Some(22), // EINVAL: this tracing permission option is unavailable.
+                    "DET_ERROR: allow tracing this synthetic marker: {error}"
+                );
+                eprintln!("TRACE_PERMISSION_OPTION_UNAVAILABLE");
+            }
         }
     }
     assert_ne!(

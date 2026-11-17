@@ -148,9 +148,7 @@ pub enum PathRefusal {
 /// is consulted. The resolver holds no policy authority: it decides reachability, and
 /// policy decides permission.
 ///
-/// The two `approve_*` methods differ only in the namespace they resolve in, because
-/// the two interpreters do not share one. `std::fs::canonicalize` answers in the
-/// **host** namespace, which is the wrong one for a script path.
+/// Host approval follows the whole path or only its parent; virtual approval performs no host I/O.
 #[derive(Debug, Clone)]
 pub struct PathResolver {
     roots: Vec<PathBuf>,
@@ -192,7 +190,7 @@ impl PathResolver {
         self
     }
 
-    /// Approve a path in the **host** namespace, following symlinks.
+    /// Approve a host path through symlink resolution where only `NotFound` indicates absence and all other lookup errors cause refusal.
     ///
     /// This is the box's seam. It resolves with the filesystem, refuses a spelling that
     /// differs from the canonical identity, and refuses an identity outside every
@@ -208,7 +206,7 @@ impl PathResolver {
         }
         let canonical = match std::fs::canonicalize(requested) {
             Ok(canonical) => canonical,
-            Err(error) => {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 let parent = requested
                     .parent()
                     .ok_or_else(|| PathRefusal::Unresolvable {
@@ -227,17 +225,57 @@ impl PathResolver {
                         reason: error.to_string(),
                     })?
                     .join(name);
-                if leaf.symlink_metadata().is_ok() {
-                    return Err(PathRefusal::Unresolvable {
-                        path: requested.to_path_buf(),
-                        reason: "the leaf name is already taken by an object this \
-                                 resolver will not write through"
-                            .to_string(),
-                    });
+                match leaf.symlink_metadata() {
+                    Ok(_) => {
+                        return Err(PathRefusal::Unresolvable {
+                            path: requested.to_path_buf(),
+                            reason: "the leaf name is already taken by an object this \
+                                     resolver will not write through"
+                                .to_string(),
+                        });
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => leaf,
+                    Err(error) => {
+                        return Err(PathRefusal::Unresolvable {
+                            path: requested.to_path_buf(),
+                            reason: error.to_string(),
+                        });
+                    }
                 }
-                leaf
+            }
+            Err(error) => {
+                return Err(PathRefusal::Unresolvable {
+                    path: requested.to_path_buf(),
+                    reason: error.to_string(),
+                });
             }
         };
+        self.admit(requested, canonical)
+    }
+
+    /// Approve a directory entry without following its final component.
+    pub fn approve_host_entry(&self, requested: &Path) -> Result<ApprovedPath, PathRefusal> {
+        if !requested.is_absolute() {
+            return Err(PathRefusal::NotAbsolute(requested.to_path_buf()));
+        }
+        let parent = requested
+            .parent()
+            .ok_or_else(|| PathRefusal::Unresolvable {
+                path: requested.to_path_buf(),
+                reason: "a directory entry requires a parent".into(),
+            })?;
+        let name = requested
+            .file_name()
+            .ok_or_else(|| PathRefusal::Unresolvable {
+                path: requested.to_path_buf(),
+                reason: "a directory entry requires a name".into(),
+            })?;
+        let canonical = std::fs::canonicalize(parent)
+            .map_err(|error| PathRefusal::Unresolvable {
+                path: requested.to_path_buf(),
+                reason: error.to_string(),
+            })?
+            .join(name);
         self.admit(requested, canonical)
     }
 
@@ -318,6 +356,47 @@ pub(crate) fn normalize_virtual(path: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entry_approval_does_not_follow_a_leaf_link_or_accept_an_aliased_parent() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let root_path = root.path().canonicalize().unwrap();
+        let resolver = PathResolver::over([root_path.clone()]).unwrap();
+        std::os::unix::fs::symlink(outside.path().join("missing"), root_path.join("leaf")).unwrap();
+        let approved = resolver
+            .approve_host_entry(&root_path.join("leaf"))
+            .unwrap();
+        assert_eq!(approved.as_path(), root_path.join("leaf"));
+        assert!(resolver.approve_host(&root_path.join("leaf")).is_err());
+        std::os::unix::fs::symlink(outside.path(), root_path.join("parent")).unwrap();
+        assert!(
+            resolver
+                .approve_host_entry(&root_path.join("parent/child"))
+                .is_err()
+        );
+        assert!(resolver.approve_host_entry(&root_path.join("new")).is_ok());
+    }
+
+    #[test]
+    fn entry_approval_requires_an_absolute_name_under_an_existing_parent() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let resolver = PathResolver::over([root.clone()]).unwrap();
+        for path in [
+            PathBuf::from("relative"),
+            PathBuf::from("/"),
+            root.join("missing/leaf"),
+        ] {
+            assert!(resolver.approve_host_entry(&path).is_err(), "{path:?}");
+        }
+        let existing = root.join("existing");
+        std::fs::write(&existing, "content").unwrap();
+        assert_eq!(
+            resolver.approve_host_entry(&existing).unwrap().as_path(),
+            existing
+        );
+    }
 
     fn resolver(root: &str) -> PathResolver {
         PathResolver::over([PathBuf::from(root)]).expect("an absolute root is accepted")
@@ -446,5 +525,38 @@ mod tests {
             .approve_host(&root.join("new.txt"))
             .expect("a new leaf inside the root is approved");
         assert_eq!(approved.as_path(), root.join("new.txt"));
+    }
+
+    #[test]
+    fn the_host_resolver_refuses_invalid_names_instead_of_approving_a_new_leaf() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let resolver = PathResolver::over([root.clone()]).unwrap();
+        for name in ["x".repeat(4096), "invalid\0name".to_string()] {
+            let path = root.join(name);
+            let error = std::fs::canonicalize(&path).unwrap_err();
+            assert_ne!(error.kind(), std::io::ErrorKind::NotFound);
+            assert!(
+                matches!(
+                    resolver.approve_host(&path),
+                    Err(PathRefusal::Unresolvable { .. })
+                ),
+                "{path:?}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_host_resolver_refuses_a_symlink_loop_instead_of_approving_a_new_leaf() {
+        let home = tempfile::tempdir().unwrap();
+        let root = home.path().canonicalize().unwrap();
+        let path = root.join("loop");
+        std::os::unix::fs::symlink("loop", &path).unwrap();
+        let resolver = PathResolver::over([root]).unwrap();
+        assert!(matches!(
+            resolver.approve_host(&path),
+            Err(PathRefusal::Unresolvable { .. })
+        ));
     }
 }

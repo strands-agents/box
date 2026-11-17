@@ -153,10 +153,13 @@ action "fs:other" appliesTo {
 // ── Network ──────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
 
-// The L4 connect input. `ip` is the pinned address after resolution, absent before it.
+// The L4 connect input. `ip4` and `ip6` are the pinned address after resolution, each absent
+// before it. An IPv6 destination that carries an IPv4 address populates both; a plain IPv4
+// destination populates `ip4` alone, because one IPv4 address has many IPv6 encodings.
 type NetworkConnectInput = {
   host: String,
-  ip?: String,
+  ip4?: String,
+  ip6?: String,
   port: Long
 };
 
@@ -166,8 +169,8 @@ type NetworkRequestInput = {
   host: String,
   port: Long,
   method: String,
-  // The URL path. The same name is a filesystem path on `fs:*`, so guard a filesystem
-  // rule with `context.input has operation`.
+  // The URL path. The same name is a filesystem path on `fs:*`, so a rule that reads
+  // `context.input` names actions of one family.
   path: String,
   body_bytes: Long,
   // Whether the gateway terminated TLS and parsed the exchange.

@@ -35,6 +35,7 @@ fn allows(policy: &PolicyEngine, server: &str, tool: &str) -> bool {
                 arguments: None,
             },
         )
+        .0
         .is_allow()
 }
 
@@ -52,6 +53,7 @@ fn allows_read(policy: &PolicyEngine, server: &str, uri: &str) -> bool {
                 arguments: None,
             },
         )
+        .0
         .is_allow()
 }
 
@@ -69,6 +71,7 @@ fn allows_list(policy: &PolicyEngine, server: &str) -> bool {
                 arguments: None,
             },
         )
+        .0
         .is_allow()
 }
 

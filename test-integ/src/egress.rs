@@ -251,7 +251,7 @@ impl HostRecorder {
 
     /// Take a snapshot behind a drain barrier: ask the accept loop to sweep its backlog and
     /// acknowledge, then wait for every accepted connection to finish. Panics as `DET_ERROR` if the
-    /// loop does not acknowledge or a connection is still being read after [`SNAPSHOT_DEADLINE`],
+    /// loop does not acknowledge or a connection is still being read after `SNAPSHOT_DEADLINE`,
     /// so a hung delivery or a dead loop can never read as a clean count.
     pub fn snapshot(&self) -> Snapshot {
         let stopped = self.shared.stop.load(Ordering::SeqCst);
@@ -2093,11 +2093,20 @@ mod tests {
             "the hook released on the stop flag, not on its bound: {gate:?}"
         );
         assert!(gate.released.load(Ordering::SeqCst));
-        // The stream was accepted, registered and read by a live handler: its observation exists,
-        // carries the one byte the peer sent, and ended short without a request line.
+        // The accepted stream has one incomplete observation, even when shutdown precedes its first read.
         let observations = recorder.shared.observations.lock().unwrap().clone();
         assert_eq!(observations.len(), 1, "{observations:?}");
-        assert_eq!(observations[0].raw, "G", "{observations:?}");
+        let closed_before_read = observations[0].raw.is_empty()
+            && (observations[0].error.as_deref() == Some("closed before the end of the head")
+                || (cfg!(target_os = "macos")
+                    && observations[0].error.as_deref()
+                        == Some(
+                            "set read timeout: Invalid argument (os error 22) after 0 head bytes",
+                        )));
+        assert!(
+            observations[0].raw == "G" || closed_before_read,
+            "{observations:?}"
+        );
         assert!(!observations[0].complete);
         assert!(observations[0].request_line.is_none());
         assert!(
