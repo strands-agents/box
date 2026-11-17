@@ -918,6 +918,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn every_websocket_opcode_is_a_declared_schema_value() {
+        use crate::request::WebSocketOpcode::{Binary, Close, Ping, Pong, Text};
+        let schema = schema().expect("shipped schema");
+        for opcode in [Text, Binary, Ping, Pong, Close] {
+            match opcode {
+                Text | Binary | Ping | Pong | Close => {}
+            }
+            let request = Request::WebSocket {
+                direction: WebSocketDirection::Send,
+                host: "h",
+                port: 443,
+                path: "/",
+                opcode,
+                payload_bytes: 0,
+            };
+            let identity = ActionIdentity::for_request(&request);
+            assert!(
+                to_cedar_request(&Principal::agent(), &request, &identity, schema).is_ok(),
+                "{opcode:?}"
+            );
+        }
+    }
+
     /// Integration metadata does not change the fixed policy principal.
     #[test]
     fn every_integration_principal_maps_to_agent_self() {

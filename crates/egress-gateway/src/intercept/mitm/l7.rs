@@ -780,12 +780,12 @@ fn list_cursor(body: &[u8]) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Split an origin-form request target into `(path, query)`.
 pub(crate) fn judged_path(target: &str) -> String {
     let (path, _) = split_target(target);
     canonicalize_request_path(&path).unwrap_or(path)
 }
 
+/// Split an origin-form request target into `(path, query)`.
 fn split_target(target: &str) -> (String, String) {
     match target.split_once('?') {
         Some((p, q)) => (p.to_string(), q.to_string()),

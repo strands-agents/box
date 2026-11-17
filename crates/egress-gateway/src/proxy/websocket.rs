@@ -101,8 +101,8 @@ struct Header {
     fin: bool,
     opcode: u8,
     key: Option<[u8; 4]>,
-    len: usize,
-    size: usize,
+    payload_len: usize,
+    header_len: usize,
 }
 
 fn header(buffer: &[u8]) -> Result<Option<Header>, &'static str> {
@@ -138,16 +138,16 @@ fn header(buffer: &[u8]) -> Result<Option<Header>, &'static str> {
             fin,
             opcode,
             key: None,
-            len,
-            size,
+            payload_len: len,
+            header_len: size,
         }));
     }
     Ok(buffer.get(size..size + 4).map(|key| Header {
         fin,
         opcode,
         key: key.try_into().ok(),
-        len,
-        size: size + 4,
+        payload_len: len,
+        header_len: size + 4,
     }))
 }
 
@@ -277,6 +277,14 @@ impl Fault {
         }
     }
 
+    fn idle() -> Self {
+        Self {
+            workload: 1001,
+            server: 1001,
+            refusal: None,
+        }
+    }
+
     fn internal(refusal: Option<String>) -> Self {
         Self {
             workload: 1011,
@@ -330,7 +338,11 @@ impl Leg {
     fn end(&self, side: Side, error: Option<io::ErrorKind>) -> Result<(), Fault> {
         self.closed.set(error.is_some());
         if let Some(in_flight) = self.in_flight.take() {
-            in_flight.record(error).map_err(|_| Fault::internal(None))?;
+            in_flight.record(error).map_err(|error| {
+                Fault::internal(Some(format!(
+                    "websocket: recording an outcome failed: {error}"
+                )))
+            })?;
         }
         match (error, side) {
             (None, _) => Ok(()),
@@ -380,19 +392,19 @@ pub(crate) async fn run(
                 session.pump(Side::Server, &mut from_server, &mut to_workload, &workload_leg),
             )
         } => ended.err(),
-        () = idle(&session.active, state.config.upstream_read_deadline) => Some(Fault {
-            workload: 1001,
-            server: 1001,
-            refusal: None,
-        }),
+        () = idle(&session.active, state.config.upstream_read_deadline) => Some(Fault::idle()),
     };
+    let mut unrecorded = None;
     for leg in [&workload_leg, &server_leg] {
         if let Some(in_flight) = leg.in_flight.take() {
             leg.closed.set(true);
-            let _ = in_flight.record(Some(io::ErrorKind::ConnectionAborted));
+            if let Err(error) = in_flight.record(Some(io::ErrorKind::ConnectionAborted)) {
+                unrecorded = Some(format!("websocket: recording an outcome failed: {error}"));
+            }
         }
     }
-    if let Some(reason) = fault.as_ref().and_then(|fault| fault.refusal.as_deref()) {
+    let refusal = fault.as_ref().and_then(|fault| fault.refusal.clone());
+    if let Some(reason) = refusal.or(unrecorded).as_deref() {
         let request = ("GET", relay.path.as_str());
         let correlation = relay.correlation.clone();
         l7::emit_decision(
@@ -450,23 +462,24 @@ impl Session<'_> {
                     && side == Side::Server
                     && self.scrub.is_none()
                 {
-                    buffer.drain(..frame.size);
-                    self.stream(frame.len, &mut buffer, from, to, leg).await?;
+                    buffer.drain(..frame.header_len);
+                    self.stream(frame.payload_len, &mut buffer, from, to, leg)
+                        .await?;
                     continue;
                 }
                 let held = match &message {
                     Some((_, payload)) if frame.opcode < CLOSE => payload.len(),
                     _ => 0,
                 };
-                if frame.len > limit.saturating_sub(held) {
+                if frame.payload_len > limit.saturating_sub(held) {
                     return Err(fault(1009, "message exceeds the size limit"));
                 }
-                if buffer.len() < frame.size + frame.len {
+                if buffer.len() < frame.header_len + frame.payload_len {
                     break;
                 }
-                let rest = buffer.split_off(frame.size + frame.len);
+                let rest = buffer.split_off(frame.header_len + frame.payload_len);
                 let mut payload = std::mem::replace(&mut buffer, rest);
-                payload.drain(..frame.size);
+                payload.drain(..frame.header_len);
                 mask(&mut payload, frame.key);
                 let whole = match (frame.opcode, message.take()) {
                     (CLOSE | PING | PONG, held) => {
@@ -757,15 +770,23 @@ mod tests {
             let frame = encode(BINARY, &payload, mask.then_some([9, 8, 7, 6]));
             let parsed = header(&frame).unwrap().unwrap();
             assert_eq!(
-                (parsed.fin, parsed.opcode, parsed.key.is_some(), parsed.len),
+                (
+                    parsed.fin,
+                    parsed.opcode,
+                    parsed.key.is_some(),
+                    parsed.payload_len
+                ),
                 (true, BINARY, mask, len)
             );
-            assert_eq!(parsed.size + len, frame.len());
-            assert_eq!(header(&frame[..parsed.size - 1]), Ok(None));
+            assert_eq!(parsed.header_len + len, frame.len());
+            assert_eq!(header(&frame[..parsed.header_len - 1]), Ok(None));
             if mask {
-                let key = &frame[parsed.size - 4..parsed.size];
-                assert_ne!(&frame[parsed.size..parsed.size + 4], &payload[..4]);
-                assert_eq!(frame[parsed.size] ^ key[0], 7);
+                let key = &frame[parsed.header_len - 4..parsed.header_len];
+                assert_ne!(
+                    &frame[parsed.header_len..parsed.header_len + 4],
+                    &payload[..4]
+                );
+                assert_eq!(frame[parsed.header_len] ^ key[0], 7);
             }
         }
         assert!(header(&[0xC1, 0]).is_err(), "a reserved bit");

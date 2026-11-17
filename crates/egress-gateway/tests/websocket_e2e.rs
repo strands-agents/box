@@ -137,6 +137,8 @@ fn echo(frames: Arc<Mutex<Vec<Frame>>>) -> impl Fn(&mut UpstreamTls, &SeenReques
                 b"leak" => (opcode, format!("token={SECRET}").into_bytes()),
                 b"flood" => (2, vec![0; FLOOD]),
                 b"big" => (2, vec![7; 300]),
+                b"leak-ping" => (9, SECRET.as_bytes().to_vec()),
+                b"leak-close" => (8, [&close(1000)[..], SECRET.as_bytes()].concat()),
                 _ => (opcode, payload),
             };
             let _ = tls.write_all(&frame(true, opcode, &reply, false));
@@ -145,6 +147,13 @@ fn echo(frames: Arc<Mutex<Vec<Frame>>>) -> impl Fn(&mut UpstreamTls, &SeenReques
             }
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum Route {
+    Direct,
+    Backend(&'static str),
+    Mcp,
 }
 
 struct Session {
@@ -162,15 +171,19 @@ impl Session {
         limit: usize,
         handler: impl Fn(&mut UpstreamTls, &SeenRequest) + Send + Sync + 'static,
     ) -> Self {
-        Self::open(credential, limit, None, handler)
+        Self::open(credential, limit, Route::Direct, handler)
     }
 
     fn open(
         credential: bool,
         limit: usize,
-        backend: Option<&str>,
+        route: Route,
         handler: impl Fn(&mut UpstreamTls, &SeenRequest) + Send + Sync + 'static,
     ) -> Self {
+        let backend = match route {
+            Route::Backend(host) => Some(host),
+            Route::Direct | Route::Mcp => None,
+        };
         let upstream = TlsUpstream::start_custom(backend.unwrap_or(HOST), handler);
         let port = upstream.port();
         let (controls, phantom) = match (credential, backend) {
@@ -197,6 +210,10 @@ impl Session {
                 "127.0.0.1".parse().unwrap(),
             )],
             backends: backends.into_iter().collect(),
+            mcp_servers: match route {
+                Route::Mcp => vec![(HOST.to_string(), "realtime-mcp".to_string())],
+                Route::Direct | Route::Backend(_) => Vec::new(),
+            },
             response_limits: ResponseLimits {
                 max_body_bytes: limit,
             },
@@ -438,6 +455,34 @@ fn a_server_message_that_carries_the_credential_is_scrubbed() {
 }
 
 #[test]
+fn a_server_control_frame_that_carries_the_credential_is_scrubbed() {
+    let mut session = Session::start(true, LIMIT, echo(Arc::default()));
+    let phantom = session.phantom.clone().unwrap();
+    let head = session.handshake(&format!("Authorization: Bearer {phantom}\r\n"));
+    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+    session.send(true, 1, b"leak-ping");
+    assert_eq!(read_frame(&mut session.client), Some((true, 9, Vec::new())));
+    session.send(true, 1, b"leak-close");
+    assert_eq!(
+        read_frame(&mut session.client),
+        Some((true, 8, close(1000)))
+    );
+}
+
+#[test]
+fn a_handshake_to_an_mcp_server_host_is_refused_with_403() {
+    let mut session = Session::open(false, LIMIT, Route::Mcp, echo(Arc::default()));
+    let head = session.handshake("");
+    assert!(head.starts_with("HTTP/1.1 403"), "{head}");
+    assert_eq!(
+        session.denials(),
+        ["websocket: handshake to a remote MCP server"]
+    );
+    assert!(session.decided().is_empty());
+    assert_eq!(session.upstream.request_count(), 0);
+}
+
+#[test]
 fn a_wrong_101_is_refused_with_502() {
     let mut session = Session::start(false, LIMIT, |tls, _| {
         let head = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\
@@ -503,7 +548,7 @@ fn box_owned(port: u16) -> CapabilitySet {
 
 #[test]
 fn a_websocket_through_a_backend_reroute_reaches_the_backend_and_is_judged_on_the_original() {
-    let mut session = Session::open(true, LIMIT, Some(BACKEND), echo(Arc::default()));
+    let mut session = Session::open(true, LIMIT, Route::Backend(BACKEND), echo(Arc::default()));
     let head = session.handshake("");
     assert!(head.starts_with("HTTP/1.1 101"), "{head}");
     let seen = session.upstream.last_request();
