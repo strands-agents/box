@@ -106,12 +106,13 @@ fn refusal(error: &io::Error) -> (i32, String) {
     (status, format!("strands-shell: {label}: {error}\n"))
 }
 
-/// The diagnostic for a name that no program in this box answers to.
+/// The diagnostic for a bare name that no tool and no file on the box's search path answers to.
 fn not_found(program: &str) -> String {
     format!(
         "strands-shell: {program}: command not found\n\
-         strands-shell: {program}: not a program in this box. The box fixes its programs when it \
-         starts, so a program installed during the run does not run\n"
+         strands-shell: {program}: no tool in this box has this name, and no file of this name is \
+         on the PATH that `box run` started with. A PATH set inside the box does not change where \
+         the box looks\n"
     )
 }
 
@@ -281,9 +282,11 @@ impl CommandFallback for ShellKernel {
                 return Ok(Some(held.finish(context, status).await));
             }
             Decided::NotFound(permit) => {
-                finish(context, permit, 127).await;
-                write_stderr(context, &not_found(&program)).await;
-                return Ok(Some(127));
+                let status = finish(context, permit, 127).await;
+                if status == 127 {
+                    write_stderr(context, &not_found(&program)).await;
+                }
+                return Ok(Some(status));
             }
             Decided::Spawn { permit, program } => (Unsettled(Some(permit)), program),
         };
@@ -302,8 +305,7 @@ impl CommandFallback for ShellKernel {
         };
         if !resolved.bound {
             permit.finish(context, 127).await;
-            write_stderr(context, &not_found(&program)).await;
-            return Ok(Some(127));
+            return Ok(None);
         }
         let spawn = HostSpawn {
             program: resolved.path.into(),

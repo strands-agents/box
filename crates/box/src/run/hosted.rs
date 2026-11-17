@@ -215,8 +215,9 @@ fn select_tool_with_commands(
             shebang_interpreters: ShebangInterpreters::MustBeListed,
         }),
         None => Err(refuse(
-            "no `[tool.<name>] command` matches this program and its leading arguments. The box \
-             fixes its tools when it starts, so a program installed during the run is not a tool"
+            "no `[tool.<name>] command` matches this program and its leading arguments. The \
+             `[tool.<name>]` tables are fixed when the box starts, so a program created during \
+             the run runs only under an `[agent.filesystem] exec` entry"
                 .to_string(),
         )),
     }
@@ -3654,7 +3655,7 @@ while :; do :; done"#
             "{error}"
         );
         assert!(
-            !error.to_string().contains("installed during the run"),
+            !error.to_string().contains("fixed when the box starts"),
             "a program a table names is a tool, so its refusal is about arguments: {error}"
         );
     }
@@ -3748,7 +3749,7 @@ while :; do :; done"#
         assert!(
             error
                 .to_string()
-                .contains("a program installed during the run is not a tool"),
+                .contains("runs only under an `[agent.filesystem] exec` entry"),
             "a program no table names says that tools are fixed at start: {error}"
         );
     }

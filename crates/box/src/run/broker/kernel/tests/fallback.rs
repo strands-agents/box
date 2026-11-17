@@ -79,14 +79,34 @@ fn a_command_found_nowhere_keeps_status_127() {
     assert!(
         output
             .stderr
-            .contains("a program installed during the run does not run"),
-        "the refusal says that the box fixes its programs at start: {}",
+            .contains("no file of this name is on the PATH that `box run` started with"),
+        "the refusal says where the box looks for a bare name: {}",
         output.stderr
     );
     assert_eq!(
         output.stderr.matches("command not found").count(),
         1,
         "the Shell adds no second diagnostic: {}",
+        output.stderr
+    );
+}
+
+#[test]
+fn a_missing_path_spelling_keeps_the_plain_status_127() {
+    let output = run(async {
+        shell_with(SPAWN_AND_EXEC, None)
+            .run("/no-such-directory-anywhere/app")
+            .await
+    });
+    assert_eq!(output.status, 127, "{}", output.stderr);
+    assert!(
+        output.stderr.contains("app: command not found"),
+        "{}",
+        output.stderr
+    );
+    assert!(
+        !output.stderr.contains("PATH that `box run` started with"),
+        "a spelling with a separator is not looked up on a PATH: {}",
         output.stderr
     );
 }
