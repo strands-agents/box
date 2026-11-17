@@ -941,6 +941,10 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
     },
 ];
 
+/// The two route-3 rules a JIT runtime trips, which executable memory lifts. `pkey_mprotect` stays
+/// refused either way, because the permit filter never admits it.
+const EXECUTABLE_MEMORY: [libc::c_long; 2] = [libc::SYS_mmap, libc::SYS_mprotect];
+
 /// The two filters for one containment request.
 #[derive(Debug)]
 pub(crate) struct SyscallFilters {
@@ -952,6 +956,7 @@ pub(crate) struct SyscallFilters {
 /// The static system-call policy for one containment request.
 #[derive(Debug)]
 pub(crate) struct SyscallPolicy {
+    executable_memory: bool,
     #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
     native_filesystem: bool,
 }
@@ -960,9 +965,16 @@ impl SyscallPolicy {
     /// Derive the policy from one request.
     pub(crate) fn for_config(_network: &Network) -> Self {
         Self {
+            executable_memory: false,
             #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
             native_filesystem: false,
         }
+    }
+
+    /// Lift route 3 of W^X, so a JIT runtime can map the code it compiles.
+    pub(crate) fn with_executable_memory(mut self, enabled: bool) -> Self {
+        self.executable_memory = enabled;
+        self
     }
 
     #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
@@ -991,6 +1003,9 @@ impl SyscallPolicy {
 
         let mut rules: BTreeMap<libc::c_long, Vec<SeccompRule>> = BTreeMap::new();
         for entry in MEDIATED {
+            if self.executable_memory && EXECUTABLE_MEMORY.contains(&entry.number) {
+                continue;
+            }
             match entry.disposition {
                 Disposition::Deny => {
                     rules.insert(entry.number, Vec::new());

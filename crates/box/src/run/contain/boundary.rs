@@ -655,6 +655,10 @@ impl Boundary {
         if launch.runtime_reach == RuntimeReach::Leaf {
             containment = containment.allow_broad_exec();
         }
+        // docs/design/decisions.md#a-jit-runtime-maps-executable-memory-in-a-leaf-and-in-an-opted-in-agent
+        if launch.runtime_reach == RuntimeReach::Leaf || spec.executable_memory {
+            containment = containment.allow_executable_memory();
+        }
 
         // The global `file-attributes` switch reaches the agent, every tool, and every contained MCP
         // server alike, because each one's write roots are rendered here.
@@ -762,9 +766,11 @@ impl Boundary {
             .chain(chain_identities.iter())
             .filter_map(|identity| writable_grant(identity).map(|grant| (identity.clone(), grant)))
             .collect();
-        // Mirrors the broad-exec wiring above, so the disclosure names the carve-out exactly when the
-        // leaf renders it.
+        // Mirrors the broad-exec and executable-memory wiring above, so the disclosure names each
+        // carve-out exactly where it renders.
         let broad_exec = launch.runtime_reach == RuntimeReach::Leaf;
+        let executable_memory = cfg!(target_os = "linux")
+            && (launch.runtime_reach == RuntimeReach::Leaf || spec.executable_memory);
         let disclosure = disclosure(&DisclosureInputs {
             table,
             grants: &reach.grants,
@@ -778,6 +784,7 @@ impl Boundary {
             program: &program_identity,
             command_listed,
             broad_exec,
+            executable_memory,
             file_attributes: cfg!(target_os = "macos") && stored.file_attributes,
             file_watching: cfg!(target_os = "macos") && spec.file_watching,
             native_egress: launch.egress == EgressMode::Native,
@@ -945,6 +952,7 @@ struct DisclosureInputs<'a> {
     program: &'a Path,
     command_listed: bool,
     broad_exec: bool,
+    executable_memory: bool,
     file_attributes: bool,
     file_watching: bool,
     native_egress: bool,
@@ -1018,6 +1026,12 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
         lines.push(format!(
             "strands-box: {table} broad exec: may run any reachable binary, and \
              load code it writes into its writable grants above"
+        ));
+    }
+    if inputs.executable_memory {
+        lines.push(format!(
+            "strands-box: {table} executable memory: may map memory that is writable and \
+             executable, so a JIT runtime runs the code it compiles"
         ));
     }
     if inputs.file_attributes {
@@ -2051,6 +2065,7 @@ mod tests {
         fn spec(&self) -> ProcessSpec {
             ProcessSpec {
                 file_watching: false,
+                executable_memory: false,
                 native_filesystem_policy: None,
                 command: vec!["/bin/sh".to_string(), "-c".to_string()],
                 workspace: Some(self.path("project")),
@@ -3166,6 +3181,35 @@ mod tests {
                 serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
             assert_eq!(config["broad_exec"], expected);
             assert_eq!(boundary.disclosure().contains("broad exec:"), expected);
+        }
+    }
+
+    /// **Every leaf maps executable memory, and the agent only when it selects the key.** It is
+    /// disclosed only where it renders.
+    #[test]
+    fn executable_memory_reaches_every_leaf_and_an_agent_that_selects_it() {
+        let fixture = Fixture::new();
+        for (table, reach, selected, expected) in [
+            ("[agent]", RuntimeReach::Agent, false, false),
+            ("[agent]", RuntimeReach::Agent, true, true),
+            ("[tool.node]", RuntimeReach::Leaf, false, true),
+        ] {
+            let mut spec = fixture.spec();
+            spec.executable_memory = selected;
+            let boundary = fixture.translate_with_reach(&spec, table, reach);
+            let config: serde_json::Value =
+                serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
+            assert_eq!(
+                config["executable_memory"].as_bool().unwrap_or(false),
+                expected,
+                "{table}"
+            );
+            assert_eq!(
+                boundary.disclosure().contains("executable memory:"),
+                expected && cfg!(target_os = "linux"),
+                "{table}: {}",
+                boundary.disclosure()
+            );
         }
     }
 

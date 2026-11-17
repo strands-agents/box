@@ -276,6 +276,7 @@ Both tables hold one process, in one shape:
 | `[<table>.filesystem]` | table | The path lists the process's own system calls reach. Eight for `[agent]`; six for a `[tool.<name>]`, which has no `metadata` or `exec` list. |
 | `native-filesystem-policy` | boolean | Optional override of the global experimental setting for this process and its descendants. See [workload selection](native-filesystem-policy.md#select-workloads). |
 | `file-watching` | boolean | `false` by default. On macOS, permit FSEvents for this process and its descendants, with the [limitations](#file-watching). Linux ignores this setting. |
+| `executable-memory` | boolean | `[agent]` only, `false` by default. On Linux, permit writable and executable memory, which a JIT runtime such as Node or Java needs. Every tool and local MCP server already has it. macOS ignores this setting. |
 | `[tool.<name>.grammar]` | table | Experimental, and `[tool.<name>]` only. The tool grammar for the program this tool runs. See [`[tool.<name>.grammar]`](#toolnamegrammar). |
 | `[[agent.ingress]]` | list of tables | `[agent]` only. Where callers reach the agent's servers, one entry per port. See [`[[agent.ingress]]`](#agentingress). |
 

@@ -144,7 +144,9 @@ impl ContainmentBackend for NamespaceBackend {
 
         // Same for the filter: a request whose filter will not compile must fail
         // here, not after the mount view is live.
-        syscall::SyscallPolicy::for_config(config.network()).compile()?;
+        syscall::SyscallPolicy::for_config(config.network())
+            .with_executable_memory(config.executable_memory())
+            .compile()?;
 
         Ok(())
     }
@@ -163,7 +165,8 @@ impl ContainmentBackend for NamespaceBackend {
 
         // Build the plan and compile both filters before anything irreversible.
         let view = view::MountView::plan(config)?;
-        let policy = syscall::SyscallPolicy::for_config(config.network());
+        let policy = syscall::SyscallPolicy::for_config(config.network())
+            .with_executable_memory(config.executable_memory());
         #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
         let policy = policy.with_native_filesystem(native_filesystem_handoff.is_some());
         #[cfg(not(all(feature = "native-filesystem-policy", box_native_adapter_tests)))]

@@ -198,7 +198,8 @@ The `mprotect` and `pkey_mprotect` system calls change memory access permissions
 The filter refuses `mprotect` requests whose permissions include executable access, including requests that retain that access.
 It refuses every `pkey_mprotect` request.
 A runtime that compiles code during execution can fail under these restrictions.
-Tool execution from writable files does not remove these memory restrictions.
+A tool, a local MCP server, and an agent that sets `executable-memory = true` skip the `mmap` and `mprotect` restrictions, so such a runtime can run the code it compiles.
+See [the executable memory decision](decisions.md#a-jit-runtime-maps-executable-memory-in-a-leaf-and-in-an-opted-in-agent).
 
 ## Terminal controls
 

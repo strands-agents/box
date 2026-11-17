@@ -701,6 +701,9 @@ pub(crate) const SUPPLIED_IDENTITY_RECORD_VERSION: u32 = 34;
 /// The record version of a record whose process selects `file-watching`, so an older build
 /// refuses the box rather than resuming it with FSEvents refused.
 const FILE_WATCHING_RECORD_VERSION: u32 = 35;
+/// The record version of a record whose `[agent]` selects `executable-memory`, so an older build
+/// refuses the box rather than resuming it with its JIT runtime refused.
+const EXECUTABLE_MEMORY_RECORD_VERSION: u32 = 36;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -760,7 +763,9 @@ fn record_version<'a>(
     has_backend: bool,
     gateway: &Gateway,
 ) -> u32 {
-    if specs.clone().any(|spec| spec.file_watching) {
+    if specs.clone().any(|spec| spec.executable_memory) {
+        EXECUTABLE_MEMORY_RECORD_VERSION
+    } else if specs.clone().any(|spec| spec.file_watching) {
         FILE_WATCHING_RECORD_VERSION
     } else if !generated_box_identity(box_id) {
         SUPPLIED_IDENTITY_RECORD_VERSION
@@ -1055,6 +1060,7 @@ impl Record {
             SHELL_STDIN_LIMIT_RECORD_VERSION,
             SUPPLIED_IDENTITY_RECORD_VERSION,
             FILE_WATCHING_RECORD_VERSION,
+            EXECUTABLE_MEMORY_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1788,6 +1794,7 @@ mod tests {
     fn agent(command: &[&str]) -> ProcessSpec {
         ProcessSpec {
             file_watching: false,
+            executable_memory: false,
             native_filesystem_policy: None,
             command: command.iter().map(|word| (*word).to_string()).collect(),
             workspace: None,
@@ -1939,6 +1946,44 @@ native-filesystem-policy = false
         assert!(
             toml::from_str::<ConfigFile>(remote).is_err(),
             "a remote MCP server refuses the key"
+        );
+    }
+
+    /// **Executable memory is an `[agent]` key and needs its record version.** A tool or MCP server
+    /// refuses it, because each already has executable memory.
+    #[test]
+    fn executable_memory_is_versioned_and_taken_only_by_the_agent() {
+        for enabled in [false, true] {
+            let body = format!("[agent]\ncommand = [\"node\"]\nexecutable-memory = {enabled}\n");
+            let mut stored = pinned_record(&body);
+            assert_eq!(stored.agent.as_ref().unwrap().executable_memory, enabled);
+            let expected = if enabled { 36 } else { 21 };
+            assert_eq!(stored.version, expected, "{body}");
+            let text = stored.to_toml().unwrap();
+            assert_eq!(text.contains("executable-memory"), enabled);
+            assert_eq!(
+                Record::parse(&text, Path::new("record.toml")).unwrap(),
+                stored
+            );
+            stored.version = if enabled { 35 } else { 36 };
+            assert!(matches!(
+                Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                Err(ConfigError::RecordVersion { expected: version, .. }) if version == expected
+            ));
+        }
+        let refusal = load("[tool.node]\ncommand = [\"node\"]\nexecutable-memory = true")
+            .expect_err("a tool refuses the key");
+        assert!(
+            refusal
+                .to_string()
+                .contains("`executable-memory` is refused on `[tool.node]`"),
+            "the refusal names the key: {refusal}"
+        );
+        let stdio = "name = \"b\"\nbox_dir = \"/b\"\n[mcp.x]\ntype = \"stdio\"\ncommand = [\"x\"]\n\
+                     executable-memory = true\n";
+        assert!(
+            toml::from_str::<ConfigFile>(stdio).is_err(),
+            "an MCP server refuses the key"
         );
     }
 
@@ -3124,7 +3169,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, FILE_WATCHING_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, EXECUTABLE_MEMORY_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

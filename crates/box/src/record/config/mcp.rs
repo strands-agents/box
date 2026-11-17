@@ -154,6 +154,7 @@ pub(crate) fn contained_specs(
                 ContainedMcp {
                     spec: ProcessSpec {
                         file_watching: *file_watching,
+                        executable_memory: false,
                         native_filesystem_policy: *native_filesystem_policy,
                         command: command.clone(),
                         workspace: workspace.clone(),

@@ -963,7 +963,9 @@ W^X closes three routes. Every writable mount, including `/tmp`, uses `MS_NOEXEC
 denies `memfd_create`, all `execveat`, and all `pkey_mprotect` calls. The restriction filter denies
 `mmap` with `PROT_WRITE|PROT_EXEC` and `mprotect` with `PROT_EXEC`. Scope `mmap` to both bits or the
 loader breaks (`a_read_execute_mapping_is_still_permitted`,
-`route_three_write_then_execute_is_refused`).
+`route_three_write_then_execute_is_refused`). A leaf, and an agent with `executable-memory`, drop
+those two rules so a JIT runtime runs; the other routes stay closed
+(`executable_memory_lifts_only_the_jit_routes`).
 
 **W^X protects the `fs:*` enforcement point, not the kernel boundary.** It does not stop the workload
 running code of its own choosing. An exec view is safe only when no reachable program is

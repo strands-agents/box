@@ -133,6 +133,9 @@ event metadata, the host-wide event count, and each volume's history identifier.
 also delete any volume's event history. Box prints these limitations at startup. See
 [file watching](../../docs/user/config.md#file-watching).
 
+`[agent]` also takes `executable-memory`, `false` by default, which permits writable and executable
+memory on Linux so a JIT runtime runs. Every tool and stdio MCP server already has it.
+
 `filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
 `exec`, and `deny`. They give this process's own filesystem calls direct reach, because an
 unmodified coding agent's `Read`, `Write` and `Edit` issue those calls and containment refuses every

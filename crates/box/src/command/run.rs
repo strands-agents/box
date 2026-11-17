@@ -562,6 +562,7 @@ mod tests {
     fn spec(command: &str, read: &[&str], write: &[&str]) -> ProcessSpec {
         ProcessSpec {
             file_watching: false,
+            executable_memory: false,
             native_filesystem_policy: None,
             command: vec![command.to_string()],
             workspace: None,

@@ -63,6 +63,9 @@ pub struct ContainmentConfig {
     /// Whether macOS FSEvents is permitted. [`Self::allow_file_watching`] states its reach.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     file_watching: bool,
+    /// Whether Linux permits memory that is writable and executable, which a JIT runtime needs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    executable_memory: bool,
 }
 
 /// One credential-store floor exception, tied to its matching path grant.
@@ -104,6 +107,7 @@ impl ContainmentConfig {
             file_attributes: false,
             runtime_services: false,
             file_watching: false,
+            executable_memory: false,
         }
     }
 
@@ -185,6 +189,18 @@ impl ContainmentConfig {
 
     pub(crate) fn file_watching(&self) -> bool {
         self.file_watching
+    }
+
+    /// Permit memory that is writable and executable, which a JIT runtime needs to run the code it
+    /// compiles. macOS ignores this setting.
+    #[must_use]
+    pub fn allow_executable_memory(mut self) -> Self {
+        self.executable_memory = true;
+        self
+    }
+
+    pub(crate) fn executable_memory(&self) -> bool {
+        self.executable_memory
     }
 
     /// Resolve one existing filesystem path before an authorization decision.
