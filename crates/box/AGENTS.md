@@ -274,7 +274,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   are **not** among them: they belong to `Record`.
 
   **The box is the credential boundary. No process table selects what it reaches.** The agent gets
-  every declared `[tool.<label>]`, the alias of every stdio `[mcp.<name>]` program, and every egress route. Each tool and
+  every declared `[tool.<label>]` that the run does not leave out, the alias of every stdio `[mcp.<name>]` program, and every egress route. Each tool and
   each MCP leaf gets every egress route, and no alias and no broker socket, so it starts no tool.
   [The box is the credential boundary](../../docs/design/decisions.md#the-box-is-the-credential-boundary)
   owns why. **Do not add a per-process selection**: the gateway and the broker cannot tell
@@ -294,6 +294,16 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   Do not re-derive meaning from a string downstream: no `strip_prefix("env://")`, no host
   re-parsing, no second reserved-name check at projection time. `EgressRoute` carries
   `provisioned_name` so the scheme is interpreted in one place.
+- **A `[tool.<name>]` whose program is not installed is left out, in one place.**
+  `commands::leave_out_absent` removes it from the run's `Record` after `configure` stores the
+  record, so every later consumer sees one set of tools: credential disclosure, grammar binding,
+  bare names, approved reach, tool selection, and leaf translation. Not installed means a bare name
+  with no executable match on the tool's search path, or an absolute path where nothing exists after
+  links are followed. Any other failure still stops the box, and so does an argument that no run can
+  expand. The policy keeps the tool's grammar actions so a policy that names them still loads, and no
+  file binds to them. Do not move the decision into a consumer: a consumer that resolves a left-out
+  tool later would admit a file planted at its path.
+  `hosted::tests::a_file_planted_at_a_left_out_tools_path_never_runs_with_its_reach` is the pin.
 - **A credential binding is not an authorization
   ([a binding is configuration](../../docs/design/decisions.md#a-credential-binding-is-configuration-not-a-policy-action)).**
   It says only what is attached to a request policy already permitted. Keep every refusal holding

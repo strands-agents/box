@@ -53,6 +53,38 @@ pub(crate) enum CommandMutationRefusal {
     IncompleteScan(std::io::Error),
 }
 
+/// A `[tool.<name>]` that a run leaves out because its program is not installed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LeftOut {
+    /// The table, spelled `[tool.<name>]`.
+    pub(crate) table: String,
+    /// The program as `command` spells it.
+    pub(crate) program: String,
+}
+
+/// Remove from `record` each `[tool.<name>]` whose program is not installed, so no later step of the
+/// run sees it, and answer with those tables, refusing one whose `command` no run can expand.
+pub(crate) fn leave_out_absent(record: &mut Record) -> Result<Vec<LeftOut>, BoxError> {
+    let mut left_out = Vec::new();
+    for (label, spec) in &record.tool {
+        if !super::contain::executable::is_absent(spec.program(), &spec.search_path()) {
+            continue;
+        }
+        let table = format!("[tool.{label}]");
+        if let Some(reason) = super::contain::boundary::environment::argument_refusal(spec) {
+            return Err(ConfigError::Process { table, reason }.into());
+        }
+        left_out.push((label.clone(), table, spec.program().to_string()));
+    }
+    Ok(left_out
+        .into_iter()
+        .map(|(label, table, program)| {
+            record.tool.remove(&label);
+            LeftOut { table, program }
+        })
+        .collect())
+}
+
 #[derive(Debug)]
 pub(crate) struct ConfiguredCommand {
     table: String,
@@ -1633,6 +1665,162 @@ mod tests {
         assert_eq!(
             names.declared.get("git").map(|(path, _)| path.clone()),
             Some(root.join("bin/git"))
+        );
+    }
+}
+
+#[cfg(test)]
+mod left_out_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    use crate::record::config::process::ProcessSpec;
+
+    fn spec(command: &[&str], path: Option<&Path>) -> ProcessSpec {
+        ProcessSpec {
+            file_watching: false,
+            native_filesystem_policy: None,
+            command: command.iter().map(|part| (*part).to_string()).collect(),
+            workspace: None,
+            env: path
+                .map(|path| BTreeMap::from([("PATH".to_string(), path.display().to_string())]))
+                .unwrap_or_default(),
+            filesystem: Default::default(),
+            network: None,
+            grammar: None,
+            ingress: Vec::new(),
+        }
+    }
+
+    fn with_tools(tools: Vec<(&str, ProcessSpec)>) -> Record {
+        Record {
+            version: crate::record::config::RECORD_VERSION,
+            experimental_features: Default::default(),
+            file_attributes: false,
+            gateway: Default::default(),
+            limits: Default::default(),
+            box_id: "left-out-test".to_string(),
+            box_dir: PathBuf::from("/var/lib/boxes/left-out"),
+            name: "left-out-test".to_string(),
+            policy: None,
+            agent: None,
+            tool: tools
+                .into_iter()
+                .map(|(label, spec)| (label.to_string(), spec))
+                .collect(),
+            egress: Default::default(),
+            remote_mcp: Default::default(),
+            mcp: Default::default(),
+            contained_mcp: Default::default(),
+            telemetry: Default::default(),
+        }
+    }
+
+    fn executable(path: &Path, mode: u32) {
+        std::fs::write(path, "#!/bin/sh\nexit 0\n").expect("program");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("mode");
+    }
+
+    fn tables(left_out: &[LeftOut]) -> Vec<&str> {
+        left_out.iter().map(|tool| tool.table.as_str()).collect()
+    }
+
+    /// **A tool whose program is not installed is left out of the record**, by a bare name no
+    /// search-path entry holds, by an absolute path to nothing, and by a link to nothing, and the
+    /// tools that remain load.
+    #[test]
+    fn a_tool_whose_program_is_not_installed_is_left_out() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let bin = root.join("bin");
+        std::fs::create_dir(&bin).expect("bin");
+        executable(&bin.join("present"), 0o755);
+        std::os::unix::fs::symlink(root.join("nowhere"), bin.join("dangling")).expect("link");
+        let mut record = with_tools(vec![
+            ("present", spec(&["present"], Some(&bin))),
+            ("bare", spec(&["tsx", "--flag"], Some(&bin))),
+            (
+                "absolute",
+                spec(&[&root.join("opt/tsx").display().to_string()], None),
+            ),
+            (
+                "dangling",
+                spec(&[&bin.join("dangling").display().to_string()], None),
+            ),
+            ("dangling_bare", spec(&["dangling"], Some(&bin))),
+        ]);
+
+        let left_out = leave_out_absent(&mut record).expect("absent tools are left out");
+
+        assert_eq!(
+            tables(&left_out),
+            [
+                "[tool.absolute]",
+                "[tool.bare]",
+                "[tool.dangling]",
+                "[tool.dangling_bare]"
+            ]
+        );
+        assert_eq!(left_out[1].program, "tsx");
+        assert_eq!(record.tool.keys().collect::<Vec<_>>(), ["present"]);
+        let commands = ConfiguredCommands::load(&record).expect("the remaining tool loads");
+        assert!(commands.get("present").is_some());
+        assert!(commands.get("bare").is_none());
+    }
+
+    /// **Every other check on a tool's file still stops the box**: a file that is not executable,
+    /// a directory, and a relative path stay in the record, so the load refuses them.
+    #[test]
+    fn a_program_that_exists_is_never_left_out() {
+        let root = tempfile::tempdir().expect("root");
+        let root = root.path().canonicalize().expect("canonical root");
+        let plain = root.join("plain");
+        executable(&plain, 0o644);
+        let directory = root.join("directory");
+        std::fs::create_dir(&directory).expect("directory");
+        for (label, command) in [
+            ("plain", plain.display().to_string()),
+            ("directory", directory.display().to_string()),
+            ("relative", "bin/tool".to_string()),
+        ] {
+            let mut record = with_tools(vec![(label, spec(&[&command], None))]);
+
+            let left_out = leave_out_absent(&mut record).expect("nothing is refused here");
+
+            assert!(left_out.is_empty(), "{label}: {left_out:?}");
+            assert!(record.tool.contains_key(label), "{label}");
+            ConfiguredCommands::load(&record).expect_err("the load refuses the file");
+        }
+    }
+
+    /// **A left-out tool whose `command` holds an argument no run can expand still stops the box**,
+    /// so a typo in a token is reported whether or not the program is installed.
+    #[test]
+    fn a_left_out_tool_with_an_unexpandable_argument_is_refused() {
+        let mut record = with_tools(vec![(
+            "tsx",
+            spec(&["/nonexistent/strands-box/tsx", "${NOT_A_VALUE}"], None),
+        )]);
+
+        let refusal = leave_out_absent(&mut record)
+            .expect_err("the token is refused")
+            .to_string();
+
+        assert!(refusal.contains("[tool.tsx]"), "{refusal}");
+        assert!(refusal.contains("NOT_A_VALUE"), "{refusal}");
+        let mut record = with_tools(vec![(
+            "tsx",
+            spec(
+                &[
+                    "/nonexistent/strands-box/tsx",
+                    "${OTEL_EXPORTER_OTLP_ENDPOINT}",
+                ],
+                None,
+            ),
+        )]);
+        assert_eq!(
+            tables(&leave_out_absent(&mut record).expect("a known token passes")),
+            ["[tool.tsx]"]
         );
     }
 }

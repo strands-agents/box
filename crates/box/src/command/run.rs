@@ -185,6 +185,26 @@ fn write_monty_disclosures(
     Ok(())
 }
 
+/// One line for each `[tool]` this run leaves out because its program is not installed.
+fn write_left_out_tools(
+    left_out: &[crate::run::commands::LeftOut],
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    for tool in left_out {
+        let program: String = tool
+            .program
+            .chars()
+            .flat_map(char::escape_default)
+            .collect();
+        writeln!(
+            output,
+            "strands-box: {} left out: {program} not found",
+            tool.table
+        )?;
+    }
+    Ok(())
+}
+
 /// One line for each bare name a `[tool]` answers to in the hosted Shell, and the file it runs.
 fn write_bare_name_disclosures(
     names: &crate::run::commands::BareNames,
@@ -544,9 +564,13 @@ fn prepare_contract(
 
     request.verify_sources()?;
     drop(root_lock);
+    let mut record = request.record;
+    let left_out = crate::run::commands::leave_out_absent(&mut record)?;
+    write_left_out_tools(&left_out, std::io::stderr().lock())
+        .map_err(|source| ConfigError::Disclosure { source })?;
     Ok(LockedRun {
         root,
-        record: request.record,
+        record,
         workspace,
         trailing: trailing_arguments(argv)?,
         policy: request.policy,
@@ -775,6 +799,29 @@ mod tests {
              runs the file of `[tool.git]`, whose label is that name\n\
              strands-box: [tool.brew_node], [tool.node]: these tables run different program paths, \
              so a bare `node` in the Shell runs the file that `PATH` finds\n"
+        );
+    }
+
+    #[test]
+    fn startup_names_each_tool_it_leaves_out() {
+        let left_out = [
+            crate::run::commands::LeftOut {
+                table: "[tool.tsx]".to_string(),
+                program: "tsx".to_string(),
+            },
+            crate::run::commands::LeftOut {
+                table: "[tool.node]".to_string(),
+                program: "/opt/node/bin/node\u{1b}[2J".to_string(),
+            },
+        ];
+        let mut output = Vec::new();
+
+        write_left_out_tools(&left_out, &mut output).expect("the disclosure writes");
+
+        assert_eq!(
+            String::from_utf8(output).expect("the disclosure is UTF-8"),
+            "strands-box: [tool.tsx] left out: tsx not found\n\
+             strands-box: [tool.node] left out: /opt/node/bin/node\\u{1b}[2J not found\n"
         );
     }
 

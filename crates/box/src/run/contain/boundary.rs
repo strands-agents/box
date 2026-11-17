@@ -1583,7 +1583,12 @@ pub(crate) mod environment {
     /// The three telemetry values Core derives from this run's attachment, and the one set a
     /// `${NAME}` may name.
     pub(crate) fn expandable(attachment: &Attachment) -> BTreeMap<String, String> {
-        let endpoint = format!("http://127.0.0.1:{}", attachment.telemetry_port);
+        expandable_at(attachment.telemetry_port)
+    }
+
+    /// The values [`expandable`] holds for a collector on `telemetry_port`.
+    fn expandable_at(telemetry_port: u16) -> BTreeMap<String, String> {
+        let endpoint = format!("http://127.0.0.1:{telemetry_port}");
         BTreeMap::from([
             (
                 "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT".to_string(),
@@ -1597,16 +1602,28 @@ pub(crate) mod environment {
         ])
     }
 
+    /// The refusal that expanding `spec`'s fixed arguments meets in every run, if any.
+    pub(crate) fn argument_refusal(spec: &ProcessSpec) -> Option<String> {
+        arguments_with(spec, &expandable_at(0)).err()
+    }
+
     /// One spec's fixed arguments, expanded. The only place a spec's arguments are expanded.
     pub(crate) fn expanded_arguments(
         spec: &ProcessSpec,
         attachment: &Attachment,
     ) -> Result<Vec<String>, String> {
-        let values = expandable(attachment);
+        arguments_with(spec, &expandable(attachment))
+    }
+
+    /// One spec's fixed arguments, expanded from `values`.
+    fn arguments_with(
+        spec: &ProcessSpec,
+        values: &BTreeMap<String, String>,
+    ) -> Result<Vec<String>, String> {
         spec.fixed_arguments()
             .iter()
             .map(|argument| {
-                expanded(argument, &values)
+                expanded(argument, values)
                     .map_err(|reason| format!("`command` argument {argument:?}: {reason}"))
             })
             .collect()
