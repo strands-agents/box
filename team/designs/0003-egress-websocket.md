@@ -146,7 +146,7 @@ The 16 MiB cap is main's `max_body_bytes`. The relay follows main after #345: a 
 - A server's binary message in one frame names its length in its header. On a host with no credential, the relay decides at the header and streams the payload with no cap, as an HTTP response has none.
 - The relay holds every other server message whole. A text message must pass the UTF-8 check before it moves on. A message in more than one frame names its whole length only at its last frame. A message on a host with a credential changes length when the scrub masks a secret.
 
-So a WebSocket holds at most one held message in each direction, 16 MiB each, and a scrubbed server message needs a second copy while the scrub runs. An HTTP exchange on main holds at most a 16 MiB request body. The 300 s is main's `upstream_read_deadline`. On main it's a total for each exchange, which would cut every WebSocket at 300 s. After the `101`, it limits idle time on both legs. A WebSocket holds one of main's 256 connections (`max_connections`) while it's open. Neither number becomes a config key.
+So a WebSocket holds at most one held message in each direction, 16 MiB each. On a host with a credential, the scrub also needs a second copy of the server message while it runs, so the worst case is about 48 MiB for each WebSocket (section 5). An HTTP exchange on main holds at most a 16 MiB request body. The 300 s is main's `upstream_read_deadline`. On main it's a total for each exchange, which would cut every WebSocket at 300 s. After the `101`, it limits idle time on both legs. A WebSocket holds one of main's 256 connections (`max_connections`) while it's open. Neither number becomes a config key.
 
 Box telemetry labels a message decision with its `websocket:*` action and the resource `host:port/path`.
 
@@ -247,7 +247,7 @@ Each message costs one decision and one record, in either direction. A probe on 
 
 So a message waits about 4 ms after its last frame arrives, and costs about 6.7 to 7.5 ms of engine time at a small history. One mutex guards each engine call, so the whole box decides about 133 to 149 messages a second, in both directions together. We haven't measured a WebSocket that sends a message for each decision.
 
-A held message also waits while the gateway reads all of it, as a large HTTP request body does on main. A streamed server binary message doesn't wait. The memory bound is one held message in each direction for each WebSocket, 16 MiB each.
+A held message also waits while the gateway reads all of it, as a large HTTP request body does on main. A streamed server binary message doesn't wait. The memory bound for each WebSocket is one held message in each direction, 16 MiB each, plus a scrub copy of up to about 16 MiB on a host with a credential. That's about 48 MiB for each WebSocket, and about 12 GiB at main's 256 connections, where main's bound is about 4 GiB of request bodies, because responses stream.
 
 The growth of the history is the cost I'm least sure of. Dogwood keeps the events that match each `count` or `sum`, but no running total. So each decision of an action that the rule names adds up its matches in the lookback again, at about 1.2 µs for each one. A decision of another action skips the rule.
 
