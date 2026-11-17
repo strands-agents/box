@@ -7,7 +7,7 @@ This design lets a WebSocket pass through the egress gateway, and keeps every me
 - **`websocket:send`** is new. It decides each message that the workload sends after the `101`, before any byte of the message leaves.
 - **`websocket:receive`** is new. It decides each message that the server sends after the `101`, before any byte of the message reaches the workload.
 
-Both message actions take the same input: the handshake's `host`, `port`, and `path`, plus the message's `opcode` (`text`, `binary`, `ping`, `pong`, or `close`) and `payload_bytes`. They follow `http:request`, and a message is to them what a body is to an HTTP request. The gateway asks policy before any byte of a message moves on, then sends the message on as one frame. A binary message in one frame names its length in its header, so the gateway decides at the header and streams the payload. The gateway reads every other message whole, up to main's 16 MiB body cap, then decides (section 3.3). `payload_bytes` is the offer on `::request` and the delivery on `::response`, as `body_bytes` is on `http:request`. Ping, Pong, and Close are messages too, because the side that sends one chooses its bytes.
+Both message actions take the same input: the handshake's `host`, `port`, and `path`, plus the message's `opcode` (`text`, `binary`, `ping`, `pong`, or `close`) and `payload_bytes`. They follow `http:request`, and a message is to them what a body is to an HTTP request. The gateway asks policy before any byte of a message moves on, then sends the message on as one frame. The gateway reads each workload message whole, up to main's 16 MiB body cap, then decides, as main reads a request body. A server's binary message in one frame names its length in its header, so on a host with no credential the gateway decides at the header and streams the payload, as #345 streams a response. The gateway reads every other server message whole, up to 16 MiB (section 3.3). `payload_bytes` is the offer on `::request` and the delivery on `::response`, as `body_bytes` is on `http:request`. Ping, Pong, and Close are messages too, because the side that sends one chooses its bytes.
 
 So an operator can permit HTTP requests and no WebSocket data, because a `GET` permit admits a handshake head and no message. A size rule refuses a large message before it moves on. A guard, such as "nothing leaves after the SSH key is read", stops the next message, and a budget sums `payload_bytes` on the records of one direction. Existing rules on `http:request` keep their meaning and their events. Each message waits about 4 ms for its decision, so a box decides about 133 to 149 messages a second, in both directions together. A `sum` over a long lookback lowers that rate (section 5).
 
@@ -56,13 +56,14 @@ sequenceDiagram
 Policy writes `::request` at each decision. A refusal at any step closes the WebSocket, and the message never reaches the other side (section 3.3).
 
 The handshake follows these rules:
-- The gateway accepts `wss://` only, because it reads messages only inside the TLS tunnel that it ends. A plain HTTP handshake gets 403 and a Deny record, the gateway's own record of a refusal, kept outside the history.
+- The gateway accepts `wss://` only, because it reads messages only inside the TLS tunnel that it ends. A plain HTTP request with `Upgrade: websocket` gets 403 and a Deny record, the gateway's own record of a refusal, kept outside the history. The refusal comes after the token check and before `net:connect`, so no upstream socket opens. It covers a host in `upgrade_http` and a malformed plain handshake too, and the record holds the path without its query.
 - The handshake must be a valid RFC 6455 `GET` on HTTP/1.1, or it gets 400. A handshake to a configured remote MCP (Model Context Protocol) server gets 403, because its messages would skip the `mcp:call` decision.
 - The gateway swaps the placeholder token for the real credential on the handshake, never in a message. On a signing host, one whose requests the gateway signs with SigV4, it signs the handshake as a `GET` with no body.
 - The gateway removes `Sec-WebSocket-Extensions` and refuses a `101` that names one, because `permessage-deflate` would hide a message from policy and the scrub. The scrub masks each copy of a credential in what the server sends back.
-- hyper's client takes any `101` as an upgrade, so the gateway checks `Upgrade`, `Connection`, and `Sec-WebSocket-Accept`, and answers 502 if one is wrong.
+- hyper's client takes any `101` as an upgrade, so the gateway checks `Upgrade`, `Connection`, and `Sec-WebSocket-Accept`, and answers 502 if one is wrong. The handshake still records `http:request::response` with status 101, then the gateway writes a Deny record.
+- hyper's server on main runs with keep-alive off, which also closes a `101`. The gateway turns keep-alive on and sets `Connection: close` on every other response, so an HTTP exchange still uses one connection and its bytes don't change.
 
-After the `101`, the relay reads each message in each direction, and section 3.3 says which messages it streams and which it holds whole. It checks each frame against RFC 6455. The checks cover reserved bits, opcodes, masking by the workload only, unfragmented control frames of at most 125 bytes, and frame order. Text and the reason in a Close must be valid UTF-8. The relay sends each message on as one frame, and masks a workload message again with a fresh key, so the workload can't choose the bytes on the upstream wire. When a placeholder credential applies to the host, the relay scrubs the `101` head and each server message after its decision.
+After the `101`, the relay reads each message in each direction, and section 3.3 says which messages it streams and which it holds whole. It checks each frame against RFC 6455. The checks cover reserved bits, opcodes, masking by the workload only, unfragmented control frames of at most 125 bytes, and frame order. Text and the reason in a Close must be valid UTF-8. The relay sends each message on as one frame, and masks a workload message again with a fresh key, so the workload can't choose the bytes on the upstream wire. When a placeholder credential applies to the host, the relay scrubs the `101` head and each server message after its decision. A scrub that changes a Ping or Pong sends it with no payload, and one that changes a Close keeps only its 2-byte code. The decision reads `payload_bytes` before the scrub, and `::response` records the bytes after it.
 
 We write the frame codec ourselves on hyper's upgrade, as #230 did. It's about 75 lines of #230's 593-line relay, and the hooks for policy and the scrub are most of the rest. tungstenite and tokio-tungstenite (0.30) answer every Ping and Close themselves, so a Ping or a Close from either side never reaches a decision. fastwebsockets (0.8) doesn't check which side masks.
 
@@ -76,7 +77,7 @@ A permit that doesn't read `upgrade` admits a handshake to its host. That lets t
 
 ### 3.2 Messages
 
-Each message that the workload sends is one `websocket:send`, and each message that the server sends is one `websocket:receive`. The gateway asks at the header of a binary message in one frame, and when the last frame has arrived for any other message (section 3.3). The two actions follow `http:request`. The input names the endpoint and the payload, and `payload_bytes` is the offer on `::request` and the delivery on `::response`, as `body_bytes` is. A message gets no reply, so neither action has an `output`, as `net:connect` has none.
+Each message that the workload sends is one `websocket:send`, and each message that the server sends is one `websocket:receive`. The gateway asks at the header of a server's binary message in one frame on a host with no credential, and when the last frame has arrived for any other message (section 3.3). The two actions follow `http:request`. The input names the endpoint and the payload, and `payload_bytes` is the offer on `::request` and the delivery on `::response`, as `body_bytes` is. A message gets no reply, so neither action has an `output`, as `net:connect` has none.
 
 ```text
 entity WebSocketOpcode enum ["text", "binary", "ping", "pong", "close"];
@@ -107,7 +108,7 @@ action "websocket:receive" appliesTo {
 | `opcode` | Frame opcode | Payload |
 |---|---|---|
 | `text` | `0x1` | 0 to 16 MiB of UTF-8 |
-| `binary` | `0x2` | 0 to 16 MiB from the workload. From the server, any length in one frame, or 0 to 16 MiB in more than one frame |
+| `binary` | `0x2` | 0 to 16 MiB from the workload. From the server, any length in one frame on a host with no credential, else 0 to 16 MiB |
 | `ping` | `0x9` | 0 to 125 bytes |
 | `pong` | `0xA` | 0 to 125 bytes, usually a copy of the Ping that it answers |
 | `close` | `0x8` | 0 bytes, or a 2-byte code and a UTF-8 reason, up to 125 bytes |
@@ -123,7 +124,7 @@ The end of a WebSocket writes no event. The `::response` of each Close records h
 
 ### 3.3 Refusals and limits
 
-A refused message never reaches the other side. The relay closes both sides and writes one Deny record. After a refusal by policy, in either direction, the workload gets 1008 and the server gets 1001, so the server learns nothing about the policy. After a protocol fault, the side that broke the rule gets the close code from the table. The other side gets 1001 after a workload fault or 1014 after a server fault.
+A refused message never reaches the other side. The relay closes both sides and writes one Deny record for a refusal by policy, a protocol fault, or a gateway fault. A drop or the idle clock writes none. After a refusal by policy, in either direction, the workload gets 1008 and the server gets 1001, so the server learns nothing about the policy. After a protocol fault, the side that broke the rule gets the close code from the table. The other side gets 1001 after a workload fault or 1014 after a server fault.
 
 | Cause | Signal |
 |---|---|
@@ -132,17 +133,22 @@ A refused message never reaches the other side. The relay closes both sides and 
 | A handshake that isn't valid RFC 6455 | 400 |
 | A `101` with a wrong `Upgrade`, `Connection`, or `Sec-WebSocket-Accept`, or with an extension | 502 |
 | `websocket:send` or `websocket:receive` refuses a message | 1008 to the workload, 1001 to the server |
-| A frame that breaks RFC 6455 | 1002 to the side that sent it |
-| Text or a Close reason that isn't valid UTF-8 | 1007 to the side that sent it |
-| A message over 16 MiB from the workload, or a held message over 16 MiB from the server | 1009 to the side that sent it, and no event |
-| One side drops | 1001 to the workload or 1014 to the server, and `::error` or `::response` for a message that was on its way to that side |
+| A frame that breaks RFC 6455 | 1002 to the side that sent it, and no event |
+| Text or a Close reason that isn't valid UTF-8 | 1007 to the side that sent it, and no event |
+| A held message over 16 MiB: any workload message, or a server message that the relay holds (list below) | 1009 to the side that sent it, and no event |
+| One side drops | 1014 to the workload when the server drops, or 1001 to the server when the workload drops, and `::error` or `::response` for a message that was on its way to the side that dropped |
+| The gateway can't decide a message for a reason other than policy, can't make a mask key, or can't record an outcome | 1011 to the workload, 1001 to the server |
 | Nothing moves on either leg for 300 s | 1001 to both sides |
+| Any of the above while the gateway is partway through a frame to one side | No Close to that side, because a Close can't go in the middle of a frame. The gateway ends that connection, that side sees an abnormal closure (1006), and the message records `::response` or `::error` with the bytes that side took |
 
-The 16 MiB cap is main's `max_body_bytes`. The relay follows main's rule after #345: what it streams has no cap, and what it holds whole is capped at 16 MiB.
-- A binary message in one frame names its length in its header, so the relay decides at the header and streams the payload. From the server it has no cap, as an HTTP response has none. From the workload it's capped at 16 MiB, as an HTTP request body is. So a budget on sent bytes overshoots by at most 16 MiB, as it does for HTTP.
-- The relay holds every other message whole. A text message must pass the UTF-8 check before it moves on. A message in more than one frame names its whole length only at its last frame. A server message on a host with a credential changes length when the scrub masks a secret.
+The 16 MiB cap is main's `max_body_bytes`. The relay follows main after #345: a request body is held whole and decided after its last byte, and a response streams. What the relay streams has no cap, and what it holds whole is capped at 16 MiB.
+- The relay holds every workload message whole and decides after its last byte, as main holds a request body. A decision at the header would come before the payload exists, so the workload could read a key after the decision and write it into the payload, and a guard such as `none_after_key` couldn't stop it. A budget on sent bytes overshoots by at most 16 MiB, as it does for HTTP.
+- A server's binary message in one frame names its length in its header. On a host with no credential, the relay decides at the header and streams the payload with no cap, as an HTTP response has none.
+- The relay holds every other server message whole. A text message must pass the UTF-8 check before it moves on. A message in more than one frame names its whole length only at its last frame. A message on a host with a credential changes length when the scrub masks a secret.
 
-So a WebSocket holds at most one held message in each direction, 16 MiB each. An HTTP exchange on main holds at most a 16 MiB request body. The 300 s is main's `upstream_read_deadline`. On main it's a total for each exchange, which would cut every WebSocket at 300 s. After the `101`, it limits idle time on both legs. A WebSocket holds one of main's 256 connections (`max_connections`) while it's open. Neither number becomes a config key.
+So a WebSocket holds at most one held message in each direction, 16 MiB each, and a scrubbed server message needs a second copy while the scrub runs. An HTTP exchange on main holds at most a 16 MiB request body. The 300 s is main's `upstream_read_deadline`. On main it's a total for each exchange, which would cut every WebSocket at 300 s. After the `101`, it limits idle time on both legs. A WebSocket holds one of main's 256 connections (`max_connections`) while it's open. Neither number becomes a config key.
+
+Box telemetry labels a message decision with its `websocket:*` action and the resource `host:port/path`.
 
 ## 4. What changes in a policy?
 
@@ -241,7 +247,7 @@ Each message costs one decision and one record, in either direction. A probe on 
 
 So a message waits about 4 ms after its last frame arrives, and costs about 6.7 to 7.5 ms of engine time at a small history. One mutex guards each engine call, so the whole box decides about 133 to 149 messages a second, in both directions together. We haven't measured a WebSocket that sends a message for each decision.
 
-A held message also waits while the gateway reads all of it, as a large HTTP request body does on main. A streamed binary message doesn't wait. The memory bound is one held message in each direction for each WebSocket, 16 MiB each.
+A held message also waits while the gateway reads all of it, as a large HTTP request body does on main. A streamed server binary message doesn't wait. The memory bound is one held message in each direction for each WebSocket, 16 MiB each.
 
 The growth of the history is the cost I'm least sure of. Dogwood keeps the events that match each `count` or `sum`, but no running total. So each decision of an action that the rule names adds up its matches in the lookback again, at about 1.2 µs for each one. A decision of another action skips the rule.
 
@@ -254,17 +260,18 @@ Every `http:request` waits on the same lock, so HTTP slows with the stream. The 
 
 ## 6. How do we deliver it?
 
-The work lands in two PRs after this doc, and each one fails closed, which means it refuses what it doesn't yet decide.
+The work lands in one PR after this doc, and it fails closed, which means it refuses what it doesn't decide.
 1. This doc.
-2. The policy PR adds `upgrade` to `http:request`, and adds `websocket:send` and `websocket:receive` with `Box::WebSocketOpcode` and their input. The gateway still strips `Upgrade`, so `upgrade` is always `""` and nothing raises a `websocket:*` action yet.
-3. The relay PR adds the handshake, the relay with its frame rules and scrub, the 16 MiB cap, the idle clock, and a decision for each message in each direction. It adds end-to-end tests through a real box, with an echo server and a SigV4 handshake to a signing host, as #197 ran them. It also runs one stream of 50 messages a second each way for 10 minutes, under `websocket_budget` with a 10-minute and a 1-minute lookback. The bar is that the relay keeps the stream's rate, and the estimate above says that only the 1-minute lookback passes.
+2. #476 adds the policy part and the relay together. The policy part adds `upgrade` to `http:request`, and adds `websocket:send` and `websocket:receive` with `Box::WebSocketOpcode` and their input. The relay adds the handshake, the frame rules and the scrub, the 16 MiB cap, the idle clock, and a decision for each message in each direction.
+
+#476 tests the relay through a real gateway, with a TLS workload and a TLS echo server, in `crates/egress-gateway/tests/websocket_e2e.rs`. A real box ran an echo server and a SigV4 handshake to a signing host on an earlier head of #476. A stream of 50 messages a second each way for 10 minutes, under `websocket_budget` with a 10-minute and a 1-minute lookback, isn't run yet. Its bar is that the relay keeps the stream's rate, and the estimate above says that only the 1-minute lookback passes.
 
 If we accept this design, we approve these changes to frozen surfaces, the interfaces that change only with an approved design:
-- The egress gateway's `pub use` set (the relay PR). `EffectAttempt::HttpRequest` gains `upgrade`, and `EffectAttempt` gains `WebSocketSend` and `WebSocketReceive`.
-- The policy crate's `pub use` set (the policy PR). `Request::Http` gains `upgrade`, and `Request` and `Outcome` each gain a `WebSocket` variant that serves both actions.
-- The policy action vocabulary (the policy PR): `upgrade` on `http:request`, the actions `websocket:send` and `websocket:receive`, and the enum `Box::WebSocketOpcode`.
+- The egress gateway's `pub use` set gains `WebSocketOpcode`. `EffectAttempt::HttpRequest` gains `upgrade`, and `EffectAttempt` gains `WebSocketSend` and `WebSocketReceive`.
+- The policy crate's `pub use` set gains `WebSocketDirection` and `WebSocketOpcode`. `Request::Http` and `Outcome::Http` gain `upgrade`, and `Request` and `Outcome` each gain a `WebSocket` variant that serves both actions.
+- The policy action vocabulary: `upgrade` on `http:request`, the actions `websocket:send` and `websocket:receive`, and the enum `Box::WebSocketOpcode`.
 
-Box rules are written in Dogwood, the upstream policy language and engine, and Dogwood fixes the event schema of a store. So a box created before the policy PR refuses to start until its operator creates it again.
+Box rules are written in Dogwood, the upstream policy language and engine, and Dogwood fixes the event schema of a store. So a box created before #476 refuses to start until its operator creates it again.
 
 ## 7. Key decisions
 
@@ -280,7 +287,7 @@ A message is what one side chooses to send, so each one is one decision. A guard
 
 ### D3. The gateway decides a message before any byte of it moves on
 
-HTTP decides a request with its `body_bytes`, so a message action decides a message with its `payload_bytes`, and a rule reads the same fact on both. A binary message in one frame names its length in its header, so the gateway decides there and streams the payload. At the first frame of a message with more than one frame, the gateway doesn't know the length, and text must pass the UTF-8 check before it moves on, so the gateway holds those messages whole. Otherwise a size rule couldn't refuse a large message before it moves on. The cost is the wait to read a held message, and memory up to the 16 MiB cap, both as for an HTTP request body on main.
+HTTP decides a request with its `body_bytes`, so a message action decides a message with its `payload_bytes`, and a rule reads the same fact on both. The workload chooses its bytes and when it writes them, so the gateway holds each workload message whole. A decision at the header would come before the payload exists, and a guard couldn't stop bytes written after it. A server's binary message in one frame names its length in its header, so on a host with no credential the gateway decides there and streams the payload, as main streams a response. At the first frame of a server message with more than one frame, the gateway doesn't know the length, and text must pass the UTF-8 check before it moves on, so the gateway holds those messages whole. Otherwise a size rule couldn't refuse a large message before it moves on. The cost is the wait to read a held message, and memory up to the 16 MiB cap, both as for an HTTP request body on main.
 
 ### D4. Control frames are messages
 
@@ -298,8 +305,9 @@ A guard over every action that sends bytes out names each action today, as `none
 
 1. The scrub reads one message at a time, so it misses a secret split across two messages or encoded again, for example in base64. A mask in a binary stream breaks the stream and shows the secret's length.
 2. There's no WebSocket over HTTP/2 (RFC 8441), no WebSocket compression, and no HTTP/3.
-3. A held message moves on only after the gateway has read all of it. So when one side sends one large text message, or a large message in more than one frame, its first byte reaches the other side late.
-4. A budget compares the bytes already delivered with its limit, so the message that crosses the limit passes in full, as an HTTP body does on main. A server's binary message in one frame has no cap, so on the receive side that message can be of any length, as an HTTP response on main can.
+3. A held message moves on only after the gateway has read all of it. So when the workload sends one large message, or the server sends a large text message or a large message in more than one frame, its first byte reaches the other side late.
+4. A budget compares the bytes already delivered with its limit, so the message that crosses the limit passes in full, as an HTTP body does on main. A server's binary message in one frame on a host with no credential has no cap, so on the receive side that message can be of any length, as an HTTP response on main can.
 5. Each message waits for a decision. The box decides about 133 to 149 messages a second in both directions together, at a small history and with no `count` or `sum`. A 10-minute `sum`, as in `websocket_budget`, lowers that to about 29 a second each way, below one realtime audio stream (section 5).
 6. A byte budget over HTTP bodies and WebSocket messages is two rules, so a workload can send up to the sum of their limits.
 7. A `formerly` guard acts once its record is written. The Strands Shell and the Python broker write the `fs:read` record before the read returns. The experimental native filesystem policy on macOS writes it after the kernel admits the open, so a message right after the read can leave first, as a request can on main.
+8. A Deny record for a protocol fault or a gateway fault carries the handshake's `GET` and path, so Box telemetry labels it `http:request`, not `websocket:send` or `websocket:receive`. Its reason names the WebSocket fault.
