@@ -418,18 +418,29 @@ message does: Box prefixes every line it prints with `strands-box:`.
 Each message names the table it came from.
 
 A target that fails while the box runs loses the record, and Box does not retry. When the run ends,
-Box prints one line on stderr if an export to a configured target failed, or if the final export did
-not finish in time:
+Box prints one line on stderr if any of these happened:
+
+- The telemetry queue was full and refused a record, or a record was still queued when the final
+  export stopped. This count is records.
+- An export to a configured target failed. This count is exports, not records: one export can carry
+  many records.
+- The final export did not finish in time.
 
 ```text
+strands-box: warning: telemetry records were lost: 441 records were dropped before export
 strands-box: warning: telemetry records were lost: 2 exports to the configured targets failed
 ```
 
-The count is exports, not records: one export can carry many records. The run's exit code does not
-change. The line does not cover everything that can be lost: a record that the telemetry queue
-refuses when it is full, an agent payload that Box refuses, a batch that a slow target does not
-accept before its export deadline while the box runs, and a relayed payload still in flight at
-shutdown are not counted. So the absence of this line does not prove that nothing was lost.
+When more than one cause applies, the line names each of them. The run's exit code does not change.
+
+The line does not cover everything that can be lost. It does not count an agent payload that Box
+refuses, a batch that a slow target does not accept before its export deadline while the box runs,
+or a relayed payload still in flight at shutdown. So the absence of this line does not prove that
+nothing was lost.
+
+While Box sends a full batch of its own records to a target, it refuses an agent payload for that
+target. This keeps the workload's own telemetry from slowing the export of Box records. Like
+any other refused payload, it still gets `200`.
 
 Set `STRANDS_BOX_TELEMETRY_DEBUG` to also print each failed export as it happens, with its cause. See
 [Failed sends](#failed-sends).

@@ -1,6 +1,7 @@
 //! One target, and the two ways a batch leaves it.
 
 use std::os::unix::fs::OpenOptionsExt as _;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
@@ -40,6 +41,88 @@ pub(crate) const SOURCE_AGENT: &str = "agent";
 /// `collector.rs` asserts.
 pub(crate) const REQUEST_DEADLINE: Duration = Duration::from_secs(4);
 
+/// The size of a full export batch, as the SDK configures it from this process's environment.
+pub(crate) static FULL_BATCH: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+    use opentelemetry_sdk::logs::{OTEL_BLRP_MAX_EXPORT_BATCH_SIZE, OTEL_BLRP_MAX_QUEUE_SIZE};
+    full_batch_of(
+        std::env::var(OTEL_BLRP_MAX_EXPORT_BATCH_SIZE)
+            .ok()
+            .as_deref(),
+        std::env::var(OTEL_BLRP_MAX_QUEUE_SIZE).ok().as_deref(),
+    )
+});
+
+/// The batch size the SDK's `BatchConfigBuilder` derives from its two variables.
+///
+/// It takes each variable that parses, keeps the default otherwise, and caps the batch at the queue.
+fn full_batch_of(batch: Option<&str>, queue: Option<&str>) -> u64 {
+    use opentelemetry_sdk::logs::{
+        OTEL_BLRP_MAX_EXPORT_BATCH_SIZE_DEFAULT, OTEL_BLRP_MAX_QUEUE_SIZE_DEFAULT,
+    };
+    let parsed = |value: Option<&str>, default: usize| {
+        value
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(default)
+    };
+    let batch = parsed(batch, OTEL_BLRP_MAX_EXPORT_BATCH_SIZE_DEFAULT)
+        .min(parsed(queue, OTEL_BLRP_MAX_QUEUE_SIZE_DEFAULT));
+    u64::try_from(batch).unwrap_or(u64::MAX)
+}
+
+/// The box records one lane handed to its SDK queue, and how many of them reached the exporter.
+#[derive(Debug, Default)]
+pub(crate) struct Backlog {
+    handed: AtomicU64,
+    reached: AtomicU64,
+    /// Whether the exporter is sending a full batch, so more box records can wait behind it.
+    busy: AtomicBool,
+}
+
+/// One batch in the exporter, which ends the lane's busy state when it drops.
+pub(crate) struct Exporting<'a> {
+    backlog: &'a Backlog,
+    full: bool,
+}
+
+impl Drop for Exporting<'_> {
+    fn drop(&mut self) {
+        if self.full {
+            self.backlog.busy.store(false, Ordering::SeqCst);
+        }
+    }
+}
+
+impl Backlog {
+    /// Count one record handed to the lane's queue.
+    pub(crate) fn handed(&self) {
+        self.handed.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Count the records of one batch that reached the exporter, for as long as it is sent.
+    pub(crate) fn exporting(&self, records: u64) -> Exporting<'_> {
+        let full = records >= *FULL_BATCH;
+        if full {
+            self.busy.store(true, Ordering::SeqCst);
+        }
+        self.reached.fetch_add(records, Ordering::SeqCst);
+        Exporting {
+            backlog: self,
+            full,
+        }
+    }
+
+    /// Whether the exporter is sending a full batch.
+    pub(crate) fn busy(&self) -> bool {
+        self.busy.load(Ordering::SeqCst)
+    }
+
+    /// The records handed to the queue that never reached the exporter, or have not yet.
+    pub(crate) fn unexported(&self) -> u64 {
+        let reached = self.reached.load(Ordering::SeqCst);
+        self.handed.load(Ordering::SeqCst).saturating_sub(reached)
+    }
+}
+
 /// Where one target's batches go.
 #[derive(Debug)]
 enum Wire {
@@ -64,16 +147,18 @@ pub(crate) struct TargetExporter {
     /// Set once when the provider is built.
     resource: std::sync::OnceLock<ResourceAttributesWithSchema>,
     /// Bumped for every batch a target refused, so a failing endpoint is not silent.
-    dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    dropped: std::sync::Arc<AtomicU64>,
     /// Whether a failed batch is also printed to stderr, as the config asks.
     reports_failures: bool,
+    /// The box records this target's lane has queued and not yet exported.
+    backlog: std::sync::Arc<Backlog>,
 }
 
 impl TargetExporter {
     /// Open the exporter `target` names, refusing what cannot work.
     pub(crate) fn open(
         target: &Target,
-        dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        dropped: std::sync::Arc<AtomicU64>,
     ) -> Result<Self> {
         Self::open_with(target, dropped, reqwest::Client::builder())
     }
@@ -81,7 +166,7 @@ impl TargetExporter {
     /// [`open`](Self::open) over a caller's client builder, so a test can pin name resolution.
     fn open_with(
         target: &Target,
-        dropped: std::sync::Arc<std::sync::atomic::AtomicU64>,
+        dropped: std::sync::Arc<AtomicU64>,
         client: reqwest::ClientBuilder,
     ) -> Result<Self> {
         let accepts = target.accepts();
@@ -97,6 +182,7 @@ impl TargetExporter {
                         resource: std::sync::OnceLock::new(),
                         dropped,
                         reports_failures: false,
+                        backlog: std::sync::Arc::default(),
                     });
                 }
                 // Only the parent chain; `O_NOFOLLOW` still guards the final component.
@@ -145,6 +231,7 @@ impl TargetExporter {
             resource: std::sync::OnceLock::new(),
             dropped,
             reports_failures: false,
+            backlog: std::sync::Arc::default(),
         })
     }
 
@@ -152,6 +239,16 @@ impl TargetExporter {
     pub(crate) fn reporting_failures(mut self, on: bool) -> Self {
         self.reports_failures = on;
         self
+    }
+
+    /// The box records this target's lane has queued and not yet exported.
+    pub(crate) fn backlog(&self) -> &std::sync::Arc<Backlog> {
+        &self.backlog
+    }
+
+    /// Whether an agent payload for this target yields to the box records waiting before it.
+    pub(crate) fn yields_to_the_box(&self) -> bool {
+        self.backlog.busy()
     }
 
     /// Take the provider's resource. Later calls are ignored.
@@ -221,8 +318,7 @@ impl TargetExporter {
         }
         let outcome = self.attempt(payload.route(), request).await;
         if let Err(error) = &outcome {
-            self.dropped
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.dropped.fetch_add(1, Ordering::Relaxed);
             if self.reports_failures {
                 eprintln!("strands-box: telemetry export failed: {error}");
             }
@@ -694,6 +790,20 @@ mod tests {
             text.starts_with(&failure.to_string()) && text.len() > failure.to_string().len(),
             "the causes follow the error: {text}"
         );
+    }
+
+    /// A full batch is the size the SDK derives from its variables, so the yield keeps pace with it.
+    #[test]
+    fn a_full_batch_is_the_size_the_sdk_configures() {
+        assert_eq!(full_batch_of(None, None), 512);
+        assert_eq!(full_batch_of(Some("64"), None), 64);
+        assert_eq!(full_batch_of(Some("not a number"), None), 512);
+        assert_eq!(
+            full_batch_of(None, Some("100")),
+            100,
+            "the queue caps the batch"
+        );
+        assert_eq!(full_batch_of(Some("4096"), Some("1000")), 1000);
     }
 
     /// A serialized request is one line, so two batches never share one.

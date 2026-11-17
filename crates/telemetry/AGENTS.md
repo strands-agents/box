@@ -266,19 +266,31 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   `LogExporter: Debug`, holding the value unwrapped put the vendor key on the SDK's diagnostic path.
   `Wire::Otlp` holds a whole `TargetSecret`, whose own `Debug` names the header and never the value, so
   the derive is safe. `an_exporters_debug_output_holds_no_secret` is the pin, and it failed before.
-- **`dropped` counts a failed BATCH, and a full queue not at all.** Every transport failure passes
-  through `TargetExporter::deliver`, which bumps the counter; before that, 50 records aimed at a
-  closed port reported zero. What it still cannot see is the SDK's own queue: `dropped_logs_count` is
-  private and reported only through `otel_warn!`, and **no `tracing` subscriber is installed anywhere
-  in this workspace**, so a full-queue drop is not counted, not printed and not observable. That is
-  why the counter is not on the facade. See
+- **`dropped` counts a failed BATCH; `Backlog` counts the records a full queue refused.** Every
+  transport failure passes through `TargetExporter::deliver`, which bumps the counter; before that,
+  50 records aimed at a closed port reported zero. The SDK's own queue is invisible to it:
+  `BatchLogProcessor::emit` drops on a full `try_send`, `dropped_logs_count` is private, and
+  `otel_warn!` fires once with no count. **No `tracing` subscriber is installed anywhere in this
+  workspace**, and one would still not give a count. Measured on `main` before the fix: 3001 refusals
+  in a burst behind an OTLP target answering after 300 ms, 2560 landed (512 in flight plus 2048
+  queued), 441 were lost, `dropped` was 0, the drain `Completed`, and no line printed.
+  So each lane owns one `Backlog`: `TargetLane::emit` counts each record it hands to the SDK, and
+  `SharedTarget::export` counts each record that reaches the exporter. At the drain, the difference
+  is the records no exporter received: refused by the full queue, or still queued when the drain
+  ended. `drain_warning` names it as the first cause. The count needs no new dependency and does
+  not read SDK internals. `a_record_the_full_queue_refuses_is_counted_and_reported` (landed plus
+  counted equals submitted), `a_burst_the_queue_holds_reports_no_loss`, and
+  `a_dropped_record_is_named_in_the_loss_line` are the pins; the first fails when the `handed` count
+  is removed. **No loss-marker record is written** to the target: the stored records are frozen, and
+  the count reaches only stderr. See
   [delivery is best effort](../../docs/design/decisions.md#delivery-is-best-effort).
-  **`drained` prints one stderr line when `dropped` is not zero or the drain did not finish.** Before
+  **`drained` prints one stderr line when a record never reached an export, `dropped` is not zero, or
+  the drain did not finish.** Before
   that, a failed batch and a failed exit flush were both silent, so a workload that filled the disk
   under the file target, or made an OTLP target hang, removed its own last records with no signal,
   and the run still exited 0. The line is at the drain and not in `deliver`, so a workload that makes
-  every batch fail cannot fill stderr. It names its cause: failed exports, an unfinished final
-  export, or both. An unfinished drain no longer increments `dropped`, because no export failed.
+  every batch fail cannot fill stderr. It names each cause: records dropped before export, failed
+  exports, and an unfinished final export. An unfinished drain no longer increments `dropped`, because no export failed.
   **A failed final export is not a timeout.** The SDK answers `shutdown` with the final export's
   own error, so a closed port or a full disk returns at once with an `Err`. `shut_down_bounded` now
   returns a `Shutdown` (`Completed`, `Failed`, `Unanswered`), and `drain_finished` calls the drain
@@ -320,10 +332,29 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
 - **`RELAY_CAPACITY` is 1, and 64 was wrong.** A file target's
   `tokio::sync::Mutex<std::fs::File>` is held across `write_all` and `sync_all`, and the same `Arc<TargetExporter>` serves the SDK lane and the relay
   list. So 64 concurrent relays each doing a write and an `fsync` stalled the box's own export worker,
-  and the SDK's queue overflow is not counted anywhere — which reopens exactly the audit-suppression
-  hole that
+  and the SDK's queue overflowed — which reopens exactly the audit-suppression hole that
   [the lane split](../../docs/design/decisions.md#the-agents-lane-and-the-boxs-lane-share-no-queue)
   claims is closed. One permit means the box's worker waits for at most one relay.
+  **A relay yields to a full batch of box records.** One permit still let the workload slow the
+  drain: each relayed line can be several MB and holds the file's lock for its write and `fsync`,
+  while the workload fills the queue with ordinary permitted requests. So `admitted` in `receive.rs`
+  skips a target while its exporter sends a full batch (`FULL_BATCH`, the SDK's default 512), and
+  counts the payload as refused, never as a lost box record. `Backlog::exporting` returns a guard
+  that sets `busy` for a full batch and clears it when the export ends, even when the SDK cuts it.
+  **The yield must not read `unexported`.** That count keeps every record the full queue refused,
+  so the first version, which yielded at 512 unexported records, refused every agent payload for the
+  rest of the run after one overflow. Found by review; `a_lane_that_overflowed_relays_again_once_idle`
+  pins it, and fails on that version. A second file handle for relays was
+  rejected, because two writers can tear a long line.
+  `a_relay_yields_while_the_box_exports_a_full_batch` is the pin, and it fails when the yield is
+  removed. Both tests hold the sink's requests behind a semaphore rather than a delay, so they do
+  not depend on timing. A relay already writing when a full batch starts still finishes, and one relay can
+  start in the gap between two full batches, so the box's worker waits for at most one relay per
+  batch. That gap is not measured. `FULL_BATCH` mirrors how the SDK sizes a batch from
+  `OTEL_BLRP_MAX_EXPORT_BATCH_SIZE` and `OTEL_BLRP_MAX_QUEUE_SIZE`, because `BatchConfig` keeps the
+  size private; `a_full_batch_is_the_size_the_sdk_configures` pins the rule. Nothing pins that `busy`
+  clears when the SDK cuts an export at its deadline: that rests on the SDK dropping the export
+  future, which drops the guard.
   **`a_flood_of_relayed_payloads_loses_no_decision` is the pin**, and it was the property's first one:
   200 concurrent posts land while 200 decisions are submitted, and every decision must reach the file.
   Its scope is the relay path, because the decision count stays inside the queue's own capacity — so it
