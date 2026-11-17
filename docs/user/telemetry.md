@@ -132,9 +132,11 @@ that the workload's log records and metrics reach every target.
 ### The credential
 
 `secret.ref` names where the box reads the key: `env://NAME` or `secret://NAME` for a variable in the
-environment of `strands-box run`, or `aws://PROFILE` or `credsd://ENVIRONMENT` for a SigV4 signature.
-The box holds the key in a vault of its own for each target, and attaches it on each request. A
-literal key is refused, and so is a `file://` or `op://` reference.
+environment of `strands-box run`, `aws://PROFILE` or `credsd://ENVIRONMENT` for a SigV4 signature, or
+a reference in a scheme that a [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table
+declares. The box holds the key in a vault of its own for each target, and attaches it on each
+request. A literal key is refused, and so is a `file://` reference. An `op://` reference is refused
+unless a table declares `op`.
 
 A credential needs an `https://` destination, unless the destination is loopback.
 
@@ -333,7 +335,7 @@ message does: Box prefixes every line it prints with `strands-box:`.
 | `` `<key>` does not apply to a `<kind>` target `` | A key belongs to another kind. |
 | ``a `cloudwatch_logs` target needs `log_group` and `log_stream` `` | A CloudWatch Logs target names no group or stream. |
 | ``needs `region`, an AWS region such as `us-west-2` `` | A CloudWatch target names no region, or an invalid one. |
-| `` `secret.ref` names no scheme this box reads `` | The reference is a literal value, or a scheme other than `env://`, `secret://`, `aws://`, or `credsd://`. |
+| `` `secret.ref` names no scheme this box reads `` | The reference is a literal value, or its scheme is not `env://`, `secret://`, `aws://`, `credsd://`, or a [declared scheme](config.md#secret-sourcescheme). |
 | `its destination is neither https nor loopback` | A credential would cross the network in the clear. |
 | `` the `aws://` credential cannot sign `` | The profile is missing, or holds no static keys. The run stops before the workload starts. |
 

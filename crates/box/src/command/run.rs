@@ -270,6 +270,7 @@ pub(crate) async fn execute(
         box_native_adapter_tests
     )))]
     let locked = prepare(config, argv, box_id)?;
+    refuse_declared_sources(&locked.record)?;
     locked.announce_credential_stores()?;
     let collector = telemetry::open(&locked.root, &locked.record)?;
     let name = locked.root.name().to_string();
@@ -308,6 +309,17 @@ pub(crate) async fn execute(
     });
     collector.drained().await;
     outcome
+}
+
+/// Refuse a record that declares a secret source, before any step reads a secret.
+fn refuse_declared_sources(record: &Record) -> Result<(), BoxError> {
+    match record.secret_source.keys().next() {
+        Some(scheme) => Err(ConfigError::SecretSourceFetch {
+            scheme: scheme.clone(),
+        }
+        .into()),
+        None => Ok(()),
+    }
 }
 
 /// Open this box's authority, translate every declared process, and supervise the agent.
@@ -605,6 +617,7 @@ mod tests {
             mcp: Vec::new(),
             contained_mcp: BTreeMap::new(),
             telemetry: BTreeMap::new(),
+            secret_source: Default::default(),
         }
     }
 
@@ -795,6 +808,26 @@ mod tests {
         assert_eq!(
             String::from_utf8(output).expect("the announcement is UTF-8"),
             "strands-box: [tool.aws-suite]: exposes ~/.aws/\\u{1b}[2J\\u{202e} (read)\n"
+        );
+    }
+
+    /// **A run stops before any step reads a secret when the record declares a secret source**,
+    /// and a record with no declaration is not refused.
+    #[test]
+    fn a_record_that_declares_a_secret_source_does_not_start() {
+        let mut record = record_with(None, BTreeMap::new());
+        refuse_declared_sources(&record).expect("no declaration, no refusal");
+        for scheme in ["op", "aws-secretsmanager"] {
+            record
+                .secret_source
+                .insert(scheme.to_string(), Default::default());
+        }
+        assert_eq!(
+            refuse_declared_sources(&record)
+                .expect_err("the record declares a source")
+                .to_string(),
+            "`[secret-source.aws-secretsmanager]` loaded, but this build cannot yet read a \
+             secret from a declared secret source, so the box does not start"
         );
     }
 }

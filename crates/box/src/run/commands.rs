@@ -546,6 +546,7 @@ mod tests {
             mcp: Default::default(),
             contained_mcp: Default::default(),
             telemetry: Default::default(),
+            secret_source: Default::default(),
         }
     }
 

@@ -332,6 +332,7 @@ fn an_all_hosts_endpoint_with_a_port_is_refused_at_configure() {
 /// `file://` target configured, started, and reported healthy — and then refused every request to
 /// its destination, because the vault minted a phantom the box had nowhere to place and the gateway
 /// requires one. Measured with a real, readable secret. Now it cannot be configured at all.
+/// The `op://` row is refused because no table declares it.
 #[test]
 fn an_undeliverable_credential_scheme_is_refused_at_configure() {
     if !fixture::namespace_launcher_is_usable() {
@@ -341,6 +342,7 @@ fn an_undeliverable_credential_scheme_is_refused_at_configure() {
         ("file-scheme", "file:///etc/tokens/gh"),
         ("op-scheme", "op://Private/GitHub/token"),
         ("cmd-scheme", "cmd://mint-a-token"),
+        ("strip-scheme", "strip-phantom://route"),
     ] {
         let (box_, output) = attempt_configure(
             name,
@@ -351,6 +353,216 @@ fn an_undeliverable_credential_scheme_is_refused_at_configure() {
         );
         assert_refused(&box_, &output, &["env://", "aws://"]);
     }
+}
+
+/// The body of a configuration that declares `program` as the source for `op://`, with `rest`
+/// after the declaration.
+fn declared_source(switch: bool, program: &str, rest: &str) -> String {
+    let switch = if switch {
+        "[experimental-features]\nsecret-sources = true\n"
+    } else {
+        ""
+    };
+    format!(
+        "{switch}[secret-source.op]\nprotocol = \"box.secret-source.v1\"\n\
+         command = [{program:?}, \"read\", \"op://{{ref}}\"]\n\
+         pass-secret-env = [\"OP_SERVICE_ACCOUNT_TOKEN\", \"OP_SESSION_*\"]\n\
+         reads = [\"~/.config/op\"]\n{rest}"
+    )
+}
+
+/// A route that reads its secret through the declared `op://` source.
+const DECLARED_ROUTE: &str = "[egress.c]\ndestinations = [\"api.example.test\"]\n\
+     secret.ref = \"op://Personal/GitHub/token\"\nsecret.env = \"GH_TOKEN\"\n";
+
+/// **A declared secret source loads and is stored, and the box does not start.**
+///
+/// The stand-in program writes a marker when it runs, so the absent marker proves that no step
+/// ran it: this build checks and stores a declaration, and reads no secret through one.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_declared_secret_source_is_stored_and_the_box_does_not_start() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let scratch = fixture::short_temporary_home();
+    let marker = scratch.path().join("the-program-ran");
+    let program = scratch.path().join("op-stand-in");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\ntouch {:?}\nprintf 'secret\\n'\n",
+            marker.display().to_string()
+        ),
+    )
+    .expect("write the stand-in program");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("make the stand-in program executable");
+    }
+    let (box_, output) = Request::with_config(
+        "declared-source",
+        &permit_egress_to("api.example.test", 443),
+        &declared_source(true, &program.display().to_string(), DECLARED_ROUTE),
+    )
+    .attempt();
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "the box must not start: {stderr}");
+    assert!(
+        stderr.contains(
+            "`[secret-source.op]` loaded, but this build cannot yet read a secret from a \
+             declared secret source, so the box does not start"
+        ),
+        "{stderr}"
+    );
+    assert!(!marker.exists(), "no step may run the declared program");
+
+    let record = std::fs::read_to_string(box_.root().join("private/box.toml"))
+        .expect("the load checks passed, so the record is stored");
+    let record: toml::Value = toml::from_str(&record).expect("the record is TOML");
+    assert_eq!(record["version"].as_integer(), Some(38));
+    assert_eq!(
+        record["experimental-features"]["secret-sources"].as_bool(),
+        Some(true)
+    );
+    let expected: toml::Value = toml::from_str(&format!(
+        "protocol = \"box.secret-source.v1\"\n\
+         command = [{:?}, \"read\", \"op://{{ref}}\"]\n\
+         pass-secret-env = [\"OP_SERVICE_ACCOUNT_TOKEN\", \"OP_SESSION_*\"]\n\
+         reads = [\"~/.config/op\"]\n",
+        program.display().to_string()
+    ))
+    .expect("the expected table is TOML");
+    assert_eq!(record["secret-source"]["op"], expected);
+    let expected: toml::Value =
+        toml::from_str("ref = \"op://Personal/GitHub/token\"\nenv = \"GH_TOKEN\"\n")
+            .expect("the expected table is TOML");
+    assert_eq!(record["egress"]["c"]["secret"], expected);
+}
+
+/// **Each unsafe secret source configuration is refused through the shipped binary**, before a
+/// box exists.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_unsafe_secret_source_configuration_is_refused_at_configure() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let env_route = |name: &str| {
+        format!(
+            "[egress.c]\ndestinations = [\"api.example.test\"]\nsecret.ref = \"env://{name}\"\n"
+        )
+    };
+    for (name, body, expected) in [
+        (
+            "src-no-switch",
+            declared_source(false, "/usr/bin/true", DECLARED_ROUTE),
+            "invalid `[secret-source.op]` table: a secret source is experimental: set \
+             `secret-sources = true` in `[experimental-features]` to load it",
+        ),
+        (
+            "src-bare-program",
+            declared_source(true, "op", DECLARED_ROUTE),
+            "invalid `[secret-source.op]` table: credential error: the secret source \"op\" \
+             names the program \"op\", which is not an absolute path",
+        ),
+        (
+            "src-no-variable",
+            declared_source(
+                true,
+                "/usr/bin/true",
+                "[egress.c]\ndestinations = [\"api.example.test\"]\n\
+                 secret.ref = \"op://Personal/GitHub/token\"\n",
+            ),
+            "a reference in the op:// scheme needs secret.env",
+        ),
+        (
+            "src-own-credential",
+            declared_source(
+                true,
+                "/usr/bin/true",
+                &env_route("OP_SERVICE_ACCOUNT_TOKEN"),
+            ),
+            "the variable OP_SERVICE_ACCOUNT_TOKEN is a credential of the secret source `op`",
+        ),
+        (
+            "src-own-prefix",
+            declared_source(true, "/usr/bin/true", &env_route("OP_SESSION_abc")),
+            "the variable OP_SESSION_abc is a credential of the secret source `op`",
+        ),
+        (
+            "src-not-declared",
+            DECLARED_ROUTE.to_string(),
+            "secret scheme \"op\" has no `[secret-source.op]` table",
+        ),
+    ] {
+        let (box_, output) =
+            Request::with_config(name, &permit_egress_to("api.example.test", 443), &body)
+                .env("OP_SERVICE_ACCOUNT_TOKEN", "ops_real_service_account_token")
+                .env("OP_SESSION_abc", "real_session_token")
+                .attempt();
+        assert_refused(&box_, &output, &[expected]);
+        assert!(
+            !box_.root().join("private/box.toml").exists(),
+            "{name}: a refused configuration stores no record"
+        );
+    }
+}
+
+/// **`secret.env` is refused while `secret-sources` is off**, through the shipped binary, on each
+/// operating system.
+#[test]
+fn a_placeholder_variable_key_is_refused_while_the_switch_is_off() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let (box_, output) = attempt_configure(
+        "env-key-no-switch",
+        &permit_egress_to("api.example.test", 443),
+        &format!(
+            "[egress.c]\ndestinations = [\"api.example.test\"]\n\
+             secret.ref = \"env://{SECRET_VARIABLE}\"\nsecret.env = \"{SECRET_VARIABLE}\"\n"
+        ),
+    );
+    assert_refused(
+        &box_,
+        &output,
+        &[
+            "secret.env is experimental: set `secret-sources = true` in \
+           `[experimental-features]` to load it, or remove secret.env, because an env:// \
+           reference already names its variable",
+        ],
+    );
+    assert!(
+        !box_.root().join("private/box.toml").exists(),
+        "a refused configuration stores no record"
+    );
+}
+
+/// **A declared secret source is refused on an operating system with no protection for it**,
+/// through the shipped binary.
+#[cfg(not(target_os = "macos"))]
+#[test]
+fn a_declared_secret_source_is_refused_where_no_protection_is_built() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let (box_, output) = Request::with_config(
+        "declared-source",
+        &permit_egress_to("api.example.test", 443),
+        &declared_source(true, "/usr/bin/true", DECLARED_ROUTE),
+    )
+    .attempt();
+    assert_refused(
+        &box_,
+        &output,
+        &[
+            "invalid `[secret-source.op]` table: a secret source loads on macOS only: protection \
+           of its program and its files from the workload is not built for Linux yet",
+        ],
+    );
 }
 
 /// One table over the refusals an operator is most likely to trip, through the shipped binary.

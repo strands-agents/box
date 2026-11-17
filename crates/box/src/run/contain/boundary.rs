@@ -2003,6 +2003,7 @@ mod tests {
                 mcp,
                 contained_mcp: Default::default(),
                 telemetry: Default::default(),
+                secret_source: Default::default(),
             };
             let attachment = Attachment {
                 proxy_port: 41080,

@@ -41,7 +41,9 @@ the scrub of an echoed secret. `strands-box-egress-gateway` applies the edits to
 - Keep backend selection a named `Backend` profile over a private enum. Return no trait object.
 - Keep `Backend::declared` the one way a caller names a program, and keep `SecretSourceCommand`'s
   fields sealed behind `new`, `output`, `pass_env`, and `pass_secret_env`. Export no output enum;
-  `output` takes the `box.toml` word.
+  `output` takes the `box.toml` word. `passes_as_secret` is the one read of a declaration: it
+  answers for one variable name, so the box refuses a reference to the credential of a vault with
+  the prefix rule of this crate. Return no pass list from an accessor.
 - Keep `Backend` `Clone` over one shared profile, so each clone of a declared backend shares each
   fetched secret. Give the held secrets no accessor: they leave through `Backend::resolve` alone,
   and their key is a reference name, never a destination or a tenant.

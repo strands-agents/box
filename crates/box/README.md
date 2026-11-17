@@ -80,10 +80,10 @@ every harness's stored credentials, through an interpreter that runs outside con
 refusal tells the operator to make a directory for the workspace and to work there, and
 `the_operator_home_is_not_a_project` pins it.
 
-The config file's complete key set is **twelve**: `name`, `box_dir`, `policy`, `[agent]`,
-`[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
-`[experimental-features]`, `file-attributes`, `[limits]`, and `[gateway]`. `name` and `box_dir`
-are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
+The config file's complete key set is **fourteen**: `name`, `box_dir`, `policy`, `[agent]`,
+`[tool.<label>]`, `[egress.<name>]`, `[secret-source.<scheme>]`, `[mcp.<name>]`,
+`[telemetry.<kind>]`, `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`.
+`name` and `box_dir` are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
 every removed spelling is refused by its own name with its replacement.
 `four_inputs.rs::the_config_record_carries_only_the_four_inputs` pins the set, and
 `run_config.rs::name_is_required_and_every_removed_key_is_refused_by_name` pins the refusals.
@@ -332,18 +332,30 @@ secret.ref   = "aws://prod"
 |---|---|---|
 | `destinations` | required | One or more destinations this secret is attached at. Each is an exact host, a `*.` suffix wildcard, an explicit `:port`, and a path prefix or `/*suffix`. Not a regex. |
 | `protocol` | `http` | What the destination speaks. `mcp` makes the gateway parse JSON-RPC frames and raise `mcp:call`; `http` is an ordinary request. |
-| `secret.ref` | required unless a backend is declared | `env://NAME`, `aws://profile` (static keys), or a bare `aws://` (the AWS default credential chain). No other scheme. See below. Beside a backend it must be `env://`, and it is phantom-only: the box provisions the placeholder and strips it, and never injects the real destination credential (the backend handles the destination's auth). |
+| `secret.ref` | required unless a backend is declared | `env://NAME`, `aws://profile` (static keys), a bare `aws://` (the AWS default credential chain), or a reference in a scheme that a `[secret-source.<scheme>]` table declares. No other scheme. See below. Beside a backend it must be `env://`, and it is phantom-only: the box provisions the placeholder and strips it, and never injects the real destination credential (the backend handles the destination's auth). |
+| `secret.env` | `NAME` for `env://NAME` | Experimental: refused unless `[experimental-features] secret-sources = true`. The workload variable that holds the phantom. Required with a declared scheme. With `env://NAME` it is optional and equals `NAME`. A signed route and a backend `auth` take none. Two entries with one variable and different references are refused. |
 | `backends.url` | — | A single backend this destination re-routes to, as `scheme://host[:port][/prefix]` (`https` or `http`; a path prefix is allowed, a query or fragment is not). Box dials the backend, presents the backend host (SNI, certificate, and `Host`), prepends the `url`'s path prefix to the agent's path, and keeps the original destination and path in policy and audit. At most one. |
-| `backends.auth.ref` | — | `env://NAME` for the backend's own token. The box attaches it (no phantom; it takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `inject` or `phantom_prefix`). A signed (`aws://` or `credsd://`) auth is refused, and an auth needs an `https` backend. |
+| `backends.auth.ref` | — | `env://NAME`, or a reference in a declared scheme, for the backend's own token. The box attaches it (no phantom; it takes `backends.auth.header`, `backends.auth.placement`, `backends.auth.prefix`, `backends.auth.param`, but no `env`, `inject`, or `phantom_prefix`). A signed (`aws://` or `credsd://`) auth is refused, and an auth needs an `https` backend. |
 | `secret.placement` | `header` | Where the credential lands: `header`, `basic_auth`, or `query_param`. |
 | `secret.header` | `Authorization` | The header the credential is attached under. `header` placement only. |
 | `secret.prefix` | `Bearer ` for `Authorization`, else empty | Literal text prepended to the credential in the header value. `header` placement only, and carries no braces. |
 | `secret.param` | required for `query_param` | The query-parameter name the credential is attached under. |
-| `secret.inject` | `phantom` | When the gateway attaches the real secret. `phantom` attaches it only to a request that carries the route's phantom, and refuses any other; `always` attaches it to every request to the destinations, and warns. `env://` only. |
-| `secret.phantom_prefix` | `strands_box_` | The literal prefix the minted phantom carries, before its random suffix. `env://` only, so a harness that checks its key format accepts the phantom. |
+| `secret.inject` | `phantom` | When the gateway attaches the real secret. `phantom` attaches it only to a request that carries the route's phantom, and refuses any other; `always` attaches it to every request to the destinations, and warns. `env://` and a declared scheme only. |
+| `secret.phantom_prefix` | `strands_box_` | The literal prefix the minted phantom carries, before its random suffix. `env://` and a declared scheme only, so a harness that checks its key format accepts the phantom. |
 
 The entry carries no credential-type key, so a `secret.type` on any scheme is an unknown key the box
 refuses.
+
+**A `[secret-source.<scheme>]` table declares the host program that reads a secret for a scheme.**
+It is experimental: it needs `[experimental-features] secret-sources = true`, and it loads on macOS
+only. The `secret.env` key needs the same switch, on each operating system. The table takes `protocol`, `command`, `output`, `pass-env`, `pass-secret-env`, `reads`, and
+`deny`, and `credentials::SecretSourceCommand` checks the first five. A reference in that scheme is
+then valid on an egress route and a remote MCP server (with `secret.env`), and on a backend
+`auth.ref` and a telemetry `secret.ref` (with no placeholder variable). An `env://NAME` or
+`secret://NAME` reference is refused when a `pass-secret-env` entry names `NAME`. The record stores
+each declaration at record version 38. This build reads no secret through a declaration: `run`
+stops after the load checks, and `policy generate-schema` stops for a remote MCP server whose secret
+names a declared scheme. `record::config::secret_source` holds the table and its checks.
 
 **A host pattern is not a reachability claim.** An entry says only what is
 attached to a request the policy already permitted, so widening one attaches a
@@ -383,15 +395,14 @@ box has no setting that refuses the bare form. See
 [the egress guide](../../docs/user/egress.md#credential-sources) for both forms, the warning, and the
 `~/.aws` rule.
 
-**Only `env://` and `aws://` are accepted**, and the config load refuses the rest by
-name.
-`file://` and `op://` resolve host-side and place nothing in the workload's
-environment — which for a credential the workload must present is not a different
-mode but an unusable one: the vault mints a phantom the box cannot deliver, so every
-request to that destination is refused for a missing placeholder. `cmd://` and
-`oauth2://` have no mint path at all. The vault still dereferences `file://` and
-`op://` for callers that need one secret and no placeholder, such as an ingress
-front door; this narrows the box's config surface, not the crate's.
+**Only `env://`, `aws://`, and a scheme that a `[secret-source.<scheme>]` table declares are
+accepted**, and the config load refuses the rest by name. `file://` resolves host-side and names no
+variable for a placeholder, so the box cannot deliver a credential that the workload must present.
+`op://` is accepted only when a `[secret-source.op]` table declares it. `secret.env` then names the
+variable that holds the phantom. `cmd://` and `oauth2://` have no mint path at all. The vault still
+dereferences `file://` and its built-in `op://` source for callers that need one secret and no
+placeholder, such as an ingress front door. This rule narrows the config surface of the box, not
+the surface of the crate.
 
 A credential whose value is empty, only whitespace, or carrying a control character
 is refused — at the config load for `env://`, and by the vault at box load for any
