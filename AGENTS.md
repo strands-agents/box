@@ -98,8 +98,10 @@ Do not grant the agent `process-exec*`, the host OS's shell, or an inherited `PA
 for metadata pairing and fork-filter limits.
 
 The broader execution and metadata grants for a tool or MCP server apply only to its own sandbox.
-Keep the agent's profile unchanged by those exceptions, including its write-xor-execute restrictions.
-**Before changing a profile**, read [macOS measurements](crates/containment/AGENTS.md#macos-measured)
+Keep the agent's macOS sandbox profile unchanged by those exceptions, including its
+write-xor-execute restrictions.
+**Before changing a macOS sandbox profile**, read
+[macOS measurements](crates/containment/AGENTS.md#macos-measured)
 and the tool and MCP rules linked above. Preserve
 `the_agent_profile_never_carries_broad_exec` and `a_leaf_carries_broad_exec_and_the_main_box_does_not`.
 
@@ -187,10 +189,10 @@ squash, or force-push. Rebase onto `main` only to resolve a conflict.
 
 The first commit has a subject, then exactly these three sections in order:
 
-- `## Problem` — what is wrong and what it costs, before describing a solution.
-- `## Solution` — what changed and every interface that moved. Name a rejected alternative only
+- `## Problem`: what is wrong and what it costs, before describing a solution.
+- `## Solution`: what changed and every interface that moved. Name a rejected alternative only
   when a reviewer needs the reason.
-- `## Tests` — what ran and what it proved. Put a named test beside each behaviour claim.
+- `## Tests`: what ran and what it proved. Put a named test beside each behaviour claim.
   State what did not run and what remains broken.
 
 Later commits need only a subject that names the feedback or defect addressed.

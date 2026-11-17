@@ -82,13 +82,14 @@ files (`git status --short`) — new crates/specs are part of the feature.
 
    **(a) Did an interface move?** Walk the frozen surface — do not reason from the diff
    summary, `grep` the actual definitions:
-   - CLI verbs/flags — `define/config.rs` `Cli`, `Command`: a verb added or removed, a
+   - CLI verbs/flags — `command/cli.rs` `Cli`, `Command`: a verb added or removed, a
      flag renamed, a short form changed, an `Option<String>` given a clap `default_value`
      (that specific one silently kills the config file's `name` key), `trailing_var_arg`
      altered.
-   - `strands-box.toml` — `ConfigFile`, `EgressSection`, `EgressTarget`: a key added,
-     renamed, retyped, or made required. **A new key is a breaking change here**, because
-     both carry `deny_unknown_fields`; likewise a removed key turns an existing operator
+   - `box.toml` — `ConfigFile` in `record/config/mod.rs` and the section structs in
+     `record/config/` (`EgressEntry` and its siblings): a key added, renamed, retyped, or
+     made required. **A new key is a breaking change here**, because they carry
+     `deny_unknown_fields`; likewise a removed key turns an existing operator
      file into a hard parse error.
    - The four box inputs (policy, credentials, name, workload). A fifth input, or a key
      naming a host path, a working directory, an env overlay, a proxy port, or a mechanism
@@ -97,7 +98,7 @@ files (`git status --short`) — new crates/specs are part of the feature.
      added, removed, or retyped **without** a version bump is the worst case, since an old
      artifact then parses as if it were new. Confirm the bump; if the shape changed and the
      const did not, quote both lines.
-   - Broker wire protocol — `serve/broker/protocol.rs` `PROTOCOL_VERSION`: frame layout,
+   - Broker wire protocol — `run/broker/protocol.rs` `PROTOCOL_VERSION`: frame layout,
      message kinds, the `Open`→`Call`→`StdinEof` sequence. Same bump rule. Note that the
      alias image is materialized by `configure`, so a protocol change that does not say
      "re-run `configure`" ships a stale-alias failure.
@@ -377,7 +378,7 @@ for DESIGN, the KD/spec/tenet/pattern it violates)`.
 
 ```
 FREEZE   (always present for a crates/** diff, even when clean)
-- surfaces checked: CLI | strands-box.toml | four inputs | Record/LiveRecord | wire protocol
+- surfaces checked: CLI | box.toml | four inputs | Record/LiveRecord | wire protocol
   | alias names | policy vocabulary | crate façades | workload env | operator-facing docs
 - interface changes: none  (or: path/to/file.rs:12 — <surface> <what moved>; approved by <KD/spec> | UNAPPROVED)
 - premise changes: none    (or: path/to/file.rs:34 — weakens <premise>; UNAPPROVED)
