@@ -224,7 +224,7 @@ pub(crate) enum ConfigError {
     ExperimentalX86Support,
 
     #[error(
-        "experimental feature `{feature}` requires a macOS build with `native-filesystem-policy`"
+        "experimental feature `{feature}` requires a supported macOS or Linux ARM64 build with `native-filesystem-policy`"
     )]
     ExperimentalFeatureUnavailable { feature: &'static str },
 
