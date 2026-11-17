@@ -332,27 +332,30 @@ fn a_message_over_the_cap_closes_with_1009_and_no_decision() {
 }
 
 #[test]
-fn a_binary_frame_streams_through_in_pieces() {
+fn a_workload_binary_message_is_decided_after_its_last_byte() {
     let frames = Arc::new(Mutex::new(Vec::new()));
     let mut session = Session::start(false, 100, echo(Arc::clone(&frames)));
     assert!(session.handshake("").starts_with("HTTP/1.1 101"));
     let payload: Vec<u8> = (0..80).collect();
     let wire = frame(true, 2, &payload, true);
     session.client.send_raw(&wire[..41]);
-    std::thread::sleep(Duration::from_millis(50));
+    std::thread::sleep(Duration::from_millis(100));
+    let decided = session.decided();
+    assert!(
+        !decided.iter().any(|entry| entry.starts_with("send")),
+        "{decided:?}"
+    );
     session.client.send_raw(&wire[41..]);
     assert_eq!(
         read_frame(&mut session.client),
         Some((true, 2, payload.clone()))
     );
     assert_eq!(*frames.lock().unwrap(), [(true, 2, payload)]);
-    let decided = session.decided();
-    for entry in [
-        "send Binary 80 -> Completed(80)",
-        "receive Binary 80 -> Completed(80)",
-    ] {
-        assert!(decided.contains(&entry.to_string()), "{decided:?}");
-    }
+    assert!(
+        session
+            .decided()
+            .contains(&"send Binary 80 -> Completed(80)".to_string())
+    );
 }
 
 #[test]
@@ -490,5 +493,12 @@ fn a_cut_off_message_records_the_bytes_the_other_side_took() {
     session.client.send_raw(&frame(true, 1, b"x", false));
     let outcome = session.wait_for(&format!("{flood} -> "));
     assert!(outcome.contains("Partial"), "{outcome}");
-    session.client.abort();
+    let mut delivered = Vec::new();
+    let ended = session.client.read_to_end(&mut delivered);
+    let timed_out = |kind| matches!(kind, io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut);
+    assert!(
+        !ended.as_ref().is_err_and(|e| timed_out(e.kind())),
+        "{ended:?}"
+    );
+    assert!(delivered.len() < 10 + FLOOD, "{}", delivered.len());
 }

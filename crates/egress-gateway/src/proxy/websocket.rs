@@ -151,9 +151,9 @@ fn header(buffer: &[u8]) -> Result<Option<Header>, &'static str> {
     }))
 }
 
-fn mask(payload: &mut [u8], key: Option<[u8; 4]>, offset: usize) {
+fn mask(payload: &mut [u8], key: Option<[u8; 4]>) {
     if let Some(key) = key {
-        for (byte, k) in payload.iter_mut().zip(key.iter().cycle().skip(offset % 4)) {
+        for (byte, k) in payload.iter_mut().zip(key.iter().cycle()) {
             *byte ^= k;
         }
     }
@@ -170,7 +170,7 @@ fn encode(opcode: u8, payload: &[u8], key: Option<[u8; 4]>) -> Vec<u8> {
     frame.reserve(payload.len());
     let start = frame.len();
     frame.extend_from_slice(payload);
-    mask(&mut frame[start..], key, 0);
+    mask(&mut frame[start..], key);
     frame
 }
 
@@ -447,12 +447,11 @@ impl Session<'_> {
                 if frame.opcode == BINARY
                     && frame.fin
                     && message.is_none()
-                    && self.scrub_for(side).is_none()
-                    && (side == Side::Server || frame.len <= limit)
+                    && side == Side::Server
+                    && self.scrub.is_none()
                 {
                     buffer.drain(..frame.size);
-                    self.stream(side, &frame, &mut buffer, from, to, leg)
-                        .await?;
+                    self.stream(frame.len, &mut buffer, from, to, leg).await?;
                     continue;
                 }
                 let held = match &message {
@@ -468,7 +467,7 @@ impl Session<'_> {
                 let rest = buffer.split_off(frame.size + frame.len);
                 let mut payload = std::mem::replace(&mut buffer, rest);
                 payload.drain(..frame.size);
-                mask(&mut payload, frame.key, 0);
+                mask(&mut payload, frame.key);
                 let whole = match (frame.opcode, message.take()) {
                     (CLOSE | PING | PONG, held) => {
                         message = held;
@@ -524,8 +523,7 @@ impl Session<'_> {
 
     async fn stream<R, W>(
         &self,
-        side: Side,
-        frame: &Header,
+        len: usize,
         buffer: &mut Vec<u8>,
         from: &mut R,
         to: &mut W,
@@ -535,28 +533,20 @@ impl Session<'_> {
         R: AsyncRead + Unpin,
         W: AsyncWrite + Unpin,
     {
-        let len = frame.len;
-        let out = out_key(side)?;
-        let permit = self.decide(side, BINARY, len)?;
-        let key = frame
-            .key
-            .zip(out)
-            .map(|(a, b)| std::array::from_fn(|i| a[i] ^ b[i]));
-        let mut first = encode_head(BINARY, len, out);
+        let permit = self.decide(Side::Server, BINARY, len)?;
+        let mut first = encode_head(BINARY, len, None);
         leg.begin(permit, first.len(), len);
         let mut sent = buffer.len().min(len);
-        mask(&mut buffer[..sent], key, 0);
         first.extend(buffer.drain(..sent));
         let mut error = self.write(to, &first, leg).await;
         while error.is_none() && sent < len {
-            self.read(side, from, buffer).await?;
+            self.read(Side::Server, from, buffer).await?;
             let piece = buffer.len().min(len - sent);
-            mask(&mut buffer[..piece], key, sent);
             error = self.write(to, &buffer[..piece], leg).await;
             buffer.drain(..piece);
             sent += piece;
         }
-        leg.end(side, error)
+        leg.end(Side::Server, error)
     }
 
     async fn read<R: AsyncRead + Unpin>(

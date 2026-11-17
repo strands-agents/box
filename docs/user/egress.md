@@ -325,10 +325,11 @@ permit must allow it. A refusal answers the handshake, or closes the WebSocket:
 | 403 `WebSocket refused for an MCP server` | The handshake went to an HTTP MCP server's host. |
 | 502 `WebSocket upgrade response refused` | The server's `101` doesn't answer the handshake, or names an extension. |
 | Close 1008 | Policy refused a message. The server gets 1001. |
-| Close 1002, 1007, or 1009 | A frame broke RFC 6455, a text message or Close reason wasn't UTF-8, or a message from the workload, or one that the gateway reads whole, was over 16 MiB. A binary message in one frame from the server streams and has no cap. |
+| Close 1002, 1007, or 1009 | A frame broke RFC 6455, a text message or Close reason wasn't UTF-8, or a message that the gateway reads whole was over 16 MiB. The gateway reads every workload message whole. A binary message in one frame from the server streams and has no cap. |
 | Close 1014 | The server broke RFC 6455 or dropped. |
 | Close 1011 | The gateway couldn't decide a message or record its outcome. |
 | Close 1001 | No byte moved on either leg for 300 seconds. |
+| No Close | The gateway was partway through a frame to the workload when the WebSocket ended, so it closed the connection without a Close. The refusal record or the message's `::response` says why. |
 
 Responses arrive progressively, including on credentialed routes. Credential redaction retains a
 short tail until more bytes arrive or the response completes cleanly. Requests and HTTP MCP
