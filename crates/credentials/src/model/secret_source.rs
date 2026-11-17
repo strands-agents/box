@@ -313,11 +313,11 @@ mod tests {
             marker(AWS_SENTINEL_REF),
             marker(STRIP_SENTINEL_REF),
         ];
-        let refused: Vec<bool> = owned
+        let reserved: Vec<bool> = owned
             .iter()
-            .map(|scheme| SecretSourceCommand::check_scheme(scheme).is_err())
+            .map(|scheme| RESERVED_SECRET_SCHEMES.contains(&scheme.as_str()))
             .collect();
-        assert_eq!(refused, [true; 8], "{owned:?}");
+        assert_eq!(reserved, [true; 8], "{owned:?}");
     }
 
     #[test]
