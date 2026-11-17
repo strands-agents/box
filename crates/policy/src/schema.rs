@@ -25,6 +25,8 @@ pub(crate) struct ActionSchema {
     pub(crate) cedar: Schema,
     pub(crate) tool_actions: HashSet<EntityUid>,
     pub(crate) tool_inputs: crate::mcp_input::ToolInputs,
+    /// The paths the installed permits name, which `check_against` fills.
+    pub(crate) path_permits: Vec<crate::spelling::PathPermit>,
 }
 
 /// Compose the canonical schema with ordered MCP schema fragments.
@@ -69,6 +71,7 @@ pub(crate) fn composed_action_schema(
         cedar,
         tool_actions,
         tool_inputs,
+        path_permits: Vec::new(),
     })
 }
 

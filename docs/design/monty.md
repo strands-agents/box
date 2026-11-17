@@ -17,8 +17,8 @@ The box's trusted process runs outside the agent's sandbox. It holds the policy 
 which accepts the agent's requests to Box's interpreters, and the egress gateway, which checks and
 forwards every outbound request. The reachable paths check is deny-only and runs after policy. It
 refuses the box directory, the `box.toml` and policy this run loaded, every credential store the
-sandbox refuses unless the configuration names it, and any path outside the operator's home, the
-agent's `HOME`, and the workspace.
+sandbox refuses unless a `permit` names the path inside it, and any path outside the operator's
+home, the agent's `HOME`, and the workspace.
 
 For the Python that Monty supports, the file operations, `fetch()`, and the rules to write, read
 [Python scripts in a box](../user/monty.md).

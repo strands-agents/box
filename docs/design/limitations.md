@@ -44,8 +44,8 @@ So a history rule can't account for a read that took one of those routes. The
 
 Strands Shell and Monty run outside every sandbox, so a broad
 filesystem permit lets them reach paths the agent's own grants never could. Credential stores are
-the exception: the interpreters refuse each store that the sandbox refuses, unless the
-configuration names it. See [the interpreters meet the sandbox's credential
+the exception: the interpreters refuse each store that the sandbox refuses, unless a `permit` names
+a path inside it. See [the interpreters meet the sandbox's credential
 floor](decisions.md#no-credential-floor-sits-beneath-the-interpreters). Keep filesystem permits to
 the paths the task needs.
 

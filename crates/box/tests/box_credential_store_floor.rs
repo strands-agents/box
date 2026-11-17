@@ -2,8 +2,9 @@
 //!
 //! The policy here is the one a security review found: a permit on every path under the home. The
 //! workload asks each interpreter for a key and for a configuration file in a credential store, and
-//! for an ordinary file beside them as the control. A second box names one store in its `read`
-//! list, which lifts the floor for that store while policy still decides each access.
+//! for an ordinary file beside them as the control. A second box adds a `permit` that names paths
+//! inside one store, which lifts the floor for those paths while policy still decides each access.
+//! The agent's own filesystem lists never lift it.
 
 #[path = "support/fixture.rs"]
 mod fixture;
@@ -105,16 +106,29 @@ fn a_home_wide_permit_reaches_no_credential_store_through_either_interpreter() {
     );
 }
 
+/// The home-wide rules plus a read permit that names the paths inside one store.
+fn naming_policy(base: &str, rules: &str) -> String {
+    format!("{base}{rules}")
+}
+
+const READ_AWS: &str = r#"
+permit (principal, action == Box::Action::"fs:read", resource)
+  when { context.input.path like "~/.aws/*" };
+"#;
+
 #[test]
-fn a_store_named_by_a_read_entry_reads_and_stays_unwritable() {
+fn a_store_a_read_permit_names_reads_and_stays_unwritable() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let request =
-        Request::with_policy("credential-floor-named", HOME_WIDE_POLICY).without_agent_home();
+    let request = Request::with_policy(
+        "credential-floor-named",
+        &naming_policy(HOME_WIDE_POLICY, READ_AWS),
+    )
+    .without_agent_home();
     let home = request.operator_home().to_path_buf();
     plant(&home);
-    let box_ = request.agent_list("read", &["~/.aws"]).expect();
+    let box_ = request.expect();
 
     for seen in [
         shell_read(&box_, &home.join(".aws/config")),
@@ -128,13 +142,44 @@ fn a_store_named_by_a_read_entry_reads_and_stays_unwritable() {
     let append = python_append(&box_, &home.join(".aws/config"));
     assert!(
         !append.contains("APPEND-OK"),
-        "a read entry took a write: {append}"
+        "a read permit took a write: {append}"
     );
     let key = python_read(&box_, &home.join(".ssh/id_rsa"));
     assert!(!key.contains(KEY), "an unnamed store opened: {key}");
+    let disclosed = text(&box_.bash("true"));
+    assert!(
+        disclosed.contains("opens ~/.aws/* in the credential store ~/.aws"),
+        "the permit must be disclosed at startup: {disclosed}"
+    );
 }
 
-/// The home-wide rules plus a rename, so a `write` entry's contents could only leave by moving.
+#[test]
+fn an_agent_entry_naming_a_store_opens_it_to_neither_interpreter() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let request =
+        Request::with_policy("credential-floor-entry", HOME_WIDE_POLICY).without_agent_home();
+    let home = request.operator_home().to_path_buf();
+    plant(&home);
+    let box_ = request.agent_list("read", &["~/.aws"]).expect();
+
+    for seen in [
+        shell_read(&box_, &home.join(".aws/config")),
+        python_read(&box_, &home.join(".aws/config")),
+    ] {
+        assert!(
+            !seen.contains("us-east-1"),
+            "the agent's entry opened the store to an interpreter: {seen}"
+        );
+        assert!(
+            seen.contains("credential store"),
+            "the refusal must name the floor: {seen}"
+        );
+    }
+}
+
+/// The home-wide rules with renames and deletes, so a store file could only leave by moving.
 const HOME_WIDE_MOVE_POLICY: &str = r#"
 permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
 permit (principal, action in [Box::Action::"fs:read", Box::Action::"fs:write",
@@ -143,23 +188,27 @@ permit (principal, action in [Box::Action::"fs:read", Box::Action::"fs:write",
 "#;
 
 #[test]
-fn a_write_entry_cannot_move_a_store_file_out_through_either_interpreter() {
+fn a_write_permit_cannot_move_a_store_file_out_through_either_interpreter() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let request =
-        Request::with_policy("credential-floor-move", HOME_WIDE_MOVE_POLICY).without_agent_home();
+    let request = Request::with_policy(
+        "credential-floor-move",
+        &naming_policy(
+            HOME_WIDE_MOVE_POLICY,
+            r#"
+permit (principal, action == Box::Action::"fs:write", resource)
+  when { context.input.path like "~/.aws/sso/cache/*" };
+"#,
+        ),
+    )
+    .without_agent_home();
     let home = request.operator_home().to_path_buf();
     let cache = home.join(".aws/sso/cache");
     std::fs::create_dir_all(&cache).expect("a credential cache");
     std::fs::write(cache.join("shell.json"), "shell-token").expect("a token");
     std::fs::write(cache.join("python.json"), "python-token").expect("a token");
-    // Linux refuses a write-only grant, because a writable bind also reads, so both platforms take
-    // the pair. The rename refusal holds whether or not reads are open.
-    let box_ = request
-        .agent_list("read", &["~/.aws/sso/cache"])
-        .agent_list("write", &["~/.aws/sso/cache"])
-        .expect();
+    let box_ = request.expect();
 
     let shell = text(&box_.bash(&format!(
         "zsh -c 'mv {} {}' 2>&1",
@@ -193,7 +242,7 @@ fn a_write_entry_cannot_move_a_store_file_out_through_either_interpreter() {
     )));
     assert!(
         inside.contains("MOVED-INSIDE"),
-        "a rename inside the entry must work: {inside}"
+        "a rename inside what the permit names must work: {inside}"
     );
 }
 
@@ -289,13 +338,12 @@ fn a_prepared_directory_cannot_be_renamed_onto_an_absent_store() {
 }
 
 #[test]
-fn a_declared_home_granted_to_the_agent_lifts_the_floor_for_its_own_stores() {
+fn a_declared_home_granted_to_the_agent_keeps_its_stores_from_the_interpreters() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
     // The fixture declares `env.HOME` as its own directory and grants it `read` and `write`, so the
-    // sandbox already reaches that home's `.aws`. The interpreters must match, while an
-    // operator-home store stays refused.
+    // sandbox reaches that home's `.aws`. The interpreters do not, because no permit names it.
     let request = Request::with_policy("credential-declared", HOME_WIDE_POLICY);
     let operator = request.operator_home().to_path_buf();
     plant(&operator);
@@ -313,46 +361,44 @@ fn a_declared_home_granted_to_the_agent_lifts_the_floor_for_its_own_stores() {
         python_read(&box_, &declared.join(".aws/config")),
     ] {
         assert!(
-            seen.contains("us-west-2"),
-            "the declared home's store must read: {seen}"
+            !seen.contains("us-west-2"),
+            "the declared home's store opened without a permit naming it: {seen}"
+        );
+        assert!(
+            seen.contains("credential store"),
+            "the refusal must name the floor: {seen}"
         );
     }
-    let append = python_append(&box_, &declared.join(".aws/config"));
-    assert!(
-        append.contains("APPEND-OK"),
-        "the declared home's store must take a write: {append}"
-    );
-    let key = python_read(&box_, &operator.join(".ssh/id_rsa"));
-    assert!(!key.contains(KEY), "an operator-home store opened: {key}");
-    assert!(
-        key.contains("credential store"),
-        "the refusal must name the floor: {key}"
-    );
 }
 
 #[test]
-fn a_parent_of_a_granted_store_cannot_be_moved_out_through_either_interpreter() {
+fn a_parent_of_a_lifted_store_cannot_be_moved_out_through_either_interpreter() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let request =
-        Request::with_policy("credential-parent", HOME_WIDE_MOVE_POLICY).without_agent_home();
-    let home = request.operator_home().to_path_buf();
     let store = "~/Library/Application Support/Google/Chrome";
+    let rule = format!(
+        r#"permit (principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource)
+  when {{ context.input.path == "{store}" || context.input.path like "{store}/*" }};
+"#
+    );
+    let request = Request::with_policy(
+        "credential-parent",
+        &naming_policy(HOME_WIDE_MOVE_POLICY, &rule),
+    )
+    .without_agent_home();
+    let home = request.operator_home().to_path_buf();
     for copy in ["shell", "python"] {
         let profile = home.join(format!("Library/Application Support/Google-{copy}/Chrome"));
         std::fs::create_dir_all(&profile).expect("a granted store with a parent");
         std::fs::write(profile.join("Cookies"), "cookies").expect("a profile file");
         std::fs::create_dir_all(home.join(format!("project-{copy}"))).expect("a destination");
     }
-    // The grant names `Google/Chrome`, so the parent `Google` holds only that granted store.
+    // The permit names `Google/Chrome`, so the parent `Google` holds only that lifted store.
     let granted = home.join("Library/Application Support/Google/Chrome");
     std::fs::create_dir_all(&granted).expect("the granted store");
     std::fs::write(granted.join("Cookies"), "cookies").expect("a profile file");
-    let box_ = request
-        .agent_list("read", &[store])
-        .agent_list("write", &[store])
-        .expect();
+    let box_ = request.expect();
     let parent = home.join("Library/Application Support/Google");
 
     let shell = text(&box_.bash(&format!(

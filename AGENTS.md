@@ -39,8 +39,11 @@ Preserve these premises and the tests that enforce them. Do not delete or `#[ign
 test to make a suite pass.
 
 - **Policy is the only authorizer.** Absent policy is default-deny. Deny-only floors stay beneath
-  policy. The egress gateway has no independent authorization authority. A credential capability
-  returns edits or a refusal, never an allow. A credential binding is not an authorization.
+  policy, with one exception: a `permit` whose path literal or pattern sits inside a credential store,
+  with no wildcard above the store, lifts the Strands Shell and Monty credential floor for the paths
+  it names, and the box discloses that rule on stderr before it first lifts the floor. The egress
+  gateway has no independent authorization authority. A credential capability returns edits or a
+  refusal, never an allow. A credential binding is not an authorization.
 - **The workload is untrusted.** It writes only where a filesystem list grants a write.
   Validate once, then act on the identity you approved.
 - **Compose the environment; never inherit it.** Harden the box's trusted process. It holds only
@@ -69,10 +72,8 @@ The box directory is not a home; no verb copies configuration into a private hom
 Neither `HOME` nor `workspace` grants filesystem reach. `workspace` sets the initial working
 directory, which remains unreadable until a filesystem list names it.
 
-The agent's filesystem lists govern its sandbox, with one exception: a `read` or `write` entry that
-names a credential store, or a path inside one, also lifts the interpreters' credential floor for that
-path, and policy still decides each Strands Shell and Monty access. Each tool gets its reach from its
-own `[tool.<name>]` table. An absent filesystem section grants no direct reach. These grants bypass
+The agent's filesystem lists govern its sandbox alone. Each tool gets its reach from its own
+`[tool.<name>]` table. An absent filesystem section grants no direct reach. These grants bypass
 `fs:*` decisions, so disclose each grant on stderr at startup. `write` does not imply `read`;
 on Linux, a writable bind also reads, and its disclosure must state that limit.
 Keep the box's own state unreachable from both the agent and its tools.

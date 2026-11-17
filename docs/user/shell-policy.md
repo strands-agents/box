@@ -57,8 +57,8 @@ when { context.input.path == "/dev/null" };
 ```
 
 Keep every `fs:read` permit scoped to a path. A permit with no path condition reads every file
-under the home except a credential store, such as `~/.ssh` or `~/.aws`, which Box refuses unless an
-`[agent.filesystem]` entry names it. See [what Box always enforces](security.md#what-box-always-enforces).
+under the home except a credential store, such as `~/.ssh` or `~/.aws`, which Box refuses unless a
+`permit` names the path inside the store. See [what Box always enforces](security.md#what-box-always-enforces).
 
 The Shell's `/tmp` exists only for one command, and policy decides it like any other path. To let
 a command use it as scratch space, permit it:

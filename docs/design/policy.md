@@ -77,8 +77,8 @@ authority](decisions.md#the-authored-policy-is-the-only-decision-authority).
 
 - The reachable paths check runs in the Shell and Monty after the engine. It refuses the box
   directory, the `box.toml` and policy this run loaded, and anything outside the operator's home and
-  the workspace. It refuses every credential store the sandbox refuses, unless an
-  `[agent.filesystem]` `read` or `write` entry names that store, and it refuses a change to a
+  the workspace. It refuses every credential store the sandbox refuses, unless a `permit` names the
+  path inside that store, and it refuses a change to a
   directory that holds a store. It also refuses writes, deletion, replacement, and enclosing-path changes for
   configured tool programs and the [installed trusted
   binaries](binaries.md#trampoline---strands-box-contain-trampoline). Reads of these files remain

@@ -544,9 +544,9 @@ Private `/tmp` storage remains writable and separate from the surrounding OS.
 
 These filesystem lists govern sandbox access.
 Shell and Python requests through Box use separate policy and reach checks in the box's trusted process.
-The one overlap is a credential store. Box refuses those requests on a store unless a `read` or
-`write` entry names the store or a path inside it. Such an entry lifts that refusal, and policy still
-decides each request. A `deny` entry inside the store keeps that path refused.
+These lists never change what Strands Shell and Monty may do with a credential store. Box refuses
+those requests on a store unless a `permit` in your policy names the path inside it. See
+[what Box always enforces](security.md#what-box-always-enforces).
 Permitted file creation retains that process's file identity.
 
 On Linux, write access permits ordinary file writes. Permission changes, including executable-bit
@@ -626,7 +626,10 @@ A `read` or `read_file` entry is the one exception: it may name a symbolic link 
 workload starts, under `strands-box: [agent] runs <program> with no policy decision over these
 paths:`. Getting started shows the example's disclosure. A credential store, such as `~/.aws` or
 `~/.ssh`, is disclosed by name as well, as `strands-box: [tool.<name>]: exposes ~/.ssh (read)` for
-a tool granted the operator's SSH directory.
+a tool granted the operator's SSH directory. A policy rule that opens a path in a credential store
+to Strands Shell and Monty is disclosed too, when the run starts or when a reloaded policy first
+uses it, as `strands-box: policy: rule @id("aws_config") opens ~/.aws/config in the credential
+store ~/.aws to the Shell and Python (fs:read)`.
 
 On Linux, preserved interpreter spellings appear in a separate section before the runtime minimum:
 

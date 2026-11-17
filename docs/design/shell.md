@@ -159,7 +159,7 @@ the grant. It can't show file contents and can't write. A swap of two real direc
 symbolic link, isn't refused either, but the operation stays inside the bound directory.
 
 The reachable paths check refuses every credential store the sandbox refuses, such as `~/.ssh` and
-`~/.aws`, unless an `[agent.filesystem]` `read` or `write` entry names that store. It doesn't
+`~/.aws`, unless a `permit` names the path inside that store. It doesn't
 protect anything else under the operator's home, so an `fs:read` permit with no path condition reads
 the operator's source and documents. Scope every `fs:read` permit to a path. See [where policy
 sits](./policy.md#where-policy-sits).

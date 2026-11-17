@@ -308,9 +308,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   a store the operator names exactly, which `validate_grant` reports and
   `record::config::filesystem::a_credential_store_is_granted_only_when_named_exactly` pins. A prefix
   of a store, or a parent of one, stays refused. `Reach` reads the same rows through
-  `containment::credential_store_anchors`, so the interpreters refuse each store beneath policy,
-  except a path that an `[agent]` `read` or `write` entry names (or, for a store under a declared
-  `env.HOME`, an entry enclosing it, which the sandbox also grants), where policy still decides; see
+  `containment::credential_store_anchors`, so the interpreters refuse each store, except a path that
+  a `permit` names inside it (`PolicyEngine::path_permits`), where policy still decides; see
   [the interpreters meet the sandbox's credential floor](../../docs/design/decisions.md#no-credential-floor-sits-beneath-the-interpreters).
 - **The authored policy is the only authorizer, at all three enforcement points.** Box builds
   three adapters over the one `Arc<PolicyEngine>`: `EgressPolicyInterceptor` for the proxy (`net:*`),
@@ -354,7 +353,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     inside the project, which the shipped examples do.
   - **`Reach`'s deny floor refuses every path resolving into `~/.strands-box`, the machine state, or
     THIS box's own directory**, whatever a `permit` says. It also refuses every credential store
-    the sandbox refuses, unless an `[agent]` `read` or `write` entry names that store, and a change to
+    the sandbox refuses, unless a `permit` names the path inside that store, and a change to
     a directory that holds one; `reach.rs`'s `credential_store_tests` pin it. It is checked on the canonical identity,
     because a spelling check is laundered by a symlink the workload can plant. **There is no
     exception, and a home does not earn one.** `layout::refuse_home_in_box_state` refuses a declared
@@ -1031,6 +1030,12 @@ through this path. Security finding disposition remains separate from this behav
   **A `write` entry on a store exposes reads.** Seatbelt lets the agent's own `/bin/mv` move a file
   out of a write-granted store into any directory the agent can write, and the interpreters then read
   it there under a broad permit. `refuse_store_relocation` closes only the interpreter route.
+  **A lifted path skips the naming rule's other conditions.** `store_lift` asks only whether a
+  `permit`'s path literal or pattern matches, so a second, broader permit decides a lifted path
+  without the naming rule's temporal budget or other clauses. Closing it needs the decision's
+  determining rules at the floor, which the adapters do not return. A lift reads the class, not the
+  verb: an `fs:write` permit lifts every change, because `approve_mutation` does not carry which
+  verb asks, so a broad `fs:delete` or `fs:move` permit reaches what an `fs:write` rule names.
 
 Do not treat any of these as settled by the code existing.
 

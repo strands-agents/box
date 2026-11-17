@@ -77,7 +77,7 @@ input: the command reads its input as empty.
 The reachable paths check is deny-only and runs after policy. It refuses a path outside the operator's home,
 the agent's home, and the workspace, a path inside the box directory, and the `box.toml` and
 `policy.dw` the run loaded, whatever a `permit` says. It also refuses a credential store, such as
-`~/.ssh` or `~/.aws`, unless an `[agent.filesystem]` `read` or `write` entry names that store. See
+`~/.ssh` or `~/.aws`, unless a `permit` names the path inside that store. See
 [what Box always enforces](security.md#what-box-always-enforces).
 
 Once the alias hands a command to the Shell, each command in it runs as follows:
@@ -371,9 +371,9 @@ refuses makes `curl` exit non-zero.
 | Any other | The directory contains a hard-link alias for a configured command. Select a directory without the alias. | `<path>: contains a hard link to a configured tool command, so this mutation is not allowed` |
 | Any other | Box cannot complete its directory scan. [Check the reported cause and scan constraints](config.md#configured-command-integrity). | `<path>: cannot finish checking for configured tool command hard links: <cause>` |
 | Any other | The operation would change an installed Box program or an enclosing path. [Update the installation between runs](config.md#installation-integrity). | `<path>: cannot change a trusted Box executable or its path` |
-| Any other | The path is in a credential store that no `[agent.filesystem]` `read` or `write` entry names. [Name the store](security.md#what-box-always-enforces) or select another path. | ``<path>: resolves into a credential store, which no policy may open unless an `[agent.filesystem]` `read` or `write` entry names that store`` |
+| Any other | The path is in a credential store that no `permit` names. [Name the path in a `permit`](security.md#what-box-always-enforces) or select another path. | ``<path>: resolves into a credential store, which no policy may open unless a `permit` names this path inside the store, with no wildcard above it`` |
 | Any other | The operation would change a directory that holds a credential store. Change a path inside the directory instead. | `<path>: contains a credential store, so no policy may change this directory` |
-| Any other | A rename would move a credential store's content outside the `write` entry that names the store. Select a destination inside that entry. | ``<path>: would move credential-store content outside the `[agent.filesystem]` `write` entry that names it`` |
+| Any other | A rename would move a credential store's content outside the store. Select a destination inside the store that an `fs:write` `permit` names. | ``<path>: would move credential-store content outside the store that a `permit` opened it in`` |
 | Any other | A rename of a directory that holds an existing credential store. Move the directory's other contents instead. | ``<path>: holds a credential store, so no policy may move this directory; move its other contents instead`` |
 
 ## See also
