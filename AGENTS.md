@@ -194,7 +194,7 @@ The first commit has a subject, then exactly these three sections in order:
   State what did not run and what remains broken.
 
 Later commits need only a subject that names the feedback or defect addressed.
-Follow [the pull request template](.github/PULL_REQUEST_TEMPLATE.md).
+Follow [the pull request template](.github/pull_request_template.md).
 Lead with the problem and reasoning the diff cannot show. State each decision the change depends on,
 checks continuous integration cannot perform, and deferred follow-ups with their reasons.
 Do not repeat the file list.
