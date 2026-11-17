@@ -136,10 +136,10 @@ The example passes `TMPDIR`, because `op` keeps the session of `op signin` in a 
 
 | Part | Rule |
 |---|---|
-| Scheme | A lowercase letter, then lowercase letters, digits, `+`, `.`, or `-`. `RESERVED_SECRET_SCHEMES` lists the eight schemes that no declaration can claim: `env`, `file`, `aws`, `credsd`, `secret`, `cmd`, `oauth2`, and `aws-signed`. `SecretSourceCommand::check_scheme` is the check. A declared `op` takes the place of the built-in `op://` source. Two declarations of one scheme are refused. |
+| Scheme | A lowercase letter, then lowercase letters, digits, `+`, `.`, or `-`. No declaration can claim one of the nine reserved schemes: `env`, `file`, `aws`, `credsd`, `secret`, `cmd`, `oauth2`, `aws-signed`, and `strip-phantom`. The last two are the crate's own route markers. `SecretSourceCommand::check_scheme` is the check. A declared `op` takes the place of the built-in `op://` source. Two declarations of one scheme are refused. |
 | Protocol | `SecretSourceCommand::PROTOCOL`, which is `box.secret-source.v1`. Any other value is refused. |
 | Command | The program, then its arguments. The program is an absolute path. The source runs it with no shell. A command with no `{ref}` in its arguments is refused. |
-| `{ref}` | `SECRET_REFERENCE_TOKEN`. The source replaces it inside each argument with `NAME`, the text after `SCHEME://` without `#FIELD`. A reference whose text after `SCHEME://` starts with `-` is refused, so the program cannot read it as a flag. |
+| `{ref}` | The source replaces `{ref}` inside each argument with `NAME`, the text after `SCHEME://` without `#FIELD`. A reference whose text after `SCHEME://` starts with `-` is refused, so the program cannot read it as a flag. |
 | Environment | `HOME` when the operator has one, `PATH=/usr/bin:/bin`, and each variable in `pass_env` or `pass_secret_env` that is set. An entry that ends with `*` passes each variable with that prefix. No entry replaces `HOME` or `PATH`. The entries `*`, `PATH`, and `HOME` are refused, and so is an entry with a `*` before its end. |
 | Bounds | No stdin. The working directory is `/`. A run of more than 30 seconds, or more than 1 MiB of stdout, stops the program and fails the fetch. A non-zero exit fails the fetch. |
 | `output` | `text` (the default): stdout is the secret. `json`: stdout is one JSON string, and the decoded string is the secret. Any other JSON value, such as `null`, is refused. The source strips one trailing `\n` or `\r\n` first. |

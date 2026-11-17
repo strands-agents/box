@@ -21,8 +21,8 @@ pub use backend::Backend;
 pub use config::VaultConfig;
 pub use error::{CredentialError, Result};
 pub use model::{
-    Destination, DestinationPattern, InjectMode, Locator, PhantomCheck, RESERVED_SECRET_SCHEMES,
-    RouteSpec, SECRET_REFERENCE_TOKEN, SecretSourceCommand,
+    Destination, DestinationPattern, InjectMode, Locator, PhantomCheck, RouteSpec,
+    SecretSourceCommand,
 };
 pub use opened::{Opened, Phantom, Skipped};
 pub use preflight::credsd_preflight;

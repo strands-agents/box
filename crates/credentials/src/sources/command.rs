@@ -20,12 +20,9 @@ use std::time::{Duration, Instant};
 
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::model::SecretSourceOutput;
+use crate::model::{SECRET_REFERENCE_TOKEN, SecretSourceOutput};
 use crate::sources::{SecretSource, uri_reference};
-use crate::{
-    CredentialError, Locator, Result, SECRET_REFERENCE_TOKEN, Secret, SecretSourceCommand,
-    redact_credential_ref,
-};
+use crate::{CredentialError, Locator, Result, Secret, SecretSourceCommand, redact_credential_ref};
 
 /// How long one run of a program may take.
 const TIMEOUT: Duration = Duration::from_secs(30);

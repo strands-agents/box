@@ -12,7 +12,7 @@ pub use destination::{Destination, DestinationPattern};
 pub use inject::InjectMode;
 pub use reference::Locator;
 pub use route::{PhantomCheck, RouteSpec};
-pub use secret_source::{RESERVED_SECRET_SCHEMES, SECRET_REFERENCE_TOKEN, SecretSourceCommand};
+pub use secret_source::SecretSourceCommand;
 
 // Crate-internal: a resolved secret's shape and the phantom that stands in for it are reached
 // only through the vault's own verbs. `PhantomToken` surfaces to callers as the non-secret string on
@@ -20,8 +20,8 @@ pub use secret_source::{RESERVED_SECRET_SCHEMES, SECRET_REFERENCE_TOKEN, SecretS
 pub(crate) use inject::{DEFAULT_PHANTOM_PREFIX, PhantomToken, check_phantom_prefix};
 pub(crate) use material::AwsSessionCredentials;
 pub(crate) use secret::Secret;
-// How a declared program's stdout is read, for the command source alone.
-pub(crate) use secret_source::SecretSourceOutput;
+// The `{ref}` text and how a declared program's stdout is read, for the command source alone.
+pub(crate) use secret_source::{SECRET_REFERENCE_TOKEN, SecretSourceOutput};
 // The route's private kind enum, for the store's dispatch. Re-exported crate-internally rather than
 // making the module public, so the variant set stays the crate's.
 pub(crate) use route::RouteKind;
