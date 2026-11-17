@@ -510,14 +510,14 @@ impl Session<'_> {
         let redactors = redactors.transpose()?;
         let key = out_key(side)?;
         let permit = self.decide(side, opcode, payload.len())?;
-        let payload = match redactors {
+        let mut payload = match redactors {
             Some(redactors) => scrub(opcode, payload, redactors),
             None => payload,
         };
-        let frame = encode(opcode, &payload, key);
-        leg.begin(permit, frame.len() - payload.len(), payload.len());
-        drop(payload);
-        let error = self.write(to, &frame, leg).await;
+        let head = encode_head(opcode, payload.len(), key);
+        mask(&mut payload, key);
+        leg.begin(permit, head.len(), payload.len());
+        let error = self.write(to, &[&head, &payload], leg).await;
         leg.end(side, error)
     }
 
@@ -534,15 +534,15 @@ impl Session<'_> {
         W: AsyncWrite + Unpin,
     {
         let permit = self.decide(Side::Server, BINARY, len)?;
-        let mut first = encode_head(BINARY, len, None);
-        leg.begin(permit, first.len(), len);
+        let head = encode_head(BINARY, len, None);
+        leg.begin(permit, head.len(), len);
         let mut sent = buffer.len().min(len);
-        first.extend(buffer.drain(..sent));
-        let mut error = self.write(to, &first, leg).await;
+        let mut error = self.write(to, &[&head, &buffer[..sent]], leg).await;
+        buffer.drain(..sent);
         while error.is_none() && sent < len {
             self.read(Side::Server, from, buffer).await?;
             let piece = buffer.len().min(len - sent);
-            error = self.write(to, &buffer[..piece], leg).await;
+            error = self.write(to, &[&buffer[..piece]], leg).await;
             buffer.drain(..piece);
             sent += piece;
         }
@@ -607,21 +607,23 @@ impl Session<'_> {
     async fn write<W: AsyncWrite + Unpin>(
         &self,
         to: &mut W,
-        frame: &[u8],
+        parts: &[&[u8]],
         leg: &Leg,
     ) -> Option<io::ErrorKind> {
-        let mut written = 0;
-        while written < frame.len() {
-            match to.write(&frame[written..]).await {
-                Ok(0) => return Some(io::ErrorKind::WriteZero),
-                Ok(count) => {
-                    written += count;
-                    self.active.set(Instant::now());
-                    if let Some(in_flight) = leg.in_flight.borrow_mut().as_mut() {
-                        in_flight.written += count;
+        for part in parts {
+            let mut written = 0;
+            while written < part.len() {
+                match to.write(&part[written..]).await {
+                    Ok(0) => return Some(io::ErrorKind::WriteZero),
+                    Ok(count) => {
+                        written += count;
+                        self.active.set(Instant::now());
+                        if let Some(in_flight) = leg.in_flight.borrow_mut().as_mut() {
+                            in_flight.written += count;
+                        }
                     }
+                    Err(error) => return Some(error.kind()),
                 }
-                Err(error) => return Some(error.kind()),
             }
         }
         to.flush().await.err().map(|error| error.kind())
