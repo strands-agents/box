@@ -918,27 +918,91 @@ pub(crate) fn rule_conditions(expanded: &str) -> Vec<serde_json::Value> {
 /// schema stages.
 ///
 /// Each rule is judged on its own. A rule that does not parse or lower yet, such as one that waits
-/// for a tool schema, must not hide another rule's refusal.
+/// for a tool schema, must not hide another rule's refusal. A rule whose own condition does not
+/// lower still has its action list judged, because the list needs only the head.
 pub(crate) fn refuse_input_reads_before_discovery(expanded: &[String]) -> Result<(), Refused> {
     let policy_schema = PolicySchema::from_cedarschema_str(&action_schema(&[])?.source)
         .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
     let service = service_schema()?;
+    let lower = |text: &str| {
+        dogwood_language::ParsedPolicySet::parse(text, &service)
+            .ok()?
+            .lower(&policy_schema)
+            .ok()
+    };
     for (ordinal, rule) in expanded.iter().enumerate() {
-        let Ok(parsed) =
-            dogwood_language::ParsedPolicySet::parse(&without_temporal(rule), &service)
-        else {
-            continue;
-        };
-        let Ok(lowered) = parsed.lower(&policy_schema) else {
-            continue;
-        };
         let positions = [ordinal];
+        let Some(lowered) = lower(&without_temporal(rule)) else {
+            if let Some(lowered) = rule_head(rule).and_then(|head| lower(&head)) {
+                let rule_of = |id: &str| rule_ref(&lowered, id, &positions);
+                crate::spelling::refuse_mixed_action_namespaces(lowered.as_cedar(), &rule_of)?;
+            }
+            continue;
+        };
         let rule_of = |cedar_policy_id: &str| rule_ref(&lowered, cedar_policy_id, &positions);
         crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &rule_of)?;
         crate::spelling::refuse_input_across_families(lowered.as_cedar(), &rule_of)?;
         crate::spelling::refuse_mixed_action_namespaces(lowered.as_cedar(), &rule_of)?;
     }
     Ok(())
+}
+
+/// A rule cut after its head, `forbid(principal, action, resource)`, with its annotations kept and
+/// every `when`, `unless` and `temporal` body dropped. `None` when the text holds no head.
+fn rule_head(rendered: &str) -> Option<String> {
+    let bytes = rendered.as_bytes();
+    let mut index = 0;
+    let mut open = None;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            index = string_end(bytes, index);
+            continue;
+        }
+        let word_start = index == 0
+            || !(bytes[index - 1].is_ascii_alphanumeric()
+                || bytes[index - 1] == b'_'
+                || bytes[index - 1] == b'@');
+        if word_start {
+            for effect in ["forbid", "permit"] {
+                if rendered[index..].starts_with(effect) {
+                    let after = index + effect.len();
+                    let paren = after
+                        + rendered[after..]
+                            .bytes()
+                            .take_while(u8::is_ascii_whitespace)
+                            .count();
+                    if bytes.get(paren) == Some(&b'(') {
+                        open = Some(paren);
+                    }
+                }
+            }
+            if open.is_some() {
+                break;
+            }
+        }
+        index += 1;
+    }
+    let open = open?;
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index = string_end(bytes, index);
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(format!("{};", &rendered[..=index]));
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 /// A rendered rule with each `temporal { … }` expression replaced by `true`.
