@@ -711,11 +711,17 @@ impl PathGrant {
             if last {
                 record(candidate.clone(), &mut nodes);
             } else if below_own {
-                // The folder the link reaches is a node too: macOS checks the metadata of each
-                // link and of what it points at, as it does for each hop of the final name.
-                if let Ok(reached) = candidate.canonicalize() {
-                    record(candidate.clone(), &mut nodes);
-                    record(reached, &mut nodes);
+                record(candidate.clone(), &mut nodes);
+                // The path the lookup asks for through this link is a node too, such as
+                // `tools/current/file`: macOS tests its existence before it follows `current`, and
+                // refuses the open without it. It names the file the grant already reaches.
+                let rest: Option<PathBuf> = pending
+                    .iter()
+                    .map(Path::new)
+                    .all(|part| part != Path::new(".") && part != Path::new(".."))
+                    .then(|| pending.iter().collect());
+                if let Some(rest) = rest {
+                    record(candidate.join(rest), &mut nodes);
                 }
             }
             if target.is_absolute() {
@@ -898,8 +904,8 @@ pub enum BackendOverride {
 mod traversal_node_tests {
     use super::*;
 
-    /// **A linked folder on a link's target path is a traversal node**, with the folder it reaches,
-    /// and so is a linked folder another linked folder points through.
+    /// **A linked folder on a link's target path is a traversal node**, with the path the lookup
+    /// asks for through it, and so is a linked folder another linked folder points through.
     #[test]
     fn a_linked_folder_on_a_links_target_path_is_a_node() {
         let directory = tempfile::tempdir().expect("a folder");
@@ -918,9 +924,9 @@ mod traversal_node_tests {
                 root.join("store/data/file"),
                 root.join("helper"),
                 root.join("current"),
-                root.join("store/data"),
+                root.join("current/file"),
                 root.join("shelf"),
-                root.join("store"),
+                root.join("shelf/data/file"),
             ]
         );
     }
@@ -981,7 +987,7 @@ mod traversal_node_tests {
                 root.join("etc/data/file"),
                 helper,
                 root.join("etc/current"),
-                root.join("etc/data")
+                root.join("etc/current/file")
             ]
         );
     }
