@@ -222,6 +222,10 @@ pub(crate) enum ConfigError {
         "x86 support on Linux is experimental. Set EXPERIMENTAL_X86_SUPPORT=TRUE to enable it."
     )]
     ExperimentalX86Support,
+    #[error(
+        "container-agent requires Linux ARM64, one agent, and no hosted tool or MCP declarations"
+    )]
+    ContainerAgentConfiguration,
 
     #[error(
         "experimental feature `{feature}` requires a macOS build with `native-filesystem-policy`"

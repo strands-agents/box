@@ -359,7 +359,7 @@ child would keep unrestricted network. The launcher builds the filesystem view t
 forks into it instead.
 
 On Linux, `apply` returns in a different process than the one that called it.
-The launcher unshares a PID namespace and forks twice: the caller serves filesystem queries and waits, a
+By default, the launcher unshares a PID namespace and forks twice: the caller serves filesystem queries and waits, a
 reaper becomes namespace PID 1, and the workload is namespace PID 2, where
 `apply` returns `Ok`. Before it forks the workload, PID 1 sets
 `PR_SET_DUMPABLE` to `0`, so the workload cannot open PID 1 memory through
@@ -374,6 +374,11 @@ and identifiers set to zero. A direct `apply` caller that does not execute a pro
 refusal because its inherited memory still belongs to an ancestor user namespace. See
 [Linux filesystem metadata](../../docs/design/containment.md#linux-filesystem-metadata) for path,
 process-memory, and lifecycle limits.
+
+The opt-in `BackendOverride::LinuxContainer` instead requires a private container
+PID 1 and forks once. It retains the container's masked procfs and a supervisor
+lifetime channel. See [container agent mode](../../docs/user/container-agent.md)
+for the required installer boundary and refusal conditions.
 
 Run the macOS enforcement proof on a macOS host:
 

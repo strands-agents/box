@@ -750,3 +750,17 @@ accepts it.
 
 For the request path, read [Policy](policy.md). For the three binaries and where each one runs, read
 [Binaries](binaries.md).
+
+## Linux container agent boundary
+
+The optional [container agent mode](../user/container-agent.md) uses the runtime-provided
+private PID namespace and its masked procfs. The launcher checks its initial PID,
+UID, capabilities, process count, and thread count before creating the other
+namespaces. The trusted Box supervisor stays outside that namespace. A private
+Unix socket admits one same-UID peer, at most eight descriptors, and a launch
+frame of at most 64 KiB. The socket is removed before the workload starts.
+
+The PID 1 reaper holds the lifetime connection. When the supervisor disconnects,
+PID 1 exits and the kernel terminates the namespace. After dropping capabilities,
+PID 1 serves filesystem notifications in a separate thread. The workload has the
+same syscall filters as in the default namespace backend.

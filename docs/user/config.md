@@ -264,6 +264,10 @@ by default.
 `ingress = true` turns on [`[[agent.ingress]]`](#agentingress), which is experimental and off by
 default.
 
+The Linux ARM64 `container-agent = true` setting selects a container-provided PID
+namespace for the agent. See [container agent mode](container-agent.md) for the
+required process, procfs, and installer boundaries. It refuses hosted tools and MCP servers.
+
 ## `[agent]` and `[tool.<name>]`
 
 Both tables hold one process, in one shape:

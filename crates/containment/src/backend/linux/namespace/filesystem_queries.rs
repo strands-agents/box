@@ -88,7 +88,7 @@ pub(super) fn supervise(reaper: libc::pid_t, proc: OwnedFd, control: UnixStream)
             return 125;
         }
     };
-    match serve(reaper, &proc, &listener) {
+    match serve(Some(reaper), &proc, &listener) {
         Ok(status) => status,
         Err(error) => {
             eprintln!("strands-box: filesystem query supervisor failed: {error}");
@@ -96,6 +96,21 @@ pub(super) fn supervise(reaper: libc::pid_t, proc: OwnedFd, control: UnixStream)
             125
         }
     }
+}
+
+/// A container already supplies PID 1, which owns waitpid and forwards signals.
+pub(super) fn start_container_worker(proc: OwnedFd, control: UnixStream) {
+    std::thread::spawn(move || {
+        let result = register_listener(&control).and_then(|listener| {
+            drop(control);
+            serve(None, &proc, &listener)
+        });
+        if let Err(error) = result {
+            eprintln!("strands-box: container filesystem query worker failed: {error}");
+            // SAFETY: stopping container PID 1 terminates every workload in the namespace.
+            unsafe { libc::_exit(125) };
+        }
+    });
 }
 
 /// Collect the namespace reaper's exit status without signaling a process.
@@ -123,25 +138,27 @@ fn register_listener(control: &UnixStream) -> io::Result<OwnedFd> {
     Ok(listener)
 }
 
-fn serve(reaper: libc::pid_t, proc: &OwnedFd, listener: &OwnedFd) -> io::Result<i32> {
+fn serve(reaper: Option<libc::pid_t>, proc: &OwnedFd, listener: &OwnedFd) -> io::Result<i32> {
     let own_pid = unsafe { libc::getpid() };
     loop {
-        let mut status = 0;
-        // SAFETY: waitpid observes only this launcher's child.
-        let waited = unsafe { libc::waitpid(reaper, &mut status, libc::WNOHANG) };
-        if waited == reaper {
-            return Ok(if libc::WIFEXITED(status) {
-                libc::WEXITSTATUS(status)
-            } else {
-                125
-            });
-        }
-        if waited == -1 {
-            let error = io::Error::last_os_error();
-            if error.raw_os_error() == Some(libc::EINTR) {
-                continue;
+        if let Some(reaper) = reaper {
+            let mut status = 0;
+            // SAFETY: waitpid observes only this launcher's child.
+            let waited = unsafe { libc::waitpid(reaper, &mut status, libc::WNOHANG) };
+            if waited == reaper {
+                return Ok(if libc::WIFEXITED(status) {
+                    libc::WEXITSTATUS(status)
+                } else {
+                    125
+                });
             }
-            return Err(error);
+            if waited == -1 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                return Err(error);
+            }
         }
         let mut poll = libc::pollfd {
             fd: listener.as_raw_fd(),
@@ -163,7 +180,7 @@ fn serve(reaper: libc::pid_t, proc: &OwnedFd, listener: &OwnedFd) -> io::Result<
         if poll.revents & libc::POLLIN == 0 {
             if poll.revents & libc::POLLHUP != 0 {
                 // All filtered tasks exited; the reaper still owns the workload's exit status.
-                return Ok(wait_for_reaper(reaper));
+                return Ok(reaper.map_or(0, wait_for_reaper));
             }
             continue;
         }
@@ -186,7 +203,7 @@ fn serve(reaper: libc::pid_t, proc: &OwnedFd, listener: &OwnedFd) -> io::Result<
         }
         let result = if request.pid == 0
             || request.pid == own_pid as u32
-            || request.pid == reaper as u32
+            || reaper.is_some_and(|pid| request.pid == pid as u32)
             || request.data.nr != libc::SYS_statfs as i32
             || request.flags != 0
         {

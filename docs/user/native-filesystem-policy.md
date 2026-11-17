@@ -107,6 +107,7 @@ A non-empty [`[gateway] upgrade_http`](config.md#gateway) requires record versio
 A box ID that a library caller supplied, other than `box-` and 16 hexadecimal digits, requires record
 version 34.
 Enabling [`file-watching`](config.md#file-watching) for any process requires record version 35.
+Selecting [container agent mode](container-agent.md) requires record version 36.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 

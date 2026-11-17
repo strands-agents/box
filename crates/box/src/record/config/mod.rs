@@ -692,11 +692,14 @@ pub(crate) const SUPPLIED_IDENTITY_RECORD_VERSION: u32 = 34;
 /// The record version of a record whose process selects `file-watching`, so an older build
 /// refuses the box rather than resuming it with FSEvents refused.
 const FILE_WATCHING_RECORD_VERSION: u32 = 35;
+const CONTAINER_RECORD_VERSION: u32 = 36;
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub(crate) struct ExperimentalFeatures {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) container_agent: bool,
     #[serde(default)]
     pub(crate) native_filesystem_policy: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -707,7 +710,7 @@ pub(crate) struct ExperimentalFeatures {
 
 impl ExperimentalFeatures {
     fn is_disabled(&self) -> bool {
-        !self.native_filesystem_policy && !self.tool_grammars && !self.ingress
+        !self.native_filesystem_policy && !self.tool_grammars && !self.ingress && !self.container_agent
     }
 
     fn record_version(&self) -> u32 {
@@ -746,7 +749,9 @@ fn record_version<'a>(
     has_backend: bool,
     gateway: &Gateway,
 ) -> u32 {
-    if specs.clone().any(|spec| spec.file_watching) {
+    if features.container_agent {
+        CONTAINER_RECORD_VERSION
+    } else if specs.clone().any(|spec| spec.file_watching) {
         FILE_WATCHING_RECORD_VERSION
     } else if !generated_box_identity(box_id) {
         SUPPLIED_IDENTITY_RECORD_VERSION
@@ -1041,6 +1046,7 @@ impl Record {
             SHELL_STDIN_LIMIT_RECORD_VERSION,
             SUPPLIED_IDENTITY_RECORD_VERSION,
             FILE_WATCHING_RECORD_VERSION,
+            CONTAINER_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1454,6 +1460,14 @@ impl ConfigFile {
     /// Reject a config no run could honor, before anything is stored.
     fn validate(&self) -> Result<(), ConfigError> {
         self.experimental_features.validate()?;
+        if self.experimental_features.container_agent
+            && (!cfg!(all(target_os = "linux", target_arch = "aarch64"))
+                || self.agent.is_none()
+                || !self.tool.is_empty()
+                || !self.mcp.is_empty())
+        {
+            return Err(ConfigError::ContainerAgentConfiguration);
+        }
         BoxName::parse(&self.name)?;
         self.gateway.validate()?;
         if let Some(agent) = &self.agent {
@@ -1946,6 +1960,7 @@ mod tests {
             for file_attributes in [false, true] {
                 for native_filesystem_policy in [false, true] {
                     let features = ExperimentalFeatures {
+                        container_agent: false,
                         native_filesystem_policy,
                         tool_grammars: true,
                         ingress: false,
@@ -3017,7 +3032,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, FILE_WATCHING_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, CONTAINER_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");
@@ -3049,6 +3064,24 @@ env = {}
             message.contains(&format!("1 to {MAXIMUM_BOX_IDENTITY_PREFIX} letters")),
             "the refusal names the limit that applies: {message}"
         );
+    }
+
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[test]
+    fn container_agent_records_refuse_the_old_experimental_stamp() {
+        for watching in [false, true] {
+            let mut record = pinned_record(&format!(
+                "[experimental-features]\ncontainer-agent = true\n\
+                 [agent]\ncommand = [\"worker\"]\nfile-watching = {watching}\n"
+            ));
+            assert_eq!(record.version, 36);
+            assert_eq!(parsed_record(&record.to_toml().unwrap()).unwrap(), record);
+            record.version = 35;
+            assert!(matches!(
+                parsed_record(&record.to_toml().unwrap()),
+                Err(ConfigError::RecordVersion { found: 35, expected: 36 })
+            ));
+        }
     }
 
     #[test]
