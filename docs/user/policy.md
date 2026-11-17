@@ -789,10 +789,10 @@ can't. Each MCP tool action is a family of its own.
 
 ### A rule that lists a built-in action beside an MCP tool's action
 
-An action list can't name a built-in action, such as `fs:read`, beside an MCP tool's action. Box
-can't check the list until the server reports its tools, and it never checks a list of both kinds
-at all. So the rule would never take effect, and the built-in action would go unenforced. This
-rule refuses to load:
+An action list can't name a built-in action, such as `fs:read`, beside an MCP tool's action, or
+the actions of two servers. Box can't check the list until the server reports its tools, and it
+never checks a list of mixed kinds at all. So the rule would never take effect, and the built-in
+action would go unenforced. This rule refuses to load:
 
 ```text
 @id("both_doors")

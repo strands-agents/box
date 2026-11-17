@@ -291,9 +291,10 @@ load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-o
 refuses a rule that reads `context.input` under actions of more than one family, or under no action,
 because a field means what the action makes it mean. See [a rule that reads the input names one
 action family](decisions.md#a-rule-that-reads-the-input-names-one-action-family). It also refuses a
-rule whose action list names a `Box::Action` beside an MCP tool's action, whether or not it reads the
-input: Cedar never validates that list against the tool's action type, so the rule would stay pending
-until discovery finishes and then be dropped, and its `Box::Action` arms would go unenforced. It also
+rule whose action list names actions of more than one action type, such as a `Box::Action` beside an
+MCP tool's action or the actions of two servers, whether or not it reads the input: Cedar refuses a set
+of mixed types, so the rule would stay pending until discovery finishes and then be dropped, and its
+other arms would go unenforced. It also
 refuses a temporal predicate on `mcp:call::error` or a per-tool `::error`, because an MCP call records only
 `::response`.
 

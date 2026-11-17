@@ -412,27 +412,52 @@ when { context.input has host };"#;
     }
 }
 
-/// A list that names `Box::Action` beside a tool's action is never validated against the tool's
-/// type, so the rule stays pending and is dropped when discovery finishes, whether or not it reads
-/// the input.
+/// Cedar refuses an action list of mixed types, so such a rule never validates: it stays pending
+/// and is dropped when discovery finishes, whether or not it reads the input.
 #[test]
 fn an_action_list_across_namespaces_refuses_validate_and_open() {
-    let source = r#"@id("both_doors")
-forbid(principal, action in [Box::Action::"fs:read", svc::Action::"deploy"], resource);"#;
-    for (path, result) in [
-        ("validate", validate(source)),
-        ("open", open(source).map(|_| ())),
+    for (label, list) in [
+        (
+            "a built-in action beside a tool's",
+            r#"[Box::Action::"fs:read", svc::Action::"deploy"]"#,
+        ),
+        (
+            "a built-in action beside a server labelled Tool",
+            r#"[Box::Action::"http:request", Tool::Action::"read"]"#,
+        ),
+        (
+            "a built-in action beside a tool grammar's",
+            r#"[Box::Action::"fs:read", Tool::git::Action::"push"]"#,
+        ),
+        (
+            "the tools of two servers",
+            r#"[alpha::Action::"read", beta::Action::"verify"]"#,
+        ),
     ] {
-        match result {
-            Err(PolicyError::MixedActionNamespaces(reason)) => assert!(
-                reason.contains("rule @id(\"both_doors\")")
-                    && reason.contains("one rule for each namespace"),
-                "{path}: {reason}"
-            ),
-            Err(other) => panic!("{path}: expected a namespace refusal, got {other}"),
-            Ok(()) => panic!("{path}: a mixed action list must refuse the load"),
+        let source = format!("@id(\"both_doors\")\nforbid(principal, action in {list}, resource);");
+        for (path, result) in [
+            ("validate", validate(&source)),
+            ("open", open(&source).map(|_| ())),
+        ] {
+            match result {
+                Err(PolicyError::MixedActionNamespaces(reason)) => assert!(
+                    reason.contains("rule @id(\"both_doors\")")
+                        && reason.contains("one rule for each namespace"),
+                    "{label}, {path}: {reason}"
+                ),
+                Err(other) => panic!("{label}, {path}: expected a namespace refusal, got {other}"),
+                Ok(()) => panic!("{label}, {path}: a mixed action list must refuse the load"),
+            }
         }
     }
+}
+
+/// A list of one action type loads, however many actions it names.
+#[test]
+fn an_action_list_of_one_namespace_loads() {
+    let source = r#"forbid(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource);"#;
+    validate(source).expect("one namespace validates");
+    open(source).expect("one namespace opens");
 }
 
 /// A `net:connect` no longer carries `ip`, so a rule that names it is refused rather than loaded
