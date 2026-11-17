@@ -329,6 +329,8 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   each reference the same secret.
 - Name no `#FIELD` text in a failure. A field name is part of the reference, and a reference body
   is redacted.
+- Build the reserved scheme list from the constant of each owner and from the two route markers,
+  so that a scheme has one owner. Keep a literal only for `secret`, which the box crate owns.
 - The JSON field step and its wipe helpers follow `json_field` and `is_json_object` in pull
   request #448. Only `wipe_value` has a test; no test can observe a wipe of a value that drops.
 - The environment test runs its stand-in through `/bin/sh`, which adds `PWD`, `OLDPWD`, `SHLVL`,

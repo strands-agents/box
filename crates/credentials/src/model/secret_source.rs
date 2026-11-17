@@ -2,23 +2,37 @@
 
 use std::path::{Path, PathBuf};
 
+use super::route::{AWS_SENTINEL_REF, STRIP_SENTINEL_REF};
+use crate::sources::{AWS_SCHEME, CREDSD_SCHEME, ENV_SCHEME, FILE_SCHEME};
+use crate::vault::{CMD_SCHEME, OAUTH2_SCHEME};
 use crate::{CredentialError, Result};
 
 /// The text in a declared argument that the reference body replaces.
 pub(crate) const SECRET_REFERENCE_TOKEN: &str = "{ref}";
 
-/// The schemes Box Core owns, which no declaration may claim.
+/// The schemes Box Core owns, which no declaration may claim, each from the constant of its owner.
 const RESERVED_SECRET_SCHEMES: &[&str] = &[
-    "env",
-    "file",
-    "aws",
-    "credsd",
+    ENV_SCHEME,
+    FILE_SCHEME,
+    AWS_SCHEME,
+    CREDSD_SCHEME,
+    // The box crate owns this scheme, so no constant of this crate names it.
     "secret",
-    "cmd",
-    "oauth2",
-    "aws-signed",
-    "strip-phantom",
+    CMD_SCHEME,
+    OAUTH2_SCHEME,
+    scheme_of(AWS_SENTINEL_REF),
+    scheme_of(STRIP_SENTINEL_REF),
 ];
+
+/// The scheme of a route marker: the text before its `:`.
+const fn scheme_of(marker: &'static str) -> &'static str {
+    let bytes = marker.as_bytes();
+    let mut end = 0;
+    while end < bytes.len() && bytes[end] != b':' {
+        end += 1;
+    }
+    marker.split_at(end).0
+}
 
 /// How a declared program's stdout becomes the secret.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,6 +294,30 @@ mod tests {
                 "strip-phantom"
             ]
         );
+    }
+
+    #[test]
+    fn each_scheme_constant_and_each_route_marker_of_the_crate_is_reserved() {
+        let marker = |reference: &str| {
+            crate::Locator::Uri(reference.to_string())
+                .scheme()
+                .to_string()
+        };
+        let owned = [
+            ENV_SCHEME.to_string(),
+            FILE_SCHEME.to_string(),
+            AWS_SCHEME.to_string(),
+            CREDSD_SCHEME.to_string(),
+            CMD_SCHEME.to_string(),
+            OAUTH2_SCHEME.to_string(),
+            marker(AWS_SENTINEL_REF),
+            marker(STRIP_SENTINEL_REF),
+        ];
+        let refused: Vec<bool> = owned
+            .iter()
+            .map(|scheme| SecretSourceCommand::check_scheme(scheme).is_err())
+            .collect();
+        assert_eq!(refused, [true; 8], "{owned:?}");
     }
 
     #[test]
