@@ -248,7 +248,34 @@ adding a location never changes what an existing rule matches.
 
 1. **The name.** We picked "locations". We avoided "tags", because Dogwood and Cedar already use
    that word for other things.
-2. **Rules that can never match.** A `has` rule in a box without its location never matches.
-   Should Box print a warning for it at startup, so an operator can see which rules are off?
-3. **Denial messages.** Should the message the agent sees when it's refused list the file's
+2. **Denial messages.** Should the message the agent sees when it's refused list the file's
    locations, or should only the decision record have them?
+
+## 10. Later: names for other kinds of requests
+
+The same pattern could name other things a policy checks: a top-level `box.toml` table that maps
+names to matchers, and a record of true-or-false fields on the actions they apply to. Both ideas
+below are possibilities, not part of this design.
+
+**Credentialed HTTP routes.** `[egress.<name>]` already says which destinations get which secret.
+`http:request` could carry one field per egress table, true when Box attaches that table's secret:
+
+```text
+forbid (principal, action == Box::Action::"http:request", resource)
+when { context.input.egress.model && context.input.method == "DELETE" };
+```
+
+The binding still grants nothing. Policy just reads what `box.toml` already declares, so a rule can
+say "requests that carry the model key" without repeating its hosts.
+
+**Named destinations.** For hosts with no secret, such as `github`, a `[destinations]` table could
+use the same entry syntax as egress `destinations`, with a field on `net:connect` and
+`http:request`.
+
+Either one needs its own rules for:
+- **Paths at connect time.** `net:connect` sees no path, so an entry with a path prefix can't be
+  decided there. Treating it as false would let a `forbid` fail open.
+- **Host matching.** Case, `*.` wildcards, and IP addresses.
+
+We'd keep one table per kind instead of a single `[tags]` table. A name that held both paths and
+hosts would land on unrelated actions.
