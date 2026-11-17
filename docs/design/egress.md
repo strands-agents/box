@@ -182,8 +182,8 @@ Pong, or Close is a message of its own. A refused message closes both sides: 100
 the server, with one refusal record. A broken frame gets 1002, bad UTF-8 gets 1007, and a message
 over the cap gets 1009. When one side breaks a rule or drops, the other side gets 1001 after the
 workload or 1014 after the server. After 300 seconds with no byte on either leg, both sides get
-1001. If the gateway is partway through a frame to the workload when the WebSocket ends, it closes
-the connection without a Close.
+1001. If the gateway is partway through a frame to one side when the WebSocket ends, it closes that
+connection without a Close.
 
 ### Cloud instance metadata
 

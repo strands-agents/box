@@ -329,7 +329,7 @@ permit must allow it. A refusal answers the handshake, or closes the WebSocket:
 | Close 1014 | The server broke RFC 6455 or dropped. |
 | Close 1011 | The gateway couldn't decide a message or record its outcome. |
 | Close 1001 | No byte moved on either leg for 300 seconds. |
-| No Close | The gateway was partway through a frame to the workload when the WebSocket ended, so it closed the connection without a Close. The refusal record or the message's `::response` says why. |
+| No Close | The gateway was partway through a frame to that side when the WebSocket ended, so it closed that connection without a Close. The message's `::response` or `::error` records the bytes that side took. |
 
 Responses arrive progressively, including on credentialed routes. Credential redaction retains a
 short tail until more bytes arrive or the response completes cleanly. Requests and HTTP MCP
