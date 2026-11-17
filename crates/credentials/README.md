@@ -96,6 +96,9 @@ Declare signed patterns that do not overlap.
 `resolve(&self, locator: &Locator) -> Result<Zeroizing<String>>`. The caller owns the
 returned secret and its lifetime.
 
+`Backend::declared(declarations)` is the local source set plus one source for each
+`SecretSourceCommand`. See [Declared secret sources](#declared-secret-sources).
+
 ## Credential references
 
 | Form | Resolves to | Absent secret |
@@ -105,12 +108,51 @@ returned secret and its lifetime.
 | `op://vault/item/field` | The authenticated 1Password CLI. | hard: `op read` returns one exit code for missing, locked, and signed-out, so there is no "absent" signal to trust |
 | `aws://profile` | Structured AWS session credentials for SigV4 signing, resolved as the named profile through the AWS SDK (static keys, credential_process, assume-role, or web identity). Not a single secret, so `Backend::resolve` rejects it. | hard |
 | `aws://` (no profile) | Structured AWS session credentials from the AWS SDK default credential provider chain (the host's ambient identity), driven on a worker thread and cached. Not a single secret, so `Backend::resolve` rejects it. | hard |
+| `SCHEME://NAME` or `SCHEME://NAME#FIELD`, for a declared `SCHEME` | The stdout of the declared program, or one string field of it. Only `Backend::declared` resolves it. | hard: a program cannot signal "absent" |
 
 A soft outcome means the vault comes up and the route appears in `skipped()`. A hard one aborts
 the open. A present value is always judged on content, so an empty, whitespace-only, non-UTF-8,
 or control-character value is hard whatever the scheme. Open the vault **before** the caller
 activates its sandbox: a `file://` path unreachable afterwards reads as an absent secret rather
 than an error.
+
+## Declared secret sources
+
+A `SecretSourceCommand` declares one host program that prints one secret on stdout. A caller
+builds one for each scheme, and `Backend::declared` registers them:
+
+```rust
+use credentials::{Backend, Locator, SecretSourceCommand};
+
+let command = ["/opt/homebrew/bin/op", "read", "op://{ref}"].map(String::from);
+let declaration = SecretSourceCommand::new("op", SecretSourceCommand::PROTOCOL, &command)?
+    .pass_env(["OP_ACCOUNT"])?
+    .pass_secret_env(["OP_SERVICE_ACCOUNT_TOKEN", "OP_SESSION_*"])?;
+let backend = Backend::declared([declaration])?;
+let secret = backend.resolve(&Locator::parse_uri("op://Private/GitHub/token")?)?;
+```
+
+| Part | Rule |
+|---|---|
+| Scheme | A lowercase letter, then lowercase letters, digits, `+`, `.`, or `-`. `RESERVED_SECRET_SCHEMES` lists the eight schemes that no declaration can claim: `env`, `file`, `aws`, `credsd`, `secret`, `cmd`, `oauth2`, and `aws-signed`. `SecretSourceCommand::check_scheme` is the check. A declared `op` takes the place of the built-in `op://` source. Two declarations of one scheme are refused. |
+| Protocol | `SecretSourceCommand::PROTOCOL`, which is `box.secret-source.v1`. Any other value is refused. |
+| Command | The program, then its arguments. The program is an absolute path. The source runs it with no shell. A command with no `{ref}` in its arguments is refused. |
+| `{ref}` | `SECRET_REFERENCE_TOKEN`. The source replaces it inside each argument with `NAME`, the text after `SCHEME://` without `#FIELD`. A reference whose text after `SCHEME://` starts with `-` is refused, so the program cannot read it as a flag. |
+| Environment | `HOME` when the operator has one, `PATH=/usr/bin:/bin`, and each variable in `pass_env` or `pass_secret_env` that is set. An entry that ends with `*` passes each variable with that prefix. No entry replaces `HOME` or `PATH`. The entries `*`, `PATH`, and `HOME` are refused, and so is an entry with a `*` before its end. |
+| Bounds | No stdin. The working directory is `/`. A run of more than 30 seconds, or more than 1 MiB of stdout, stops the program and fails the fetch. A non-zero exit fails the fetch. |
+| `output` | `text` (the default): stdout is the secret. `json`: stdout is one JSON string, and the decoded string is the secret. Any other JSON value, such as `null`, is refused. The source strips one trailing `\n` or `\r\n` first. |
+| `#FIELD` | The source parses the secret as a JSON object and returns that one string field. Without `#FIELD`, a secret that is a JSON object is refused. |
+| One fetch | The backend keeps each fetched secret until its last clone drops. Two references that differ only in `#FIELD` name one secret, so the program runs once for both. `Backend` is `Clone`, and each clone shares the fetch. A run that fails, or whose output the source cannot read, is not kept. A run whose output is read is kept, also when the `#FIELD` step or the content check then refuses the value. |
+
+A failure names the scheme, the program, and the redacted reference. After a non-zero exit it also
+carries the last bytes of the program's stderr, at most 512, as one line. The reference name and the value
+of each passed `pass_secret_env` variable are replaced with `[REDACTED]`, and the line holds no control
+character. A program that prints one part of the reference name on its own, such as one path
+segment, still shows that part. No failure carries stdout.
+
+The program runs in the caller's process context, outside every sandbox, so declare only a program
+that the operator chose. This crate does not check the program's identity and does not protect its
+files; the caller owns both.
 
 ## What this crate refuses
 
@@ -214,7 +256,7 @@ question about this crate:
 | [Identity substitution](../../docs/design/decisions.md#a-provider-refuses-an-identity-it-cannot-honour) | May a provider substitute an identity it cannot honour? |
 
 Two are worth knowing even if you are only reading: the unusable-secret decision, because the
-`Secret` type is the reason three sources cannot each be wrong about content; and the
+`Secret` type is the reason no source can be wrong about content; and the
 endpoint-breadth decision, because the guard it replaced had been bypassable by writing `*:443`
 instead of `*`.
 
