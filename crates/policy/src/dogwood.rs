@@ -1527,10 +1527,9 @@ pub(crate) fn refuse_undeclared_locations(
             let validation = Validator::new().validate(&lowered);
             for error in validation.validation_errors() {
                 let message = error.to_string();
-                // A pending MCP schema can declare an action or a type, so neither refuses here.
-                if message.contains("unrecognized action")
-                    || message.contains("unrecognized entity type")
-                {
+                // A pending MCP schema can declare an action or a type in its own namespace, but
+                // never in `Box`, so only a `Box::` name refuses here.
+                if mcp_could_supply(&message) {
                     continue;
                 }
                 problems.push(match undeclared_location_name(&message) {
@@ -1806,6 +1805,18 @@ fn undeclared_location(name: &str) -> String {
          declare; declare `{name}` there, or guard the read with \
          `context.input.locations has {name}`"
     )
+}
+
+/// Whether a Cedar validation `message` names an action or entity type outside `Box`, which a
+/// pending MCP schema could still declare.
+fn mcp_could_supply(message: &str) -> bool {
+    ["unrecognized action `", "unrecognized entity type `"]
+        .iter()
+        .any(|marker| {
+            message
+                .split_once(marker)
+                .is_some_and(|(_, name)| !name.starts_with("Box::"))
+        })
 }
 
 /// The refusal of a history clause that reads `<read>.locations.<name>` for an undeclared `name`,

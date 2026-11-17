@@ -1133,3 +1133,51 @@ when { context.input.locations.hmoe };
     assert!(message.contains("hmoe"), "{message}");
     assert!(!message.contains("[locations]"), "{message}");
 }
+
+/// A held file rule that reads a declared location and misspells a `Box::` type refuses at load,
+/// because no MCP schema can declare a `Box` type.
+#[test]
+fn a_held_location_rule_refuses_a_misspelled_box_type() {
+    let text = r#"
+permit (principal, action == Box::Action::"fs:write", resource);
+@id("guarded")
+forbid (principal, action == Box::Action::"fs:write", resource)
+when { context.input.locations.project
+       && context.input.operation == Box::FsWriteOperaton::"write_content" }
+unless temporal { formerly within 1h alpha::Action::"deploy"::response{} };
+"#;
+    let directory = tempfile::tempdir().expect("history directory");
+    let Err(error) =
+        PolicyEngine::open_staged(&project(), sources(text), &directory.path().join("h"))
+    else {
+        panic!("open_staged must refuse the misspelled Box type");
+    };
+    assert!(error.to_string().contains("FsWriteOperaton"), "{error}");
+    let check = PolicyEngine::check(&project(), &sources(text), false);
+    assert!(
+        !check.errors().is_empty() && check.unchecked().is_empty(),
+        "{:?}",
+        check.errors()
+    );
+}
+
+/// An unresolvable location directory is reported with its name and directory as fields.
+#[test]
+fn an_unresolvable_location_names_its_location_and_directory() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let link = directory.path().join("dangling");
+    std::os::unix::fs::symlink(directory.path().join("missing"), &link).expect("the link");
+    let error = Operator::unanchored()
+        .anchored_at(directory.path())
+        .with_locations([("project".to_string(), vec![link.clone()])])
+        .expect_err("a dangling root must refuse");
+    let policy::PolicyError::UnresolvableLocation {
+        name,
+        directory: named,
+        ..
+    } = error
+    else {
+        panic!("expected UnresolvableLocation, got {error:?}");
+    };
+    assert_eq!((name.as_str(), named), ("project", link));
+}
