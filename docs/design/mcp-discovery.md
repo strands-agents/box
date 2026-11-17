@@ -53,12 +53,14 @@ flowchart LR
     commit --> accept["The catalogs accept the tool names"]
 ```
 
-The policy engine keeps one active fragment for each configured server. For each commit, it combines
-the fragments, validates the whole policy against them, and commits the result. HTTP catalogs retain
-separate fragments for each address and MCP session. Before a tool call, Box selects that source's
-fragment and evaluates the call while holding the same authority lock. An already active fragment
-needs no new commit. Switching fragments preserves the policy identities and shared temporal history,
-but can add a schema record to the durable store. Commits run one at a time.
+The policy engine installs one fragment for each configured server. A catalog change combines
+these fragments, validates the policy against them, and commits the result. HTTP catalogs retain
+separate fragments for each address and MCP session. Before a tool call, Box selects a cached
+request schema from that source and evaluates the call while holding the same authority lock.
+A cache miss validates the source against the currently served rules. Selecting a request schema
+leaves the installed policy and schema unchanged, so source switches add no durable schema records.
+Actual catalog and policy commits invalidate these cached validations and run one at a time.
+All calls use the same policy engine and temporal history.
 Each server commits when its list is complete:
 
 | Commit | When | What it adds | Engine readiness |
@@ -175,10 +177,20 @@ the expected cursor. JSON and server-sent event responses must contain one match
 `jsonrpc = "2.0"`; repeated JSON keys and conflicting responses are refused. Box neither guesses
 a catalog URL nor changes the operator's `destinations` entries.
 
-The catalogs retain at most 64 sources per configured server, within the shared discovery-data
-budget. Exhaustion refuses new sources without removing another source's accepted catalog. HTTP
-source isolation does not establish that a server describes its own behavior truthfully. Headers
-other than `Mcp-Session-Id` do not distinguish sources at the same address.
+Box caches at most 64 sources per configured server within the shared discovery-data budget.
+A new list can replace an older cached source. Box prefers sources without unfinished lists,
+then sources without accepted catalogs, and then the least recently used source. Calls to an
+evicted source are refused until that source lists its tools again. A pending call keeps its
+own reply schema, and eviction does not reset policy history. Failed first lists do not retain
+source slots. A list that cannot fit after remote cache reclamation is refused.
+
+Each call uses a validated request schema from its source's accepted catalog. Switching between
+unchanged catalogs does not reinstall the policy or write schema changes to history. Box
+invalidates cached request schemas when accepted catalogs or policy state change. All sources
+continue to use one policy engine and one shared history.
+
+HTTP source isolation does not establish that a server describes its own behavior truthfully.
+Headers other than `Mcp-Session-Id` do not distinguish sources at the same address.
 
 ## The parts and their states
 
@@ -295,8 +307,9 @@ doesn't change it.
 | It fails | The accepted tools stay | The accepted tools are withdrawn |
 
 While a changed list commits, only tools named in both lists pass the catalog check. A catalog can
-change 16 times in one run. This limit applies per stdio server and per HTTP source. After that,
-its accepted tools stay, and stderr names the configured server.
+change 16 times in one run for each stdio server, or 16 times while an HTTP source remains cached.
+After that, its accepted tools stay, and stderr names the configured server. Evicting an HTTP
+source removes its change counter; a fresh list starts a new retained catalog.
 
 ## Pages, limits, and failures
 
@@ -311,11 +324,13 @@ doesn't continue that source's chain, still reaches the harness, but Box doesn't
 | Bytes in one list | 8 MiB | The list fails |
 | Discovery data in one run | 32 MiB, checked best-effort | The list that goes over it fails |
 | Unfinished lists for one server | 4 | A new list replaces the oldest unfinished one |
-| Catalog changes per stdio server or HTTP source | 16 in one run | The accepted tools stay |
-| HTTP sources per configured server | 64 in one run | New sources cannot supply an accepted catalog |
+| Catalog changes | 16 per stdio server per run; 16 per retained HTTP source | The accepted tools stay |
+| Cached HTTP sources per configured server | 64 at a time | A new list replaces an older source; the evicted source must list again |
 | Time for a stdio server to answer a captured list | 30 seconds | The server fails |
 
-A failure stays with its stdio server or HTTP source. Other addresses and sessions keep their catalogs:
+A discovery failure is attributed to its stdio server or HTTP source. Admitting or staging a list
+can separately reclaim older remote catalogs to stay within cache limits, even if that new list
+later fails. Apart from this cache reclamation, other addresses and sessions keep their catalogs:
 
 | Failure | Affected server or HTTP source | The other servers and HTTP sources |
 |---|---|---|

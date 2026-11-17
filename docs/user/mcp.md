@@ -456,8 +456,10 @@ string cursor when present. A repeated or invalid `Mcp-Session-Id` header also c
 
 If the tool catalog is not accepted, list tools again at the call's address and session. Box
 accepts a list only when its response identifier matches the request. A malformed refresh removes
-the accepted list for that source; other addresses and sessions keep their lists. Each configured
-server can retain up to 64 address/session combinations during one run.
+the accepted list for that source; other addresses and sessions keep their lists. Box caches up
+to 64 address/session combinations per configured server at a time. A new list can replace an
+older cached source. If your source was evicted, list its tools again before calling them.
+Eviction preserves shared policy history and any reply already pending for that source.
 
 For a request the policy refuses, see [troubleshooting](./mcp-policy.md#troubleshooting).
 

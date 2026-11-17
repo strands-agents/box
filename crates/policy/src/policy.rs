@@ -588,7 +588,7 @@ impl PolicyEngine {
         server: &str,
         tool: &str,
         arguments: &serde_json::Value,
-        fragment: &str,
+        fragment: &std::sync::Arc<str>,
     ) -> (Decision, Option<crate::PendingToolResponse>) {
         self.refine_tool_call_in_schema(
             governed,
@@ -607,7 +607,7 @@ impl PolicyEngine {
         server: &str,
         tool: &str,
         arguments: &serde_json::Value,
-        fragment: Option<&str>,
+        fragment: Option<&std::sync::Arc<str>>,
     ) -> (Decision, Option<crate::PendingToolResponse>) {
         let identity = crate::schema::ActionIdentity::mcp_tool(server, tool);
         let request = Request::McpCall {

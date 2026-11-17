@@ -2887,6 +2887,283 @@ mod tests {
     }
 
     #[test]
+    fn remote_catalog_cache_reuses_slots_and_requires_evicted_sources_to_list_again() {
+        let fixture = tracked_interceptor(DEMO_PERMITS);
+        let catalog = source_catalog("string");
+        let source = |number| McpSource {
+            endpoint: [number; 32],
+            session: Some("session"),
+        };
+        for number in 0..64 {
+            stage_source(&fixture, source(number), &catalog).unwrap();
+            fixture
+                .intercept(&source_call(source(number), r#"{"value":"hello"}"#))
+                .unwrap()
+                .record_outcome(EgressEffectOutcome::Completed(4))
+                .unwrap();
+        }
+        fixture
+            .intercept(&source_call(source(0), r#"{"value":"hello"}"#))
+            .expect("using the oldest source keeps it in the cache")
+            .record_outcome(EgressEffectOutcome::Completed(4))
+            .unwrap();
+        stage_source(&fixture, source(64), &catalog)
+            .expect("a new source can replace the least recently used catalog");
+        assert!(
+            fixture
+                .intercept(&source_call(source(1), r#"{"value":"hello"}"#))
+                .is_err(),
+            "an evicted source cannot borrow a retained source's catalog"
+        );
+        for number in [0, 64] {
+            fixture
+                .intercept(&source_call(source(number), r#"{"value":"hello"}"#))
+                .expect("the recently used and newly discovered sources remain usable")
+                .record_outcome(EgressEffectOutcome::Completed(4))
+                .unwrap();
+        }
+        stage_source(&fixture, source(1), &catalog).unwrap();
+        fixture
+            .intercept(&source_call(source(1), r#"{"value":"hello"}"#))
+            .expect("an evicted source recovers by listing its tools again")
+            .record_outcome(EgressEffectOutcome::Completed(4))
+            .unwrap();
+    }
+
+    #[test]
+    fn malformed_new_remote_catalogs_do_not_exhaust_source_slots() {
+        let fixture = tracked_interceptor(DEMO_PERMITS);
+        for number in 0..80 {
+            let source = McpSource {
+                endpoint: [number; 32],
+                session: None,
+            };
+            assert!(stage_source(&fixture, source, b"malformed catalog").is_err());
+        }
+        let source = McpSource {
+            endpoint: [80; 32],
+            session: None,
+        };
+        stage_source(&fixture, source, &source_catalog("string"))
+            .expect("failed first lists leave room for a valid source");
+        fixture
+            .intercept(&source_call(source, r#"{"value":"hello"}"#))
+            .unwrap()
+            .record_outcome(EgressEffectOutcome::Completed(4))
+            .unwrap();
+    }
+
+    #[test]
+    fn remote_catalog_switching_does_not_write_schema_changes() {
+        let run = |alternate: bool| {
+            let fixture = tracked_interceptor(DEMO_PERMITS);
+            let first = McpSource {
+                endpoint: [1; 32],
+                session: None,
+            };
+            let second = McpSource {
+                endpoint: [2; 32],
+                session: None,
+            };
+            stage_source(&fixture, first, &source_catalog("string")).unwrap();
+            stage_source(&fixture, second, &source_catalog("integer")).unwrap();
+            for index in 0..8 {
+                let call = if alternate && index % 2 == 0 {
+                    source_call(first, r#"{"value":"hello"}"#)
+                } else {
+                    source_call(second, r#"{"value":7}"#)
+                };
+                fixture
+                    .intercept(&call)
+                    .expect("each valid source call is admitted")
+                    .record_outcome(EgressEffectOutcome::Completed(4))
+                    .expect("each admitted call records its response");
+            }
+            let InterceptorFixture {
+                interceptor,
+                _history: history,
+            } = fixture;
+            drop(interceptor);
+            let log = dogwood_local_engine::DurableLog::open(history.path().join("dogwood.redb"))
+                .unwrap();
+            let mut schema_changes = 0;
+            let mut tool_requests = 0;
+            let mut tool_replies = 0;
+            log.scan_from(0, |_, bytes| {
+                match dogwood_local_engine::Record::decode(bytes).unwrap() {
+                    dogwood_local_engine::Record::SetActionSchema { .. }
+                    | dogwood_local_engine::Record::AppendActionSchema { .. } => {
+                        schema_changes += 1;
+                    }
+                    dogwood_local_engine::Record::Event(event) if event.action() == "echo" => {
+                        match event.kind() {
+                            "request" => tool_requests += 1,
+                            "response" => tool_replies += 1,
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            })
+            .unwrap();
+            assert_eq!(tool_requests, 8, "all typed requests actually ran");
+            assert_eq!(
+                tool_replies, 8,
+                "all typed responses reached shared history"
+            );
+            schema_changes
+        };
+        let repeated_source = run(false);
+        let alternating_sources = run(true);
+        assert_eq!(
+            alternating_sources, repeated_source,
+            "selecting an unchanged catalog must not append durable schema records"
+        );
+    }
+
+    #[test]
+    fn remote_catalogs_keep_disjoint_tool_sets_callable() {
+        let fixture = tracked_interceptor(DEMO_PERMITS);
+        let first = McpSource {
+            endpoint: [1; 32],
+            session: None,
+        };
+        let second = McpSource {
+            endpoint: [2; 32],
+            session: None,
+        };
+        stage_source(&fixture, first, &source_catalog("string")).unwrap();
+        stage_source(&fixture, second, DEMO_TOOLS.as_bytes()).unwrap();
+        let call = |source, tool, arguments| {
+            let mut call = mcp_call_attempt("demo", tool, arguments);
+            if let EgressEffectAttempt::HttpRequest { mcp_source, .. } = &mut call {
+                *mcp_source = Some(source);
+            }
+            call
+        };
+        for _ in 0..3 {
+            for request in [
+                call(first, "echo", r#"{"value":"hello"}"#),
+                call(second, "add", r#"{"a":1,"b":2}"#),
+            ] {
+                fixture
+                    .intercept(&request)
+                    .expect("each source can call its own declared tool")
+                    .record_outcome(EgressEffectOutcome::Completed(4))
+                    .unwrap();
+            }
+            assert!(
+                fixture
+                    .intercept(&call(first, "add", r#"{"a":1,"b":2}"#))
+                    .is_err()
+            );
+            assert!(
+                fixture
+                    .intercept(&call(second, "echo", r#"{"value":"hello"}"#))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn an_evicted_remote_catalog_keeps_its_pending_reply_and_shared_history() {
+        let policy = format!(
+            r#"{DEMO_PERMITS}
+            forbid(principal, action == demo::Action::"echo", resource)
+            when temporal {{ formerly within 3600s (demo::Action::"echo"::response{{
+                input.value: _, output.reply: "result", output.structured.accepted: true
+            }}) }};"#
+        );
+        let fixture = tracked_interceptor(&policy);
+        let source = |number| McpSource {
+            endpoint: [number; 32],
+            session: None,
+        };
+        let catalog = |kind: &str| {
+            let mut response: serde_json::Value =
+                serde_json::from_slice(&source_catalog(kind)).unwrap();
+            response["result"]["tools"][0]["outputSchema"] = serde_json::json!({
+                "type":"object", "properties":{
+                    "accepted":{"type":"boolean"}, "token":{"type":kind}
+                }, "required":["accepted","token"]
+            });
+            serde_json::to_vec(&response).unwrap()
+        };
+        stage_source(&fixture, source(0), &catalog("string")).unwrap();
+        let mut pending = fixture
+            .intercept(&source_call(source(0), r#"{"value":"hello"}"#))
+            .unwrap();
+        let reply = pending.reply_observer(Some("1")).unwrap();
+        pending.record_outcome(REPLIED).unwrap();
+        for number in 1..=64 {
+            stage_source(&fixture, source(number), &catalog("integer")).unwrap();
+        }
+        assert!(
+            fixture
+                .intercept(&source_call(source(0), r#"{"value":"hello"}"#))
+                .is_err(),
+            "eviction requires rediscovery even while an earlier reply is pending"
+        );
+        fixture
+            .intercept(&source_call(source(64), r#"{"value":7}"#))
+            .expect("another source is allowed before the delayed reply arms the rule")
+            .record_outcome(EgressEffectOutcome::Completed(4))
+            .unwrap();
+        reply.finished(
+            br#"{"jsonrpc":"2.0","id":1,"result":{
+            "content":[],"structuredContent":{"accepted":true,"token":"first-source"}}}"#,
+        );
+        assert!(
+            fixture
+                .intercept(&source_call(source(64), r#"{"value":7}"#))
+                .is_err(),
+            "the evicted source's delayed reply still arms the shared rule"
+        );
+        stage_source(&fixture, source(0), &catalog("string")).unwrap();
+        assert!(
+            fixture
+                .intercept(&source_call(source(0), r#"{"value":"hello"}"#))
+                .is_err(),
+            "rediscovery does not reset the shared rule's history"
+        );
+        let InterceptorFixture {
+            interceptor,
+            _history: history,
+        } = fixture;
+        drop(interceptor);
+        let log =
+            dogwood_local_engine::DurableLog::open(history.path().join("dogwood.redb")).unwrap();
+        let mut preserved = 0;
+        log.scan_from(0, |_, bytes| {
+            if let dogwood_local_engine::Record::Event(event) =
+                dogwood_local_engine::Record::decode(bytes).unwrap()
+                && event.action() == "echo"
+                && event.kind() == "response"
+                && format!("{:?}", event.field_path(&["input".into(), "value".into()]))
+                    == "Some(String(\"hello\"))"
+            {
+                assert_eq!(
+                    format!(
+                        "{:?}",
+                        event.field_path(&[
+                            "output".into(),
+                            "structured".into(),
+                            "accepted".into()
+                        ])
+                    ),
+                    "Some(Bool(true))"
+                );
+                preserved += 1;
+            }
+        })
+        .unwrap();
+        assert_eq!(
+            preserved, 1,
+            "the original typed reply is recorded exactly once"
+        );
+    }
+
+    #[test]
     fn remote_catalogs_keep_argument_types_separate_by_address_and_session() {
         let first = McpSource {
             endpoint: [1; 32],
