@@ -300,11 +300,11 @@ actions](policy/actions.md#filesystem) show both forms.
 
 The startup disclosure prints one line for each location, after the agent's filesystem grants. It
 prints each directory as resolved, which is the spelling a rule matches, and spells one under the
-operator's home `~/…`:
+operator's home `~/…`. For an operator whose home is `/Users/dev`, the table above prints:
 
 ```text
 strands-box: [locations] caches: ~/.cache/my-agent, ~/.npm  (a name for policy rules; grants no access)
-strands-box: [locations] project: /Users/dev/src/app  (a name for policy rules; grants no access)
+strands-box: [locations] project: ~/src/app  (a name for policy rules; grants no access)
 ```
 
 A box that declares a location stores its record at version 36, and an older build refuses it.

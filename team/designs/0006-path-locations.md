@@ -52,9 +52,11 @@ caches = ["~/.cache/my-agent", "~/.npm"]
 
 - Each key is a name. Each value is a list of one or more directories.
 - A name starts with a letter and holds only letters, digits and `_`, so a rule can write
-  `locations.my_cache`. Cedar's reserved words, such as `if` and `in`, aren't allowed.
-- A directory is an absolute path or starts with `~/`.
-- An empty list is an error, because the name would label nothing.
+  `locations.my_cache`. A name is at most 64 characters long. Cedar's reserved words, such as
+  `if` and `in`, aren't allowed.
+- A directory is an absolute path, `~` for the whole home, or starts with `~/`.
+- An empty list is an error, because the name would label nothing. Listing the same directory
+  twice in one location is an error too.
 - Without a `[locations]` table, every file request carries an empty `locations`, and a policy
   that doesn't mention locations works as it does today.
 
@@ -156,6 +158,9 @@ changes to them:
   declares locations.
 - What time-based rules see: each `fs:*` event in history records `locations`.
 - A newer stored record version for a box that declares locations, as other optional features do.
+- In the policy crate, `Operator::with_locations`, which declares the locations and returns an
+  error for a declaration Box can't use, and `Operator::locations`, which returns the resolved
+  directories that the startup message prints.
 
 ## 7. Key decisions
 
