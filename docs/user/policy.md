@@ -169,6 +169,8 @@ strands-shell: tee: policy denied this operation on '~/project/notes.md' [policy
 - The rule counts `fs:write::response` events with result `completed`, which the box records when a
   content write finishes. A refused write does not count, and a write still in flight does not count
   yet, so a burst of writes started together can exceed the budget by the size of the burst.
+- A `touch` of an existing file changes its times as a `write_content` write, so it counts toward
+  the budget. A `touch` that creates a file completes no write and doesn't count.
 - The `when` clause limits the `forbid` to content writes. A `mkdir` is `fs:write` with operation
   `create_dir`, so the budget leaves it alone. A rename is `fs:move`, and a delete is `fs:delete`;
   each needs its own rule.
