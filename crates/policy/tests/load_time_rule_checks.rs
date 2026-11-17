@@ -452,6 +452,49 @@ fn an_action_list_across_namespaces_refuses_validate_and_open() {
     }
 }
 
+/// A rule that does not lower yet must not hide another rule's refusal: the checks before discovery
+/// judge each rule on its own, so validate, check and open give one answer.
+#[test]
+fn a_rule_that_does_not_lower_cannot_hide_a_mixed_action_list() {
+    let source = r#"permit(principal, action == Box::Action::"fs:read", resource);
+
+@id("both_doors")
+forbid(principal, action in [Box::Action::"fs:read", svc::Action::"deploy"], resource);
+
+permit(principal, action == other::Action::"x", resource)
+when { context.input.x.unsupported() };"#;
+    assert!(
+        matches!(
+            PolicyEngine::validate_staged(&[self::source(source)]),
+            Err(PolicyError::MixedActionNamespaces(_))
+        ),
+        "validate_staged"
+    );
+    let check = PolicyEngine::check(&Operator::unanchored(), &[self::source(source)], false);
+    assert!(
+        check
+            .errors()
+            .iter()
+            .any(|finding| finding.message().contains("more than one namespace")),
+        "check: {:?}",
+        check.errors()
+    );
+    let history = tempfile::tempdir().expect("history directory");
+    assert!(
+        matches!(
+            PolicyEngine::open_staged(
+                &Operator::unanchored(),
+                vec![self::source(source)],
+                &history.path().join("dogwood.redb"),
+            ),
+            Err(PolicyStagingError::Policy(
+                PolicyError::MixedActionNamespaces(_)
+            ))
+        ),
+        "open_staged"
+    );
+}
+
 /// A list of one action type loads, however many actions it names.
 #[test]
 fn an_action_list_of_one_namespace_loads() {

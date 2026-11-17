@@ -913,26 +913,32 @@ pub(crate) fn rule_conditions(expanded: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Refuse a macro-expanded rule that names the removed `ip` attribute, or reads `context.input`
-/// without one action family, before an MCP action schema stages.
+/// Refuse a macro-expanded rule that names the removed `ip` attribute, reads `context.input`
+/// without one action family, or lists actions of more than one action type, before an MCP action
+/// schema stages.
+///
+/// Each rule is judged on its own. A rule that does not parse or lower yet, such as one that waits
+/// for a tool schema, must not hide another rule's refusal.
 pub(crate) fn refuse_input_reads_before_discovery(expanded: &[String]) -> Result<(), Refused> {
-    let source = expanded
-        .iter()
-        .map(|policy| without_temporal(policy))
-        .collect::<Vec<_>>()
-        .join("\n");
     let policy_schema = PolicySchema::from_cedarschema_str(&action_schema(&[])?.source)
         .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
-    let Ok(parsed) = dogwood_language::ParsedPolicySet::parse(&source, &service_schema()?) else {
-        return Ok(());
-    };
-    let Ok(lowered) = parsed.lower(&policy_schema) else {
-        return Ok(());
-    };
-    let rule_of = |cedar_policy_id: &str| rule_ref(&lowered, cedar_policy_id, &[]);
-    crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &rule_of)?;
-    crate::spelling::refuse_input_across_families(lowered.as_cedar(), &rule_of)?;
-    crate::spelling::refuse_mixed_action_namespaces(lowered.as_cedar(), &rule_of)
+    let service = service_schema()?;
+    for (ordinal, rule) in expanded.iter().enumerate() {
+        let Ok(parsed) =
+            dogwood_language::ParsedPolicySet::parse(&without_temporal(rule), &service)
+        else {
+            continue;
+        };
+        let Ok(lowered) = parsed.lower(&policy_schema) else {
+            continue;
+        };
+        let positions = [ordinal];
+        let rule_of = |cedar_policy_id: &str| rule_ref(&lowered, cedar_policy_id, &positions);
+        crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &rule_of)?;
+        crate::spelling::refuse_input_across_families(lowered.as_cedar(), &rule_of)?;
+        crate::spelling::refuse_mixed_action_namespaces(lowered.as_cedar(), &rule_of)?;
+    }
+    Ok(())
 }
 
 /// A rendered rule with each `temporal { … }` expression replaced by `true`.
