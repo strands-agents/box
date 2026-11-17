@@ -35,7 +35,7 @@ policy = { package = "strands-box-policy", path = "../policy", features = [
 ] }
 telemetry = { package = "strands-box-telemetry", path = "../telemetry" }
 box-shell = { package = "strands-box-shell", path = "../shell" }
-strands-shell = { git = "https://github.com/strands-agents/shell", rev = "20c642b0634e9f1a752fa884d9b21d0aadf40b33", default-features = false }
+strands-shell = { git = "https://github.com/strands-agents/shell", rev = "39daa83d7f155d5b164f794f783e35598f49064e", default-features = false }
 # The interpreter behind the `python3`/`python` aliases
 # (docs/design/decisions.md#interpreters-are-brokered-aliases). Published crates, not
 # a fork: `monty` drives the run loop and `monty-types` carries the OS-call vocabulary the
@@ -66,7 +66,8 @@ bytes = "1"
 tempfile = "3"
 thiserror = "2"
 toml = "1"
-# The parsed host the Shell's SSRF floor reads, as the egress client parses it.
+# The parsed host the Shell's SSRF floor reads, as the egress client parses it, and the host and
+# port a telemetry destination's credential is bound to.
 url = "2"
 
 # Test-only, enabled by `test-support`: a TLS client for `box-egress-probe` and a TLS

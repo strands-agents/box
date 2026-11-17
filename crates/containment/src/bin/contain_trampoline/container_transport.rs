@@ -72,6 +72,16 @@ fn connect(path: &Path, arguments: &[String]) -> io::Result<u8> {
             "container launch requires an opened config and no pre-existing control channel",
         ));
     }
+    // Opening the procfd makes an independent file description. The receiver
+    // still reads the original opened config from offset zero.
+    let fd = parsed
+        .config_fd
+        .ok_or_else(|| invalid("missing opened config"))?;
+    let source = std::fs::read_to_string(format!("/proc/self/fd/{fd}"))?;
+    use sha2::{Digest as _, Sha256};
+    if Sha256::digest(source.as_bytes())[..] != parsed.config_sha256 {
+        return Err(invalid("supervisor config digest mismatch"));
+    }
     let mut descriptors = vec![0, 1, 2];
     descriptors.extend(
         [
@@ -86,7 +96,7 @@ fn connect(path: &Path, arguments: &[String]) -> io::Result<u8> {
     let mut sending = descriptors.clone();
     sending.push(image.as_raw_fd());
     let payload = Launch {
-        version: 1,
+        version: 2,
         arguments: arguments.to_vec(),
         working_directory: std::env::current_dir()?,
         descriptors,
@@ -115,6 +125,9 @@ fn connect(path: &Path, arguments: &[String]) -> io::Result<u8> {
     send_descriptors(&stream, &sending)?;
     stream.write_all(&(bytes.len() as u32).to_be_bytes())?;
     stream.write_all(&bytes)?;
+    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
+    super::container_anchors::approve(&mut stream, &source)?;
+    stream.set_read_timeout(None)?;
     drop(image);
     for descriptor in sending
         .into_iter()
@@ -230,7 +243,7 @@ fn receive(path: &Path) -> io::Result<u8> {
     let mut bytes = vec![0; length];
     stream.read_exact(&mut bytes)?;
     let mut launch: Launch = serde_json::from_slice(&bytes)?;
-    if launch.version != 1
+    if launch.version != 2
         || launch.descriptors.len() + 1 != descriptors.len()
         || launch.descriptors.get(..3) != Some(&[0, 1, 2])
     {

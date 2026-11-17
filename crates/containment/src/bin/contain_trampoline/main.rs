@@ -13,6 +13,8 @@ use std::process::ExitCode;
 // `cfg` gate and is unit-tested on every target.
 mod args;
 #[cfg(target_os = "linux")]
+mod container_anchors;
+#[cfg(target_os = "linux")]
 mod container_transport;
 use args::Args;
 
@@ -263,7 +265,18 @@ fn apply_containment(args: &Args, setup_status: &SetupStatus) -> Result<(), Exit
             format_args!("config is not valid UTF-8: {error}"),
         )
     })?;
-    let mut config = ContainmentConfig::from_json(config_json).map_err(|error| {
+    #[cfg(target_os = "linux")]
+    let loaded = if let Some(fd) = args.container_lifetime_fd {
+        // SAFETY: receive owns this socket across exec and preserves it for the reaper.
+        container_anchors::load(config_json, unsafe {
+            std::os::fd::BorrowedFd::borrow_raw(fd)
+        })
+    } else {
+        ContainmentConfig::from_json(config_json).map_err(std::io::Error::other)
+    };
+    #[cfg(not(target_os = "linux"))]
+    let loaded = ContainmentConfig::from_json(config_json);
+    let mut config = loaded.map_err(|error| {
         setup_status.fail(
             SetupStage::ConfigValidation,
             2,

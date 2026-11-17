@@ -14,7 +14,7 @@ container-agent = true
 
 This mode accepts one
 `[agent]` and refuses hosted `[tool]` and `[mcp]` declarations. It writes record
-version 36, which older binaries refuse. This build refuses earlier experimental container-agent records stamped 35.
+version 38, which older binaries refuse. Recreate earlier experimental container-agent records from the original configuration.
 
 The installer starts the trusted `strands-box run` process separately from the
 workload container. Both use the same non-root UID and a shared Box directory.
@@ -36,7 +36,16 @@ masked submounts, and makes it read-only. Filesystem grants, executable-memory
 restrictions, and mediated network access still apply. The workload uses the normal Linux syscall policy. PID 1 handles its filesystem
 queries after dropping capabilities.
 
-The trusted processes exchange one bounded launch request and descriptors before
-the workload starts. The PID 1 reaper holds a lifetime connection to the trusted
+Mount granted application files, executables, libraries, and time zone data
+from the same objects in both containers. Separate root filesystems built from
+the same image can assign different device and inode numbers to these paths.
+Use read-only shared mounts for immutable runtime files. Keep private credentials
+on their intended container.
+
+The trusted processes exchange a bounded launch request and descriptors. PID 1
+opens and pins its own root entry, the entry-only directories `/etc` and `/var`,
+and the kernel null device. The supervisor checks the original grants and
+confirms the digest of the exact workload configuration. All data-bearing
+application grants retain their original object identity checks. The PID 1 reaper holds a lifetime connection to the trusted
 supervisor. If that connection closes, PID 1 exits and the kernel terminates its
 remaining namespace members. Do not use this mode in a shared or host PID namespace.

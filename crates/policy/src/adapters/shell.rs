@@ -193,6 +193,9 @@ fn fs_operation(operation: KernelFsOperation) -> FsOperation {
         KernelFsOperation::RemoveDir => FsOperation::RemoveDir,
         KernelFsOperation::CreateDir => FsOperation::CreateDir,
         KernelFsOperation::SetPermissions { .. } => FsOperation::SetPermissions,
+        // A time change is decided as a write, so a rule that permits writing a file permits
+        // touching it, and the authored vocabulary has no separate operation for it.
+        KernelFsOperation::SetTimes => FsOperation::WriteContent,
         KernelFsOperation::ChangeDir => FsOperation::ChangeDir,
         KernelFsOperation::ReadLink => FsOperation::ReadLink,
         _ => FsOperation::Other,

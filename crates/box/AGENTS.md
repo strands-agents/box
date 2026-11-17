@@ -6,7 +6,7 @@ Read the **"`strands-box` is interface-frozen"** section of the
 [repository guidance](../../AGENTS.md) before changing anything here. A change to an
 observable surface — the CLI verbs and flags, `box.toml`'s keys, the four box inputs, the
 on-disk records (`Record` at `RECORD_VERSION` and each later record version through
-`SUPPLIED_IDENTITY_RECORD_VERSION`, with the `box_id` grammar `valid_box_identity` accepts,
+`TELEMETRY_EXPORT_RECORD_VERSION`, with the `box_id` grammar `valid_box_identity` accepts,
 `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
 `PROTOCOL_VERSION`, the alias names and their socket derivation, the
 policy action vocabulary, the composed workload environment — or to a foundational premise,
@@ -256,9 +256,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   about one box. **Do not reintroduce `--name`**; reconciling a flag against the file is the shape in
   which the file's key became silently dead once already.
 
-  **`box.toml` carries twelve top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
+  **`box.toml` carries thirteen top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
   `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
-  `[experimental-features]`, `file-attributes`, `[limits]`, and `[gateway]`.** The experimental settings select native file
+  `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`.** The experimental settings select native file
   checks and tool grammars. They add no authority beyond the authored policy. `file-attributes` adds
   no grant: it widens what the workload's own `write` lists allow on macOS, so it is part of the
   workload input, and each process discloses it. `[gateway] upgrade_http` adds no grant either:
@@ -575,9 +575,11 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   - **A Python alias sends words, and only the trusted process quotes them.** `python3` and
     `python` send their name and arguments as a list; `command_text` single-quotes every word
     before the Shell parses it, so `$(…)`, backticks, and a newline in an argument stay literal.
-    The alias parses no option and reads no file, and the Shell's own `python3` refuses a bare
-    `python3` or `python3 -` with status 2. `a_command_as_words_keeps_every_argument_literal` pins
-    the quoting.
+    The alias parses no option and reads no file. A bare `python3` or `python3 -` exits 2: Monty
+    refuses it, and with `monty = false` the Shell refuses it before the spawn, because a program
+    the Shell starts receives no input and CPython would run an empty program and exit 0.
+    `a_command_as_words_keeps_every_argument_literal` pins the quoting, and
+    `without_a_monty_runner_python3_runs_its_declared_program` the refusal with Monty off.
   - **The hosted Shell has no network of its own — it can reach only the gateway
     ([Shell network](../../docs/design/decisions.md#shell-network-goes-through-the-egress-gateway)).**
     The Shell itself never dials an origin: its one outbound path routes through the box's egress
