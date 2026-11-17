@@ -307,7 +307,7 @@ strands-box: [locations] caches: ~/.cache/my-agent, ~/.npm  (a name for policy r
 strands-box: [locations] project: ~/src/app  (a name for policy rules; grants no access)
 ```
 
-A box that declares a location stores its record at version 36, and an older build refuses it.
+A box that declares a location stores its record at version 37, and an older build refuses it.
 Without `[locations]`, the record is unchanged.
 
 ## `[experimental-features]`
