@@ -125,7 +125,7 @@ The end of a WebSocket writes no event. The `::response` of each Close records h
 
 ### 3.3 Refusals and limits
 
-A refused message never reaches the other side. The relay closes both sides and writes one Deny record for a refusal by policy, a protocol fault, or a gateway fault. A drop or the idle clock writes none. After a refusal by policy, in either direction, the workload gets 1008 and the server gets 1001, so the server learns nothing about the policy. After a protocol fault, the side that broke the rule gets the close code from the table. The other side gets 1001 after a workload fault or 1014 after a server fault.
+A refused message never reaches the other side. The relay closes both sides and writes one Deny record for a refusal by policy, a protocol fault, a gateway fault, or an outcome that it can't record. A drop or the idle clock writes none, as an HTTP exchange that ends writes no Deny on main. After a refusal by policy, in either direction, the workload gets 1008 and the server gets 1001, so the server learns nothing about the policy. After a protocol fault, the side that broke the rule gets the close code from the table. The other side gets 1001 after a workload fault or 1014 after a server fault.
 
 | Cause | Signal |
 |---|---|
