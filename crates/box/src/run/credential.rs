@@ -8,20 +8,28 @@ use credentials::{Backend, Vault, VaultConfig};
 
 use crate::error::{BoxError, Internal};
 use crate::record::config::egress::{EgressEntry, EgressRoute, credsd_environments};
+use crate::record::config::telemetry::TelemetryEntry;
 
 /// Validate every declared `credsd` credential before the workload starts.
 ///
 /// A box that names no `credsd` source contacts no daemon. Otherwise this confirms the daemon is
 /// reachable and speaks the protocol, and that each named environment holds a usable session; any
 /// gap is a hard failure that stops the run before it spawns the workload.
-/// Both maps are passed by construction: remote MCP is stored in its own map (`record.remote_mcp`),
-/// so a credsd source declared only on a `[mcp.<name>] type = "http"` server is covered here rather
-/// than deferred to the first request — the failure this preflight exists to prevent.
+/// Every map is passed by construction: remote MCP is stored in its own map (`record.remote_mcp`),
+/// and telemetry in another, so a credsd source declared only on a `[mcp.<name>] type = "http"`
+/// server or a `[telemetry.<label>]` target is covered here rather than deferred to the first
+/// request — the failure this preflight exists to prevent.
 pub(crate) fn preflight_credsd(
     egress: &BTreeMap<String, EgressEntry>,
     remote_mcp: &BTreeMap<String, EgressEntry>,
+    telemetry: &BTreeMap<String, TelemetryEntry>,
 ) -> Result<(), BoxError> {
-    let environments = credsd_environments(egress, remote_mcp);
+    let mut environments = credsd_environments(egress, remote_mcp);
+    for environment in crate::record::config::telemetry::credsd_environments(telemetry) {
+        if !environments.contains(&environment) {
+            environments.push(environment);
+        }
+    }
     if environments.is_empty() {
         return Ok(());
     }

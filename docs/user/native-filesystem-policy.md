@@ -110,7 +110,8 @@ Policies that select directory opens by operation must use `enumerate` on both L
 When `[limits]` has no explicit settings, `file-attributes` is `false`, MCP argument wildcards
 are disabled, MCP executable names are bare, the agent declares no `[[agent.ingress]]`,
 no egress destination has a backend, `[gateway] upgrade_http` is empty, the box ID is `box-` and 16 hexadecimal digits,
-and every process leaves `file-watching` disabled,
+every process leaves `file-watching` disabled, and each telemetry target uses only the settings
+an earlier build reads,
 configurations without process overrides retain version 21 when disabled and version 22 when enabled.
 An explicit process override requires record version 23.
 Two stdio MCP servers that share a program require record version 24.
@@ -126,15 +127,17 @@ A non-empty [`[gateway] upgrade_http`](config.md#gateway) requires record versio
 A box ID that a library caller supplied, other than `box-` and 16 hexadecimal digits, requires record
 version 34.
 Enabling [`file-watching`](config.md#file-watching) for any process requires record version 35.
-Setting `executable-memory` for any process requires record version 36.
+A [telemetry target](config.md#telemetrylabel) that uses `accepts`, `headers`, `secret.prefix`,
+`secret.placement`, a vendor kind, or an `aws://` or `credsd://` secret requires record version 36.
+Setting `executable-memory` for any process requires record version 37.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 
 To disable the experiment, change the global setting to `false`.
 Remove all process overrides and `[limits]` settings, give each stdio MCP server its own
-program, set `file-attributes` to `false`, remove `file-watching` and `executable-memory` from every process,
-and remove `[gateway] upgrade_http` before returning to
-a binary that supports only version 21.
+program, set `file-attributes` to `false`, remove `file-watching` and `executable-memory` from every
+process, remove `[gateway] upgrade_http`, and give each telemetry target only `env://` or `secret://`
+bearer settings before returning to a binary that supports only version 21.
 If MCP argument wildcards are enabled, replace the stars with concrete arguments and disable
 `argument_wildcards` on each server too.
 Replace each absolute MCP executable path with a bare program name that the server's `PATH`
@@ -206,7 +209,7 @@ Tests cover normal detached-child cleanup, but not every shutdown failure or enf
 
 ### Can I immediately return to an older binary?
 
-No, if the box has a version 22, 23, 24, 25, 26, 27, or 28 record that the older binary does not support.
+No, if the box has a record of version 22 or later that the older binary does not support.
 Follow [Stored configuration and rollback](#stored-configuration-and-rollback) before starting an older binary.
 Changing TOML alone does not rewrite the stored record.
 

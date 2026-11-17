@@ -6,7 +6,7 @@ Read the **"`strands-box` is interface-frozen"** section of the
 [repository guidance](../../AGENTS.md) before changing anything here. A change to an
 observable surface — the CLI verbs and flags, `box.toml`'s keys, the four box inputs, the
 on-disk records (`Record` at `RECORD_VERSION` and each later record version through
-`SUPPLIED_IDENTITY_RECORD_VERSION`, with the `box_id` grammar `valid_box_identity` accepts,
+`TELEMETRY_EXPORT_RECORD_VERSION`, with the `box_id` grammar `valid_box_identity` accepts,
 `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
 `PROTOCOL_VERSION`, the alias names and their socket derivation, the
 policy action vocabulary, the composed workload environment — or to a foundational premise,

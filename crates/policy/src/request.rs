@@ -103,7 +103,7 @@ pub enum FsAccess {
 pub enum FsOperation {
     /// Open to read file content.
     ReadContent,
-    /// Open to write file content, including an open that creates or truncates.
+    /// Write file content, including an open that creates or truncates, or set a file's times.
     WriteContent,
     /// Read attributes without reading content, following a final symlink or not.
     ReadMetadata,

@@ -266,3 +266,32 @@ fn a_program_planted_inside_the_admission_window_does_not_reach_the_seam() {
     assert_eq!(out.status, 127, "{}", out.stderr);
     assert!(out.stderr.contains("command not found"), "{}", out.stderr);
 }
+
+#[test]
+fn a_file_replaced_inside_the_admission_window_keeps_its_times() {
+    use std::os::unix::fs::MetadataExt as _;
+    let folder = Folder::standard();
+    let ws = folder.ws.clone();
+    let (hook, fired) = once(
+        |effect| {
+            matches!(
+                effect,
+                EffectAttempt::Filesystem {
+                    path,
+                    operation: box_shell::FsOperation::SetTimes,
+                } if path.ends_with("/real.txt")
+            )
+        },
+        move || {
+            std::fs::write(ws.join("planted.txt"), "PLANTED").expect("a replacement");
+            std::fs::rename(ws.join("planted.txt"), ws.join("real.txt")).expect("replace");
+        },
+    );
+    let out = folder.run_with(hook, "touch -d @0 real.txt");
+    assert!(fired.load(Ordering::SeqCst));
+    assert_ne!(out.status, 0, "{}", out.stderr);
+    assert!(out.stderr.contains(STALE), "{}", out.stderr);
+    let replaced = std::fs::metadata(folder.ws.join("real.txt")).expect("stat");
+    assert_eq!(read(&folder.ws.join("real.txt")), "PLANTED");
+    assert_ne!(replaced.mtime(), 0, "the replacement's time is unchanged");
+}

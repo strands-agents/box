@@ -251,3 +251,58 @@ host_case!(
         assert!(!ran.out.stdout.contains("OUTSIDE"), "{}", ran.out.stdout);
     }
 );
+
+// `touch` sets a host file's times, follows a link, and copies a reference's access time.
+
+/// The (access, modification) seconds of `name` under `ws/`, following a link.
+fn host_times(folder: &support::Folder, name: &str) -> (i64, i64) {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = std::fs::metadata(folder.ws.join(name)).expect("stat");
+    (meta.atime(), meta.mtime())
+}
+
+host_case!(
+    touch_d_sets_both_times_of_a_host_file,
+    "touch -d @981173106 real.txt",
+    |folder, ran| {
+        assert_eq!(ran.out.status, 0, "{}", ran.out.stderr);
+        assert_eq!(host_times(&folder, "real.txt"), (981_173_106, 981_173_106));
+        assert_eq!(
+            std::fs::read_to_string(folder.ws.join("real.txt")).expect("read"),
+            "REAL_BYTES"
+        );
+    }
+);
+
+host_case!(
+    touch_through_a_link_sets_the_times_of_its_target,
+    "touch -d @981173106 flink",
+    |folder, ran| {
+        assert_eq!(ran.out.status, 0, "{}", ran.out.stderr);
+        assert!(folder.is_link("flink"), "the link stays a link");
+        assert_eq!(
+            host_times(&folder, "secret.txt"),
+            (981_173_106, 981_173_106)
+        );
+    }
+);
+
+host_case!(
+    touch_r_copies_the_access_time_of_a_host_reference,
+    "touch -a -d @631152000 mode.txt && touch -m -d @981173106 mode.txt \
+     && touch -r mode.txt real.txt",
+    |folder, ran| {
+        assert_eq!(ran.out.status, 0, "{}", ran.out.stderr);
+        assert_eq!(host_times(&folder, "real.txt"), (631_152_000, 981_173_106));
+    }
+);
+
+host_case!(
+    a_plain_touch_moves_both_times_of_an_existing_host_file_to_now,
+    "touch -d @981173106 real.txt && touch real.txt",
+    |folder, ran| {
+        assert_eq!(ran.out.status, 0, "{}", ran.out.stderr);
+        let (accessed, modified) = host_times(&folder, "real.txt");
+        assert!(accessed > 981_173_106 && modified > 981_173_106);
+    }
+);
