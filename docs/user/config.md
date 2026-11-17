@@ -293,7 +293,9 @@ A location grants no access. The agent still reaches a directory only through
 [`[agent.filesystem]`](#agentfilesystem-and-toolnamefilesystem) and a policy permit. A rule that
 reads `context.input.locations.<name>` for a location this file does not declare refuses to load.
 A rule that first tests `context.input.locations has <name>` treats the location as optional: it
-loads in any box and applies only where this file declares the name. [The filesystem
+loads in any box and applies only where this file declares the name. A history predicate on a
+location, such as `input.locations.<name>: true`, is always strict, so a rule with one refuses to
+load where this file doesn't declare the name, even beside `has`. [The filesystem
 actions](policy/actions.md#filesystem) show both forms.
 
 The startup disclosure prints one line for each location, after the agent's filesystem grants. It

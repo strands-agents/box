@@ -1032,3 +1032,38 @@ unless temporal {{ formerly within 1h alpha::Action::"deploy"::response{{}} }};
     assert!(error.contains("pathh"), "{error}");
     assert!(!error.contains("does not declare"), "{error}");
 }
+
+/// `has` makes a Cedar condition on a location optional, but a history predicate on a location is
+/// always strict, so it refuses to load where the location is not declared.
+#[test]
+fn a_history_predicate_on_an_undeclared_location_refuses_even_beside_has() {
+    let text = r#"
+@id("secrets_budget")
+permit (principal, action == Box::Action::"fs:read", resource)
+when { context.input.locations has secrets && context.input.locations.secrets }
+when temporal {
+    exists (total: Long). (
+        (count for (t: Timepoint). where (
+            formerly within 1h (
+                Box::Action::"fs:read"::response{ input.locations.secrets: true } && tp(t)
+            )
+        )) == total
+        && total < 10
+    )
+};
+"#;
+    let directory = tempfile::tempdir().expect("history directory");
+    for (label, declared) in [("none", Operator::unanchored()), ("other", project())] {
+        let Err(error) =
+            PolicyEngine::open_staged(&declared, sources(text), &directory.path().join(label))
+        else {
+            panic!("{label}: the history predicate must refuse");
+        };
+        assert!(
+            error.to_string().contains("input.locations.secrets"),
+            "{label}: {error}"
+        );
+    }
+    let secrets = operator(&[("secrets", &["/vault"])]);
+    open(&secrets, text, &directory.path().join("declared"));
+}

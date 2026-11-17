@@ -80,7 +80,9 @@ A rule reads a location in one of two ways:
   location `box.toml` does not declare refuses to load.
 - **Optional:** `context.input.locations has project && context.input.locations.project`. The
   location may be missing, so the rule loads in every box and applies only where `project` is
-  declared.
+  declared. `has` makes only the `when` condition optional: a history predicate on a location,
+  such as `input.locations.project: true`, is always strict, so that rule still refuses to load
+  where `project` is not declared.
 
 ```text
 @id("project_write")
