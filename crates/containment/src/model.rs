@@ -653,8 +653,16 @@ impl PathGrant {
         self.nodes.clone()
     }
 
-    /// Walk the chain once: [`Self::reachable_paths`], the caller's spelling parent-canonical, and
-    /// each link node between the two ends.
+    /// Walk the chain once: [`Self::reachable_paths`], the caller's spelling parent-canonical, each
+    /// link node between the two ends, and each linked directory those spellings pass through.
+    ///
+    /// The kernel reads every link a lookup meets, a linked directory as much as a linked file. A
+    /// venv's `python3.14 -> /opt/homebrew/opt/python@3.14/bin/python3.14` meets the
+    /// `opt/python@3.14` folder link after the venv's own file links, and Homebrew names each
+    /// library a Python module loads through an `opt/<formula>` folder link the same way. A linked
+    /// directory's own target is walked as well, because it can pass through more links. Each node
+    /// is spelled parent-canonical, and the walk follows at most [`MAXIMUM_LINK_HOPS`] links of each
+    /// kind.
     ///
     /// A grant whose parent is canonical and which holds no link, or one, gives back exactly
     /// [`Self::reachable_paths`].
@@ -668,20 +676,45 @@ impl PathGrant {
 
         record(parent_canonical(&self.original), &mut nodes);
 
+        let target_of = |link: &Path, target: PathBuf| match link.parent() {
+            Some(parent) if target.is_relative() => parent.join(&target),
+            _ => target,
+        };
+        let mut spellings = vec![self.original.clone()];
         let mut current = self.original.clone();
         for _ in 0..MAXIMUM_LINK_HOPS {
             let Ok(target) = std::fs::read_link(&current) else {
                 break;
             };
-            current = match current.parent() {
-                Some(parent) if target.is_relative() => parent.join(&target),
-                _ => target,
-            };
+            current = target_of(&current, target);
+            spellings.push(current.clone());
             let node = parent_canonical(&current);
             if node == self.resolved {
                 break;
             }
             record(node, &mut nodes);
+        }
+
+        let mut followed = 0;
+        while let Some(spelling) = spellings.pop() {
+            if followed == MAXIMUM_LINK_HOPS {
+                break;
+            }
+            followed += 1;
+            for ancestor in spelling.ancestors().skip(1) {
+                if !std::fs::symlink_metadata(ancestor).is_ok_and(|metadata| metadata.is_symlink())
+                {
+                    continue;
+                }
+                let node = parent_canonical(ancestor);
+                if nodes.contains(&node) {
+                    continue;
+                }
+                nodes.push(node);
+                if let Ok(target) = std::fs::read_link(ancestor) {
+                    spellings.push(target_of(ancestor, target));
+                }
+            }
         }
         nodes
     }

@@ -1906,19 +1906,35 @@ Monty.
 
 The Shell's deadline bounds both ways, and the Shell reads a script file argument under policy.
 The broker refuses a request that opens Monty without the Shell, so a `shell:exec` decision covers
-every route.
+every route. With `monty = false`, both ways reach whatever the Shell's `python3` resolves to
+instead ([a bare `python` name means Monty unless the operator turns Monty off](#a-bare-python-name-always-means-monty)).
 
 <a id="a-bare-python-name-always-means-monty"></a>
-### A bare `python` name always means Monty, so a host interpreter needs its absolute path
+### A bare `python` name means Monty unless the operator turns Monty off, and then it is an ordinary program
 
-The Shell's registered `python` and `python3` commands win over any host interpreter on `PATH`, and
-over a declared `[tool.<name>]` table that names a host interpreter. So `python --version` returns a
-Monty identifying string, and `python3 -m venv` fails. That precedence prevents a declared tool from
-taking over the bare name. This is a known gap. A workload that runs an interpreter by its own
-absolute path, or runs a virtual environment's `python` by absolute path, reaches the host OS's
-Python under the `[tool.<name>]` table whose `command` names that path. Monty is stateless and
-refuses the interactive frames, so a `python` with no `-c` and no script file refuses instead of
-opening a REPL.
+While Monty is on, which is the default, the Shell's `python` and `python3` win over any host
+interpreter on `PATH` and over a declared `[tool.python3]` or `[tool.python]`. So
+`python --version` returns a Monty identifying string, and `python3 -m venv` fails with a refusal
+that says how to turn real Python on. Startup names a Python table that Monty leaves unused.
+
+`monty = false` at the top of `box.toml` turns Monty off for the box. Box then installs no Monty
+runner, and both names resolve the way any other program the Shell starts does: a tool whose command
+file is named `python3` or `python` answers that name, and otherwise the host's `PATH` decides. The
+spawn meets its own `shell:spawn` decision. Nothing falls back to Monty. With Monty off, Box treats
+the Python tool like any other tool: it adds no grants and doesn't inspect the install, so the
+operator lists what Python reads and writes, and keeps the interpreter's install out of every write
+grant and every `fs:write` rule. Box's check on a configured command still refuses a write grant
+that can change the tool's command or its path, but not one that reaches the rest of a venv.
+
+Why a box-level switch rather than a per-tool one: Monty is part of the Shell, not a tool, and one
+bare name runs one program, so the choice is the box's. A box that never sets the key keeps Monty,
+so existing configurations don't change on upgrade, and a record with `monty = false` needs record
+version 37, so an older build refuses it rather than running Monty again.
+
+We rejected a Box that recognizes Python installs and grants and protects them itself. It made Box
+know Python's layouts and it widened grants no policy decision covers, when a declared tool already
+says what the operator wants. Monty is stateless and refuses the interactive frames, so a `python`
+with no `-c` and no script file refuses instead of opening a REPL.
 
 <a id="monty-is-judged-at-the-effect-level-alone"></a>
 ### Monty is judged at the effect level alone, above two deny-only floors

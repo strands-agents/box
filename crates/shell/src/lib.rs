@@ -23,7 +23,7 @@ pub use effect::{
     EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, EffectResult, FsOperation,
     FsPairOperation,
 };
-pub use fallback::{ScriptFuture, ScriptOutcome, ScriptRunner};
+pub use fallback::{REAL_PYTHON_HINT, ScriptFuture, ScriptOutcome, ScriptRunner};
 pub use floor::check_url_safe;
 pub use kernel::{Filesystem, ShellKernel};
 pub use network::Network;

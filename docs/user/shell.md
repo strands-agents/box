@@ -94,10 +94,11 @@ The Shell implements these, each in place of a program of the same name on the `
 - Files: `ls`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `ln`, `chmod`, `touch`, `mktemp`, `readlink`.
 - Data and network: `jq`, `curl`.
 - Interpreters: `sh` and `lash`, which run a script in the Shell; `lua`; and `python` and
-  `python3`, which run in Monty, Box's Python interpreter. Policy sees `sh` and `lash` as two
-  programs. `sh FILE` and `/bin/sh FILE` are both decided as `program == "sh"`, and `lash FILE` and
-  `/bin/lash FILE` as `program == "lash"`, so a rule meant for the Shell's script interpreter must
-  name both. `.` and `source` also run a file.
+  `python3`, which run in Monty, Box's Python interpreter. With
+  [`monty = false`](./config.md#monty), `python` and `python3` are external programs instead.
+  Policy sees `sh` and `lash` as two programs. `sh FILE` and `/bin/sh FILE` are both decided as
+  `program == "sh"`, and `lash FILE` and `/bin/lash FILE` as `program == "lash"`, so a rule meant
+  for the Shell's script interpreter must name both. `.` and `source` also run a file.
 
 Paths outside the operator's home, the agent's home, and the workspace, such as `/tmp`, exist only
 in the Shell's memory, for one command. A file written to `/tmp` is gone when the command ends.

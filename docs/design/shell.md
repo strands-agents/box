@@ -97,7 +97,8 @@ flowchart TD
 A command the Shell implements raises `shell:exec`. That covers its builtins, shell functions the
 command defines, and its own commands, such as `cat`, `grep`, `jq`, and `curl`. See [the full
 list](../user/shell.md#what-runs-where). A `python` or `python3` typed in the Shell runs in Monty,
-Box's Python interpreter. See [a workload reaches Monty two
+Box's Python interpreter, unless `box.toml` sets `monty = false`; then each is an external program
+like any other. See [a workload reaches Monty two
 ways](decisions.md#python-in-the-shell-is-monty).
 
 When a Shell command and an external program share a name, the Shell command takes precedence. For
