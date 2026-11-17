@@ -944,6 +944,19 @@ and its `P_PIDFD` form takes a descriptor from the permitted `pidfd_open`.
 `a_child_is_awaited_with_waitid_under_the_filters` checks `P_ALL` with `WNOHANG`, `P_PIDFD`, and
 `P_PID` under the filters.
 
+### Returning to a saved folder
+
+On native ARM64 Amazon Linux 2023 (kernel 6.18), Box `5ed679f1` refused `fchdir` with `EPERM`.
+Go's `testing.T.Chdir` saves the working folder as an open descriptor and goes back to it with
+`fchdir` when the test ends. Under Go 1.27.3, `go test ./pkg/cmd/pr/...` in cli/cli panicked with
+`testing.Chdir: chdir .: operation not permitted`. With `fchdir` permitted, the same tests passed.
+`fchdir` adds no reach beyond `chdir`: the kernel checks the same search permission on the open
+folder, and every relative path after it resolves as the permitted `*at(fd, …)` form does. With the
+native filesystem broker, `AT_FDCWD` resolves through `/proc/<pid>/cwd` with the same view check as
+an explicit descriptor (`RequestPath::new` in `crates/box/src/run/linux_enforcement/broker.rs`).
+`a_workload_returns_to_its_saved_folder_with_fchdir`
+saves a folder, enters a subfolder, and returns with `fchdir` under the real trampoline.
+
 ### W^X
 
 W^X closes three routes. Every writable mount, including `/tmp`, uses `MS_NOEXEC`. The permit filter
