@@ -1676,21 +1676,23 @@ retains its existing execution restrictions. Linux keeps automatic temporary mou
 and protected files non-executable. `cn_x_04` tests execution and library loading from tool output,
 with agent denials on both platforms.
 
-<a id="a-jit-runtime-maps-executable-memory-in-a-leaf-and-in-an-opted-in-agent"></a>
-#### A JIT runtime maps executable memory in a tool or MCP server, and in an agent that selects it
+<a id="a-jit-runtime-maps-executable-memory-only-where-its-table-selects-it"></a>
+#### A JIT runtime maps executable memory only where its table selects it
 
 A JIT runtime such as Node, Java, or Bun writes the code it compiles into memory and then runs it.
-Linux's restriction filter refused that memory everywhere, so V8 and the JVM aborted and Bun fell
-back to its interpreter. A tool or MCP server now maps writable and executable memory, and the agent
-does when `[agent]` sets `executable-memory = true`. Only the `mmap` and `mprotect` rules lift.
-`memfd_create`, descriptor `execveat`, `pkey_mprotect`, and the `noexec` mounts stay refused.
+Linux's restriction filter refuses that memory, so V8 and the JVM abort and Bun falls back to its
+interpreter. `[agent]`, a `[tool.<name>]`, or a stdio `[mcp.<name>]` that sets
+`executable-memory = true` lifts the filter's `mmap` and `mprotect` rules for that process and its
+descendants. `memfd_create`, descriptor `execveat`, `pkey_mprotect`, and the `noexec` mounts stay
+refused. Each table selects the key on its own, and it is off by default.
 
 The cost is that such a process can run code it writes into memory, not only code its mount view
-admits. A tool already runs code it writes into its writable grants, so the change adds little there.
-The agent keeps the rule by default, because its mount view decides which programs it runs. An agent
-that selects the key and can also run an FFI runtime, such as Python or Java, lets that runtime run
-programs its grants never listed. macOS has no counterpart rule: Seatbelt does not govern anonymous
-memory, and a macOS box already lets every process write code and then execute it.
+admits. This holds for a leaf too: broad exec runs only what a leaf's grants hold, so a leaf with no
+writable grant had no place to run bytes it wrote. A runtime that calls native code, such as Python
+through `ctypes` or Java through its foreign function API, can then run any bytes. The key is
+therefore a choice the operator makes per table, not a default for every leaf, which would also have
+changed every stored box when it resumed. macOS has no counterpart rule: Seatbelt does not govern
+anonymous memory, and a macOS box already lets every process write code and then execute it.
 
 <a id="native-egress-is-an-operator-declared-leaf-escape"></a>
 #### Native egress is an operator-declared escape from a tool's or server's sandbox, recorded as a downgrade

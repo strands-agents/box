@@ -701,7 +701,7 @@ pub(crate) const SUPPLIED_IDENTITY_RECORD_VERSION: u32 = 34;
 /// The record version of a record whose process selects `file-watching`, so an older build
 /// refuses the box rather than resuming it with FSEvents refused.
 const FILE_WATCHING_RECORD_VERSION: u32 = 35;
-/// The record version of a record whose `[agent]` selects `executable-memory`, so an older build
+/// The record version of a record whose process selects `executable-memory`, so an older build
 /// refuses the box rather than resuming it with its JIT runtime refused.
 const EXECUTABLE_MEMORY_RECORD_VERSION: u32 = 36;
 
@@ -1900,91 +1900,62 @@ native-filesystem-policy = false
         }
     }
 
-    /// **File watching is selected per local process and needs its record version.** Each
+    /// **A per-process switch is selected per local process and needs its record version.** Each
     /// table stores only its own selection, a selected record refuses an older version, and a
     /// remote MCP server refuses the key.
     #[test]
-    fn file_watching_is_versioned_and_selected_per_process() {
-        for table in ["agent", "tool.watcher", "mcp.watcher"] {
-            for enabled in [false, true] {
-                let transport = if table.starts_with("mcp.") {
-                    "type = \"stdio\"\n"
-                } else {
-                    ""
-                };
-                let body = format!(
-                    "[{table}]\n{transport}command = [\"watcher\"]\n\
-                     file-watching = {enabled}\n\
-                     [tool.other]\ncommand = [\"other\"]\n"
-                );
-                let mut stored = pinned_record(&body);
-                let selected = match table {
-                    "agent" => stored.agent.as_ref().unwrap(),
-                    "tool.watcher" => &stored.tool["watcher"],
-                    _ => &stored.contained_mcp["watcher"].spec,
-                };
-                assert_eq!(selected.file_watching, enabled, "{table}");
-                assert!(!stored.tool["other"].file_watching);
-                let expected = if enabled { 35 } else { 21 };
-                assert_eq!(stored.version, expected, "{body}");
-                let text = stored.to_toml().unwrap();
-                assert_eq!(text.contains("file-watching"), enabled);
-                assert_eq!(
-                    Record::parse(&text, Path::new("record.toml")).unwrap(),
-                    stored
-                );
-                stored.version = if enabled { 34 } else { 35 };
-                assert!(matches!(
-                    Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
-                    Err(ConfigError::RecordVersion { expected: version, .. }) if version == expected
-                ));
+    fn per_process_switches_are_versioned_and_selected_per_process() {
+        type Selected = fn(&ProcessSpec) -> bool;
+        let switches: [(&str, Selected, u32); 2] = [
+            ("file-watching", |spec| spec.file_watching, 35),
+            ("executable-memory", |spec| spec.executable_memory, 36),
+        ];
+        for (key, selected_in, version) in switches {
+            for table in ["agent", "tool.watcher", "mcp.watcher"] {
+                for enabled in [false, true] {
+                    let transport = if table.starts_with("mcp.") {
+                        "type = \"stdio\"\n"
+                    } else {
+                        ""
+                    };
+                    let body = format!(
+                        "[{table}]\n{transport}command = [\"watcher\"]\n\
+                         {key} = {enabled}\n\
+                         [tool.other]\ncommand = [\"other\"]\n"
+                    );
+                    let mut stored = pinned_record(&body);
+                    let selected = match table {
+                        "agent" => stored.agent.as_ref().unwrap(),
+                        "tool.watcher" => &stored.tool["watcher"],
+                        _ => &stored.contained_mcp["watcher"].spec,
+                    };
+                    assert_eq!(selected_in(selected), enabled, "{key} {table}");
+                    assert!(!selected_in(&stored.tool["other"]));
+                    let expected = if enabled { version } else { 21 };
+                    assert_eq!(stored.version, expected, "{body}");
+                    let text = stored.to_toml().unwrap();
+                    assert_eq!(text.contains(key), enabled);
+                    assert_eq!(
+                        Record::parse(&text, Path::new("record.toml")).unwrap(),
+                        stored
+                    );
+                    stored.version = if enabled { version - 1 } else { version };
+                    assert!(matches!(
+                        Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                        Err(ConfigError::RecordVersion { expected: required, .. }) if required == expected
+                    ));
+                }
             }
-        }
-        let remote = "name = \"watcher\"\nbox_dir = \"/var/lib/boxes/watcher\"\n\
-                      [mcp.remote]\ntype = \"http\"\ndestinations = [\"example.com\"]\n\
-                      file-watching = false\n";
-        assert!(
-            toml::from_str::<ConfigFile>(remote).is_err(),
-            "a remote MCP server refuses the key"
-        );
-    }
-
-    /// **Executable memory is an `[agent]` key and needs its record version.** A tool or MCP server
-    /// refuses it, because each already has executable memory.
-    #[test]
-    fn executable_memory_is_versioned_and_taken_only_by_the_agent() {
-        for enabled in [false, true] {
-            let body = format!("[agent]\ncommand = [\"node\"]\nexecutable-memory = {enabled}\n");
-            let mut stored = pinned_record(&body);
-            assert_eq!(stored.agent.as_ref().unwrap().executable_memory, enabled);
-            let expected = if enabled { 36 } else { 21 };
-            assert_eq!(stored.version, expected, "{body}");
-            let text = stored.to_toml().unwrap();
-            assert_eq!(text.contains("executable-memory"), enabled);
-            assert_eq!(
-                Record::parse(&text, Path::new("record.toml")).unwrap(),
-                stored
+            let remote = format!(
+                "name = \"watcher\"\nbox_dir = \"/var/lib/boxes/watcher\"\n\
+                 [mcp.remote]\ntype = \"http\"\ndestinations = [\"example.com\"]\n\
+                 {key} = false\n"
             );
-            stored.version = if enabled { 35 } else { 36 };
-            assert!(matches!(
-                Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
-                Err(ConfigError::RecordVersion { expected: version, .. }) if version == expected
-            ));
+            assert!(
+                toml::from_str::<ConfigFile>(&remote).is_err(),
+                "a remote MCP server refuses {key}"
+            );
         }
-        let refusal = load("[tool.node]\ncommand = [\"node\"]\nexecutable-memory = true")
-            .expect_err("a tool refuses the key");
-        assert!(
-            refusal
-                .to_string()
-                .contains("`executable-memory` is refused on `[tool.node]`"),
-            "the refusal names the key: {refusal}"
-        );
-        let stdio = "name = \"b\"\nbox_dir = \"/b\"\n[mcp.x]\ntype = \"stdio\"\ncommand = [\"x\"]\n\
-                     executable-memory = true\n";
-        assert!(
-            toml::from_str::<ConfigFile>(stdio).is_err(),
-            "an MCP server refuses the key"
-        );
     }
 
     #[test]

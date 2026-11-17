@@ -655,10 +655,6 @@ impl Boundary {
         if launch.runtime_reach == RuntimeReach::Leaf {
             containment = containment.allow_broad_exec();
         }
-        // docs/design/decisions.md#a-jit-runtime-maps-executable-memory-in-a-leaf-and-in-an-opted-in-agent
-        if launch.runtime_reach == RuntimeReach::Leaf || spec.executable_memory {
-            containment = containment.allow_executable_memory();
-        }
 
         // The global `file-attributes` switch reaches the agent, every tool, and every contained MCP
         // server alike, because each one's write roots are rendered here.
@@ -667,6 +663,10 @@ impl Boundary {
         }
         if spec.file_watching {
             containment = containment.allow_file_watching();
+        }
+        // docs/design/decisions.md#a-jit-runtime-maps-executable-memory-only-where-its-table-selects-it
+        if spec.executable_memory {
+            containment = containment.allow_executable_memory();
         }
 
         // **Every refusal the grants need, applied before the grants themselves.** macOS renders
@@ -766,11 +766,9 @@ impl Boundary {
             .chain(chain_identities.iter())
             .filter_map(|identity| writable_grant(identity).map(|grant| (identity.clone(), grant)))
             .collect();
-        // Mirrors the broad-exec and executable-memory wiring above, so the disclosure names each
-        // carve-out exactly where it renders.
+        // Mirrors the broad-exec wiring above, so the disclosure names the carve-out exactly when the
+        // leaf renders it.
         let broad_exec = launch.runtime_reach == RuntimeReach::Leaf;
-        let executable_memory = cfg!(target_os = "linux")
-            && (launch.runtime_reach == RuntimeReach::Leaf || spec.executable_memory);
         let disclosure = disclosure(&DisclosureInputs {
             table,
             grants: &reach.grants,
@@ -784,9 +782,9 @@ impl Boundary {
             program: &program_identity,
             command_listed,
             broad_exec,
-            executable_memory,
             file_attributes: cfg!(target_os = "macos") && stored.file_attributes,
             file_watching: cfg!(target_os = "macos") && spec.file_watching,
+            executable_memory: cfg!(target_os = "linux") && spec.executable_memory,
             native_egress: launch.egress == EgressMode::Native,
             native_filesystem_policy: spec
                 .native_filesystem_policy
@@ -952,9 +950,9 @@ struct DisclosureInputs<'a> {
     program: &'a Path,
     command_listed: bool,
     broad_exec: bool,
-    executable_memory: bool,
     file_attributes: bool,
     file_watching: bool,
+    executable_memory: bool,
     native_egress: bool,
     native_filesystem_policy: bool,
 }
@@ -968,6 +966,16 @@ pub(crate) fn file_watching_disclosure(table: &str) -> String {
          as the host-wide event count and each volume's history identifier; file-content and \
          write restrictions still apply, except that a root process can delete any volume's \
          event history"
+    )
+}
+
+/// The line a box prints for a `table` that selects executable memory, at startup and again
+/// when the process starts.
+pub(crate) fn executable_memory_disclosure(table: &str) -> String {
+    format!(
+        "strands-box: {table} executable memory: may run code it writes into memory, as a JIT \
+         runtime does; a runtime that calls native code, such as Python through ctypes, may run \
+         any bytes this way"
     )
 }
 
@@ -1028,12 +1036,6 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
              load code it writes into its writable grants above"
         ));
     }
-    if inputs.executable_memory {
-        lines.push(format!(
-            "strands-box: {table} executable memory: may map memory that is writable and \
-             executable, so a JIT runtime runs the code it compiles"
-        ));
-    }
     if inputs.file_attributes {
         lines.push(format!(
             "strands-box: {table} file attributes: may set file times, set-user-ID and set-group-ID \
@@ -1042,6 +1044,9 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
     }
     if inputs.file_watching {
         lines.push(file_watching_disclosure(table));
+    }
+    if inputs.executable_memory {
+        lines.push(executable_memory_disclosure(table));
     }
     if inputs.native_egress {
         let arguments = if table.starts_with("[tool.") {
@@ -3184,67 +3189,60 @@ mod tests {
         }
     }
 
-    /// **Every leaf maps executable memory, and the agent only when it selects the key.** It is
-    /// disclosed only where it renders.
+    /// **A per-process switch reaches only the process that selects it, and is disclosed only
+    /// where it renders.** The agent selects each here, so a tool or MCP leaf that does not stays
+    /// off.
     #[test]
-    fn executable_memory_reaches_every_leaf_and_an_agent_that_selects_it() {
-        let fixture = Fixture::new();
-        for (table, reach, selected, expected) in [
-            ("[agent]", RuntimeReach::Agent, false, false),
-            ("[agent]", RuntimeReach::Agent, true, true),
-            ("[tool.node]", RuntimeReach::Leaf, false, true),
-        ] {
-            let mut spec = fixture.spec();
-            spec.executable_memory = selected;
-            let boundary = fixture.translate_with_reach(&spec, table, reach);
-            let config: serde_json::Value =
-                serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
-            assert_eq!(
-                config["executable_memory"].as_bool().unwrap_or(false),
-                expected,
-                "{table}"
-            );
-            assert_eq!(
-                boundary.disclosure().contains("executable memory:"),
-                expected && cfg!(target_os = "linux"),
-                "{table}: {}",
-                boundary.disclosure()
-            );
-        }
-    }
-
-    /// **File watching reaches only the process that selects it, and is disclosed only where
-    /// it renders.** The agent selects it here, so a tool or MCP leaf that does not stays off.
-    #[test]
-    fn file_watching_follows_only_the_selected_process() {
-        let mut fixture = Fixture::new();
-        let mut selected = fixture.spec();
-        selected.file_watching = true;
-        fixture.record.agent = Some(selected);
-        for (table, reach) in [
-            ("[agent]", RuntimeReach::Agent),
-            ("[tool.watcher]", RuntimeReach::Leaf),
-            ("[mcp.watcher]", RuntimeReach::Leaf),
-        ] {
-            for enabled in [false, true] {
-                let mut spec = fixture.spec();
-                spec.file_watching = enabled;
-                let boundary = fixture.translate_full(&spec, table, reach, EgressMode::Gateway);
-                let config: serde_json::Value =
-                    serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
-                assert_eq!(
-                    config["file_watching"].as_bool().unwrap_or(false),
-                    enabled,
-                    "{table}"
-                );
-                assert_eq!(
-                    boundary
-                        .disclosure()
-                        .contains(&file_watching_disclosure(table)),
-                    enabled && cfg!(target_os = "macos"),
-                    "{table}: {}",
-                    boundary.disclosure()
-                );
+    fn per_process_switches_follow_only_the_selected_process() {
+        type Switch = (
+            &'static str,
+            fn(&mut ProcessSpec, bool),
+            fn(&str) -> String,
+            bool,
+        );
+        let switches: [Switch; 2] = [
+            (
+                "file_watching",
+                |spec, enabled| spec.file_watching = enabled,
+                file_watching_disclosure,
+                cfg!(target_os = "macos"),
+            ),
+            (
+                "executable_memory",
+                |spec, enabled| spec.executable_memory = enabled,
+                executable_memory_disclosure,
+                cfg!(target_os = "linux"),
+            ),
+        ];
+        for (field, select, disclosure, renders) in switches {
+            let mut fixture = Fixture::new();
+            let mut selected = fixture.spec();
+            select(&mut selected, true);
+            fixture.record.agent = Some(selected);
+            for (table, reach) in [
+                ("[agent]", RuntimeReach::Agent),
+                ("[tool.watcher]", RuntimeReach::Leaf),
+                ("[mcp.watcher]", RuntimeReach::Leaf),
+            ] {
+                for enabled in [false, true] {
+                    let mut spec = fixture.spec();
+                    select(&mut spec, enabled);
+                    let boundary = fixture.translate_full(&spec, table, reach, EgressMode::Gateway);
+                    let config: serde_json::Value =
+                        serde_json::from_str(&boundary.containment_config_text())
+                            .expect("config JSON");
+                    assert_eq!(
+                        config[field].as_bool().unwrap_or(false),
+                        enabled,
+                        "{field} {table}"
+                    );
+                    assert_eq!(
+                        boundary.disclosure().contains(&disclosure(table)),
+                        enabled && renders,
+                        "{field} {table}: {}",
+                        boundary.disclosure()
+                    );
+                }
             }
         }
     }

@@ -15,7 +15,8 @@ use crate::record::config::{
 use crate::record::layout::BoxRoot;
 use crate::run::commands::ConfiguredCommands;
 use crate::run::contain::boundary::{
-    Boundary, EgressMode, Launch, RuntimeReach, ShebangInterpreters, Site, file_watching_disclosure,
+    Boundary, EgressMode, Launch, RuntimeReach, ShebangInterpreters, Site,
+    executable_memory_disclosure, file_watching_disclosure,
 };
 use crate::run::contain::supervise::Contained;
 use crate::run::hosted::HostedBox;
@@ -397,6 +398,9 @@ async fn hosted(
         }
         if cfg!(target_os = "macos") && contained.spec.file_watching {
             eprintln!("{}", file_watching_disclosure(&table));
+        }
+        if cfg!(target_os = "linux") && contained.spec.executable_memory {
+            eprintln!("{}", executable_memory_disclosure(&table));
         }
     }
     let boundary = Boundary::translate(

@@ -32,8 +32,7 @@ pub(crate) struct ProcessSpec {
     )]
     pub(crate) file_watching: bool,
 
-    /// Permit writable and executable memory on Linux. Only `[agent]` takes it, because every
-    /// tool and stdio MCP server already has it.
+    /// Permit writable and executable memory on Linux for this process and its descendants.
     #[serde(
         default,
         rename = "executable-memory",
@@ -314,12 +313,6 @@ impl ProcessSpec {
                  `network.contain_egress`"
                     .into(),
             ));
-        }
-        if table != "[agent]" && self.executable_memory {
-            return Err(refuse(format!(
-                "`executable-memory` is refused on `{table}`: every tool and stdio MCP server \
-                 already has executable memory, so only `[agent]` takes the key"
-            )));
         }
         if self.grammar.is_some() && !table.starts_with("[tool.") {
             return Err(refuse(format!(
