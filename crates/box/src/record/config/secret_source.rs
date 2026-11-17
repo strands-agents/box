@@ -4,14 +4,17 @@
 //! |---|---|
 //! | [`SecretSourceEntry`] | one `[secret-source.<scheme>]` table, as the operator writes it |
 //! | [`DeclaredSources`] | the checked declarations that each secret reference is judged against |
+//! | [`ProtectedPath`] | one `reads` or `deny` entry, which no workload may reach |
+//! | [`VaultCredential`] | one variable of the operator that is a credential of a source's vault |
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use credentials::SecretSourceCommand;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
+use crate::record::config::process::ProcessSpec;
 
 /// One `[secret-source.<scheme>]` table.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,20 +76,157 @@ impl SecretSourceEntry {
             })
             .map_err(refused)?;
         for (list, entries) in [("reads", &self.reads), ("deny", &self.deny)] {
-            if let Some(entry) = entries.iter().find(|entry| !protectable(entry)) {
-                return Err(refuse(format!(
-                    "`{list}` entry {entry:?} is not a path that Box can protect; write an \
-                     absolute path, or one that begins with `~/`"
-                )));
+            for entry in entries {
+                if let Some(advice) = unprotectable(entry) {
+                    return Err(refuse(format!(
+                        "`{list}` entry {entry:?} is not a path that Box can protect; {advice}"
+                    )));
+                }
             }
         }
         Ok(declaration)
     }
 }
 
-/// Whether `entry` names one host path: an absolute path, the operator's home, or a path under it.
-fn protectable(entry: &str) -> bool {
-    entry == "~" || entry.starts_with("~/") || Path::new(entry).is_absolute()
+/// What to write in place of `entry`, when it does not name one host path that each sandbox can
+/// spell: an absolute path, the operator's home, or a path under it, with no `..`, no control
+/// character, and no pattern.
+fn unprotectable(entry: &str) -> Option<&'static str> {
+    let under_home = entry.strip_prefix("~/");
+    if entry != "~" && under_home.is_none() && !Path::new(entry).is_absolute() {
+        return Some("write an absolute path, or one that begins with `~/`");
+    }
+    // A second `/` makes the rest an absolute path, which is not under the home.
+    if under_home.is_some_and(|rest| rest.starts_with('/')) {
+        return Some("write one `/` after `~`");
+    }
+    if Path::new(entry)
+        .components()
+        .any(|component| component == std::path::Component::ParentDir)
+    {
+        return Some("write the path without `..`");
+    }
+    if entry.chars().any(char::is_control) {
+        return Some("write the path without a control character");
+    }
+    // The characters that a filesystem list refuses, so a sandbox can spell each entry.
+    if entry.contains(['*', '?', '[', ']', '{', '}']) {
+        return Some(
+            "Box reads no pattern, so write each path without `*`, `?`, `[`, `]`, `{`, or `}`",
+        );
+    }
+    None
+}
+
+/// One `reads` or `deny` entry of a `[secret-source.<scheme>]` table, which no workload may reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProtectedPath {
+    /// The scheme of the table that holds the entry.
+    pub(crate) scheme: String,
+    /// The key that holds the entry: `reads` or `deny`.
+    pub(crate) list: &'static str,
+    /// The entry as the operator wrote it.
+    pub(crate) entry: String,
+}
+
+impl ProtectedPath {
+    /// This path as written under `operator_home` and as it resolves through each symbolic link,
+    /// also a link whose target is not there yet, then each link on the way.
+    pub(crate) fn spellings(
+        &self,
+        operator_home: &Path,
+    ) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ConfigError> {
+        let refuse = |reason: String| ConfigError::SecretSource {
+            scheme: self.scheme.clone(),
+            reason: format!("`{}` entry {:?} {reason}", self.list, self.entry),
+        };
+        let written = super::filesystem::under_home(&self.entry, operator_home)
+            .ok_or_else(|| refuse("is not an absolute path or one under `~`".to_string()))?;
+        // The sandbox checks the path that a name resolves to, so a file that appears behind a
+        // link must be closed too.
+        let (resolved, links) = crate::record::layout::resolved_through_links(&written)
+            .map_err(|error| refuse(format!("cannot be inspected: {error}")))?;
+        let mut spellings = vec![written];
+        if !spellings.contains(&resolved) {
+            spellings.push(resolved);
+        }
+        Ok((spellings, links))
+    }
+}
+
+/// Each `reads` and `deny` entry of `entries`.
+pub(crate) fn protected_paths(entries: &BTreeMap<String, SecretSourceEntry>) -> Vec<ProtectedPath> {
+    entries
+        .iter()
+        .flat_map(|(scheme, entry)| {
+            [("reads", &entry.reads), ("deny", &entry.deny)]
+                .into_iter()
+                .flat_map(move |(list, paths)| {
+                    paths.iter().map(move |path| ProtectedPath {
+                        scheme: scheme.clone(),
+                        list,
+                        entry: path.clone(),
+                    })
+                })
+        })
+        .collect()
+}
+
+/// One variable of the operator that is a credential of a declared source's own vault.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct VaultCredential {
+    name: String,
+    /// The scheme of the source whose `pass-secret-env` names the variable.
+    scheme: String,
+    value: String,
+}
+
+impl std::fmt::Debug for VaultCredential {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("VaultCredential")
+            .field("name", &self.name)
+            .field("scheme", &self.scheme)
+            .finish_non_exhaustive()
+    }
+}
+
+impl VaultCredential {
+    /// Refuse the process table `table` when an `env` value or a `command` element of `spec`
+    /// holds the value of one of `credentials`.
+    pub(crate) fn refuse_held(
+        credentials: &[Self],
+        table: &str,
+        spec: &ProcessSpec,
+    ) -> Result<(), ConfigError> {
+        let values = spec
+            .env
+            .iter()
+            .map(|(name, value)| (format!("`env.{name}`"), value))
+            .chain(
+                spec.command
+                    .iter()
+                    .enumerate()
+                    .map(|(index, element)| (format!("`command` element {index}"), element)),
+            );
+        for (place, value) in values {
+            if let Some(credential) = credentials
+                .iter()
+                .find(|credential| value.contains(&credential.value))
+            {
+                return Err(ConfigError::Process {
+                    table: table.to_string(),
+                    reason: format!(
+                        "{place} holds the value of the variable {}, which is a credential of \
+                         the secret source `{}` (its `pass-secret-env` names it), so no workload \
+                         can hold it",
+                        credential.name, credential.scheme
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The checked declarations of one configuration, keyed by scheme.
@@ -165,6 +305,29 @@ impl DeclaredSources {
             .iter()
             .find(|(_, declaration)| declaration.passes_as_secret(name))
             .map(|(scheme, _)| scheme.as_str())
+    }
+
+    /// Each variable of `environment` that a `pass-secret-env` entry names and that holds a value.
+    pub(crate) fn vault_credentials(
+        &self,
+        environment: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    ) -> Vec<VaultCredential> {
+        let mut credentials: Vec<VaultCredential> = environment
+            .into_iter()
+            .filter_map(|(name, value)| {
+                // A workload value is text, so a value that is not text is in none of them.
+                let (name, value) = (name.into_string().ok()?, value.into_string().ok()?);
+                let scheme = self.credential_owner(&name)?.to_string();
+                (!value.is_empty()).then_some(VaultCredential {
+                    name,
+                    scheme,
+                    value,
+                })
+            })
+            .collect();
+        // By name, so one configuration gets one refusal in each run.
+        credentials.sort_by(|one, other| one.name.cmp(&other.name));
+        credentials
     }
 
     /// The checked declarations of `entries` on a protected operating system, with the feature on.
@@ -408,6 +571,202 @@ pub(crate) mod tests {
             "[secret-source.op]\n{PROTOCOL}{COMMAND}reads = [\"~\", \"~/.config/op\", \"/etc/op\"]\n"
         ));
         DeclaredSources::check_on(&entries, true, true).expect("each spelling names one host path");
+    }
+
+    #[test]
+    fn a_reads_or_deny_entry_that_does_not_name_one_place_is_refused() {
+        const PATTERN: &str =
+            "Box reads no pattern, so write each path without `*`, `?`, `[`, `]`, `{`, or `}`";
+        for (list, entry, advice) in [
+            ("reads", "~/.config/../op", "write the path without `..`"),
+            ("deny", "/var/run/op/..", "write the path without `..`"),
+            ("reads", "~/.config/op*", PATTERN),
+            ("deny", "/var/run/op-?.sock", PATTERN),
+            ("deny", "~/Library/Group Containers/[A-Z", PATTERN),
+            ("deny", "/var/run/op]", PATTERN),
+            // The sandbox profile of macOS cannot hold these two.
+            ("reads", "~/.config/{{op", PATTERN),
+            ("reads", "~/.config/op}", PATTERN),
+            (
+                "reads",
+                "~/.config/op\nconfig",
+                "write the path without a control character",
+            ),
+            // A second `/` after `~` names a path under `/`, not under the home.
+            ("reads", "~//.config/op", "write one `/` after `~`"),
+            ("deny", "~//", "write one `/` after `~`"),
+        ] {
+            assert_eq!(
+                refusal(&format!("{PROTOCOL}{COMMAND}{list} = [{entry:?}]\n")),
+                format!(
+                    "invalid `[secret-source.op]` table: `{list}` entry {entry:?} is not a path \
+                     that Box can protect; {advice}"
+                )
+            );
+        }
+        // A name that only holds two dots is one place.
+        let entries = entries(&format!(
+            "[secret-source.op]\n{PROTOCOL}{COMMAND}reads = [\"~/.config/op..d\", \"/etc/..op\"]\n"
+        ));
+        DeclaredSources::check_on(&entries, true, true).expect("no `..` component, no refusal");
+    }
+
+    #[test]
+    fn each_reads_and_deny_entry_is_a_protected_path_of_its_scheme() {
+        let protected = |scheme: &str, list: &'static str, entry: &str| ProtectedPath {
+            scheme: scheme.to_string(),
+            list,
+            entry: entry.to_string(),
+        };
+        assert_eq!(
+            protected_paths(&entries(DECLARED)),
+            [
+                protected("op", "reads", "~/.config/op"),
+                protected("op", "deny", "/var/run/op"),
+            ],
+            "the `aws-secretsmanager` table of the fixture names no path"
+        );
+        assert_eq!(protected_paths(&BTreeMap::new()), []);
+    }
+
+    /// The operator's variables `pairs`, as the process environment gives them.
+    fn environment(pairs: &[(&str, &str)]) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.into(), value.into()))
+            .collect()
+    }
+
+    #[test]
+    fn each_set_pass_secret_env_variable_is_a_vault_credential() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let mut operator = environment(&[
+            ("OP_SESSION_team", "session-value"),
+            ("OP_SERVICE_ACCOUNT_TOKEN", "ops_token"),
+            ("AWS_SECRET_ACCESS_KEY", ""),
+            ("OP_ACCOUNT", "my.1password.com"),
+            ("GH_TOKEN", "ghp_other"),
+        ]);
+        // A value that is not text is in no workload value, which is text.
+        operator.push((
+            "OP_SESSION_bytes".into(),
+            std::ffi::OsString::from_vec(vec![0xff, 0xfe]),
+        ));
+        let credentials = declared().vault_credentials(operator);
+        assert_eq!(
+            credentials
+                .iter()
+                .map(|credential| {
+                    (
+                        credential.name.as_str(),
+                        credential.scheme.as_str(),
+                        credential.value.as_str(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            [
+                ("OP_SERVICE_ACCOUNT_TOKEN", "op", "ops_token"),
+                ("OP_SESSION_team", "op", "session-value"),
+            ],
+            "by name: a `pass-env` variable, an empty variable, and another variable are none"
+        );
+        assert_eq!(
+            format!("{credentials:?}"),
+            "[VaultCredential { name: \"OP_SERVICE_ACCOUNT_TOKEN\", scheme: \"op\", .. }, \
+             VaultCredential { name: \"OP_SESSION_team\", scheme: \"op\", .. }]",
+            "a debug print holds no value"
+        );
+        assert_eq!(
+            DeclaredSources::none()
+                .vault_credentials(environment(&[("OP_SERVICE_ACCOUNT_TOKEN", "ops_token")])),
+            []
+        );
+    }
+
+    /// One process table with `body` after its command.
+    fn process(body: &str) -> ProcessSpec {
+        toml::from_str(&format!(
+            "command = [\"/bin/bash\", \"-c\", \"true\"]\n{body}"
+        ))
+        .expect("the process table parses")
+    }
+
+    #[test]
+    fn a_process_table_that_holds_a_vault_credential_is_refused() {
+        let credentials = declared().vault_credentials(environment(&[
+            ("OP_SERVICE_ACCOUNT_TOKEN", "ops_token"),
+            ("OP_SESSION_team", "session-value"),
+        ]));
+        let refused = |table: &str, spec: &ProcessSpec| {
+            VaultCredential::refuse_held(&credentials, table, spec)
+                .expect_err("the table holds a credential")
+                .to_string()
+        };
+        // The same name, another name, and a value that holds the credential inside other text.
+        for (table, name, value, variable) in [
+            (
+                "[agent]",
+                "OP_SERVICE_ACCOUNT_TOKEN",
+                "ops_token",
+                "OP_SERVICE_ACCOUNT_TOKEN",
+            ),
+            (
+                "[tool.git]",
+                "GIT_PASSWORD",
+                "ops_token",
+                "OP_SERVICE_ACCOUNT_TOKEN",
+            ),
+            (
+                "[mcp.github]",
+                "AUTHORIZATION",
+                "Bearer session-value",
+                "OP_SESSION_team",
+            ),
+        ] {
+            let refusal = refused(table, &process(&format!("[env]\n{name} = {value:?}\n")));
+            assert_eq!(
+                refusal,
+                format!(
+                    "invalid `{table}` table: `env.{name}` holds the value of the variable \
+                     {variable}, which is a credential of the secret source `op` (its \
+                     `pass-secret-env` names it), so no workload can hold it"
+                )
+            );
+            assert!(!refusal.contains(value), "the refusal holds no value");
+        }
+        let mut spec = process("");
+        spec.command.push("--token=ops_token".to_string());
+        assert_eq!(
+            refused("[mcp.github]", &spec),
+            "invalid `[mcp.github]` table: `command` element 3 holds the value of the variable \
+             OP_SERVICE_ACCOUNT_TOKEN, which is a credential of the secret source `op` (its \
+             `pass-secret-env` names it), so no workload can hold it"
+        );
+    }
+
+    #[test]
+    fn a_placeholder_under_the_name_of_a_vault_credential_passes() {
+        let credentials = declared().vault_credentials(environment(&[
+            ("OP_SERVICE_ACCOUNT_TOKEN", "ops_token"),
+            ("OP_ACCOUNT", "my.1password.com"),
+        ]));
+        for body in [
+            // Another value under the name of the credential.
+            "[env]\nOP_SERVICE_ACCOUNT_TOKEN = \"strands_box_placeholder\"\n",
+            // The operator's value of a `pass-env` variable, which is a plain setting.
+            "[env]\nOP_ACCOUNT = \"my.1password.com\"\n",
+            "",
+        ] {
+            VaultCredential::refuse_held(&credentials, "[agent]", &process(body))
+                .expect("the table holds no credential");
+        }
+        // An operator who sets no credential variable has no value to refuse.
+        VaultCredential::refuse_held(
+            &[],
+            "[agent]",
+            &process("[env]\nOP_SERVICE_ACCOUNT_TOKEN = \"ops_token\"\n"),
+        )
+        .expect("no credential, no refusal");
     }
 
     #[test]

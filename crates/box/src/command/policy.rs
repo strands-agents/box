@@ -114,8 +114,8 @@ fn secret_sources(config: &Path, servers: &[RemoteMcpServer]) -> Result<SecretSo
         return SecretSources::open(&Default::default(), enabled);
     }
     let secrets = SecretSources::open(&entries, enabled)?;
-    // No program starts for a configuration whose write grants let a workload replace it.
-    secrets.refuse_writable_programs(&tables, &[])?;
+    // No program starts for a configuration that lets a workload go around a source.
+    secrets.refuse_exposure(&tables, &[])?;
     secrets
         .disclose(std::io::stderr().lock())
         .map_err(|source| ConfigError::Disclosure { source })?;

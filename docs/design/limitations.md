@@ -63,6 +63,45 @@ access. Review each one before you run:
 | A program with no tool table | Run a program under one of the agent's `exec` entries. | It gets the agent's grants plus the wider reach of a tool's sandbox, and the startup report doesn't show the wider part. |
 | `contain_egress = false` on a local MCP server or a tool | Support a client that can't use the gateway. | Its traffic bypasses the gateway and its policy checks. Its filesystem restrictions still apply. A tool's arguments come from the agent, so the agent can direct that tool's network access. See [native egress](decisions.md#native-egress-is-an-operator-declared-leaf-escape). |
 
+## A secret source runs outside every sandbox
+
+A [`[secret-source.<scheme>]`](../user/config.md#secret-sourcescheme) table names a program that
+Box runs with your rights, outside every sandbox, to read a secret from a vault. Box keeps each
+workload away from that program, from the `reads` and `deny` paths of the table, and from your
+values of its `pass-secret-env` variables. [What Box protects](../user/config.md#what-box-protects)
+lists each check. These limits remain:
+
+- Strands Shell and Monty refuse a change to a `reads` or `deny` path, but not a read. A
+  filesystem permit that covers one of those paths lets the workload read the vault's files
+  through an interpreter, as it does for a credential store. See [no credential floor sits beneath the interpreters](decisions.md#no-credential-floor-sits-beneath-the-interpreters).
+  Keep `fs:read` permits away from those paths.
+- Box protects the program file and each file that an argument names by its absolute path. It
+  doesn't know about a library, a module, or a settings file that the program finds by itself. A
+  workload that can write one of those changes what runs outside the sandbox.
+- Each check covers one box, and the stored record holds no identity of the program. A workload
+  in a second box that can write the program's folder can replace the program, and the next run
+  of the first box starts that file. Keep each program outside every folder that any box can
+  write.
+- Box protects the paths that `reads` and `deny` name, and no others. It doesn't discover a
+  vault's other files or sockets.
+- The interpreters compare a `reads` or `deny` path that is absent by its spelling, without
+  regard to case. They don't compare two Unicode forms of one name. On a volume that reads both
+  forms as one name, a change under the other form is not refused until the path exists. A name
+  of ASCII letters, digits, `.`, `-`, `_`, and spaces has one form, so this limit needs a name
+  with another letter.
+- Box finds a `reads` or `deny` path by its name and by the file at that name. It doesn't search
+  for hard links. A hard link in another folder to a file under a `reads` path is not protected,
+  and a grant on the folder that holds it loads.
+- Box compares the `env` and `command` of each table with the `pass-secret-env` variables that are
+  set when the box starts. It doesn't check the arguments you type after `run`, a file that a
+  workload can read, or a value in another form, such as Base64.
+- `policy generate-schema` starts each stdio MCP server to list its tools, and that start has no
+  sandbox, with or without a secret source. A server that it starts can read and change the `reads`
+  paths, the program of a source, and each file that its `command` names, and the next run starts
+  what the server left there. Run `policy generate-schema` only with servers that you trust as
+  yourself.
+- All of this is macOS only. A secret source doesn't load on Linux.
+
 ## Protections Box doesn't provide
 
 Box does not provide the following protections:

@@ -735,6 +735,7 @@ happen after the box directory is created and before the workload starts.
 | A writable grant at or above a directory on the operator's `PATH` | `<path> is at or above <path>, which is on the search path this box resolves a bare-name MCP program against` (excerpt). Keep the directory and its parents outside write grants. |
 | A writable grant can change an installed Box program, a hard-link name, or an enclosing directory | `this write grant can change trusted Box executable <path> or its path. Keep the Box installation outside every process's write grants` |
 | A system directory or a credential store the box always refuses | `<path> is refused beneath every grant: <reason>` |
+| A path that a [`[secret-source.<scheme>]`](#what-box-protects) table lists in `reads` or `deny`, a path inside it, or a folder that holds it | ``this grant reaches <path>, which the secret source `<scheme>` keeps from each workload (its `reads` entry "<entry>"). Keep each grant outside the paths that a secret source names in `reads` and `deny` `` |
 
 Create the path first, or name the existing directory above it. The same rule holds for a
 `[tool.<name>] command` that names a file the workload has not built yet, which is refused with
@@ -1040,8 +1041,8 @@ secret.env   = "GH_TOKEN"
 | `output` | string | How Box reads the program's stdout: `text` (default) or `json`, where stdout is one JSON string. |
 | `pass-env` | string array | Plain settings from your environment that the program receives when they are set, such as `AWS_REGION`. An entry that ends with `*` names each variable with that prefix. |
 | `pass-secret-env` | string array | Credentials from your environment that the program receives when they are set, such as `OP_SERVICE_ACCOUNT_TOKEN`. An entry that ends with `*` names each variable with that prefix. No `env://` or `secret://` reference can read one of these variables. |
-| `reads` | string array | The paths that the program reads, such as its configuration directory. Each is absolute, is `~`, or begins with `~/`. |
-| `deny` | string array | Other paths to the vault, such as the directory of an authentication socket. Each is absolute, is `~`, or begins with `~/`. |
+| `reads` | string array | The paths that the program reads, such as its configuration directory. Each is absolute, is `~`, or begins with `~/`. No workload can reach them. See [what Box protects](#what-box-protects). |
+| `deny` | string array | Other paths to the vault, such as the directory of an authentication socket. Each is absolute, is `~`, or begins with `~/`. No workload can reach them. |
 
 The scheme is a lowercase letter, then lowercase letters, digits, `+`, `.`, or `-`. A table can
 declare `op`, and no table can declare a scheme that Box reserves: `env`, `file`, `aws`, `credsd`,
@@ -1062,6 +1063,11 @@ Each of these is refused when the configuration loads:
 - A `pass-env` or `pass-secret-env` entry that is empty, is `*`, is `PATH` or `HOME`, holds `=`, or
   holds a `*` before its end. The program always gets your `HOME` and a fixed `PATH`.
 - A `reads` or `deny` entry that is not absolute, is not `~`, and does not begin with `~/`.
+- A `reads` or `deny` entry that holds `..`, a control character, a second `/` after `~`, or one
+  of the characters `*`, `?`, `[`, `]`, `{`, and `}`: ``invalid `[secret-source.op]` table:
+  `reads` entry "~/.config/op*" is not a path that Box can protect; Box reads no pattern, so
+  write each path without `*`, `?`, `[`, `]`, `{`, or `}` ``. Each entry names one path. A path
+  that is absent is fine.
 - A reference in a scheme that no table declares: ``secret scheme "op" has no `[secret-source.op]`
   table``.
 - A route or a remote MCP server in a declared scheme with no `secret.env`.
@@ -1127,6 +1133,32 @@ Each of these stops the box before the workload starts:
   one of them: ``this write grant can change
   [secret-source.op] command /opt/homebrew/Caskroom/1password-cli/2.42.0/op or its path. Keep the
   program of each secret source outside every process's write grants``. Narrow the grant.
+- A write grant covers a file that a later element of `command` names, such as a script after an
+  interpreter: ``this write grant can change /Users/me/tools/vault.sh, a file that the `command`
+  of [secret-source.vault] names, or its path. Keep each file that a secret source command names
+  outside every process's write grants``. Narrow the grant, or move the file.
+- Box can't open a file that a later element of `command` names: ``invalid
+  `[secret-source.vault]` table: the file /Users/me/tools/key.pem, which its `command` names,
+  cannot be opened: Permission denied (os error 13)``. Box must be able to open each file that
+  `command` names by its absolute path, so that it can protect the file.
+- A `reads` or `deny` entry passes through symbolic links that don't end, or through a folder
+  that Box can't search: ``invalid
+  `[secret-source.op]` table: `deny` entry "~/.op/socket" cannot be inspected: the path passes
+  through too many symbolic links``.
+- A write grant covers the folder that holds a symbolic link on the way to a `reads` or `deny`
+  path, such as `~/dotfiles` when `~/.aws` names `~/dotfiles/aws`: ``this write grant can change
+  /Users/me/dotfiles/aws, a symbolic link on the way to /Users/me/keys/aws, which the secret
+  source `aws-secretsmanager` keeps from each workload (its `reads` entry "~/.aws"). Keep each
+  write grant outside the folders that hold a link on the way to a path that a secret source
+  names in `reads` and `deny` ``. Narrow the grant.
+- A grant reaches a `reads` or `deny` path: ``this grant reaches /Users/me/.aws, which the secret
+  source `aws-secretsmanager` keeps from each workload (its `reads` entry "~/.aws"). Keep each
+  grant outside the paths that a secret source names in `reads` and `deny` ``. Remove the grant.
+- A table's `env` or `command` holds your value of a `pass-secret-env` variable: ``invalid
+  `[mcp.github]` table: `env.API_KEY` holds the value of the variable OP_SERVICE_ACCOUNT_TOKEN,
+  which is a credential of the secret source `op` (its `pass-secret-env` names it), so no
+  workload can hold it``. Remove the value. To give the workload a secret, name it in a
+  `secret.ref`.
 - A reference that the program can't take: the text after `<scheme>://` starts with `-`, names
   no secret, or ends with an empty `#FIELD`. Box starts no program for it.
 - A secret that is a JSON object, on a reference with no `#FIELD`. Name one field.
@@ -1135,23 +1167,58 @@ Each of these stops the box before the workload starts:
 
 ### What Box protects
 
-Box keeps the program file away from the workload as it does for a
+A workload must not go around Box to the vault. So Box protects four things that the table names,
+in `[agent]`, each `[tool.<name>]` table, and each local `[mcp.<name>]` table. It checks all four
+before it starts a program for the first time, in `box run` and in `policy generate-schema`, so a
+box that fails a check never runs the program.
+
+**The program file.** Box keeps the program file away from the workload as it does for a
 [configured tool program](#configured-command-integrity). The program file is element 0 of
-`command`. A write grant in `[agent]`, a `[tool.<name>]` table, or a local `[mcp.<name>]` table
-can't cover that path, the file that it resolves to, a symbolic link on the way, or a folder that
-holds one of them. The Shell and Monty can't change them. Box checks the grants before it starts
-the program for the first time, in `box run` and in `policy generate-schema`, so a box with such a
-grant never runs the program.
+`command`. A write grant can't cover that path, the file that it resolves to, a symbolic link on
+the way, or a folder that holds one of them. The Shell and Monty can't change them.
 
-That check covers the program file and its path. It doesn't cover a file that the program loads
-or that an argument names, such as a script, a library, or an interpreter. Keep those outside
-every write grant yourself.
+**A file that an argument names.** A later element of `command` that is the absolute path of a
+file gets the same protection, such as the script in
+`command = ["/bin/sh", "/Users/me/tools/vault.sh", "{ref}"]`. That protection is from change
+only: a workload with a read grant over the file can read it. So list a file that holds a key or
+a passphrase in `reads` too. Box doesn't know about a file that
+the program loads by itself, such as a library or a module. It also doesn't see a folder, or a
+path inside a longer argument such as `--config=/etc/vault.hcl`. Keep those outside every write
+grant yourself, or list the folder in `reads`.
 
-Box doesn't yet protect the rest of the vault from the workload. It doesn't check a grant against
-`reads` and `deny`, and it doesn't check a workload's `env` against the `pass-secret-env`
-variables. Until it does, don't grant a workload a path that those lists name, don't permit
-`fs:read` or `fs:write` on those paths, and don't put the value of a `pass-secret-env` variable in
-a table's `env`.
+**The `reads` and `deny` paths.** No grant can reach one of these paths. Box refuses a
+filesystem entry in any list except `deny` that names the path, a path inside it, or a folder
+that holds it. That includes a credential store that a grant can otherwise name exactly: with
+`reads = ["~/.aws"]`, a tool can't take `read = ["~/.aws"]`. Each sandbox also denies these
+paths, as it denies an entry of its own `deny` list. So a path that is absent when the box starts
+stays closed if it appears later. An entry that is a symbolic link protects the link and the path
+that it names, also when nothing is there yet, such as a socket that an app makes when it starts.
+No write grant can reach the folder that holds a symbolic link on the way to the path, because a
+change to the link writes that folder. Strands Shell and Monty refuse a change at one of these
+paths, inside it, or above it, and a change to a link on the way or to its folder:
+``<path>: is at, inside, or above a path that a secret source keeps from each workload, or a link
+on the way to one, which this run does not allow to change``. They compare a path that is absent without regard to case,
+so `~/.OP` is refused beside `reads = ["~/.op"]`.
+
+**The `pass-secret-env` values.** No table's `env` or `command` can hold your value of one of
+these variables, under any name, alone or inside a longer value. Box compares each value with
+your environment when the box starts, and an entry that ends with `*` covers each of your
+variables with that prefix. A short value, such as `test`, is inside many other values. When a
+refusal names such a variable, unset the variable before you start the box, or remove it from
+`pass-secret-env`. Write an entry that ends with `*` only for a prefix whose variables are all
+credentials: `OP_*` also covers a plain setting such as `OP_FORMAT`, and Box then looks for its
+value in each table. A different value under the same name is fine, such as the
+placeholder of a signed `aws://` route in `AWS_ACCESS_KEY_ID`. A `pass-env` variable has no such
+rule. The arguments that you type after `box run` are not checked.
+
+Two limits remain:
+
+- Strands Shell and Monty refuse a change to a `reads` or `deny` path, but not a read. They run
+  outside every sandbox, and policy decides each path they read. So don't permit `fs:read` on
+  those paths. The [limits page](../design/limitations.md#a-secret-source-runs-outside-every-sandbox)
+  says more.
+- Each check covers one box. Keep each program and each `reads` path outside every folder that
+  any other box can write.
 
 ## `[mcp.<name>]`
 

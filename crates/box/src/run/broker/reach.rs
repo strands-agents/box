@@ -440,6 +440,10 @@ const TRUSTED_EXECUTABLE: &str = "cannot change a trusted Box executable or its 
 const CONFIGURED_COMMAND: &str =
     "is a configured tool command or its ancestor, which this run does not allow to change";
 
+const SOURCE_PATH: &str = "is at, inside, or above a path that a secret source keeps from each \
+                           workload, or a link on the way to one, which this run does not allow \
+                           to change";
+
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const CONFIGURED_COMMAND_ALIAS: &str =
     "contains a hard link to a configured tool command, so this mutation is not allowed";
@@ -451,6 +455,7 @@ const COMMAND_SCAN_INCOMPLETE: &str =
 fn command_mutation_reason(refusal: CommandMutationRefusal) -> Cow<'static, str> {
     match refusal {
         CommandMutationRefusal::CommandOrAncestor => CONFIGURED_COMMAND.into(),
+        CommandMutationRefusal::SourcePath => SOURCE_PATH.into(),
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         CommandMutationRefusal::HardLinkAlias => CONFIGURED_COMMAND_ALIAS.into(),
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1233,6 +1238,45 @@ mod linked_command_mutation_tests {
                 format!("{reported_as}: {reason}")
             );
         }
+    }
+
+    /// **Neither interpreter changes a path that a secret source protects**: the refusal says so,
+    /// and a read of that path stays with policy.
+    #[test]
+    fn a_path_of_a_secret_source_refuses_mutation_and_names_its_reason() {
+        let temporary = tempfile::tempdir().expect("fixture directory");
+        let home = temporary.path().canonicalize().expect("canonical fixture");
+        std::fs::create_dir_all(home.join("vault/store")).expect("the folder of the vault");
+        std::fs::create_dir(home.join("output")).expect("unrelated directory");
+        std::fs::write(home.join("vault/store/config"), "").expect("the settings of the vault");
+        let entries = BTreeMap::from([(
+            "op".to_string(),
+            crate::record::config::secret_source::SecretSourceEntry {
+                command: vec!["/bin/sh".to_string(), "{ref}".to_string()],
+                reads: vec![home.join("vault/store").display().to_string()],
+                ..Default::default()
+            },
+        )]);
+        let commands =
+            ConfiguredCommands::of_secret_sources(&entries).expect("the source is admitted");
+        let reach = Reach::over(&home, None, None)
+            .expect("reachable fixture")
+            .with_commands(Arc::new(commands));
+        for relative in ["vault/store/config", "vault/store", "vault"] {
+            mutation_refused_for(
+                &reach,
+                &home.join(relative),
+                relative,
+                "is at, inside, or above a path that a secret source keeps from each workload, \
+                 or a link on the way to one, which this run does not allow to change",
+            );
+        }
+        reach
+            .approve_mutation(&home.join("output/new"), "output/new")
+            .expect("a path beside the vault stays writable");
+        reach
+            .approve(&home.join("vault/store/config"), "vault/store/config")
+            .expect("a read stays with policy");
     }
 
     #[test]

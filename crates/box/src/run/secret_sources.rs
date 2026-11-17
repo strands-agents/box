@@ -4,7 +4,7 @@
 //! | Step | Owner |
 //! |---|---|
 //! | Check each program file before a secret is read | [`SecretSources::open`] |
-//! | Refuse a write grant over a program before it first starts | [`SecretSources::refuse_writable_programs`] |
+//! | Refuse a table that lets a workload go around a source, before a program first starts | [`SecretSources::refuse_exposure`] |
 //! | Name each source and its program on stderr | [`SecretSources::disclose`] |
 //! | Find each entry whose secret a source reads | [`SecretSources::telemetry_uses`], [`SecretSources::route_uses`] |
 //! | Read each of those secrets, and state each outcome | [`SecretSources::fetch`] |
@@ -16,7 +16,7 @@ use credentials::{Backend, Locator};
 
 use crate::error::{BoxError, ConfigError};
 use crate::record::config::egress::EgressEntry;
-use crate::record::config::secret_source::{DeclaredSources, SecretSourceEntry};
+use crate::record::config::secret_source::{DeclaredSources, SecretSourceEntry, VaultCredential};
 use crate::record::config::{AuthoritySource, ProcessTables, Record};
 use crate::run::commands::ConfiguredCommands;
 use crate::run::contain::boundary::judge_lists;
@@ -33,8 +33,10 @@ pub(crate) struct SecretSources {
     /// The program path of each declared scheme, as `box.toml` spells it, with each control
     /// character escaped.
     programs: BTreeMap<String, String>,
-    /// The checked program of each declared scheme.
+    /// The checked program of each declared scheme, and each file that its arguments name.
     commands: ConfiguredCommands,
+    /// Each variable of the operator that is a credential of a source's own vault.
+    credentials: Vec<VaultCredential>,
 }
 
 /// One configuration entry that names a secret in a declared scheme.
@@ -75,7 +77,11 @@ impl SecretSources {
         entries: &BTreeMap<String, SecretSourceEntry>,
         enabled: bool,
     ) -> Result<Self, BoxError> {
-        Self::over(entries, DeclaredSources::check(entries, enabled)?)
+        Self::over(
+            entries,
+            DeclaredSources::check(entries, enabled)?,
+            std::env::vars_os(),
+        )
     }
 
     /// [`open`](Self::open) on a protected operating system, with the feature on.
@@ -83,13 +89,30 @@ impl SecretSources {
     pub(crate) fn for_tests(
         entries: &BTreeMap<String, SecretSourceEntry>,
     ) -> Result<Self, BoxError> {
-        Self::over(entries, DeclaredSources::for_tests(entries))
+        Self::for_tests_in(entries, &[])
     }
 
-    /// The sources of `entries`, whose checked declarations are `declared`.
+    /// [`for_tests`](Self::for_tests) for an operator whose variables are `environment`.
+    #[cfg(test)]
+    pub(crate) fn for_tests_in(
+        entries: &BTreeMap<String, SecretSourceEntry>,
+        environment: &[(&str, &str)],
+    ) -> Result<Self, BoxError> {
+        Self::over(
+            entries,
+            DeclaredSources::for_tests(entries),
+            environment
+                .iter()
+                .map(|(name, value)| (name.into(), value.into())),
+        )
+    }
+
+    /// The sources of `entries`, whose checked declarations are `declared`, for an operator
+    /// whose variables are `environment`.
     fn over(
         entries: &BTreeMap<String, SecretSourceEntry>,
         declared: DeclaredSources,
+        environment: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
     ) -> Result<Self, BoxError> {
         // A configuration that declares no source keeps the local sources as they are.
         if entries.is_empty() {
@@ -97,9 +120,11 @@ impl SecretSources {
                 backend: Backend::local(),
                 programs: BTreeMap::new(),
                 commands: ConfiguredCommands::default(),
+                credentials: Vec::new(),
             });
         }
         let commands = ConfiguredCommands::of_secret_sources(entries)?;
+        let credentials = declared.vault_credentials(environment);
         let mut programs = BTreeMap::new();
         let mut checked = Vec::with_capacity(entries.len());
         for (scheme, declaration) in declared.into_declarations() {
@@ -125,29 +150,27 @@ impl SecretSources {
             backend,
             programs,
             commands,
+            credentials,
         })
     }
 
-    /// Refuse each write grant in `tables` that can change the program of a source, so that no
-    /// source program starts in a configuration that lets a workload replace it.
-    pub(crate) fn refuse_writable_programs(
+    /// Refuse each process table in `tables` that lets a workload go around a source, so that
+    /// no source program starts in that configuration: a grant that reaches a path that a
+    /// source protects, a write grant that can change a file that a source runs, and a value
+    /// that holds a credential of a source's own vault.
+    pub(crate) fn refuse_exposure(
         &self,
         tables: &ProcessTables,
         protected_sources: &[AuthoritySource],
     ) -> Result<(), BoxError> {
-        // A configuration that declares no source has no program to judge a grant against.
+        // A configuration that declares no source has nothing to judge a table against.
         if !self.commands.has_sources() {
             return Ok(());
         }
         for (table, spec) in &tables.tables {
-            let reach = judge_lists(
-                spec,
-                table,
-                tables.policy.as_deref(),
-                tables.declares_stdio_mcp,
-                protected_sources,
-            )?;
+            let reach = judge_lists(spec, table, tables, protected_sources)?;
             self.commands.validate_reach(table, &reach)?;
+            VaultCredential::refuse_held(&self.credentials, table, spec)?;
         }
         Ok(())
     }

@@ -502,6 +502,7 @@ fn agent_writes(folder: &Path) -> ProcessTables {
         tables: vec![("[agent]".to_string(), agent)],
         policy: None,
         declares_stdio_mcp: false,
+        source_paths: Vec::new(),
     }
 }
 
@@ -517,7 +518,7 @@ fn a_write_grant_over_a_source_program_is_refused_and_starts_no_program() {
     let sources = sources(&program.table("op", &link)).expect("the program is checked");
 
     let refusal = sources
-        .refuse_writable_programs(&agent_writes(&bin), &[])
+        .refuse_exposure(&agent_writes(&bin), &[])
         .expect_err("the agent can replace the link to the program")
         .to_string();
     assert_eq!(
@@ -534,19 +535,168 @@ fn a_write_grant_over_a_source_program_is_refused_and_starts_no_program() {
         )
     );
     sources
-        .refuse_writable_programs(&agent_writes(&output), &[])
+        .refuse_exposure(&agent_writes(&output), &[])
         .expect("a grant beside the program is not refused");
     // A configuration that declares no source judges no list here, also a list that the
     // judgement refuses, so its checks keep their order.
     assert!(
-        sources
-            .refuse_writable_programs(&agent_writes(&link), &[])
-            .is_err(),
+        sources.refuse_exposure(&agent_writes(&link), &[]).is_err(),
         "the judgement refuses a list entry that is a symbolic link"
     );
     SecretSources::none()
-        .refuse_writable_programs(&agent_writes(&link), &[])
+        .refuse_exposure(&agent_writes(&link), &[])
         .expect("no source, no judgement");
+    assert_eq!(program.runs(), 0, "the check starts no program");
+}
+
+/// The process tables of a configuration whose `[agent]` table has `body` after its command,
+/// beside the secret sources `entries`.
+fn agent_beside(body: &str, entries: &BTreeMap<String, SecretSourceEntry>) -> ProcessTables {
+    let agent = toml::from_str(&format!("command = [\"/bin/bash\"]\n{body}"))
+        .expect("the agent table parses");
+    ProcessTables {
+        tables: vec![("[agent]".to_string(), agent)],
+        policy: None,
+        declares_stdio_mcp: false,
+        source_paths: crate::record::config::secret_source::protected_paths(entries),
+    }
+}
+
+#[test]
+fn a_grant_over_a_path_of_a_source_is_refused_and_starts_no_program() {
+    let program = StandIn::new(PRINTER);
+    let (store, beside) = (program.path().join("store"), program.path().join("beside"));
+    for folder in [&store, &beside] {
+        std::fs::create_dir(folder).expect("the folder is made");
+    }
+    let quoted = |path: &Path| toml::Value::String(path.display().to_string()).to_string();
+    let entries = crate::record::config::secret_source::tests::entries(&format!(
+        "{}reads = [{}]\n",
+        program.table("op", Path::new(SHELL)),
+        quoted(&store)
+    ));
+    let sources = SecretSources::for_tests(&entries).expect("the program is checked");
+
+    let refusal = sources
+        .refuse_exposure(
+            &agent_beside(
+                &format!("[filesystem]\nread = [{}]\n", quoted(&store)),
+                &entries,
+            ),
+            &[],
+        )
+        .expect_err("the agent can read a path of the source")
+        .to_string();
+    assert_eq!(
+        refusal,
+        format!(
+            "`[agent]` filesystem entry {0:?} is refused: this grant reaches {0}, which the \
+             secret source `op` keeps from each workload (its `reads` entry {0:?}). Keep each \
+             grant outside the paths that a secret source names in `reads` and `deny`",
+            store.display().to_string()
+        )
+    );
+    sources
+        .refuse_exposure(
+            &agent_beside(
+                &format!("[filesystem]\nread = [{}]\n", quoted(&beside)),
+                &entries,
+            ),
+            &[],
+        )
+        .expect("a grant beside the path is not refused");
+    assert_eq!(program.runs(), 0, "the check starts no program");
+}
+
+#[test]
+fn a_write_grant_over_an_argument_file_of_a_source_is_refused_and_starts_no_program() {
+    let program = StandIn::new(PRINTER);
+    let entries = crate::record::config::secret_source::tests::entries(
+        &program.table("op", Path::new(SHELL)),
+    );
+    let sources = SecretSources::for_tests(&entries).expect("the program is checked");
+    let folder = toml::Value::String(program.path().display().to_string()).to_string();
+
+    let refusal = sources
+        .refuse_exposure(
+            &agent_beside(
+                &format!("[filesystem]\nread = [{folder}]\nwrite = [{folder}]\n"),
+                &entries,
+            ),
+            &[],
+        )
+        .expect_err("the agent can replace the script that the source runs")
+        .to_string();
+    assert_eq!(
+        refusal,
+        format!(
+            "`[agent]` filesystem entry {:?} is refused: this write grant can change {}, a file \
+             that the `command` of [secret-source.op] names, or its path. Keep each file that a \
+             secret source command names outside every process's write grants",
+            program.path().display().to_string(),
+            program.path().join("program.sh").display()
+        )
+    );
+    sources
+        .refuse_exposure(
+            &agent_beside(&format!("[filesystem]\nread = [{folder}]\n"), &entries),
+            &[],
+        )
+        .expect("a read grant cannot change the script");
+    assert_eq!(program.runs(), 0, "the check starts no program");
+}
+
+#[test]
+fn a_table_that_holds_a_credential_of_a_vault_is_refused_and_starts_no_program() {
+    let program = StandIn::new(PRINTER);
+    let entries = crate::record::config::secret_source::tests::entries(&format!(
+        "{}pass-env = [\"OP_ACCOUNT\"]\npass-secret-env = [\"OP_SERVICE_ACCOUNT_TOKEN\", \"OP_SESSION_*\"]\n",
+        program.table("op", Path::new(SHELL))
+    ));
+    let operator = [
+        ("OP_SERVICE_ACCOUNT_TOKEN", "ops_token_of_the_operator"),
+        ("OP_SESSION_team", "session_of_the_operator"),
+        ("OP_ACCOUNT", "my.1password.com"),
+    ];
+    let sources = SecretSources::for_tests_in(&entries, &operator).expect("the program is checked");
+
+    // A value that an operator pasted into a table, under a name of its own, for a prefix entry.
+    let refusal = sources
+        .refuse_exposure(
+            &agent_beside(
+                "[env]\nGITHUB_TOKEN = \"session_of_the_operator\"\n",
+                &entries,
+            ),
+            &[],
+        )
+        .expect_err("the agent holds the session of the vault")
+        .to_string();
+    assert_eq!(
+        refusal,
+        "invalid `[agent]` table: `env.GITHUB_TOKEN` holds the value of the variable \
+         OP_SESSION_team, which is a credential of the secret source `op` (its \
+         `pass-secret-env` names it), so no workload can hold it"
+    );
+    for body in [
+        // A placeholder under the name of the credential, and a plain setting.
+        "[env]\nOP_SERVICE_ACCOUNT_TOKEN = \"strands_box_placeholder\"\n",
+        "[env]\nOP_ACCOUNT = \"my.1password.com\"\n",
+    ] {
+        sources
+            .refuse_exposure(&agent_beside(body, &entries), &[])
+            .expect("the table holds no credential");
+    }
+    // The same table beside an operator who sets no credential.
+    SecretSources::for_tests(&entries)
+        .expect("the program is checked")
+        .refuse_exposure(
+            &agent_beside(
+                "[env]\nGITHUB_TOKEN = \"session_of_the_operator\"\n",
+                &entries,
+            ),
+            &[],
+        )
+        .expect("no credential, no refusal");
     assert_eq!(program.runs(), 0, "the check starts no program");
 }
 

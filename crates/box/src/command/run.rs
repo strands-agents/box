@@ -273,8 +273,8 @@ pub(crate) async fn execute(
     let locked = prepare(config, argv, box_id)?;
     // Each program file is checked before a secret is read through it.
     let secrets = Arc::new(SecretSources::of(&locked.record)?);
-    // No program starts in a box whose write grants let a workload replace it.
-    secrets.refuse_writable_programs(&locked.record.process_tables(), &locked.sources)?;
+    // No program starts in a box whose grants or values let a workload go around a source.
+    secrets.refuse_exposure(&locked.record.process_tables(), &locked.sources)?;
     secrets
         .disclose(std::io::stderr().lock())
         .map_err(|source| ConfigError::Disclosure { source })?;

@@ -340,16 +340,24 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
       tool command holds the path as written and the canonical file only; do not widen that
       without approval, because it adds a refusal to a configuration that loads today.
       `each_link_on_the_way_to_a_secret_source_program_is_protected` pins both.
-    - Residual: the protection covers element 0 of `command` alone. It does not cover a file
-      that the program loads or that an argument names, such as a script after an interpreter.
-    - `SecretSources::refuse_writable_programs` judges the write grants of each process table
-      against the source programs before the first read, in `run` and in
-      `policy generate-schema`. `ApprovedReach::judge_with` makes the same check, but it runs
-      after both read steps, so alone it refuses a box whose program has already run with the
-      vault's credentials. A configuration with no declaration skips the early check, so the
-      order of its refusals does not change. Both judgements take their tables from
-      `Record::process_tables`, so a table that one judges, the other judges too.
-      `a_write_grant_over_a_secret_source_program_is_refused` asserts that the program did not
+    - A later element of `command` that is the absolute path of an existing regular file is
+      held as the program is (`ConfiguredCommands::source_files`, `ConfiguredCommand::named_file`),
+      such as a script after an interpreter. It need not be executable. Box must be able to
+      open it: the refusal says ``the file <path>, which its `command` names``, not
+      `configured command`.
+      `a_file_that_a_secret_source_argument_names_is_protected` pins it. Residual: a file that
+      the program loads by itself, a folder, and a path inside a longer argument are not held.
+    - `SecretSources::refuse_exposure` judges each process table before the first read, in `run`
+      and in `policy generate-schema`: its lists against the source programs, the argument
+      files, and the `reads` and `deny` paths, then its `env` and `command` against the
+      operator's vault credentials. `ApprovedReach::judge_with` judges the lists again, but it
+      runs after both read steps, so alone it refuses a box whose program has already run with
+      the vault's credentials. A configuration with no declaration skips the early check, so
+      the order of its refusals does not change. Both judgements take their tables and the
+      protected paths from `Record::process_tables`, so a table or a path that one judges, the
+      other judges too. `a_write_grant_over_a_secret_source_program_is_refused`,
+      `a_grant_over_a_path_of_a_secret_source_is_refused`, and
+      `a_table_that_holds_a_credential_of_a_vault_is_refused` assert that the program did not
       start.
     - One backend serves the run: the telemetry secret, each vault of `run::credential`, and
       `policy generate-schema`. A second backend would run a program twice for one secret. Do not
@@ -381,9 +389,76 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     - A route in a declared scheme provisions its `secret.env` variable through
       `checked_provisioned_name_without_value`, so the operator's own value of that variable is
       never read.
-  - `reads` and `deny` are stored and judged for shape only. No grant is checked against them yet,
-    and no workload `env` is checked against `pass-secret-env`. `docs/user/config.md` ("What Box
-    protects") tells the operator. Remove that text with the change that adds the checks.
+  - **No workload reaches a `reads` or `deny` path.** `filesystem::direct_grants` owns the
+    check, so each judgement of a list makes it. Keep each part:
+    - `require_outside_source_paths` refuses an authorizing entry that is at a protected path,
+      inside it, or above it. It runs before `containment::validate_grant`, so the refusal names
+      the source also for a credential store such as `~/.aws`, which has no exact-name exception
+      here. It compares the entry as written and as it resolves, by spelling and by on-disk
+      identity (`layout::lies_within`), so a link in either path does not hide the overlap.
+    - A protected path resolves through each symbolic link, also one whose target is not there
+      yet (`layout::resolved_through_links`). `canonicalize` stops at such a link, and the
+      sandbox checks the path that a name resolves to. So without the walk, a socket that a
+      vault's app makes behind a link has no refusal: `~/.1password/agent.sock` names a socket
+      in a group container that exists only while the app runs.
+      `a_grant_that_reaches_a_path_of_a_secret_source_through_a_link_is_refused` pins it.
+    - Each link on the way is held as a program's link is (`holds`): no write grant reaches the
+      folder that holds it, and no interpreter changes the link or that folder. Without this, a
+      chain such as `~/.aws` to `~/dotfiles/aws` to `~/keys/aws` lets a write grant on
+      `~/dotfiles` point the middle link at a folder that the workload wrote, and the operator's
+      own `aws` reads it. A read grant there stays: it reaches only the denied target. A link in
+      a folder at the top, such as `/var`, is held by `/`, which no grant reaches.
+      `a_link_on_the_way_to_a_path_of_a_secret_source_cannot_change_through_an_interpreter`
+      pins the interpreter half.
+    - Compare a link by its spelling alone. Its on-disk identity is the folder or file that it
+      names, so an identity compare refuses each change inside that folder, such as each path
+      under `/private/var` for an entry under `/var`.
+    - `direct_grants` also gives each process a `Refusal` on each spelling of each protected
+      path, with no pinned identity. The sandbox then denies the path under the cells that Box
+      adds itself, under a tool's discovery of the home, and when the path appears after the box
+      starts. An absent path is not an error. Do not pin an identity there: a vault program can
+      make its socket again during a run, and a pinned one would refuse the next spawn.
+    - `DeclaredSources::check` refuses an entry with a `..` component, a second `/` after `~`,
+      a control character, or a character that a filesystem list refuses (`*`, `?`, `[`, `]`,
+      `{`, `}`). The compare and the `Refusal` need one place, `~//x` names `/x` after a join,
+      and the macOS profile cannot spell `{{` or a control character. Without the last rule the
+      profile fails to render after each source program has run.
+    - `ConfiguredCommands` holds each spelling of each protected path (`source_paths`), and
+      `mutation_refusal` refuses a change through Strands Shell or Monty at one, inside it, or
+      above it. A workload that changes `~/.aws/config` adds a `credential_process`, which the
+      `aws` child of Box then starts outside every sandbox.
+      `a_path_of_a_secret_source_cannot_change_through_an_interpreter` and
+      `a_path_of_a_secret_source_refuses_mutation_and_names_its_reason` pin it.
+    - `mutation_refusal` compares by spelling, by on-disk identity, and by folded spelling
+      (`commands::folded`). An absent path has no identity, and a volume that ignores case makes
+      it under each case of its name: `mkdir ~/.OP` beside an absent `~/.op`, which `op` then
+      reads. The fold is lowercase, uppercase, lowercase, so the 11 letters whose full case
+      folding is ASCII letters (the long s, the Kelvin sign, both sharp s, the seven Latin
+      ligatures) fold to them. This change did not measure which of them APFS reads as those
+      ASCII letters. A letter that the volume keeps apart is refused too, which fails closed.
+      The fold also refuses a little more on a volume that keeps case. `an_absent_path_of_a_secret_source_cannot_change_under_another_case` pins
+      it. Residual: two Unicode forms of one name. The grant check needs no fold: a grant on an
+      absent path is refused as absent, and a grant above one is found by identity.
+    - Residual: Strands Shell and Monty do not refuse a read of a protected path. The decision
+      [no credential floor sits beneath the interpreters](../../docs/design/decisions.md#no-credential-floor-sits-beneath-the-interpreters)
+      covers a credential store in the same way. `docs/design/limitations.md` tells the operator.
+    - `ProtectedPath::spellings` is the one place that expands and resolves an entry, for the
+      lists and for the interpreters. `filesystem::under_home` owns the `~` rule for it and for
+      `expand_home`.
+    - On Linux, an absent protected path has no lowering, and `require_interpreter_route`
+      cannot resolve it. Decide both before a declaration loads there.
+  - **No workload holds the operator's value of a `pass-secret-env` variable.**
+    `DeclaredSources::vault_credentials` reads the operator's variables once, when the sources
+    open, and `VaultCredential::refuse_held` refuses a process table whose `env` value or
+    `command` element contains one of those values, under any name. The compare is on the
+    value alone, so a placeholder under the same name passes. An empty variable is no
+    credential. The compare has no shortest length: a short value, or a plain setting that a
+    prefix entry such as `OP_*` covers, stops a table that holds the same text. A floor would
+    let a short credential through with no word, so the user guide says what to do instead.
+    `VaultCredential` prints no value in its `Debug` form, and the refusal names the
+    variable and never the value. Box CLI cannot see a value that an operator pasted into the
+    `env` of an imported MCP server, so this is the only check for that case. Residual: the
+    trailing arguments of `run`, and a value in another encoding.
   - The `pass-secret-env` refusal covers `env://NAME` and `secret://NAME` only. A bare `aws://`
     route signs with the ambient AWS identity, also when a `pass-secret-env` entry names an AWS
     key. The design pairs that route with a source that reads AWS Secrets Manager under the same

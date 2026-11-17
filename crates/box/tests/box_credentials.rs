@@ -661,6 +661,259 @@ fn a_write_grant_over_a_secret_source_program_is_refused() {
     }
 }
 
+/// The body of a configuration whose `op://` source runs `program` for one route and protects
+/// `~/.config/op`, and whose `aws-secretsmanager://` source protects `~/.aws` and a path that is
+/// not there, with `rest` after them.
+#[cfg(target_os = "macos")]
+fn protecting_sources(program: &str, rest: &str) -> String {
+    let route = declared_route("api.example.test", "op://Personal/GitHub/token");
+    format!(
+        "{}[secret-source.aws-secretsmanager]\nprotocol = \"box.secret-source.v1\"\n\
+         command = [{program:?}, \"get\", \"{{ref}}\"]\n\
+         pass-secret-env = [\"AWS_SECRET_ACCESS_KEY\"]\nreads = [\"~/.aws\"]\n\
+         deny = [\"~/Library/Group Containers/vault\"]\n{rest}",
+        declared_source(true, program, &route)
+    )
+}
+
+/// The refusal of a grant that reaches `path`, which the `list` entry `entry` of the source
+/// `scheme` protects.
+#[cfg(target_os = "macos")]
+fn source_path_refusal(path: &std::path::Path, scheme: &str, list: &str, entry: &str) -> String {
+    format!(
+        "is refused: this grant reaches {}, which the secret source `{scheme}` keeps from each \
+         workload (its `{list}` entry {entry:?}). Keep each grant outside the paths that a \
+         secret source names in `reads` and `deny`",
+        path.display()
+    )
+}
+
+/// **A grant that reaches a path of a secret source stops the box before a program starts**:
+/// a credential store that a tool names exactly, a folder of the agent that holds the path, and
+/// a path that is not there under a stdio MCP server.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_grant_over_a_path_of_a_secret_source_is_refused() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let tool = "[tool.aws]\ncommand = [\"/usr/bin/true\"]\n\
+                [tool.aws.filesystem]\nread = [\"~/.aws\"]\n";
+    let server = "[mcp.files]\ntype = \"stdio\"\ncommand = [\"files-server\"]\n\
+                  [mcp.files.filesystem]\nread = [\"~/Library/Group Containers/vault/t\"]\n";
+    for (name, rest, agent_reads) in [
+        ("protected-store", tool, None),
+        ("protected-folder", "", Some(".config")),
+        ("protected-absent", server, None),
+    ] {
+        let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+        let mut request = Request::with_config(
+            name,
+            &permit_egress_to("api.example.test", 443),
+            &protecting_sources(&program.path(), rest),
+        );
+        let home = request
+            .operator_home()
+            .canonicalize()
+            .expect("the operator home resolves");
+        for folder in [".aws", ".config/op"] {
+            std::fs::create_dir_all(home.join(folder)).expect("create a folder of the vault");
+        }
+        let expected = match name {
+            "protected-store" => format!(
+                "`[tool.aws]` filesystem entry \"~/.aws\" {}",
+                source_path_refusal(&home.join(".aws"), "aws-secretsmanager", "reads", "~/.aws")
+            ),
+            "protected-folder" => format!(
+                "`[agent]` filesystem entry {:?} {}",
+                home.join(".config").display().to_string(),
+                source_path_refusal(&home.join(".config/op"), "op", "reads", "~/.config/op")
+            ),
+            _ => format!(
+                "`[mcp.files]` filesystem entry \"~/Library/Group Containers/vault/t\" {}",
+                source_path_refusal(
+                    &home.join("Library/Group Containers/vault"),
+                    "aws-secretsmanager",
+                    "deny",
+                    "~/Library/Group Containers/vault"
+                )
+            ),
+        };
+        if let Some(folder) = agent_reads {
+            request = request.agent_read(&[&home.join(folder)]);
+        }
+        let (box_, output) = request.attempt();
+        assert_refused(&box_, &output, &[&expected]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains("reads each op:// secret"), "{stderr}");
+        assert_eq!(
+            program.runs(),
+            Vec::<String>::new(),
+            "{name}: no program starts in a box that lets a workload reach the vault"
+        );
+    }
+}
+
+/// The value of a vault credential of the operator, which must never appear inside the box.
+#[cfg(target_os = "macos")]
+const VAULT_CREDENTIAL: &str = "ops_vault_credential_of_the_operator_41c7";
+
+/// **A process table that holds the operator's value of a `pass-secret-env` variable stops the
+/// box before a program starts**: under another name in `[agent]`, and pasted into the `env` of
+/// a stdio MCP server, for a prefix entry, with no part of the value in the refusal.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_table_that_holds_a_credential_of_a_vault_is_refused() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let server = format!(
+        "[mcp.files]\ntype = \"stdio\"\ncommand = [\"files-server\"]\n\
+         [mcp.files.env]\nAPI_KEY = \"Bearer {VAULT_CREDENTIAL}\"\n"
+    );
+    for (name, variable, rest, expected) in [
+        (
+            "credential-agent",
+            "OP_SERVICE_ACCOUNT_TOKEN",
+            String::new(),
+            "invalid `[agent]` table: `env.GITHUB_TOKEN` holds the value of the variable \
+             OP_SERVICE_ACCOUNT_TOKEN, which is a credential of the secret source `op` (its \
+             `pass-secret-env` names it), so no workload can hold it",
+        ),
+        (
+            "credential-server",
+            "OP_SESSION_team",
+            server,
+            "invalid `[mcp.files]` table: `env.API_KEY` holds the value of the variable \
+             OP_SESSION_team, which is a credential of the secret source `op` (its \
+             `pass-secret-env` names it), so no workload can hold it",
+        ),
+    ] {
+        let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+        let mut request = Request::with_config(
+            name,
+            &permit_egress_to("api.example.test", 443),
+            &protecting_sources(&program.path(), &rest),
+        )
+        .env(variable, VAULT_CREDENTIAL);
+        if rest.is_empty() {
+            request = request.agent_env("GITHUB_TOKEN", VAULT_CREDENTIAL);
+        }
+        let (box_, output) = request.attempt();
+        assert_refused(&box_, &output, &[expected]);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!stderr.contains(VAULT_CREDENTIAL), "{stderr}");
+        assert!(!stderr.contains("reads each op:// secret"), "{stderr}");
+        assert_eq!(
+            program.runs(),
+            Vec::<String>::new(),
+            "{name}: no program starts in a box whose workload holds the credential of the vault"
+        );
+    }
+}
+
+/// **A placeholder under the name of a vault credential passes**: the box starts, the program
+/// gets the operator's credential, and the workload holds its own value under that name.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_workload_holds_a_placeholder_under_the_name_of_a_vault_credential() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let program = StandInProgram::new(&format!(
+        "printf '%s' \"$OP_SERVICE_ACCOUNT_TOKEN\" > \"$0.credential\"\n\
+         printf '%s\\n' {DECLARED_SECRET}"
+    ));
+    let (box_, output) = Request::with_config(
+        "protected-run",
+        &permit_egress_to("api.example.test", 443),
+        &protecting_sources(&program.path(), ""),
+    )
+    .env("OP_SERVICE_ACCOUNT_TOKEN", VAULT_CREDENTIAL)
+    .agent_env("OP_SERVICE_ACCOUNT_TOKEN", "a-placeholder-of-the-profile")
+    .attempt();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "the box must start: {stderr}");
+    assert_eq!(program.runs(), ["read op://Personal/GitHub/token"]);
+    assert_eq!(
+        std::fs::read_to_string(format!("{}.credential", program.path()))
+            .expect("the program wrote what it received"),
+        VAULT_CREDENTIAL,
+        "the program of the source receives the credential of the vault"
+    );
+
+    let output = box_.run(&["/usr/bin/env"]);
+    let environment = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        environment.contains("OP_SERVICE_ACCOUNT_TOKEN=a-placeholder-of-the-profile\n"),
+        "{environment}"
+    );
+    assert!(!environment.contains(VAULT_CREDENTIAL), "{environment}");
+}
+
+/// **A tool cannot see a path of a secret source, and the Shell cannot change one**: a tool
+/// with no grant of its own reads the size of an ordinary file under the home and gets nothing
+/// for a file that a source protects, and a write that policy permits changes the ordinary file
+/// alone.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tool_cannot_see_and_the_shell_cannot_change_a_path_of_a_secret_source() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    const POLICY: &str = r#"
+permit(principal, action == Box::Action::"shell:exec", resource);
+permit(principal, action == Box::Action::"shell:spawn", resource)
+when { context.input.program == "stat" };
+permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource);
+"#;
+    const SETTINGS: &str = "the settings of the vault";
+    let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+    let request = Request::with_config(
+        "protected-tool",
+        POLICY,
+        &protecting_sources(&program.path(), "[tool.stat]\ncommand = [\"stat\"]\n"),
+    );
+    let home = request
+        .operator_home()
+        .canonicalize()
+        .expect("the operator home resolves");
+    let (plain, settings) = (home.join("notes.txt"), home.join(".config/op/config"));
+    std::fs::create_dir_all(home.join(".config/op")).expect("create the folder of the vault");
+    std::fs::write(&plain, "0123456789").expect("write an ordinary file");
+    std::fs::write(&settings, SETTINGS).expect("write the settings");
+    let box_ = request.expect();
+
+    let output = box_.bash(&format!(
+        "zsh -lc 'stat -f plain=%z \"{plain}\"'; echo \"plain_rc=$?\"\n\
+         zsh -lc 'stat -f vault=%z \"{settings}\"'; echo \"vault_rc=$?\"\n\
+         zsh -lc 'printf changed > \"{plain}\"'; echo \"plain_write_rc=$?\"\n\
+         zsh -lc 'printf changed > \"{settings}\"'; echo \"vault_write_rc=$?\"\n",
+        plain = plain.display(),
+        settings = settings.display()
+    ));
+    let seen = String::from_utf8_lossy(&output.stdout).into_owned();
+    let printed = |line: &str| seen.lines().any(|printed| printed == line);
+    assert!(
+        printed("plain=10") && printed("plain_rc=0"),
+        "the tool must see an ordinary file, so that the next refusal means something: {output:?}"
+    );
+    assert!(!seen.contains("vault="), "{output:?}");
+    assert!(printed("vault_rc=1"), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(&plain).expect("the ordinary file"),
+        "changed",
+        "the Shell must change an ordinary file, so that the next refusal means something: \
+         {output:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&settings).expect("the settings of the vault"),
+        SETTINGS,
+        "{output:?}"
+    );
+    assert!(!printed("vault_write_rc=0"), "{output:?}");
+}
+
 /// **A telemetry target and a route that name one secret run the program once**, the target
 /// receives its field of that secret, and both reads are recorded after the collector opens.
 #[cfg(target_os = "macos")]

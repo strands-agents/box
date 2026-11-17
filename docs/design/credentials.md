@@ -72,10 +72,24 @@ Between two runs, a workload must not replace the program. So Box treats the pro
 a configured tool command. It refuses a write grant that covers the path in `command`, the file
 that the path resolves to, a symbolic link on the way, or a folder that holds one of them. The
 interpreters refuse a change to them. Box makes that check before the program starts for the
-first time, so a box that it refuses never runs the program. The check covers that one file and
-its path. It doesn't cover a file that the program loads or that an argument names. Box doesn't
-yet refuse a grant, a policy rule, or a workload environment that reaches a `reads` path, a
-`deny` path, or a `pass-secret-env` value. Until it does, the operator keeps them apart.
+first time, so a box that it refuses never runs the program. A later element of `command` that
+is the absolute path of a file gets the same check, such as a script after an interpreter. The
+check doesn't cover a file that the program loads by itself.
+
+A workload must not reach the vault around Box either. The table lists the vault's own paths in
+`reads` and `deny`, and the variables that hold the vault's credential in `pass-secret-env`. In
+that same early step, Box refuses a grant of the agent, a tool, or a local MCP server that names
+one of those paths, a path inside it, or a folder that holds it, and a write grant over the
+folder that holds a symbolic link on the way to one. A credential store that a grant can
+otherwise name exactly, such as `~/.aws`, has no exception here. Each sandbox also denies
+those paths, so they stay closed when they appear after the box starts. Box then refuses a
+table whose `env` or `command` holds the operator's value of a `pass-secret-env` variable, under
+any name. A different value under the same name passes, so the placeholder of a signed route is
+fine. The interpreters refuse a change at one of those paths, inside it, or above it, as they
+do for the program. They don't refuse a read there, because [no credential floor sits beneath
+them](./decisions.md#no-credential-floor-sits-beneath-the-interpreters).
+[The limits page](./limitations.md#a-secret-source-runs-outside-every-sandbox) lists what
+remains.
 
 Box starts the program by its path, because macOS can't start a program from an open file. So the
 runner compares the path with the checked file before it starts the program and again after the

@@ -10,8 +10,11 @@ use containment::{Operation, Scope};
 use crate::error::{BoxError, ConfigError};
 use crate::record::config::Record;
 use crate::record::config::filesystem::DirectReach;
-use crate::record::config::secret_source::SecretSourceEntry;
-use crate::record::layout::{disk_identity, lies_within, open_without_following};
+use crate::record::config::secret_source::{SecretSourceEntry, protected_paths};
+use crate::record::layout::{
+    canonical, disk_identity, lies_within, open_without_following, operator_home_directory,
+    resolved_through_links,
+};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod aliases;
@@ -21,6 +24,14 @@ pub(crate) struct ConfiguredCommands {
     tools: BTreeMap<String, Arc<ConfiguredCommand>>,
     /// The program of each `[secret-source.<scheme>]` table, which no workload may change.
     sources: BTreeMap<String, Arc<ConfiguredCommand>>,
+    /// Each file that an argument of a `[secret-source.<scheme>]` command names, which no
+    /// workload may change.
+    source_files: Vec<Arc<ConfiguredCommand>>,
+    /// Each spelling of each `reads` and `deny` path of a secret source, which no interpreter
+    /// may change, beside that spelling with its letters folded.
+    source_paths: Vec<(PathBuf, PathBuf)>,
+    /// Each symbolic link on the way to a `reads` or `deny` path, which no interpreter may change.
+    source_links: Vec<PathBuf>,
 }
 
 /// The file each bare name runs in the hosted Shell, from the `[tool]` tables that answer to it.
@@ -50,6 +61,9 @@ impl BareNames {
 #[derive(Debug)]
 pub(crate) enum CommandMutationRefusal {
     CommandOrAncestor,
+    /// The path is a `reads` or `deny` path of a secret source, lies inside one, or holds one, or
+    /// it is a symbolic link on the way to one or holds that link.
+    SourcePath,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     HardLinkAlias,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -62,8 +76,10 @@ pub(crate) struct ConfiguredCommand {
     path: PathBuf,
     invoked: PathBuf,
     routes: Vec<PathBuf>,
-    /// Each symbolic link that the resolution of a secret source program passes through.
+    /// Each symbolic link that the resolution of a secret source file passes through.
     links: Vec<PathBuf>,
+    /// Whether an argument of a secret source command names this file, which is then no program.
+    argument: bool,
     opened: File,
     identity: (u64, u64),
     loaded: FileState,
@@ -106,48 +122,80 @@ impl ConfiguredCommands {
                 Ok((label.clone(), Arc::new(command)))
             })
             .collect::<Result<_, BoxError>>()?;
-        let sources = Self::source_programs(&record.secret_source)?;
-        Ok(Self { tools, sources })
-    }
-
-    /// The program of each `[secret-source.<scheme>]` table alone, opened and checked.
-    pub(crate) fn of_secret_sources(
-        entries: &BTreeMap<String, SecretSourceEntry>,
-    ) -> Result<Self, BoxError> {
         Ok(Self {
-            tools: BTreeMap::new(),
-            sources: Self::source_programs(entries)?,
+            tools,
+            ..Self::of_secret_sources(&record.secret_source)?
         })
     }
 
-    fn source_programs(
+    /// The files of each `[secret-source.<scheme>]` table alone, opened and checked: its
+    /// program, and each file that a later element of its `command` names.
+    pub(crate) fn of_secret_sources(
         entries: &BTreeMap<String, SecretSourceEntry>,
-    ) -> Result<BTreeMap<String, Arc<ConfiguredCommand>>, BoxError> {
-        entries
-            .iter()
-            .map(|(scheme, entry)| {
-                let refuse = |reason: String| ConfigError::SecretSource {
-                    scheme: scheme.clone(),
-                    reason,
-                };
-                let program = entry
-                    .command
-                    .first()
-                    .ok_or_else(|| refuse("has an empty command".to_string()))?;
-                // The program is an absolute path, so no search path finds it.
-                let nowhere = std::ffi::OsStr::new("");
-                super::contain::executable::resolve(program, nowhere)
-                    .map_err(|error| refuse(format!("its program cannot run: {error}")))?;
-                let mut command =
-                    ConfiguredCommand::load(format!("[secret-source.{scheme}]"), program, nowhere)?;
-                // A workload that can change one link of the chain chooses the file that the
-                // next run starts.
-                command.links = links_on_the_way(Path::new(program)).map_err(|error| {
-                    refuse(format!("its program path cannot be inspected: {error}"))
+    ) -> Result<Self, BoxError> {
+        let mut programs = BTreeMap::new();
+        let mut files = Vec::new();
+        for (scheme, entry) in entries {
+            let refuse = |reason: String| ConfigError::SecretSource {
+                scheme: scheme.clone(),
+                reason,
+            };
+            let table = format!("[secret-source.{scheme}]");
+            let program = entry
+                .command
+                .first()
+                .ok_or_else(|| refuse("has an empty command".to_string()))?;
+            // The program is an absolute path, so no search path finds it.
+            let nowhere = std::ffi::OsStr::new("");
+            super::contain::executable::resolve(program, nowhere)
+                .map_err(|error| refuse(format!("its program cannot run: {error}")))?;
+            let mut command = ConfiguredCommand::load(table.clone(), program, nowhere)?;
+            // A workload that can change one link of the chain chooses the file that the
+            // next run starts.
+            command.links = links_on_the_way(Path::new(program)).map_err(|error| {
+                refuse(format!("its program path cannot be inspected: {error}"))
+            })?;
+            programs.insert(scheme.clone(), Arc::new(command));
+            for argument in entry.command.iter().skip(1) {
+                let named = Path::new(argument);
+                // An element that is the absolute path of a file is a file that the program
+                // reads or runs, such as a script after an interpreter.
+                if !named.is_absolute()
+                    || !std::fs::metadata(named).is_ok_and(|metadata| metadata.is_file())
+                {
+                    continue;
+                }
+                let mut file = ConfiguredCommand::named_file(table.clone(), named)?;
+                file.links = links_on_the_way(named).map_err(|error| {
+                    refuse(format!(
+                        "the path of its argument {argument:?} cannot be inspected: {error}"
+                    ))
                 })?;
-                Ok((scheme.clone(), Arc::new(command)))
-            })
-            .collect()
+                files.push(Arc::new(file));
+            }
+        }
+        let protected = protected_paths(entries);
+        let mut source_paths = Vec::new();
+        let mut source_links = Vec::new();
+        if !protected.is_empty() {
+            // Canonical, as the judgement of each filesystem list resolves `~`.
+            let home = canonical(&operator_home_directory()?);
+            for path in &protected {
+                let (spellings, links) = path.spellings(&home)?;
+                source_paths.extend(spellings.into_iter().map(|spelling| {
+                    let folded = folded(&spelling);
+                    (spelling, folded)
+                }));
+                source_links.extend(links);
+            }
+        }
+        Ok(Self {
+            tools: BTreeMap::new(),
+            sources: programs,
+            source_files: files,
+            source_paths,
+            source_links,
+        })
     }
 
     /// The checked program of the `[secret-source.<scheme>]` table for `scheme`.
@@ -160,9 +208,13 @@ impl ConfiguredCommands {
         !self.sources.is_empty()
     }
 
-    /// Each program that no workload may change: of a tool, and of a secret source.
+    /// Each file that no workload may change: the program of a tool, and the program and each
+    /// argument file of a secret source.
     fn protected(&self) -> impl Iterator<Item = &Arc<ConfiguredCommand>> {
-        self.tools.values().chain(self.sources.values())
+        self.tools
+            .values()
+            .chain(self.sources.values())
+            .chain(&self.source_files)
     }
 
     pub(crate) fn get(&self, label: &str) -> Option<&Arc<ConfiguredCommand>> {
@@ -264,6 +316,33 @@ impl ConfiguredCommands {
         if self.protected().any(|command| command.enclosed_by(path)) {
             return Some(CommandMutationRefusal::CommandOrAncestor);
         }
+        if self
+            .source_paths
+            .iter()
+            .any(|(protected, _)| lies_within(path, protected) || lies_within(protected, path))
+        {
+            return Some(CommandMutationRefusal::SourcePath);
+        }
+        // A link on the way, and the folder that holds it, which a change to the link writes.
+        if self
+            .source_links
+            .iter()
+            .any(|link| path == link || holds(path, link))
+        {
+            return Some(CommandMutationRefusal::SourcePath);
+        }
+        // A path that is not there has no identity to compare, and a volume that ignores case
+        // makes it under each case of its name.
+        if !self.source_paths.is_empty() {
+            let named = folded(path);
+            if self
+                .source_paths
+                .iter()
+                .any(|(_, protected)| named.starts_with(protected) || protected.starts_with(&named))
+            {
+                return Some(CommandMutationRefusal::SourcePath);
+            }
+        }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
             let identities = self.mutable_aliases(path);
@@ -290,10 +369,16 @@ impl ConfiguredCommands {
                     Scope::File => command.names(&grant.resolved),
                 };
                 if overlaps {
-                    return Err(ConfigError::Filesystem {
-                        table: table.to_string(),
-                        entry: grant.authored.clone(),
-                        reason: format!(
+                    let reason = if command.argument {
+                        format!(
+                            "this write grant can change {}, a file that the `command` of {} \
+                             names, or its path. Keep each file that a secret source command \
+                             names outside every process's write grants",
+                            command.path.display(),
+                            command.table
+                        )
+                    } else {
+                        format!(
                             "this write grant can change {} command {} or its path. \
                              Keep {} outside every process's write grants",
                             command.table,
@@ -303,7 +388,12 @@ impl ConfiguredCommands {
                             } else {
                                 "configured tools"
                             }
-                        ),
+                        )
+                    };
+                    return Err(ConfigError::Filesystem {
+                        table: table.to_string(),
+                        entry: grant.authored.clone(),
+                        reason,
                     }
                     .into());
                 }
@@ -356,7 +446,34 @@ impl ConfiguredCommand {
         search_path: &std::ffi::OsStr,
     ) -> Result<Self, BoxError> {
         let resolved = super::contain::executable::resolve(program, search_path)?;
-        let path = resolved.granted_path().to_path_buf();
+        Self::over(
+            table,
+            resolved.granted_path().to_path_buf(),
+            resolved.invoked().to_path_buf(),
+            Path::new(program),
+            false,
+        )
+    }
+
+    /// Open and check the file that an argument of the command of `table` names as `named`.
+    fn named_file(table: String, named: &Path) -> Result<Self, BoxError> {
+        let path = named.canonicalize().map_err(|error| {
+            file_refusal(&table, named, true, &format!("cannot be resolved: {error}"))
+        })?;
+        Self::over(table, path, named.to_path_buf(), named, true)
+    }
+
+    /// Open and check the file `path` of `table`, which `invoked` and `authored` also name, and
+    /// which is the program of the table or, for `argument`, a file that its arguments name.
+    fn over(
+        table: String,
+        path: PathBuf,
+        invoked: PathBuf,
+        authored: &Path,
+        argument: bool,
+    ) -> Result<Self, BoxError> {
+        let refusal =
+            |table: &str, path: &Path, reason: &str| file_refusal(table, path, argument, reason);
         let opened = open_without_following(&path)
             .map_err(|error| refusal(&table, &path, &format!("cannot be opened: {error}")))?;
         let metadata = opened
@@ -379,9 +496,7 @@ impl ConfiguredCommand {
                 ),
             ));
         }
-        let invoked = resolved.invoked().to_path_buf();
         let mut routes = vec![invoked.clone()];
-        let authored = Path::new(program);
         if authored.is_absolute() && !routes.iter().any(|route| route == authored) {
             routes.push(authored.to_path_buf());
         }
@@ -391,6 +506,7 @@ impl ConfiguredCommand {
             invoked,
             routes,
             links: Vec::new(),
+            argument,
             opened,
             identity: (metadata.dev(), metadata.ino()),
             loaded,
@@ -446,9 +562,10 @@ impl ConfiguredCommand {
         {
             return Ok(());
         }
-        Err(refusal(
+        Err(file_refusal(
             &self.table,
             &self.path,
+            self.argument,
             "changed after this run loaded it. Stop Box before updating a configured tool",
         ))
     }
@@ -477,53 +594,10 @@ fn holds(outer: &Path, entry: &Path) -> bool {
         .is_some_and(|folder| lies_within(folder, outer))
 }
 
-/// The most symbolic links that one path resolution may pass through.
-const MAXIMUM_LINKS: usize = 40;
-
 /// Each symbolic link that the resolution of the absolute `path` passes through, spelled as the
 /// resolved folder that holds it and its own name.
 fn links_on_the_way(path: &Path) -> std::io::Result<Vec<PathBuf>> {
-    use std::path::Component;
-    let mut links = Vec::new();
-    let mut resolved = PathBuf::from("/");
-    // The names still to resolve, with the next one last.
-    let mut pending: Vec<std::ffi::OsString> = Vec::new();
-    let push = |pending: &mut Vec<std::ffi::OsString>, target: &Path| {
-        for component in target.components().rev() {
-            match component {
-                Component::Normal(name) => pending.push(name.to_os_string()),
-                Component::ParentDir => pending.push("..".into()),
-                Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
-            }
-        }
-    };
-    push(&mut pending, path);
-    while let Some(name) = pending.pop() {
-        if name == ".." {
-            resolved.pop();
-            continue;
-        }
-        let candidate = resolved.join(&name);
-        if !std::fs::symlink_metadata(&candidate)?
-            .file_type()
-            .is_symlink()
-        {
-            resolved = candidate;
-            continue;
-        }
-        if links.len() == MAXIMUM_LINKS {
-            return Err(std::io::Error::other(
-                "the path passes through too many symbolic links",
-            ));
-        }
-        let target = std::fs::read_link(&candidate)?;
-        links.push(candidate);
-        if target.is_absolute() {
-            resolved = PathBuf::from("/");
-        }
-        push(&mut pending, &target);
-    }
-    Ok(links)
+    resolved_through_links(path).map(|(_, links)| links)
 }
 
 /// Whether the user that runs Box can write `opened`, or can give itself that right, through any name.
@@ -630,12 +704,34 @@ fn write_access(_opened: &File, path: &Path) -> std::io::Result<()> {
     }
 }
 
-fn refusal(table: &str, path: &Path, reason: &str) -> BoxError {
+/// The refusal of the file `path` of `table`: its command, or for `argument`, a file that an
+/// argument of its command names.
+fn file_refusal(table: &str, path: &Path, argument: bool, reason: &str) -> BoxError {
+    let reason = if argument {
+        format!(
+            "the file {}, which its `command` names, {reason}",
+            path.display()
+        )
+    } else {
+        format!("configured command {} {reason}", path.display())
+    };
     ConfigError::Process {
         table: table.to_string(),
-        reason: format!("configured command {} {reason}", path.display()),
+        reason,
     }
     .into()
+}
+
+/// `path` with its letters folded, as a volume that ignores case compares two names.
+fn folded(path: &Path) -> PathBuf {
+    // The middle step expands a letter such as `ß` or `ﬁ` to ASCII letters, and the first step
+    // gives it a capital such as `ẞ` in a form that it expands.
+    PathBuf::from(
+        path.to_string_lossy()
+            .to_lowercase()
+            .to_uppercase()
+            .to_lowercase(),
+    )
 }
 
 #[cfg(test)]
@@ -700,6 +796,7 @@ mod tests {
                 policy: None,
                 authority_directories: Vec::new(),
                 program_search_directories: Vec::new(),
+                source_paths: &[],
             },
         )
         .expect("read-write reach")
@@ -904,6 +1001,352 @@ mod tests {
             .expect("the tool loads")
             .validate_reach("[agent]", &reach(&home, &middle))
             .expect("the tool check does not change");
+    }
+
+    /// **A file that a later element of a secret source command names is protected as the
+    /// program is**: no write grant covers the file, a link on the way to it, or a folder of
+    /// either, and no interpreter changes them. An element that names no file is not held.
+    #[test]
+    fn a_file_that_a_secret_source_argument_names_is_protected() {
+        let directory = tempfile::tempdir().expect("directory");
+        let home = directory
+            .path()
+            .canonicalize()
+            .expect("canonical directory");
+        let folder = |name: &str| {
+            let folder = home.join(name);
+            std::fs::create_dir_all(&folder).expect("folder");
+            folder
+        };
+        let (scripts, current, settings, output) = (
+            folder("scripts/1"),
+            folder("current"),
+            folder("settings"),
+            folder("output"),
+        );
+        // A script that is not executable, which a link names, and a settings file.
+        let script = scripts.join("vault.sh");
+        std::fs::write(&script, "printf secret\n").expect("script");
+        std::os::unix::fs::symlink(&script, current.join("vault.sh")).expect("link");
+        let options = settings.join("vault.hcl");
+        std::fs::write(&options, "").expect("settings");
+        let mut record = source_record(Path::new("/bin/sh"));
+        record
+            .secret_source
+            .get_mut("op")
+            .expect("the table of the fixture")
+            .command = [
+            "/bin/sh".to_string(),
+            current.join("vault.sh").display().to_string(),
+            "--settings".to_string(),
+            options.display().to_string(),
+            // None of these names a file: a folder, an absent path, a path that is a file only
+            // from the working directory of this test, a path in other text, and the reference.
+            output.display().to_string(),
+            home.join("absent").display().to_string(),
+            "Cargo.toml".to_string(),
+            format!("--script={}", script.display()),
+            "{ref}".to_string(),
+        ]
+        .to_vec();
+        assert!(
+            Path::new("Cargo.toml").is_file(),
+            "the relative element must name a file from here, or it proves nothing"
+        );
+        let commands = ConfiguredCommands::load(&record).expect("the files load");
+        assert_eq!(
+            commands
+                .source_files
+                .iter()
+                .map(|file| (file.path.clone(), file.links.clone(), file.argument))
+                .collect::<Vec<_>>(),
+            [
+                (script.clone(), vec![current.join("vault.sh")], true),
+                (options.clone(), Vec::new(), true),
+            ]
+        );
+        assert!(
+            !commands.source("op").expect("the program").argument,
+            "the program is no argument"
+        );
+
+        let scripts_root = home.join("scripts");
+        for (writable, file) in [
+            (&scripts, &script),
+            (&scripts_root, &script),
+            (&current, &script),
+            (&script, &script),
+            (&settings, &options),
+            (&options, &options),
+        ] {
+            let error = commands
+                .validate_reach("[agent]", &reach(&home, writable))
+                .expect_err("a file that a source command names cannot be writable")
+                .to_string();
+            assert_eq!(
+                error,
+                format!(
+                    "`[agent]` filesystem entry {:?} is refused: this write grant can change \
+                     {}, a file that the `command` of [secret-source.op] names, or its path. \
+                     Keep each file that a secret source command names outside every process's \
+                     write grants",
+                    writable.display().to_string(),
+                    file.display()
+                )
+            );
+        }
+        for mutation in [
+            &home,
+            &scripts,
+            &current,
+            &settings,
+            &script,
+            &options,
+            &current.join("vault.sh"),
+        ] {
+            assert!(
+                matches!(
+                    commands.mutation_refusal(mutation),
+                    Some(CommandMutationRefusal::CommandOrAncestor)
+                ),
+                "{}",
+                mutation.display()
+            );
+        }
+        commands
+            .validate_reach("[agent]", &reach(&home, &output))
+            .expect("a folder that an argument names is not held");
+        assert!(commands.mutation_refusal(&output.join("file")).is_none());
+        // The check of the sources alone holds the same files.
+        let alone =
+            ConfiguredCommands::of_secret_sources(&record.secret_source).expect("the files load");
+        assert_eq!(alone.source_files.len(), 2);
+    }
+
+    /// **A file that an argument names and that Box cannot open stops the load**, and the
+    /// refusal names the file as an argument, not as a command.
+    #[test]
+    fn an_argument_file_that_cannot_be_opened_is_refused_by_name() {
+        // SAFETY: the call reads the effective user and changes nothing.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping: the superuser opens each file");
+            return;
+        }
+        let directory = tempfile::tempdir().expect("directory");
+        let key = directory
+            .path()
+            .canonicalize()
+            .expect("canonical directory")
+            .join("key.pem");
+        std::fs::write(&key, "").expect("key");
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o000)).expect("closed");
+        let mut record = source_record(Path::new("/bin/sh"));
+        record
+            .secret_source
+            .get_mut("op")
+            .expect("the table of the fixture")
+            .command
+            .push(key.display().to_string());
+        assert_eq!(
+            ConfiguredCommands::load(&record)
+                .expect_err("the file cannot be held")
+                .to_string(),
+            format!(
+                "invalid `[secret-source.op]` table: the file {}, which its `command` names, \
+                 cannot be opened: Permission denied (os error 13)",
+                key.display()
+            )
+        );
+    }
+
+    /// **No interpreter changes a path that a secret source protects**: the path, a path inside
+    /// it, or a folder that holds it, also when the path is not there or is behind a link.
+    #[test]
+    fn a_path_of_a_secret_source_cannot_change_through_an_interpreter() {
+        let directory = tempfile::tempdir().expect("directory");
+        let home = directory
+            .path()
+            .canonicalize()
+            .expect("canonical directory");
+        for folder in ["vault/store", "real", "output"] {
+            std::fs::create_dir_all(home.join(folder)).expect("folder");
+        }
+        std::os::unix::fs::symlink(home.join("real"), home.join("linked")).expect("link");
+        let mut record = source_record(Path::new("/bin/sh"));
+        let table = record
+            .secret_source
+            .get_mut("op")
+            .expect("the table of the fixture");
+        table.reads = vec![
+            home.join("vault/store").display().to_string(),
+            home.join("linked/settings").display().to_string(),
+        ];
+        table.deny = vec![home.join("later/socket").display().to_string()];
+        let commands = ConfiguredCommands::load(&record).expect("the sources load");
+        // Two names that no entry holds: a second name of the protected folder, and a second
+        // name of the folder above it. Only the file at each name shows the overlap.
+        std::os::unix::fs::symlink(home.join("vault/store"), home.join("output/store"))
+            .expect("link");
+        std::os::unix::fs::symlink(home.join("vault"), home.join("output/above")).expect("link");
+
+        for mutation in [
+            "vault/store",
+            "vault/store/config",
+            "vault",
+            "later/socket",
+            "later",
+            "later/socket/new",
+            "linked/settings",
+            "real/settings",
+            "real",
+            "output/store",
+            "output/store/config",
+            "output/above",
+        ] {
+            assert!(
+                matches!(
+                    commands.mutation_refusal(&home.join(mutation)),
+                    Some(CommandMutationRefusal::SourcePath)
+                ),
+                "{mutation}"
+            );
+        }
+        for mutation in ["output", "output/file", "vault/other", "later-beside"] {
+            assert!(
+                commands.mutation_refusal(&home.join(mutation)).is_none(),
+                "{mutation}"
+            );
+        }
+        // A configuration with no source protects no path.
+        assert!(
+            ConfiguredCommands::load(&source_record(Path::new("/bin/sh")))
+                .expect("the source loads")
+                .mutation_refusal(&home.join("vault/store"))
+                .is_none()
+        );
+    }
+
+    /// **No interpreter changes a link on the way to a path that a secret source protects**: the
+    /// link, and the folder that holds it, also when the target of the link is not there yet.
+    #[test]
+    fn a_link_on_the_way_to_a_path_of_a_secret_source_cannot_change_through_an_interpreter() {
+        let directory = tempfile::tempdir().expect("directory");
+        let home = directory
+            .path()
+            .canonicalize()
+            .expect("canonical directory");
+        for folder in ["dotfiles", "keys/store", "outer/dotfiles", "real/other"] {
+            std::fs::create_dir_all(home.join(folder)).expect("folder");
+        }
+        // `through` names the folder `real`, and an entry passes through it to `real/settings`.
+        std::os::unix::fs::symlink(home.join("real"), home.join("through")).expect("link");
+        // `chain` names `dotfiles/hop`, which names `keys/store`; `outer/dotfiles/hop` names a
+        // target that is not there.
+        std::os::unix::fs::symlink(home.join("keys/store"), home.join("dotfiles/hop"))
+            .expect("link");
+        std::os::unix::fs::symlink(home.join("dotfiles/hop"), home.join("chain")).expect("link");
+        std::os::unix::fs::symlink(home.join("keys/absent"), home.join("outer/dotfiles/hop"))
+            .expect("link");
+        std::os::unix::fs::symlink(home.join("outer/dotfiles/hop"), home.join("gone"))
+            .expect("link");
+        let mut record = source_record(Path::new("/bin/sh"));
+        record
+            .secret_source
+            .get_mut("op")
+            .expect("the table of the fixture")
+            .reads = vec![
+            home.join("chain").display().to_string(),
+            home.join("gone").display().to_string(),
+            home.join("through/settings").display().to_string(),
+        ];
+        let commands = ConfiguredCommands::load(&record).expect("the sources load");
+        for mutation in [
+            "dotfiles/hop",
+            "dotfiles",
+            "outer/dotfiles/hop",
+            "outer/dotfiles",
+            "outer",
+        ] {
+            assert!(
+                matches!(
+                    commands.mutation_refusal(&home.join(mutation)),
+                    Some(CommandMutationRefusal::SourcePath)
+                ),
+                "{mutation}"
+            );
+        }
+        // A path beside a link, and a path in the folder that a link names, change no link.
+        for mutation in [
+            "dotfiles/other",
+            "outer/other",
+            "outer/dotfiles/other",
+            "real/other",
+            "real/other/file",
+        ] {
+            assert!(
+                commands.mutation_refusal(&home.join(mutation)).is_none(),
+                "{mutation}"
+            );
+        }
+    }
+
+    /// **No interpreter makes an absent path of a secret source under another case of its
+    /// name**: a volume that ignores case reads that name as the protected one, and an absent
+    /// path has no identity to compare.
+    #[test]
+    fn an_absent_path_of_a_secret_source_cannot_change_under_another_case() {
+        let directory = tempfile::tempdir().expect("directory");
+        let home = directory
+            .path()
+            .canonicalize()
+            .expect("canonical directory");
+        let mut record = source_record(Path::new("/bin/sh"));
+        let table = record
+            .secret_source
+            .get_mut("op")
+            .expect("the table of the fixture");
+        table.reads = vec![home.join(".op").display().to_string()];
+        table.deny = vec![
+            home.join("Mixed/Case/absent/sock").display().to_string(),
+            home.join(".kiss-office-fiesta").display().to_string(),
+        ];
+        let commands = ConfiguredCommands::load(&record).expect("the sources load");
+        for mutation in [
+            ".OP",
+            ".Op/config",
+            "mixed",
+            "MIXED/case/ABSENT",
+            "mixed/case/absent/SOCK/new",
+            // Each letter whose full case folding is ASCII letters: the long s, the Kelvin
+            // sign, both sharp s, and the seven Latin ligatures.
+            ".\u{212A}i\u{17F}s-office-fiesta",
+            ".ki\u{DF}-office-fiesta",
+            ".KI\u{1E9E}-office-fiesta",
+            ".kiss-o\u{FB00}ice-fiesta",
+            ".kiss-o\u{FB03}ce-fiesta",
+            ".kiss-of\u{FB01}ce-fiesta",
+            ".kiss-office-\u{FB01}esta",
+            ".kiss-office-fie\u{FB05}a",
+            ".kiss-office-fie\u{FB06}a",
+        ] {
+            assert!(
+                matches!(
+                    commands.mutation_refusal(&home.join(mutation)),
+                    Some(CommandMutationRefusal::SourcePath)
+                ),
+                "{mutation}"
+            );
+        }
+        assert_eq!(
+            folded(Path::new("/\u{FB02}at/\u{FB04}e")),
+            Path::new("/flat/ffle")
+        );
+        for mutation in [".opx", ".o", "mixed-case", ".kiss-office-fiestas"] {
+            assert!(
+                commands.mutation_refusal(&home.join(mutation)).is_none(),
+                "{mutation}"
+            );
+        }
     }
 
     #[test]
@@ -1479,6 +1922,7 @@ mod tests {
                 invoked: path.to_path_buf(),
                 routes: vec![path.to_path_buf()],
                 links: Vec::new(),
+                argument: false,
                 identity: (metadata.dev(), metadata.ino()),
                 loaded: loaded.unwrap_or_else(|| FileState::of(&metadata)),
                 #[cfg(any(target_os = "macos", target_os = "linux"))]

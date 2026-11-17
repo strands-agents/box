@@ -19,7 +19,7 @@ use sha2::{Digest as _, Sha256};
 use crate::error::{BoxError, ConfigError, TrampolineError};
 use crate::record::config::filesystem::{self, DirectGrant, DirectReach, FilesystemContext};
 use crate::record::config::process::ProcessSpec;
-use crate::record::config::{AuthoritySource, Record};
+use crate::record::config::{AuthoritySource, ProcessTables, Record};
 use crate::record::layout::{BoxRoot, disk_identity, lies_within, respelled_under};
 use crate::run::contain::executable;
 use crate::run::contain::runtime_minimum::{self, MinimumCell};
@@ -90,13 +90,7 @@ impl ApprovedReach {
             .tables
             .iter()
             .map(|(table, spec)| {
-                let mut reach = judge_lists(
-                    spec,
-                    table,
-                    judged.policy.as_deref(),
-                    judged.declares_stdio_mcp,
-                    protected_sources,
-                )?;
+                let mut reach = judge_lists(spec, table, &judged, protected_sources)?;
                 commands.validate_reach(table, &reach)?;
                 installation.validate_reach(table, &reach)?;
                 reach.installation = Some(std::sync::Arc::clone(&installation));
@@ -134,22 +128,14 @@ fn judge_filesystem(
     stored: &Record,
     protected_sources: &[AuthoritySource],
 ) -> Result<DirectReach, BoxError> {
-    judge_lists(
-        spec,
-        table,
-        stored.policy.as_deref(),
-        stored.declares_stdio_mcp(),
-        protected_sources,
-    )
+    judge_lists(spec, table, &stored.process_tables(), protected_sources)
 }
 
-/// The direct reach of one process table, for a configuration whose policy file is `policy` and
-/// which declares a stdio MCP server or not.
+/// The direct reach of one process table of the configuration whose tables are `tables`.
 pub(crate) fn judge_lists(
     spec: &ProcessSpec,
     table: &str,
-    policy: Option<&Path>,
-    declares_stdio_mcp: bool,
+    tables: &ProcessTables,
     protected_sources: &[AuthoritySource],
 ) -> Result<DirectReach, BoxError> {
     let operator_home = crate::record::layout::operator_home_directory()?;
@@ -159,7 +145,10 @@ pub(crate) fn judge_lists(
         .canonicalize()
         .unwrap_or_else(|_| operator_home.clone());
     // Canonical, because every check on it is lexical and the stored spelling can carry `..`.
-    let policy = policy.map(crate::record::layout::resolved_to_its_deepest_existing_ancestor);
+    let policy = tables
+        .policy
+        .as_deref()
+        .map(crate::record::layout::resolved_to_its_deepest_existing_ancestor);
     let mut authority_directories: Vec<PathBuf> = Vec::new();
     for directory in protected_sources
         .iter()
@@ -177,11 +166,12 @@ pub(crate) fn judge_lists(
         // Only when the box declares a server at all: the search path matters because
         // `broker/mcp` execs the declared name against the operator's own `PATH`, outside
         // containment, and every declared name is bare.
-        program_search_directories: if declares_stdio_mcp {
+        program_search_directories: if tables.declares_stdio_mcp {
             program_search_directories(&std::env::var_os("PATH").unwrap_or_default())
         } else {
             Vec::new()
         },
+        source_paths: &tables.source_paths,
     };
     Ok(filesystem::direct_grants(&spec.filesystem, &context)?)
 }
@@ -2240,6 +2230,61 @@ mod tests {
 
     fn environment_of(boundary: &Boundary) -> BTreeMap<String, String> {
         serde_json::from_str(boundary.target_environment()).expect("the environment is JSON")
+    }
+
+    /// **Each process is refused each path that a secret source protects**: the agent and a
+    /// tool carry a denial of the path beside their own, and a grant that reaches the path
+    /// stops the translation.
+    #[test]
+    fn each_boundary_refuses_each_path_of_a_secret_source() {
+        let mut fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.path(".config/op")).expect("the folder of the source");
+        fixture.record.secret_source.insert(
+            "op".to_string(),
+            crate::record::config::secret_source::SecretSourceEntry {
+                reads: vec!["~/.config/op".to_string()],
+                ..Default::default()
+            },
+        );
+        let mut spec = fixture.spec();
+        for (table, reach) in [
+            ("[agent]", RuntimeReach::Agent),
+            ("[tool.build]", RuntimeReach::Leaf),
+        ] {
+            let boundary = fixture.translate_with_reach(&spec, table, reach);
+            let denied: Vec<PathBuf> = cells(&boundary)
+                .into_iter()
+                .filter(|(path, operation, scope)| {
+                    *operation == Operation::Deny
+                        && *scope == Scope::Root
+                        && !path.starts_with(fixture.root.root())
+                })
+                .map(|(path, _, _)| path)
+                .collect();
+            assert_eq!(
+                denied,
+                [fixture.path("vendor/sdk"), fixture.path(".config/op")],
+                "{table}: its own `deny`, then the path of the source"
+            );
+        }
+
+        spec.filesystem.read.push(fixture.path(".config"));
+        let refusal = fixture
+            .try_translate(&spec, "[tool.build]", &[])
+            .err()
+            .expect("the tool reads the folder that holds the path of the source")
+            .to_string();
+        assert_eq!(
+            refusal,
+            format!(
+                "`[tool.build]` filesystem entry {:?} is refused: this grant reaches {}, which \
+                 the secret source `op` keeps from each workload (its `reads` entry \
+                 \"~/.config/op\"). Keep each grant outside the paths that a secret source \
+                 names in `reads` and `deny`",
+                fixture.path(".config").display().to_string(),
+                fixture.path(".config/op").display()
+            )
+        );
     }
 
     /// **A spawn acts on the reach judged when the run started.** The directory holding an
