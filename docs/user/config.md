@@ -152,7 +152,9 @@ A native `filesystem.deny` entry does not restrict these requests through the bo
 On macOS, a write folder refuses most calls that set a file's times: `utimensat`, which `touch`
 calls, and `setattrlist`, which `cp -p` and `rsync -t` use. Only `utimes` works. So `touch`,
 `cp -p`, and `rsync -t` fail with `Operation not permitted`. The `file-attributes` switch lets a
-write folder set them. The key goes at the top of the file, above the first table:
+write folder set them. This applies to programs that run in a sandbox. The Shell's built-in `touch`
+runs outside the sandbox and doesn't need the switch. The key goes at the top of the file, above
+the first table:
 
 ```toml
 file-attributes = true
@@ -527,7 +529,7 @@ mounted aliases, and enclosing directories.
 | List | What each entry grants |
 |---|---|
 | `read` | Read the path. A directory entry covers everything below it. |
-| `write` | Write the path. On macOS, add `read` to permit reads, and setting a file's times needs [`file-attributes`](#file-attributes). Linux requires explicit read access across the entire write scope. |
+| `write` | Write the path. On macOS, add `read` to permit reads, and a sandboxed program that sets a file's times needs [`file-attributes`](#file-attributes). Linux requires explicit read access across the entire write scope. |
 | `read_file` | Read one exact file. The entry names a file. |
 | `write_file` | Write one exact file. Linux requires explicit read access to that file. The entry names an existing file. |
 | `list` | List the directory without content access on macOS. Linux refuses this list. |
