@@ -654,7 +654,7 @@ impl PathGrant {
     }
 
     /// Walk the chain once: [`Self::reachable_paths`], the caller's spelling parent-canonical, and
-    /// each link node between the two ends.
+    /// each link node between the two ends, a linked folder on a link's target path included.
     ///
     /// A grant whose parent is canonical and which holds no link, or one, gives back exactly
     /// [`Self::reachable_paths`].
@@ -668,20 +668,48 @@ impl PathGrant {
 
         record(parent_canonical(&self.original), &mut nodes);
 
-        let mut current = self.original.clone();
-        for _ in 0..MAXIMUM_LINK_HOPS {
-            let Ok(target) = std::fs::read_link(&current) else {
-                break;
+        // **Each link the lookup follows after the caller's own folder.** For `helper` pointing at
+        // `current/file`, where `current` links to `data`, the lookup follows `current` as well,
+        // and macOS refuses the open unless that link node is granted too. The walk starts at the
+        // caller's folder, canonical, so a link above the caller's spelling, such as `/var` on
+        // macOS, is not a node, as before.
+        let Some(name) = self.original.file_name() else {
+            return nodes;
+        };
+        let Some(mut folder) = self.original.parent().and_then(|p| p.canonicalize().ok()) else {
+            return nodes;
+        };
+        let mut pending: std::collections::VecDeque<std::ffi::OsString> =
+            std::collections::VecDeque::from([name.to_os_string()]);
+        let mut hops = 0;
+        while let Some(component) = pending.pop_front() {
+            let component = Path::new(&component);
+            if component == Path::new(".") {
+                continue;
+            }
+            if component == Path::new("..") {
+                folder.pop();
+                continue;
+            }
+            let candidate = folder.join(component);
+            let Ok(target) = std::fs::read_link(&candidate) else {
+                folder = candidate;
+                continue;
             };
-            current = match current.parent() {
-                Some(parent) if target.is_relative() => parent.join(&target),
-                _ => target,
-            };
-            let node = parent_canonical(&current);
-            if node == self.resolved {
+            hops += 1;
+            if hops > MAXIMUM_LINK_HOPS {
                 break;
             }
-            record(node, &mut nodes);
+            record(candidate, &mut nodes);
+            if target.is_absolute() {
+                folder = PathBuf::from("/");
+            }
+            for part in target.components().rev() {
+                match part {
+                    std::path::Component::RootDir | std::path::Component::Prefix(_) => {}
+                    other => pending.push_front(other.as_os_str().to_os_string()),
+                }
+            }
         }
         nodes
     }
@@ -847,4 +875,51 @@ pub enum BackendOverride {
         /// Whether Seatbelt extension tokens are enabled.
         extensions_enabled: bool,
     },
+}
+
+#[cfg(test)]
+mod traversal_node_tests {
+    use super::*;
+
+    /// **A linked folder on a link's target path is a traversal node**, at its canonical spelling,
+    /// and so is a linked folder another linked folder points through.
+    #[test]
+    fn a_linked_folder_on_a_links_target_path_is_a_node() {
+        let directory = tempfile::tempdir().expect("a folder");
+        let root = directory.path().canonicalize().expect("canonical");
+        std::fs::create_dir_all(root.join("store/data")).expect("data");
+        std::fs::write(root.join("store/data/file"), "x").expect("file");
+        std::fs::write(root.join("store/data/sibling"), "x").expect("sibling");
+        std::os::unix::fs::symlink("store", root.join("shelf")).expect("a linked folder");
+        std::os::unix::fs::symlink("shelf/data", root.join("current")).expect("a second one");
+        std::os::unix::fs::symlink("current/file", root.join("helper")).expect("a link");
+        let granted =
+            PathGrant::new(root.join("helper"), Operation::Read, Scope::File).expect("granted");
+        assert_eq!(
+            granted.traversal_paths(),
+            vec![
+                root.join("store/data/file"),
+                root.join("helper"),
+                root.join("current"),
+                root.join("shelf"),
+            ]
+        );
+    }
+
+    /// **A grant with no link has only its own node**, and a link to a file beside it adds only
+    /// the link.
+    #[test]
+    fn a_grant_with_no_linked_folder_keeps_its_nodes() {
+        let directory = tempfile::tempdir().expect("a folder");
+        let root = directory.path().canonicalize().expect("canonical");
+        std::fs::write(root.join("gcc"), "x").expect("file");
+        std::os::unix::fs::symlink("gcc", root.join("cc")).expect("a link");
+        let plain = PathGrant::new(root.join("gcc"), Operation::Read, Scope::File).expect("plain");
+        assert_eq!(plain.traversal_paths(), vec![root.join("gcc")]);
+        let link = PathGrant::new(root.join("cc"), Operation::Read, Scope::File).expect("link");
+        assert_eq!(
+            link.traversal_paths(),
+            vec![root.join("gcc"), root.join("cc")]
+        );
+    }
 }
