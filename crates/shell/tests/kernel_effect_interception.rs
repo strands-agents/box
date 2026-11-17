@@ -485,9 +485,9 @@ fn denying_a_direct_api_read_fails_it_closed() {
     assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
 }
 
-/// An open reports a descriptor, never a completed transfer.
+/// A read open reports a descriptor, and a write reports its whole transfer once it closes.
 #[test]
-fn an_open_reports_a_descriptor_not_a_transfer() {
+fn a_read_reports_a_descriptor_and_a_write_reports_its_transfer() {
     let outcomes = Arc::new(Mutex::new(Vec::new()));
     let interceptor = Arc::new(Recorder {
         attempted: Mutex::new(Vec::new()),
@@ -509,23 +509,23 @@ fn an_open_reports_a_descriptor_not_a_transfer() {
     });
 
     let recorded = outcomes.lock().unwrap().clone();
-    let opens: Vec<_> = recorded
-        .iter()
-        .filter(|(effect, _)| effect.starts_with("read ") || effect.starts_with("write("))
-        .collect();
-    assert!(
-        !opens.is_empty(),
-        "opens must report an outcome: {recorded:?}"
-    );
-    for (effect, result) in opens {
+    for (prefix, expected) in [
+        ("read ", EffectResult::DescriptorIssued),
+        ("write(", EffectResult::Completed),
+    ] {
+        let opens: Vec<_> = recorded
+            .iter()
+            .filter(|(effect, _)| effect.starts_with(prefix))
+            .collect();
         assert_eq!(
-            *result,
-            EffectResult::DescriptorIssued,
-            "{effect} must report DescriptorIssued, not a transfer"
+            opens.len(),
+            1,
+            "one `{prefix}` outcome, recorded once: {recorded:?}"
         );
+        assert_eq!(opens[0].1, expected, "{}", opens[0].0);
     }
 
-    // A one-shot operation, by contrast, completes within its call.
+    // A one-shot operation completes within its call.
     let one_shot = recorded
         .iter()
         .find(|(effect, _)| effect.starts_with("create_dir") || effect.starts_with("enumerate"));
@@ -536,6 +536,251 @@ fn an_open_reports_a_descriptor_not_a_transfer() {
             "{effect} completes within its call"
         );
     }
+}
+
+/// The position of the one outcome recorded for `effect`.
+fn outcome_for(recorded: &[(String, EffectResult)], effect: &str) -> (usize, EffectResult) {
+    let found: Vec<_> = recorded
+        .iter()
+        .enumerate()
+        .filter(|(_, (rendered, _))| rendered == effect)
+        .collect();
+    assert_eq!(found.len(), 1, "one outcome for {effect}: {recorded:?}");
+    (found[0].0, found[0].1.1)
+}
+
+/// A writer held open across commands records its outcome when it closes, before the next decision.
+#[test]
+fn a_write_records_its_outcome_when_its_last_copy_closes() {
+    let outcomes = Arc::new(Mutex::new(Vec::new()));
+    let interceptor = Arc::new(Recorder {
+        attempted: Mutex::new(Vec::new()),
+        admitted: Arc::new(Mutex::new(Vec::new())),
+        outcomes: Arc::clone(&outcomes),
+        deny: Box::new(|_| false),
+    });
+    let mut shell = shell_with(interceptor);
+
+    let out = run(shell.run(
+        "{ printf x; test -e /home/lash/inside; printf y; } > /home/lash/held; \
+         test -e /home/lash/after; cat /home/lash/held",
+    ));
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "xy");
+
+    let recorded = outcomes.lock().unwrap().clone();
+    let (inside, _) = outcome_for(&recorded, "meta(follow=true) /home/lash/inside");
+    let (held, result) = outcome_for(
+        &recorded,
+        "write(create=true,truncate=true) /home/lash/held",
+    );
+    let (after, _) = outcome_for(&recorded, "meta(follow=true) /home/lash/after");
+    assert_eq!(result, EffectResult::Completed);
+    assert!(
+        inside < held && held < after,
+        "the write is recorded after the command it spans and before the next decision: \
+         {recorded:?}"
+    );
+}
+
+/// The decision after a write closes waits for that write's outcome, with no yield between them.
+#[test]
+fn a_closed_write_is_recorded_before_the_next_decision() {
+    use strands_shell::os::{Kernel as _, OpenFlags};
+    use tokio::io::AsyncWriteExt as _;
+
+    const WRITE: &str = "write(create=true,truncate=true) /tmp/written";
+    let outcomes = Arc::new(Mutex::new(Vec::<(String, EffectResult)>::new()));
+    let seen = Arc::clone(&outcomes);
+    let interceptor = Arc::new(Recorder {
+        attempted: Mutex::new(Vec::new()),
+        admitted: Arc::new(Mutex::new(Vec::new())),
+        outcomes: Arc::clone(&outcomes),
+        // Refuse the next decision unless the write is already recorded.
+        deny: Box::new(move |effect| {
+            effect.ends_with(" /tmp/next")
+                && !seen.lock().unwrap().iter().any(|(done, _)| done == WRITE)
+        }),
+    });
+    let kernel = support::kernel(interceptor);
+    let mut proc = kernel.new_process();
+    let next = run(async {
+        let fd = kernel
+            .open(&mut proc, "/tmp/written", OpenFlags::write())
+            .await
+            .expect("opens");
+        let mut writer = proc.take_writer(fd).expect("a writer");
+        writer.write_all(b"bytes").await.expect("writes");
+        drop(writer);
+        kernel.try_stat(&proc, "/tmp/next").await
+    });
+    assert_ne!(
+        next.map_err(|error| error.kind()).err(),
+        Some(io::ErrorKind::PermissionDenied),
+        "the write was not recorded before the next decision: {:?}",
+        outcomes.lock().unwrap()
+    );
+}
+
+/// Holds a write's recording until released, and lists each attempt it is asked to decide.
+struct HeldRecording {
+    attempted: Arc<Mutex<Vec<String>>>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+struct HeldPermit {
+    write: bool,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl EffectInterceptor for HeldRecording {
+    async fn intercept(&self, effect: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>> {
+        let rendered = render(effect);
+        self.attempted.lock().unwrap().push(rendered.clone());
+        Ok(Box::new(HeldPermit {
+            write: rendered.starts_with("write("),
+            release: Arc::clone(&self.release),
+        }))
+    }
+}
+
+#[async_trait]
+impl EffectPermit for HeldPermit {
+    async fn record_outcome(self: Box<Self>, _outcome: EffectOutcome) -> io::Result<()> {
+        if self.write {
+            self.release.notified().await;
+        }
+        Ok(())
+    }
+
+    fn mark_indeterminate(self: Box<Self>) {}
+}
+
+/// A kernel whose closed write to `/tmp/written` is still recording, and the attempts it decided.
+async fn kernel_with_a_write_recording() -> (
+    box_shell::ShellKernel,
+    strands_shell::os::Process,
+    Arc<Mutex<Vec<String>>>,
+    Arc<tokio::sync::Notify>,
+) {
+    use strands_shell::os::{Kernel as _, OpenFlags};
+    use tokio::io::AsyncWriteExt as _;
+
+    let attempted = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let kernel = support::kernel(Arc::new(HeldRecording {
+        attempted: Arc::clone(&attempted),
+        release: Arc::clone(&release),
+    }));
+    let mut proc = kernel.new_process();
+    let fd = kernel
+        .open(&mut proc, "/tmp/written", OpenFlags::write())
+        .await
+        .expect("opens");
+    let mut writer = proc.take_writer(fd).expect("a writer");
+    writer.write_all(b"bytes").await.expect("writes");
+    drop(writer);
+    (kernel, proc, attempted, release)
+}
+
+/// Whether any attempt on `paths` was decided.
+fn decided_any(attempted: &Mutex<Vec<String>>, paths: &[&str]) -> bool {
+    attempted
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|attempt| paths.iter().any(|path| attempt.ends_with(path)))
+}
+
+/// Two concurrent decisions both wait for a closed write that is still recording.
+#[test]
+fn concurrent_decisions_both_wait_for_a_closed_write() {
+    use strands_shell::os::Kernel as _;
+
+    let decided_early = run(async {
+        let (kernel, proc, attempted, release) = kernel_with_a_write_recording().await;
+        let check = async {
+            for _ in 0..50 {
+                tokio::task::yield_now().await;
+            }
+            let early = decided_any(&attempted, &[" /tmp/first", " /tmp/second"]);
+            release.notify_one();
+            early
+        };
+        let (_, _, early) = tokio::join!(
+            kernel.try_stat(&proc, "/tmp/first"),
+            kernel.try_stat(&proc, "/tmp/second"),
+            check
+        );
+        early
+    });
+    assert!(
+        !decided_early,
+        "no decision may reach the interceptor while a closed write is recording"
+    );
+}
+
+/// A decision cancelled while it waits leaves the closed write for the next decision to wait on.
+#[test]
+fn a_cancelled_wait_leaves_the_closed_write_to_the_next_decision() {
+    use strands_shell::os::Kernel as _;
+
+    let decided_early = run(async {
+        let (kernel, proc, attempted, release) = kernel_with_a_write_recording().await;
+        tokio::select! {
+            _ = kernel.try_stat(&proc, "/tmp/cancelled") => panic!("the write is still recording"),
+            () = async {
+                for _ in 0..20 {
+                    tokio::task::yield_now().await;
+                }
+            } => {}
+        }
+        let check = async {
+            for _ in 0..50 {
+                tokio::task::yield_now().await;
+            }
+            let early = decided_any(&attempted, &[" /tmp/cancelled", " /tmp/next"]);
+            release.notify_one();
+            early
+        };
+        let (_, early) = tokio::join!(kernel.try_stat(&proc, "/tmp/next"), check);
+        early
+    });
+    assert!(
+        !decided_early,
+        "a cancelled wait must not release the next decision early"
+    );
+}
+
+/// A write the size cap cuts off records an indeterminate outcome, because part of it landed.
+#[test]
+fn a_write_the_size_cap_cuts_off_is_indeterminate() {
+    let outcomes = Arc::new(Mutex::new(Vec::new()));
+    let interceptor = Arc::new(Recorder {
+        attempted: Mutex::new(Vec::new()),
+        admitted: Arc::new(Mutex::new(Vec::new())),
+        outcomes: Arc::clone(&outcomes),
+        deny: Box::new(|_| false),
+    });
+    let mut vfs = strands_shell::vfs_config::build_vfs(&Default::default()).expect("vfs");
+    vfs.max_file_size = 4;
+    let filesystem = Arc::new(box_shell::Filesystem::serving(vfs, &[]).expect("a filesystem"));
+    let kernel = Arc::new(box_shell::ShellKernel::over(filesystem, interceptor));
+    let mut shell = Shell::with_kernel(Arc::clone(&kernel) as Arc<dyn strands_shell::os::Kernel>);
+
+    let out = run(async {
+        let out = shell.run("printf 0123456789 > /tmp/capped").await;
+        kernel.record_closed_writes().await.expect("recorded");
+        out
+    });
+    assert_ne!(out.status, 0, "the cap refuses the write");
+
+    let recorded = outcomes.lock().unwrap().clone();
+    assert_eq!(
+        outcome_for(&recorded, "write(create=true,truncate=true) /tmp/capped").1,
+        EffectResult::Indeterminate
+    );
 }
 
 /// An answered metadata probe reports a completed effect, whether the answer is yes or no.

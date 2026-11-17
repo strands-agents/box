@@ -196,6 +196,14 @@ impl Program {
         }
         let output = self.shell.run(command).await;
         self.kernel.settle();
+        // A Call's last write records its outcome before the Call answers.
+        if let Err(error) = self.kernel.record_closed_writes().await {
+            Self::forward(
+                &self.stderr,
+                format!("strands-box: recording a write outcome failed: {error}\n"),
+            )
+            .await;
+        }
         Self::forward(&self.stdout, output.stdout).await;
         Self::forward(&self.stderr, output.stderr).await;
         CallOutcome {

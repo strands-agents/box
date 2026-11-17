@@ -5,6 +5,7 @@ mod egress;
 mod fallback;
 mod limits;
 mod streams;
+mod writes;
 
 use std::io;
 use std::path::PathBuf;

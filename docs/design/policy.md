@@ -206,11 +206,15 @@ The caller's Shell keeps its own working directory.
 
 Each caller fills in the outcome from what it saw. A filesystem response carries `output.result` as
 `completed`, `descriptor_issued`, or `indeterminate`, so a rule that counts certain completions can
-leave the other two out. A shell response carries the command's exit status as `output.status`, and
-a command that a signal killed records 128 plus the signal number, so a rule can require a passing
-test before it permits a commit. A connect that definitely failed is a `::error`, and one that may
-have opened a socket is a `::response`, so a rule can count failed connects, and a cap on connects
-still counts the uncertain ones.
+leave the other two out. A Shell write to a regular file opened only for writing records its result
+when the last copy of its file descriptor closes, and the Shell's next decision waits for that
+record, so a count of completed writes includes every such write that closed before it. A read, a
+write to a device such as `/dev/null`, and a read-write open of a file in the Shell's memory record
+`descriptor_issued` at the open, so that count leaves them out. A shell response carries the
+command's exit status as `output.status`, and a command that a signal killed records 128 plus the
+signal number, so a rule can require a passing test before it permits a commit. A connect that
+definitely failed is a `::error`, and one that may have opened a socket is a `::response`, so a rule
+can count failed connects, and a cap on connects still counts the uncertain ones.
 
 For an HTTP request, the gateway records accepted request bytes and any received status when the
 upstream response completes, fails, or reaches its deadline. HTTP MCP calls record their outcome at

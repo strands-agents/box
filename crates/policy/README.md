@@ -341,7 +341,7 @@ answer; any other one that the reach floor or
 a guard against a changed path refuses records a `::error`. Every filesystem response also carries `output.result`, one of three
 `Box::FsResponseResult` values: `"completed"`, `"descriptor_issued"` (an open issued a
 descriptor whose bytes move later), or `"indeterminate"` (a permit was dropped
-without reporting). A rule that counts certain completions matches
+without reporting, or a Shell write failed after part of it landed). A rule that counts certain completions matches
 `output.result: Box::FsResponseResult::"completed"`, which excludes the other two.
 
 `fs:other` is its own action, so a permit for `fs:read`, `fs:write`, `fs:delete`, or

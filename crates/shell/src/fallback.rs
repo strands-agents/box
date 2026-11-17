@@ -212,6 +212,7 @@ impl ShellKernel {
         args: &[String],
         cwd: &std::path::Path,
     ) -> io::Result<Decided> {
+        self.record_closed_writes().await?;
         let cwd_text = cwd.to_string_lossy();
         if matches!(program, "python" | "python3") && self.commands.script.is_some() {
             return admit_run(self.interceptor.as_ref(), program, args, &cwd_text)
