@@ -279,7 +279,7 @@ Both tables hold one process, in one shape:
 | `env` | table | The literal environment. `HOME` and `PATH` default to the operator's own; every other variable is present only when `env` names it. |
 | `[<table>.filesystem]` | table | The path lists the process's own system calls reach. Eight for `[agent]`; six for a `[tool.<name>]`, which has no `metadata` or `exec` list. |
 | `native-filesystem-policy` | boolean | Optional override of the global experimental setting for this process and its descendants. See [workload selection](native-filesystem-policy.md#select-workloads). |
-| `file-watching` | boolean | `false` by default. On macOS, permit FSEvents for this process and its descendants, with the [metadata limitation](#file-watching). Linux ignores this setting. |
+| `file-watching` | boolean | `false` by default. On macOS, permit FSEvents for this process and its descendants, with the [limitations](#file-watching). Linux ignores this setting. |
 | `[tool.<name>.grammar]` | table | Experimental, and `[tool.<name>]` only. The tool grammar for the program this tool runs. See [`[tool.<name>.grammar]`](#toolnamegrammar). |
 | `[[agent.ingress]]` | list of tables | `[agent]` only. Where callers reach the agent's servers, one entry per port. See [`[[agent.ingress]]`](#agentingress). |
 
@@ -378,11 +378,12 @@ The process still needs the filesystem grants required by its runtime and applic
 **FSEvents can disclose names and event metadata for denied paths.**
 This includes removed or renamed paths and some historical events.
 A subscription to an accessible ancestor can disclose paths outside the workspace.
+FSEvents also discloses the host-wide event count and each volume's history identifier.
 Filesystem `deny` entries do not fully filter this event stream.
-Direct file-content access and write restrictions still apply.
+Direct file-content access and write restrictions still apply, except that a root process can delete any volume's event history.
 FSEvents events do not pass through `fs:*` policy decisions, including experimental native filesystem policy checks.
 
-Use this option only when that metadata disclosure is acceptable.
+Use this option only when these limitations are acceptable.
 Keep it disabled when denied filenames or activity must remain confidential, and use the application's polling mode if available.
 Node directory watchers can report `EMFILE` when FSEvents is unavailable; this error does not necessarily mean that file descriptors are exhausted.
 
@@ -390,7 +391,7 @@ On macOS, the startup disclosure names each selected process before the agent st
 This includes stdio MCP servers that remain unstarted; Box repeats their disclosure when they start.
 
 ```text
-strands-box: [tool.dev] file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events; file-content and write restrictions still apply
+strands-box: [tool.dev] file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events, as well as the host-wide event count and each volume's history identifier; file-content and write restrictions still apply, except that a root process can delete any volume's event history
 ```
 
 A record with any selected process requires version 35.
@@ -540,6 +541,7 @@ mounted aliases, and enclosing directories.
 
 On macOS, opting into [file watching](#file-watching) permits an event stream that can
 disclose denied names and activity despite these direct-access restrictions.
+A root process can also delete any volume's event history.
 
 On Linux, root and non-root launches support directory writes with explicit read and write grants.
 Permitted file creation retains the launcher's underlying file identity.
@@ -964,7 +966,7 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | `argument_wildcards` | bool | For `stdio`: `false` by default. `true` lets this server's whole-argument `*` entries match and forward caller-supplied values. See [argument wildcards](mcp.md#argument-wildcards). |
 | `network.contain_egress` | bool | For `stdio`: `true` by default. `false` gives this one server direct network access, with no gateway, no policy decision per request, and no credential injection. |
 | `native-filesystem-policy` | boolean | For `stdio`: override the global experimental filesystem policy setting. Remote `http` entries refuse this field. See [workload selection](native-filesystem-policy.md#select-workloads). |
-| `file-watching` | boolean | For `stdio`: `false` by default. Permit macOS FSEvents with the [metadata limitation](#file-watching). Linux ignores this setting. Remote `http` entries refuse this field. |
+| `file-watching` | boolean | For `stdio`: `false` by default. Permit macOS FSEvents with the [limitations](#file-watching). Linux ignores this setting. Remote `http` entries refuse this field. |
 | `destinations` | string array | For `http`: the hosts the server answers on. |
 | `secret.ref` | string | For `http`: the credential the gateway attaches on the way out. |
 | `backends` | table array | For `http`: a backend to re-route the server's requests to, at most one. The same shape and rules as an `[egress.<name>]` backend; a `stdio` table refuses it. See [Backends](mcp.md#backends). |

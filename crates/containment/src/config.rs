@@ -62,7 +62,7 @@ pub struct ContainmentConfig {
     /// `(deny network*)` still stands and AF_INET/AF_UNIX are unaffected).
     #[serde(default)]
     runtime_services: bool,
-    /// Whether macOS FSEvents may disclose names and event metadata beyond the filesystem grants.
+    /// Whether macOS FSEvents is permitted. [`Self::allow_file_watching`] states its reach.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     file_watching: bool,
 }
@@ -189,8 +189,9 @@ impl ContainmentConfig {
         self.runtime_services
     }
 
-    /// Permit macOS FSEvents, which can disclose denied names and event metadata. Linux ignores
-    /// this setting.
+    /// Permit macOS FSEvents, which can disclose denied names, event metadata, the host-wide event
+    /// count, and each volume's history identifier. A root process can also delete any volume's
+    /// event history. Linux ignores this setting.
     #[must_use]
     pub fn allow_file_watching(mut self) -> Self {
         self.file_watching = true;

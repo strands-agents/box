@@ -172,6 +172,81 @@ exec "$1" "$2"
                 self.assertTrue(self.urls()[-1].endswith("box-v1.2.3-linux-arm64.tar.gz"))
                 self.assertIn("(Linux ARM64)", result.stderr)
                 self.assertNotIn("unknown", result.stderr)
+                self.assertNotIn("EXPERIMENTAL_X86_SUPPORT", result.stderr)
+
+    def test_linux_x86_64_aliases_download_without_enabling_runtime(self):
+        self.env.pop("EXPERIMENTAL_X86_SUPPORT", None)
+        for version in ("v1.2.3", "v9.9.9"):
+            program = ("#!/bin/sh\n"
+                       '[ "$1" = --version ] || exit 90\n'
+                       '[ "${EXPERIMENTAL_X86_SUPPORT+x}" != x ] || exit 91\n'
+                       f"printf '%s\\n' 'fixture {version} box x86_64'\n").encode()
+            self.archive(version=version, triple="linux-x86_64", box_program=program)
+        for client in ("curl", "wget"):
+            if client == "wget":
+                (self.tools / "curl").unlink()
+            for arch in ("x86_64", "amd64"):
+                for selection, version in (("pinned", "v1.2.3"), ("latest", "v9.9.9")):
+                    with self.subTest(client=client, arch=arch, selection=selection):
+                        self.env.update(TEST_ARCH=arch, BOX_VERSION=version if selection == "pinned" else "")
+                        self.requests.write_text("")
+                        result = self.run_script()
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        for name in BINARIES:
+                            executable = self.destination / name
+                            self.assertIn(f"fixture {version} {name}".encode(), executable.read_bytes())
+                            self.assertFalse(executable.is_symlink())
+                            self.assertTrue(os.access(executable, os.X_OK))
+                        self.assertEqual((self.destination / "keep.txt").read_bytes(), b"user file")
+                        base = f"https://github.com/example/box/releases/download/{version}"
+                        expected = [f"{base}/SHA256SUMS.txt", f"{base}/box-{version}-linux-x86_64.tar.gz"]
+                        if selection == "latest":
+                            expected.insert(0, "https://github.com/example/box/releases/latest")
+                        self.assertEqual(self.urls(), expected)
+                        self.assertIn(f"fixture {version} box x86_64", result.stdout)
+                        self.assertIn("(Linux x86-64)", result.stderr)
+                        self.assertIn(
+                            f"EXPERIMENTAL_X86_SUPPORT=TRUE {self.destination}/box run --config ./box.toml",
+                            result.stderr,
+                        )
+
+    def test_linux_x86_64_refuses_arm_only_releases_before_archive_fetch(self):
+        for client in ("curl", "wget"):
+            if client == "wget":
+                (self.tools / "curl").unlink()
+            for triple in ("linux-arm64", "aarch64-unknown-linux-gnu"):
+                with self.subTest(client=client, triple=triple):
+                    self.archive(triple=triple)
+                    self.env["TEST_ARCH"] = "x86_64"
+                    self.requests.write_text("")
+                    result = self.assert_refused("no SHA256SUMS.txt entry for box-v1.2.3-linux-x86_64.tar.gz")
+                    self.assertIn("Check whether this release includes Linux x86-64", result.stderr)
+                    self.assertEqual(self.urls(), [
+                        "https://github.com/example/box/releases/download/v1.2.3/SHA256SUMS.txt",
+                    ])
+
+    def test_invalid_x86_64_archive_never_falls_back_to_arm(self):
+        for client in ("curl", "wget"):
+            if client == "wget":
+                (self.tools / "curl").unlink()
+            for failure in ("missing", "corrupt"):
+                with self.subTest(client=client, failure=failure):
+                    arm, _legacy = self.both_linux_names()
+                    sums = arm.parent / "SHA256SUMS.txt"
+                    arm_entries = sums.read_text()
+                    x86 = self.archive(triple="linux-x86_64")
+                    sums.write_text(sums.read_text() + arm_entries)
+                    if failure == "missing":
+                        x86.unlink()
+                    else:
+                        x86.write_bytes(b"corrupt")
+                    self.env["TEST_ARCH"] = "x86_64"
+                    self.requests.write_text("")
+                    self.assert_refused("could not download" if failure == "missing" else "checksum mismatch")
+                    self.assertEqual(self.urls(), [
+                        "https://github.com/example/box/releases/download/v1.2.3/SHA256SUMS.txt",
+                        "https://github.com/example/box/releases/download/v1.2.3/box-v1.2.3-linux-x86_64.tar.gz",
+                    ])
 
     def test_legacy_linux_archive_uses_the_same_release_checksum(self):
         asset = self.archive(triple="aarch64-unknown-linux-gnu")
@@ -223,9 +298,10 @@ exec "$1" "$2"
                          b"fixture profile")
         self.assertIn("aarch64-apple-darwin.tar.gz", self.urls()[-1])
         self.assertIn("(macOS ARM64)", result.stderr)
+        self.assertNotIn("EXPERIMENTAL_X86_SUPPORT", result.stderr)
 
     def test_unsupported_platforms_do_not_download(self):
-        for system, arch in (("Linux", "x86_64"), ("Darwin", "x86_64"), ("FreeBSD", "aarch64")):
+        for system, arch in (("Linux", "i686"), ("Darwin", "x86_64"), ("FreeBSD", "aarch64")):
             with self.subTest(system=system, arch=arch):
                 self.env.update(TEST_OS=system, TEST_ARCH=arch)
                 self.assert_refused("unsupported platform")

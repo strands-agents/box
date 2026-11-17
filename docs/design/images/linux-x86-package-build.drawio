@@ -5,7 +5,7 @@
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-        <mxCell id="title" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;Both Linux targets use the same build baseline&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=22;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+        <mxCell id="title" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;Checked Linux packages reach matching downloads&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=22;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
           <mxGeometry x="40" y="30" width="960" height="40" as="geometry" />
         </mxCell>
         <mxCell id="arm-job" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;Native ARM64 build job&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;fillColor=none;strokeWidth=2;verticalAlign=top;align=left;spacing=0;spacingLeft=16;fontSize=14;fontStyle=1;strokeColor=#232F3E;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;spacingTop=16;" vertex="1" parent="1">
@@ -65,18 +65,41 @@
           </mxGeometry>
         </mxCell>
         <mxCell id="contents" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;Each archive contains&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;box&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;strands-box-sock-alias&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;strands-box-contain-trampoline&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=22;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
-          <mxGeometry x="40" y="730" width="460" height="120" as="geometry" />
+          <mxGeometry x="40" y="985" width="460" height="120" as="geometry" />
         </mxCell>
-        <mxCell id="x86-artifact" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;Retained workflow artifact&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;Not published by this change&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;fillColor=none;strokeWidth=2;verticalAlign=top;align=left;spacing=0;spacingLeft=16;fontSize=14;fontStyle=1;strokeColor=#232F3E;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;spacingTop=14;" vertex="1" parent="1">
-          <mxGeometry x="580" y="770" width="380" height="80" as="geometry" />
+        <mxCell id="linux-download" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;Download for this Linux CPU&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;ARM64: linux-arm64&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;x86-64: linux-x86_64&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;Verify the selected checksum&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;fillColor=none;strokeWidth=2;verticalAlign=top;align=left;spacing=0;spacingLeft=16;fontSize=14;fontStyle=1;strokeColor=#232F3E;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;spacingTop=14;" vertex="1" parent="1">
+          <mxGeometry x="600" y="780" width="400" height="150" as="geometry" />
         </mxCell>
-        <mxCell id="x86-retain" value="If checks pass" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2.5;strokeColor=#545B64;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;align=left;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="x86-checks" target="x86-artifact">
+        <mxCell id="linux-release" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;Release Box publication&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;publish_linux=true selects ARM64&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;publish_linux_x86=true adds x86-64&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;Selected archives + SHA256SUMS.txt&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;Required qualification and approval&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;fillColor=none;strokeWidth=2;verticalAlign=top;align=left;spacing=0;spacingLeft=16;fontSize=14;fontStyle=1;strokeColor=#232F3E;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;spacingTop=14;" vertex="1" parent="1">
+          <mxGeometry x="40" y="780" width="460" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="arm-publish" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2.5;strokeColor=#545B64;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;align=left;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="arm-checks" target="linux-release">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="270" y="720" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="x86-publish" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2.5;strokeColor=#545B64;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.8;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;align=left;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="x86-checks" target="linux-release">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
               <mxPoint x="770" y="720" />
+              <mxPoint x="408" y="720" />
             </Array>
-            <mxPoint x="12" y="0" as="offset" />
           </mxGeometry>
+        </mxCell>
+        <mxCell id="linux-deliver" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2.5;strokeColor=#545B64;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;align=left;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="linux-release" target="linux-download">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="550" y="855" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="x86-opt-in" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;x86-64 remains experimental&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;Workload startup requires&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;EXPERIMENTAL_X86_SUPPORT=TRUE&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=22;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="600" y="970" width="400" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="x86-missing" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;Missing x86-64 download&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;Archive or checksum is missing.&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;Stop without an ARM64 fallback.&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=22;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="600" y="1085" width="400" height="95" as="geometry" />
         </mxCell>
       </root>
     </mxGraphModel>

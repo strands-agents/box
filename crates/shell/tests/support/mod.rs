@@ -7,8 +7,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use box_shell::{
-    EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, Filesystem, HostSpawner,
-    ShellKernel,
+    EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, Filesystem, HostPrograms,
+    HostSpawner, ShellKernel,
 };
 use strands_shell::Shell;
 
@@ -23,6 +23,7 @@ pub struct Builder {
     binds: Vec<(String, String)>,
     interceptor: Option<Arc<dyn EffectInterceptor>>,
     spawner: Option<HostSpawner>,
+    programs: Option<HostPrograms>,
     env: Vec<(String, String)>,
 }
 
@@ -59,6 +60,12 @@ impl Builder {
         self
     }
 
+    /// Run each bare name in `programs` as its declared host file.
+    pub fn programs(mut self, programs: HostPrograms) -> Self {
+        self.programs = Some(programs);
+        self
+    }
+
     /// Set one Shell variable.
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env.push((key.into(), value.into()));
@@ -87,6 +94,9 @@ impl Builder {
         let mut kernel = ShellKernel::over(filesystem, interceptor);
         if let Some(spawner) = self.spawner {
             kernel = kernel.spawner(spawner);
+        }
+        if let Some(programs) = self.programs {
+            kernel = kernel.programs(programs);
         }
         let kernel = Arc::new(kernel);
         let mut shell =
