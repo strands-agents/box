@@ -169,6 +169,8 @@ strands-shell: tee: policy denied this operation on '~/project/notes.md' [policy
 - The rule counts `fs:write::response` events with result `completed`, which the box records when a
   content write finishes. A refused write does not count, and a write still in flight does not count
   yet, so a burst of writes started together can exceed the budget by the size of the burst.
+- In the Shell, a redirect, `tee`, or `cp` records `descriptor_issued` when it opens the file, not
+  `completed`, so this rule doesn't count it. Only a time change from `touch` records `completed`.
 - A `touch` changes a file's times as a `write_content` write, so it counts toward the budget. Only
   a plain `touch` that creates a file doesn't count; with `-d`, `-t`, or `-r` it then sets the new
   file's times, and that counts.

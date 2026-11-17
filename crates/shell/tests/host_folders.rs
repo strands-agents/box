@@ -296,3 +296,13 @@ host_case!(
         assert_eq!(host_times(&folder, "real.txt"), (631_152_000, 981_173_106));
     }
 );
+
+host_case!(
+    a_plain_touch_moves_both_times_of_an_existing_host_file_to_now,
+    "touch -d @981173106 real.txt && touch real.txt",
+    |folder, ran| {
+        assert_eq!(ran.out.status, 0, "{}", ran.out.stderr);
+        let (accessed, modified) = host_times(&folder, "real.txt");
+        assert!(accessed > 981_173_106 && modified > 981_173_106);
+    }
+);

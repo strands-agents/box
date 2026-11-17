@@ -186,9 +186,11 @@ link resolved.
 | `fs:move` | `Box::FsMoveOperation::"rename"` |
 
 `touch` changes a file's times as a `write_content` write. It first reads the file's metadata to see
-whether the file exists, so it also needs `fs:read` with `read_metadata`. Without that, `touch` on
-an existing file exits `0` and changes nothing. The macOS `file-attributes` switch doesn't apply to
-`touch`, because the Shell runs outside the agent's sandbox.
+whether the file exists, so it also needs `fs:read` with `read_metadata`. Without that, a plain
+`touch` on an existing file in a host folder exits `0` and changes nothing. The macOS
+[`file-attributes`](config.md#file-attributes) switch doesn't apply to the Shell's built-in `touch`,
+because the Shell runs outside the agent's sandbox. A `touch` program that runs in a sandbox still
+needs it.
 
 | Field | Type | Present | Value |
 |---|---|---|---|

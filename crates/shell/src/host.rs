@@ -812,6 +812,23 @@ fn timespec(change: TimeChange) -> io::Result<libc::timespec> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_time_change_converts_to_the_timespec_utimensat_reads() {
+        use std::time::{Duration, UNIX_EPOCH};
+        let spec = |change| {
+            let value = timespec(change).expect("in range");
+            (value.tv_sec, value.tv_nsec)
+        };
+        assert_eq!(spec(TimeChange::Keep).1, libc::UTIME_OMIT);
+        assert_eq!(spec(TimeChange::Now).1, libc::UTIME_NOW);
+        let after = UNIX_EPOCH + Duration::new(1, 500_000_000);
+        assert_eq!(spec(TimeChange::To(after)), (1, 500_000_000));
+        let before = UNIX_EPOCH - Duration::new(1, 500_000_000);
+        assert_eq!(spec(TimeChange::To(before)), (-2, 500_000_000));
+        let whole = UNIX_EPOCH - Duration::from_secs(1);
+        assert_eq!(spec(TimeChange::To(whole)), (-1, 0));
+    }
+
     struct Fixture {
         _base: tempfile::TempDir,
         workspace: PathBuf,
