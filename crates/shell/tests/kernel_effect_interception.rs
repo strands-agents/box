@@ -753,7 +753,7 @@ fn a_cancelled_wait_leaves_the_closed_write_to_the_next_decision() {
     );
 }
 
-/// Permits every effect, and fails to record a content write, as a full history store does.
+/// Permits every effect, and fails to record a write to `/tmp/a.txt`, as a full history store does.
 struct FailingWriteRecord;
 
 struct FailingPermit {
@@ -763,8 +763,9 @@ struct FailingPermit {
 #[async_trait]
 impl EffectInterceptor for FailingWriteRecord {
     async fn intercept(&self, effect: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>> {
+        let rendered = render(effect);
         Ok(Box::new(FailingPermit {
-            write: render(effect).starts_with("write("),
+            write: rendered.starts_with("write(") && rendered.ends_with(" /tmp/a.txt"),
         }))
     }
 }
@@ -917,29 +918,24 @@ fn a_network_request_waits_for_a_closed_write() {
     );
 }
 
-/// A command lookup's path check discards errors, so it leaves a write's recording failure.
+/// A script run after a write that failed to record is found, and the failure names the write.
 #[test]
-fn a_command_lookup_leaves_a_write_recording_failure() {
-    use strands_shell::os::{Kernel as _, OpenFlags};
-    use tokio::io::AsyncWriteExt as _;
-
-    let kernel = support::kernel(Arc::new(FailingWriteRecord));
-    let mut proc = kernel.new_process();
-    let (canonical, reported) = run(async {
-        let fd = kernel
-            .open(&mut proc, "/tmp/a.txt", OpenFlags::write())
-            .await
-            .expect("opens");
-        let mut writer = proc.take_writer(fd).expect("a writer");
-        writer.write_all(b"x").await.expect("writes");
-        drop(writer);
-        let canonical = kernel.canonicalize(&proc, "/tmp/a.txt").await;
-        (canonical, kernel.record_closed_writes().await)
-    });
-    assert!(canonical.is_ok(), "{canonical:?}");
+fn a_script_after_a_failed_write_record_reports_the_write() {
+    let mut shell = shell_with(Arc::new(FailingWriteRecord));
+    let out = run(shell.run(
+        "printf '#!/bin/sh\\necho ran-script\\n' > /tmp/s.sh; chmod +x /tmp/s.sh; \\
+         printf x > /tmp/a.txt; /tmp/s.sh; echo st=$?",
+    ));
     assert!(
-        reported.is_err(),
-        "the failure is left for a decision that reports"
+        !out.stderr.contains("command not found"),
+        "the lookup must not lose the script: {}",
+        out.stderr
+    );
+    assert!(
+        out.stderr
+            .contains("/tmp/a.txt: recording this write failed"),
+        "the next command reports the write: {}",
+        out.stderr
     );
 }
 

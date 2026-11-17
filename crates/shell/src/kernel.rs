@@ -24,13 +24,6 @@ use crate::resolve;
 use crate::writer::{ServedWriter, Writes};
 use crate::{Network, memory};
 
-/// Whether a decision's caller can surface an error, and so reports a write's recording failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Reports {
-    Yes,
-    No,
-}
-
 /// Whether an operation acts on a symlink's target or on the link itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Follow {
@@ -160,21 +153,21 @@ impl ShellKernel {
         Ok(network)
     }
 
-    /// Wait until each write of this Call whose every copy is closed has recorded its outcome.
+    /// Wait until each write of this Call whose every copy is closed has recorded its outcome, and
+    /// return the oldest recording failure not yet reported.
     ///
-    /// Each decision waits for this first, so a closed write counts before the next one is decided.
+    /// Each command, network request, and Call reports through this, so a closed write counts
+    /// before the next one is decided, and its failure reaches the workload on the next command.
     pub async fn record_closed_writes(&self) -> io::Result<()> {
         self.writes.record_closed(true).await
     }
 
+    /// Decide one filesystem effect after closed writes are recorded.
+    ///
+    /// The Shell discards the errors of many filesystem calls, such as a command lookup's, so a
+    /// recording failure is left for the next command to report.
     async fn admit(&self, attempt: &EffectAttempt<'_>) -> io::Result<Permit> {
-        self.admit_as(attempt, Reports::Yes).await
-    }
-
-    /// Decide `attempt` after closed writes are recorded; only a caller that `reports` takes a
-    /// recording failure as its error.
-    async fn admit_as(&self, attempt: &EffectAttempt<'_>, reports: Reports) -> io::Result<Permit> {
-        self.writes.record_closed(reports == Reports::Yes).await?;
+        self.writes.record_closed(false).await?;
         self.interceptor.intercept(attempt).await.map(Permit::new)
     }
 
@@ -229,27 +222,12 @@ impl ShellKernel {
         follow: Follow,
         operation: FsOperation,
     ) -> io::Result<(Resolved, Permit)> {
-        self.admit_path_as(proc, path, follow, operation, Reports::Yes)
-            .await
-    }
-
-    async fn admit_path_as(
-        &self,
-        proc: &Process,
-        path: &str,
-        follow: Follow,
-        operation: FsOperation,
-        reports: Reports,
-    ) -> io::Result<(Resolved, Permit)> {
         let resolved = self.resolve(proc, path, follow).await;
         let permit = self
-            .admit_as(
-                &EffectAttempt::Filesystem {
-                    path: &resolved.path,
-                    operation,
-                },
-                reports,
-            )
+            .admit(&EffectAttempt::Filesystem {
+                path: &resolved.path,
+                operation,
+            })
             .await?;
         Ok((resolved, permit))
     }
@@ -262,9 +240,7 @@ impl ShellKernel {
         follow: Follow,
         operation: FsOperation,
     ) -> Option<(Resolved, Permit)> {
-        self.admit_path_as(proc, path, follow, operation, Reports::No)
-            .await
-            .ok()
+        self.admit_path(proc, path, follow, operation).await.ok()
     }
 
     fn host_for(&self, resolved: &Resolved, follow: Follow) -> Option<(PathBuf, PathBuf)> {
@@ -302,10 +278,9 @@ impl ShellKernel {
         proc: &Process,
         path: &str,
         follow: Follow,
-        reports: Reports,
     ) -> io::Result<FileStat> {
         let (resolved, permit) = self
-            .admit_path_as(proc, path, follow, metadata(follow), reports)
+            .admit_path(proc, path, follow, metadata(follow))
             .await?;
         let stat = self.stat_answer(proc, resolved, follow).await;
         permit.report_answer(&stat).await;
@@ -601,13 +576,13 @@ impl Kernel for ShellKernel {
     }
 
     async fn stat(&self, proc: &Process, path: &str) -> FileStat {
-        self.stat_decided(proc, path, Follow::Yes, Reports::No)
+        self.stat_decided(proc, path, Follow::Yes)
             .await
             .unwrap_or_default()
     }
 
     async fn lstat(&self, proc: &Process, path: &str) -> FileStat {
-        self.stat_decided(proc, path, Follow::No, Reports::No)
+        self.stat_decided(proc, path, Follow::No)
             .await
             .unwrap_or_default()
     }
@@ -636,9 +611,7 @@ impl Kernel for ShellKernel {
     }
 
     async fn try_stat(&self, proc: &Process, path: &str) -> io::Result<FileStat> {
-        let stat = self
-            .stat_decided(proc, path, Follow::Yes, Reports::Yes)
-            .await?;
+        let stat = self.stat_decided(proc, path, Follow::Yes).await?;
         if stat.exists {
             Ok(stat)
         } else {
@@ -646,10 +619,9 @@ impl Kernel for ShellKernel {
         }
     }
 
-    /// Every caller in the Shell discards the error, so it reports no recording failure.
     async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf> {
         let (resolved, permit) = self
-            .admit_path_as(proc, path, Follow::Yes, metadata(Follow::Yes), Reports::No)
+            .admit_path(proc, path, Follow::Yes, metadata(Follow::Yes))
             .await?;
         let canonical = async {
             let _generation = self.guard(&resolved).await?;
