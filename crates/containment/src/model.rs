@@ -708,8 +708,15 @@ impl PathGrant {
                 && candidate
                     .parent()
                     .is_some_and(|parent| parent.starts_with(&own));
-            if last || below_own {
-                record(candidate, &mut nodes);
+            if last {
+                record(candidate.clone(), &mut nodes);
+            } else if below_own {
+                // The folder the link reaches is a node too: macOS checks the metadata of each
+                // link and of what it points at, as it does for each hop of the final name.
+                if let Ok(reached) = candidate.canonicalize() {
+                    record(candidate.clone(), &mut nodes);
+                    record(reached, &mut nodes);
+                }
             }
             if target.is_absolute() {
                 folder = PathBuf::from("/");
@@ -891,7 +898,7 @@ pub enum BackendOverride {
 mod traversal_node_tests {
     use super::*;
 
-    /// **A linked folder on a link's target path is a traversal node**, at its canonical spelling,
+    /// **A linked folder on a link's target path is a traversal node**, with the folder it reaches,
     /// and so is a linked folder another linked folder points through.
     #[test]
     fn a_linked_folder_on_a_links_target_path_is_a_node() {
@@ -911,7 +918,9 @@ mod traversal_node_tests {
                 root.join("store/data/file"),
                 root.join("helper"),
                 root.join("current"),
+                root.join("store/data"),
                 root.join("shelf"),
+                root.join("store"),
             ]
         );
     }
@@ -968,7 +977,12 @@ mod traversal_node_tests {
         let granted = PathGrant::new(&helper, Operation::Read, Scope::File).expect("granted");
         assert_eq!(
             granted.traversal_paths(),
-            vec![root.join("etc/data/file"), helper, root.join("etc/current")]
+            vec![
+                root.join("etc/data/file"),
+                helper,
+                root.join("etc/current"),
+                root.join("etc/data")
+            ]
         );
     }
 

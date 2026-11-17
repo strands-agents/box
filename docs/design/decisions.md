@@ -467,7 +467,8 @@ program runs a helper by the name `PATH` finds. Granting only the target left th
 so cargo failed with `linker 'cc' not found` on Linux. The links in between, such as
 `/etc/alternatives/cc`, are not granted: Linux binds the file at the named path, and macOS allows
 reading the metadata of each link on the way. A linked folder is one of them only below the link's
-own folder, such as `current` in `helper -> current/file`. A linked folder anywhere else is not
+own folder, such as `current` in `helper -> current/file`, and then the folder it reaches, such as
+`data`, is one too. A linked folder anywhere else is not
 one. `/var`, `/etc` and `/tmp` are floor entries instead. Any other one, such as `current` in
 `~/.local/bin/java -> ~/.sdkman/candidates/java/current/bin/java`, is not granted, so on macOS the
 link's own name fails to open, as it does without this rule. The grant is built from one lookup of the link, compared
