@@ -126,11 +126,13 @@ use credentials::{Backend, Locator, SecretSourceCommand};
 
 let command = ["/opt/homebrew/bin/op", "read", "op://{ref}"].map(String::from);
 let declaration = SecretSourceCommand::new("op", SecretSourceCommand::PROTOCOL, &command)?
-    .pass_env(["OP_ACCOUNT"])?
+    .pass_env(["OP_ACCOUNT", "TMPDIR"])?
     .pass_secret_env(["OP_SERVICE_ACCOUNT_TOKEN", "OP_SESSION_*"])?;
 let backend = Backend::declared([declaration])?;
 let secret = backend.resolve(&Locator::parse_uri("op://Private/GitHub/token")?)?;
 ```
+
+The example passes `TMPDIR`, because `op` keeps the session of `op signin` in a folder under it.
 
 | Part | Rule |
 |---|---|
