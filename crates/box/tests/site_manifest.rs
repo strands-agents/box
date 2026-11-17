@@ -563,15 +563,11 @@ fn repository_manifest_is_valid() {
 fn ci_runs_validation_for_manifest_and_user_page_changes() {
     let root = repository_root();
     let workflow = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read CI");
-    let rust_filter = workflow
-        .split_once("            rust:\n")
-        .and_then(|(_, remainder)| remainder.split_once("            site_manifest:\n"))
-        .map(|(filter, _)| filter)
-        .expect("Rust path filter");
-    let site_manifest_filter = workflow
-        .split_once("            site_manifest:\n")
-        .and_then(|(_, remainder)| remainder.split_once("            containment:\n"))
-        .map(|(filter, _)| filter)
+    let filters = path_filters(&workflow);
+    let site_manifest_filter = filters
+        .iter()
+        .find(|(name, _)| name == "site_manifest")
+        .map(|(_, patterns)| patterns)
         .expect("site manifest path filter");
     for path in [
         "docs/site-manifest.json",
@@ -579,13 +575,15 @@ fn ci_runs_validation_for_manifest_and_user_page_changes() {
         "docs/user/**/*.md",
     ] {
         assert!(
-            site_manifest_filter.contains(&format!("- '{path}'")),
+            site_manifest_filter.iter().any(|pattern| pattern == path),
             "site manifest CI must run for {path}"
         );
-        assert!(
-            !rust_filter.contains(&format!("- '{path}'")),
-            "Rust CI must not run for {path}"
-        );
+        for (name, patterns) in filters.iter().filter(|(name, _)| name != "site_manifest") {
+            assert!(
+                !patterns.iter().any(|pattern| pattern == path),
+                "the {name} Rust or test filter must not run for {path}"
+            );
+        }
     }
     assert!(
         workflow.contains("\n  site-manifest:\n"),
@@ -630,6 +628,44 @@ fn ci_runs_validation_for_manifest_and_user_page_changes() {
             ),
         "pull-request CI must compare the manifest with its base revision"
     );
+}
+
+/// The named path filters of every `dorny/paths-filter` `filters:` block in a workflow.
+fn path_filters(workflow: &str) -> Vec<(String, Vec<String>)> {
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let mut filters: Vec<(String, Vec<String>)> = Vec::new();
+    // The `filters:` key's indent while inside its block, and the indent of its filter names.
+    let mut block: Option<(usize, Option<usize>)> = None;
+    for line in workflow.lines() {
+        let content = line.trim();
+        if content.is_empty() || content.starts_with('#') {
+            continue;
+        }
+        if let Some((key_indent, name_indent)) = block.as_mut()
+            && indent(line) > *key_indent
+        {
+            if indent(line) == *name_indent.get_or_insert(indent(line)) {
+                let name = content
+                    .strip_suffix(':')
+                    .unwrap_or_else(|| panic!("a filter name, found {content:?}"));
+                filters.push((name.to_string(), Vec::new()));
+            } else {
+                let pattern = content
+                    .strip_prefix("- ")
+                    .unwrap_or_else(|| panic!("a filter pattern, found {content:?}"))
+                    .trim_matches(|quote| quote == '\'' || quote == '"');
+                filters
+                    .last_mut()
+                    .expect("a pattern belongs to a filter")
+                    .1
+                    .push(pattern.to_string());
+            }
+            continue;
+        }
+        block = matches!(content, "filters: |" | "filters: |-").then(|| (indent(line), None));
+    }
+    assert!(!filters.is_empty(), "CI names no paths-filter filter");
+    filters
 }
 
 #[test]
@@ -1072,7 +1108,24 @@ fn invalid_navigation_is_refused() {
     );
 
     let mut split_group = manifest;
-    split_group.pages[2].nav.group = split_group.pages[0].nav.group.clone();
+    let first_group = split_group.pages[0].nav.group.clone();
+    let separated = (1..split_group.pages.len())
+        .find(|&index| {
+            let pages = &split_group.pages;
+            pages[index].nav.group != pages[index - 1].nav.group
+                && pages[index - 1].nav.group != first_group
+        })
+        .expect("the first page of a group whose block does not follow the first group's");
+    let free_order = split_group
+        .pages
+        .iter()
+        .filter(|page| page.nav.group == first_group)
+        .map(|page| page.nav.order)
+        .max()
+        .expect("the first group has a page")
+        + 1;
+    split_group.pages[separated].nav.group = first_group;
+    split_group.pages[separated].nav.order = free_order;
     assert!(
         validate_manifest(&root, &split_group)
             .expect_err("split navigation group must fail")
