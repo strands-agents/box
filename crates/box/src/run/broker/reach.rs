@@ -329,8 +329,11 @@ impl Reach {
             .map(|approved| approved.as_path().to_path_buf())
             .map_err(|refusal| {
                 let mut refused = Refused::new(reported_as, reason(&refusal));
-                refused.unresolved = matches!(refusal, PathRefusal::Unresolvable { .. })
-                    && self.is_an_unresolved_answer(&identity);
+                if matches!(refusal, PathRefusal::Unresolvable { .. }) {
+                    let answer = self.unresolved_answer(&identity);
+                    refused.unresolved = answer.is_some();
+                    refused.absent = answer == Some(true);
+                }
                 refused
             })?;
         // **The deny floor, applied last and on the canonical identity.**
@@ -393,24 +396,31 @@ impl Reach {
         Ok(())
     }
 
-    /// Whether a path the resolver could not resolve crosses no symbolic link and lies beneath no deny floor.
-    fn is_an_unresolved_answer(&self, identity: &Path) -> bool {
+    /// For a path the resolver could not resolve that crosses no symbolic link and lies beneath no
+    /// deny floor, whether a folder on it is missing; `None` for any other path.
+    fn unresolved_answer(&self, identity: &Path) -> Option<bool> {
         if identity
             .components()
             .any(|component| !matches!(component, Component::RootDir | Component::Normal(_)))
         {
-            return false;
+            return None;
         }
         let mut prefix = PathBuf::new();
+        let mut absent = false;
         for component in identity.components() {
             prefix.push(component);
             match std::fs::symlink_metadata(&prefix) {
-                Ok(metadata) if metadata.file_type().is_symlink() => return false,
+                Ok(metadata) if metadata.file_type().is_symlink() => return None,
                 Ok(_) => {}
-                Err(_) => break,
+                Err(error) => {
+                    absent = error.kind() == std::io::ErrorKind::NotFound;
+                    break;
+                }
             }
         }
-        self.refuse_forbidden(identity, "", false).is_ok()
+        self.refuse_forbidden(identity, "", false)
+            .is_ok()
+            .then_some(absent)
     }
 
     /// Whether `named` lies under a root of this box's reachable set.
@@ -479,6 +489,9 @@ pub(super) struct Refused {
 
     /// Whether the host could not resolve the path, beneath no deny floor and through no symbolic link.
     unresolved: bool,
+
+    /// Whether it could not, because a folder on the path is not there.
+    absent: bool,
 }
 
 impl Refused {
@@ -487,12 +500,18 @@ impl Refused {
             requested: requested.to_string(),
             reason: reason.into(),
             unresolved: false,
+            absent: false,
         }
     }
 
     /// Whether the refusal only reports that the host could not resolve the path.
     pub(super) fn is_unresolved(&self) -> bool {
         self.unresolved
+    }
+
+    /// Whether the refusal only reports that a folder on the path is not there.
+    pub(super) fn is_absent(&self) -> bool {
+        self.absent
     }
 }
 

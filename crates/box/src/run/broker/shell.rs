@@ -369,6 +369,11 @@ fn is_metadata_read(effect: &EffectAttempt<'_>) -> bool {
     )
 }
 
+/// Whether the effect reads one path and changes nothing.
+fn is_read(effect: &EffectAttempt<'_>) -> bool {
+    matches!(effect, EffectAttempt::Filesystem { operation, .. } if !mutates(*operation))
+}
+
 fn mutates(operation: FsOperation) -> bool {
     match operation {
         FsOperation::WriteContent { .. }
@@ -621,6 +626,31 @@ impl EffectInterceptor for ReachFloor {
                             as Box<dyn EffectPermit>,
                         None => permit,
                     })
+                }
+                Err(refused) if refused.is_absent() && is_read(effect) => {
+                    // A read under a missing folder that policy permitted is an answer: the path
+                    // is not there.
+                    if let Some(subject) = subject {
+                        self.recorder.record(
+                            EffectiveDecision::gate_permit(
+                                subject.action,
+                                subject.resource,
+                                "shell-policy",
+                                determined.as_ref(),
+                            )
+                            .about(subject.reported),
+                        );
+                    }
+                    let outcome = if is_metadata_read(effect) {
+                        EffectResult::Completed
+                    } else {
+                        EffectResult::Failed(io::ErrorKind::NotFound)
+                    };
+                    let _ = permit.record_outcome(EffectOutcome::Kernel(outcome)).await;
+                    Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "No such file or directory",
+                    ))
                 }
                 Err(refused) => {
                     if let Some(subject) = subject {
@@ -990,6 +1020,60 @@ mod tests {
             },
             recorder,
         )
+    }
+
+    /// A read under a missing folder that policy permits answers not found and records the permit;
+    /// a write there stays refused.
+    #[tokio::test]
+    async fn a_read_under_a_missing_folder_is_not_found_and_a_write_stays_refused() {
+        let (root, reach) = fixture();
+        let resolved = root.path().canonicalize().expect("the root resolves");
+        let (floor, recorder) = recording_floor(
+            reach,
+            r#"permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource);"#,
+        );
+        let absent = resolved.join("home/absent-dir/x").display().to_string();
+
+        for operation in [
+            box_shell::FsOperation::ReadContent,
+            box_shell::FsOperation::Enumerate,
+        ] {
+            let error = floor
+                .intercept(&EffectAttempt::Filesystem {
+                    path: &absent,
+                    operation,
+                })
+                .await
+                .err()
+                .expect("nothing is there to read");
+            assert_eq!(error.kind(), io::ErrorKind::NotFound);
+        }
+        let error = floor
+            .intercept(&EffectAttempt::Filesystem {
+                path: &absent,
+                operation: box_shell::FsOperation::WriteContent {
+                    create: true,
+                    truncate: true,
+                },
+            })
+            .await
+            .err()
+            .expect("the floor refuses a write it cannot resolve");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+
+        let verdicts: Vec<_> = recorder
+            .recorded()
+            .iter()
+            .map(|decision| decision.parts().3)
+            .collect();
+        assert_eq!(
+            verdicts,
+            [
+                EffectiveVerdict::Permit,
+                EffectiveVerdict::Permit,
+                EffectiveVerdict::Deny
+            ]
+        );
     }
 
     /// **A Shell record names the authored policy that decided the effect.** The gate's own label
