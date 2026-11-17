@@ -663,8 +663,10 @@ fn claim_effect(
 fn refused_binding_path(target: &str) -> String {
     let (path, _) = split_target(target);
     let path = match path.split_once("://") {
-        Some((_, rest)) => rest.find('/').map_or("/", |at| &rest[at..]).to_string(),
-        None => path,
+        Some((_, rest)) if !path.starts_with('/') => {
+            rest.find('/').map_or("/", |at| &rest[at..]).to_string()
+        }
+        _ => path,
     };
     canonicalize_request_path(&path).unwrap_or(path)
 }
@@ -1065,6 +1067,8 @@ mod tests {
             ("/x/../%61dmin?token=1", "/admin"),
             ("https://169.254.169.254/latest/../meta-data", "/meta-data"),
             ("http://other.example", "/"),
+            ("/web/2020/https://example.com/a", "/web/2020/https://example.com/a"),
+            ("/proxy/http://x/y?q=1", "/proxy/http://x/y"),
             ("/a%zz", "/a%zz"),
             ("*", "*"),
         ] {
