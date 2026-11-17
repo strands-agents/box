@@ -410,21 +410,73 @@ when { context.input.locations has secrets && context.input.locations.secrets };
     assert!(!read(&engine, "/work/a"));
 }
 
+/// A `forbid` guarded by `has` loads with no error or warning where the location is missing, and
+/// denies where it is declared.
+#[test]
+fn an_optional_forbid_is_neither_refused_nor_reported_and_applies_where_declared() {
+    let policy = r#"
+@id("all_reads")
+permit (principal, action == Box::Action::"fs:read", resource);
+
+@id("no_secrets_reads")
+forbid (principal, action == Box::Action::"fs:read", resource)
+when { context.input.locations has secrets && context.input.locations.secrets };
+"#;
+    let read = |engine: &PolicyEngine, path: &str| {
+        let approved = approved(path);
+        engine
+            .decide(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                &Request::Fs {
+                    path: &approved,
+                    operation: FsOperation::ReadContent,
+                },
+            )
+            .0
+            .is_allow()
+    };
+    let directory = tempfile::tempdir().expect("history directory");
+    for (label, declared) in [("none", Operator::unanchored()), ("other", project())] {
+        for complete in [true, false] {
+            let check = PolicyEngine::check(&declared, &sources(policy), complete);
+            assert!(check.errors().is_empty(), "{label}: {:?}", check.errors());
+            assert!(
+                check.warnings().is_empty(),
+                "{label}: {:?}",
+                check.warnings()
+            );
+        }
+        let engine = open(&declared, policy, &directory.path().join(label));
+        assert!(read(&engine, "/vault/key"), "{label}: the forbid is off");
+    }
+    let secrets = operator(&[("secrets", &["/vault"])]);
+    let engine = open(&secrets, policy, &directory.path().join("declared"));
+    assert!(
+        !read(&engine, "/vault/key"),
+        "the forbid applies where declared"
+    );
+    assert!(read(&engine, "/work/a"));
+}
+
 #[test]
 fn a_response_named_by_its_home_relative_spelling_carries_its_requests_locations() {
     let directory = tempfile::tempdir().expect("history directory");
     let history = directory.path().join("h.redb");
+    // A canonical home, because macOS links `/home`, and a root resolves through links.
+    let home_dir = directory
+        .path()
+        .canonicalize()
+        .expect("canonical")
+        .join("dev");
     let home = Operator::unanchored()
-        .anchored_at("/home/dev")
-        .with_locations([(
-            "project".to_string(),
-            vec![PathBuf::from("/home/dev/src/app")],
-        )]);
+        .anchored_at(&home_dir)
+        .with_locations([("project".to_string(), vec![home_dir.join("src/app")])]);
     let engine = open(&home, PROJECT_WRITE, &history);
-    let approved = PathResolver::over([PathBuf::from("/home/dev")])
+    let approved = PathResolver::over([home_dir.clone()])
         .expect("the root is absolute")
-        .reporting_under("/home/dev")
-        .approve_virtual(Path::new("/home/dev/src/app/main.rs"))
+        .reporting_under(&home_dir)
+        .approve_virtual(&home_dir.join("src/app/main.rs"))
         .expect("the path resolves");
     assert_eq!(approved.reported(), "~/src/app/main.rs");
 
@@ -833,7 +885,14 @@ fn a_home_relative_outcome_matches_under_a_home_that_is_not_utf8() {
         .canonicalize()
         .expect("canonical")
         .join(std::ffi::OsStr::from_bytes(b"home-\xff"));
-    std::fs::create_dir_all(home.join("work")).expect("the home");
+    // macOS APFS refuses a non-UTF-8 name (EILSEQ, 92), so this home cannot exist there.
+    if let Err(error) = std::fs::create_dir_all(home.join("work")) {
+        if cfg!(target_os = "macos") && error.raw_os_error() == Some(92) {
+            eprintln!("skipping: this filesystem refuses non-UTF-8 names ({error})");
+            return;
+        }
+        panic!("the home: {error:?}");
+    }
     assert!(home.to_str().is_none(), "the home is not UTF-8");
     let history = directory.path().join("h.redb");
     let declared = Operator::unanchored()

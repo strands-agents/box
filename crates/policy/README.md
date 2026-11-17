@@ -345,8 +345,8 @@ when { context.input.locations.project };
 ```
 
 `context.input.locations has secrets && context.input.locations.secrets` loads for any operator,
-because Cedar types `has` on a closed record that lacks the field as false. Write that form on a
-`permit` only: a `forbid` in it loads and matches nothing when the location name is misspelled.
+because Cedar types `has` on a closed record that lacks the field as false. The engine neither
+refuses nor reports such a rule, because `has` is the author marking the location optional.
 
 A location names directories and grants no reach. `with_locations` resolves each directory the
 way `PathResolver::approve_host` resolves a requested path, so a root spelled through a symbolic

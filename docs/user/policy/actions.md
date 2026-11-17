@@ -76,10 +76,11 @@ A path is in a location when it is one of the location's directories or below on
 components, so `/work-old/notes.md` is not in `/work`. A path can be in more than one location.
 A rule reads a location in one of two ways:
 
-- **Strict:** `context.input.locations.project`. A rule that names a location `box.toml` does not
-  declare refuses to load, so a typo stops the box.
-- **Portable:** `context.input.locations has project && context.input.locations.project`. The
-  rule loads in every box and matches nothing where `project` is not declared.
+- **Strict:** `context.input.locations.project`. The rule must apply, so a rule that names a
+  location `box.toml` does not declare refuses to load.
+- **Optional:** `context.input.locations has project && context.input.locations.project`. The
+  location may be missing, so the rule loads in every box and applies only where `project` is
+  declared.
 
 ```text
 @id("project_write")
@@ -87,8 +88,8 @@ permit (principal, action == Box::Action::"fs:write", resource)
 when { context.input.locations.project };
 ```
 
-Use the portable form on a `permit`, and never on a `forbid`. A portable `forbid` whose location
-`box.toml` misspells loads and protects nothing.
+Both forms work on a `permit` and on a `forbid`. Write a rule that must apply in the strict form,
+so a box that lacks the location, or misspells it, stops instead of running without the rule.
 
 A history rule reads one location as a field of the event, so a budget counts every write in
 `project`, whatever other locations also hold the path:

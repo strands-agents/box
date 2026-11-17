@@ -112,8 +112,8 @@ one location. This counts every write in `project`, including writes that are al
 formerly within 1h ( Box::Action::"fs:write"::response{ input.locations.project: true } )
 ```
 
-**Rules that work with or without a location.** A starter may want to allow writes to `secrets`
-in boxes that declare it, and still load in boxes that don't. Cedar's `has` does that:
+**Rules that work with or without a location.** A starter may want a rule about `secrets` in
+boxes that declare it, and still load in boxes that don't. Cedar's `has` does that:
 
 ```text
 @id("secrets_write")
@@ -121,9 +121,9 @@ permit (principal, action == Box::Action::"fs:write", resource)
 when { context.input.locations has secrets && context.input.locations.secrets };
 ```
 
-In a box without `secrets`, this rule loads and matches nothing. Use this form on a `permit`, never
-on a `forbid`. If `box.toml` misspells `secrets`, a `forbid` written this way loads and protects
-nothing (see D2).
+In a box without `secrets`, this rule loads and matches nothing. Writing `has` says the location is
+optional, so Box neither refuses nor warns about it, for a `permit` or a `forbid`. A rule that must
+apply leaves out `has`, so a missing or misspelled location stops the box (see D2).
 
 ## 5. What does it cost?
 

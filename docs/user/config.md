@@ -291,9 +291,9 @@ components. A path can be in more than one location, and a rule on each of them 
 A location grants no access. The agent still reaches a directory only through
 [`[agent.filesystem]`](#agentfilesystem-and-toolnamefilesystem) and a policy permit. A rule that
 reads `context.input.locations.<name>` for a location this file does not declare refuses to load.
-A rule that first tests `context.input.locations has <name>` loads in any box; use that form on a
-`permit` only, because a `forbid` written that way loads and protects nothing when this file
-misspells the name. [The filesystem actions](policy/actions.md#filesystem) show both forms.
+A rule that first tests `context.input.locations has <name>` treats the location as optional: it
+loads in any box and applies only where this file declares the name. [The filesystem
+actions](policy/actions.md#filesystem) show both forms.
 
 The startup disclosure prints one line for each location, after the agent's filesystem grants. A
 directory under the operator's home is spelled `~/…`:
@@ -303,7 +303,7 @@ strands-box: [locations] caches: ~/.cache/my-agent, ~/.npm  (a name for policy r
 strands-box: [locations] project: /Users/dev/src/app  (a name for policy rules; grants no access)
 ```
 
-A box that declares a location stores its record at version 35, and an older build refuses it.
+A box that declares a location stores its record at version 36, and an older build refuses it.
 Without `[locations]`, the record is unchanged.
 
 ## `[experimental-features]`
