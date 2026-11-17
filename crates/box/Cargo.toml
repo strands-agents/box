@@ -66,7 +66,8 @@ bytes = "1"
 tempfile = "3"
 thiserror = "2"
 toml = "1"
-# The parsed host the Shell's SSRF floor reads, as the egress client parses it.
+# The parsed host the Shell's SSRF floor reads, as the egress client parses it, and the host and
+# port a telemetry destination's credential is bound to.
 url = "2"
 
 # Test-only, enabled by `test-support`: a TLS client for `box-egress-probe` and a TLS

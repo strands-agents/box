@@ -12,7 +12,7 @@ Box runs an agent, or another command, under an operator's policy, with operatin
 - [`shell-policy.md`](./shell-policy.md): write policy for the agent's shell commands, the programs it runs, and the files they touch.
 - [`tool-grammars.md`](./tool-grammars.md): experimental. Describe a program such as `git` as actions
   and effects, and write one rule for every spelling of a command.
-- [`telemetry.md`](./telemetry.md): the `[telemetry.decisions]` keys, what each record carries, and how to read a records file.
+- [`telemetry.md`](./telemetry.md): the `[telemetry.decisions]` keys, the endpoint and vendor kinds, what each record carries, and how to read a records file.
 - [`policy.md`](./policy.md): what a policy is, when the box asks it, the ten actions, the six
   common rules, and what to do when a policy fails to load. Start here for policy.
 - [`security.md`](./security.md): what `box.toml` governs, what `policy.dw` governs, the one rule
