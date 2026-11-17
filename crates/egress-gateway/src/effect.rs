@@ -201,7 +201,7 @@ pub trait EffectInterceptor: Send + Sync {
         Ok(())
     }
 
-    /// Observe one `HttpRequest` attempt that the gateway refused before it claimed the effect.
+    /// Observe one attempt that the gateway refused before it claimed the effect.
     fn observe_refused(&self, _effect: &EffectAttempt<'_>) {}
 }
 

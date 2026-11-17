@@ -267,22 +267,32 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
     }
 
     fn observe_refused(&self, effect: &EgressEffectAttempt<'_>) {
-        let EgressEffectAttempt::HttpRequest {
-            host,
-            port,
-            method,
-            path,
-            body_bytes,
-            intercepted,
-            ..
-        } = effect
-        else {
-            return;
-        };
-        self.policy.observe_refused(
-            &self.governed,
-            &self.principal,
-            &Request::Http {
+        // Each attempt maps to the request `intercept` decides for it.
+        let request = match effect {
+            EgressEffectAttempt::Resolve { host, port } => Request::Connect {
+                host,
+                ip: None,
+                port: *port,
+            },
+            EgressEffectAttempt::Connect {
+                host,
+                port,
+                address,
+                ..
+            } => Request::Connect {
+                host,
+                ip: Some(address.ip()),
+                port: *port,
+            },
+            EgressEffectAttempt::HttpRequest {
+                host,
+                port,
+                method,
+                path,
+                body_bytes,
+                intercepted,
+                ..
+            } => Request::Http {
                 host,
                 port: *port,
                 method,
@@ -290,7 +300,11 @@ impl EgressEffectInterceptor for EgressPolicyInterceptor {
                 body_bytes: *body_bytes,
                 intercepted: *intercepted,
             },
-        );
+            // A reply release is not decided, so `intercept` records nothing for it either.
+            _ => return,
+        };
+        self.policy
+            .observe_refused(&self.governed, &self.principal, &request);
     }
 }
 
@@ -2491,6 +2505,76 @@ mod tests {
             probed.intercept(&request).is_err(),
             "two refused probes and this attempt reach the cap"
         );
+    }
+
+    /// A resolution and a connection the gateway refused enter history as `net:connect` requests, as
+    /// `intercept` would decide them, so a connect cap counts them.
+    #[test]
+    fn a_gateway_refused_connection_counts_toward_a_connect_cap() {
+        let source = r#"permit(principal, action == Box::Action::"net:connect", resource);
+               forbid(principal, action == Box::Action::"net:connect", resource)
+               when temporal {
+                 exists (n: Long). (
+                   (count for (t: Timepoint). where (
+                     formerly within 3600s (
+                       Box::Action::"net:connect"::request{ input.host: "api.github.com" } && tp(t)
+                     )
+                   )) == n
+                   && n >= 3
+                 )
+               };"#;
+        let peer: SocketAddr = "192.0.2.1:443".parse().unwrap();
+
+        let control = interceptor(source);
+        control
+            .intercept(&connect_attempt(peer))
+            .expect("one attempt is under the cap")
+            .mark_indeterminate();
+
+        let probed = interceptor(source);
+        probed.observe_refused(&resolve_attempt("api.github.com"));
+        probed.observe_refused(&connect_attempt(peer));
+        assert!(
+            probed.intercept(&connect_attempt(peer)).is_err(),
+            "a refused resolution, a refused connection, and this attempt reach the cap"
+        );
+    }
+
+    /// The release of a reply is not decided, so a refused one leaves no history.
+    #[test]
+    fn a_refused_reply_release_records_nothing() {
+        let source = r#"permit(principal, action == Box::Action::"http:request", resource);
+               forbid(principal, action == Box::Action::"http:request", resource)
+               when temporal {
+                 exists (n: Long). (
+                   (count for (t: Timepoint). where (
+                     formerly within 3600s (
+                       Box::Action::"http:request"::request{ input.host: "api.github.com" } && tp(t)
+                     )
+                   )) == n
+                   && n >= 2
+                 )
+               };"#;
+        let fixture = interceptor(source);
+        fixture.observe_refused(&EgressEffectAttempt::ResponseRelease {
+            host: "api.github.com",
+            port: 443,
+            method: "GET",
+            path: "/",
+            status: 200,
+        });
+        fixture
+            .intercept(&EgressEffectAttempt::HttpRequest {
+                host: "api.github.com",
+                port: 443,
+                method: "GET",
+                path: "/",
+                body_bytes: 0,
+                intercepted: true,
+                mcp: None,
+            })
+            .expect("no earlier request is in history")
+            .mark_indeterminate();
     }
 
     /// The forbid a reply status arms: three 500s within the window refuse the fourth request,

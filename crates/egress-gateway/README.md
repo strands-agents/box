@@ -77,9 +77,11 @@ query string and is the path the workload sent, captured before any credential
 edit. `HttpRequest::body_bytes` is the complete request body length. Response release requires
 no upfront body length.
 
-The proxy hands an `HttpRequest` that it refuses before `intercept` to `observe_refused`. That
-call carries no permit and no outcome, because the effect never ran. It lets an authority keep the
-attempt in its history. The default does nothing.
+The proxy hands an attempt that it refuses before `intercept` to `observe_refused`. That call
+carries no permit and no outcome, because the effect never ran. It lets an authority keep the
+attempt in its history. The default does nothing. Today the proxy passes only `HttpRequest`
+attempts; the policy adapter also records a refused `Resolve` or `Connect` as the `net:connect`
+request `intercept` would decide, and records nothing for a `ResponseRelease`.
 
 Both `EffectPermit` methods consume `self: Box<Self>`, so one permit reaches
 exactly one terminal transition. The proxy reports `EffectOutcome::Connected`,
