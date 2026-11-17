@@ -93,7 +93,7 @@ fn replace_once(source: &str, anchor: &str, replacement: &str) -> Result<String,
 }
 
 /// Refuse a location whose name or directories the declaration rules do not accept.
-fn refuse_bad_locations(locations: &Locations) -> Result<(), PolicyError> {
+pub(crate) fn refuse_bad_locations(locations: &Locations) -> Result<(), PolicyError> {
     for (name, directories) in locations {
         if let Some(reason) = invalid_location_name(name) {
             return Err(PolicyError::Schema(format!(

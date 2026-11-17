@@ -28,7 +28,8 @@ fn sources(text: &str) -> Vec<Policy> {
 /// The operator home every fixture states, which does not exist on the test host.
 const HOME: &str = "/nonexistent-box-home/dev";
 
-fn operator(locations: &[(&str, &[&str])]) -> Operator {
+/// An operator under [`HOME`] that declares `locations`, or the refusal of the declaration.
+fn declare(locations: &[(&str, &[&str])]) -> Result<Operator, policy::PolicyError> {
     Operator::unanchored()
         .anchored_at(HOME)
         .with_locations(locations.iter().map(|(name, directories)| {
@@ -37,6 +38,10 @@ fn operator(locations: &[(&str, &[&str])]) -> Operator {
                 directories.iter().map(PathBuf::from).collect(),
             )
         }))
+}
+
+fn operator(locations: &[(&str, &[&str])]) -> Operator {
+    declare(locations).expect("the locations resolve")
 }
 
 fn project() -> Operator {
@@ -248,7 +253,7 @@ fn a_policy_that_names_a_location_refuses_to_load_when_none_is_declared() {
 }
 
 #[test]
-fn a_bad_declaration_is_refused_by_open_validate_and_check() {
+fn a_bad_declaration_is_refused_by_with_locations() {
     let long = "a".repeat(65);
     let longest = "a".repeat(64);
     let cases: [(&str, &[&str]); 12] = [
@@ -265,26 +270,13 @@ fn a_bad_declaration_is_refused_by_open_validate_and_check() {
         ("project", &["/work/./src"]),
         ("project", &["/work/../etc"]),
     ];
-    let permit = r#"permit (principal, action == Box::Action::"fs:read", resource);"#;
     for (name, directories) in cases {
-        let declared = operator(&[(name, directories)]);
-        let directory = tempfile::tempdir().expect("history directory");
-        let opened =
-            PolicyEngine::open_staged(&declared, sources(permit), &directory.path().join("h"));
         assert!(
-            opened.is_err(),
-            "open must refuse {name:?} = {directories:?}"
+            declare(&[(name, directories)]).is_err(),
+            "with_locations must refuse {name:?} = {directories:?}"
         );
-        assert!(PolicyEngine::validate(&declared, &sources(permit)).is_err());
-        for complete in [true, false] {
-            assert!(
-                !PolicyEngine::check(&declared, &sources(permit), complete)
-                    .errors()
-                    .is_empty(),
-                "check (complete: {complete}) must refuse {name:?} = {directories:?}"
-            );
-        }
     }
+    let permit = r#"permit (principal, action == Box::Action::"fs:read", resource);"#;
     for accepted in ["P", "my_project_2", "permit", longest.as_str()] {
         assert!(
             PolicyEngine::validate(&operator(&[(accepted, &["/"])]), &sources(permit)).is_ok(),
@@ -471,7 +463,8 @@ fn a_response_named_by_its_home_relative_spelling_carries_its_requests_locations
         .join("dev");
     let home = Operator::unanchored()
         .anchored_at(&home_dir)
-        .with_locations([("project".to_string(), vec![home_dir.join("src/app")])]);
+        .with_locations([("project".to_string(), vec![home_dir.join("src/app")])])
+        .expect("the locations resolve");
     let engine = open(&home, PROJECT_WRITE, &history);
     let approved = PathResolver::over([home_dir.clone()])
         .expect("the root is absolute")
@@ -687,7 +680,8 @@ fn a_root_that_does_not_exist_yet_under_a_linked_parent_matches_once_created() {
     let root = link.join("new").join("deeper");
     let declared = Operator::unanchored()
         .anchored_at(HOME)
-        .with_locations([("project".to_string(), vec![root.clone()])]);
+        .with_locations([("project".to_string(), vec![root.clone()])])
+        .expect("the locations resolve");
     let engine = open(&declared, PROJECT_WRITE, &directory.path().join("h.redb"));
 
     std::fs::create_dir_all(&root).expect("the root is created after the box starts");
@@ -716,26 +710,19 @@ fn a_root_that_does_not_exist_yet_under_a_linked_parent_matches_once_created() {
 }
 
 #[test]
-fn locations_without_an_operator_home_refuse_to_load() {
-    let directory = tempfile::tempdir().expect("history directory");
-    let unanchored = Operator::unanchored()
-        .with_locations([("project".to_string(), vec![PathBuf::from("/work")])]);
-    let permit = r#"permit (principal, action == Box::Action::"fs:read", resource);"#;
-
-    let Err(error) =
-        PolicyEngine::open_staged(&unanchored, sources(permit), &directory.path().join("h"))
+fn locations_without_an_operator_home_are_refused() {
+    let Err(error) = Operator::unanchored()
+        .with_locations([("project".to_string(), vec![PathBuf::from("/work")])])
     else {
-        panic!("open_staged must refuse locations without a home");
+        panic!("with_locations must refuse locations without a home");
     };
     assert!(error.to_string().contains("no home"), "{error}");
-    assert!(PolicyEngine::validate(&unanchored, &sources(permit)).is_err());
-    for complete in [true, false] {
-        assert!(
-            !PolicyEngine::check(&unanchored, &sources(permit), complete)
-                .errors()
-                .is_empty()
-        );
-    }
+    assert!(
+        Operator::unanchored()
+            .with_locations(std::iter::empty())
+            .is_ok(),
+        "no location needs no home"
+    );
 }
 
 /// The operator states its home through a link, and a location's root resolves through it; a
@@ -751,7 +738,8 @@ fn a_home_relative_outcome_matches_under_the_canonical_home() {
     let history = directory.path().join("h.redb");
     let declared = Operator::unanchored()
         .anchored_at(&link)
-        .with_locations([("project".to_string(), vec![link.join("work")])]);
+        .with_locations([("project".to_string(), vec![link.join("work")])])
+        .expect("the locations resolve");
     let engine = open(&declared, PROJECT_WRITE, &history);
     let approved = PathResolver::over([canonical.clone()])
         .expect("the root is absolute")
@@ -787,50 +775,34 @@ fn a_home_relative_outcome_matches_under_the_canonical_home() {
     assert_eq!(recorded_locations(&history), [project.clone(), project]);
 }
 
-/// Assert that open_staged, validate, and check each refuse `declared`, naming `fragment`.
-fn assert_refused_at_load(declared: &Operator, fragment: &str, history: &Path) {
-    let permit = r#"permit (principal, action == Box::Action::"fs:read", resource);"#;
-    let Err(error) = PolicyEngine::open_staged(declared, sources(permit), history) else {
-        panic!("open_staged must refuse {declared:?}");
+/// Assert that `with_locations` refuses `root` as the `project` location, naming it.
+fn assert_root_refused(root: &Path) {
+    let Err(error) = Operator::unanchored()
+        .anchored_at(HOME)
+        .with_locations([("project".to_string(), vec![root.to_path_buf()])])
+    else {
+        panic!("with_locations must refuse {}", root.display());
     };
-    assert!(error.to_string().contains(fragment), "{error}");
-    let Err(error) = PolicyEngine::validate(declared, &sources(permit)) else {
-        panic!("validate must refuse {declared:?}");
-    };
-    assert!(error.to_string().contains(fragment), "{error}");
-    for complete in [true, false] {
-        let check = PolicyEngine::check(declared, &sources(permit), complete);
-        assert!(
-            check
-                .errors()
-                .iter()
-                .any(|finding| finding.message().contains(fragment)),
-            "check (complete: {complete}) must refuse: {:?}",
-            check.errors()
-        );
-    }
+    let fragment = format!(
+        "location \"project\": {} cannot be resolved",
+        root.display()
+    );
+    assert!(error.to_string().contains(&fragment), "{error}");
 }
 
 #[test]
-fn a_root_that_is_a_dangling_link_refuses_to_load() {
+fn a_root_that_is_a_dangling_link_is_refused() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let canonical = directory.path().canonicalize().expect("canonical");
     let link = canonical.join("link");
     std::os::unix::fs::symlink(canonical.join("absent"), &link).expect("the dangling link");
     for root in [link.clone(), link.join("below")] {
-        let declared = Operator::unanchored()
-            .anchored_at(HOME)
-            .with_locations([("project".to_string(), vec![root.clone()])]);
-        assert_refused_at_load(
-            &declared,
-            &format!("location \"project\": {}", root.display()),
-            &directory.path().join("h.redb"),
-        );
+        assert_root_refused(&root);
     }
 }
 
 #[test]
-fn a_root_that_is_a_file_or_a_link_to_one_refuses_to_load() {
+fn a_root_that_is_a_file_or_a_link_to_one_is_refused() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let canonical = directory.path().canonicalize().expect("canonical");
     let file = canonical.join("file");
@@ -838,19 +810,12 @@ fn a_root_that_is_a_file_or_a_link_to_one_refuses_to_load() {
     let link = canonical.join("link-to-file");
     std::os::unix::fs::symlink(&file, &link).expect("the link to the file");
     for root in [file.clone(), link.clone(), file.join("below")] {
-        let declared = Operator::unanchored()
-            .anchored_at(HOME)
-            .with_locations([("project".to_string(), vec![root.clone()])]);
-        assert_refused_at_load(
-            &declared,
-            &format!("location \"project\": {}", root.display()),
-            &directory.path().join("h.redb"),
-        );
+        assert_root_refused(&root);
     }
 }
 
 #[test]
-fn a_root_under_a_directory_that_cannot_be_searched_refuses_to_load() {
+fn a_root_under_a_directory_that_cannot_be_searched_is_refused() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let directory = tempfile::tempdir().expect("a temporary directory");
@@ -864,14 +829,7 @@ fn a_root_under_a_directory_that_cannot_be_searched_refuses_to_load() {
         return;
     }
     let root = locked.join("project");
-    let declared = Operator::unanchored()
-        .anchored_at(HOME)
-        .with_locations([("project".to_string(), vec![root.clone()])]);
-    assert_refused_at_load(
-        &declared,
-        &format!("location \"project\": {}", root.display()),
-        &canonical.join("h.redb"),
-    );
+    assert_root_refused(&root);
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).expect("chmod");
 }
 
@@ -897,7 +855,8 @@ fn a_home_relative_outcome_matches_under_a_home_that_is_not_utf8() {
     let history = directory.path().join("h.redb");
     let declared = Operator::unanchored()
         .anchored_at(&home)
-        .with_locations([("project".to_string(), vec![home.join("work")])]);
+        .with_locations([("project".to_string(), vec![home.join("work")])])
+        .expect("the locations resolve");
     let engine = open(&declared, PROJECT_WRITE, &history);
     let approved = PathResolver::over([home.clone()])
         .expect("the root is absolute")

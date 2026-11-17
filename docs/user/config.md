@@ -269,20 +269,21 @@ when { context.input.locations.project };
 |---|---|
 | A name starts with an ASCII letter, holds at most 64 ASCII letters, digits, or `_`, and is not one of Cedar's reserved words (`true`, `false`, `if`, `then`, `else`, `in`, `is`, `like`, `has`). | ``` `[locations] <name>` is not a location name``` |
 | A location lists at least one directory. | ``` `[locations] <name>` lists no directory``` |
-| Each directory is absolute or starts with `~/`. | ``` `[locations] <name>` entry "<entry>" is refused: it is neither absolute nor `~/`-relative``` |
+| Each directory is absolute, is `~` for the whole home, or starts with `~/`. | ``` `[locations] <name>` entry "<entry>" is refused: it is neither absolute nor `~/`-relative``` |
+| A `~/` directory has no empty component after `~/`, so `~//etc` is refused. | ``` `[locations] <name>` entry "<entry>" is refused: it holds an empty component after `~/` ``` |
 | A directory has no `.` or `..` component. | ``` `[locations] <name>` entry "<entry>" is refused: it holds a `.` or `..` component``` |
 | A location lists each directory once. | ``` `[locations] <name>` lists "<entry>" twice``` |
-| A directory resolves: it is not, and is not below, a broken symbolic link or a file, and no folder on its way refuses to be searched. | ``` location "<name>": <directory> cannot be resolved: <reason>``` |
+| A directory resolves: it is not, and is not below, a broken symbolic link or a file, and no folder on its way refuses to be searched. | ``` `[locations] <name>` entry "<entry>" cannot be resolved: <reason>``` |
 
-The box expands `~/` against the operator's home. It then resolves each directory the same way it
+The box expands `~` and `~/` against the operator's home. It then resolves each directory the same way it
 resolves a request's path: it follows the symbolic links in the directory, and when the directory
 doesn't exist yet, it follows them in the nearest folder above it that does. So a directory that
 you create later under a linked folder still matches. A path matches by its resolved spelling, as
 `path` does. The box resolves the directories once, when it builds the policy for `run` or for a
 check. A directory that you replace with a symbolic link after that no longer matches files through
-the link. A directory that is a broken symbolic link, or lies below one, refuses to load, and so
-does one that the box can't resolve for another reason, such as a folder on its way that refuses to
-be searched. Two locations may list the same directory.
+the link. A directory that is a broken symbolic link, or lies below one, is refused, and so is one
+that the box can't resolve for another reason, such as a folder on its way that refuses to be
+searched. Two locations may list the same directory.
 
 A path is in a location when it is one of the location's directories or below one, by whole path
 components. A path can be in more than one location, and a rule on each of them applies to it.
@@ -295,8 +296,9 @@ A rule that first tests `context.input.locations has <name>` treats the location
 loads in any box and applies only where this file declares the name. [The filesystem
 actions](policy/actions.md#filesystem) show both forms.
 
-The startup disclosure prints one line for each location, after the agent's filesystem grants. A
-directory under the operator's home is spelled `~/…`:
+The startup disclosure prints one line for each location, after the agent's filesystem grants. It
+prints each directory as resolved, which is the spelling a rule matches, and spells one under the
+operator's home `~/…`:
 
 ```text
 strands-box: [locations] caches: ~/.cache/my-agent, ~/.npm  (a name for policy rules; grants no access)

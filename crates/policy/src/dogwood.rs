@@ -257,7 +257,6 @@ impl DogwoodEngine {
         history: &Path,
         operator: &Operator,
     ) -> Result<Self, PolicyStagingError> {
-        operator.refuse_unusable_locations()?;
         let effective_schema = composed_action_schema(operator.locations(), &[], &[])?;
         let engine = open_history(history, durable_config())
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
@@ -269,7 +268,6 @@ impl DogwoodEngine {
         label: PathBuf,
         operator: &Operator,
     ) -> Result<Self, PolicyStagingError> {
-        operator.refuse_unusable_locations()?;
         let effective_schema = composed_action_schema(operator.locations(), &[], &[])?;
         let log = DurableLog::open(opened_file_path(&history))
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
@@ -1176,7 +1174,6 @@ pub(crate) fn check_against(
     authored: bool,
     positions: &[usize],
 ) -> Result<(Vec<String>, crate::schema::ActionSchema, Vec<PolicyWarning>), Refused> {
-    operator.refuse_unusable_locations()?;
     let policy_schema = PolicySchema::from_cedarschema_str(&effective_schema.source)
         .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
 
@@ -4126,6 +4123,7 @@ when temporal {
                     .iter()
                     .map(|(name, directory)| ((*name).to_string(), vec![PathBuf::from(directory)])),
             )
+            .expect("the locations resolve")
     }
 
     fn located_write(engine: &DogwoodEngine, path: &str) -> bool {

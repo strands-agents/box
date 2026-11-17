@@ -191,18 +191,19 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   temporal field path. `Operator::with_locations` resolves each root with
   `path::resolve_host_directory`, the rule `approve_host` uses for a request, so roots and request
   paths cannot drift. A root that is or crosses a dangling symbolic link, or that hits an error
-  other than an absent component, cannot be resolved, so the operator keeps the reason and the load
-  refuses it, as `approve_host` refuses such a path; keeping the link spelling instead would leave
-  every later request outside the location once the target appears. A filesystem outcome names its
-  path by the reported spelling, so the engine expands `~` and `~/…` under each spelling of the
-  operator home and matches that; it keeps nothing per request. The home spellings are paths, not
-  strings, so a home that is not UTF-8 still expands. The load refuses locations for an operator
-  with no home (`Operator::refuse_unusable_locations`), because such an outcome could not be
-  matched. Before `classify_naming` holds a rule for an MCP schema,
-  `dogwood::refuse_undeclared_locations` validates its Box-only condition against the base schema
-  when the rule reads `context.input.locations`, and checks each `input.locations.<name>` a
-  filesystem temporal predicate reads, because no MCP schema can declare a location. Pinned by
-  `tests/path_locations.rs` and
+  other than an absent component, cannot be resolved, so `with_locations` refuses it, as
+  `approve_host` refuses such a path; keeping the link spelling instead would leave every later
+  request outside the location once the target appears. A filesystem outcome names its path by the
+  reported spelling, so the engine expands `~` and `~/…` under each spelling of the operator home
+  and matches that; it keeps nothing per request. The home spellings are paths, not strings, so a
+  home that is not UTF-8 still expands. `with_locations` refuses locations for an operator with no
+  home, because such an outcome could not be matched. Box prints `Operator::locations`, so its
+  disclosure shows the roots rules match. Before `classify_naming` holds a rule for an MCP schema,
+  `dogwood::refuse_undeclared_locations`, only for a rule whose scope can include an `fs:*` action,
+  validates its Box-only condition against the base schema when the rule reads
+  `context.input.locations`, and checks each `input.locations.<name>` a filesystem temporal
+  predicate reads, because no MCP schema can declare a location. Pinned by `tests/path_locations.rs`
+  and
   `dogwood::tests::a_location_budget_holds_in_each_window_and_counts_every_path_in_the_location`.
 - Sum an outbound budget over `http:request::response`, as `tests/policies/egress_byte_budget.dw`
   does. One exchange records one such event, at reply time, with the delivered request bytes and

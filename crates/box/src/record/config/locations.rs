@@ -20,7 +20,7 @@ const RESERVED_WORDS: [&str; 10] = [
 #[serde(transparent)]
 pub(crate) struct Locations(BTreeMap<String, Vec<String>>);
 
-/// Each location's directories, with `~/` expanded; the policy operator resolves them.
+/// Each location's directories, resolved as a filesystem rule matches them.
 pub(crate) type ResolvedLocations = BTreeMap<String, Vec<PathBuf>>;
 
 impl Locations {
@@ -64,22 +64,51 @@ impl Locations {
         Ok(())
     }
 
-    /// Each location's directories with `~/` expanded against `operator_home`, each listed once.
-    pub(crate) fn resolved(&self, operator_home: &Path) -> ResolvedLocations {
+    /// The policy operator anchored at `operator_home` with these locations, or the refusal that
+    /// names the entry whose directory cannot be resolved.
+    pub(crate) fn operator(&self, operator_home: &Path) -> Result<policy::Operator, ConfigError> {
+        let anchored = policy::Operator::unanchored().anchored_at(operator_home);
+        for (name, directories) in &self.0 {
+            for entry in directories {
+                let single = anchored
+                    .clone()
+                    .with_locations([(name.clone(), vec![expand(entry, operator_home)])]);
+                if let Err(error) = single {
+                    let detail = match &error {
+                        policy::PolicyError::Schema(message) => message
+                            .split_once(" cannot be resolved: ")
+                            .map_or(message.as_str(), |(_, reason)| reason)
+                            .to_string(),
+                        other => other.to_string(),
+                    };
+                    return Err(ConfigError::Contract {
+                        reason: format!(
+                            "`[locations] {name}` entry {entry:?} cannot be resolved: {detail}"
+                        ),
+                    });
+                }
+            }
+        }
+        anchored
+            .with_locations(self.expanded(operator_home))
+            .map_err(|error| ConfigError::Contract {
+                reason: format!("`[locations]` cannot be resolved: {error}"),
+            })
+    }
+
+    /// Each location's directories with `~` expanded against `operator_home`, each listed once.
+    pub(crate) fn expanded(&self, operator_home: &Path) -> BTreeMap<String, Vec<PathBuf>> {
         self.0
             .iter()
             .map(|(name, directories)| {
-                let mut resolved: Vec<PathBuf> = Vec::new();
+                let mut expanded: Vec<PathBuf> = Vec::new();
                 for entry in directories {
-                    let expanded = match entry.strip_prefix("~/") {
-                        Some(relative) => operator_home.join(relative),
-                        None => PathBuf::from(entry),
-                    };
-                    if !resolved.contains(&expanded) {
-                        resolved.push(expanded);
+                    let directory = expand(entry, operator_home);
+                    if !expanded.contains(&directory) {
+                        expanded.push(directory);
                     }
                 }
-                (name.clone(), resolved)
+                (name.clone(), expanded)
             })
             .collect()
     }
@@ -108,9 +137,26 @@ fn invalid_name(name: &str) -> Option<&'static str> {
     None
 }
 
+/// `entry` with a leading `~` or `~/` expanded against `operator_home`.
+fn expand(entry: &str, operator_home: &Path) -> PathBuf {
+    if entry == "~" {
+        return operator_home.to_path_buf();
+    }
+    match entry.strip_prefix("~/") {
+        Some(relative) => operator_home.join(relative),
+        None => PathBuf::from(entry),
+    }
+}
+
 /// Why `entry` is not a directory a location can name, or `None` when it is one.
 fn invalid_directory(entry: &str) -> Option<&'static str> {
+    if entry == "~" {
+        return None;
+    }
     let rest = match entry.strip_prefix("~/") {
+        Some(relative) if relative.starts_with('/') => {
+            return Some("it holds an empty component after `~/`");
+        }
         Some(relative) => relative,
         None if Path::new(entry).is_absolute() => entry,
         None => return Some("it is neither absolute nor `~/`-relative"),
@@ -201,7 +247,7 @@ mod tests {
         for (entry, reason) in [
             ("work/app", "neither absolute nor `~/`-relative"),
             ("./work", "neither absolute nor `~/`-relative"),
-            ("~", "neither absolute nor `~/`-relative"),
+            ("~//etc", "an empty component after `~/`"),
             ("~user/app", "neither absolute nor `~/`-relative"),
             ("", "neither absolute nor `~/`-relative"),
             ("/work/./app", "a `.` or `..` component"),
@@ -220,7 +266,7 @@ mod tests {
             );
             assert!(error.contains(reason), "{entry:?}: {error}");
         }
-        for entry in ["/work/.app", "/work/..app", "~/.cache"] {
+        for entry in ["/work/.app", "/work/..app", "~/.cache", "~"] {
             locations(&[("project", &[entry])])
                 .validate()
                 .unwrap_or_else(|error| panic!("{entry:?}: {error}"));
@@ -245,55 +291,70 @@ mod tests {
     #[test]
     fn a_home_relative_entry_expands_against_the_operator_home() {
         let home = Path::new("/nonexistent-box-home/operator");
-        let resolved =
-            locations(&[("caches", &["~/.cache/agent", "/absent/elsewhere"])]).resolved(home);
+        let expanded =
+            locations(&[("caches", &["~/.cache/agent", "/absent/elsewhere", "~"])]).expanded(home);
         assert_eq!(
-            resolved,
+            expanded,
             BTreeMap::from([(
                 "caches".to_string(),
                 vec![
                     PathBuf::from("/nonexistent-box-home/operator/.cache/agent"),
                     PathBuf::from("/absent/elsewhere"),
+                    PathBuf::from("/nonexistent-box-home/operator"),
                 ],
-            )])
+            )]),
+            "a bare `~` names the whole home"
         );
     }
 
     #[test]
     fn a_linked_entry_is_resolved_by_the_policy_operator_and_appears_once() {
         let directory = tempfile::tempdir().expect("a temporary directory");
-        let real = directory.path().join("real");
-        std::fs::create_dir(&real).expect("the real directory");
-        let link = directory.path().join("link");
-        std::os::unix::fs::symlink(&real, &link).expect("the link");
-        let missing = directory.path().join("missing");
-        let spelled = |path: &Path| path.to_str().expect("UTF-8").to_string();
-        let table = Locations(BTreeMap::from([(
-            "project".to_string(),
-            vec![
-                spelled(&link),
-                spelled(&missing),
-                spelled(&real),
-                spelled(&link),
-            ],
-        )]));
-        let resolved = table.resolved(Path::new("/unused"));
+        let home = directory.path().canonicalize().expect("canonical");
+        std::fs::create_dir(home.join("real")).expect("the real directory");
+        std::os::unix::fs::symlink(home.join("real"), home.join("link")).expect("the link");
+        let table = locations(&[("project", &["~/link", "~/missing", "~/real"])]);
+        table.validate().expect("the table is valid");
         assert_eq!(
-            resolved,
+            table.expanded(&home),
             BTreeMap::from([(
                 "project".to_string(),
-                vec![link.clone(), missing.clone(), real.clone()],
+                vec![home.join("link"), home.join("missing"), home.join("real")],
             )]),
             "the table only expands and dedupes; it resolves no link"
         );
-        let canonical = directory.path().canonicalize().expect("canonical");
         assert_eq!(
-            policy::Operator::unanchored().with_locations(resolved),
-            policy::Operator::unanchored().with_locations([(
+            table
+                .operator(&home)
+                .expect("the operator builds")
+                .locations(),
+            &BTreeMap::from([(
                 "project".to_string(),
-                vec![canonical.join("real"), canonical.join("missing")],
+                vec![home.join("real"), home.join("missing")],
             )]),
             "the operator resolves the link to its target, which then appears once"
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_entry_is_refused_by_its_key() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let home = directory.path().canonicalize().expect("canonical");
+        std::os::unix::fs::symlink(home.join("absent"), home.join("dangling")).expect("the link");
+        let error = locations(&[("project", &["~/fine", "~/dangling"])])
+            .operator(&home)
+            .expect_err("a dangling link")
+            .to_string();
+        assert!(
+            error.starts_with(
+                "invalid Box configuration: `[locations] project` entry \"~/dangling\" cannot \
+                 be resolved: "
+            ),
+            "{error}"
+        );
+        assert!(
+            error.contains("symbolic link whose target does not exist"),
+            "{error}"
         );
     }
 

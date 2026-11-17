@@ -20,8 +20,6 @@ const BOX_ACTION_TYPE: &str = "Box::Action";
 pub struct Operator {
     home: Option<PathBuf>,
     locations: BTreeMap<String, Vec<PathBuf>>,
-    /// Why each location directory that cannot be resolved was not.
-    unresolved: Vec<String>,
 }
 
 impl Operator {
@@ -31,7 +29,6 @@ impl Operator {
         Self {
             home: None,
             locations: BTreeMap::new(),
-            unresolved: Vec::new(),
         }
     }
 
@@ -42,64 +39,51 @@ impl Operator {
         self
     }
 
-    /// Name the directories a filesystem rule matches as `Box::Location::"<name>"`, each resolved
-    /// once, here, as a requested host path is resolved.
-    #[must_use]
+    /// Name the directories a filesystem rule matches as `context.input.locations.<name>`, each
+    /// resolved here as a requested host path is resolved, or refuse a declaration the engine
+    /// cannot match.
     pub fn with_locations(
         mut self,
         locations: impl IntoIterator<Item = (String, Vec<PathBuf>)>,
-    ) -> Self {
-        let mut unresolved = Vec::new();
-        self.locations = locations
-            .into_iter()
-            .map(|(name, directories)| {
-                let mut resolved: Vec<PathBuf> = Vec::new();
-                for directory in directories {
-                    let directory =
-                        if directory.is_absolute() && crate::schema::is_normal(&directory) {
-                            match crate::path::resolve_host_directory(&directory) {
-                                Ok(canonical) => canonical,
-                                Err(reason) => {
-                                    unresolved.push(format!(
-                                        "location {name:?}: {} cannot be resolved: {reason}",
-                                        directory.display()
-                                    ));
-                                    directory
-                                }
-                            }
-                        } else {
-                            directory
-                        };
-                    if !resolved.contains(&directory) {
-                        resolved.push(directory);
-                    }
+    ) -> Result<Self, PolicyError> {
+        let declared: BTreeMap<String, Vec<PathBuf>> = locations.into_iter().collect();
+        if declared.is_empty() {
+            self.locations = declared;
+            return Ok(self);
+        }
+        if self.home.is_none() {
+            return Err(PolicyError::Schema(
+                "locations are declared for an operator with no home; a path under the home is \
+                 reported as `~/…`, so state the home with `Operator::anchored_at` first"
+                    .to_string(),
+            ));
+        }
+        crate::schema::refuse_bad_locations(&declared)?;
+        let mut resolved_locations = BTreeMap::new();
+        for (name, directories) in declared {
+            let mut resolved: Vec<PathBuf> = Vec::new();
+            for directory in directories {
+                let directory =
+                    crate::path::resolve_host_directory(&directory).map_err(|reason| {
+                        PolicyError::Schema(format!(
+                            "location {name:?}: {} cannot be resolved: {reason}",
+                            directory.display()
+                        ))
+                    })?;
+                if !resolved.contains(&directory) {
+                    resolved.push(directory);
                 }
-                (name, resolved)
-            })
-            .collect();
-        self.unresolved = unresolved;
-        self
+            }
+            resolved_locations.insert(name, resolved);
+        }
+        self.locations = resolved_locations;
+        Ok(self)
     }
 
-    /// The declared locations, by name.
-    pub(crate) fn locations(&self) -> &BTreeMap<String, Vec<PathBuf>> {
+    /// The declared locations by name, each directory resolved as a rule matches it.
+    #[must_use]
+    pub fn locations(&self) -> &BTreeMap<String, Vec<PathBuf>> {
         &self.locations
-    }
-
-    /// Refuse declared locations that the engine cannot match: a directory that did not resolve,
-    /// or any location for an operator with no home.
-    pub(crate) fn refuse_unusable_locations(&self) -> Result<(), PolicyError> {
-        if !self.unresolved.is_empty() {
-            return Err(PolicyError::Schema(self.unresolved.join("; ")));
-        }
-        if self.locations.is_empty() || self.home.is_some() {
-            return Ok(());
-        }
-        Err(PolicyError::Schema(
-            "locations are declared for an operator with no home; a path under the home is \
-             reported as `~/…`, so state the home with `Operator::anchored_at`"
-                .to_string(),
-        ))
     }
 
     /// Each spelling of the home, as stated and canonical, that a `~/…` path is expanded under.

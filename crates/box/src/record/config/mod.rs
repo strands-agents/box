@@ -1316,10 +1316,8 @@ pub(crate) fn policy_operator(
     locations: &Locations,
 ) -> Result<(policy::Operator, ResolvedLocations), BoxError> {
     let home = crate::record::layout::operator_home_directory()?;
-    let resolved = locations.resolved(&home);
-    let operator = policy::Operator::unanchored()
-        .anchored_at(home)
-        .with_locations(resolved.clone());
+    let operator = locations.operator(&home)?;
+    let resolved = operator.locations().clone();
     Ok((operator, resolved))
 }
 
@@ -2425,7 +2423,7 @@ native-filesystem-policy = false
         let parsed = Record::parse(&encoded, Path::new("record.toml")).unwrap();
         assert_eq!(parsed, stored);
         assert_eq!(
-            parsed.locations.resolved(Path::new("/home/operator")),
+            parsed.locations.expanded(Path::new("/home/operator")),
             BTreeMap::from([
                 (
                     "caches".to_string(),
@@ -2519,8 +2517,9 @@ native-filesystem-policy = false
         let home = tempfile::tempdir().expect("operator home");
         let home = home.path().canonicalize().expect("canonical home");
         std::fs::create_dir(home.join("project")).expect("project directory");
+        std::os::unix::fs::symlink(home.join("project"), home.join("link")).expect("the link");
         let locations: Locations =
-            toml::from_str("project = [\"~/project\", \"/absent/data\"]").unwrap();
+            toml::from_str("project = [\"~/link\", \"~/project\", \"/absent/data\"]").unwrap();
         let (operator, resolved) = crate::test_support::with_operator_home(&home, || {
             policy_operator(&locations).expect("the operator builds")
         });
@@ -2534,6 +2533,7 @@ native-filesystem-policy = false
             policy::Operator::unanchored()
                 .anchored_at(home.clone())
                 .with_locations(expected)
+                .expect("the locations resolve")
         );
         let (bare, none) = crate::test_support::with_operator_home(&home, || {
             policy_operator(&Locations::default()).expect("the operator builds")

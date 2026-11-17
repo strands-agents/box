@@ -353,13 +353,13 @@ way `PathResolver::approve_host` resolves a requested path, so a root spelled th
 link, or one that does not exist yet below a linked parent, matches the canonical path a request
 carries. A rule that reads an undeclared location without `has` is a load error in `open_staged`,
 `validate`, and `check`, also when the rule waits for an MCP schema. `open` and
-`open_with_mcp_schemas` declare no location. These calls also refuse a bad declaration: a name
-that is not a letter followed by at most 63 letters, digits, or `_`, or that Cedar reserves, an
-empty directory
-list, a directory that is relative or has a `.` or `..` component, or a directory that cannot be
-resolved, such as a broken symbolic link or one below a folder that refuses to be searched. They
-refuse locations for an operator with no home, too (see `Operator::anchored_at`), because an
-outcome names a path under the home as `~/…`.
+`open_with_mcp_schemas` declare no location. `with_locations` returns `PolicyError::Schema` for a
+bad declaration: a name that is not a letter followed by at most 63 letters, digits, or `_`, or
+that Cedar reserves, an empty directory list, a directory that is relative or has a `.` or `..`
+component, or a directory that cannot be resolved, such as a broken symbolic link or one below a
+folder that refuses to be searched. It also refuses locations for an operator with no home, so
+call `Operator::anchored_at` first, because an outcome names a path under the home as `~/…`.
+`Operator::locations` returns the resolved directories, the spelling a rule matches.
 
 The response of a filesystem request records the record of the path it names, with `~/…`
 expanded under the operator's home. A temporal predicate reads one location as a field, so
