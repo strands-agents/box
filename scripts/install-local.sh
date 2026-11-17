@@ -92,10 +92,7 @@ welcome() {
     } >&2
 }
 version() {
-    case "$1" in ''|*[!0-9a-z.-]*) die "expected a version such as 0.1.0 or 0.1.1-linux-preview.1: $1" ;; esac
-    awk -v value="$1" 'BEGIN {
-        exit !(value ~ /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-linux-preview\.[1-9][0-9]*)?$/)
-    }' || die "expected a version such as 0.1.0 or 0.1.1-linux-preview.1: $1"
+    release_version "$1" || die "expected a version such as 0.1.0 or 0.1.1-linux-preview.1: $1"
 }
 checksum() {
     case "$box_system" in
@@ -196,6 +193,18 @@ download() {
     [ -f "$box_local/$1" ] && [ ! -L "$box_local/$1" ] || die "missing file: $box_local/$1"
     cp "$box_local/$1" "$2" || die "cannot copy $1"
 }
+release_version() {
+    case "$1" in ''|*[!0-9a-z.-]*) return 1 ;; esac
+    awk -v value="$1" 'BEGIN {
+        exit !(value ~ /^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-linux-preview\.[1-9][0-9]*)?$/)
+    }'
+}
+managed_release() {
+    case "$1" in *-"$box_triple") ;; *) return 1 ;; esac
+    release_version "${1%-"$box_triple"}" || return 1
+    [ ! -L "$box_root/$1" ] && [ -d "$box_root/$1" ] &&
+        [ -f "$box_root/$1/release.json" ] && [ ! -L "$box_root/$1/release.json" ]
+}
 check_installation() {
     if [ -L "$box_launcher" ]; then
         [ "$(readlink "$box_launcher")" = "$box_launcher_target" ] ||
@@ -203,14 +212,13 @@ check_installation() {
     elif [ -e "$box_launcher" ]; then
         die "another file exists at $box_launcher"
     fi
-    box_previous=
+    box_previous= box_replaced=
     if [ -L "$box_current" ]; then
         box_previous=$(readlink "$box_current")
-        case "$box_previous" in *-"$box_triple") ;; *) die "current is not a managed release" ;; esac
-        version "${box_previous%-$box_triple}"
-        [ ! -L "$box_root/$box_previous" ] && [ -d "$box_root/$box_previous" ] &&
-            [ -f "$box_root/$box_previous/release.json" ] &&
-            [ ! -L "$box_root/$box_previous/release.json" ] || die "current is not a managed release"
+        if ! managed_release "$box_previous"; then
+            box_replaced=$box_previous
+            box_previous=
+        fi
     elif [ -e "$box_current" ]; then
         die "current is not a symbolic link: $box_current"
     fi
@@ -223,7 +231,7 @@ check_installation() {
 }
 
 box_work= box_stage= box_path_temp= box_lock=
-box_previous= box_activating=0 box_created_launcher=0
+box_previous= box_replaced= box_activating=0 box_created_launcher=0
 cleanup() {
     box_status=$?
     trap - 0 HUP INT TERM
@@ -234,12 +242,13 @@ cleanup() {
     clear_progress
     if [ "$box_status" -ne 0 ] && [ "$box_activating" -eq 1 ] &&
         [ -L "$box_current" ] && [ "$(readlink "$box_current")" = "$box_release" ]; then
-        if [ -n "$box_previous" ]; then
-            if ln -s "$box_previous" "$box_stage/current.rollback" &&
+        box_restore=${box_previous:-$box_replaced}
+        if [ -n "$box_restore" ]; then
+            if ln -s "$box_restore" "$box_stage/current.rollback" &&
                 replace_link "$box_stage/current.rollback" "$box_current"; then
-                log "Restored $box_previous."
+                log "Restored $box_restore."
             else
-                log "Cannot restore $box_current to $box_previous."
+                log "Cannot restore $box_current to $box_restore."
             fi
         else
             rm -f "$box_current"
@@ -609,6 +618,8 @@ else
     printf '%s%s%s\n' "$box_dim" "$box_verified" "$box_reset" >&2
     [ "$box_pretty" -eq 1 ] || log "Installed box $box_version."
 fi
+[ -z "$box_replaced" ] ||
+    log "Replaced $box_current, which pointed to $box_replaced. This installer does not manage $box_replaced and left it in place."
 [ -z "$box_path_notice" ] || log "$box_path_notice"
 case ":${PATH-}:" in
     *":$box_bin:"*|*":$HOME/.local/bin:"*) ;;
