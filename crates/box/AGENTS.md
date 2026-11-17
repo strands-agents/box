@@ -122,9 +122,10 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   is a thin wrapper that calls `strands_box::run` and `strands_box::generate_policy_schema`. Every
   module stays `pub(crate)`. The library's public API is not frozen, but a pull request that adds
   to it needs a maintainer's approval. Keep every part:
-  - **One process runs at most one box.** `run` sets `STARTED` and refuses a second call, because
-    `flock` is per file descriptor, so two in-process runs would both take the lock, and that breaks
-    [one policy engine per box](../../docs/design/decisions.md#one-policy-engine-per-box).
+  - **One process runs at most one box.** `run` sets `STARTED` and refuses a second call, even for
+    a different box directory. The box lock refuses only a second run of the *same* box. A second
+    box in this process would hold two boxes' secrets and policy engines in one address space, which
+    breaks [one trusted process per box](../../docs/design/decisions.md#one-trusted-process-per-box).
     `box_library.rs::hardening_and_repeat_run` proves the refusal.
   - Nothing outside the crate can name the `run` or `record` modules, so `Boundary`, `Trampoline`,
     and `Attachment` are unreachable. `Boundary::translate` and `trampoline::command` stay

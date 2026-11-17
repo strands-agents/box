@@ -111,6 +111,8 @@ files (`git status --short`) — new crates/specs are part of the feature.
    - Mechanism-crate façades — the `pub use` sets in `containment`, `credentials`,
      `policy`, `egress-gateway` `lib.rs`. An export removed or renamed is an interface
      change even if `box` is the only current caller.
+   - `strands-box` library — the `pub` items in `crates/box/src/lib.rs`. Not frozen, but an
+     addition without a named maintainer approval is UNAPPROVED.
    - The composed workload environment and `reserved_workload_environment`.
    - Operator-facing description — whatever onboarding text, README, or runbook an operator
      is handed. If the code change makes it wrong, that is an interface change
@@ -379,7 +381,7 @@ for DESIGN, the KD/spec/tenet/pattern it violates)`.
 ```
 FREEZE   (always present for a crates/** diff, even when clean)
 - surfaces checked: CLI | box.toml | four inputs | Record/LiveRecord | wire protocol
-  | alias names | policy vocabulary | crate façades | workload env | operator-facing docs
+  | alias names | policy vocabulary | crate façades | box library | workload env | operator-facing docs
 - interface changes: none  (or: path/to/file.rs:12 — <surface> <what moved>; approved by <KD/spec> | UNAPPROVED)
 - premise changes: none    (or: path/to/file.rs:34 — weakens <premise>; UNAPPROVED)
 - security tests removed/ignored: none  (or: name each)
