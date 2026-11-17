@@ -110,9 +110,6 @@ fn a_forbid_on_a_nested_location_beats_a_permit_on_the_outer_one() {
 
 #[test]
 fn a_misspelled_location_stops_the_box_before_the_workload_starts() {
-    if !fixture::namespace_launcher_is_usable() {
-        return;
-    }
     let (_box, output) = Request::with_config(
         "locations-typo",
         &PROJECT_WRITES.replace("locations.project", "locations.projcet"),
@@ -129,9 +126,6 @@ fn a_misspelled_location_stops_the_box_before_the_workload_starts() {
 
 #[test]
 fn a_policy_that_names_a_location_stops_a_box_that_declares_none() {
-    if !fixture::namespace_launcher_is_usable() {
-        return;
-    }
     let (_box, output) = Request::with_policy("locations-none", PROJECT_WRITES).attempt();
     assert!(!output.status.success(), "{output:?}");
     assert!(
