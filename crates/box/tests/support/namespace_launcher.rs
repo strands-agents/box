@@ -12,9 +12,14 @@ pub(crate) fn namespace_launcher_is_usable() -> bool {
 /// reaper the way the real launcher does.
 #[cfg(target_os = "linux")]
 pub(crate) fn namespace_launcher_is_usable() -> bool {
-    // The box selects the namespace backend only on aarch64 and refuses every other Linux
-    // architecture by name, so no box runs on x86_64 whatever the kernel permits.
-    if !cfg!(target_arch = "aarch64") {
+    // The box selects the namespace backend only on ARM64 and x86-64.
+    if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
+        return false;
+    }
+    #[cfg(target_arch = "x86_64")]
+    if std::env::var_os("EXPERIMENTAL_X86_SUPPORT").as_deref() != Some(std::ffi::OsStr::new("TRUE"))
+    {
+        eprintln!("skipping: Linux x86-64 Box tests require EXPERIMENTAL_X86_SUPPORT=TRUE");
         return false;
     }
     use std::sync::OnceLock;

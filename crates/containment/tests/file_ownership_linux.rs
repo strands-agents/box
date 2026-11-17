@@ -1,5 +1,8 @@
 //! Linux filesystem grants through the production trampoline under root and nonroot launch identities.
-#![cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#![cfg(all(
+    target_os = "linux",
+    any(target_arch = "aarch64", target_arch = "x86_64")
+))]
 
 use containment::{ContainmentConfig, Operation, Scope};
 use sha2::{Digest, Sha256};

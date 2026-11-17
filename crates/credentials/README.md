@@ -49,9 +49,12 @@ route that names no profile then fails at signing time, per request, rather than
 than not starting: the request goes upstream bare, and the upstream's `401` reads
 like the boundary denying the call.
 
-A route is either **opaque** (`RouteSpec::opaque`) — one secret attached
-at one location, standing behind a phantom — or **signed AWS**
-(`RouteSpec::signed_aws`), SigV4-signed across several headers. A signed
+A route is one of four kinds. **Opaque** (`RouteSpec::opaque`) — one secret attached
+at one location, standing behind a phantom. **Signed AWS**
+(`RouteSpec::signed_aws`), SigV4-signed across several headers. And two for a re-route to a backend:
+**box-owned** (`RouteSpec::box_owned`) attaches the box's own credential — a backend token — at one
+location with no phantom; and **strip-phantom** (`RouteSpec::strip_phantom`) mints a placeholder the
+workload presents and strips it, attaching nothing (a re-routed destination's own secret). A signed
 route takes no inject location and mints no phantom, because nothing is placed for
 the vault to recognize. Add `harness_location(mode)` to an opaque route when the
 workload presents the phantom somewhere other than where the real secret attaches. It returns
@@ -100,7 +103,7 @@ returned secret and its lifetime.
 | `env://NAME` | A process environment variable. A nine-name denylist refuses `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN`, `AWS_CREDENTIAL_EXPIRATION`, `AWS_PROFILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `LD_PRELOAD`, and `LD_LIBRARY_PATH`, case-insensitively. | soft when the variable is unset |
 | `file:///path` | File contents, trailing newline stripped. | soft when the file is missing or unreadable |
 | `op://vault/item/field` | The authenticated 1Password CLI. | hard: `op read` returns one exit code for missing, locked, and signed-out, so there is no "absent" signal to trust |
-| `aws://profile` | Structured AWS session credentials for SigV4 signing, from the named profile's static keys. Not a single secret, so `Backend::resolve` rejects it. | hard |
+| `aws://profile` | Structured AWS session credentials for SigV4 signing, resolved as the named profile through the AWS SDK (static keys, credential_process, assume-role, or web identity). Not a single secret, so `Backend::resolve` rejects it. | hard |
 | `aws://` (no profile) | Structured AWS session credentials from the AWS SDK default credential provider chain (the host's ambient identity), driven on a worker thread and cached. Not a single secret, so `Backend::resolve` rejects it. | hard |
 
 A soft outcome means the vault comes up and the route appears in `skipped()`. A hard one aborts

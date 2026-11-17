@@ -33,7 +33,7 @@ pub(crate) struct BareNames {
 
 impl BareNames {
     /// The declared file of each name, as the Shell reads it.
-    pub(crate) fn programs(&self) -> strands_shell::os::HostPrograms {
+    pub(crate) fn programs(&self) -> box_shell::HostPrograms {
         Arc::new(
             self.declared
                 .iter()
@@ -164,7 +164,7 @@ impl ConfiguredCommands {
             let (Some(name), Some(command)) = (bound_name(spec), self.tools.get(label)) else {
                 continue;
             };
-            if strands_shell::exec::implements_program(name) {
+            if box_shell::implements_program(name) {
                 continue;
             }
             let declares = name == called_name(spec);
@@ -525,6 +525,7 @@ mod tests {
             tool: BTreeMap::from([(
                 "reader".to_string(),
                 ProcessSpec {
+                    file_watching: false,
                     native_filesystem_policy: None,
                     command: vec![path.display().to_string()],
                     workspace: None,
@@ -1318,6 +1319,7 @@ mod tests {
 
     fn tool(command: &Path, program: Option<&str>) -> ProcessSpec {
         ProcessSpec {
+            file_watching: false,
             native_filesystem_policy: None,
             command: vec![command.display().to_string()],
             workspace: None,

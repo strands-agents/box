@@ -84,6 +84,15 @@ impl McpTarget {
             ));
         };
         let method = match object.get("method") {
+            Some(Value::String(_))
+                if object.contains_key("result") || object.contains_key("error") =>
+            {
+                return Err(refuse(
+                    "an MCP frame that carries both a method and a result or error is refused: the \
+                     box cannot say whether it is a request or a response"
+                        .to_string(),
+                ));
+            }
             Some(Value::String(method)) => method.as_str(),
             None if object.contains_key("result") || object.contains_key("error") => {
                 return Err(refuse(
@@ -349,6 +358,19 @@ mod tests {
             );
             assert!(classify(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#).is_err());
             assert!(classify(br#"{"jsonrpc":"2.0","id":1,"method":"resources/read"}"#).is_err());
+            for answer in [
+                &br#"{"jsonrpc":"2.0","id":5,"method":"ping","result":{"action":"accept"}}"#[..],
+                br#"{"jsonrpc":"2.0","id":5,"method":"ping","error":{"code":-1,"message":"x"}}"#,
+                br#"{"jsonrpc":"2.0","id":5,"method":"notifications/x","result":{}}"#,
+            ] {
+                let error = classify(answer).expect_err("a frame with a method and an answer");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("both a method and a result or error"),
+                    "the wrong refusal: {error}"
+                );
+            }
         }
     }
 

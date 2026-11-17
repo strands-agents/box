@@ -72,6 +72,7 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
             cli,
             options.terminal,
             signals,
+            options.box_id.as_deref(),
             #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
             native_setup,
         )
@@ -90,6 +91,7 @@ async fn dispatch(
     cli: Cli,
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
+    box_id: Option<&str>,
     #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))] native_setup: Option<
         run::NativeSetup,
     >,
@@ -101,6 +103,7 @@ async fn dispatch(
                 workload,
                 terminal,
                 signals,
+                box_id,
                 #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
                 native_setup.expect("native capabilities prepared before runtime startup"),
             )

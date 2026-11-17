@@ -1527,6 +1527,176 @@ mod tests {
     }
 
     #[test]
+    fn a_child_is_awaited_with_waitid_under_the_filters() {
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        let outcome = in_filtered_child(&filters, || {
+            let waitid = |idtype: libc::idtype_t, id: libc::c_long, options: libc::c_int| {
+                // SAFETY: an all-zero siginfo_t is a valid output buffer.
+                let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+                // SAFETY: the kernel writes only into the live siginfo_t; rusage is null.
+                let result = unsafe {
+                    libc::syscall(
+                        libc::SYS_waitid,
+                        idtype,
+                        id,
+                        &mut info,
+                        options,
+                        std::ptr::null_mut::<libc::rusage>(),
+                    )
+                };
+                (result, info)
+            };
+            let refused = |result: libc::c_long| {
+                result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+            };
+            // SAFETY: the grandchild only exits.
+            let child = unsafe { libc::fork() };
+            if child == -1 {
+                return 13;
+            }
+            if child == 0 {
+                // SAFETY: terminating the grandchild with a known status.
+                unsafe { libc::_exit(7) };
+            }
+            let (result, _) = waitid(
+                libc::P_ALL,
+                0,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            );
+            if result != 0 {
+                return if refused(result) { 10 } else { 14 };
+            }
+            // SAFETY: opening a descriptor for this process's own child.
+            let pidfd = unsafe { libc::syscall(libc::SYS_pidfd_open, child, 0) };
+            if pidfd < 0 {
+                return 15;
+            }
+            let (result, info) = waitid(libc::P_PIDFD, pidfd, libc::WEXITED | libc::WNOWAIT);
+            // SAFETY: closing the descriptor this child just opened.
+            unsafe { libc::close(pidfd as libc::c_int) };
+            // SAFETY: the kernel filled a CLD_EXITED record for a child.
+            if result != 0 || unsafe { info.si_pid() } != child {
+                return if refused(result) { 11 } else { 16 };
+            }
+            let (result, info) = waitid(libc::P_PID, child.into(), libc::WEXITED);
+            // SAFETY: the kernel filled a CLD_EXITED record for a child.
+            if result != 0 || unsafe { info.si_status() } != 7 {
+                return if refused(result) { 12 } else { 17 };
+            }
+            0
+        });
+        assert_eq!(
+            outcome, 0,
+            "10/11/12 = WAITID WAS REFUSED WITH EPERM for P_ALL with WNOHANG, P_PIDFD, or P_PID, \
+             so Go's os/exec fails every child it starts and gh cannot run git, \
+             13 = fork failed, 14/16/17 = waitid failed with another errno or a wrong record, \
+             15 = pidfd_open failed, 40 = installing the filters failed"
+        );
+    }
+
+    #[test]
+    fn select_waits_on_held_descriptors_under_the_filters() {
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        let outcome = in_filtered_child(&filters, || {
+            let mut pipe = [0; 2];
+            // SAFETY: the kernel writes two descriptors into the live array.
+            if unsafe { libc::pipe2(pipe.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+                return 13;
+            }
+            // SAFETY: writing one byte from a live buffer into this child's own pipe.
+            if unsafe { libc::write(pipe[1], b"x".as_ptr().cast(), 1) } != 1 {
+                return 14;
+            }
+            let ready = |result: libc::c_long, set: &libc::fd_set| -> Option<i32> {
+                if result == -1 {
+                    return Some(
+                        if std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) {
+                            10
+                        } else {
+                            11
+                        },
+                    );
+                }
+                // SAFETY: reading a bit of a live, initialized set.
+                (result != 1 || !unsafe { libc::FD_ISSET(pipe[0], set) }).then_some(12)
+            };
+            let readable = || {
+                // SAFETY: an all-zero fd_set is an empty set.
+                let mut set: libc::fd_set = unsafe { std::mem::zeroed() };
+                // SAFETY: the pipe's read end is far below FD_SETSIZE.
+                unsafe { libc::FD_SET(pipe[0], &mut set) };
+                set
+            };
+            // glibc's select(), which issues pselect6 on ARM64 and whichever call it picks on x86.
+            let mut set = readable();
+            let mut timeout = libc::timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            };
+            let null = std::ptr::null_mut::<libc::fd_set>();
+            // SAFETY: every pointer is live or null for the duration of the call.
+            let result = unsafe { libc::select(pipe[0] + 1, &mut set, null, null, &mut timeout) };
+            if let Some(code) = ready(result.into(), &set) {
+                return code;
+            }
+            let mut set = readable();
+            let timeout = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            // SAFETY: every pointer is live or null; a null sigmask argument leaves the mask alone.
+            let result = unsafe {
+                libc::syscall(
+                    libc::SYS_pselect6,
+                    pipe[0] + 1,
+                    &mut set,
+                    null,
+                    null,
+                    &timeout,
+                    std::ptr::null::<libc::c_void>(),
+                )
+            };
+            if let Some(code) = ready(result, &set) {
+                return code + 10;
+            }
+            #[cfg(target_arch = "x86_64")]
+            {
+                let mut set = readable();
+                let mut timeout = libc::timeval {
+                    tv_sec: 0,
+                    tv_usec: 0,
+                };
+                // SAFETY: every pointer is live or null for the duration of the call.
+                let result = unsafe {
+                    libc::syscall(
+                        libc::SYS_select,
+                        pipe[0] + 1,
+                        &mut set,
+                        null,
+                        null,
+                        &mut timeout,
+                    )
+                };
+                if let Some(code) = ready(result, &set) {
+                    return code + 20;
+                }
+            }
+            0
+        });
+        assert_eq!(
+            outcome, 0,
+            "10/20/30 = glibc select / raw pselect6 / raw x86 select WAS REFUSED WITH EPERM, so \
+             cargo's vendored libcurl fails every download with 'Unrecoverable error in \
+             select/poll'; 11/21/31 = refused with another errno; 12/22/32 = the readable pipe \
+             was not reported; 13/14 = pipe setup failed; 40 = installing the filters failed"
+        );
+    }
+
+    #[test]
     fn permit_and_restriction_filters_refuse_unapproved_calls() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()

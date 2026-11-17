@@ -1,5 +1,8 @@
 //! Linux filesystem queries expose only the approved fields and preserve file access restrictions.
-#![cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#![cfg(all(
+    target_os = "linux",
+    any(target_arch = "aarch64", target_arch = "x86_64")
+))]
 
 use std::ffi::{CStr, CString};
 use std::io::{self, Write as _};

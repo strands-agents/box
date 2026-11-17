@@ -201,7 +201,7 @@ files (`git status --short`) — new crates/specs are part of the feature.
    - Panicking indexing (`v[i]`) where `.get()` is warranted; `as` truncation / overflow on
      lengths/ports; missing `#[must_use]` where dropping the value is a bug.
    - A `std::sync::Mutex` guard held across an `.await` (deadlock/blocking risk); blocking I/O in async.
-5b. **Does each new test FAIL without the fix? Break it and find out.** The repo's vendored-fix rule —
+5b. **Does each new test FAIL without the fix? Break it and find out.** The repo's guard rule —
     *"Introduce the defect, watch the refusal, restore"* — applies to **every test the diff adds**.
     Per test: revert what it claims to pin, run that test by name, confirm it **FAILS**, restore, and
     say you did. A scratch edit you revert in the same step is observation, not authorship.
@@ -311,7 +311,7 @@ The review is read-only, but its build artifacts still share the operator's memo
 - `cargo build -p <crate> --all-features`
 - `cargo test -p <crate> --all-features`
 - `cargo clippy -p <crate> --all-targets --all-features` — owned warnings must be **zero**:
-  `… 2>&1 | grep -c -- '--> crates/<crate-dir>'` must print `0`. Vendored warnings are expected.
+  `… 2>&1 | grep -c -- '--> crates/<crate-dir>'` must print `0`.
 - `cargo fmt --check`
 - `cargo build -p <crate> --no-default-features`  *(critical — proves feature-gated layers isolate)*
 - **`scripts/test-all.sh` — mandatory.** It reports a skip when no example supplies `run.sh`.

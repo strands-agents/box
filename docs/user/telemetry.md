@@ -132,7 +132,7 @@ Each box record names its origin on its resource:
 | Key | Value |
 |---|---|
 | `service.name` | `strands-box` |
-| `strands.box.name` | this box's generated identifier, as `box-` and 16 hexadecimal characters |
+| `strands.box.name` | this box's ID: the one the library caller supplied, or a generated `box-` and 16 hexadecimal characters |
 | `strands.box.source` | `box` for a record the box wrote, and `agent` for a relayed payload |
 | `strands.box.run.id` | one identifier per `strands-box run` invocation |
 
@@ -162,8 +162,8 @@ action `push` in the category `Tool::git`.
 
 Two keys are excluded: `url.full` and `process.command_line`.
 
-`process.command_args` reports an argument the script stated literally. For an argument that arrived
-from an expansion, the record reports:
+`process.command_args` reports each argument after expansion, because the Shell does not say which
+words the script stated literally. For each argument, the record reports:
 
 | The expanded argument | What the record carries |
 |---|---|
@@ -272,8 +272,19 @@ message does: Box prefixes every line it prints with `strands-box:`.
 
 Each message names the table it came from.
 
-A target that fails while the box runs loses the record. Box reports no such loss, and it does not
-retry.
+A target that fails while the box runs loses the record, and Box does not retry. When the run ends,
+Box prints one line on stderr if an export to a configured target failed, or if the final export did
+not finish in time:
+
+```text
+strands-box: warning: telemetry records were lost: 2 exports to the configured targets failed
+```
+
+The count is exports, not records: one export can carry many records. The run's exit code does not
+change. The line does not cover everything that can be lost: a record that the telemetry queue
+refuses when it is full, an agent payload that Box refuses, a batch that a slow target does not
+accept before its export deadline while the box runs, and a relayed payload still in flight at
+shutdown are not counted. So the absence of this line does not prove that nothing was lost.
 
 ## See also
 

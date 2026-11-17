@@ -458,6 +458,22 @@ move executed outside the workload's mount namespace.
 A path these lists name does not join the Shell's reachable set, so `read = ["~/vendor/sdk"]` makes
 the agent's own read work while `cat` through the Shell stays refused.
 
+<a id="a-read-entry-may-name-a-link-to-a-file"></a>
+### A read entry may name a link to a file
+
+A `read` or `read_file` entry may name a symbolic link to a file, such as `/usr/bin/cc`. The grant is
+the file the link resolves to, and the box also shows that file at the link's name, read-only. A
+program runs a helper by the name `PATH` finds. Granting only the target left that name missing,
+so cargo failed with `linker 'cc' not found` on Linux. The links in between, such as
+`/etc/alternatives/cc`, are not granted: Linux binds the file at the named path, and macOS allows
+the link nodes on the way. We rejected granting the folders that hold the links, such as
+`/usr/bin` or `/etc/alternatives`, because that grants every file in them. The link must sit in its
+own real folder, and every other list still refuses a link. A link inside a credential store is
+refused, because the store exception resolves the entry again at each spawn, and the link could be
+pointed at another file of the store during a run. A write, exec, list or metadata grant
+through a link would act on a name the operator did not state as that file.
+`a_read_entry_naming_a_link_to_a_file_reads_by_both_names` pins it.
+
 <a id="the-runtime-minimum-is-two-sets-and-the-agent-takes-the-smaller-one"></a>
 ### The runtime minimum is two sets, and the agent takes only the smaller one
 
@@ -518,16 +534,18 @@ input inside its parent's boundary because native descendants raise no new decis
 <a id="ca-trust-is-a-per-process-environment-value"></a>
 ### CA trust is a per-process environment value, not a system trust store
 
-Box composes six CA environment names for each process and sets each one to the gateway's CA:
+Box composes six CA environment names for each gateway-routed process and sets each one to the
+gateway's CA:
 `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `CODEX_CA_CERTIFICATE`, `AWS_CA_BUNDLE`,
 `REQUESTS_CA_BUNDLE`, and `GIT_SSL_CAINFO`. The general alternative is one system trust store, which
 on macOS is the keychain, and a contained process can neither reach nor change it. Most runtimes
 honour `SSL_CERT_FILE`. `botocore` instead reads `AWS_CA_BUNDLE`, and the libcurl in Apple git reads
 only `GIT_SSL_CAINFO`. Setting a name a runtime ignores costs nothing, so the rule is "every name a
 supported runtime reads", and the list grows when a runtime is added. Box reserves each name and
-refuses a table that states one at startup. Letting the workload choose a CA bundle would let it
+refuses a gateway table that states one at startup. Letting the workload choose a CA bundle would let it
 choose a trust root. A CA name is trust and never authorization, and the gateway stays the one
-outbound boundary.
+outbound boundary. A native-egress process gets none of these names, and its table may set them; see
+[a native-egress process keeps its own proxy and trust settings](#a-native-egress-process-keeps-its-own-proxy-and-trust-settings).
 
 <a id="an-mcp-server-is-one-configuration-table"></a>
 ### Every MCP server is one `[mcp.<name>]` table, and its start is a policy decision
@@ -648,9 +666,9 @@ fails with `EPERM: operation not permitted, posix_spawn '/bin/sh'` for every hoo
 reaches stderr, and `run` exits 0, so the operator sees no failure. Granting `process-exec` on
 `/bin/sh` would make it work, but the commands the hook issues would then raise no decision, so an
 authored `forbid` would never see them. Once rewritten, each hook command reaches the mediated Shell
-and raises `shell:exec`, and each file it touches raises its own `fs:*`. Two limits remain. A hook
-that reads its payload on stdin sees nothing because the alias forwards no input. Plugin hooks
-remain broken because most of them exec a script.
+and raises `shell:exec`, and each file it touches raises its own `fs:*`. The alias forwards a hook's finite stdin to the Shell, so a hook reads its payload with a Shell
+command such as `cat` or `jq`. A program that the Shell starts in its own sandbox still reads no
+stdin. Plugin hooks remain broken because most of them exec a script.
 
 ## Policy
 
@@ -1677,6 +1695,46 @@ network namespace. It reaches the public and private networks, the machine's loo
 the instance metadata endpoint. Treat this flag as a host-network trust grant for one named tool or
 server, never a default.
 
+<a id="a-native-egress-process-keeps-its-own-proxy-and-trust-settings"></a>
+#### A native-egress process keeps its own proxy and trust settings
+
+A program with `contain_egress = false` connects as it would on the host. Box adds no proxy or CA
+setting of its own for it, and refuses none. Before this rule, Box set the gateway's proxy
+variables and CA on every process. A client that reads `HTTPS_PROXY`, such as Go, `gh`, `reqwest`
+or `curl`, then sent its traffic through the gateway anyway, and the escape did nothing. Box now
+sets none of `HTTP_PROXY`, `HTTPS_PROXY`, `http_proxy`, `https_proxy`, `NODE_USE_ENV_PROXY`,
+`NO_PROXY`, `no_proxy`, and the six CA names for that program, and grants no read of the gateway's
+CA. That table's `env` may set any of those thirteen names, for a company proxy or a company CA
+bundle. A table that names a file still needs a `read_file` entry for it. A gateway table and the
+agent still refuse them, because the gateway's CA must win for the gateway to read the traffic.
+
+Box sets no default CA file, on either platform. A fixed file changes which roots a client trusts.
+On macOS, `/private/etc/ssl/cert.pem` holds only Apple's shipped roots, and a client such as
+`rustls-native-certs` reads only that file when `SSL_CERT_FILE` is set. It then misses roots that an
+administrator added to the keychain, such as a TLS-inspection root, and fails inside the box where it
+works on the host. On Linux, each distribution keeps its bundle in a different place, so one fixed
+path would be wrong on some. A tool pack that knows a client reads only a file sets that file in
+the table's `env`. A distribution whose bundle under `/etc/ssl` is a link into another tree, such as
+`/etc/pki` on Amazon Linux and Fedora, needs a `read` entry for that tree.
+
+On macOS, many clients verify a certificate through Apple's trust check, which asks the
+`com.apple.trustd.agent` and `com.apple.SecurityServer` services. The sandbox denied both, so Go
+1.26, Go 1.27 with an older `go.mod`, Rust's `rustls-platform-verifier` and `native-tls`, and very
+likely Swift failed every check. A native-egress profile now allows a lookup of these two services,
+as the program has on the host. `native-tls` needs `SecurityServer`; the others need only trustd.
+A gateway profile and the agent get neither service: the gateway's per-run CA is not in the keychain,
+so they would gain nothing.
+
+The cost is service reach on macOS. `SecurityServer` also serves the keychain and authorization.
+On a Mac, a throwaway generic password in the login keychain stayed unreadable with both services
+allowed, because Box still refuses reads of the keychain files. So the program reaches the host's
+services, but not the host's keychain files. Data-protection and iCloud keychain items were not
+tested. Their service, `secd`, stays denied. The startup disclosure states the rule on a
+`native trust:` line under the `native egress:` line.
+`a_native_egress_leaf_gets_no_proxy_or_ca_from_core_and_keeps_its_own`,
+`only_a_native_egress_table_may_set_the_proxy_and_ca_names`, and
+`only_a_native_egress_leaf_renders_the_trust_services` hold the rule.
+
 <a id="a-leaf-reaches-the-host-startup-runtime-services"></a>
 #### Agents get account lookup; tool and MCP server sandboxes can also request network startup services
 
@@ -1691,30 +1749,41 @@ gains neither `net.*` reads nor a routing socket, while tool and MCP server sand
 in gain no lookup. `account_lookup_is_allowed_but_preferences_services_remain_denied` checks live
 account lookup and preference-service denials against successful outside controls.
 
+<a id="file-watching-requires-explicit-acceptance-of-metadata-disclosure"></a>
+### File watching requires explicit acceptance of metadata disclosure
+
+The approved `file-watching = true` option is an explicit exception to the four-inputs authority test because it grants access to event metadata that policy does not judge and that can extend beyond the process's filesystem grants.
+This exception accepts possible disclosure of denied names and event metadata, including outside the workspace and from past events; direct file-content and write restrictions remain in force.
+Box permits FSEvents only for each process table that opts in, so the default remains off and the agent's selection does not enable its tools or local MCP servers.
+Automatically permitting FSEvents for tools would restore directory watching without the operator accepting this additional authority.
+On macOS, Box discloses the limitation for every selected table before the agent starts, including stdio MCP servers that remain unstarted, and repeats the disclosure when a server starts.
+Linux retains its existing watcher behavior.
+
 ## Interpreters
 
-Box runs two interpreters for the workload: the vendored Strands Shell, and Monty, which is the
-Python interpreter.
+Box runs two interpreters for the workload: Strands Shell, and Monty, which is the Python
+interpreter.
 
 <a id="interpreters-are-vendored-not-the-host-shell"></a>
-### Box runs a vendored interpreter, never the host OS's shell
+### Box runs a pinned Strands Shell, never the host OS's shell
 
-Box runs every shell command the agent issues through Strands Shell, an open-source interpreter that
-Box vendors at a pinned revision. It never runs `bash` or `zsh` from the surrounding OS for the
-agent's sandbox. A tool's or MCP server's sandbox runs programs of the surrounding OS, a shell
-included, inside that sandbox. A harness runs a real shell for its command tool, so Box gives it
-something with the same exit codes, the same stdout and stderr shape, and the same argument
-conventions. Each filesystem operation is a Rust method call that Box intercepts before acting. The
-Shell does not make that operation as a syscall on its own authority. Box vendors the interpreter
-instead of writing one, because upstream already holds the parser, the pipelines, the control flow,
-and more than fifty builtins. Box must keep every builtin on the interception path. Updating the
-vendored interpreter requires a merge, and Box must fix upstream defects it encounters.
+Box runs every shell command the agent issues through Strands Shell, an open-source interpreter. Box
+builds against a pinned upstream revision, `20c642b`, and holds no copy of its source. It never runs
+`bash` or `zsh` from the surrounding OS for the agent's sandbox. A tool's or MCP server's sandbox
+runs programs of the surrounding OS, a shell included, inside that sandbox. A harness runs a real
+shell for its command tool, so Box gives it something with the same exit codes, the same stdout and
+stderr shape, and the same argument conventions. Each filesystem operation is a call on Box's own
+kernel, which Box intercepts before acting. The Shell does not make that operation as a syscall on
+its own authority. Box uses the interpreter instead of writing one, because upstream already holds
+the parser, the pipelines, the control flow, and more than fifty builtins. Box must keep every
+builtin on the interception path. A Shell defect that Box needs fixed is fixed upstream, and Box
+moves its pin to the revision that holds the fix.
 
 <a id="the-interpreters-run-in-the-trusted-process"></a>
 ### Both interpreters run in the box's trusted process, and that is stated residual risk
 
 The Shell and Monty run in the `run` process. That process is outside the sandbox boundary, and it
-holds the policy engine, the interception CA key, and the resolved secrets. The vendored Shell
+holds the policy engine, the interception CA key, and the resolved secrets. Strands Shell
 always embeds a Lua 5.4 C interpreter, which the workload reaches through the `lua` builtin. The
 Shell is therefore not a small interpreter with no `unsafe` code. Monty has weaker memory-safety
 guarantees. The pinned version contains 46 `unsafe` blocks, including a custom raw-pointer heap. We
@@ -1792,21 +1861,22 @@ not covered.
 <a id="shell-network-goes-through-the-egress-gateway"></a>
 ### Box's kernel wrapper sends the Shell's HTTP through the egress gateway
 
-Box owns the Shell's HTTP step. `CallKernel::http_request` does not hand a request to the vendored
-backend. The wrapper refuses every request when the box has no gateway. Otherwise, it runs the private-address floor and sends the request with its own client. That client dials the box's egress gateway on loopback,
+Box owns the Shell's HTTP step. `box_shell::ShellKernel::http_request` does not hand a request to
+the Shell's `VfsKernel`. It refuses every request when the box has no gateway. Otherwise, it runs the
+private-address floor and hands the request to the box's `GatewayNetwork`, which sends it with its
+own client. That client dials the box's egress gateway on loopback,
 trusts only the gateway's interception CA, and follows no redirect, so each `curl -L` hop is a new
-request through the wrapper. It ignores `curl -k`. The backend keeps its own network off, so the
-vendored client can't dial even if a call skips the wrapper. The gateway stays the one authority for
+request through the wrapper. It ignores `curl -k`. `ShellKernel` serves HTTP itself, so the Shell's
+own client in `VfsKernel` is never reached. The gateway stays the one authority for
 `net:connect` and `http:request`, and the Shell resolves no credential and attaches no secret.
 
-The alternative was proxy fields on the vendored `VfsKernel`, set through
-`ShellBuilder::egress_proxy`. Upstream Shell doesn't have that feature and Box won't propose it, and
-the builder calls did nothing once Box supplied its own kernel.
+The alternative was proxy fields on the Shell's `VfsKernel`, set through a builder call. Upstream
+Shell doesn't have that feature and Box won't propose it, and a builder call does nothing once Box
+supplies its own kernel.
 
 The wrapper governs only requests that reach the kernel's HTTP step. A future Shell network command
-that builds its own client would skip it. A test in `shell_egress_client_guard.rs` fails if a client
-is built in the Shell sources outside `vfs_kernel.rs` and `shell.rs`, but that check is a lint and
-not a guarantee.
+that builds its own client would skip it. A test in `shell_dependency_guard.rs` fails if a client
+is built in the Shell sources outside `vfs_kernel.rs`, but that check is a lint and not a guarantee.
 
 <a id="a-gateway-refusal-never-reports-success"></a>
 ### A gateway refusal never reaches the workload as a successful response
@@ -1826,15 +1896,17 @@ answer. This remains an open residual risk.
 <a id="python-in-the-shell-is-monty"></a>
 ### A workload reaches Monty two ways, and Box judges both on its one policy
 
-The workload reaches Monty by running the `python3` alias directly through the broker or by typing
-`python` or `python3` in the hosted Shell. The Shell forwards source to Monty through a script
-interface. Both routes run one Monty VM per request, and Box judges both as the same principal under
-its one policy engine, so no route reaches an interpreter that policy does not see. Without the
-second route a `python` typed in the Shell exited 127, so an agent that reaches interpreters only
-through its shell never reached Monty.
+The workload reaches Monty by running the `python3` alias or by typing `python` or `python3` in the
+hosted Shell. The alias sends its name and arguments to the Shell, so both ways reach the Shell's
+own `python3`, which forwards source to Monty through a script interface. Each run is one Monty VM
+per request, and Box judges both ways as the same principal under its one policy engine, so no route
+reaches an interpreter that policy does not see. Without the Shell's `python3` a `python` typed in
+the Shell exited 127, so an agent that reaches interpreters only through its shell never reached
+Monty.
 
-The direct route adds an outer request timeout. A script file argument through the Shell can also
-reach a bind, while the direct alias cannot.
+The Shell's deadline bounds both ways, and the Shell reads a script file argument under policy.
+The broker refuses a request that opens Monty without the Shell, so a `shell:exec` decision covers
+every route.
 
 <a id="a-bare-python-name-always-means-monty"></a>
 ### A bare `python` name always means Monty, so a host interpreter needs its absolute path
@@ -1890,13 +1962,12 @@ means a broker or interpreter fault.
 
 The interpreter stops a script after 2 minutes of execution time, from inside its own run loop, so
 `while True: pass` stops even when the script makes no OS call. Time suspended on the surrounding OS
-does not count against that budget. Box adds a fixed outer wall-clock limit to direct Python calls,
-plus limits of 60 seconds for each `fetch`, 3 minutes for all sleeps, 10,000 suspensions, and 1 MiB
-for each `os.urandom` call.
+does not count against that budget. Box adds limits of 60 seconds for each `fetch`, 3 minutes for
+all sleeps, 10,000 suspensions, and 1 MiB for each `os.urandom` call.
 
-Python invoked through Shell shares the enclosing call's configured deadline and broker grace
-period. It does not receive a separate five-minute allowance. Monty's limits also apply. A shorter
-Shell deadline can expire first, although synchronous execution can delay its check. Box never
+Python runs through the Shell, so it shares the enclosing call's configured deadline and broker grace
+period. Monty's limits also apply. A shorter Shell deadline can expire first, although synchronous
+execution can delay its check. Box never
 shortens a sleep. A sleep that would exceed the total raises `TimeoutError` before waiting, as
 `a_sleep_longer_than_the_total_raises_at_once` checks. `a_script_stops_at_its_suspension_limit` and
 `urandom_above_its_cap_is_a_catchable_python_error` pin two of them. Monty refuses one allocation
@@ -1951,21 +2022,22 @@ its sandbox has no route to the broker either.
 
 <a id="the-box-runs-a-host-binary-through-the-spawn-host-seam"></a>
 <a id="box-runs-a-host-binary-through-a-spawn-seam-that-the-shell-names-and-box-implements"></a>
-### The Shell declares the spawn hook, and Box implements it
+### The Shell hands a command it does not implement to Box, and Box runs it
 
-The Shell declares the `spawn_host` hook and calls the implementation its embedder installs. Box installs an implementation that selects a tool, translates its process spec into a boundary, and runs the program. The split
-exists because the Shell crate depends on neither the containment crate nor the policy crate, so the
-Shell owns the interpreter boundary and Box owns operating system enforcement. The interface returns
-buffered stdout and stderr plus a status. A long operation such as a large `git clone` therefore
-does not stream. This hook differs from the upstream Shell, as recorded in `UPSTREAM.md`.
+The Shell calls the `command_fallback` handler of its kernel for a command it does not implement.
+`box_shell::ShellKernel` resolves the program, decides `shell:spawn`, and runs the program through
+the `HostSpawner` Box installs, which selects a tool, translates its process spec into a boundary,
+and runs it. `python` and `python3` go to the Monty runner Box installs instead. The split exists
+because neither the Shell nor `box_shell` depends on the containment crate or the policy crate, so
+they own the interpreter boundary and Box owns operating system enforcement. The hook returns buffered stdout and stderr plus a status. A long operation such as a
+large `git clone` therefore does not stream. A name no tool or program answers to keeps status 127.
 
 <a id="the-spawn-host-seam-fails-closed"></a>
 ### With no contained spawner installed, a host binary is refused and not run uncontained
 
-The spawn hook defaults to unsupported. With no hook installed there is no contained path, so a host
-binary is refused rather than run with the crate's built-in fork and exec inside the box's trusted
-process. An embedder must install that built-in explicitly to opt in to uncontained execution, and
-nothing installs it by default. `a_host_binary_is_refused_when_no_spawn_hook_is_installed` pins it.
+With no `HostSpawner` installed there is no contained path, so `ShellKernel` refuses a host binary
+with status 126 rather than run it in the box's trusted process. Nothing runs a host binary any
+other way. `run/broker/kernel/tests/fallback.rs::a_host_binary_is_refused_when_no_spawner_is_installed` pins it.
 Forgetting to install the hook therefore refuses the binary instead of running it without a sandbox.
 
 <a id="a-tool-reaches-only-the-paths-its-own-lists-name"></a>
@@ -2174,7 +2246,7 @@ because the backend handles the destination's auth downstream. On the same heade
 before the backend token attaches, so the backend token wins and no placeholder rides upstream.
 A backend `auth` of `aws://` is SigV4-signed over the **backend** host: the gateway signs the
 re-routed request AFTER it rewrites the `Host` to the backend and joins the path, so the signature
-covers exactly the bytes the backend receives, with service and region derived from the backend host
+covers exactly the bytes the backend receives, under the service and region the `aws://` auth states
 ([where a re-route signs a backend auth](#where-a-re-route-signs-a-backend-auth-of-aws)). The backend
 host is a gateway or custom domain with no derivable scope, so the `aws://` auth states an explicit
 `aws.service` and `aws.region`, which the loader requires — Box never guesses a vendor's host shape.
@@ -2329,29 +2401,41 @@ broken config after the box starts. Do not delete one because the other exists.
 
 <a id="a-provider-refuses-an-identity-it-cannot-honour"></a>
 <a id="a-bare-aws-resolves-the-default-credential-chain"></a>
-### An AWS binding resolves a named profile's static keys, and a bare aws:// resolves the full chain
+### Both aws:// forms resolve through the AWS SDK and share one risk
 
-`aws://PROFILE` reads the named profile's static keys and nothing else: it never runs
-`credential_process` (which runs a subprocess), SSO, or assume-role (each an STS or SSO call),
-because a credential that is not the one the operator named is a silent authority change. A bare
-`aws://` resolves the AWS SDK default credential provider chain: the environment, the profile files
-(including `credential_process`), web identity, the container endpoint, then instance metadata.
+`aws://PROFILE` and a bare `aws://` both resolve through the AWS SDK credential providers, so they
+share one capability, but through different providers so the audit never lies. `aws://PROFILE`
+resolves only the named profile, through a profile provider: it reads that profile's static keys,
+`credential_process`, assume-role, or web identity, never the ambient `AWS_*` keys or instance
+metadata, and a missing profile is refused rather than falling through to the ambient identity. A
+bare `aws://` resolves the default credential provider chain: the environment, the profile files,
+web identity, the container endpoint, then instance metadata. A named profile records its own
+acquisition and a bare form records the default chain, so the audit names what actually signed.
+Building the named form from the default chain with a pinned profile name was rejected, because that
+chain keeps the environment provider in front of the profile and falls through a missing profile to
+instance metadata, so a named route could sign as the ambient identity while the audit still claimed
+the profile. The earlier split, where `aws://PROFILE` read static keys only and refused
+`credential_process` as a boundary, is also gone: it made the named form weaker than the unscoped one
+and drove operators to set `AWS_PROFILE` and use a bare `aws://`, which signed as the profile but
+mislabelled the audit as the default chain.
 
 The credentials crate owns the SDK (`aws-config`, an HTTP/TLS stack, and a current-thread runtime on
-a dedicated worker thread), because the crate that already resolves `aws://PROFILE` owns every AWS
+a dedicated worker thread), because the crate that already resolves AWS routes owns every AWS
 credential path; the box crate injecting a resolver across a seam was rejected for splitting that
 ownership. The reserved tokens `aws://@instance-role` and `aws://@container-role`, and
 `aws://default`, were rejected, the last because `default` is a real profile and the overlap would
 be a silent identity substitution. The SDK's `sso` and `credentials-login` providers are compiled
-out (`default-features = false`), so a bare `aws://` does not resolve an AWS SSO or `aws login`
-default profile; such a profile is refused, and the refusal names the missing provider.
+out (`default-features = false`), so neither form resolves an AWS SSO or `aws login` profile; such a
+profile is refused, and the refusal names the missing provider.
 
 The cost: the SDK, a runtime, and a TLS stack link into the one process that holds every resolved
 plaintext; and a workload with write access to `~/.aws` can name a `credential_process` program the
 trusted process runs outside the sandbox, which is remote code execution
-([how access choices change the risk](limitations.md#how-access-choices-change-the-risk)). The
-shipped box exposes no setting that refuses a bare `aws://`, so the mitigation is a named profile or
-keeping `~/.aws` unwritable.
+([how access choices change the risk](limitations.md#how-access-choices-change-the-risk)). This
+residual now covers a named profile as well as the bare form. The bare form also signs with the
+host's ambient identity, so the box warns on every such request; `require_scoped_aws_profile` refuses
+the bare form, but it does not gate a named profile that declares `credential_process`. The one
+mitigation that covers both is keeping `~/.aws` unwritable by the workload.
 
 <a id="a-route-may-set-the-phantom-check-to-advisory"></a>
 ### A route may attach its secret always, not only against the phantom
@@ -2541,12 +2625,12 @@ see when a permit depended on more than one policy. Removing it would lose that 
 A reader that needs the caller's parent as an attribute must read the log record.
 
 <a id="a-shell-record-names-only-a-literal-argument"></a>
-### A shell record names an argument only when the script stated it literally
+### A shell record names an argument only when it is a plain flag
 
-The record reports an argument whose word was literal in the submitted script, and for an expanded
-word reports it only when it is a path or a plain flag. Every other argument becomes `<redacted>`,
-because the Shell holds arguments after expansion, so `echo $(cat secret.txt)` would otherwise write
-the file's contents into the record. A shape test alone cannot distinguish `pipefail` from
-`hunter2`. Provenance distinguishes them because the literal word already appears in a file the
-operator can read. The policy engine never receives provenance, because a decision is about what
-runs and not about how a word was spelled.
+The record reports a plain flag, and every other argument becomes `<redacted>`. The Shell holds
+arguments after expansion, so `echo $(cat secret.txt)` would otherwise write the file's contents
+into the record, and a shape test alone cannot distinguish `pipefail` from `hunter2`. The Shell does
+not say which words the script stated, so no argument counts as literal, and a literal word is
+redacted too. The cost is audit detail: a record names the program and the directory, and the path
+a command read is named by that read's own `fs:read` decision. The alternative was a literal-word
+mask on each command the Shell hands to Box, which upstream does not have.

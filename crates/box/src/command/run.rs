@@ -15,7 +15,7 @@ use crate::record::config::{
 use crate::record::layout::BoxRoot;
 use crate::run::commands::ConfiguredCommands;
 use crate::run::contain::boundary::{
-    Boundary, EgressMode, Launch, RuntimeReach, ShebangInterpreters, Site,
+    Boundary, EgressMode, Launch, RuntimeReach, ShebangInterpreters, Site, file_watching_disclosure,
 };
 use crate::run::contain::supervise::Contained;
 use crate::run::hosted::HostedBox;
@@ -178,6 +178,7 @@ pub(crate) async fn execute(
     argv: &[OsString],
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
+    box_id: Option<&str>,
     #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     native_setup: NativeSetup,
 ) -> Result<ExitCode, BoxError> {
@@ -203,10 +204,10 @@ pub(crate) async fn execute(
             drop(guard);
             None
         };
-        (prepare_contract(contract, config, argv)?, guard)
+        (prepare_contract(contract, config, argv, box_id)?, guard)
     };
     #[cfg(not(all(target_os = "linux", feature = "native-filesystem-policy")))]
-    let locked = prepare(config, argv)?;
+    let locked = prepare(config, argv, box_id)?;
     locked.announce_credential_stores()?;
     let collector = telemetry::open(&locked.root, &locked.record)?;
     let name = locked.root.name().to_string();
@@ -351,7 +352,7 @@ async fn hosted(
         )?;
         eprintln!("{}", boundary.disclosure());
     }
-    for label in locked.record.contained_mcp.keys() {
+    for (label, contained) in &locked.record.contained_mcp {
         let table = format!("[mcp.{label}]");
         let reach = hosted
             .approved()
@@ -362,6 +363,9 @@ async fn hosted(
         eprintln!("strands-box: {table} starts on demand; approved direct filesystem grants:");
         for grant in &reach.grants {
             eprintln!("{}", grant.disclosure());
+        }
+        if cfg!(target_os = "macos") && contained.spec.file_watching {
+            eprintln!("{}", file_watching_disclosure(&table));
         }
     }
     let boundary = Boundary::translate(
@@ -403,14 +407,15 @@ fn read_contract(config: &Path) -> Result<RunContract, BoxError> {
 }
 
 #[cfg(not(all(target_os = "linux", feature = "native-filesystem-policy")))]
-fn prepare(config: &Path, argv: &[OsString]) -> Result<LockedRun, BoxError> {
-    prepare_contract(read_contract(config)?, config, argv)
+fn prepare(config: &Path, argv: &[OsString], box_id: Option<&str>) -> Result<LockedRun, BoxError> {
+    prepare_contract(read_contract(config)?, config, argv, box_id)
 }
 
 fn prepare_contract(
     contract: RunContract,
     config: &Path,
     argv: &[OsString],
+    box_id: Option<&str>,
 ) -> Result<LockedRun, BoxError> {
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     if contract.experimental_features().native_filesystem_policy {
@@ -423,7 +428,7 @@ fn prepare_contract(
     contract.validate_declared_directory()?;
     let (mut root, root_lock) = BoxRoot::lock_directory(contract.box_directory())?;
     contract.validate_directory(root.root())?;
-    root.settle_identity()?;
+    root.settle_identity(box_id)?;
     let workspace = contract.workspace().to_path_buf();
     let request = contract.into_request(&root)?;
     let existed = root.is_configured();
@@ -517,6 +522,7 @@ mod tests {
 
     fn spec(command: &str, read: &[&str], write: &[&str]) -> ProcessSpec {
         ProcessSpec {
+            file_watching: false,
             native_filesystem_policy: None,
             command: vec![command.to_string()],
             workspace: None,

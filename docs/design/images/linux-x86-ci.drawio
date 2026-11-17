@@ -1,0 +1,49 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<mxfile host="drawio" type="device">
+  <diagram id="linux-x86-ci" name="Required native platform checks">
+    <mxGraphModel dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1200" pageHeight="700" math="0" shadow="0" background="#ffffff">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="arm" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;Ubuntu ARM64&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;Workspace + deterministic&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;fillColor=none;strokeWidth=2;verticalAlign=top;align=left;spacing=0;spacingLeft=16;fontSize=14;fontStyle=1;strokeColor=#232F3E;fontColor=#232F3E;spacingTop=14;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="40" width="300" height="100" />
+        </mxCell>
+        <mxCell id="x86" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;Ubuntu x86-64&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;Workspace + deterministic&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;Experimental opt-in enabled&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;fillColor=none;strokeWidth=2;verticalAlign=top;align=left;spacing=0;spacingLeft=16;fontSize=14;fontStyle=1;strokeColor=#232F3E;fontColor=#232F3E;spacingTop=14;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="200" width="300" height="120" />
+        </mxCell>
+        <mxCell id="mac" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;macOS&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;Workspace + deterministic&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;fillColor=none;strokeWidth=2;verticalAlign=top;align=left;spacing=0;spacingLeft=16;fontSize=14;fontStyle=1;strokeColor=#232F3E;fontColor=#232F3E;spacingTop=14;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="400" width="300" height="100" />
+        </mxCell>
+        <mxCell id="gate" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;CI Gate&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;Requires successful jobs&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;on every selected runner&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;fillColor=none;strokeWidth=2;verticalAlign=top;align=left;spacing=0;spacingLeft=16;fontSize=14;fontStyle=1;strokeColor=#232F3E;fontColor=#232F3E;spacingTop=14;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="680" y="200" width="320" height="120" />
+        </mxCell>
+        <mxCell id="arm-result" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2.5;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.2;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;strokeColor=#545B64;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="arm" target="gate">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="520" y="90" />
+              <mxPoint x="520" y="224" />
+            </Array>
+            <mxPoint as="offset" x="0" y="-15" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="x86-result" value="Job results" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2.5;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;strokeColor=#545B64;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="x86" target="gate">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="500" y="260" />
+            </Array>
+            <mxPoint as="offset" x="0" y="-15" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="mac-result" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeWidth=2.5;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.8;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;strokeColor=#545B64;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="mac" target="gate">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="520" y="450" />
+              <mxPoint x="520" y="296" />
+            </Array>
+            <mxPoint as="offset" x="0" y="-15" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
