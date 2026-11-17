@@ -329,6 +329,9 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   each reference the same secret.
 - Name no `#FIELD` text in a failure. A field name is part of the reference, and a reference body
   is redacted.
+- Refuse a JSON object that has no `#FIELD` with each `output`. A check for `json` alone lets a
+  program that prints an object as text give one destination each key. The built-in `op://`
+  source has no such check and returns the object whole, so a declared `op` differs from it.
 - Build the reserved scheme list from the constant of each owner and from the two route markers,
   so that a scheme has one owner. Keep a literal only for `secret`, which the box crate owns.
 - The JSON field step and its wipe helpers follow `json_field` and `is_json_object` in pull
