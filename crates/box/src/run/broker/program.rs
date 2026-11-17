@@ -196,7 +196,8 @@ impl Program {
         }
         let output = self.shell.run(command).await;
         self.kernel.settle();
-        // A Call's last write records its outcome before the Call answers.
+        // A Call's last write records its outcome before the Call answers. A write still open, such
+        // as one in a background job, records when it closes, after the Call has answered.
         if let Err(error) = self.kernel.record_closed_writes().await {
             Self::forward(
                 &self.stderr,

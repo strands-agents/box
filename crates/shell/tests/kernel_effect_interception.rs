@@ -814,6 +814,135 @@ fn a_probe_leaves_a_write_recording_failure_for_a_reporting_decision() {
     assert!(again.is_ok(), "the failure is reported once");
 }
 
+/// A read-write open in a host folder records its read at the open and its write at close.
+#[test]
+fn a_read_write_open_in_a_host_folder_records_its_write_at_close() {
+    let host = tempfile::tempdir().expect("a host folder");
+    let outcomes = Arc::new(Mutex::new(Vec::new()));
+    let interceptor = Arc::new(Recorder {
+        attempted: Mutex::new(Vec::new()),
+        admitted: Arc::new(Mutex::new(Vec::new())),
+        outcomes: Arc::clone(&outcomes),
+        deny: Box::new(|_| false),
+    });
+    let mut shell = support::builder()
+        .bind_direct(host.path().to_str().expect("a UTF-8 path"), "/workspace")
+        .effect_interceptor(interceptor)
+        .build()
+        .expect("shell builds");
+    let out = run(shell.run("printf AB 1<> /workspace/rw.txt"));
+    assert_eq!(out.status, 0, "{}", out.stderr);
+
+    let recorded = outcomes.lock().unwrap().clone();
+    assert_eq!(
+        outcome_for(&recorded, "read /workspace/rw.txt").1,
+        EffectResult::DescriptorIssued
+    );
+    assert_eq!(
+        outcome_for(
+            &recorded,
+            "write(create=true,truncate=false) /workspace/rw.txt"
+        )
+        .1,
+        EffectResult::Completed
+    );
+}
+
+/// A command the Shell runs is decided only after a closed write is recorded.
+#[test]
+fn a_command_waits_for_a_closed_write() {
+    let attempted = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(tokio::sync::Notify::new());
+    let mut shell = shell_with(Arc::new(HeldRecording {
+        attempted: Arc::clone(&attempted),
+        release: Arc::clone(&release),
+    }));
+    let (out, decided_early) = run(async {
+        let check = async {
+            for _ in 0..100 {
+                tokio::task::yield_now().await;
+            }
+            let early = attempted
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|attempt| attempt == "shell:run true");
+            release.notify_one();
+            early
+        };
+        tokio::join!(shell.run("printf x > /tmp/written; true"), check)
+    });
+    assert_eq!(out.status, 0, "{}", out.stderr);
+    assert!(
+        !decided_early,
+        "`true` was decided before the write was recorded: {:?}",
+        attempted.lock().unwrap()
+    );
+}
+
+/// A network request waits for a closed write, as every other effect does.
+#[test]
+fn a_network_request_waits_for_a_closed_write() {
+    use strands_shell::os::{HttpRequest, Kernel as _};
+
+    let finished_early = run(async {
+        let (kernel, _proc, _attempted, release) = kernel_with_a_write_recording().await;
+        let finished = AtomicBool::new(false);
+        let request = async {
+            let _ = kernel
+                .http_request(HttpRequest {
+                    method: "GET".into(),
+                    url: "https://example.com/".into(),
+                    headers: Vec::new(),
+                    body: None,
+                    insecure: false,
+                    max_response: 0,
+                })
+                .await;
+            finished.store(true, Ordering::SeqCst);
+        };
+        let check = async {
+            for _ in 0..50 {
+                tokio::task::yield_now().await;
+            }
+            let early = finished.load(Ordering::SeqCst);
+            release.notify_one();
+            early
+        };
+        tokio::join!(request, check).1
+    });
+    assert!(
+        !finished_early,
+        "the request went ahead while a closed write was recording"
+    );
+}
+
+/// A command lookup's path check discards errors, so it leaves a write's recording failure.
+#[test]
+fn a_command_lookup_leaves_a_write_recording_failure() {
+    use strands_shell::os::{Kernel as _, OpenFlags};
+    use tokio::io::AsyncWriteExt as _;
+
+    let kernel = support::kernel(Arc::new(FailingWriteRecord));
+    let mut proc = kernel.new_process();
+    let (canonical, reported) = run(async {
+        let fd = kernel
+            .open(&mut proc, "/tmp/a.txt", OpenFlags::write())
+            .await
+            .expect("opens");
+        let mut writer = proc.take_writer(fd).expect("a writer");
+        writer.write_all(b"x").await.expect("writes");
+        drop(writer);
+        let canonical = kernel.canonicalize(&proc, "/tmp/a.txt").await;
+        (canonical, kernel.record_closed_writes().await)
+    });
+    assert!(canonical.is_ok(), "{canonical:?}");
+    assert!(
+        reported.is_err(),
+        "the failure is left for a decision that reports"
+    );
+}
+
 /// A write the size cap cuts off records an indeterminate outcome, because part of it landed.
 #[test]
 fn a_write_the_size_cap_cuts_off_is_indeterminate() {

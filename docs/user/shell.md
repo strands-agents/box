@@ -193,7 +193,7 @@ link resolved.
 |---|---|---|---|
 | `context.input.path` | String | Always | The resolved path. A path under the operator's home starts with `~/`, and the home itself is `~`. |
 | `context.input.operation` | Enum | Always | One value from the table above. |
-| `context.output.result` | Enum | On a `::response` event | `Box::FsResponseResult::"completed"`, `"descriptor_issued"`, or `"indeterminate"`. A file opened only for writing, as `>`, `>>`, `tee`, and `cp` open it, records `"completed"` when it is closed, or `"indeterminate"` when part of the write failed. Any other open records `"descriptor_issued"` when it opens: a read, a write to a device such as `/dev/null`, and a read-write `<>` open of a file that exists only in the Shell's memory. |
+| `context.output.result` | Enum | On a `::response` event | `Box::FsResponseResult::"completed"`, `"descriptor_issued"`, or `"indeterminate"`. A file opened only for writing, as `>`, `>>`, `tee`, and `cp` open it, records `"completed"` when it is closed, or `"indeterminate"` when part of the write failed. A read-write `<>` open of a file in a host folder records `"descriptor_issued"` for its read, and its write records `"completed"` or `"indeterminate"` when it closes. Any other open records `"descriptor_issued"` when it opens: a read, a write to a device such as `/dev/null`, and a `<>` open of a file that exists only in the Shell's memory. |
 
 ```cedar
 @id("project_read")

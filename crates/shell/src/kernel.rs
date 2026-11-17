@@ -646,9 +646,10 @@ impl Kernel for ShellKernel {
         }
     }
 
+    /// Every caller in the Shell discards the error, so it reports no recording failure.
     async fn canonicalize(&self, proc: &Process, path: &str) -> io::Result<PathBuf> {
         let (resolved, permit) = self
-            .admit_path(proc, path, Follow::Yes, metadata(Follow::Yes))
+            .admit_path_as(proc, path, Follow::Yes, metadata(Follow::Yes), Reports::No)
             .await?;
         let canonical = async {
             let _generation = self.guard(&resolved).await?;
@@ -982,6 +983,7 @@ impl Kernel for ShellKernel {
     }
 
     async fn http_request(&self, req: HttpRequest) -> io::Result<HttpResponse> {
+        self.record_closed_writes().await?;
         self.route(&req.url)?.send(req).await
     }
 
