@@ -360,6 +360,7 @@ mod tests {
                 ("/usr/lib", Operation::Read, Scope::Root),
                 ("/usr/lib64", Operation::Read, Scope::Root),
                 ("/etc/ssl", Operation::Read, Scope::Root),
+                ("/usr/include", Operation::Read, Scope::Root),
                 ("/dev/urandom", Operation::Read, Scope::File),
                 ("/dev/random", Operation::Read, Scope::File),
                 ("/dev/zero", Operation::Read, Scope::File),

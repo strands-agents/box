@@ -9,8 +9,8 @@
     "metadata_dir": ["/etc", "/var"]
   },
   "leaf": {
-    "description": "What leaf containment needs in addition to agent containment: the loader's cache and library directories, and the entropy devices a runtime seeds from. A read root here is also a directory the loader maps code from, which a bind cannot make readable without letting code run there, so the startup disclosure says so on each of those lines.",
-    "read_root": ["/lib", "/lib64", "/usr/lib", "/usr/lib64", "/etc/ssl"],
+    "description": "What leaf containment needs in addition to agent containment: the loader's cache and library directories, the system C headers a compiler reads, and the entropy devices a runtime seeds from. A read root here is also a directory the loader maps code from, which a bind cannot make readable without letting code run there, so the startup disclosure says so on each of those lines.",
+    "read_root": ["/lib", "/lib64", "/usr/lib", "/usr/lib64", "/etc/ssl", "/usr/include"],
     "read_file": ["/dev/urandom", "/dev/random", "/dev/zero", "/etc/ld.so.cache"]
   }
 }
