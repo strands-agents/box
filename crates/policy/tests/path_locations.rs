@@ -964,3 +964,71 @@ unless temporal {
         check.errors()
     );
 }
+
+/// An undeclared location names `[locations]` and both fixes, in an ordinary rule and a held one;
+/// another schema error in a held rule is not called a location.
+#[test]
+fn an_undeclared_location_is_refused_with_the_two_fixes() {
+    let ordinary = PROJECT_WRITE.replace("locations.project", "locations.caches");
+    let Err(error) = PolicyEngine::validate(&project(), &sources(&ordinary)) else {
+        panic!("validate must refuse an undeclared location");
+    };
+    let error = error.to_string();
+    for fragment in [
+        "`context.input.locations.caches`",
+        "[locations]",
+        "declare `caches`",
+        "context.input.locations has caches",
+    ] {
+        assert!(error.contains(fragment), "{fragment}: {error}");
+    }
+    assert!(!error.contains("did you mean"), "{error}");
+    let check = PolicyEngine::check(&project(), &sources(&ordinary), true);
+    assert!(
+        check
+            .errors()
+            .iter()
+            .any(|finding| finding.message().contains("declare `caches`")),
+        "{:?}",
+        check.errors()
+    );
+
+    let held = |condition: &str| {
+        format!(
+            r#"
+permit (principal, action == Box::Action::"fs:write", resource);
+@id("guarded")
+forbid (principal, action == Box::Action::"fs:write", resource)
+when {{ {condition} }}
+unless temporal {{ formerly within 1h alpha::Action::"deploy"::response{{}} }};
+"#
+        )
+    };
+    let directory = tempfile::tempdir().expect("history directory");
+    let Err(error) = PolicyEngine::open_staged(
+        &project(),
+        sources(&held("context.input.locations.caches")),
+        &directory.path().join("held"),
+    ) else {
+        panic!("open_staged must refuse an undeclared location");
+    };
+    let error = error.to_string();
+    assert!(error.contains("declare `caches`"), "{error}");
+
+    let Err(error) = PolicyEngine::open_staged(
+        &project(),
+        sources(&held(
+            r#"context.input.locations.project && context.input.pathh == "x""#,
+        )),
+        &directory.path().join("pathh"),
+    ) else {
+        panic!("open_staged must refuse an undeclared attribute");
+    };
+    let error = error.to_string();
+    assert!(
+        error.contains("fails validation against the Box action schema"),
+        "{error}"
+    );
+    assert!(error.contains("pathh"), "{error}");
+    assert!(!error.contains("does not declare"), "{error}");
+}

@@ -1513,12 +1513,19 @@ pub(crate) fn refuse_undeclared_locations(
             && let Ok(lowered) = cedar_parsed.lower(&policy_schema)
         {
             let validation = Validator::new().validate(&lowered);
-            problems.extend(
-                validation
-                    .validation_errors()
-                    .map(ToString::to_string)
-                    .filter(|message| message.contains("input.locations.")),
-            );
+            for error in validation.validation_errors() {
+                let message = error.to_string();
+                // A pending MCP schema can declare an action or a type, so neither refuses here.
+                if message.contains("unrecognized action")
+                    || message.contains("unrecognized entity type")
+                {
+                    continue;
+                }
+                problems.push(match undeclared_location_name(&message) {
+                    Some(name) => (true, undeclared_location(&name)),
+                    None => (false, message),
+                });
+            }
         }
     }
     for policy in parsed.policies() {
@@ -1529,7 +1536,7 @@ pub(crate) fn refuse_undeclared_locations(
                 names
                     .into_iter()
                     .filter(|name| !base.locations.contains_key(name))
-                    .map(|name| format!("`input.locations.{name}` names no declared location")),
+                    .map(|name| (true, undeclared_location(&name))),
             );
         }
     }
@@ -1538,11 +1545,20 @@ pub(crate) fn refuse_undeclared_locations(
         return Ok(());
     }
     let id = annotated_id(expanded);
+    let prefix = if problems.iter().all(|(location, _)| *location) {
+        "reads a location that box.toml does not declare"
+    } else {
+        "fails validation against the Box action schema"
+    };
     let message = format!(
-        "{} (rule {}) reads a location that box.toml does not declare: {}",
+        "{} (rule {}) {prefix}: {}",
         parsed_rule_name(expanded, id.as_deref()),
         index.saturating_add(1),
-        problems.join("; ")
+        problems
+            .into_iter()
+            .map(|(_, problem)| problem)
+            .collect::<Vec<_>>()
+            .join("; ")
     );
     Err(Refused::new(
         PolicyError::Schema(message.clone()),
@@ -1734,6 +1750,17 @@ fn validation_finding(
         ),
         other => (other.to_string(), None, None),
     };
+    let (message, help) = match undeclared_location_name(&message) {
+        Some(name) => {
+            let wording = undeclared_location(&name);
+            let message = match cedar_policy_id(&message) {
+                Some((id, _)) => format!("for policy `{id}`, {wording}"),
+                None => wording,
+            };
+            (message, None)
+        }
+        None => (message, help),
+    };
     let named = cedar_policy_id(&message);
     let rule = named.and_then(|(id, _)| rule_ref(lowered, id, positions));
     let own = named.map_or(message.as_str(), |(_, rest)| rest);
@@ -1745,6 +1772,23 @@ fn validation_finding(
         finding = finding.with_span(span);
     }
     (message, finding)
+}
+
+/// The location a validator message says is not an attribute of `context.input.locations`.
+fn undeclared_location_name(message: &str) -> Option<String> {
+    let (_, rest) = message.split_once("attribute `input.locations.")?;
+    let (name, after) = rest.split_once('`')?;
+    (after.starts_with(" in context for ") && after.contains(" not found") && !name.contains('.'))
+        .then(|| name.to_string())
+}
+
+/// The refusal of a rule that reads `context.input.locations.<name>` for an undeclared `name`.
+fn undeclared_location(name: &str) -> String {
+    format!(
+        "`context.input.locations.{name}` names a location that box.toml's [locations] does not \
+         declare; declare `{name}` there, or guard the read with \
+         `context.input.locations has {name}`"
+    )
 }
 
 /// The Cedar policy id that a validator message names, such as `policy_0`, and the rest of it.
