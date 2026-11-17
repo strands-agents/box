@@ -563,28 +563,7 @@ fn repository_manifest_is_valid() {
 fn ci_runs_validation_for_manifest_and_user_page_changes() {
     let root = repository_root();
     let workflow = fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read CI");
-    let filters = path_filters(&workflow);
-    let site_manifest_filter = filters
-        .iter()
-        .find(|(name, _)| name == "site_manifest")
-        .map(|(_, patterns)| patterns)
-        .expect("site manifest path filter");
-    for path in [
-        "docs/site-manifest.json",
-        "docs/site-manifest-retirements.json",
-        "docs/user/**/*.md",
-    ] {
-        assert!(
-            site_manifest_filter.iter().any(|pattern| pattern == path),
-            "site manifest CI must run for {path}"
-        );
-        for (name, patterns) in filters.iter().filter(|(name, _)| name != "site_manifest") {
-            assert!(
-                !patterns.iter().any(|pattern| pattern == path),
-                "the {name} Rust or test filter must not run for {path}"
-            );
-        }
-    }
+    assert_only_the_site_manifest_filter_runs_for_docs(&workflow);
     assert!(
         workflow.contains("\n  site-manifest:\n"),
         "CI must have a focused site manifest job"
@@ -627,6 +606,72 @@ fn ci_runs_validation_for_manifest_and_user_page_changes() {
                 "echo \"SITE_MANIFEST_RETIREMENTS_BASE=$BASE_RETIREMENTS\" >> \"$GITHUB_ENV\"",
             ),
         "pull-request CI must compare the manifest with its base revision"
+    );
+}
+
+/// The `site_manifest` paths filter names the manifest, its retirements and the user pages, and no
+/// other filter does, whatever the filters are called and in whatever order they appear.
+fn assert_only_the_site_manifest_filter_runs_for_docs(workflow: &str) {
+    let filters = path_filters(workflow);
+    let site_manifest_filter = filters
+        .iter()
+        .find(|(name, _)| name == "site_manifest")
+        .map(|(_, patterns)| patterns)
+        .expect("site manifest path filter");
+    for path in [
+        "docs/site-manifest.json",
+        "docs/site-manifest-retirements.json",
+        "docs/user/**/*.md",
+    ] {
+        assert!(
+            site_manifest_filter.iter().any(|pattern| pattern == path),
+            "site manifest CI must run for {path}"
+        );
+        for (name, patterns) in filters.iter().filter(|(name, _)| name != "site_manifest") {
+            assert!(
+                !patterns.iter().any(|pattern| pattern == path),
+                "the {name} Rust or test filter must not run for {path}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_docs_filter_check_reads_renamed_and_reordered_filters() {
+    let filter = |name: &str, patterns: &[&str]| {
+        let mut text = format!("            {name}:\n");
+        for pattern in patterns {
+            text.push_str(&format!("              - '{pattern}'\n"));
+        }
+        text
+    };
+    let docs = [
+        "docs/site-manifest.json",
+        "docs/site-manifest-retirements.json",
+        "docs/user/**/*.md",
+    ];
+    let workflow = |filters: &[String]| {
+        format!(
+            "      - uses: dorny/paths-filter@v4\n        with:\n          filters: |\n{}",
+            filters.concat()
+        )
+    };
+    // The docs filter first, and Rust filters with other names after it.
+    assert_only_the_site_manifest_filter_runs_for_docs(&workflow(&[
+        filter("site_manifest", &docs),
+        filter("core", &["crates/**"]),
+        filter("cli", &["crates/cli/**"]),
+    ]));
+    // A renamed Rust filter that also names the user pages is still caught.
+    let leaky = workflow(&[
+        filter("core", &["crates/**"]),
+        filter("site_manifest", &docs),
+        filter("cli", &["crates/cli/**", "docs/user/**/*.md"]),
+    ]);
+    assert!(
+        std::panic::catch_unwind(|| assert_only_the_site_manifest_filter_runs_for_docs(&leaky))
+            .is_err(),
+        "a non-docs filter naming the user pages must fail the check"
     );
 }
 
@@ -1107,7 +1152,31 @@ fn invalid_navigation_is_refused() {
             .contains("nav duplicates")
     );
 
-    let mut split_group = manifest;
+    assert_a_split_group_is_refused(&root, manifest.clone());
+
+    // A first group with two pages: the split case must not assume where the second group starts.
+    let mut two_first = manifest;
+    let first_group = two_first.pages[0].nav.group.clone();
+    let next_order = two_first.pages[0].nav.order + 1;
+    if two_first.pages[1].nav.group != first_group {
+        for page in two_first
+            .pages
+            .iter_mut()
+            .filter(|page| page.nav.group == first_group)
+        {
+            if page.nav.order >= next_order {
+                page.nav.order += 1;
+            }
+        }
+        two_first.pages[1].nav.group = first_group;
+        two_first.pages[1].nav.order = next_order;
+    }
+    validate_manifest(&root, &two_first).expect("a two-page first group is valid");
+    assert_a_split_group_is_refused(&root, two_first);
+}
+
+/// Moving the first page of a later group into the first group splits that group's block.
+fn assert_a_split_group_is_refused(root: &Path, mut split_group: SiteManifest) {
     let first_group = split_group.pages[0].nav.group.clone();
     let separated = (1..split_group.pages.len())
         .find(|&index| {
@@ -1127,7 +1196,7 @@ fn invalid_navigation_is_refused() {
     split_group.pages[separated].nav.group = first_group;
     split_group.pages[separated].nav.order = free_order;
     assert!(
-        validate_manifest(&root, &split_group)
+        validate_manifest(root, &split_group)
             .expect_err("split navigation group must fail")
             .contains("must use one contiguous block")
     );
