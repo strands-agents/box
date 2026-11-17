@@ -24,6 +24,13 @@ use crate::resolve;
 use crate::writer::{ServedWriter, Writes};
 use crate::{Network, memory};
 
+/// Whether a decision's caller can surface an error, and so reports a write's recording failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reports {
+    Yes,
+    No,
+}
+
 /// Whether an operation acts on a symlink's target or on the link itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Follow {
@@ -157,11 +164,17 @@ impl ShellKernel {
     ///
     /// Each decision waits for this first, so a closed write counts before the next one is decided.
     pub async fn record_closed_writes(&self) -> io::Result<()> {
-        self.writes.record_closed().await
+        self.writes.record_closed(true).await
     }
 
     async fn admit(&self, attempt: &EffectAttempt<'_>) -> io::Result<Permit> {
-        self.record_closed_writes().await?;
+        self.admit_as(attempt, Reports::Yes).await
+    }
+
+    /// Decide `attempt` after closed writes are recorded; only a caller that `reports` takes a
+    /// recording failure as its error.
+    async fn admit_as(&self, attempt: &EffectAttempt<'_>, reports: Reports) -> io::Result<Permit> {
+        self.writes.record_closed(reports == Reports::Yes).await?;
         self.interceptor.intercept(attempt).await.map(Permit::new)
     }
 
@@ -216,12 +229,27 @@ impl ShellKernel {
         follow: Follow,
         operation: FsOperation,
     ) -> io::Result<(Resolved, Permit)> {
+        self.admit_path_as(proc, path, follow, operation, Reports::Yes)
+            .await
+    }
+
+    async fn admit_path_as(
+        &self,
+        proc: &Process,
+        path: &str,
+        follow: Follow,
+        operation: FsOperation,
+        reports: Reports,
+    ) -> io::Result<(Resolved, Permit)> {
         let resolved = self.resolve(proc, path, follow).await;
         let permit = self
-            .admit(&EffectAttempt::Filesystem {
-                path: &resolved.path,
-                operation,
-            })
+            .admit_as(
+                &EffectAttempt::Filesystem {
+                    path: &resolved.path,
+                    operation,
+                },
+                reports,
+            )
             .await?;
         Ok((resolved, permit))
     }
@@ -234,7 +262,9 @@ impl ShellKernel {
         follow: Follow,
         operation: FsOperation,
     ) -> Option<(Resolved, Permit)> {
-        self.admit_path(proc, path, follow, operation).await.ok()
+        self.admit_path_as(proc, path, follow, operation, Reports::No)
+            .await
+            .ok()
     }
 
     fn host_for(&self, resolved: &Resolved, follow: Follow) -> Option<(PathBuf, PathBuf)> {
@@ -272,9 +302,10 @@ impl ShellKernel {
         proc: &Process,
         path: &str,
         follow: Follow,
+        reports: Reports,
     ) -> io::Result<FileStat> {
         let (resolved, permit) = self
-            .admit_path(proc, path, follow, metadata(follow))
+            .admit_path_as(proc, path, follow, metadata(follow), reports)
             .await?;
         let stat = self.stat_answer(proc, resolved, follow).await;
         permit.report_answer(&stat).await;
@@ -323,11 +354,12 @@ impl ShellKernel {
     async fn record_write(
         &self,
         permit: Permit,
+        path: &str,
         opened: io::Result<(Fd, Option<ServedWriter>)>,
     ) -> io::Result<Fd> {
         match opened {
             Ok((fd, Some(writer))) => {
-                self.writes.record_at_close(writer, permit);
+                self.writes.record_at_close(writer, permit, path);
                 Ok(fd)
             }
             Ok((fd, None)) => {
@@ -500,7 +532,9 @@ impl Kernel for ShellKernel {
                 .await?;
             let opened = self.open_effect(proc, &resolved, flags).await;
             let read_result = open_outcome(&opened);
-            let opened = self.record_write(write_permit, opened).await;
+            let opened = self
+                .record_write(write_permit, &resolved.path, opened)
+                .await;
             read_permit.record(read_result).await?;
             return opened;
         }
@@ -509,7 +543,7 @@ impl Kernel for ShellKernel {
                 .admit_path(proc, path, Follow::Yes, write_operation)
                 .await?;
             let opened = self.open_effect(proc, &resolved, flags).await;
-            return self.record_write(permit, opened).await;
+            return self.record_write(permit, &resolved.path, opened).await;
         }
         let (resolved, permit) = self
             .admit_path(proc, path, Follow::Yes, FsOperation::ReadContent)
@@ -567,13 +601,13 @@ impl Kernel for ShellKernel {
     }
 
     async fn stat(&self, proc: &Process, path: &str) -> FileStat {
-        self.stat_decided(proc, path, Follow::Yes)
+        self.stat_decided(proc, path, Follow::Yes, Reports::No)
             .await
             .unwrap_or_default()
     }
 
     async fn lstat(&self, proc: &Process, path: &str) -> FileStat {
-        self.stat_decided(proc, path, Follow::No)
+        self.stat_decided(proc, path, Follow::No, Reports::No)
             .await
             .unwrap_or_default()
     }
@@ -602,7 +636,9 @@ impl Kernel for ShellKernel {
     }
 
     async fn try_stat(&self, proc: &Process, path: &str) -> io::Result<FileStat> {
-        let stat = self.stat_decided(proc, path, Follow::Yes).await?;
+        let stat = self
+            .stat_decided(proc, path, Follow::Yes, Reports::Yes)
+            .await?;
         if stat.exists {
             Ok(stat)
         } else {

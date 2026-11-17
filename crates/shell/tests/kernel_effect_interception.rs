@@ -753,6 +753,67 @@ fn a_cancelled_wait_leaves_the_closed_write_to_the_next_decision() {
     );
 }
 
+/// Permits every effect, and fails to record a content write, as a full history store does.
+struct FailingWriteRecord;
+
+struct FailingPermit {
+    write: bool,
+}
+
+#[async_trait]
+impl EffectInterceptor for FailingWriteRecord {
+    async fn intercept(&self, effect: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>> {
+        Ok(Box::new(FailingPermit {
+            write: render(effect).starts_with("write("),
+        }))
+    }
+}
+
+#[async_trait]
+impl EffectPermit for FailingPermit {
+    async fn record_outcome(self: Box<Self>, _outcome: EffectOutcome) -> io::Result<()> {
+        if self.write {
+            return Err(io::Error::other("history append failed"));
+        }
+        Ok(())
+    }
+
+    fn mark_indeterminate(self: Box<Self>) {}
+}
+
+/// A probe after a write that failed to record answers truly, and leaves the failure for a
+/// decision that can report it.
+#[test]
+fn a_probe_leaves_a_write_recording_failure_for_a_reporting_decision() {
+    use strands_shell::os::{Kernel as _, OpenFlags};
+    use tokio::io::AsyncWriteExt as _;
+
+    let kernel = support::kernel(Arc::new(FailingWriteRecord));
+    let mut proc = kernel.new_process();
+    let (matches, stat, reported, again) = run(async {
+        let fd = kernel
+            .open(&mut proc, "/tmp/a.txt", OpenFlags::write())
+            .await
+            .expect("opens");
+        let mut writer = proc.take_writer(fd).expect("a writer");
+        writer.write_all(b"x").await.expect("writes");
+        drop(writer);
+        let matches = kernel.glob(&proc, "/tmp/*.txt").await;
+        let stat = kernel.stat(&proc, "/tmp/a.txt").await;
+        let reported = kernel.record_closed_writes().await;
+        let again = kernel.record_closed_writes().await;
+        (matches, stat, reported, again)
+    });
+    assert_eq!(matches, ["/tmp/a.txt"], "the glob sees the written file");
+    assert!(stat.exists, "the stat sees the written file");
+    let error = reported.expect_err("the next reporting decision gets the failure");
+    assert!(
+        error.to_string().contains("/tmp/a.txt") && error.to_string().contains("history append"),
+        "{error}"
+    );
+    assert!(again.is_ok(), "the failure is reported once");
+}
+
 /// A write the size cap cuts off records an indeterminate outcome, because part of it landed.
 #[test]
 fn a_write_the_size_cap_cuts_off_is_indeterminate() {
