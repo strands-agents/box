@@ -1,4 +1,4 @@
-//! Filesystem type queries with no surrounding-OS capacity counters or filesystem identifiers.
+//! Filesystem notifications with sanitized information queries and forwarded native policy requests.
 
 use std::ffi::CString;
 use std::io::{self, Read as _, Write as _};
@@ -24,6 +24,13 @@ pub(super) fn open_proc() -> io::Result<OwnedFd> {
 
 /// Install the notification filter and transfer its only listener before workload execution.
 pub(super) fn install(program: &seccompiler::BpfProgram, control: &UnixStream) -> io::Result<()> {
+    let listener = create_listener(program)?;
+    send_listener(control, &listener, false)?;
+    drop(listener);
+    confirm_handoff(control)
+}
+
+pub(super) fn create_listener(program: &seccompiler::BpfProgram) -> io::Result<OwnedFd> {
     // SAFETY: zero initializes the kernel output structure.
     let mut sizes: libc::seccomp_notif_sizes = unsafe { zeroed() };
     // SAFETY: the kernel receives space for the structure selected by this operation.
@@ -60,10 +67,12 @@ pub(super) fn install(program: &seccompiler::BpfProgram, control: &UnixStream) -
         )
     })?;
     // SAFETY: seccomp returned a new listener owned by this process.
-    let listener = unsafe { OwnedFd::from_raw_fd(raw as RawFd) };
-    send_listener(control, &listener)?;
-    drop(listener);
-    let mut control = control;
+    Ok(unsafe { OwnedFd::from_raw_fd(raw as RawFd) })
+}
+
+pub(super) fn confirm_handoff(mut control: &UnixStream) -> io::Result<()> {
+    control.set_read_timeout(Some(Duration::from_secs(5)))?;
+    control.set_write_timeout(Some(Duration::from_secs(5)))?;
     control.write_all(&[1])?;
     let mut acknowledgment = [0];
     control.read_exact(&mut acknowledgment)?;
@@ -76,8 +85,7 @@ pub(super) fn install(program: &seccompiler::BpfProgram, control: &UnixStream) -
 /// Serve the workload's filesystem queries while waiting for the existing namespace reaper.
 pub(super) fn supervise(reaper: libc::pid_t, proc: OwnedFd, control: UnixStream) -> i32 {
     let registration = register_listener(&control);
-    drop(control);
-    let listener = match registration {
+    let (listener, native) = match registration {
         Ok(listener) => listener,
         Err(error) => {
             eprintln!("strands-box: filesystem query supervisor failed: {error}");
@@ -88,7 +96,7 @@ pub(super) fn supervise(reaper: libc::pid_t, proc: OwnedFd, control: UnixStream)
             return 125;
         }
     };
-    match serve(reaper, &proc, &listener) {
+    match serve(reaper, &proc, &listener, native.then_some(&control)) {
         Ok(status) => status,
         Err(error) => {
             eprintln!("strands-box: filesystem query supervisor failed: {error}");
@@ -106,8 +114,8 @@ pub(super) fn wait_for_reaper(reaper: libc::pid_t) -> i32 {
     })
 }
 
-fn register_listener(control: &UnixStream) -> io::Result<OwnedFd> {
-    let listener = receive_listener(control)?;
+fn register_listener(control: &UnixStream) -> io::Result<(OwnedFd, bool)> {
+    let (listener, native) = receive_listener(control)?;
     // A listener accepts ID_VALID and refuses the nonexistent request zero with ENOENT.
     match valid(listener.as_raw_fd(), 0) {
         Err(error) if error.raw_os_error() == Some(libc::ENOENT) => {}
@@ -120,11 +128,17 @@ fn register_listener(control: &UnixStream) -> io::Result<OwnedFd> {
         return Err(io::Error::other("filesystem listener remains in workload"));
     }
     peer.write_all(&[1])?;
-    Ok(listener)
+    Ok((listener, native))
 }
 
-fn serve(reaper: libc::pid_t, proc: &OwnedFd, listener: &OwnedFd) -> io::Result<i32> {
+fn serve(
+    reaper: libc::pid_t,
+    proc: &OwnedFd,
+    listener: &OwnedFd,
+    native: Option<&UnixStream>,
+) -> io::Result<i32> {
     let own_pid = unsafe { libc::getpid() };
+    let mut pending: Option<(&UnixStream, libc::seccomp_notif)> = None;
     loop {
         let mut status = 0;
         // SAFETY: waitpid observes only this launcher's child.
@@ -143,9 +157,15 @@ fn serve(reaper: libc::pid_t, proc: &OwnedFd, listener: &OwnedFd) -> io::Result<
             }
             return Err(error);
         }
+        // Keep at most one unsent request; leave further notifications in the kernel.
+        // Poll only the blocked socket so queued notifications cannot cause a busy loop.
+        let (fd, events) = match pending.as_ref() {
+            Some((socket, _)) => (socket.as_raw_fd(), libc::POLLOUT),
+            None => (listener.as_raw_fd(), libc::POLLIN),
+        };
         let mut poll = libc::pollfd {
-            fd: listener.as_raw_fd(),
-            events: libc::POLLIN,
+            fd,
+            events,
             revents: 0,
         };
         // SAFETY: poll receives one initialized writable pollfd.
@@ -158,7 +178,23 @@ fn serve(reaper: libc::pid_t, proc: &OwnedFd, listener: &OwnedFd) -> io::Result<
             return Err(error);
         }
         if poll.revents & libc::POLLNVAL != 0 {
-            return Err(io::Error::other("filesystem listener closed unexpectedly"));
+            return Err(io::Error::other(
+                "filesystem notification descriptor closed unexpectedly",
+            ));
+        }
+        if let Some((socket, request)) = pending.as_ref() {
+            if poll.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+                return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+            }
+            if poll.revents & libc::POLLOUT != 0 {
+                match forward_request(socket, request) {
+                    Ok(()) => pending = None,
+                    // Readiness does not reserve capacity; retain the same request on retry.
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            continue;
         }
         if poll.revents & libc::POLLIN == 0 {
             if poll.revents & libc::POLLHUP != 0 {
@@ -183,6 +219,22 @@ fn serve(reaper: libc::pid_t, proc: &OwnedFd, listener: &OwnedFd) -> io::Result<
                 continue;
             }
             return Err(error);
+        }
+        if let Some(native) = native
+            && request.pid != 0
+            && request.pid != own_pid as u32
+            && request.pid != reaper as u32
+            && request.flags == 0
+            && is_native_operation(request.data.nr)
+        {
+            match forward_request(native, &request) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    pending = Some((native, request));
+                }
+                Err(error) => return Err(error),
+            }
+            continue;
         }
         let result = if request.pid == 0
             || request.pid == own_pid as u32
@@ -214,6 +266,56 @@ fn serve(reaper: libc::pid_t, proc: &OwnedFd, listener: &OwnedFd) -> io::Result<
             } as libc::c_long)
             .map(|_| ())
         })?;
+    }
+}
+
+fn is_native_operation(number: i32) -> bool {
+    #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+    {
+        super::native_filesystem::OPERATIONS.contains(&(number as libc::c_long))
+    }
+    #[cfg(not(all(feature = "native-filesystem-policy", box_native_adapter_tests)))]
+    {
+        let _ = number;
+        false
+    }
+}
+
+/// Forward one fixed-size, little-endian request without waiting for policy evaluation.
+fn forward_request(socket: &UnixStream, request: &libc::seccomp_notif) -> io::Result<()> {
+    let mut bytes = [0_u8; 80];
+    bytes[0..8].copy_from_slice(&request.id.to_le_bytes());
+    bytes[8..12].copy_from_slice(&request.pid.to_le_bytes());
+    bytes[12..16].copy_from_slice(&request.flags.to_le_bytes());
+    bytes[16..20].copy_from_slice(&request.data.nr.to_le_bytes());
+    bytes[20..24].copy_from_slice(&request.data.arch.to_le_bytes());
+    bytes[24..32].copy_from_slice(&request.data.instruction_pointer.to_le_bytes());
+    for (index, value) in request.data.args.iter().enumerate() {
+        bytes[32 + index * 8..40 + index * 8].copy_from_slice(&value.to_le_bytes());
+    }
+    loop {
+        // SAFETY: send reads the fixed frame; nonblocking operation bounds supervisor work.
+        let sent = unsafe {
+            libc::send(
+                socket.as_raw_fd(),
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL,
+            )
+        };
+        if sent == bytes.len() as isize {
+            return Ok(());
+        }
+        if sent == -1 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        return Err(io::Error::other(
+            "incomplete native filesystem request forwarding",
+        ));
     }
 }
 
@@ -355,8 +457,12 @@ fn owned(raw: RawFd) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
 
-fn send_listener(control: &UnixStream, listener: &OwnedFd) -> io::Result<()> {
-    let byte = [1_u8];
+pub(super) fn send_listener(
+    control: &UnixStream,
+    listener: &OwnedFd,
+    native: bool,
+) -> io::Result<()> {
+    let byte = [if native { 2_u8 } else { 1_u8 }];
     let mut vector = libc::iovec {
         iov_base: byte.as_ptr().cast_mut().cast(),
         iov_len: 1,
@@ -389,7 +495,7 @@ fn send_listener(control: &UnixStream, listener: &OwnedFd) -> io::Result<()> {
     Ok(())
 }
 
-fn receive_listener(control: &UnixStream) -> io::Result<OwnedFd> {
+fn receive_listener(control: &UnixStream) -> io::Result<(OwnedFd, bool)> {
     control.set_read_timeout(Some(Duration::from_secs(30)))?;
     let mut byte = [0_u8];
     let mut vector = libc::iovec {
@@ -447,7 +553,7 @@ fn receive_listener(control: &UnixStream) -> io::Result<OwnedFd> {
         return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
     }
     if received != 1
-        || byte != [1]
+        || !matches!(byte, [1] | [2])
         || malformed
         || headers != 1
         || descriptors.len() != 1
@@ -455,13 +561,65 @@ fn receive_listener(control: &UnixStream) -> io::Result<OwnedFd> {
     {
         return Err(io::Error::other("invalid filesystem listener handoff"));
     }
-    Ok(descriptors.pop().expect("exactly one received descriptor"))
+    Ok((
+        descriptors.pop().expect("exactly one received descriptor"),
+        byte == [2],
+    ))
 }
+
+#[cfg(all(test, feature = "native-filesystem-policy", box_native_adapter_tests))]
+#[path = "filesystem_queries/forwarding_tests.rs"]
+mod forwarding_tests;
 
 #[cfg(test)]
 mod tests {
     use super::super::failure_tests::in_fresh_process;
     use super::*;
+
+    #[test]
+    fn forwarding_fails_without_waiting_when_the_peer_closes_or_stops_reading() {
+        in_fresh_process(|| {
+            let (sender, receiver) = UnixStream::pair().unwrap();
+            // SAFETY: zero initializes every kernel notification field for this transport test.
+            let request = unsafe { zeroed() };
+            drop(receiver);
+            assert_eq!(
+                forward_request(&sender, &request).unwrap_err().kind(),
+                io::ErrorKind::BrokenPipe
+            );
+            let (sender, _receiver) = UnixStream::pair().unwrap();
+            let buffer: libc::c_int = 4096;
+            // SAFETY: the option pointer covers one live integer of the declared length.
+            assert_eq!(
+                unsafe {
+                    libc::setsockopt(
+                        sender.as_raw_fd(),
+                        libc::SOL_SOCKET,
+                        libc::SO_SNDBUF,
+                        (&buffer as *const libc::c_int).cast(),
+                        size_of_val(&buffer) as libc::socklen_t,
+                    )
+                },
+                0
+            );
+            let start = std::time::Instant::now();
+            let mut refusal = None;
+            for _ in 0..1024 {
+                if let Err(error) = forward_request(&sender, &request) {
+                    refusal = Some(error);
+                    break;
+                }
+            }
+            assert_eq!(
+                refusal.expect("bounded forwarding buffer must fill").kind(),
+                io::ErrorKind::WouldBlock
+            );
+            assert!(
+                start.elapsed() < Duration::from_secs(1),
+                "policy backpressure must not block the supervisor"
+            );
+        });
+    }
 
     #[test]
     fn a_closed_or_malformed_handoff_never_registers() {
@@ -473,7 +631,7 @@ mod tests {
         assert!(register_listener(&receiver).is_err());
         let (sender, receiver) = UnixStream::pair().unwrap();
         let ordinary_file = open_proc().unwrap();
-        send_listener(&sender, &ordinary_file).unwrap();
+        send_listener(&sender, &ordinary_file, false).unwrap();
         assert!(register_listener(&receiver).is_err());
     }
 

@@ -280,6 +280,9 @@ For direct Cargo commands, build the validator first as shown above, using the d
 for debug tests. `cargo test --workspace --all-features` then runs the main workspace.
 The `box_shell` and `box_credentials` suites require the `test-support` feature, which
 `--all-features` enables.
+Linux CI also runs the three native filesystem forwarding tests with a private build switch.
+See the [Linux native test guide](docs/dev/linux-native-tests.md#forwarding-buffer-tests)
+for that command and the other native test prerequisites.
 
 In pull-request CI, changes to `docs/site-manifest.json`,
 `docs/site-manifest-retirements.json`, or a publishable page under `docs/user/` run the focused
