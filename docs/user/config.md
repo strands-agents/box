@@ -776,6 +776,8 @@ program is not installed when:
 - nothing with a bare name's spelling exists in any directory on the tool's search path, or
 - nothing exists at an absolute path.
 
+A search-path entry that is a file, or that Box cannot search, holds nothing.
+
 A symbolic link to a file that doesn't exist counts as nothing.
 
 `run` prints one line for each tool it leaves out, before the workload starts:

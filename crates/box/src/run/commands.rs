@@ -1730,8 +1730,8 @@ mod left_out_tests {
     }
 
     /// **A tool whose program is not installed is left out of the record**, by a bare name no
-    /// search-path entry holds, by an absolute path to nothing, and by a link to nothing, and the
-    /// tools that remain load.
+    /// search-path entry holds, even when an entry is a file or cannot be searched, by an absolute
+    /// path to nothing or beneath a file, and by a link to nothing, and the tools that remain load.
     #[test]
     fn a_tool_whose_program_is_not_installed_is_left_out() {
         let root = tempfile::tempdir().expect("root");
@@ -1740,8 +1740,18 @@ mod left_out_tests {
         std::fs::create_dir(&bin).expect("bin");
         executable(&bin.join("present"), 0o755);
         std::os::unix::fs::symlink(root.join("nowhere"), bin.join("dangling")).expect("link");
+        let locked = root.join("locked");
+        std::fs::create_dir(&locked).expect("locked");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("mode");
+        let odd_path = std::env::join_paths([bin.clone(), bin.join("present"), locked.clone()])
+            .expect("a search path");
         let mut record = with_tools(vec![
             ("present", spec(&["present"], Some(&bin))),
+            ("odd_path", spec(&["tsx"], Some(Path::new(&odd_path)))),
+            (
+                "under_a_file",
+                spec(&[&bin.join("present/tsx").display().to_string()], None),
+            ),
             ("bare", spec(&["tsx", "--flag"], Some(&bin))),
             (
                 "absolute",
@@ -1755,6 +1765,7 @@ mod left_out_tests {
         ]);
 
         let left_out = leave_out_absent(&mut record).expect("absent tools are left out");
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("mode");
 
         assert_eq!(
             tables(&left_out),
@@ -1762,7 +1773,9 @@ mod left_out_tests {
                 "[tool.absolute]",
                 "[tool.bare]",
                 "[tool.dangling]",
-                "[tool.dangling_bare]"
+                "[tool.dangling_bare]",
+                "[tool.odd_path]",
+                "[tool.under_a_file]"
             ]
         );
         assert_eq!(left_out[1].program, "tsx");

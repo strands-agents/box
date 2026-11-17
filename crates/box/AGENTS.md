@@ -298,7 +298,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   `commands::leave_out_absent` removes it from the run's `Record` after `configure` stores the
   record, so every later consumer sees one set of tools: credential disclosure, grammar binding,
   bare names, approved reach, tool selection, and leaf translation. Not installed means nothing exists,
-  after links are followed, at an absolute path or at a bare name in any absolute search-path entry.
+  after links are followed, at an absolute path or at a bare name in any absolute search-path entry that Box can search.
   So a non-executable or non-regular match still reaches its real refusal. Any other failure still
   stops the box, and so does a program that holds `${` or an argument that no run can expand. The policy keeps the tool's grammar actions so a policy that names them still loads, and no
   file binds to them. Do not move the decision into a consumer: a consumer that resolves a left-out
