@@ -500,6 +500,81 @@ fn a_response_named_by_its_home_relative_spelling_carries_its_requests_locations
     assert_eq!(recorded_locations(&history), [project.clone(), project]);
 }
 
+/// A location rooted above the home holds a path reported as `~/…`, on the request and on the
+/// response the caller records with that spelling, and the home itself.
+#[test]
+fn a_location_above_the_home_holds_home_relative_paths() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let users = directory
+        .path()
+        .canonicalize()
+        .expect("canonical")
+        .join("users");
+    let home_dir = users.join("me");
+    std::fs::create_dir_all(&home_dir).expect("the home");
+    let operator = Operator::unanchored()
+        .anchored_at(&home_dir)
+        .with_locations([("users".to_string(), vec![users.clone()])])
+        .expect("the locations resolve");
+    let policy = r#"
+@id("users_write")
+permit (principal, action == Box::Action::"fs:write", resource)
+when { context.input.locations.users };
+"#;
+    let resolver = PathResolver::over([users.clone()])
+        .expect("the root is absolute")
+        .reporting_under(&home_dir);
+
+    for (index, (target, reported)) in [
+        (home_dir.join("Cat"), "~/Cat"),
+        (home_dir.clone(), "~"),
+        (users.join("other/Cat"), ""),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let history = directory.path().join(format!("h{index}.redb"));
+        let engine = open(&operator, policy, &history);
+        let approved = resolver
+            .approve_virtual(&target)
+            .expect("the path resolves");
+        let reported = if reported.is_empty() {
+            target.to_str().expect("UTF-8").to_string()
+        } else {
+            reported.to_string()
+        };
+        assert_eq!(approved.reported(), reported);
+        let (decision, request_id) = engine.decide(
+            &GovernedBox::assigned("test-box"),
+            &Principal::agent(),
+            &Request::Fs {
+                path: &approved,
+                operation: FsOperation::WriteContent,
+            },
+        );
+        assert!(decision.is_allow(), "{reported}: {decision:?}");
+        engine
+            .record(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                &request_id.expect("an allow carries a request id"),
+                &Outcome::Fs {
+                    path: Path::new(&reported),
+                    operation: FsOperation::WriteContent,
+                    result: FsResult::Completed,
+                },
+            )
+            .expect("the outcome records");
+        drop(engine);
+        let held = Some(vec!["users".to_string()]);
+        assert_eq!(
+            recorded_locations(&history),
+            [held.clone(), held],
+            "{reported}"
+        );
+    }
+}
+
 /// A rule that also names a per-tool MCP action is held pending until that server's schema
 /// stages; a location it reads must still refuse at load when no location of that name exists.
 #[test]
