@@ -270,7 +270,10 @@ interpreters are part of the code the operator must trust.
    canonical path and filesystem identity of each source file it opens.
    [Later steps use the validated identities](decisions.md#a-run-validates-once-then-acts-on-the-identity-it-approved),
    so replacing a source file cannot substitute a new configuration.
-3. It opens the collector to record the steps that follow.
+3. It checks the program file of each declared secret source, refuses a write grant that covers
+   one, and prints one line for each on stderr. It runs those programs to read the secrets of
+   telemetry targets, and opens the collector to record the steps that follow. A read that fails
+   here is on stderr alone.
 4. It installs the policy. Parsing or validation errors stop startup. Box also
    [rejects rules it can prove will never match](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns).
    It warns when it finds a rule that may never match but cannot prove it.
@@ -279,7 +282,9 @@ interpreters are part of the code the operator must trust.
    For each `[tool]` or stdio `[mcp.<name>]` entry covered by a grammar, Box prints a line on stderr.
    Rules for `shell:spawn` do not apply to a spawn of those programs by the bound name.
    Box also prints, for each bare name a `[tool]` answers to, the file the Shell runs for it.
-5. It resolves bound secrets and starts the gateway with its own certificate authority.
+5. It runs the programs of the declared secret sources to read every other secret, and records
+   each read. It resolves bound secrets and starts the gateway with its own certificate authority.
+   It refuses a write grant that covers a configured tool program or the program of a secret source.
    It checks each process specification's filesystem grants, then binds the broker socket.
    A grant it cannot check stops startup.
 6. It builds and discloses the sandbox grants for each tool, then for the agent.

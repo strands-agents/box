@@ -20,6 +20,7 @@ use crate::run::contain::boundary::{
 use crate::run::contain::supervise::Contained;
 use crate::run::hosted::HostedBox;
 use crate::run::lock::Lock;
+use crate::run::secret_sources::{Fetched, SecretSources, SecretUse};
 use crate::run::telemetry;
 
 /// One locked box, before this run holds any authority over it.
@@ -270,17 +271,30 @@ pub(crate) async fn execute(
         box_native_adapter_tests
     )))]
     let locked = prepare(config, argv, box_id)?;
-    refuse_declared_sources(&locked.record)?;
+    // Each program file is checked before a secret is read through it.
+    let secrets = Arc::new(SecretSources::of(&locked.record)?);
+    // No program starts in a box whose write grants let a workload replace it.
+    secrets.refuse_writable_programs(&locked.record.process_tables(), &locked.sources)?;
+    secrets
+        .disclose(std::io::stderr().lock())
+        .map_err(|source| ConfigError::Disclosure { source })?;
     locked.announce_credential_stores()?;
-    let collector = telemetry::open(&locked.root, &locked.record)?;
+    // No collector exists yet, so a read that fails here is stated on stderr alone.
+    let (fetched, read) = read_secrets(&secrets, secrets.telemetry_uses(&locked.record)).await;
+    read?;
+    let collector = telemetry::open(&locked.root, &locked.record, &secrets)?;
     let name = locked.root.name().to_string();
     collector.control(telemetry::ControlRecord::completed(
         telemetry::ControlOperation::BoxStarted,
         &name,
     ));
+    for read in &fetched {
+        collector.control(read.record());
+    }
 
     let outcome = hosted(
         locked,
+        secrets,
         Arc::clone(&collector),
         terminal,
         signals,
@@ -311,20 +325,22 @@ pub(crate) async fn execute(
     outcome
 }
 
-/// Refuse a record that declares a secret source, before any step reads a secret.
-fn refuse_declared_sources(record: &Record) -> Result<(), BoxError> {
-    match record.secret_source.keys().next() {
-        Some(scheme) => Err(ConfigError::SecretSourceFetch {
-            scheme: scheme.clone(),
-        }
-        .into()),
-        None => Ok(()),
-    }
+/// Read the secret of each entry in `uses` off the async worker, because a program can take its
+/// whole timeout.
+async fn read_secrets(
+    secrets: &Arc<SecretSources>,
+    uses: Vec<SecretUse>,
+) -> (Vec<Fetched>, Result<(), BoxError>) {
+    let reading = Arc::clone(secrets);
+    tokio::task::spawn_blocking(move || reading.fetch(&uses, std::io::stderr()))
+        .await
+        .expect("the secret source task panicked")
 }
 
 /// Open this box's authority, translate every declared process, and supervise the agent.
 async fn hosted(
     locked: LockedRun,
+    secrets: Arc<SecretSources>,
     collector: Arc<telemetry::Collector>,
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
@@ -401,6 +417,15 @@ async fn hosted(
         std::io::stderr().lock(),
     )
     .map_err(|source| ConfigError::Disclosure { source })?;
+    // Read each other secret that a declared source holds, after the checks above, which need
+    // none, so no vault program runs for a box that one of them stops. The checks of
+    // `HostedBox::open` come after this read.
+    let (fetched, read) = read_secrets(&secrets, secrets.route_uses(&locked.record)).await;
+    for read in &fetched {
+        collector.control(read.record());
+    }
+    read?;
+
     eprintln!("strands-box: starting workload");
     let hosted = HostedBox::open(
         &locked.root,
@@ -408,6 +433,7 @@ async fn hosted(
         policy,
         commands,
         collector,
+        &secrets,
         &locked.sources,
         locked.owned,
         &locked.workspace,
@@ -808,26 +834,6 @@ mod tests {
         assert_eq!(
             String::from_utf8(output).expect("the announcement is UTF-8"),
             "strands-box: [tool.aws-suite]: exposes ~/.aws/\\u{1b}[2J\\u{202e} (read)\n"
-        );
-    }
-
-    /// **A run stops before any step reads a secret when the record declares a secret source**,
-    /// and a record with no declaration is not refused.
-    #[test]
-    fn a_record_that_declares_a_secret_source_does_not_start() {
-        let mut record = record_with(None, BTreeMap::new());
-        refuse_declared_sources(&record).expect("no declaration, no refusal");
-        for scheme in ["op", "aws-secretsmanager"] {
-            record
-                .secret_source
-                .insert(scheme.to_string(), Default::default());
-        }
-        assert_eq!(
-            refuse_declared_sources(&record)
-                .expect_err("the record declares a source")
-                .to_string(),
-            "`[secret-source.aws-secretsmanager]` loaded, but this build cannot yet read a \
-             secret from a declared secret source, so the box does not start"
         );
     }
 }

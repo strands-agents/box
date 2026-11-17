@@ -154,6 +154,11 @@ impl DeclaredSources {
         self.declarations.contains_key(scheme)
     }
 
+    /// Each checked declaration with its scheme, for the backend that reads through it.
+    pub(crate) fn into_declarations(self) -> impl Iterator<Item = (String, SecretSourceCommand)> {
+        self.declarations.into_iter()
+    }
+
     /// The scheme of a source whose `pass-secret-env` names the variable `name`.
     pub(crate) fn credential_owner(&self, name: &str) -> Option<&str> {
         self.declarations

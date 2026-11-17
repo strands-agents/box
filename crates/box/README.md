@@ -353,9 +353,13 @@ only. The `secret.env` key needs the same switch, on each operating system. The 
 then valid on an egress route and a remote MCP server (with `secret.env`), and on a backend
 `auth.ref` and a telemetry `secret.ref` (with no placeholder variable). An `env://NAME` or
 `secret://NAME` reference is refused when a `pass-secret-env` entry names `NAME`. The record stores
-each declaration at record version 38. This build reads no secret through a declaration: `run`
-stops after the load checks, and `policy generate-schema` stops for a remote MCP server whose secret
-names a declared scheme. `record::config::secret_source` holds the table and its checks.
+each declaration at record version 38. `record::config::secret_source` holds the table and its
+checks. When a run starts, `run::secret_sources` checks each program file, prints one line for each
+source on stderr, and runs each program once for each secret before a workload starts: the secrets
+of telemetry targets first, then the others. The workload gets a placeholder in the `secret.env`
+variable. `policy generate-schema` reads the secret of a remote MCP server through the same
+declarations. `run::commands` protects each source program as it protects a configured tool
+command: no write grant covers it, and no interpreter changes it.
 
 **A host pattern is not a reachability claim.** An entry says only what is
 attached to a request the policy already permitted, so widening one attaches a
