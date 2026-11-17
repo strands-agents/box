@@ -772,6 +772,7 @@ fn linux_main() -> ExitCode {
         Some("--unix-ipc") => unix_ipc(&args[2..]),
         Some("--shell-child") => shell_child(&args[2..]),
         Some("--verify-no-inherited-handles") => verify_no_inherited_handles(&args),
+        Some("--return-to-saved-folder") => return_to_saved_folder(&args[2..]),
         Some("--attempt-executable-memory-write") => proc_mem_probe::run(),
         Some("--attempt-supervisor-memory-write") => {
             match args.get(2).and_then(|uid| uid.parse::<libc::uid_t>().ok()) {
@@ -786,11 +787,59 @@ fn linux_main() -> ExitCode {
             eprintln!(
                 "usage: containment-test-probe \
                  (--unix-ipc | --shell-child | --verify-no-inherited-handles | \
+                 --return-to-saved-folder | \
                  --attempt-supervisor-memory-write | --attempt-executable-memory-write) ..."
             );
             ExitCode::from(2)
         }
     }
+}
+
+/// `--return-to-saved-folder <dir>`: enter `<dir>`, save it as an open descriptor, enter a
+/// subfolder, and go back with `fchdir`, as Go's `testing.T.Chdir` does when a test ends. Prints
+/// `RETURNED_TO_SAVED_FOLDER` when the working folder is `<dir>` again.
+#[cfg(target_os = "linux")]
+fn return_to_saved_folder(args: &[String]) -> ExitCode {
+    use std::os::fd::AsRawFd as _;
+
+    let Some(folder) = args.first() else {
+        eprintln!("probe: --return-to-saved-folder requires a folder");
+        return ExitCode::from(2);
+    };
+    if let Err(error) = std::env::set_current_dir(folder) {
+        eprintln!("probe FAILED: enter {folder}: {error}");
+        return ExitCode::from(1);
+    }
+    let saved = match std::fs::File::open(".") {
+        Ok(saved) => saved,
+        Err(error) => {
+            eprintln!("probe FAILED: open .: {error}");
+            return ExitCode::from(1);
+        }
+    };
+    let before = std::env::current_dir().expect("working folder");
+    let inner = before.join("inner");
+    if let Err(error) = std::fs::create_dir(&inner).and_then(|()| std::env::set_current_dir(&inner))
+    {
+        eprintln!("probe FAILED: enter {}: {error}", inner.display());
+        return ExitCode::from(1);
+    }
+    // SAFETY: `saved` is an open descriptor this process owns.
+    if unsafe { libc::fchdir(saved.as_raw_fd()) } != 0 {
+        eprintln!("probe FAILED: fchdir: {}", std::io::Error::last_os_error());
+        return ExitCode::from(1);
+    }
+    let after = std::env::current_dir().expect("working folder");
+    if after != before {
+        eprintln!(
+            "probe FAILED: fchdir returned to {}, not {}",
+            after.display(),
+            before.display()
+        );
+        return ExitCode::from(1);
+    }
+    println!("RETURNED_TO_SAVED_FOLDER");
+    ExitCode::SUCCESS
 }
 
 #[cfg(target_os = "linux")]
