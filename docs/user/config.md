@@ -262,7 +262,10 @@ the host's `PATH` decides. Each spawn needs a `shell:spawn` permit, and nothing 
 Startup says which file each name runs, or that neither a tool nor `PATH` has it.
 
 Box treats the Python tool like any other tool. It adds no grants and doesn't inspect the install,
-so the tool's table lists what Python reads and writes:
+so the tool's table lists what Python reads and writes. Python's own reads and writes take no
+`fs:read` or `fs:write` decision: they meet only these lists, which startup prints under
+`[tool.python3] runs <file> with no policy decision over these paths`. Policy still decides the
+spawn of `python3` itself, and each command the agent's shell runs. A working setup:
 
 ```toml
 monty = false
