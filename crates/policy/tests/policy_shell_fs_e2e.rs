@@ -866,12 +866,8 @@ fn a_plain_mkdir_after_a_refused_probe_is_still_decided() {
     }
 }
 
-/// A time change is recorded as a completed `write_content`, so a content-write budget counts
-/// each `touch` of an existing file.
-#[test]
-fn a_touch_counts_toward_a_content_write_budget() {
-    let mut shell = shell_governed_by(
-        r#"permit(principal, action, resource);
+/// A content-write budget of one completed write in an hour.
+const BUDGET_OF_ONE: &str = r#"permit(principal, action, resource);
 @id("write_budget")
 forbid (principal, action == Box::Action::"fs:write", resource)
 when { context.input.operation == Box::FsWriteOperation::"write_content" }
@@ -883,14 +879,32 @@ when temporal {
       )
     )) == total && total >= 1
   )
-};"#,
-    );
+};"#;
+
+/// A time change is recorded as a completed `write_content`, so a content-write budget counts
+/// each `touch` of an existing file and each `touch -d` that creates one.
+#[test]
+fn a_touch_counts_toward_a_content_write_budget() {
+    let mut shell = shell_governed_by(BUDGET_OF_ONE);
     let (created, touched, refused) = run(async {
         let created = shell.run("touch /tmp/a.txt").await;
         let touched = shell.run("touch /tmp/a.txt").await;
         let refused = shell.run("touch /tmp/a.txt").await;
         (created, touched, refused)
     });
+    let mut dated = shell_governed_by(BUDGET_OF_ONE);
+    let (dated_new, after) = run(async {
+        let dated_new = dated.run("touch -d @0 /tmp/b.txt").await;
+        let after = dated.run("touch /tmp/b.txt").await;
+        (dated_new, after)
+    });
+    // Creating a file at a date completes the time change, so it uses the budget.
+    assert_eq!(dated_new.status, 0, "{}", dated_new.stderr);
+    assert!(
+        after.stderr.contains("[policy: write_budget]"),
+        "{}",
+        after.stderr
+    );
     // Creating the file issues a descriptor and completes no write, so it uses none of the budget.
     assert_eq!(created.status, 0, "{}", created.stderr);
     assert_eq!(touched.status, 0, "{}", touched.stderr);
