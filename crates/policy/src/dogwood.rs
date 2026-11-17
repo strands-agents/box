@@ -922,25 +922,105 @@ pub(crate) fn rule_conditions(expanded: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Refuse a macro-expanded rule that names the removed `ip` attribute, or reads `context.input`
-/// without one action family, before an MCP action schema stages.
+/// Refuse a macro-expanded rule that names the removed `ip` attribute, reads `context.input`
+/// without one action family, or lists actions of more than one action type, before an MCP action
+/// schema stages.
+///
+/// Each rule is judged on its own. A rule that does not parse or lower yet, such as one that waits
+/// for a tool schema, must not hide another rule's refusal. A rule whose own condition does not
+/// lower still has its action list judged, because the list needs only the head, and a rule whose
+/// head cannot be read is refused.
 pub(crate) fn refuse_input_reads_before_discovery(expanded: &[String]) -> Result<(), Refused> {
-    let source = expanded
-        .iter()
-        .map(|policy| without_temporal(policy))
-        .collect::<Vec<_>>()
-        .join("\n");
     let policy_schema = PolicySchema::from_cedarschema_str(&action_schema(&[])?.source)
         .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
-    let Ok(parsed) = dogwood_language::ParsedPolicySet::parse(&source, &service_schema()?) else {
-        return Ok(());
+    let service = service_schema()?;
+    let lower = |text: &str| {
+        dogwood_language::ParsedPolicySet::parse(text, &service)
+            .ok()?
+            .lower(&policy_schema)
+            .ok()
     };
-    let Ok(lowered) = parsed.lower(&policy_schema) else {
-        return Ok(());
-    };
-    let rule_of = |cedar_policy_id: &str| rule_ref(&lowered, cedar_policy_id, &[]);
-    crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &rule_of)?;
-    crate::spelling::refuse_input_across_families(lowered.as_cedar(), &rule_of)
+    for (ordinal, rule) in expanded.iter().enumerate() {
+        let positions = [ordinal];
+        let Some(lowered) = lower(&without_temporal(rule)) else {
+            // A rule whose head cannot be read is refused, not skipped: its action list could
+            // hide a mixed list that would otherwise load and be dropped.
+            let head = rule_head(rule)
+                .and_then(|head| lower(&head))
+                .ok_or_else(|| {
+                    PolicyError::Schema(format!(
+                        "rule {} cannot be inspected at load: its action list could not be read",
+                        ordinal + 1
+                    ))
+                })?;
+            let rule_of = |id: &str| rule_ref(&head, id, &positions);
+            crate::spelling::refuse_mixed_action_namespaces(head.as_cedar(), &rule_of)?;
+            continue;
+        };
+        let rule_of = |cedar_policy_id: &str| rule_ref(&lowered, cedar_policy_id, &positions);
+        crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &rule_of)?;
+        crate::spelling::refuse_input_across_families(lowered.as_cedar(), &rule_of)?;
+        crate::spelling::refuse_mixed_action_namespaces(lowered.as_cedar(), &rule_of)?;
+    }
+    Ok(())
+}
+
+/// A rule cut after its head, `forbid(principal, action, resource)`, with its annotations kept and
+/// every `when`, `unless` and `temporal` body dropped. `None` when the text holds no head.
+fn rule_head(rendered: &str) -> Option<String> {
+    let bytes = rendered.as_bytes();
+    let mut index = 0;
+    let mut open = None;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            index = string_end(bytes, index);
+            continue;
+        }
+        let word_start = index == 0
+            || !(bytes[index - 1].is_ascii_alphanumeric()
+                || bytes[index - 1] == b'_'
+                || bytes[index - 1] == b'@');
+        if word_start {
+            for effect in ["forbid", "permit"] {
+                if rendered[index..].starts_with(effect) {
+                    let after = index + effect.len();
+                    let paren = after
+                        + rendered[after..]
+                            .bytes()
+                            .take_while(u8::is_ascii_whitespace)
+                            .count();
+                    if bytes.get(paren) == Some(&b'(') {
+                        open = Some(paren);
+                    }
+                }
+            }
+            if open.is_some() {
+                break;
+            }
+        }
+        index += 1;
+    }
+    let open = open?;
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index = string_end(bytes, index);
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(format!("{};", &rendered[..=index]));
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 /// A rendered rule with each `temporal { … }` expression replaced by `true`.
@@ -1129,6 +1209,7 @@ pub(crate) fn check_against(
     let rule_of = |cedar_policy_id: &str| rule_ref(&lowered, cedar_policy_id, positions);
     crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &rule_of)?;
     crate::spelling::refuse_input_across_families(lowered.as_cedar(), &rule_of)?;
+    crate::spelling::refuse_mixed_action_namespaces(lowered.as_cedar(), &rule_of)?;
     let cap_warnings = crate::cap::judge(&parsed, &lowered, positions)?;
 
     // Strict schema validation, and it is load-bearing: `lower` alone accepts a
@@ -3880,5 +3961,32 @@ mod authored_positions {
             .map(RuleRef::position)
             .collect();
         assert_eq!(positions, [4, 8]);
+    }
+}
+
+#[cfg(test)]
+mod rule_heads {
+    use super::*;
+
+    #[test]
+    fn a_rule_whose_head_cannot_be_read_is_refused_not_skipped() {
+        let error = refuse_input_reads_before_discovery(&["not a rule".to_string()])
+            .expect_err("a rule with no readable head must be refused");
+        let message = error.into_error().to_string();
+        assert!(
+            message.contains("rule 1 cannot be inspected at load"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_rule_whose_condition_alone_does_not_lower_keeps_its_head() {
+        let rule = r#"@id("r") forbid(principal, action in [Box::Action::"fs:read", svc::Action::"x"], resource) when { context.input.x.unsupported() };"#;
+        let error = refuse_input_reads_before_discovery(&[rule.to_string()])
+            .expect_err("the mixed list is refused from the head");
+        assert!(matches!(
+            error.into_error(),
+            PolicyError::MixedActionNamespaces(_)
+        ));
     }
 }

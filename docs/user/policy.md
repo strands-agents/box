@@ -792,6 +792,32 @@ Actions are in the same family when their names start the same way before the `:
 `fs:read`, `fs:write`, and `fs:delete` can share one rule, and `net:connect` and `http:request`
 can't. Each MCP tool action is a family of its own.
 
+### A rule that lists a built-in action beside an MCP tool's action
+
+An action list can't name a built-in action, such as `fs:read`, beside an MCP tool's action, or
+the actions of two servers. Box can't check the list until the server reports its tools, and it
+never checks a list of mixed kinds at all. So the rule would never take effect, and the built-in
+action would go unenforced. This rule refuses to load:
+
+```text
+@id("both_doors")
+forbid (principal, action in [Box::Action::"fs:read", filesrv::Action::"read_file"], resource);
+```
+
+```text
+policy lists actions of more than one namespace: rule @id("both_doors") lists [Box::Action::"fs:read"] beside [filesrv::Action::"read_file"], and an action list of more than one namespace never takes effect; write one rule for each namespace
+```
+
+To fix it, write one rule for each:
+
+```text
+@id("both_doors_file")
+forbid (principal, action == Box::Action::"fs:read", resource);
+
+@id("both_doors_tool")
+forbid (principal, action == filesrv::Action::"read_file", resource);
+```
+
 A rule that checks `context.input` and names no action gets the same error. Name the action the
 rule is for in its scope, as `action == Box::Action::"fs:read"`. A test such as
 `action == Box::Action::"fs:read"` inside `when` doesn't count, so this rule still gets the error:
