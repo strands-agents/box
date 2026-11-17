@@ -941,9 +941,9 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
     },
 ];
 
-/// The two route-3 rules a JIT runtime trips, which executable memory lifts. `pkey_mprotect` stays
-/// refused either way, because the permit filter never admits it.
-const EXECUTABLE_MEMORY: [libc::c_long; 2] = [libc::SYS_mmap, libc::SYS_mprotect];
+/// The syscalls whose route-3 rule executable memory lifts. `pkey_mprotect` stays refused, because
+/// the permit filter never admits it.
+const EXECUTABLE_MEMORY_SYSCALLS: [libc::c_long; 2] = [libc::SYS_mmap, libc::SYS_mprotect];
 
 /// The two filters for one containment request.
 #[derive(Debug)]
@@ -1003,7 +1003,7 @@ impl SyscallPolicy {
 
         let mut rules: BTreeMap<libc::c_long, Vec<SeccompRule>> = BTreeMap::new();
         for entry in MEDIATED {
-            if self.executable_memory && EXECUTABLE_MEMORY.contains(&entry.number) {
+            if self.executable_memory && EXECUTABLE_MEMORY_SYSCALLS.contains(&entry.number) {
                 continue;
             }
             match entry.disposition {

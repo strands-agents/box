@@ -1905,12 +1905,12 @@ native-filesystem-policy = false
     /// remote MCP server refuses the key.
     #[test]
     fn per_process_switches_are_versioned_and_selected_per_process() {
-        type Selected = fn(&ProcessSpec) -> bool;
-        let switches: [(&str, Selected, u32); 2] = [
+        type Switch = (&'static str, fn(&ProcessSpec) -> bool, u32);
+        let switches: [Switch; 2] = [
             ("file-watching", |spec| spec.file_watching, 35),
             ("executable-memory", |spec| spec.executable_memory, 36),
         ];
-        for (key, selected_in, version) in switches {
+        for (key, is_selected, version) in switches {
             for table in ["agent", "tool.watcher", "mcp.watcher"] {
                 for enabled in [false, true] {
                     let transport = if table.starts_with("mcp.") {
@@ -1929,8 +1929,8 @@ native-filesystem-policy = false
                         "tool.watcher" => &stored.tool["watcher"],
                         _ => &stored.contained_mcp["watcher"].spec,
                     };
-                    assert_eq!(selected_in(selected), enabled, "{key} {table}");
-                    assert!(!selected_in(&stored.tool["other"]));
+                    assert_eq!(is_selected(selected), enabled, "{key} {table}");
+                    assert!(!is_selected(&stored.tool["other"]));
                     let expected = if enabled { version } else { 21 };
                     assert_eq!(stored.version, expected, "{body}");
                     let text = stored.to_toml().unwrap();

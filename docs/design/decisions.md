@@ -1688,11 +1688,11 @@ refused. Each table selects the key on its own, and it is off by default.
 
 The cost is that such a process can run code it writes into memory, not only code its mount view
 admits. This holds for a leaf too: broad exec runs only what a leaf's grants hold, so a leaf with no
-writable grant had no place to run bytes it wrote. A runtime that calls native code, such as Python
+writable grant has no place to run bytes it wrote. A runtime that calls native code, such as Python
 through `ctypes` or Java through its foreign function API, can then run any bytes. The key is
-therefore a choice the operator makes per table, not a default for every leaf, which would also have
-changed every stored box when it resumed. macOS has no counterpart rule: Seatbelt does not govern
-anonymous memory, and a macOS box already lets every process write code and then execute it.
+therefore a choice per table rather than a default for every leaf, which would also change every
+stored box when it resumed. macOS has no counterpart rule: Seatbelt does not govern anonymous
+memory, and a macOS box already lets every process write code and then execute it.
 
 <a id="native-egress-is-an-operator-declared-leaf-escape"></a>
 #### Native egress is an operator-declared escape from a tool's or server's sandbox, recorded as a downgrade
