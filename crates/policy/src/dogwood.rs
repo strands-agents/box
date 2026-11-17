@@ -1535,8 +1535,8 @@ pub(crate) fn refuse_undeclared_locations(
             problems.extend(
                 names
                     .into_iter()
-                    .filter(|name| !base.locations.contains_key(name))
-                    .map(|name| (true, undeclared_location(&name))),
+                    .filter(|(_, name)| !base.locations.contains_key(name))
+                    .map(|(read, name)| (true, undeclared_history_location(read, &name))),
             );
         }
     }
@@ -1607,7 +1607,7 @@ fn may_decide_a_file_action(scope: &dogwood_language::PolicyScope) -> bool {
 fn temporal_location_names(
     condition: &dogwood_language::temporal_ast::Condition,
     decides_files: bool,
-    out: &mut Vec<String>,
+    out: &mut Vec<(&'static str, String)>,
 ) {
     use dogwood_language::temporal_ast::{AggExprKind, ConditionKind, Term};
     fn location_name(path: &[String]) -> Option<String> {
@@ -1618,9 +1618,11 @@ fn temporal_location_names(
             _ => None,
         }
     }
-    fn term_names(term: &Term, decides_files: bool, out: &mut Vec<String>) {
+    fn term_names(term: &Term, decides_files: bool, out: &mut Vec<(&'static str, String)>) {
         match term {
-            Term::ContextField(path) if decides_files => out.extend(location_name(path)),
+            Term::ContextField(path) if decides_files => {
+                out.extend(location_name(path).map(|name| ("context.input", name)));
+            }
             Term::Agg(aggregate) => match &aggregate.kind {
                 AggExprKind::Sum { body, .. } | AggExprKind::Count { body, .. } => {
                     temporal_location_names(body, decides_files, out);
@@ -1653,7 +1655,7 @@ fn temporal_location_names(
                 && predicate.action.starts_with("fs:");
             for argument in &predicate.args {
                 if filesystem {
-                    out.extend(location_name(&argument.field_path()));
+                    out.extend(location_name(&argument.field_path()).map(|name| ("input", name)));
                 }
                 term_names(&argument.value, decides_files, out);
             }
@@ -1788,6 +1790,15 @@ fn undeclared_location(name: &str) -> String {
         "`context.input.locations.{name}` names a location that box.toml's [locations] does not \
          declare; declare `{name}` there, or guard the read with \
          `context.input.locations has {name}`"
+    )
+}
+
+/// The refusal of a history clause that reads `<read>.locations.<name>` for an undeclared `name`,
+/// which `has` cannot guard.
+fn undeclared_history_location(read: &str, name: &str) -> String {
+    format!(
+        "history clause field `{read}.locations.{name}` names a location that box.toml's \
+         [locations] does not declare; declare `{name}` there"
     )
 }
 

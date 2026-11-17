@@ -554,6 +554,12 @@ unless temporal {{
             error.to_string().contains("does not declare"),
             "{label}: {error}"
         );
+        if label == "history" {
+            assert!(
+                !error.to_string().contains(" has "),
+                "a history clause can't be guarded with `has`: {error}"
+            );
+        }
         let check = PolicyEngine::check(&declared, &sources(&text), false);
         assert!(
             !check.errors().is_empty() && check.unchecked().is_empty(),
