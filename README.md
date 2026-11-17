@@ -90,8 +90,14 @@ By default, it uses the process's terminal and returns its exit
 code. The second argument appends arguments to `[agent] command`.
 Use `RunOptions::terminal` to supply the workload's terminal and `RunOptions::on_ready`
 to start host threads after hardening and signal registration, before workload setup.
+Use `RunOptions::box_id` to give a new box your own ID, such as
+`my-app-3f9a1c0e7b2d4a6f`: a prefix of 1 to 15 letters, digits, `.`, `_`, or `-`, then `-` and 16
+lowercase hexadecimal digits. Box stores it, prints it, and labels telemetry with it. A box that
+already has an ID refuses a different one. Without `box_id`, Box generates `box-` and 16
+hexadecimal digits.
 Call it before starting application threads or loading secrets, and use one Box workload
-per host process. Later `run` calls fail, even if the first call failed.
+per host process. Later `run` calls fail, even if the first call failed, unless `run` refused a
+malformed `box_id`.
 Ship the matching Box helper binaries beside the host application.
 
 To replace the running box's policy from a host thread:
@@ -191,7 +197,9 @@ Set `BOX_VERSION` to that release tag when running the script. Set `BOX_DOWNLOAD
 the destination. A release can contain macOS assets only; check its assets if a Linux download fails.
 
 The script verifies the checksum and extracts into temporary storage before changing destination files.
-Linux packages must contain executable `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` files.
+The downloader requires executable `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` files.
+Current packages also include `strands-box-dogwood-1-0-migrate` for explicit history migration.
+Keep all package files together. Older releases can omit that validator.
 The Linux package requires glibc 2.34 or newer and the GCC runtime library (`libgcc_s.so.1`).
 Before replacing files, the downloader runs the candidate's `box --version` in a private directory inside an existing destination.
 For a new destination, it uses the parent directory. This staging location must be writable and allow execution.
@@ -232,16 +240,21 @@ installs it on the first build. Build the box binaries from a clone with
 git clone https://github.com/strands-agents/box.git
 cd box
 cargo build --release -p strands-box -p strands-box-containment
+cargo build --release --locked --manifest-path crates/dogwood-legacy-migration/Cargo.toml --target-dir target
 ```
 
 Run the compiled binary as `./target/release/strands-box`. Keep its helper
-binaries in the same directory.
+binaries in the same directory. The migration validator uses a separate Cargo lockfile to
+retain the exact Dogwood 1.0.0 engine and language. It runs only for an explicit
+[history migration](docs/user/policy.md#saved-history-requires-migration).
 
 The [release guide](docs/dev/releases.md) covers version selection and publication for macOS and Linux ARM64.
 
-Linux workspace tests run on Ubuntu ARM64 with user, mount, and process namespaces enabled.
+Linux workspace tests run on Ubuntu ARM64 and x86-64 with user, mount, and process namespaces enabled.
+The x86-64 jobs set `EXPERIMENTAL_X86_SUPPORT=TRUE` to test the experimental runtime.
 Unexpected prerequisite skips fail the job. The accepted alias-read limitation and missing
-credential-daemon fixture remain explicit in the report. Deterministic integration failures on either platform fail `CI Gate`.
+credential-daemon fixture remain explicit in the report. Workspace and deterministic integration
+failures on either Linux architecture or macOS fail `CI Gate`.
 
 The [macOS release guide](docs/dev/macos-release.md) covers the native-feature build,
 automated signing, notarization, package verification, and release gates.
@@ -252,15 +265,17 @@ parser.
 Common tasks run through [`just`](https://github.com/casey/just):
 
 ```sh
-just build         # the CLI, the alias image, and the containment trampoline
-just test          # workspace tests
+just build         # the CLI, runtime helpers, and history migration validator
+just test          # workspace and migration validator tests
 just check         # pre-push gate: fmt-check + clippy + test
 just test-all      # workspace tests and box example checks
 ```
 
-`cargo test --workspace --all-features` runs the full suite. Include
-`--all-features` to run the `box_shell` and `box_credentials` suites, which require
-the `test-support` feature.
+`just test` builds the separately resolved validator and runs both Cargo test suites.
+For direct Cargo commands, build the validator first as shown above, using the debug profile
+for debug tests. `cargo test --workspace --all-features` then runs the main workspace.
+The `box_shell` and `box_credentials` suites require the `test-support` feature, which
+`--all-features` enables.
 
 In pull-request CI, changes to `docs/site-manifest.json`,
 `docs/site-manifest-retirements.json`, or a publishable page under `docs/user/` run the focused
@@ -273,6 +288,7 @@ is removed.
 Run `python3 -m unittest discover -s scripts -p 'test_*.py' -v` to test release packaging and the downloader.
 Continuous integration runs the downloader tests on Linux and macOS. These tests use local fixture archives
 and simulated HTTP clients; they do not qualify a published binary or its containment behavior.
+The [release guide](docs/dev/releases.md#rehearse) describes the architecture and system-library checks for Linux ARM64 and x86-64 packages.
 On Linux, the mount test requires util-linux and permission to create a user and mount namespace.
 It creates a `noexec` temporary mount only inside the test process's private namespace.
 

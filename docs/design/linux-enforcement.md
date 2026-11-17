@@ -178,6 +178,10 @@ Seccomp checks system call numbers and selected arguments.
 It does not resolve pathnames or replace filesystem grants.
 The filters refuse operations outside their permit set.
 
+The permit set includes `copy_file_range` and `sendfile`, which Node uses to copy files.
+Both calls move data from a file that the workload already has open, to a file, pipe, or connected socket that it already has open.
+So they reach only what the filesystem grants and the network restrictions already allow.
+
 The filter rejects simultaneous writable and executable memory mappings.
 The `mprotect` and `pkey_mprotect` system calls change memory access permissions.
 The filter refuses `mprotect` requests whose permissions include executable access, including requests that retain that access.

@@ -20,7 +20,8 @@ const PREVIOUS_RELEASE: &str = include_str!("fixtures/actions-v0.2.2.cedarschema
 
 const DESK_TOOLS: &str = r#"{"result": {"tools": [{"name": "reset_password",
     "inputSchema": {"type": "object", "properties": {"user_name": {"type": "string"}},
-        "required": ["user_name"]}}]}}"#;
+        "required": ["user_name"]},
+    "outputSchema": {"type": "object", "properties": {"reset": {"type": "boolean"}}}}]}}"#;
 
 /// A budget of one `reset_password` an hour, on an event both releases record. The call being
 /// decided records its own `::request`, so the second call sees a count of two.
@@ -141,7 +142,7 @@ fn stored_schema_under_the_previous_release(
 }
 
 /// Tool lists covering each shape the generator renders: plain inputs, unions, numbers, enums,
-/// nested objects, and a declared output.
+/// nested objects, and declared outputs of each of those shapes under `output.structured`.
 fn tool_lists() -> Vec<serde_json::Value> {
     vec![
         json!({"result": {"tools": [{"name": "read", "inputSchema": {"type": "object",
@@ -158,6 +159,14 @@ fn tool_lists() -> Vec<serde_json::Value> {
                 "required": ["user_name"]},
             "outputSchema": {"type": "object", "properties": {"verified": {"type": "boolean"}},
                 "required": ["verified"]}}]}}),
+        json!({"result": {"tools": [{"name": "status",
+        "inputSchema": {"type": "object", "properties": {}},
+        "outputSchema": {"type": "object", "properties": {
+            "state": {"type": "string", "enum": ["open", "closed"]},
+            "count": {"type": "number"},
+            "owner": {"type": "object", "properties": {"login": {"type": "string"}}},
+            "labels": {"type": "array", "items": {"type": "string"}}
+        }}}]}}),
     ]
 }
 

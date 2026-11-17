@@ -1,0 +1,2 @@
+permit (principal, action, resource)
+when { context has "input".x.y.z };

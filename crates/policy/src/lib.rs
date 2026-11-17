@@ -20,6 +20,7 @@ mod error;
 mod grammar;
 mod mcp_input;
 mod mcp_schema;
+mod migration;
 mod observe;
 mod outcome;
 mod path;
@@ -57,6 +58,7 @@ pub use grammar::{BindingRefusal, GrammarBindings, ToolGrammar, ToolGrammarError
 pub use mcp_schema::{
     McpSchemaError, compose_action_schema, generate_mcp_schema, validate_mcp_schema_composition,
 };
+pub use migration::{MigrationInput, MigrationSummary, MigrationTarget, PolicyMigration};
 pub use observe::DecisionObserver;
 pub use outcome::{Delivery, FsResult, McpReply, Outcome, PendingToolResponse};
 pub use path::{ApprovedPath, PathRefusal, PathResolver};

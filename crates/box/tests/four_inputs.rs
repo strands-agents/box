@@ -34,7 +34,7 @@
 //! guards, in the file whose own header calls that spelling load-bearing. It now calls
 //! `parser_source::fields_of`, which takes the last token before the colon.
 //!
-//! # The configuration holds eleven keys, and the four inputs still stand
+//! # The configuration holds twelve keys, and the four inputs still stand
 //!
 //! `policy` and credentials are authority, `name` and `box_dir` select state, and `[agent] command`
 //! plus the trailing argv select the workload. `[mcp]`, `[telemetry]`, `[tool]`, and `[agent.ingress]`
@@ -48,6 +48,11 @@
 //! `file-attributes` lets each macOS write grant also set file times, which brings set-ID bits, the
 //! group, the owner, and ACLs with them. It widens only what the workload's own `write` lists allow,
 //! and each process discloses it, so it is part of the workload input and not a fifth one.
+//!
+//! `[gateway] upgrade_http` names hosts whose plain `http://` request to port 80 the gateway sends as
+//! `https://` on port 443. Policy still decides each such request, on port 443, as it decides a
+//! CONNECT to the same host, so the key changes which port a request is judged on and grants no
+//! reach a permit does not.
 //!
 //! `mcp` declares which local MCP servers exist, with a program and its argv. The configuration
 //! selects which servers can start, and `shell:spawn` decides each start. `mcp:call` decides each
@@ -198,6 +203,7 @@ fn the_config_record_carries_only_the_four_inputs() {
             "egress",
             "experimental_features",
             "file_attributes",
+            "gateway",
             "limits",
             "mcp",
             "name",
@@ -205,8 +211,9 @@ fn the_config_record_carries_only_the_four_inputs() {
             "telemetry",
             "tool"
         ],
-        "the eleven config keys include execution limits, explicit experimental enforcement selection, \
-         and `file-attributes`, which widens only the workload's own write grants. \
+        "the twelve config keys include execution limits, explicit experimental enforcement selection, \
+         `file-attributes`, which widens only the workload's own write grants, and `[gateway]`, \
+         whose upgraded requests policy still decides. \
          Unknown keys must remain errors; any further input requires a deliberate contract change."
     );
 }

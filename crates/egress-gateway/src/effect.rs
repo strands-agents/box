@@ -209,6 +209,25 @@ pub trait EffectPermit: Send {
 
     /// Mark a claimed effect that ended without a terminal outcome.
     fn mark_indeterminate(self: Box<Self>);
+
+    /// The observer for this request's reply body, given the JSON text of its JSON-RPC `id`.
+    fn reply_observer(&mut self, _request_id: Option<&str>) -> Option<Box<dyn ReplyObserver>> {
+        None
+    }
+}
+
+/// Receives a copy of one request's reply body, after redaction, as it passes to the workload.
+pub trait ReplyObserver: Send {
+    /// Whether the reply so far, which only grows between calls, already holds the answer.
+    fn complete(&mut self, _reply: &[u8]) -> bool {
+        false
+    }
+
+    /// The reply so far, once the stream ended or [`Self::complete`] said it holds the answer.
+    fn finished(self: Box<Self>, reply: &[u8]);
+
+    /// The reply did not finish: the workload went away, or the reply was over the limit.
+    fn abandoned(self: Box<Self>);
 }
 
 /// Makes the permit's indeterminate transition automatic on every early exit.
@@ -223,6 +242,13 @@ impl ClaimedEffectPermit {
         Self {
             permit: Some(permit),
         }
+    }
+
+    pub(crate) fn reply_observer(
+        &mut self,
+        request_id: Option<&str>,
+    ) -> Option<Box<dyn ReplyObserver>> {
+        self.permit.as_mut()?.reply_observer(request_id)
     }
 
     pub(crate) fn record_outcome(mut self, outcome: EffectOutcome) -> io::Result<()> {

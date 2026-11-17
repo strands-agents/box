@@ -610,15 +610,17 @@ impl Boundary {
                 Scope::File,
             )?;
         }
-        let trust_bundle = match attachment.trust_bundle.as_ref() {
-            Some(bundle) => {
+        // A gateway process trusts the gateway's CA; a native-egress process never reaches the
+        // gateway, so it gets no grant on that CA and keeps its own client's roots.
+        let trust_bundle = match (launch.egress, attachment.trust_bundle.as_ref()) {
+            (EgressMode::Gateway, Some(bundle)) => {
                 // `File` scope, not `Root`: a `Root` grant plans a fresh empty `tmpfs` at the path on
                 // Linux, so the workload would see a directory where its CA file should be.
                 containment = allow(containment, &bundle.path, Operation::Read, Scope::File)?
                     .protect_write(&bundle.path, &bundle.opened)?;
                 Some(bundle.path.clone())
             }
-            None => None,
+            _ => None,
         };
 
         // The floor anchors its home-relative credential rows at `passwd(getuid())`, which is not
@@ -652,6 +654,9 @@ impl Boundary {
         if stored.file_attributes {
             containment = containment.allow_file_attributes();
         }
+        if spec.file_watching {
+            containment = containment.allow_file_watching();
+        }
 
         // **Every refusal the grants need, applied before the grants themselves.** macOS renders
         // these after every allow and Linux overmounts them empty, so each subtracts from the grant
@@ -675,7 +680,13 @@ impl Boundary {
                 guard.judge(&grant.resolved, grant.operation, grant.scope)?;
                 containment.allow_credential_store(&grant.lexical, grant.operation, grant.scope)?
             } else {
-                allow_operator(containment, &grant.resolved, grant.operation, grant.scope)?
+                // A link entry is granted by its own name, so the box shows the file there too.
+                let path = if grant.is_link() {
+                    &grant.lexical
+                } else {
+                    &grant.resolved
+                };
+                allow_operator(containment, path, grant.operation, grant.scope)?
             };
         }
 
@@ -718,7 +729,12 @@ impl Boundary {
             aliases_first: mediated,
             working_directory: &working_directory,
             attachment,
-            trust_bundle: trust_bundle.as_deref(),
+            route: match launch.egress {
+                EgressMode::Gateway => environment::Route::Gateway {
+                    trust_bundle: trust_bundle.as_deref(),
+                },
+                EgressMode::Native => environment::Route::Native,
+            },
         })?;
         let target_environment = serde_json::to_string(&composed)
             .map_err(|source| TrampolineError::Environment { source })?;
@@ -756,6 +772,7 @@ impl Boundary {
             command_listed,
             broad_exec,
             file_attributes: cfg!(target_os = "macos") && stored.file_attributes,
+            file_watching: cfg!(target_os = "macos") && spec.file_watching,
             native_egress: launch.egress == EgressMode::Native,
             native_filesystem_policy: spec
                 .native_filesystem_policy
@@ -908,8 +925,19 @@ struct DisclosureInputs<'a> {
     command_listed: bool,
     broad_exec: bool,
     file_attributes: bool,
+    file_watching: bool,
     native_egress: bool,
     native_filesystem_policy: bool,
+}
+
+/// The line a box prints for a `table` that selects file watching, at startup and again
+/// when the process starts.
+pub(crate) fn file_watching_disclosure(table: &str) -> String {
+    format!(
+        "strands-box: {table} file watching: macOS FSEvents may disclose denied names \
+         and event metadata, including outside the workspace and from past events; \
+         file-content and write restrictions still apply"
+    )
 }
 
 /// The text a box prints for one spec: its grants, selected policy checks, Core's own additions,
@@ -975,6 +1003,9 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
              bits, the group, the owner, and access control lists on files in its writable grants"
         ));
     }
+    if inputs.file_watching {
+        lines.push(file_watching_disclosure(table));
+    }
     if inputs.native_egress {
         let arguments = if table.starts_with("[tool.") {
             ", with the arguments the agent passes,"
@@ -984,6 +1015,15 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
         lines.push(format!(
             "strands-box: {table} native egress: connects to the network directly{arguments} with \
              no egress gateway, no net:connect or http:request decision, and no credential injection"
+        ));
+        lines.push(format!(
+            "strands-box: {table} native trust: no proxy and no CA variable from Box, so its \
+             client uses its own defaults or its table's `env`{services}",
+            services = if cfg!(target_os = "macos") {
+                "; the trustd and SecurityServer services for the system's certificate checks"
+            } else {
+                ""
+            }
         ));
     }
     lines.push(format!(
@@ -1005,6 +1045,21 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
         ));
     }
     lines.join("\n")
+}
+
+/// Whether one of `cells` grants a read of `file`, compared by identity.
+#[cfg(test)]
+fn reads<'a>(cells: impl IntoIterator<Item = (&'a Path, Operation, Scope)>, file: &Path) -> bool {
+    let identity = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let file = identity(file);
+    cells.into_iter().any(|(path, operation, scope)| {
+        operation == Operation::Read
+            && match scope {
+                Scope::Root => file.starts_with(identity(path)),
+                Scope::File => file == identity(path),
+                _ => false,
+            }
+    })
 }
 
 fn protect_authorities<'a>(
@@ -1407,6 +1462,19 @@ pub(crate) mod environment {
         "PATH",
     ];
 
+    /// The names in [`CORE_OWNED`] that route through the gateway, which a native-egress process
+    /// does not receive.
+    #[cfg(test)]
+    pub(crate) const GATEWAY_ROUTING: [&str; 7] = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "NODE_USE_ENV_PROXY",
+        "NO_PROXY",
+        "no_proxy",
+    ];
+
     /// What one composition takes.
     pub(crate) struct Inputs<'a> {
         /// Every phantom the box provisions, as `(name, value)`.
@@ -1422,7 +1490,18 @@ pub(crate) mod environment {
         pub(crate) aliases_first: bool,
         pub(crate) working_directory: &'a Path,
         pub(crate) attachment: &'a Attachment,
-        pub(crate) trust_bundle: Option<&'a Path>,
+        pub(crate) route: Route<'a>,
+    }
+
+    /// Where the process's traffic goes, which decides its proxy and trust names.
+    #[derive(Debug, Clone, Copy)]
+    pub(crate) enum Route<'a> {
+        /// Through the gateway: every proxy name, and every trust name at the gateway's CA when the
+        /// gateway has one.
+        Gateway { trust_bundle: Option<&'a Path> },
+        /// Direct: no proxy name and no CA name, so the spec's own `env` and the client's
+        /// defaults decide.
+        Native,
     }
 
     /// Compose the environment the process receives: phantoms beneath the spec's variables beneath
@@ -1443,13 +1522,15 @@ pub(crate) mod environment {
         );
 
         // Core's own names, last.
-        let proxy = format!("http://127.0.0.1:{}", inputs.attachment.proxy_port);
-        environment.insert(NODE_PROXY_OPT_IN.to_string(), "1".to_string());
-        for name in PROXY_NAMES {
-            environment.insert(name.to_string(), proxy.clone());
+        if let Route::Gateway { .. } = inputs.route {
+            let proxy = format!("http://127.0.0.1:{}", inputs.attachment.proxy_port);
+            environment.insert(NODE_PROXY_OPT_IN.to_string(), "1".to_string());
+            for name in PROXY_NAMES {
+                environment.insert(name.to_string(), proxy.clone());
+            }
+            environment.insert("NO_PROXY".to_string(), LOOPBACK_EXEMPTION.to_string());
+            environment.insert("no_proxy".to_string(), LOOPBACK_EXEMPTION.to_string());
         }
-        environment.insert("NO_PROXY".to_string(), LOOPBACK_EXEMPTION.to_string());
-        environment.insert("no_proxy".to_string(), LOOPBACK_EXEMPTION.to_string());
         // The agent's own instrumentation exports here, with no credential.
         environment.extend(expandable(inputs.attachment));
         environment.insert("PWD".to_string(), utf8(inputs.working_directory, "PWD")?);
@@ -1462,11 +1543,16 @@ pub(crate) mod environment {
                 inputs.search_path,
             )?,
         );
-        if let Some(trust_bundle) = inputs.trust_bundle {
-            let value = utf8(trust_bundle, "proxy CA path")?;
-            for name in TRUST_NAMES {
-                environment.insert(name.to_string(), value.clone());
+        match inputs.route {
+            Route::Gateway {
+                trust_bundle: Some(trust_bundle),
+            } => {
+                let value = utf8(trust_bundle, "proxy CA path")?;
+                for name in TRUST_NAMES {
+                    environment.insert(name.to_string(), value.clone());
+                }
             }
+            Route::Gateway { trust_bundle: None } | Route::Native => {}
         }
         Ok(environment)
     }
@@ -1595,7 +1681,10 @@ mod tests {
     use crate::record::config::process::{ContainedMcp, Filesystem};
     use crate::run::credential::ProvisionedVariable;
 
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
     #[tokio::test]
     async fn setup_reporting_preserves_late_failures_in_buffered_and_streaming_execution() {
         if !the_host_can_build_a_view() {
@@ -1640,7 +1729,10 @@ mod tests {
         }
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
     #[tokio::test]
     async fn setup_reporting_preserves_successful_buffered_and_streaming_execution() {
         if !the_host_can_build_a_view() {
@@ -1696,7 +1788,10 @@ mod tests {
         assert_eq!(output, b"STREAM_OK");
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
     fn the_host_can_build_a_view() -> bool {
         // SAFETY: the child uses syscalls only and calls `_exit`.
         let child = unsafe { libc::fork() };
@@ -1821,6 +1916,7 @@ mod tests {
                 version: RECORD_VERSION,
                 experimental_features: Default::default(),
                 file_attributes: false,
+                gateway: Default::default(),
                 limits: Default::default(),
                 box_id: root.name().to_string(),
                 box_dir: root.root().to_path_buf(),
@@ -1881,6 +1977,7 @@ mod tests {
         /// variables, and one entry in every list Linux lowers.
         fn spec(&self) -> ProcessSpec {
             ProcessSpec {
+                file_watching: false,
                 native_filesystem_policy: None,
                 command: vec!["/bin/sh".to_string(), "-c".to_string()],
                 workspace: Some(self.path("project")),
@@ -2491,6 +2588,157 @@ mod tests {
             "{}",
             gateway.disclosure()
         );
+        let trust = "strands-box: [tool.sso-cli] native trust: no proxy and no CA variable from \
+                     Box, so its client uses its own defaults or its table's `env`";
+        assert!(
+            native.disclosure().contains(trust),
+            "{}",
+            native.disclosure()
+        );
+        assert!(
+            !gateway.disclosure().contains("native trust"),
+            "{}",
+            gateway.disclosure()
+        );
+    }
+
+    /// A fixture whose gateway has a CA, as a run with an intercepting gateway does.
+    fn fixture_with_trust_bundle() -> (Fixture, PathBuf) {
+        let mut fixture = Fixture::new();
+        std::fs::create_dir_all(fixture.root.trust_directory()).expect("the trust directory");
+        let path = fixture.root.trust_directory().join("cert.pem");
+        std::fs::write(&path, "-----BEGIN CERTIFICATE-----\n").expect("the CA is written");
+        let opened = std::fs::File::open(&path).expect("the CA opens");
+        fixture.attachment.trust_bundle = Some(crate::run::hosted::TrustBundle {
+            path: path.clone(),
+            opened: std::sync::Arc::new(opened),
+            pem: std::sync::Arc::new(Vec::new()),
+        });
+        (fixture, path)
+    }
+
+    /// **A gateway leaf routes through the proxy and trusts the gateway's CA**: every proxy name at
+    /// the gateway's port, every trust name at its CA, and a read grant on that CA.
+    #[test]
+    fn a_gateway_leaf_routes_through_the_proxy_and_trusts_the_gateway_ca() {
+        let (fixture, bundle) = fixture_with_trust_bundle();
+        let leaf = fixture.translate_full(
+            &fixture.spec(),
+            "[tool.gh]",
+            RuntimeReach::Leaf,
+            EgressMode::Gateway,
+        );
+        let environment = environment_of(&leaf);
+        let proxy = format!("http://127.0.0.1:{}", fixture.attachment.proxy_port);
+        for name in ["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"] {
+            assert_eq!(environment.get(name), Some(&proxy), "{name}");
+        }
+        assert_eq!(environment["NODE_USE_ENV_PROXY"], "1");
+        assert_eq!(environment["NO_PROXY"], "127.0.0.1,localhost");
+        assert_eq!(environment["no_proxy"], "127.0.0.1,localhost");
+        for name in environment::TRUST_NAMES {
+            assert_eq!(
+                environment.get(name).map(String::as_str),
+                bundle.to_str(),
+                "{name} names the gateway's CA"
+            );
+        }
+        assert!(
+            reads(
+                cells(&leaf).iter().map(|(path, operation, scope)| (
+                    path.as_path(),
+                    *operation,
+                    *scope
+                )),
+                &bundle
+            ),
+            "a gateway leaf reads the gateway's CA"
+        );
+    }
+
+    /// **A native-egress leaf gets no proxy and no CA name from Core, and keeps its spec's own**:
+    /// no proxy name, no trust name, no grant on the gateway's CA, and the operator's `env` values
+    /// for those names reach the process unchanged.
+    #[test]
+    fn a_native_egress_leaf_gets_no_proxy_or_ca_from_core_and_keeps_its_own() {
+        let (fixture, bundle) = fixture_with_trust_bundle();
+        let leaf = fixture.translate_full(
+            &fixture.spec(),
+            "[tool.gh]",
+            RuntimeReach::Leaf,
+            EgressMode::Native,
+        );
+        let environment = environment_of(&leaf);
+        for name in environment::GATEWAY_ROUTING
+            .into_iter()
+            .chain(environment::TRUST_NAMES)
+        {
+            assert!(
+                !environment.contains_key(name),
+                "a native-egress leaf receives no {name}"
+            );
+        }
+        assert!(
+            !reads(
+                cells(&leaf).iter().map(|(path, operation, scope)| (
+                    path.as_path(),
+                    *operation,
+                    *scope
+                )),
+                &bundle
+            ),
+            "a native-egress leaf has no grant on the gateway's CA"
+        );
+
+        let mut spec = fixture.spec();
+        spec.env.insert(
+            "HTTPS_PROXY".to_string(),
+            "http://proxy.corp:3128".to_string(),
+        );
+        spec.env
+            .insert("SSL_CERT_FILE".to_string(), "/etc/corp/ca.pem".to_string());
+        let declared = environment_of(&fixture.translate_full(
+            &spec,
+            "[tool.gh]",
+            RuntimeReach::Leaf,
+            EgressMode::Native,
+        ));
+        assert_eq!(declared["HTTPS_PROXY"], "http://proxy.corp:3128");
+        assert_eq!(declared["SSL_CERT_FILE"], "/etc/corp/ca.pem");
+        assert!(
+            !declared.contains_key("http_proxy"),
+            "Core adds no spelling of its own"
+        );
+    }
+
+    /// **The trust services reach a native-egress leaf alone (macOS render).** The agent and a
+    /// gateway leaf render neither `com.apple.trustd.agent` nor `com.apple.SecurityServer`.
+    #[test]
+    fn only_a_native_egress_leaf_renders_the_trust_services() {
+        const SERVICES: [&str; 2] = ["com.apple.trustd.agent", "com.apple.SecurityServer"];
+        let fixture = Fixture::new();
+        let spec = fixture.spec();
+        let agent = rendered(&fixture.translate_with_reach(&spec, "[agent]", RuntimeReach::Agent));
+        let gateway = rendered(&fixture.translate_full(
+            &spec,
+            "[tool.gh]",
+            RuntimeReach::Leaf,
+            EgressMode::Gateway,
+        ));
+        let native = rendered(&fixture.translate_full(
+            &spec,
+            "[tool.gh]",
+            RuntimeReach::Leaf,
+            EgressMode::Native,
+        ));
+        for service in SERVICES {
+            assert!(!agent.contains(service), "the agent renders no {service}");
+            assert!(
+                !gateway.contains(service),
+                "a gateway leaf renders no {service}"
+            );
+            assert!(native.contains(service), "a native leaf renders {service}");
+        }
     }
 
     /// **A native-egress launch translates to `Network::AllowAll` (macOS render).** `EgressMode::Native`
@@ -2845,6 +3093,42 @@ mod tests {
                 serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
             assert_eq!(config["broad_exec"], expected);
             assert_eq!(boundary.disclosure().contains("broad exec:"), expected);
+        }
+    }
+
+    /// **File watching reaches only the process that selects it, and is disclosed only where
+    /// it renders.** The agent selects it here, so a tool or MCP leaf that does not stays off.
+    #[test]
+    fn file_watching_follows_only_the_selected_process() {
+        let mut fixture = Fixture::new();
+        let mut selected = fixture.spec();
+        selected.file_watching = true;
+        fixture.record.agent = Some(selected);
+        for (table, reach) in [
+            ("[agent]", RuntimeReach::Agent),
+            ("[tool.watcher]", RuntimeReach::Leaf),
+            ("[mcp.watcher]", RuntimeReach::Leaf),
+        ] {
+            for enabled in [false, true] {
+                let mut spec = fixture.spec();
+                spec.file_watching = enabled;
+                let boundary = fixture.translate_full(&spec, table, reach, EgressMode::Gateway);
+                let config: serde_json::Value =
+                    serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
+                assert_eq!(
+                    config["file_watching"].as_bool().unwrap_or(false),
+                    enabled,
+                    "{table}"
+                );
+                assert_eq!(
+                    boundary
+                        .disclosure()
+                        .contains(&file_watching_disclosure(table)),
+                    enabled && cfg!(target_os = "macos"),
+                    "{table}: {}",
+                    boundary.disclosure()
+                );
+            }
         }
     }
 
@@ -3406,7 +3690,7 @@ mod tests {
     }
 
     /// **A leaf holds no variable from the operator's environment**: only its spec's `env`, every
-    /// phantom, and Core's names, in both egress modes.
+    /// phantom, and Core's names for its egress mode.
     #[test]
     fn a_leaf_holds_no_operator_variable_only_its_spec_phantom_and_core_names() {
         let fixture = Fixture::new();
@@ -3446,9 +3730,11 @@ mod tests {
                 );
             }
             for name in environment::CORE_OWNED {
-                assert!(
+                let routed = environment::GATEWAY_ROUTING.contains(&name);
+                assert_eq!(
                     environment.contains_key(name),
-                    "Core sets {name} on a leaf ({egress:?})"
+                    egress == EgressMode::Gateway || !routed,
+                    "Core sets {name} on a leaf only when its egress uses it ({egress:?})"
                 );
             }
         }
@@ -4841,7 +5127,10 @@ write = ["/Users/example/box-demo/aws-tmp"]
         );
     }
 
-    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    #[cfg(all(
+        target_os = "linux",
+        any(target_arch = "aarch64", target_arch = "x86_64")
+    ))]
     mod live_script_mutation {
         use super::*;
         use crate::run::contain::supervise::{CapturedLeaf, LeafBox};

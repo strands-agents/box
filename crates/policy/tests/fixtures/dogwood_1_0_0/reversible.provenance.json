@@ -1,0 +1,42 @@
+{
+  "format_version": 1,
+  "captured_at": "2026-11-13",
+  "generator_command": "old decision HISTORY POLICY POST /v1/upload 40 Allow",
+  "fixtures": [
+    {
+      "fixture": "reversible",
+      "origin": "Published Dogwood engine and language 1.0.0 through the captured Box policy API",
+      "source_receipt": "seed40.stdout.json",
+      "source_receipt_sha256": "ed2f7be3af95e975893da4f98078ee394cddfd08be047bd060898a04b2dec868",
+      "old_probe_source_sha256": "f06eb40bf527cbd0d93ae88fd1732dc1ead4739c0e958687439c0e51d8fd00af",
+      "record_count": 7,
+      "base": 0,
+      "next": 7,
+      "snapshot": null,
+      "original_response_bytes": 40,
+      "files": {
+        ".jsonl": "7a79e4dfff0e232eb4a3764b41077d5fa0c75574ccfd6d7426818fbc448170ae",
+        ".metadata.json": "46fcc73632c30488c39078dfc35c9aa8b2f12a2548294a15f3d0d355f446bcd3",
+        ".dw": "e5c374e09f59683f1ee497451eaab68cbfe65308f980ca76a9d0c48328288dea"
+      }
+    },
+    {
+      "fixture": "reversible-duplicates",
+      "origin": "Published Dogwood engine and language 1.0.0 through the captured Box policy API",
+      "source_receipt": "duplicate-seed40.stdout.json",
+      "source_receipt_sha256": "b37eb6addb82919e3f57d54b35a48a5bd310df02526ac9bde515a316c309793c",
+      "old_probe_source_sha256": "f06eb40bf527cbd0d93ae88fd1732dc1ead4739c0e958687439c0e51d8fd00af",
+      "record_count": 8,
+      "base": 0,
+      "next": 8,
+      "snapshot": null,
+      "original_response_bytes": 40,
+      "files": {
+        ".jsonl": "f773e5d975ae8a444384cfc8800cac77f0086f814ea84a3bf2202c0c2759a57a",
+        ".metadata.json": "46fcc73632c30488c39078dfc35c9aa8b2f12a2548294a15f3d0d355f446bcd3",
+        ".dw": "b18ea31e8bb723e7910911e33758c2c4c68ba040266dce5b669e843c57f1d529"
+      }
+    }
+  ],
+  "test_clock": "The existing captured_migration loader translates every captured record timestamp by one common offset into the recent past; it verifies inverse translation and uses the production clock. No snapshot is fabricated. The pinned old helper creates genuine snapshots and prunes during tests."
+}

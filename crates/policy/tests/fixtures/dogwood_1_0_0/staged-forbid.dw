@@ -1,0 +1,14 @@
+
+permit(principal == Box::Agent::"self", action == Box::Action::"http:request", resource)
+when temporal {
+    exists (total: Long). (
+        (sum_within(b, 86400s, Box::Action::"http:request"::response{ input.host: _, input.body_bytes: b })) == total
+        && total < 100
+        && (exists (t_33: Timepoint). tp(t_33))
+    )
+};
+
+permit(principal == Box::Agent::"self", action == Box::Action::"mcp:call", resource)
+when { context.input.server == "alpha" };
+forbid(principal == Box::Agent::"self", action == alpha::Action::"read", resource)
+when { context.input.path != "/workspace/input" };

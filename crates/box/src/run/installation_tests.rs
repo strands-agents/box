@@ -463,3 +463,80 @@ fn unrelated_siblings_do_not_turn_a_standalone_bundle_into_a_package() {
         assert!(installation.refuses_mutation(&bundled), "{kind}");
     }
 }
+
+#[test]
+fn an_installed_history_migration_helper_and_its_hard_links_are_protected() {
+    let fixture = Fixture::new();
+    let helper = fixture.directory.join(HISTORY_MIGRATION_HELPER);
+    let alias = fixture
+        .directory
+        .join("deps/strands_box_dogwood_1_0_migrate-artifact");
+    executable_fixture(&helper);
+    std::fs::hard_link(&helper, &alias).unwrap();
+    let installation = fixture.open();
+    for path in [&helper, &alias] {
+        assert!(installation.refuses_mutation(path));
+        assert!(
+            installation
+                .validate_reach("[agent]", &fixture.writable(path))
+                .is_err()
+        );
+    }
+    let replacement = fixture.directory.join("replacement-migration-helper");
+    executable_fixture(&replacement);
+    std::fs::rename(replacement, &helper).unwrap();
+    assert!(installation.verify().is_err());
+}
+
+#[test]
+fn a_missing_history_migration_helper_does_not_prevent_run_but_its_name_is_reserved() {
+    let fixture = Fixture::new();
+    let helper = fixture.directory.join(HISTORY_MIGRATION_HELPER);
+    let installation = fixture.open();
+    installation.verify().unwrap();
+    assert!(installation.refuses_mutation(&helper));
+    let directory_alias = fixture.root.join("installation-alias");
+    std::os::unix::fs::symlink(&fixture.directory, &directory_alias).unwrap();
+    let reserved_alias = directory_alias.join(HISTORY_MIGRATION_HELPER);
+    assert!(installation.refuses_mutation(&reserved_alias));
+    // Direct grants require an existing, non-symlink spelling. Writing the real
+    // parent would permit creating the helper unless installation protection refuses it.
+    assert!(
+        installation
+            .validate_reach("[agent]", &fixture.writable(&fixture.directory))
+            .is_err()
+    );
+    #[cfg(target_os = "macos")]
+    assert!(
+        installation
+            .refuses_mutation(&directory_alias.join(HISTORY_MIGRATION_HELPER.to_ascii_uppercase()))
+    );
+    assert!(!installation.refuses_mutation(&fixture.directory.join("ordinary-output")));
+    executable_fixture(&helper);
+    assert!(installation.verify().is_err());
+}
+
+#[test]
+fn a_symbolic_history_migration_helper_refuses_installation_loading() {
+    let fixture = Fixture::new();
+    std::os::unix::fs::symlink(
+        &fixture.alias,
+        fixture.directory.join(HISTORY_MIGRATION_HELPER),
+    )
+    .unwrap();
+    assert!(TrustedInstallation::open(fixture.current.clone(), fixture.helper.clone()).is_err());
+}
+
+#[test]
+fn history_migration_helper_lookup_stays_beside_the_native_box_image() {
+    for executable in [
+        "/opt/box/strands-box",
+        "/opt/box/Box.app/Contents/MacOS/box",
+    ] {
+        let executable = Path::new(executable);
+        assert_eq!(
+            history_migration_helper_beside(executable).unwrap(),
+            executable.parent().unwrap().join(HISTORY_MIGRATION_HELPER)
+        );
+    }
+}

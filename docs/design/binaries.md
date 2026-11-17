@@ -1,15 +1,17 @@
 # The box binaries
 
-A box uses three binaries. `strands-box` runs outside the sandboxes and makes the security
-decisions. The trampoline starts each contained process. The alias runs inside the agent's sandbox
-and sends requests to the trusted process.
+Three binaries run workloads: `strands-box` makes the security decisions outside the sandboxes,
+the trampoline starts contained processes, and the alias sends interpreter requests from the
+agent sandbox. A fourth binary validates saved history during an explicit version migration.
 
-## The three binaries
+## The binaries
 
 - `strands-box` is the entry point and the [trusted process](terminology.md). The operator starts
   it, and it starts everything else. It never runs inside a sandbox.
 - `strands-box-contain-trampoline` starts each workload inside its sandbox.
 - `strands-box-sock-alias` lets the workload reach the interpreters from inside its sandbox.
+- `strands-box-dogwood-1-0-migrate` uses the exact Dogwood 1.0.0 engine and language to
+  validate scratch copies during a history migration. It never authorizes workload requests.
 
 The release archive ships `strands-box` under the name `box`, so the operator types `box run`. This
 page uses the binary's real name.
@@ -32,6 +34,14 @@ The trampoline and alias binaries must sit next to `strands-box`. If a required 
 `strands-box` stops. On macOS, Box asks the operating system for the running executable's location.
 If the operator started it through a symlink, changing that link to another release does not change
 where the running process finds its helpers.
+
+The history migration validator also sits beside the Box executable. The offline
+`policy migrate-history` command opens that installed file and passes its retained identity
+to the policy library. The validator receives only private copies of the history. Box retains
+the original database lock and commits a conversion only after source and destination
+validation succeed. The validator has an independent Cargo workspace and lockfile because
+the old and current Dogwood releases cannot share one compatible-major dependency resolution.
+See [history migration](policy.md).
 
 <a id="trampoline---strands-box-contain-trampoline"></a>
 ### Trampoline: `strands-box-contain-trampoline`
@@ -131,7 +141,11 @@ can take one of the five interpreter names.
 
 `bin/` comes first on the agent's `PATH`, so a harness that runs `zsh` gets the alias. Tools and
 local MCP servers get neither the alias nor `bin/` on their `PATH`. The alias uses its invocation
-name to select an interpreter. For an MCP program name, it also sends the arguments. `strands-box`
+name to select where its request goes. A shell name sends one command to Strands Shell. A Python
+name sends its name and its arguments, unchanged, to Strands Shell, whose own `python3` runs Monty.
+Both send the directory the alias was run from, and the broker starts the command there only after
+the decision a `cd` gets. No alias asks for Monty directly, and the broker refuses a request that
+does. For an MCP program name, the alias sends the arguments. `strands-box`
 starts the server whose alias name and declared arguments match after policy permits it.
 The server's configured executable path remains separate from its alias name. See
 [MCP executable filenames name their aliases](decisions.md#mcp-executable-filenames-name-their-aliases).

@@ -45,6 +45,10 @@ pub enum PolicyError {
     /// or submit an event.
     #[error("policy history failure: {0}")]
     Evaluation(String),
+
+    /// The history refused an outcome event for now, and the policy keeps it to append first.
+    #[error("policy outcome kept until the history accepts it: {0}")]
+    OutcomeKept(String),
 }
 
 /// One policy that remained unresolved after MCP discovery.

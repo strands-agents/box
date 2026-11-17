@@ -604,12 +604,26 @@ impl PolicyEngine {
         response: crate::PendingToolResponse,
         reply: crate::McpReply,
     ) -> Result<(), PolicyError> {
-        self.authority.record_tool_response(response, reply)
+        self.authority.record_tool_response(response, reply, None)
+    }
+
+    /// Record the `::response` of one per-tool `tools/call`, with `output.reply` and
+    /// `output.structured`, from the server's JSON-RPC reply.
+    pub fn record_tool_reply(
+        &self,
+        response: crate::PendingToolResponse,
+        reply: &serde_json::Value,
+    ) -> Result<(), PolicyError> {
+        self.authority.record_tool_response(
+            response,
+            crate::McpReply::of_reply(reply),
+            reply.pointer("/result/structuredContent"),
+        )
     }
 }
 
 /// The text the engine loads, shared by [`PolicyEngine::open`] and [`PolicyEngine::validate`].
-fn authored(sources: &[Policy]) -> String {
+pub(crate) fn authored(sources: &[Policy]) -> String {
     sources
         .iter()
         .map(|source| source.text.as_str())

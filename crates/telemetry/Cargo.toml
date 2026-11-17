@@ -41,7 +41,7 @@ opentelemetry_sdk = { version = "0.33", default-features = false, features = [
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 tower-http = { version = "0.7", default-features = false, features = ["timeout"] }
 prost = "0.14"
-# The same spec the vendored shell declares, so the graph keeps one `reqwest`.
+# The same spec Strands Shell declares, so the graph keeps one `reqwest`.
 reqwest = { version = "0.12", features = ["rustls-tls"], default-features = false }
 
 [dev-dependencies]

@@ -54,8 +54,23 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
                 reason: format!("on_ready callback failed: {source}"),
             })?;
         }
-        dispatch(cli, options.terminal, signals).await
+        dispatch(cli, options.terminal, signals, options.box_id.as_deref()).await
     }) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("strands-box: error: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Run an offline history conversion after the same platform admission check as other verbs.
+pub(crate) fn migrate_policy_history(config: &std::path::Path, to: &str, apply: bool) -> ExitCode {
+    if let Err(error) = platform::preflight() {
+        eprintln!("strands-box: refusing to run: {error}");
+        return ExitCode::FAILURE;
+    }
+    match policy::migrate_history(config, to, apply) {
         Ok(code) => code,
         Err(error) => {
             eprintln!("strands-box: error: {error}");
@@ -69,13 +84,17 @@ async fn dispatch(
     cli: Cli,
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
+    box_id: Option<&str>,
 ) -> Result<ExitCode, BoxError> {
     match &cli.command {
         Command::Run { config, workload } => {
-            run::execute(config, workload, terminal, signals).await
+            run::execute(config, workload, terminal, signals, box_id).await
         }
         Command::Policy {
             command: PolicyCommand::GenerateSchema { config, output_dir },
         } => policy::generate_schema(config, output_dir).await,
+        Command::Policy {
+            command: PolicyCommand::MigrateHistory { config, to, apply },
+        } => policy::migrate_history(config, to, *apply),
     }
 }

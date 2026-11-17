@@ -291,6 +291,8 @@ pub(crate) mod attr {
     pub(crate) const STATUS: &str = "status";
     /// `context.output.reply` — how an MCP tool call ended.
     pub(crate) const REPLY: &str = "reply";
+    /// A tool's declared `structuredContent`, on its own `::response`.
+    pub(crate) const STRUCTURED: &str = "structured";
     /// `context.input.body_bytes` — HTTP body length (`http:request`).
     pub(crate) const BODY_BYTES: &str = "body_bytes";
     /// `context.input.intercepted` — whether HTTP was seen through TLS interception.

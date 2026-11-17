@@ -77,7 +77,8 @@ class DownloaderTests(unittest.TestCase):
                         BOX_DOWNLOAD_DIR=str(self.destination), TMPDIR=str(self.temp))
 
     def archive(self, version="v1.2.3", triple="linux-arm64", omit=(),
-                non_executable=(), symlink=None, marker="", mac_bundle=False, box_program=None, modes=None):
+                non_executable=(), symlink=None, marker="", mac_bundle=False, box_program=None, modes=None,
+                migration_helper=False):
         folder = self.releases / version
         folder.mkdir(parents=True, exist_ok=True)
         asset = folder / f"box-{version}-{triple}.tar.gz"
@@ -92,7 +93,8 @@ class DownloaderTests(unittest.TestCase):
                 info.type = tarfile.SYMTYPE
                 info.linkname = target
                 archive.addfile(info)
-            for name in BINARIES:
+            binaries = (*BINARIES, "strands-box-dogwood-1-0-migrate") if migration_helper else BINARIES
+            for name in binaries:
                 if name in omit:
                     continue
                 data = f"#!/bin/sh\nprintf '%s\\n' 'fixture {version} {name}'\n".encode()
@@ -112,6 +114,18 @@ class DownloaderTests(unittest.TestCase):
         digest = hashlib.sha256(asset.read_bytes()).hexdigest()
         (folder / "SHA256SUMS.txt").write_text(f"{digest}  {marker}{asset.name}\n")
         return asset
+
+    def test_installs_new_migration_helper_without_requiring_it_in_older_archives(self):
+        for include_helper in (False, True):
+            with self.subTest(include_helper=include_helper):
+                self.env["BOX_DOWNLOAD_DIR"] = str(self.root / ("new" if include_helper else "old"))
+                self.archive(migration_helper=include_helper)
+                result = self.run_script()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                helper = Path(self.env["BOX_DOWNLOAD_DIR"]) / "strands-box-dogwood-1-0-migrate"
+                self.assertEqual(helper.exists(), include_helper)
+                if include_helper:
+                    self.assertTrue(os.access(helper, os.X_OK))
 
     def run_script(self, noexec_tmp=False, noexec_destination=False):
         command = [str(self.tools / "sh"), str(SCRIPT)]

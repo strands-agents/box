@@ -22,8 +22,9 @@ Four parts of the box ask policy, each about its own boundary:
   `fs:*`.
 - **Monty**, the Python interpreter the box runs for the agent's scripts. It asks once per file
   operation, as `fs:*`.
-- **The egress gateway.** It asks once per connection, as `net:connect`, once per HTTP request, as
-  `http:request`, and once per MCP request over HTTP, as `mcp:call`.
+- **The egress gateway.** It asks once per connection, as `net:connect`, and once per HTTP request,
+  as `http:request`. It asks `mcp:call` for MCP requests whose host matches a declared server,
+  except the protocol methods listed in the [action reference](policy/actions.md#mcp).
 - **The MCP broker.** It asks once per request to a local MCP server, as `mcp:call`. On a
   `tools/call` it asks a second time, as the tool's own generated action. At startup it asks once
   for each declared server, as `shell:spawn`.
@@ -127,9 +128,11 @@ actions. [The action vocabulary](policy/actions.md) lists the fields of each one
   shell resolves its first word to a program. `shell:exec` for a program the shell implements, such
   as `cat` or `grep`, and `shell:spawn` for a program of the surrounding OS, such as `git`, and for
   the start of each stdio MCP server `box.toml` declares.
-- **[MCP](policy/actions.md#mcp)**: a request to an MCP server. `mcp:call` for each request, on
-  every method, and one generated `<server>::Action::"<tool>"` for each discovered tool, decided
-  on a `tools/call` after `mcp:call` permitted it.
+- **[MCP](policy/actions.md#mcp)**: a request through a declared MCP server, with
+  [host-based matching](mcp.md#remote-destination-matching) for remote servers.
+  `mcp:call` decides each request except the protocol methods listed in the action reference.
+  One generated `<server>::Action::"<tool>"` per discovered tool decides a `tools/call` after
+  `mcp:call` permitted it.
 
 ## Common rules
 
@@ -183,14 +186,14 @@ happens at load when a budget is written as a `permit`.
 
 ### A rate limit on one host
 
-At most sixty completed requests to one host in ten minutes. The sixty-first is refused until the
-oldest counted request is more than ten minutes old. Write it beside a `permit` for `api.github.com`
-on `http:request`, such as the `github_request` rule in
+This rule refuses new requests to `api.github.com` when Box has recorded at least sixty response
+outcomes for that host in the last ten minutes. Pending exchanges do not count yet. Write it
+beside a `permit` for `api.github.com` on `http:request`, such as the `github_request` rule in
 [the `[egress.<name>]` table](egress.md#example).
 
 ```text
 @id("github_rate_limit")
-@description("At most 60 requests to api.github.com completed in 10 minutes.")
+@description("Refuse requests when at least 60 response outcomes for api.github.com were recorded in the last 10 minutes.")
 forbid (principal, action == Box::Action::"http:request", resource)
 when { context.input.host == "api.github.com" }
 when temporal {
@@ -204,8 +207,11 @@ when temporal {
 };
 ```
 
-- The rule counts `http:request::response` events for the host, which the box records when the
-  reply arrives. A refused request does not count, and one still in flight does not count yet.
+- The rule counts `http:request::response` events for the host, using their recording times for
+  the ten-minute window. The gateway records the outcome when the exchange ends, including failure
+  or timeout. A refused request or a request that definitely failed to reach upstream does not
+  count. Pending exchanges do not count yet, so several requests can pass before earlier exchanges
+  end. Those requests can make the total exceed the limit.
 - The `when` clause scopes the `forbid` to the one host, so a request to any other host is
   unaffected. The same shape on `net:connect` limits connections rather than requests.
 - The agent receives a `403` whose body names the rule, as `[policy: github_rate_limit]`, and its
@@ -439,6 +445,52 @@ When the box suspects a rule is inert but cannot prove it, it prints a warning a
 ```text
 strands-box: warning: <finding>
 ```
+
+### Saved history requires migration
+
+A Box build using Dogwood 1.1.2 refuses previously used Dogwood 1.0.0 history until an explicit
+migration records the original policies and converts the saved state. No workload starts.
+Do not delete history or edit a rule to bypass this refusal: earlier activity must continue to count.
+
+Stop the Box process. Use the new Box executable and the configuration that selects the existing
+box directory. Keep the original policy and tool grammar files unchanged. First prepare the upgrade:
+
+```sh
+./box-core/box policy migrate-history --config /absolute/path/to/box.toml --to 1.1.2
+```
+
+Preparation reports the proposed conversion without changing policy or event records. Opening the
+database can update its internal metadata. To validate the complete conversion and apply it, run:
+
+```sh
+./box-core/box policy migrate-history --config /absolute/path/to/box.toml --to 1.1.2 --apply
+```
+
+The command holds the same operation lock as a Box run. If Box is still running, migration fails.
+It uses private copies to validate recovery and retains the original history file and its events.
+It does not start a workload, contact MCP servers, or resolve credentials. Missing original policies
+or historical tool schemas cause a refusal; discovering the tools again does not recover the old schemas.
+See the [migration interface and limits](../../crates/policy/README.md#upgrade-saved-history-from-dogwood-100).
+
+To return to a Box build using Dogwood 1.0.0, stop Box and convert the same history first:
+
+```sh
+./box-core/box policy migrate-history --config /absolute/path/to/box.toml --to 1.0.0 --apply
+```
+
+Keep the new Box executable and its `strands-box-dogwood-1-0-migrate` helper together for this step.
+The command converts saved history; it does not install the older Box build. Only switch binaries
+after conversion succeeds. The converter preserves activity recorded before and after the upgrade.
+A later rule edit, missing original input, or unsupported policy mapping can prevent conversion.
+
+Before using the new build again, stop the older Box process and run the upgrade command against
+that same history. This preserves activity recorded while the older build was running. Do not copy
+a pre-upgrade backup over a history file that contains newer activity.
+
+Without conversion, Box using Dogwood 1.0.0 can treat a generated spelling change as a policy edit
+and replace an unchanged rule. The replacement loses that rule's accumulated history. The explicit
+conversion prevents that replacement for the rules it validates; it does not change how later
+policy edits reset history.
 
 ### The rule does not parse
 
@@ -884,6 +936,25 @@ The text varies: the record `is committed` or `is not committed`, and the histor
 file, with `policy staging failed: ` and the engine's own reason, and the file is left as found.
 Remove the box directory to start again, as [getting started](getting-started.md#clean-up)
 describes.
+
+The run also refuses history stamped more than five minutes ahead of the system clock. This
+happens when the clock moved back after the box last ran, or when someone edited the history file:
+
+```text
+strands-box: error: policy staging failed: policy staging history failure: durable timestamp <t> is <n> ns ahead of the current clock <now>, exceeding the maximum allowed future skew of 300000000000 ns; refusing the operation rather than issuing future-dated timestamps
+```
+
+If the clock moves back more than five minutes during a run, the box denies each request and prints
+`policy: warn: durable timestamp ...; denying` on stderr. Requests are decided again once the clock
+is within five minutes of the newest history timestamp. If an action finished while the clock was
+that far back, the box keeps its record and prints
+`policy: warn: an earlier outcome is not recorded yet: ...; denying` for each request until the
+record is saved. Once the clock is within five minutes again, the box saves it at the next request,
+or when the run shuts down, and then requests are decided normally. If the run ends while the clock
+is still more than five minutes behind, or the process is killed, that action doesn't count toward
+any limit after a restart. A time-zone change does not move this clock.
+Correct the system clock, or remove the box directory to start again, as
+[getting started](getting-started.md#clean-up) describes.
 
 ## See also
 

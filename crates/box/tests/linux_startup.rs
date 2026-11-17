@@ -108,6 +108,40 @@ fn linux_commands_require_exact_x86_opt_in_only_on_x86() {
                 "--output-dir",
                 destination_text,
             ],
+            vec![
+                "policy",
+                "migrate-history",
+                "--config",
+                config_text,
+                "--to",
+                "1.0.0",
+            ],
+            vec![
+                "policy",
+                "migrate-history",
+                "--config",
+                config_text,
+                "--to",
+                "1.0.0",
+                "--apply",
+            ],
+            vec![
+                "policy",
+                "migrate-history",
+                "--config",
+                config_text,
+                "--to",
+                "1.1.2",
+            ],
+            vec![
+                "policy",
+                "migrate-history",
+                "--config",
+                config_text,
+                "--to",
+                "1.1.2",
+                "--apply",
+            ],
         ] {
             let output = command(Some(OsStr::new("TRUE")), value.as_deref(), &args);
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -131,6 +165,7 @@ fn linux_help_and_version_remain_available_without_opt_in() {
         &["--version"][..],
         &["run", "--help"][..],
         &["policy", "generate-schema", "--help"][..],
+        &["policy", "migrate-history", "--help"][..],
     ] {
         let output = command(None, None, args);
         assert!(

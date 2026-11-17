@@ -1,0 +1,2 @@
+permit (principal, action, resource)
+when { ((context has input.x) && (resource has owner.group)) };

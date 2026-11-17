@@ -197,7 +197,8 @@ pub enum McpReply {
     ProtocolError,
     /// The client cancelled the call.
     Cancelled,
-    /// The call's end is uncertain: its connection ended, or the reply was not read.
+    /// The call's end is uncertain: its connection ended, the reply was not read, or the reply only
+    /// accepted an MCP task.
     Indeterminate,
 }
 
@@ -205,8 +206,9 @@ impl McpReply {
     /// The value a JSON-RPC reply to a `tools/call` reports.
     ///
     /// Only a `result` that is an object, with an `isError` that is absent or a boolean, is a
-    /// `Result` or a `ToolError`. Any other shape is `Indeterminate`, so it cannot satisfy a
-    /// precondition that requires `result`.
+    /// `Result` or a `ToolError`. A result that only accepts an MCP task or has a `resultType` other
+    /// than `complete`, and any other shape, is `Indeterminate`, so it cannot satisfy a precondition
+    /// that requires `result`.
     #[must_use]
     pub fn of_reply(reply: &serde_json::Value) -> Self {
         if reply.get("error").is_some() {
@@ -215,6 +217,15 @@ impl McpReply {
         let Some(serde_json::Value::Object(result)) = reply.get("result") else {
             return Self::Indeterminate;
         };
+        // A task's result arrives later, through `tasks/result`, and any `resultType` but
+        // `complete` (such as `input_required`) is not the call's answer; Box records neither.
+        if result.contains_key("task")
+            || result
+                .get("resultType")
+                .is_some_and(|kind| kind.as_str() != Some("complete"))
+        {
+            return Self::Indeterminate;
+        }
         match result.get("isError") {
             None | Some(serde_json::Value::Bool(false)) => Self::Result,
             Some(serde_json::Value::Bool(true)) => Self::ToolError,

@@ -1,6 +1,7 @@
 # Write policy for an MCP server
 
-Policy decides each request the agent makes to an MCP server. Permit the server's startup or network connection, then permit its MCP calls.
+Policy decides MCP requests routed through a declared server. MCP means Model Context Protocol.
+Permit the server's startup or network connection, then permit its MCP calls.
 Use a `forbid` rule to block a tool or a specific argument value.
 
 Audience: an operator who has declared a server in [the `[mcp.<name>]` table](./mcp.md) and
@@ -10,6 +11,27 @@ writes its rules in `policy.dw`.
 
 - A box from [getting started](./getting-started.md).
 - An `[mcp.<name>]` table for the server in its `box.toml`.
+
+### Scope of remote-server rules
+
+For an `http` server, Box applies MCP rules when the request's host matches an explicit hostname
+or IP address in that server's `destinations` list in `box.toml`. Box does not discover other hostnames or IP
+addresses for the same application. A request to an unmatched destination is subject to
+`net:connect` and `http:request`, without that server's `mcp:call` or per-tool rules.
+
+For example, declaring `localhost` does not make a request to `127.0.0.1` use the same MCP
+rules. If both addresses reach your server and network and HTTP policy allow both, a tool
+forbidden through `localhost` can still run through `127.0.0.1`.
+
+To require the server's tool restrictions on every permitted route to that application:
+
+- List each intended hostname or IP address explicitly in the same server's `destinations`.
+- Restrict network and HTTP access to those destinations and the ports and paths the task needs.
+  Check other permits too; adding a narrow permit does not remove access from a broader one.
+- Check whether any other allowed destination can reach that application. Restrict that route
+  if you cannot apply the required MCP rules to it.
+
+See [remote destination matching](mcp.md#remote-destination-matching) for the matching rules.
 
 ## Step 1. Allow the server
 
@@ -105,7 +127,9 @@ server. It attempts to run ordinary `npx` inside the agent's sandbox. Add the de
 to the harness entry to select the MCP server. The same applies to every `stdio` server whose
 `command` has arguments.
 
-The server URL must match the server declared in `box.toml`.
+For an `http` server, use a URL whose hostname or IP address appears in that server's `destinations`
+in `box.toml`. An unmatched host does not select that server's MCP rules, even if it reaches the
+same application. The URL must also satisfy network and HTTP policy.
 
 ## Step 3. Find the tool and argument names
 
@@ -193,9 +217,10 @@ when temporal {
 `::request` counts every attempt, including a refused one. `::response` counts calls that reached
 the server.
 
-A rule can also require that another tool call finished first, for the same argument. This rule
-refuses a password reset unless the server returned a result for a `verify_identity` of the same
-user in the last hour:
+A rule can also require that another tool call finished first, for the same argument, with a
+given answer. When `verify_identity` declares an `outputSchema` with a `verified` field, this rule
+refuses a password reset unless a `verify_identity` of the same user answered `verified: true` in
+the last hour:
 
 ```cedar
 @id("reset_after_verify")
@@ -203,7 +228,9 @@ forbid (principal, action == servicenow::Action::"reset_password", resource)
 unless temporal {
   formerly within 1h (
     servicenow::Action::"verify_identity"::response{
-      input.user_name: context.input.user_name, output.reply: "result" }
+      input.user_name: context.input.user_name,
+      output.reply: "result",
+      output.structured.verified: true }
   )
 };
 ```
@@ -214,11 +241,34 @@ Key it on `::response`, and require `output.reply` to be `result`:
 - Every call that ends records `::response`, so a budget counts it. `output.reply` says how it
   ended: `result`, `tool_error` when the result sets `isError`, `protocol_error` for a JSON-RPC
   error, `cancelled`, or `indeterminate` when its connection ended or Box didn't read the reply.
-  Requiring `result` means this rule isn't met by a call that failed, or that the agent started and
-  abandoned.
+  A reply that only accepts a background task (an MCP task), or that asks the client for input
+  first (`resultType: "input_required"`), is also `indeterminate`, because it isn't the call's
+  answer and Box doesn't record the later one. Requiring `result` means this rule isn't met by a call
+  that failed, that the agent started and abandoned, or that is still running as a task.
 - A `result` shows that the server answered without an error, not that the verification passed.
-- Over an http server, Box doesn't read the reply, so `output.reply` is always `indeterminate`
-  there, and a rule like this one refuses every reset. A budget over `::response` works on both.
+  `output.structured` is what the tool answered. It holds the reply's `structuredContent`, keeping
+  only the fields the tool's `outputSchema` declares, so a misspelled field fails at load. An
+  `outputSchema` that Box can't turn into a policy type, such as one with a field named `if` or a
+  `$ref` it can't resolve, declares no `output.structured`, so a rule that reads it fails at load.
+  The server's other tools keep their outputs, unless the problem only appears when the outputs
+  are read together; then no tool on that server declares one.
+- Box records no `output.structured` when the tool declares no `outputSchema`, when the reply isn't
+  a `result`, or when a required field doesn't match its declared type. An optional field that
+  doesn't match is left out, like an undeclared one. A JSON
+  `number` field is read as a whole number, so a fractional value such as `22.5` doesn't match. A
+  rule that reads a field Box left out isn't met; a rule on another field still is.
+- Box reads the reply on stdio and http servers alike, including a streamed (Server-Sent Events)
+  http reply. Box asks an http server for an uncompressed reply. An http reply over the gateway's
+  16 MiB response limit, compressed anyway, or cut off records `indeterminate`, and so does a reply
+  Box can't copy because many tool calls' replies are being read at once. A server that
+  always compresses its replies therefore never meets a precondition, so every call that needs one
+  is refused.
+- The agent can make its own reply unreadable, for example by asking for an output over 16 MiB.
+  So write a rule on a tool's output as a precondition (`unless temporal`, as above), which an
+  unreadable reply fails. A `forbid` that fires when an earlier output said something can be
+  avoided that way.
+- Tool outputs are stored in local history in `box_dir`, next to the inputs Box already stores.
+  They never go to telemetry.
 
 Box doesn't record `::error` for an MCP call, and the load refuses a rule that reads one, or that
 compares `output.reply` with a value other than the five above.

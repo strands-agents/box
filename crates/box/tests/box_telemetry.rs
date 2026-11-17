@@ -139,9 +139,10 @@ fn a_shell_decision_states_its_arguments_and_its_directory() {
     });
     assert_eq!(args.first().map(String::as_str), Some("cat"), "{args:?}");
     assert_eq!(args.len(), 2, "the program and one path: {args:?}");
-    assert!(
-        args[1].ends_with("allowed.txt"),
-        "the expanded path, not the spelling: {args:?}"
+    assert_eq!(
+        args[1], "<redacted>",
+        "the Shell does not say which words the script stated, so every argument is redacted: \
+         {args:?}"
     );
     assert!(cwd.is_some(), "the directory the line ran in: {spans:?}");
 }
@@ -845,7 +846,13 @@ fn a_declared_file_target_is_where_the_records_go() {
         "[telemetry.decisions]\nkind = \"file\"\ndestination = \"~/declared.jsonl\"\ninclude = [\"deny\", \"permit\"]\n",
     )
     .expect();
-    assert!(configured.bash("zsh -c 'true'").status.success());
+    let output = configured.bash("zsh -c 'true'");
+    assert!(output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("telemetry records were lost"),
+        "a target that took every record reports no loss: {stderr}"
+    );
 
     let declared = configured.operator_home().join("declared.jsonl");
     let text = std::fs::read_to_string(&declared)
@@ -854,6 +861,48 @@ fn a_declared_file_target_is_where_the_records_go() {
     assert!(
         !default_records(&configured.root()).exists(),
         "a declared target replaces the default rather than adding to it"
+    );
+}
+
+/// **A target that refuses every export is reported once on stderr, and the run still succeeds.**
+#[test]
+fn an_unreachable_target_reports_the_lost_records_once() {
+    needs_a_box!("an_unreachable_target_reports_the_lost_records_once");
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
+        listener.local_addr().expect("its port").port()
+    };
+    let configured = Request::with_config(
+        "telemetry-unreachable",
+        READ_ONE_FILE,
+        &format!(
+            "[telemetry.decisions]\nkind = \"otlp\"\ndestination = \"http://127.0.0.1:{port}\"\n"
+        ),
+    )
+    .expect();
+    let output = configured.bash("zsh -c 'true'");
+
+    assert!(
+        output.status.success(),
+        "a lost record does not fail the run: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let lines: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("telemetry records were lost"))
+        .collect();
+    assert_eq!(lines.len(), 1, "exactly one loss line: {stderr}");
+    assert!(
+        lines[0].starts_with("strands-box: warning: telemetry records were lost: "),
+        "{stderr}"
+    );
+    assert!(
+        lines[0].contains("failed"),
+        "the cause is a failed export: {stderr}"
+    );
+    assert!(
+        !lines[0].contains("did not finish"),
+        "a final export that failed at once is not a drain that ran out of time: {stderr}"
     );
 }
 
@@ -1265,14 +1314,19 @@ fn an_otlp_target_receives_the_records_with_the_secret_attached() {
     // Several connections, not one: a box exports its control-plane records and its decisions in
     // separate batches, so serving one would answer whichever raced first and drop the other.
     std::thread::spawn(move || {
-        for stream in listener.incoming().take(8) {
+        'connections: for stream in listener.incoming().take(8) {
             let Ok(mut stream) = stream else { continue };
             let mut reader = BufReader::new(stream.try_clone().expect("clone"));
             let mut head = String::new();
             let mut length = 0usize;
             loop {
                 let mut line = String::new();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                let read = reader.read_line(&mut line).expect("read HTTP headers");
+                // A connection can close before sending any request bytes.
+                if read == 0 && head.is_empty() {
+                    continue 'connections;
+                }
+                if read == 0 || line == "\r\n" {
                     break;
                 }
                 if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {

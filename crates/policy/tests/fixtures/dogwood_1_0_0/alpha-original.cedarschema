@@ -1,0 +1,16 @@
+namespace alpha {
+  type readInput = {
+    path: String
+  };
+
+  action "read" appliesTo {
+    principal: [Box::Agent],
+    resource: [Box::Resource],
+    context: {
+      input: readInput,
+      output?: {
+        reply: __cedar::String
+      }
+    }
+  };
+}

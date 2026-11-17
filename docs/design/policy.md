@@ -138,14 +138,21 @@ An MCP call records only `::response`, both as `mcp:call` and, for a `tools/call
 decided, as that tool's action with the request's `input`. A completed call is a response whatever
 the server replied, and so is a cancelled or uncertain one, so a budget over responses can't be
 escaped by making calls fail. The tool's response carries `output.reply`, a string that says how the
-call ended, so a precondition can require `result` and exclude a failed or abandoned call. Only a
-stdio reply frame records `result`, `tool_error`, or `protocol_error`. The gateway reads no http
-reply, and a streamed reply sends its status before the tool's result, so an http call records
-`indeterminate`. The load refuses a rule that reads an MCP `::error`, or an `output.reply` value Box
-never records. `output.reply` is a string rather than a Box enum type because each MCP server's
-generated schema is stored in the history, and the previous release validates it against its own Box
-schema at startup; a new Box type there would make it drop the schema and reset every per-tool
-rule's history.
+call ended, so a precondition can require `result` and exclude a failed or abandoned call. For a tool
+that declares an `outputSchema`, a `result` also carries `output.structured`: the reply's
+`structuredContent` reduced to the declared fields, converted like `input`, and absent when a
+required field doesn't conform; an optional field that doesn't conform is left out. Like `input`,
+it has no size limit of its own: the stdio frame limit and the gateway's response limit bound it. The stdio broker reads each reply frame. The gateway copies a
+`tools/call` reply as it streams to the workload, after credential redaction, so history sees the
+bytes the workload saw, and hands the copy to the request's `ReplyObserver` once the reply matching
+the request's JSON-RPC id has passed. A reply over the gateway's response body limit (16 MiB),
+compressed, cut off, or without that reply records `indeterminate`, and so does a reply that only
+accepts an MCP task or has a `resultType` other than `complete`, such as `input_required`, because
+it isn't the call's answer and Box doesn't record the later one. The load refuses a rule that
+reads an MCP `::error`, or an `output.reply` value Box never records. `output.reply` is a string
+rather than a Box enum type because each MCP server's generated schema is stored in the history, and
+the previous release validates it against its own Box schema at startup; a new Box type there would
+make it drop the schema and reset every per-tool rule's history.
 
 For an MCP command with [argument wildcards](../user/mcp.md#argument-wildcards) enabled, the
 `shell:spawn` request records the alias name and effective launch arguments, including the received
@@ -233,6 +240,14 @@ Dogwood's default, and a longer window refuses to load.
 
 ## Durable history
 
+*Figure: the Box process uses Dogwood 1.1.2 after the upgrade. Offline migration also invokes a
+separate validator built with Dogwood 1.0.0; that process is not shown. The event commit mode
+remains unchanged.*
+
+![Before the upgrade, the Box policy adapter uses dogwood-language and dogwood-local-engine 1.0.0. After the upgrade, the adapter includes explicit migration and uses both packages at 1.1.2. The language package also uses dogwood-syntax 1.1.2. Migration preserves saved history before Box starts. Cedar and redb versions remain fixed, and events still commit individually.](images/dogwood-upgrade.png)
+
+[Editable figure](images/dogwood-upgrade.drawio)
+
 Each box keeps one history file, `<box_dir>/private/dogwood.redb`, and a restart reuses it. See
 [history is durable per box](decisions.md#history-is-durable-per-box-and-has-no-rewind). That's what
 stops a restart from resetting a budget. The history follows these rules:
@@ -252,9 +267,16 @@ stops a restart from resetting a budget. The history follows these rules:
   subset](decisions.md#discovery-serves-the-schema-independent-subset).
 - The engine timestamps each event from the system clock. Callers cannot supply timestamps. If the
   clock steps backwards, timestamps keep moving forward, so rolling the clock back doesn't free a
-  budget. The cost is that a restriction can outlast its window a little.
-- If an append fails, the engine denies that request and every subsequent request. When recording an
-  outcome fails, the caller warns on stderr and nothing retries it.
+  budget. The cost is that a restriction can outlast its window a little. If history is stamped
+  more than five minutes ahead of the clock, the box refuses to open it. During a run, the engine
+  refuses to timestamp an event while the gap exceeds five minutes, so the box denies that request
+  without appending it. A refused request doesn't persist: the next request within the bound is
+  decided.
+- If a request's append fails, the engine denies that request. If recording an outcome fails, the
+  caller warns on stderr, and the engine keeps the event. Before each later decision it records the
+  kept events first, and it denies every request until they append. It also records them when the
+  engine shuts down. An event that still can't append then, or a run that is killed, is lost, so
+  that effect doesn't count after a restart.
 - The engine checkpoints as events accumulate and removes events outside the longest window. This
   bounds the file size by the window rather than the box's lifetime.
 
@@ -265,6 +287,30 @@ translate those stored values.
 History is not an audit record and has no tamper evidence. It cannot be rewound or shared by boxes.
 The operation and its recorded outcome do not commit together. If the process stops between them,
 the history omits that outcome and a `::response` count is too low.
+
+### Explicit version conversion
+
+`policy migrate-history` converts the history of one existing, stopped box. It selects that box
+through `--config`, holds the operation lock used by `run`, and retains the original history
+descriptor. It does not initialize a box or refresh policy through runtime startup.
+
+The policy library validates original policy inputs, schemas, and current rule identities. For a
+downgrade, the bundled `strands-box-dogwood-1-0-migrate` process recovers and validates private
+copies with the exact Dogwood 1.0.0 engine and language. The current process uses Dogwood 1.1.2.
+The initial upgrade translates supported saved statements in a private copy, then recovers and
+checkpoints it with Dogwood 1.1.2. For later downgrades and upgrades, the source engine first
+checkpoints through the latest event; the converter then changes the saved statements. In both
+paths, the destination engine must recover the candidate snapshot with event replay unavailable.
+Rule identities, accumulated state, timestamps, and existing event records remain preserved.
+
+Each later conversion commits its snapshot, direction, and new generation together. An old forward receipt does not prove a later conversion. The 1.1.2 adapter refuses a
+history explicitly converted for 1.0.0 until it is converted forward again. The command changes
+history format, not the installed executable.
+
+Downgrade conversion requires a validated mapping back to the original rules. Later policy edits,
+missing historical schemas, or unsupported mappings cause a refusal. Box does not erase newer
+activity or restore deleted rules to make a downgrade succeed. Ordinary policy-edit behavior
+remains unchanged. See [the operator procedure](../user/policy.md#saved-history-requires-migration).
 
 ## What refuses to load
 
@@ -366,15 +412,15 @@ has these limits:
 
 - Decisions serialize. Every decision waits for one disk sync and for the one lock, so requests in a
   burst wait for earlier decisions.
-- A temporal macro can lose its history. In Dogwood 1.1.1, a rule that calls a temporal macro such
+- A temporal macro can lose its history. In Dogwood 1.1.2, a rule that calls a temporal macro such
   as `count_within` loses its accumulated state when the text before the call changes, even by a
   comment. A rule written inline keeps its state. Nothing Box ships calls a macro.
-- Upgrading from Dogwood 1.0.0 to 1.1.1 can reset an exhausted macro budget without a policy edit.
-  When the newer macro expansion renames a generated variable to avoid an authored name, Box treats
-  the changed expanded statement as a new rule. Stored events remain, but the new rule starts with
-  empty history and can allow a request that the previous rule denied. Closing and reopening the
-  policy engine reproduces this failure without a crash. This upgrade needs a migration fix before
-  use with existing policy history.
+- Upgrading saved Dogwood 1.0.0 history requires an explicit migration. Normal startup refuses an
+  unmarked history before engine recovery or policy reconciliation. The migration records
+  original policy inputs, validates retained state on private copies, and commits a replacement
+  snapshot and version record together. Unsupported histories remain unavailable until a supported
+  migration exists; Box never starts them with empty history. See the
+  [migration interface and limits](../../crates/policy/README.md#upgrade-saved-history-from-dogwood-100).
 - A verdict is allow or deny. No rule can pause a request for human approval. See [there is no
   approval verdict](decisions.md#there-is-no-approval-verdict).
 - A refusal reveals policy details. It names the component, the reason, and the rule, so a workload

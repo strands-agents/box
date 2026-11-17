@@ -6,7 +6,7 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   names, readable attributes, and what `when temporal { … }` observes. An operator's policy file is
   their source code.
 - Fix the Box integration, the schema, and the event mapping behind the façade without approval.
-- `dogwood-language` and `dogwood-local-engine` are published crates, pinned at `=1.1.1`.
+- `dogwood-language` and `dogwood-local-engine` are published crates, pinned at `=1.1.2`.
 - Close a gap listed here; never widen one. Never delete or `#[ignore]` a test that pins one.
 
 ## Read This First: Durable Dogwood History
@@ -31,6 +31,10 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 
 - The lifecycle is `PolicyEngine::open` → `decide` → `record` → `effective`.
   `PolicyEngine::validate` and `PolicyEngine::check` sit off it and return no authority.
+  `PolicyMigration` prepares and applies explicit history conversions while Box is stopped; it returns no authority.
+  `MigrationTarget` selects Dogwood 1.0.0 or 1.1.2 storage, not the installed Box binary.
+  The independent legacy validator receives only scratch copies. Preserve its exact old engine and
+  language pins, the retained executable identity, and fresh conversion-generation validation.
 - The root `pub use` set is the whole API: `EgressPolicyInterceptor`, `RenameDestination`,
   `ScriptPermit`, `ScriptPolicyInterceptor`, `ScriptRefusal`, `ShellPolicyInterceptor`,
   `CatalogRefusal`, `CatalogStage`, `CompleteCatalog`, `DiscoveryFailure`, `ListPage`,
@@ -38,12 +42,13 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `Finding`, `Location`, `PolicyCheck`, `RuleRef`, `Decision`, `DenyReason`, `PolicyAttribution`,
   `RuleId`, `event_schema_source`, `PolicyDiagnostic`, `PolicyError`, `PolicyStagingError`,
   `McpSchemaError`, `compose_action_schema`, `generate_mcp_schema`,
-  `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `McpReply`,
+  `validate_mcp_schema_composition`, `MigrationInput`, `MigrationSummary`, `MigrationTarget`, `PolicyMigration`,
+  `DecisionObserver`, `Delivery`, `FsResult`, `McpReply`,
   `Outcome`, `PendingToolResponse`, `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`,
   `EffectivePolicy`, `Policy`, `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`,
   `FsOperation`, `Principal`, `Request`, `RequestId`, `GovernedBox`, `Operator`, `PolicyWarning`,
-  `ToolGrammar`, `ToolGrammars`, `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`. That is 60
-  names with `--all-features` and 54 by default; recompute it when you touch the façade.
+  `ToolGrammar`, `ToolGrammars`, `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`. That is 64
+  names with `--all-features` and 58 by default; recompute it when you touch the façade.
 - `check` and `validate` share one composition (`check_and_expand`), and the staged check repeats
   the steps of `open_staged_with_engine` with no engine. A finding keeps a span only when the span
   is an offset into the authored text: a Dogwood parse error and a Cedar validation error over
@@ -114,12 +119,30 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 - Key a precondition on `::response`, because a `::request` predicate matches a denied attempt.
   Pinned by `tests/temporal_shell_e2e.rs::a_denied_attempt_satisfies_a_request_keyed_precondition`.
 - An MCP tool's `::response` also records a cancelled, cut-off, or unread call, so a precondition
-  on one also requires `output.reply: "result"`. Only a stdio reply frame records
-  `result`, `tool_error`, or `protocol_error`; the gateway reads no http reply, so every http call
-  records `indeterminate` until it does. Pinned by
+  on one also requires `output.reply: "result"`. The gateway hands a `tools/call`
+  reply, copied after redaction, to the request permit's `ReplyObserver`; the permit and the
+  observer share the pending response, and whichever ends second records it, so the tool's leg
+  records exactly when `mcp:call::response` does. A coarse outcome the history keeps for later
+  (`PolicyError::OutcomeKept`) counts as recorded, so the tool's leg queues behind it, on the http
+  and stdio paths alike (`dogwood::tests::a_tool_leg_queues_behind_a_kept_coarse_outcome_and_both_count`). An http reply over the 16 MiB response limit,
+  compressed, cut off, or without the reply matching the request's JSON-RPC id records
+  `indeterminate`, and so does a reply that only accepts an MCP task or has a `resultType` other
+  than `complete` (such as `input_required`): neither is the call's answer, and Box records no
+  later one. The stdio broker never records an `input_required` frame as an answer either. `output.structured` is recorded only for a `result`
+  whose required fields conform to the tool's `outputSchema`; an optional field that does not
+  conform is dropped. Like `input`, it has no size cap of its own; the stdio frame and the gateway's
+  response limit bound both. Measured on macOS, release, 100 calls: each recorded byte costs about
+  5 bytes of history, the per-call time stays near 17 ms and the rule check near 8 ms up to 1 MiB
+  outputs, and an input costs twice an output because both legs record it. `generate_mcp_schema` drops an
+  `outputSchema` that does not generate, so one tool's unreadable output never costs the server its
+  catalog (`mcp_schema::tests::an_output_schema_cedar_cannot_read_drops_only_that_tools_output`).
+  The workload can still make its own http reply unreadable (an output over 16 MiB, or a server
+  that compresses anyway), so only a precondition on `output.structured` is sound; a `forbid`
+  keyed on an earlier output can be avoided.
+  Pinned by
   `crates/box/.../exchange/tests/protocol_2026_07_28.rs::a_cancelled_call_does_not_satisfy_a_result_precondition`,
-  `::an_error_reply_does_not_satisfy_a_result_precondition`, and
-  `adapters/egress.rs::a_remote_tool_call_never_satisfies_a_result_precondition`.
+  `adapters/egress.rs::a_reply_observer_dropped_before_a_failed_delivery_records_nothing`,
+  `::a_remote_reply_is_matched_to_its_request_by_id`, and `tests/mcp_tool_output.rs`.
 - History is pruned to the deepest window, and the workload fills that window. State an
   availability bound.
 - Pin a destination on `host` and `port`, and refuse an address with a `forbid` on the string `ip4`
@@ -176,8 +199,7 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
    [`decisions.md`](../../docs/design/decisions.md).
 2. Reconcile the public names across the code, the tests, and `README.md`.
 3. Run `build`, `test`, `clippy --all-targets`, and `fmt --check` for `-p strands-box-policy`, each
-   with and without `--all-features`, plus `RUSTDOCFLAGS="-D warnings" cargo doc`. Vendored
-   clippy warnings from `strands-shell` are expected; policy-owned warnings must be zero.
+   with and without `--all-features`, plus `RUSTDOCFLAGS="-D warnings" cargo doc`. Policy-owned clippy warnings must be zero.
 4. Give a temporal change a long-run test, because a short one passes on a sawtooth.
 5. Run `feature-critic` before you commit. Keep `Cargo.lock`, `egress-gateway`, and `credentials`
    unchanged.

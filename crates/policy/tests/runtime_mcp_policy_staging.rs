@@ -2950,6 +2950,10 @@ when temporal {
 fn upgrading_retires_global_identities_without_moving_their_temporal_state() {
     let history = tempfile::tempdir().expect("history directory");
     let path = history.path().join("dogwood.redb");
+    // The engine is 1.1.2; only the captured event fields or action vocabulary are old.
+    // Initialize its version on an empty store before installing that historical fixture.
+    drop(PolicyEngine::open(Vec::new(), &path).expect("current engine version recorded"));
+
     let old_fragment = r#"
 namespace Mcp::alpha {
     type readInput = { path: String };

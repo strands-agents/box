@@ -1,7 +1,10 @@
 """Check release source selection through the workflow's scan command."""
 
+import json
 import os
+import re
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import textwrap
@@ -30,6 +33,25 @@ def workflow_command(name):
     while end < len(lines) and (not lines[end] or lines[end].startswith("          ")):
         end += 1
     return textwrap.dedent("\n".join(lines[start:end]))
+
+
+def workflow_step_condition(name):
+    step = WORKFLOW.read_text().split(f"      - name: {name}\n", 1)[1].split("      - name:", 1)[0]
+    match = re.search(r"^        if: (.+)$", step, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def condition_selects_target(condition, target):
+    if condition is None:
+        return True
+    equality = re.fullmatch(r"matrix\.target\.triple (==|!=) '([^']+)'", condition)
+    if equality:
+        same = target.casefold() == equality.group(2).casefold()
+        return same if equality.group(1) == "==" else not same
+    suffix = re.fullmatch(r"endsWith\(matrix\.target\.triple, '([^']+)'\)", condition)
+    if suffix:
+        return target.casefold().endswith(suffix.group(1).casefold())
+    raise AssertionError(f"Unsupported target condition: {condition}")
 
 
 class ReleaseSourceTests(unittest.TestCase):
@@ -266,6 +288,7 @@ class ReleaseBundleTests(unittest.TestCase):
                     with tarfile.open(assets / f"box-{tag}-{triple}.tar.gz", "w:gz") as archive:
                         for name in [
                             "box", "strands-box-sock-alias", "strands-box-contain-trampoline",
+                            "strands-box-dogwood-1-0-migrate",
                         ]:
                             entry = tarfile.TarInfo(name)
                             entry.size = 4
@@ -320,6 +343,121 @@ class ReleaseBundleTests(unittest.TestCase):
                     cwd=root, env=environment, capture_output=True, text=True,
                 )
                 self.assertNotEqual(result.returncode, 0)
+
+
+
+class ReleasePackageTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.package = self.root / "stage/box-core"
+        self.package.mkdir(parents=True)
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        shutil.copyfile(
+            WORKFLOW.parents[2] / "scripts/check-linux-package.py",
+            scripts / "check-linux-package.py",
+        )
+        for name in ("box", "strands-box-sock-alias", "strands-box-contain-trampoline",
+                     "strands-box-dogwood-1-0-migrate"):
+            self.executable(self.package / name, '#!/bin/sh\nprintf "%s\\n" "$PACKAGE_VERSION"\n')
+        self.executable(self.root / "readelf", '#!/bin/sh\nprintf "%s\\n" "$PACKAGE_HEADER"\n')
+        self.docker_arguments = self.root / "docker-arguments.json"
+        self.executable(self.root / "docker", "#!/usr/bin/env python3\n"
+                        "import json, os, sys\n"
+                        "from pathlib import Path\n"
+                        "Path(os.environ['DOCKER_ARGS']).write_text(json.dumps(sys.argv[1:]))\n"
+                        "command = sys.argv[sys.argv.index('box-linux-release') + 1:]\n"
+                        "os.execvp(command[0], command)\n")
+
+    def executable(self, path, contents):
+        path.write_text(contents)
+        path.chmod(0o755)
+
+    def run_step(self, name, **environment):
+        return subprocess.run(
+            ["bash", "-c", workflow_command(name)],
+            cwd=self.root,
+            env={**os.environ, "PATH": f"{self.root}:{os.environ['PATH']}",
+                 "DOCKER_ARGS": str(self.docker_arguments), **environment},
+            text=True,
+            capture_output=True,
+        )
+
+    def header(self, machine="Advanced Micro Devices X86-64", loader="/lib64/ld-linux-x86-64.so.2", version="2.34"):
+        return f"Machine: {machine}\nRequesting program interpreter: {loader}]\nName: GLIBC_{version}\n"
+
+    def test_x86_package_step_checks_all_required_executables_in_read_only_container(self):
+        result = self.run_step("Check the x86-64 Linux package", PACKAGE_HEADER=self.header())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(self.docker_arguments.read_text()), [
+            "run", "--rm", "--mount", f"type=bind,source={self.root},target=/src,readonly",
+            "box-linux-release", "python3", "scripts/check-linux-package.py", "stage/box-core",
+            "--target", "x86_64-unknown-linux-gnu",
+        ])
+        report = json.loads(result.stdout)
+        self.assertEqual([item["binary"] for item in report], [
+            "box", "strands-box-sock-alias", "strands-box-contain-trampoline",
+            "strands-box-dogwood-1-0-migrate",
+        ])
+        self.assertEqual({item["architecture"] for item in report}, {"x86_64"})
+
+    def test_x86_package_step_propagates_architecture_and_library_failures(self):
+        for header in (
+            self.header(machine="AArch64", loader="/lib/ld-linux-aarch64.so.1"),
+            self.header(version="2.35"),
+        ):
+            with self.subTest(header=header):
+                result = self.run_step("Check the x86-64 Linux package", PACKAGE_HEADER=header)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertTrue(result.stderr)
+
+    def test_build_and_package_steps_select_the_required_targets(self):
+        arm, x86, mac = "aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "aarch64-apple-darwin"
+        targets = {arm, x86, mac}
+        expected = {
+            "Prepare the Amazon Linux 2023 builder": {arm, x86},
+            "Build Linux against glibc 2.34": {arm, x86},
+            "Build strands-box (release)": {mac},
+            "Check the x86-64 Linux package": {x86},
+            "Check and run the ARM64 Linux package": {arm},
+            "Assert the packaged binary reports the stamped version": targets,
+        }
+        for name, selected in expected.items():
+            with self.subTest(step=name):
+                condition = workflow_step_condition(name)
+                self.assertEqual({target for target in targets if condition_selects_target(condition, target)}, selected)
+
+    def test_linux_build_uses_the_container_for_each_native_target(self):
+        arguments = self.root / "docker-arguments.jsonl"
+        self.executable(self.root / "docker", "#!/usr/bin/env python3\n"
+                        "import json, os, sys\n"
+                        "with open(os.environ['DOCKER_ARGS'], 'a') as output:\n"
+                        "    output.write(json.dumps(sys.argv[1:]) + '\\n')\n")
+        for target in ("aarch64-unknown-linux-gnu", "x86_64-unknown-linux-gnu"):
+            with self.subTest(target=target):
+                arguments.write_text("")
+                result = self.run_step("Build Linux against glibc 2.34", TRIPLE=target,
+                                       DOCKER_ARGS=str(arguments))
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                invocations = [json.loads(line) for line in arguments.read_text().splitlines()]
+                commands = [actual[actual.index("box-linux-release"):] for actual in invocations]
+                self.assertEqual(commands, [
+                    ["box-linux-release", "cargo", "build", "--release", "--locked", "--target", target,
+                     "-p", "strands-box", "-p", "strands-box-containment"],
+                    ["box-linux-release", "cargo", "build", "--release", "--locked", "--target", target,
+                     "--manifest-path", "crates/dogwood-legacy-migration/Cargo.toml"],
+                ])
+
+    def test_all_builds_check_the_packaged_version(self):
+        name = "Assert the packaged binary reports the stamped version"
+        step = WORKFLOW.read_text().split(f"      - name: {name}\n", 1)[1].split("      - name:", 1)[0]
+        self.assertNotIn("        if:", step)
+        for output, expected in (("box 0.2.3", 0), ("box 0.2.2", 1)):
+            with self.subTest(output=output):
+                result = self.run_step(name, VERSION="0.2.3", PACKAGE_VERSION=output)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

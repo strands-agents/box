@@ -1,0 +1,32 @@
+// The request/response/error event-schema convention: for every action A, derive a
+// `request` decision event (input fields + reserved scope/uid), a `response`
+// history event (input + output fields + reserved), and an `error` history event.
+//
+// `callerPrincipal`/`callerResource`, not AgentCore's `eventPrincipal`/
+// `eventResource` spelling: the vendored engine hardcodes the scope mirror under
+// the `caller*` names, so a differently named field is never populated and a
+// pattern on it silently matches nothing. Adopt the AgentCore names at the next
+// vendored re-sync.
+
+decision event <A>::request {
+    ...inputs(A),
+    callerPrincipal: principalType(A),
+    callerResource:  resourceType(A),
+    requestId:      String,
+}
+
+event <A>::response {
+    ...inputs(A),
+    ...outputs(A),
+    callerPrincipal: principalType(A),
+    callerResource:  resourceType(A),
+    requestId:      String,
+}
+
+// Carries the failing call's inputs; a failure has no outputs to record.
+event <A>::error {
+    ...inputs(A),
+    callerPrincipal: principalType(A),
+    callerResource:  resourceType(A),
+    requestId:      String,
+}

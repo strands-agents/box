@@ -1,0 +1,9 @@
+
+permit(principal == Box::Agent::"self", action == Box::Action::"http:request", resource)
+when temporal {
+    exists (total: Long). (
+        (sum_within(b, 86400s, Box::Action::"http:request"::response{ input.host: _, input.body_bytes: b })) == total
+        && total < 100
+        && (exists (t_33: Timepoint). (tp(t_33) && (exists (t_33: Timepoint). tp(t_33))))
+    )
+};

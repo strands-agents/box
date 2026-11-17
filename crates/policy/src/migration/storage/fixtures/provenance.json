@@ -1,0 +1,139 @@
+{
+  "format_version": 1,
+  "purpose": "Synthetic published Dogwood1.0.0 engine fixtures for explicit storage migration unit tests; not full Box CLI evidence",
+  "generated_on": {
+    "date_utc": "2026-11-13",
+    "platform": "Linux ARM64",
+    "rust": "1.98.1",
+    "cargo": "1.98.1"
+  },
+  "generator": {
+    "source": "generator/src/main.rs",
+    "source_sha256": "f7f4401ce463805197c0c6b820ed8bf87e830ac35014f5359ae01a22f72f4a92",
+    "manifest_sha256": "f542a358b72c67bef0712dd3c12b8bcad6b4a8eac3a0e3d9d5debcdf21c347a6",
+    "lock_sha256": "3b329e3d4b545795623a1935ac949d117a24c0cf5b2b4e72289bffd2b6273e0c",
+    "toolchain_sha256": "72da9f9e503464ba7393560f6f51a69fb06be72633d52ae7725fa0ba59dfda22",
+    "historical_binary_sha256": "ca97d51e0146b608781768583b2568aa505ae2573454e1d03d58d4ed49b1e068",
+    "source_kind": "Unmodified archived generator source; only seed mode generated these fixtures"
+  },
+  "public_registry_packages": [
+    {
+      "name": "cedar-policy",
+      "version": "4.11.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "674ca6ef6e44a1e29e6c07f6b2ab7e6913938d6049204d48e7849703d02443ce"
+    },
+    {
+      "name": "dogwood-language",
+      "version": "1.0.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "6996ef17ca5d06cea0e53bbffb177690e8e4a7f3bbcdb5bf67ad59603f2bf079"
+    },
+    {
+      "name": "dogwood-local-engine",
+      "version": "1.0.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "02d82f08653e0090010cfa076bcec582d3aa31e1dc3f0574e4e929c63253878b"
+    },
+    {
+      "name": "redb",
+      "version": "4.2.0",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "de6c3b63e007e90ce536ec2ae4690826136a20ec8dbbbb400daef1bb999d2e36"
+    },
+    {
+      "name": "serde_json",
+      "version": "1.0.154",
+      "source": "registry+https://github.com/rust-lang/crates.io-index",
+      "checksum": "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
+    }
+  ],
+  "inputs": {
+    "authored_policy": {
+      "file": "authored-policy.dw",
+      "sha256": "36fa2e40c24da61936320b5fdf58aad2e4577707d8caae7c6467e2c2c490b986"
+    },
+    "action_schema": {
+      "file": "action-schema.cedarschema",
+      "sha256": "960094f327bcd2c06e65df207f52cdb0c8598469d4ca22066dea089f94dfefa2"
+    }
+  },
+  "clock": {
+    "fixed_unix_nanos": 1800000000000000000,
+    "fixed_utc": "2027-01-15T08:00:00Z",
+    "meaning": "Synthetic fixture epoch, not generation wall clock; generated event timestamps advance by nanoseconds",
+    "generator_future_skew": "Duration::MAX in archived fixture-only harness",
+    "current_unit_test_clock": "Same fixed epoch, normal future-skew limit; production clock unchanged"
+  },
+  "fixtures": [
+    {
+      "file": "old-complete.redb",
+      "sha256": "6f12465faa3632b98599163080fc2605c8cab38d7b6c654766261522d97f16b3",
+      "bytes": 69632,
+      "generated_at": "2026-11-13T17:10:50.476857+00:00",
+      "generator_arguments": [
+        "seed",
+        "old-complete.redb",
+        "complete",
+        "dotted-has"
+      ],
+      "base_offset": 0,
+      "next_offset": 10,
+      "snapshot_up_to": null,
+      "retained_records": 10,
+      "checkpoint_called": false,
+      "checkpoint_return": null,
+      "tail_after_checkpoint": null,
+      "before_login": {
+        "allowed": true,
+        "offset": 5,
+        "timestamp": 1800000000000000001,
+        "threshold": 2
+      },
+      "after_two_login_responses": {
+        "allowed": false,
+        "offset": 9,
+        "timestamp": 1800000000000000005,
+        "threshold": 2
+      }
+    },
+    {
+      "file": "old-pruned.redb",
+      "sha256": "bcfee22497f6b099728b8bb1a87fe9e744c96785994a40a1bdcc3dba17a85b8c",
+      "bytes": 69632,
+      "generated_at": "2026-11-13T17:10:50.684511+00:00",
+      "generator_arguments": [
+        "seed",
+        "old-pruned.redb",
+        "pruned",
+        "dotted-has"
+      ],
+      "base_offset": 10,
+      "next_offset": 11,
+      "snapshot_up_to": 10,
+      "retained_records": 1,
+      "checkpoint_called": true,
+      "checkpoint_return": 10,
+      "tail_after_checkpoint": {
+        "allowed": false,
+        "offset": 10,
+        "timestamp": 1800000000000000006,
+        "threshold": 2
+      },
+      "before_login": {
+        "allowed": true,
+        "offset": 5,
+        "timestamp": 1800000000000000001,
+        "threshold": 2
+      },
+      "after_two_login_responses": {
+        "allowed": false,
+        "offset": 9,
+        "timestamp": 1800000000000000005,
+        "threshold": 2
+      }
+    }
+  ],
+  "checkpoint_behavior": "Published1.0.0 engine.checkpoint() creates snapshot and prunes covered records; pruned mode then submits one denied Read request as suffix",
+  "regeneration": "Manual only. Stable semantics and offsets are expected, not bit-identical database bytes; generated tokens/database allocation may differ. Review newly generated files before replacement."
+}

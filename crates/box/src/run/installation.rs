@@ -55,10 +55,24 @@ pub(super) fn directory(executable: &Path) -> Option<&Path> {
     Some(directory)
 }
 
+pub(crate) const HISTORY_MIGRATION_HELPER: &str = "strands-box-dogwood-1-0-migrate";
+
+pub(crate) fn history_migration_helper() -> io::Result<PathBuf> {
+    history_migration_helper_beside(&executable()?)
+}
+
+fn history_migration_helper_beside(executable: &Path) -> io::Result<PathBuf> {
+    directory(executable)
+        .map(|directory| directory.join(HISTORY_MIGRATION_HELPER))
+        .ok_or_else(|| io::Error::other("the installed executable has no parent directory"))
+}
+
 /// The installed executable identities that no workload may change.
 #[derive(Debug)]
 pub(crate) struct TrustedInstallation {
     binaries: Vec<InstalledBinary>,
+    migration_helper: PathBuf,
+    migration_helper_present: bool,
     preparation: std::sync::Mutex<()>,
 }
 
@@ -87,6 +101,21 @@ impl TrustedInstallation {
             InstalledBinary::open(helper.clone(), directory)?,
             InstalledBinary::open(directory.join("strands-box-sock-alias"), directory)?,
         ];
+        let migration_helper = directory.join(HISTORY_MIGRATION_HELPER);
+        let migration_helper_present = match std::fs::symlink_metadata(&migration_helper) {
+            Ok(_) => {
+                binaries.push(InstalledBinary::open(migration_helper.clone(), directory)?);
+                true
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => false,
+            Err(error) => {
+                return Err(InstallationError::Invalid {
+                    path: migration_helper,
+                    reason: error.to_string(),
+                }
+                .into());
+            }
+        };
         if current.ends_with("Box.app/Contents/MacOS/box") {
             let package = current
                 .ancestors()
@@ -113,6 +142,8 @@ impl TrustedInstallation {
         }
         let installation = Self {
             binaries,
+            migration_helper,
+            migration_helper_present,
             preparation: std::sync::Mutex::new(()),
         };
         installation.verify()?;
@@ -120,6 +151,14 @@ impl TrustedInstallation {
     }
 
     pub(crate) fn verify(&self) -> Result<(), BoxError> {
+        if !self.migration_helper_present
+            && !matches!(std::fs::symlink_metadata(&self.migration_helper), Err(error) if error.kind() == io::ErrorKind::NotFound)
+        {
+            return Err(InstallationError::Changed {
+                path: self.migration_helper.clone(),
+            }
+            .into());
+        }
         for binary in &self.binaries {
             binary.verify()?;
         }
@@ -144,9 +183,30 @@ impl TrustedInstallation {
 
     pub(crate) fn refuses_mutation(&self, path: &Path) -> bool {
         self.binaries.iter().any(|binary| binary.enclosed_by(path))
+            || lies_within(&self.migration_helper, path)
+            || self.reserved_helper_entry(path)
             || self.aliases().map_or(true, |aliases| {
                 aliases.iter().any(|name| lies_within(name, path))
             })
+    }
+
+    // A missing image has no inode yet. Bind its reserved name to the parent directory
+    // identity so another spelling of that directory cannot plant the later helper.
+    fn reserved_helper_entry(&self, path: &Path) -> bool {
+        let Some(name) = path.file_name() else {
+            return false;
+        };
+        let matches = name == HISTORY_MIGRATION_HELPER
+            || (cfg!(target_os = "macos")
+                && name
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(HISTORY_MIGRATION_HELPER));
+        matches
+            && path
+                .parent()
+                .and_then(disk_identity)
+                .zip(self.migration_helper.parent().and_then(disk_identity))
+                .is_some_and(|(candidate, installed)| candidate == installed)
     }
 
     fn aliases(&self) -> io::Result<Vec<PathBuf>> {
@@ -196,6 +256,15 @@ impl TrustedInstallation {
                     Scope::File => binary.names(&grant.resolved),
                 })
                 .map(|binary| &binary.path)
+                .or_else(|| {
+                    match grant.scope {
+                        Scope::Root | Scope::Dir => {
+                            lies_within(&self.migration_helper, &grant.resolved)
+                        }
+                        Scope::File => self.reserved_helper_entry(&grant.resolved),
+                    }
+                    .then_some(&self.migration_helper)
+                })
                 .or_else(|| {
                     aliases.iter().find(|name| match grant.scope {
                         Scope::Root | Scope::Dir => lies_within(name, &grant.resolved),

@@ -29,9 +29,21 @@ bold "== Sections: $sections =="
 log_dir=$(mktemp -d "${TMPDIR:-/tmp}/strands-tests.XXXXXX") || exit 1
 printf 'Logs: %s\n' "$log_dir"
 
+# The migration validator has its own lockfile and must be beside the test Box.
+if ! cargo build --locked --manifest-path crates/dogwood-legacy-migration/Cargo.toml \
+    --target-dir "${CARGO_TARGET_DIR:-target}" >"$log_dir/legacy-helper-build.log" 2>&1; then
+  err "migration validator build failed — $log_dir/legacy-helper-build.log"
+  exit 1
+fi
+
 # --- 1. Rust workspace -------------------------------------------------------
 if want rust; then
 bold "== Rust workspace (cargo test --workspace --all-features) =="
+if ! cargo test --locked --manifest-path crates/dogwood-legacy-migration/Cargo.toml \
+    --target-dir "${CARGO_TARGET_DIR:-target}" >"$log_dir/legacy-helper-tests.log" 2>&1; then
+  err "migration validator tests failed — $log_dir/legacy-helper-tests.log"
+  failures=$((failures + 1))
+fi
 # Report skipped tests from their captured output.
 rust_log="$log_dir/rust.log"
 if cargo test --workspace --all-features --no-fail-fast -- --nocapture 2>&1 | tee "$rust_log"; then

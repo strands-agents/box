@@ -1,0 +1,2 @@
+@id("duplicate") permit(principal, action == Box::Action::"fs:read", resource);
+@id("duplicate") permit(principal, action == Box::Action::"fs:write", resource);

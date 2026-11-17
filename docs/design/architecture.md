@@ -49,9 +49,9 @@ the engine decides a request and what a history rule can see.
 ### The broker
 
 The broker accepts connections from the alias on `run/box.sock` in the box directory. It checks
-the protocol version and routes each request by type. Strands Shell handles shell commands, Monty
-handles Python scripts, and the MCP broker handles requests to local MCP servers. The broker does
-not authorize requests itself.
+the protocol version and routes each request by type. Strands Shell handles shell commands and the
+`python3` and `python` aliases, and runs Python scripts in Monty. The MCP broker handles requests to
+local MCP servers. The broker does not authorize requests itself.
 
 The alias is part of the untrusted workload. The broker therefore treats its input as hostile, as
 described in [why interpreters run outside the workload](decisions.md#interpreters-are-brokered-aliases).
@@ -196,7 +196,7 @@ flowchart TD
     alias -->|"one request over run/box.sock"| broker
     agent -->|"every outbound request"| gateway
     broker -->|"a shell command"| shell
-    broker -->|"a Python script"| monty
+    shell -->|"a Python script"| monty
     broker -->|"a local MCP request"| mcp
     shell -->|"asks"| policy
     monty -->|"asks"| policy
@@ -287,6 +287,9 @@ interpreters are part of the code the operator must trust.
    because those accesses do not produce `fs:*` decisions. If Box cannot build a tool's sandbox
    grants, startup fails before the agent starts. On macOS, `file-attributes` adds a line for each
    sandbox that states which attributes its write grants can set.
+   A process that selects `file-watching` gets a line that FSEvents can expose denied names
+   and event metadata. A selected stdio MCP server gets it before the agent starts, and again when
+   the server starts.
 
    On Linux, `interpreter aliases for configured access` lists preserved interpreter spellings
    before the runtime-minimum section. Each line maps a spelling to a file the process's existing

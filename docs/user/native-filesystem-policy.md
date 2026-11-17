@@ -12,6 +12,7 @@ system described above and the runtime opt-in below. For a source build, build t
 
 ```sh
 cargo build --release --locked -p strands-box -p strands-box-containment --features native-filesystem-policy
+cargo build --release --locked --manifest-path crates/dogwood-legacy-migration/Cargo.toml --target-dir target
 ```
 
 Sign the product bundle with an identity and provisioning profile that permit `com.apple.developer.endpoint-security.client`.
@@ -90,7 +91,8 @@ Production use still requires further review and tests for those failures.
 
 When `[limits]` has no explicit settings, `file-attributes` is `false`, MCP argument wildcards
 are disabled, MCP executable names are bare, the agent declares no `[[agent.ingress]]`,
-and no egress destination has a backend,
+no egress destination has a backend, `[gateway] upgrade_http` is empty, the box ID is `box-` and 16 hexadecimal digits,
+and every process leaves `file-watching` disabled,
 configurations without process overrides retain version 21 when disabled and version 22 when enabled.
 An explicit process override requires record version 23.
 Two stdio MCP servers that share a program require record version 24.
@@ -102,13 +104,18 @@ A box whose agent declares `[[agent.ingress]]` requires record version 29.
 A box whose egress re-routes a destination to a [backend](egress.md) requires record version 30.
 An explicit `limits.shell.max_input` or `limits.shell.max_output` requires record version 31,
 including values equal to the defaults.
+A non-empty [`[gateway] upgrade_http`](config.md#gateway) requires record version 32.
+A box ID that a library caller supplied, other than `box-` and 16 hexadecimal digits, requires record
+version 34.
+Enabling [`file-watching`](config.md#file-watching) for any process requires record version 35.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 
 To disable the experiment, change the global setting to `false`.
 Remove all process overrides and `[limits]` settings, give each stdio MCP server its own
-program, and set `file-attributes` to `false` before returning to a binary that supports only
-version 21.
+program, set `file-attributes` to `false`, remove `file-watching` from every process,
+and remove `[gateway] upgrade_http` before returning to
+a binary that supports only version 21.
 If MCP argument wildcards are enabled, replace the stars with concrete arguments and disable
 `argument_wildcards` on each server too.
 Replace each absolute MCP executable path with a bare program name that the server's `PATH`

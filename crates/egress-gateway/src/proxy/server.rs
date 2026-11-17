@@ -116,7 +116,8 @@ async fn first_request(
     let Some((host, port, origin_target)) = connect::parse_absolute_target(&parsed.target) else {
         return Ok(WorkloadResponse::bare(400));
     };
-    let connect = ConnectRequest { host, port };
+    // A listed host's port 80 is decided and sent as port 443 over TLS, exactly as a CONNECT to it.
+    let (connect, upgraded) = connect::plain_destination(&state.config.upgrade_http, host, port);
     let correlation = RequestId::unique().with_headers(&parsed.headers);
     let (upstream, backend) = match admit(state, &connect, token.as_deref(), &correlation) {
         Ok(opened) => opened,
@@ -128,6 +129,7 @@ async fn first_request(
         &connect,
         parsed,
         origin_target,
+        upgraded,
         state,
         correlation,
         completion,

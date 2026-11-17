@@ -134,18 +134,26 @@ a table when needed. Omit a comment that repeats the name or explains Rust synta
 Put change rationale in the commit message. Put measurements, past defects, rejected alternatives,
 and implementation caveats in the crate's `AGENTS.md`. Cite a decision's stable anchor for its rationale.
 
-### Vendored code
+### Upstream Shell
 
-For a change under `crates/shell/`, read its `AGENTS.md` and `UPSTREAM.md`. Ask whether upstream
-would call the issue a bug: a wrong result, lost error, hang, unsound check, or unreportable suspension.
-Fix an upstream bug there and explain its ownership in the diff. Put Box composition in `crates/box/`.
+Box builds against Strands Shell at a pinned upstream revision, and holds no copy of its source.
+For a Shell defect, ask whether upstream would call the issue a bug: a wrong result, lost error, hang,
+unsound check, or unreportable suspension. Fix an upstream bug there, move the pin to the revision
+that holds the fix, and explain its ownership in the diff. Put Box composition in `crates/box/`.
 
 Make an invalid state impossible by construction, or refuse it at startup. Prove the guard fires:
-introduce the defect, observe the refusal, then restore the fix. Keep the vendored suite green and
-its warning count unchanged. Record divergence in `UPSTREAM.md`.
+introduce the defect, observe the refusal, then restore the fix. Box carries no patch on the Shell.
 A local build workaround, relaxed version, or bypass of Box configuration is divergence.
 
 ## Verify before commit
+
+The offline history migration command also ships `strands-box-dogwood-1-0-migrate`.
+Its package, `crates/dogwood-legacy-migration`, is an independent workspace with exact
+Dogwood 1.0.0 engine and language pins. Keep its lockfile separate; aliases in the root
+workspace do not isolate compatible-major versions. `just build`, `just test`, and `just check`
+include this helper. Direct Cargo checks must build it into the same target directory first
+and run its format, Clippy, and test gates through its own manifest. Release archives and
+source-install instructions must ship the helper beside Box. Ordinary runs do not invoke it.
 
 For each changed Rust package, run:
 
@@ -158,7 +166,7 @@ cargo fmt     -p <package> --check
 
 `--all-features` is required: `box_shell` and `box_credentials` need `test-support`, so a plain
 `cargo test` skips them. Report interpreter-dependent `skipping: ...` messages.
-Owned clippy warnings must be zero; vendored warnings must not increase. Check warning locations
+Owned clippy warnings must be zero. Check warning locations
 against `crates/<changed-crate>/`. Use `just --list` for workspace gates and
 [README.md](README.md) for prerequisites.
 

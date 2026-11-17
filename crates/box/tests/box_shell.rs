@@ -1199,7 +1199,7 @@ fn shell_state_does_not_persist_across_requests() {
 /// Two separate properties, and each has broken once.
 ///
 /// `HOME` is the *same* string on both sides. The Shell once fabricated its own mount while `HOME`
-/// kept the vendored default of `/home/lash`, so `~` expanded outside the mount and a bare `cd`
+/// kept the Shell's default of `/home/lash`, so `~` expanded outside the mount and a bare `cd`
 /// walked away from it. Then the composed workload environment moved `HOME` to the operator's home
 /// while this side still reported the box home — the same defect with the sides swapped. So the
 /// assertion is a *comparison* rather than a literal: whatever `HOME` is, both sides read one
@@ -1461,10 +1461,10 @@ fn reading_an_unrelated_file_leaves_egress_open() {
     );
 }
 
-/// The vendored Lua interpreter is reachable, and its effects are mediated.
+/// The Shell's Lua interpreter is reachable, and its effects are mediated.
 ///
 /// Recorded because it is the sharpest fact about what hosting the Shell puts in the
-/// daemon. `mlua` is a **non-optional** dependency of the vendored Shell
+/// daemon. `mlua` is a **non-optional** dependency of Strands Shell
 /// with `features = ["lua54", "async", "vendored"]`, so a Lua 5.4 **C** interpreter —
 /// roughly 500 `unsafe` FFI blocks in the binding alone — is compiled into whichever
 /// process hosts the Shell, and `builtins/mod.rs` exposes it as a `lua` builtin that
@@ -1511,7 +1511,7 @@ fn the_lua_interpreter_is_reachable_and_mediated() {
 /// **This was an `#[ignore]`d failing pin.** The attribute came off when the bypass closed;
 /// the history is kept because it explains why admission sits where it does.
 ///
-/// The vendored Shell used to admit a command in `Shell::run` → `intercept_shell_command`,
+/// The Shell used to admit a command in `Shell::run` → `intercept_shell_command`,
 /// while Lua's `io.popen` (`shell/src/builtins/lua.rs:682`) and `os.execute` (`:837`) called
 /// `exec::execute_capture` **directly**, performing no admission. So once a policy permitted
 /// *any* `lua -e …` command, two lines of Lua ran arbitrary shell text unjudged. Measured
@@ -1812,6 +1812,110 @@ fn every_python_alias_reaches_the_broker() {
             "{name} must reach the broker: {output:?}"
         );
     }
+}
+
+/// A box whose agent may read `{workspace}/sub`, which holds a `here.txt` and a `show.py` of its
+/// own. The workspace holds a different `here.txt`, so a command run in the wrong folder reads the
+/// wrong file instead of failing.
+fn box_with_a_sub_folder(policy_text: &str, name: &str) -> Configured {
+    let request = Request::with_policy(name, policy_text);
+    // Created before the grant names it, so the grant resolves to the folder's canonical path.
+    let workspace = request.operator_home().join("workspace");
+    std::fs::create_dir_all(workspace.join("sub")).expect("a sub folder");
+    std::fs::write(workspace.join("here.txt"), "WORKSPACE_FILE").expect("the workspace's file");
+    std::fs::write(workspace.join("sub/here.txt"), "SUB_FILE").expect("the sub folder's file");
+    std::fs::write(workspace.join("sub/show.py"), "print('SCRIPT_IN_SUB')\n")
+        .expect("a script only the sub folder holds");
+    request.agent_list("read", &["{workspace}/sub"]).expect()
+}
+
+/// **Every alias starts in the caller's folder.** Until protocol version 9 each one started in
+/// the workspace, so `zsh -c 'cat here.txt'` from a subfolder read the workspace's file and
+/// exited 0. The `python3` alias finds a script that exists only in the caller's folder.
+#[test]
+fn an_alias_run_from_a_subfolder_runs_in_that_subfolder() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let box_ = box_with_a_sub_folder(PERMISSIVE_POLICY, "alias-caller-folder");
+    let sub = box_.workspace().join("sub").display().to_string();
+
+    let output = box_.bash(
+        r#"cd sub || exit 9
+           zsh -c pwd
+           zsh -c 'cat here.txt'; printf '\n'
+           bash -c 'cat here.txt'; printf '\n'
+           python3 show.py
+           python show.py"#,
+    );
+
+    assert_eq!(
+        stdout(&output),
+        format!("{sub}\nSUB_FILE\nSUB_FILE\nSCRIPT_IN_SUB\nSCRIPT_IN_SUB\n"),
+        "each alias must run in the caller's folder: {output:?}"
+    );
+}
+
+/// **A folder the policy refuses fails the call, and the command runs nowhere.** The folder meets
+/// the same `fs:read` `change_dir` decision a typed `cd` gets.
+#[test]
+fn an_alias_in_a_folder_the_policy_refuses_runs_nothing() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    const NO_ENTRY_TO_SUB: &str = r#"
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
+permit(principal, action == Box::Action::"fs:read", resource);
+permit(principal, action == Box::Action::"fs:write", resource);
+forbid(principal, action == Box::Action::"fs:read", resource)
+when { context.input.operation == Box::FsReadOperation::"change_dir"
+       && context.input.path like "*/sub" };
+"#;
+    let box_ = box_with_a_sub_folder(NO_ENTRY_TO_SUB, "alias-refused-folder");
+    let workspace = box_.workspace();
+
+    let output = box_.bash(
+        r#"cd sub || exit 9
+           zsh -c 'printf RAN > ran.txt'; printf 'zsh=%s\n' "$?"
+           python3 -c "open('ran.txt', 'w').write('RAN')"; printf 'python3=%s\n' "$?""#,
+    );
+
+    assert_eq!(
+        stdout(&output),
+        format!("zsh={DENIED_STATUS}\npython3={DENIED_STATUS}\n"),
+        "a refused folder must fail each call: {output:?}"
+    );
+    assert!(
+        stderr(&output).contains("cannot start in"),
+        "the refusal must say which folder: {output:?}"
+    );
+    for folder in [workspace.join("sub"), workspace.clone()] {
+        assert!(
+            !folder.join("ran.txt").exists(),
+            "a refused folder must run nothing, there or in the workspace: {output:?}"
+        );
+    }
+}
+
+/// **The `python3` alias is a Shell command, so it needs a `shell:exec` permit.** Before protocol
+/// version 9 it reached Monty with no command-level decision.
+#[test]
+fn the_python_alias_needs_a_shell_exec_permit() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    const READS_ONLY: &str = r#"
+permit(principal, action == Box::Action::"fs:read", resource);
+"#;
+    let box_ = box_under(READS_ONLY, "monty-needs-exec");
+
+    let output = box_.bash(r#"python3 -c "print('RAN')"; printf 'status=%s\n' "$?""#);
+
+    assert_eq!(
+        stdout(&output),
+        format!("status={DENIED_STATUS}\n"),
+        "python3 with no shell:exec permit must be refused and print nothing: {output:?}"
+    );
 }
 
 /// A Python read the policy refuses raises, and reads nothing.

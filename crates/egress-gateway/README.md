@@ -15,7 +15,7 @@ operators inspecting egress decisions.
 
 ## Public Interface
 
-The crate root is the complete public API — 35 names, 30 unconditional and 5
+The crate root is the complete public API — 36 names, 31 unconditional and 5
 behind the `tls-intercept` feature:
 
 | Area | Items |
@@ -24,7 +24,7 @@ behind the `tls-intercept` feature:
 | Boundary values | `HeaderMap`, `InterceptedRequest`, `InterceptedResponse`, `Mutation`, `MutationTarget`, `Target` |
 | Credential mutators | `CapabilitySet`, `CredentialCapability` |
 | Host spelling | `is_bindable_host`, `normalize_host` |
-| Effect lifecycle | `EffectAttempt`, `EffectInterceptor`, `EffectOutcome`, `EffectPermit`, `McpFrame`, `McpListReply` |
+| Effect lifecycle | `EffectAttempt`, `EffectInterceptor`, `EffectOutcome`, `EffectPermit`, `McpFrame`, `McpListReply`, `ReplyObserver` |
 | Remote MCP | `McpTarget`, `McpTargetIdentity`, `canonicalize_mcp_frame`, `mcp_denial_response`, `refuse_duplicate_mcp_keys` |
 | Audit seam | `Emitter`, `StubEmitter` |
 | Errors | `PROXY_ORIGIN_HEADER`, `PROXY_ORIGIN_VALUE`, `ProxyError`, `Result` |
@@ -47,6 +47,15 @@ pub trait EffectInterceptor: Send + Sync {
 pub trait EffectPermit: Send {
     fn record_outcome(self: Box<Self>, outcome: EffectOutcome) -> io::Result<()>;
     fn mark_indeterminate(self: Box<Self>);
+    fn reply_observer(&mut self, request_id: Option<&str>) -> Option<Box<dyn ReplyObserver>> {
+        None
+    }
+}
+
+pub trait ReplyObserver: Send {
+    fn complete(&mut self, reply: &[u8]) -> bool { false }
+    fn finished(self: Box<Self>, reply: &[u8]);
+    fn abandoned(self: Box<Self>);
 }
 ```
 
@@ -68,6 +77,17 @@ Both `EffectPermit` methods consume `self: Box<Self>`, so one permit reaches
 exactly one terminal transition. The proxy reports `EffectOutcome::Connected`,
 `ConnectFailed`, `Replied`, `Completed`, `Failed`, `Partial`, or `Indeterminate`. A dropped
 permit becomes `mark_indeterminate`, so an early return or a panic still reports.
+
+For an MCP `tools/call`, a permit can return a `ReplyObserver` from `reply_observer`, and the
+proxy asks the server for an uncompressed reply. The proxy copies the reply as it passes to the
+workload, after credential redaction, up to the response body limit. It calls `finished` with the
+copy when the stream ends, or as soon as `complete` says the copy holds the answer, so the observer
+does not wait for a stream the server holds open. The permit's outcome still waits for that stream
+to end. It calls `abandoned` when the reply goes over the limit, the upstream fails, or the
+workload goes away. All copies held at once share a budget of four times the limit, so concurrent
+tool calls cannot make the gateway hold a full copy per connection; a reply that would go over it
+is abandoned, and still reaches the workload whole. A dropped observer is abandoned too.
+
 Response delivery counts include accepted HTTP headers and framing. A source failure after a
 flushed prefix records incomplete delivery; an earlier flush does not make the response complete.
 
@@ -199,7 +219,7 @@ fn start() -> egress_gateway::Result<MitmHandle> {
 
 `EffectAttempt` is `#[non_exhaustive]`, so an implementation needs a wildcard arm.
 
-`MitmConfig` has eleven fields:
+`MitmConfig` has twelve fields:
 
 | Field | Type | Default |
 |---|---|---|
@@ -214,6 +234,7 @@ fn start() -> egress_gateway::Result<MitmHandle> {
 | `max_connections` | `usize` | `256` |
 | `mcp_servers` | `Vec<(String, String)>` | empty |
 | `backends` | `Vec<(DestinationPattern, BackendDial)>` | empty |
+| `upgrade_http` | `Vec<String>` | empty |
 
 `unix_socket_path` selects the transport. `None` binds a localhost `TcpListener`
 at `bind_addr`; `Some(path)` binds only a `UnixListener`, at mode `0600`, and
@@ -242,6 +263,12 @@ response, which may already have delivered a processed prefix.
 dialled to that backend instead, the backend host is presented on the upstream leg, and the backend
 path prefix joins in front of the agent's path. The host decision still runs on the original
 destination and the address decision on the backend address, so policy judges the agent's intent.
+
+`upgrade_http` lists hosts whose plain `http://` request to port 80 the gateway decides and sends as
+`https://` on port 443. Every decision sees port 443, as for a `CONNECT` to the host, and the
+upstream leg speaks TLS against the same roots, with the host as SNI and `Host`. A backend that
+matches the host on 443 still re-routes it. The workload's leg stays plain, so `intercepted` is
+`false` and a credential-matched request is refused.
 
 `MitmHandle` exposes `port()`, `unix_socket_path()`, `intercept_ca_path()`,
 `env_vars()`, and `shutdown()`.

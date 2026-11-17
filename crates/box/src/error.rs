@@ -61,6 +61,9 @@ pub(crate) enum Internal {
     #[error(transparent)]
     McpSchema(#[from] McpSchemaError),
 
+    #[error(transparent)]
+    HistoryMigration(#[from] HistoryMigrationError),
+
     #[error("policy load failed: {0}")]
     Policy(#[from] policy::PolicyError),
 
@@ -189,6 +192,71 @@ pub(crate) enum McpSchemaError {
         path: PathBuf,
         source: std::io::Error,
     },
+}
+
+/// An offline history conversion could not prepare or publish saved state.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum HistoryMigrationError {
+    #[error("history migration requires an existing configured box at {path}; no box was created")]
+    NotConfigured { path: PathBuf },
+
+    #[error("cannot migrate history while Box is running at {path}; stop the run and retry")]
+    Running { path: PathBuf },
+
+    #[error(
+        "history migration cannot find the existing ownership lock {path}; saved history was not changed"
+    )]
+    MissingLock { path: PathBuf },
+
+    #[error(
+        "history migration requires an existing, nonempty history at {path}; no history was created"
+    )]
+    MissingHistory { path: PathBuf },
+
+    #[error(
+        "history migration configuration does not match the stored {field}; supply the unchanged configuration"
+    )]
+    ConfigurationChanged { field: &'static str },
+
+    #[error("history migration source {path} changed after it was read; retry preparation")]
+    SourceChanged { path: PathBuf },
+
+    #[error("cannot locate the installed Box executable for history migration: {source}")]
+    Executable { source: std::io::Error },
+
+    #[error(
+        "cannot open the installed history migration helper {path}: {source}; install the complete Box distribution"
+    )]
+    Helper {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error(
+        "history migration helper {path} is not a {required}; install the complete Box distribution"
+    )]
+    InvalidHelper {
+        path: PathBuf,
+        required: &'static str,
+    },
+
+    #[error("cannot prepare private history migration files in {path}: {source}")]
+    Scratch {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+
+    #[error("history migration refused: {source}")]
+    Policy { source: policy::PolicyError },
+
+    #[error("history migration schema refused: {source}")]
+    Schema { source: policy::McpSchemaError },
+
+    #[error("cannot encode the history migration summary: {source}")]
+    Summary { source: serde_json::Error },
+
+    #[error("unsupported Dogwood migration target {target}; use 1.0.0 or 1.1.2")]
+    Target { target: String },
 }
 
 /// The Linux egress relay could not be established.
@@ -329,6 +397,19 @@ pub(crate) enum ConfigError {
         "box record identity {found:?} is invalid; select an empty `box_dir`, or remove the stale box state before the next run"
     )]
     RecordIdentity { found: String },
+
+    #[error(
+        "box ID {found:?} is invalid; a box ID is a prefix of 1 to {max} letters, digits, `.`, `_`, \
+         or `-` that does not start with `.` or `-`, then `-` and 16 lowercase hexadecimal digits",
+        max = crate::record::config::MAXIMUM_BOX_IDENTITY_PREFIX
+    )]
+    SuppliedIdentity { found: String },
+
+    #[error(
+        "box ID {supplied:?} does not match this box, whose ID is {stored:?}; pass {stored:?}, or \
+         select an empty `box_dir` for a new box"
+    )]
+    IdentityMismatch { stored: String, supplied: String },
 
     #[error(
         "{path} carries `{key}`, which this build does not read; write {replacement} instead. Edit \

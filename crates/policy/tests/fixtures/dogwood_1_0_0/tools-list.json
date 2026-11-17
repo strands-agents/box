@@ -1,0 +1,20 @@
+{
+  "result": {
+    "tools": [
+      {
+        "name": "read",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      }
+    ]
+  }
+}

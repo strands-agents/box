@@ -100,9 +100,11 @@ To build Box yourself, install [rustup](https://rustup.rs/). Build it and copy t
 ```sh
 git clone https://github.com/strands-agents/box.git box-src
 cargo build --release --manifest-path box-src/Cargo.toml -p strands-box -p strands-box-containment
+cargo build --release --locked --manifest-path box-src/crates/dogwood-legacy-migration/Cargo.toml --target-dir box-src/target
 mkdir box-core
 cp box-src/target/release/strands-box box-core/box
 cp box-src/target/release/strands-box-sock-alias box-src/target/release/strands-box-contain-trampoline box-core/
+cp box-src/target/release/strands-box-dogwood-1-0-migrate box-core/
 ```
 
 Linux x86-64 builds are experimental. Release downloads still target Linux ARM64.
@@ -112,8 +114,8 @@ To run an x86-64 build, set the Box startup opt-in in the same terminal:
 export EXPERIMENTAL_X86_SUPPORT=TRUE
 ```
 
-Box requires the exact value `TRUE` for `run` and `policy generate-schema`, including
-their Rust library entry points. Help and version output do not require the flag.
+Box requires the exact value `TRUE` for `run` and the `policy` commands, including
+the existing Rust library entry points. Help and version output do not require the flag.
 ARM64 does not require the flag. It does not change the sandbox permissions.
 
 </details>
@@ -420,6 +422,7 @@ The box writes its own errors to stderr. To keep them, add `2> my-box/box-run.lo
 | `getaddrinfo ENOTFOUND bedrock-runtime.us-west-2.amazonaws.com` | Node didn't load the preload file. Check the `--import` path in `command`. |
 | `Authentication failed: Please make sure your API Key is valid.` | Your key has expired, or you made it in another region. Make a new one in `us-west-2`. |
 | `OpenSSL configuration error` ... `openssl.cnf` | Add `openssl.cnf` to `read_file`. |
+| `EMFILE` from a directory watcher on macOS | Use the application's polling mode, or explicitly enable [file watching](config.md#file-watching) after accepting its denied-name disclosure. |
 | `EPERM: process.cwd failed with error operation not permitted, uv_cwd` | Add the project to `list`. |
 | `Unexpected token 'b', "blocked by"... is not valid JSON` | The box refused a model request. Find its `deny` in the decision log, and read the reason. |
 | `unsafe box directory ...: it is not empty and contains no valid private record` | You removed part of `my-box/state`. Remove all of it; `run` recreates it. Never remove `state/private` alone. |

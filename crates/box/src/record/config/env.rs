@@ -2,8 +2,8 @@
 
 use std::path::Path;
 
-use crate::EnvRefusal;
 use crate::error::{BoxError, Internal};
+use crate::{EnvRefusal, ReservedEnv};
 
 /// Prefixes whose whole family loads code. See [`reserved_workload_environment`].
 pub(super) const LOADER_HOOK_PREFIXES: [&str; 3] = ["LD_", "DYLD_", "PYTHON"];
@@ -103,6 +103,17 @@ fn box_owned_environment(name: &str) -> bool {
         return true;
     }
 
+    gateway_routing_environment(name) || matches!(name, "PWD" | "USER")
+}
+
+/// Whether `name` routes a process through the gateway or trusts the gateway's CA, which Core sets
+/// only for a gateway-routed process.
+pub(crate) fn gateway_routing_environment(name: &str) -> bool {
+    gateway_proxy_environment(name) || gateway_ca_environment(name)
+}
+
+/// Whether `name` routes a process through the gateway's proxy.
+fn gateway_proxy_environment(name: &str) -> bool {
     matches!(
         name,
         "HTTP_PROXY"
@@ -111,9 +122,16 @@ fn box_owned_environment(name: &str) -> bool {
             | "https_proxy"
             | "NO_PROXY"
             | "no_proxy"
-            | "SSL_CERT_FILE"
-            | "NODE_EXTRA_CA_CERTS"
             | "NODE_USE_ENV_PROXY"
+    )
+}
+
+/// Whether `name` names a CA file, which Core points at the gateway's CA.
+fn gateway_ca_environment(name: &str) -> bool {
+    matches!(
+        name,
+        "SSL_CERT_FILE"
+            | "NODE_EXTRA_CA_CERTS"
             | "CODEX_CA_CERTIFICATE"
             // `botocore` reads this one and not `SSL_CERT_FILE`, and `requests` and `httpx` read
             // the next. The box sets both, so both are box-owned.
@@ -121,9 +139,32 @@ fn box_owned_environment(name: &str) -> bool {
             | "REQUESTS_CA_BUNDLE"
             // Apple `git`'s libcurl reads this one and none of the others.
             | "GIT_SSL_CAINFO"
-            | "PWD"
-            | "USER"
     )
+}
+
+/// The kind of name Core reserves, by the same lists that `refused_name` and
+/// `reserved_workload_environment` use.
+pub(crate) fn reserved_kind(name: &str) -> Option<ReservedEnv> {
+    if gateway_proxy_environment(name) {
+        Some(ReservedEnv::GatewayProxy)
+    } else if gateway_ca_environment(name) {
+        Some(ReservedEnv::GatewayCaFile)
+    } else if box_owned_environment(name) {
+        Some(ReservedEnv::SetByBox)
+    } else if loader_hook(name) || dynamic_loader_environment(name) {
+        Some(ReservedEnv::LoadsCode)
+    } else {
+        None
+    }
+}
+
+/// Why the `env` of a table with `contain_egress = false` refuses `name`: as [`refused_name`], except
+/// that the gateway's proxy and CA names are the operator's, because Core sets none of them there.
+pub(crate) fn refused_native_egress_name(name: &str) -> Option<EnvRefusal> {
+    if valid_environment_name(name) && gateway_routing_environment(name) {
+        return None;
+    }
+    refused_name(name)
 }
 
 /// Why a process table's `env` refuses the name `name`, whatever its value.
