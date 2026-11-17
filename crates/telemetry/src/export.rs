@@ -247,8 +247,10 @@ impl TargetExporter {
     }
 
     /// Whether an agent payload for this target yields to the box records waiting before it.
+    ///
+    /// Only a file target yields, because only its handle is shared with the box's export.
     pub(crate) fn yields_to_the_box(&self) -> bool {
-        self.backlog.busy()
+        matches!(self.wire, Wire::File(_)) && self.backlog.busy()
     }
 
     /// Take the provider's resource. Later calls are ignored.

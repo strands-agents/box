@@ -438,9 +438,10 @@ refuses, a batch that a slow target does not accept before its export deadline w
 or a relayed payload still in flight at shutdown. So the absence of this line does not prove that
 nothing was lost.
 
-While Box sends a full batch of its own records to a target, it refuses an agent payload for that
-target. This keeps the workload's own telemetry from slowing the export of Box records. Like
-any other refused payload, it still gets `200`.
+While Box writes a full batch of its own records to a file target, it refuses an agent payload for
+that target. This keeps the workload's own telemetry from slowing the export of Box records. Like
+any other refused payload, it still gets `200`. An OTLP target never refuses a payload for this
+reason, because the payload does not slow its export.
 
 Set `STRANDS_BOX_TELEMETRY_DEBUG` to also print each failed export as it happens, with its cause. See
 [Failed sends](#failed-sends).

@@ -2131,11 +2131,26 @@ mod tests {
         delay: Duration,
         gate: Arc<tokio::sync::Semaphore>,
     ) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let (address, landed, _) = counting_gated_sink(delay, gate).await;
+        (address, landed)
+    }
+
+    /// [`gated_sink`], with the count of log requests that arrived, before the gate.
+    async fn counting_gated_sink(
+        delay: Duration,
+        gate: Arc<tokio::sync::Semaphore>,
+    ) -> (
+        String,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
         use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
         use prost::Message as _;
 
         let landed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let arrived = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let counted = Arc::clone(&landed);
+        let arriving = Arc::clone(&arrived);
         let traces_gate = Arc::clone(&gate);
         let router = axum::Router::new()
             .route(
@@ -2143,6 +2158,7 @@ mod tests {
                 axum::routing::post(move |body: axum::body::Bytes| {
                     let counted = Arc::clone(&counted);
                     let gate = Arc::clone(&gate);
+                    arriving.fetch_add(1, Ordering::SeqCst);
                     async move {
                         let _passed = gate.acquire().await;
                         tokio::time::sleep(delay).await;
@@ -2176,7 +2192,7 @@ mod tests {
         tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         });
-        (address, landed)
+        (address, landed, arrived)
     }
 
     /// Wait until `ready` holds, or fail after ten seconds.
@@ -2317,118 +2333,137 @@ mod tests {
         }
     }
 
-    /// **An agent payload yields while the box's lane exports a full batch, and only then**, so the
-    /// workload cannot slow the drain of its own refusals and an idle lane still relays.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_relay_yields_while_the_box_exports_a_full_batch() {
-        const BURST: usize = 1500;
-        if queue_is_resized() {
-            return;
-        }
-        let gate = Arc::new(tokio::sync::Semaphore::new(0));
-        let (address, landed) = gated_sink(Duration::ZERO, Arc::clone(&gate)).await;
-        let collector = Collector::start(
-            TelemetryConfig::for_box("demo").with_target(Target::new(TargetKind::Otlp, address)),
-        )
-        .expect("open");
-        let client = reqwest::Client::new();
-        let post = || {
-            client
-                .post(format!("http://127.0.0.1:{}/v1/logs", collector.port()))
-                .header("content-type", "application/json")
-                .body(
-                    r#"{"resourceLogs":[{"scopeLogs":[{"scope":{"name":"my-agent"},
-                       "logRecords":[{"body":{"stringValue":"agent"}}]}]}]}"#,
-                )
-                .send()
-        };
+    /// One agent log record, as the agent's own exporter posts it.
+    const AGENT_LOG: &str = r#"{"resourceLogs":[{"scopeLogs":[{"scope":{"name":"my-agent"},
+        "logRecords":[{"body":{"stringValue":"the agent payload"}}]}]}]}"#;
 
-        // The sink holds the first full batch, so the box's lane stays busy behind it.
-        burst(&collector, BURST);
-        let waiting = u64::try_from(BURST).expect("fits") - *crate::export::FULL_BATCH;
-        until("the first full batch reaches the exporter", || {
-            collector.unexported() == waiting
-        })
-        .await;
-        assert_eq!(post().await.expect("answered").status().as_u16(), 200);
+    /// Post [`AGENT_LOG`] to the collector's receiver, and answer its status.
+    async fn post_agent_log(collector: &Collector) -> u16 {
+        reqwest::Client::new()
+            .post(format!("http://127.0.0.1:{}/v1/logs", collector.port()))
+            .header("content-type", "application/json")
+            .body(AGENT_LOG)
+            .send()
+            .await
+            .expect("answered")
+            .status()
+            .as_u16()
+    }
+
+    /// **A relay to a file target yields while the box's lane exports a full batch, and only then**,
+    /// because the relay would hold the file the box's batch writes through.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_relay_to_a_file_target_yields_while_the_box_exports_a_full_batch() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("records.jsonl");
+        let collector = Collector::start(file_config(&path)).expect("open");
+
+        // A full batch in the exporter, as the SDK's worker holds it.
+        let exporting = collector.backlogs[0].exporting(*crate::export::FULL_BATCH);
+        assert_eq!(post_agent_log(&collector).await, 200);
         assert_eq!(
             collector.refused(),
             1,
             "the payload yields to the box's batch"
         );
 
-        // Once the box's records are out, the lane is idle and relays again.
-        gate.add_permits(OPEN);
-        until("every box record lands", || {
-            landed.load(Ordering::SeqCst) == BURST
-        })
-        .await;
-        assert_eq!(post().await.expect("answered").status().as_u16(), 200);
-        until("the relayed payload lands", || {
-            landed.load(Ordering::SeqCst) == BURST + 1
-        })
-        .await;
+        drop(exporting);
+        assert_eq!(post_agent_log(&collector).await, 200);
         assert_eq!(collector.refused(), 1, "an idle lane relays the payload");
 
-        let ended = shut_down_off_the_runtime_thread(&collector).await;
-        assert_eq!(ended, Shutdown::Completed);
+        collector.drained().await;
+        let text = std::fs::read_to_string(&path).expect("the records");
         assert_eq!(
-            collector.dropped(),
-            0,
-            "a yielded payload is not a failed export"
-        );
-        assert_eq!(
-            collector.unexported(),
-            0,
-            "a yielded payload is not a lost record"
+            text.matches("the agent payload").count(),
+            1,
+            "only the payload sent while the lane was idle is kept: {text}"
         );
     }
 
-    /// **A lane that overflowed relays again once it is idle**, so one burst does not end the
-    /// agent's telemetry for the rest of the run.
+    /// **A relay to an OTLP target never yields**, because it shares no handle with the box's export,
+    /// so refusing it would drop the agent's telemetry and protect nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_lane_that_overflowed_relays_again_once_idle() {
-        const BURST: usize = 4000;
+    async fn a_relay_to_an_otlp_target_is_kept_while_the_box_exports_a_full_batch() {
+        const BURST: usize = 1500;
         if queue_is_resized() {
             return;
         }
         let gate = Arc::new(tokio::sync::Semaphore::new(0));
-        let (address, landed) = gated_sink(Duration::ZERO, Arc::clone(&gate)).await;
-        let collector = Collector::start(
-            TelemetryConfig::for_box("demo").with_target(Target::new(TargetKind::Otlp, address)),
-        )
-        .expect("open");
-
-        burst(&collector, BURST);
-        gate.add_permits(OPEN);
-        // One batch in flight and a full queue behind it, five full batches in all.
-        until("what the queue held lands", || {
-            landed.load(Ordering::SeqCst) == 2560
-        })
-        .await;
-        // The sink counts a batch before it answers, so the last full export may still be open.
-        until("the lane is idle", || {
-            !collector.backlogs.iter().any(|backlog| backlog.busy())
-        })
-        .await;
-        assert!(collector.unexported() > 0, "the overflow is counted");
-        let answered = reqwest::Client::new()
-            .post(format!("http://127.0.0.1:{}/v1/logs", collector.port()))
-            .header("content-type", "application/json")
-            .body(
-                r#"{"resourceLogs":[{"scopeLogs":[{"scope":{"name":"my-agent"},
-                   "logRecords":[{"body":{"stringValue":"agent"}}]}]}]}"#,
+        let (address, landed, arrived) =
+            counting_gated_sink(Duration::ZERO, Arc::clone(&gate)).await;
+        let collector = Arc::new(
+            Collector::start(
+                TelemetryConfig::for_box("demo")
+                    .with_target(Target::new(TargetKind::Otlp, address)),
             )
-            .send()
-            .await
-            .expect("answered")
-            .status()
-            .as_u16();
-        assert_eq!(answered, 200);
-        until("the relayed payload lands", || {
-            landed.load(Ordering::SeqCst) == 2561
+            .expect("open"),
+        );
+
+        // The sink holds the first full batch, so the box's lane stays busy behind it.
+        burst(&collector, BURST);
+        until("the first full batch reaches the exporter", || {
+            collector.backlogs[0].busy()
         })
         .await;
+        let posting = {
+            let collector = Arc::clone(&collector);
+            tokio::spawn(async move { post_agent_log(&collector).await })
+        };
+        // The relay waits at the closed sink, so the box's batch is still in the exporter.
+        until("the relay reaches the sink", || {
+            arrived.load(Ordering::SeqCst) == 2
+        })
+        .await;
+        assert!(
+            collector.backlogs[0].busy(),
+            "the box's batch is still in the exporter"
+        );
+        assert_eq!(collector.refused(), 0, "an OTLP relay does not yield");
+
+        gate.add_permits(OPEN);
+        assert_eq!(posting.await.expect("the post"), 200);
+        until("every box record and the payload land", || {
+            landed.load(Ordering::SeqCst) == BURST + 1
+        })
+        .await;
+        assert_eq!(collector.refused(), 0);
+    }
+
+    /// **A lane that overflowed relays again once it is idle**, so one burst does not end the
+    /// agent's telemetry for the rest of the run.
+    ///
+    /// A current-thread runtime runs no export while the burst records, so the queue is sure to
+    /// overflow.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_lane_that_overflowed_relays_again_once_idle() {
+        const BURST: u64 = 4000;
+        if queue_is_resized() {
+            return;
+        }
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("records.jsonl");
+        let collector = Collector::start(file_config(&path)).expect("open");
+
+        burst(&collector, usize::try_from(BURST).expect("fits"));
+        // The queue's full batches have reached the exporter and finished; its last, partial batch
+        // waits for the timer, which leaves the lane idle.
+        let full = *crate::export::FULL_BATCH;
+        until("the queue's full batches are exported", || {
+            collector.unexported() <= BURST - 3 * full && !collector.backlogs[0].busy()
+        })
+        .await;
+        assert!(
+            collector.unexported() >= *crate::export::FULL_BATCH,
+            "the overflow alone would hold a yield on a lifetime count"
+        );
+
+        assert_eq!(post_agent_log(&collector).await, 200);
         assert_eq!(collector.refused(), 0, "an idle lane relays the payload");
+        collector.drained().await;
+        let text = std::fs::read_to_string(&path).expect("the records");
+        assert!(
+            text.contains("the agent payload"),
+            "the payload was relayed"
+        );
     }
 }

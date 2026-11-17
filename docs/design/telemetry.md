@@ -157,8 +157,9 @@ a shared queue, the workload could fill it until subsequent decisions were dropp
 
 The workload can still fill a Box queue with its own decisions, because each request it makes is
 recorded. A relay to a file target holds the file while it writes, which delays the box's next
-batch. So a payload yields while its target is sending a full batch of Box records, and the
-receiver drops it. A full batch means more records can wait behind it. When the queue empties, the
+batch. So a payload to a file target yields while that target is writing a full batch of Box
+records, and the receiver drops it. A payload to an OTLP target never yields: it travels as its
+own request and shares nothing with the box's export, so dropping it would protect nothing. A full batch means more records can wait behind it. When the queue empties, the
 next batch is not full, and relays resume. One relay can still start between two full batches, so
 relayed payloads delay each full batch by at most one relay. A record that a full queue refuses is
 counted and reported when the run ends.
