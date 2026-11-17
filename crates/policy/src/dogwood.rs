@@ -1489,41 +1489,51 @@ pub(crate) fn refuse_undeclared_locations(
     base: &ActionSchema,
     index: usize,
 ) -> Result<(), Refused> {
+    let service = service_schema()?;
+    let Ok(parsed) = dogwood_language::ParsedPolicySet::parse(expanded, &service) else {
+        return Ok(());
+    };
+    let decides_files = parsed
+        .policies()
+        .any(|policy| may_decide_a_file_action(&policy.scope()));
     let mut problems = Vec::new();
     let cedar_part = without_temporal(expanded);
-    if cedar_part
-        .parse::<cedar_policy::PolicySet>()
-        .ok()
-        .is_some_and(|policies| {
-            policies.policies().any(|policy| {
-                policy
-                    .to_json()
-                    .is_ok_and(|json| reads_locations_record(&json))
+    if decides_files
+        && cedar_part
+            .parse::<cedar_policy::PolicySet>()
+            .ok()
+            .is_some_and(|policies| {
+                policies.policies().any(|policy| {
+                    policy
+                        .to_json()
+                        .is_ok_and(|json| reads_locations_record(&json))
+                })
             })
-        })
     {
         let policy_schema = PolicySchema::from_cedarschema_str(&base.source)
             .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
-        if let Ok(parsed) =
-            dogwood_language::ParsedPolicySet::parse(&cedar_part, &service_schema()?)
-            && let Ok(lowered) = parsed.lower(&policy_schema)
+        if let Ok(cedar_parsed) = dogwood_language::ParsedPolicySet::parse(&cedar_part, &service)
+            && let Ok(lowered) = cedar_parsed.lower(&policy_schema)
         {
             let validation = Validator::new().validate(&lowered);
-            problems.extend(validation.validation_errors().map(ToString::to_string));
+            problems.extend(
+                validation
+                    .validation_errors()
+                    .map(ToString::to_string)
+                    .filter(|message| message.contains("input.locations.")),
+            );
         }
     }
-    if let Ok(parsed) = dogwood_language::ParsedPolicySet::parse(expanded, &service_schema()?) {
-        for policy in parsed.policies() {
-            for condition in policy.temporal_conditions() {
-                let mut names = Vec::new();
-                temporal_location_names(condition, &mut names);
-                problems.extend(
-                    names
-                        .into_iter()
-                        .filter(|name| !base.locations.contains_key(name))
-                        .map(|name| format!("`input.locations.{name}` names no declared location")),
-                );
-            }
+    for policy in parsed.policies() {
+        for condition in policy.temporal_conditions() {
+            let mut names = Vec::new();
+            temporal_location_names(condition, decides_files, &mut names);
+            problems.extend(
+                names
+                    .into_iter()
+                    .filter(|name| !base.locations.contains_key(name))
+                    .map(|name| format!("`input.locations.{name}` names no declared location")),
+            );
         }
     }
     problems.dedup();
@@ -1566,10 +1576,24 @@ fn reads_locations_record(value: &serde_json::Value) -> bool {
     }
 }
 
-/// Collect the name of each `input.locations.<name>` field a filesystem predicate or a
-/// `context.input.locations.<name>` term in a temporal condition reads.
+/// Whether a rule's action scope can include a `Box::Action::"fs:*"` action.
+fn may_decide_a_file_action(scope: &dogwood_language::PolicyScope) -> bool {
+    let is_file_action = |action: &cedar_policy::EntityUid| {
+        action.type_name().to_string() == "Box::Action"
+            && action.id().unescaped().starts_with("fs:")
+    };
+    match scope.action() {
+        dogwood_language::ActionConstraint::Any => true,
+        dogwood_language::ActionConstraint::Eq(action) => is_file_action(action),
+        dogwood_language::ActionConstraint::In(actions) => actions.iter().any(is_file_action),
+    }
+}
+
+/// Collect the name of each `input.locations.<name>` field a filesystem predicate reads, and of
+/// each `context.input.locations.<name>` term when the rule decides a file action.
 fn temporal_location_names(
     condition: &dogwood_language::temporal_ast::Condition,
+    decides_files: bool,
     out: &mut Vec<String>,
 ) {
     use dogwood_language::temporal_ast::{AggExprKind, ConditionKind, Term};
@@ -1581,16 +1605,18 @@ fn temporal_location_names(
             _ => None,
         }
     }
-    fn term_names(term: &Term, out: &mut Vec<String>) {
+    fn term_names(term: &Term, decides_files: bool, out: &mut Vec<String>) {
         match term {
-            Term::ContextField(path) => out.extend(location_name(path)),
+            Term::ContextField(path) if decides_files => out.extend(location_name(path)),
             Term::Agg(aggregate) => match &aggregate.kind {
                 AggExprKind::Sum { body, .. } | AggExprKind::Count { body, .. } => {
-                    temporal_location_names(body, out);
+                    temporal_location_names(body, decides_files, out);
                 }
                 AggExprKind::Call(_) => {}
             },
-            Term::Array(items) => items.iter().for_each(|item| term_names(item, out)),
+            Term::Array(items) => items
+                .iter()
+                .for_each(|item| term_names(item, decides_files, out)),
             _ => {}
         }
     }
@@ -1598,14 +1624,16 @@ fn temporal_location_names(
         ConditionKind::And { left, right }
         | ConditionKind::Or { left, right }
         | ConditionKind::Since { left, right, .. } => {
-            temporal_location_names(left, out);
-            temporal_location_names(right, out);
+            temporal_location_names(left, decides_files, out);
+            temporal_location_names(right, decides_files, out);
         }
         ConditionKind::Not { inner: body }
         | ConditionKind::Formerly { body, .. }
         | ConditionKind::Previous { body, .. }
         | ConditionKind::Exists { body, .. }
-        | ConditionKind::Refine { base: body, .. } => temporal_location_names(body, out),
+        | ConditionKind::Refine { base: body, .. } => {
+            temporal_location_names(body, decides_files, out)
+        }
         ConditionKind::Predicate(predicate) => {
             let filesystem = matches!(predicate.namespace.as_slice(), [box_namespace, kind]
                 if box_namespace == "Box" && kind == "Action")
@@ -1614,12 +1642,12 @@ fn temporal_location_names(
                 if filesystem {
                     out.extend(location_name(&argument.field_path()));
                 }
-                term_names(&argument.value, out);
+                term_names(&argument.value, decides_files, out);
             }
         }
         ConditionKind::Comparison { left, right, .. } => {
-            term_names(left, out);
-            term_names(right, out);
+            term_names(left, decides_files, out);
+            term_names(right, decides_files, out);
         }
         ConditionKind::Tp { .. } | ConditionKind::Call(_) | ConditionKind::SigilRef { .. } => {}
     }

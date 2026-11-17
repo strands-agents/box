@@ -936,3 +936,72 @@ fn a_home_relative_outcome_matches_under_a_home_that_is_not_utf8() {
     let project = Some(vec!["project".to_string()]);
     assert_eq!(recorded_locations(&history), [project.clone(), project]);
 }
+
+/// A rule held for an MCP schema that reads a `locations` field of its own tool action is not a
+/// location read, so it waits for that schema as before.
+#[test]
+fn a_held_rule_on_a_tool_action_reads_its_own_locations_field_and_waits() {
+    let held = |condition: &str| {
+        format!(
+            r#"
+@id("route")
+forbid (principal, action == demo::Action::"route", resource)
+{condition};
+"#
+        )
+    };
+    let cases = [
+        held(r#"when { context.input.locations == "home" }"#),
+        held(r#"when { context.input has locations }"#),
+        held(r#"when { context.input.locations like "home*" }"#),
+        held(r#"unless { context.input.locations == "home" }"#),
+        held(r#"when { context.input["locations"] == "home" }"#),
+        held(
+            r#"when temporal { formerly within 1h demo::Action::"route"::response{ input.target: context.input.locations.home } }"#,
+        ),
+    ];
+    let directory = tempfile::tempdir().expect("history directory");
+    for (index, text) in cases.iter().enumerate() {
+        for (label, declared) in [("none", Operator::unanchored()), ("project", project())] {
+            let opened = PolicyEngine::open_staged(
+                &declared,
+                sources(text),
+                &directory.path().join(format!("{index}-{label}")),
+            );
+            assert!(opened.is_ok(), "{label}: {text}: {:?}", opened.err());
+            let check = PolicyEngine::check(&declared, &sources(text), false);
+            assert!(
+                check.errors().is_empty(),
+                "{label}: {text}: {:?}",
+                check.errors()
+            );
+            assert_eq!(check.unchecked().len(), 1, "{label}: {text}");
+        }
+    }
+}
+
+/// A held rule on a tool action whose history predicate reads a file event's undeclared location
+/// still refuses at load.
+#[test]
+fn a_held_rule_on_a_tool_action_refuses_a_file_events_undeclared_location() {
+    let text = r#"
+@id("route")
+forbid (principal, action == demo::Action::"route", resource)
+unless temporal {
+    formerly within 1h Box::Action::"fs:write"::response{ input.locations.projcet: true }
+};
+"#;
+    let directory = tempfile::tempdir().expect("history directory");
+    let Err(error) =
+        PolicyEngine::open_staged(&project(), sources(text), &directory.path().join("h"))
+    else {
+        panic!("open_staged must refuse the undeclared location");
+    };
+    assert!(error.to_string().contains("projcet"), "{error}");
+    let check = PolicyEngine::check(&project(), &sources(text), false);
+    assert!(
+        !check.errors().is_empty() && check.unchecked().is_empty(),
+        "{:?}",
+        check.errors()
+    );
+}
