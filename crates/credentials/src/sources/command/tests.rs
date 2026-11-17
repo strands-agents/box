@@ -809,7 +809,7 @@ fn a_json_object_without_a_field_is_refused() {
 #[test]
 fn a_declared_op_refuses_a_json_object_without_a_field_in_text_output() {
     let program = printer("declared-op-object");
-    let backend = Backend::declared([program.declaration("op")]).expect("op is free to declare");
+    let backend = backend(program.declaration("op"));
     assert_eq!(
         refusal(&backend, "op://object"),
         "credential error: the secret source \"op\" (\"/bin/sh\") for op://[REDACTED] returned a \

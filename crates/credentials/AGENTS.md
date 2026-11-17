@@ -333,7 +333,10 @@ link when this surface shrinks. Build and test the three consumers: `strands-box
   program that prints an object as text give one destination each key. The built-in `op://`
   source has no such check and returns the object whole, so a declared `op` differs from it.
 - Build the reserved scheme list from the constant of each owner and from the two route markers,
-  so that a scheme has one owner. Keep a literal only for `secret`, which the box crate owns.
+  so that a scheme has one owner. Keep a literal only for `secret`, which the box crate owns. No
+  code collects the constants, so add each new scheme constant and each new route marker to the
+  list and to `each_scheme_constant_and_each_route_marker_of_the_crate_is_reserved`. Keep `op`
+  out of the list, because a declaration can claim it.
 - The JSON field step and its wipe helpers follow `json_field` and `is_json_object` in pull
   request #448. Only `wipe_value` has a test; no test can observe a wipe of a value that drops.
 - The environment test runs its stand-in through `/bin/sh`, which adds `PWD`, `OLDPWD`, `SHLVL`,
