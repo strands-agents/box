@@ -1701,6 +1701,7 @@ mod left_out_tests {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             box_id: "left-out-test".to_string(),
