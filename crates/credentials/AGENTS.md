@@ -17,10 +17,11 @@ the scrub of an echoed secret. `strands-box-egress-gateway` applies the edits to
 
 ## Public Contract
 
-- Keep implementation modules private. `src/lib.rs` re-exports the supported surface: 23 public
+- Keep implementation modules private. `src/lib.rs` re-exports the supported surface: 21 public
   names and eleven `pub(crate) use` re-exports. The public names include `PhantomCheck`, the opaque
-  `ResponseRedactor`, and the three of a declared secret source: `SecretSourceCommand`,
-  `SECRET_REFERENCE_TOKEN`, and `RESERVED_SECRET_SCHEMES`. The crate-internal ones are
+  `ResponseRedactor`, and `SecretSourceCommand`, the one name of a declared secret source. Keep the
+  reserved scheme list and the `{ref}` text inside the crate, because no other crate reads them.
+  `SecretSourceCommand::check_scheme` is the one check of a scheme. The crate-internal ones are
   `Emitter`, `RequestId`, `audit_resolve`, `CredentialDiagnostic`, `redact_credential_ref`,
   `AwsSessionCredentials`, `PhantomToken`, `Secret`, `DEFAULT_PHANTOM_PREFIX`,
   `check_phantom_prefix`, and `sign_request`.

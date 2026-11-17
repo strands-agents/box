@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use crate::{CredentialError, Result};
 
 /// The text in a declared argument that the reference body replaces.
-pub const SECRET_REFERENCE_TOKEN: &str = "{ref}";
+pub(crate) const SECRET_REFERENCE_TOKEN: &str = "{ref}";
 
 /// The schemes Box Core owns, which no declaration may claim.
-pub const RESERVED_SECRET_SCHEMES: &[&str] = &[
+const RESERVED_SECRET_SCHEMES: &[&str] = &[
     "env",
     "file",
     "aws",
@@ -17,6 +17,7 @@ pub const RESERVED_SECRET_SCHEMES: &[&str] = &[
     "cmd",
     "oauth2",
     "aws-signed",
+    "strip-phantom",
 ];
 
 /// How a declared program's stdout becomes the secret.
@@ -264,7 +265,7 @@ mod tests {
     }
 
     #[test]
-    fn the_reserved_schemes_are_the_eight_the_box_owns() {
+    fn the_reserved_schemes_are_the_nine_the_box_owns() {
         assert_eq!(
             RESERVED_SECRET_SCHEMES,
             [
@@ -275,7 +276,8 @@ mod tests {
                 "secret",
                 "cmd",
                 "oauth2",
-                "aws-signed"
+                "aws-signed",
+                "strip-phantom"
             ]
         );
     }
@@ -293,7 +295,7 @@ mod tests {
                 format!(
                     "credential error: a secret source cannot claim the scheme {scheme:?}, which \
                      the box reserves (reserved: env, file, aws, credsd, secret, cmd, oauth2, \
-                     aws-signed)"
+                     aws-signed, strip-phantom)"
                 )
             );
         }
