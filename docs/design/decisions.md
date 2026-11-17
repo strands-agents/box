@@ -1753,7 +1753,7 @@ account lookup and preference-service denials against successful outside control
 ### File watching requires explicit acceptance of metadata disclosure
 
 The approved `file-watching = true` option is an explicit exception to the four-inputs authority test because it grants access to event metadata that policy does not judge and that can extend beyond the process's filesystem grants.
-This exception accepts possible disclosure of denied names and event metadata (including outside the workspace and from past events), a host-wide count of filesystem activity across other users and boxes, and each volume's history-database identifier, and it lets a root workload delete a volume's recorded event history; direct file-content and write restrictions remain in force.
+This exception accepts possible disclosure of denied names and event metadata, including outside the workspace and from past events; direct file-content and write restrictions remain in force.
 Box permits FSEvents only for each process table that opts in, so the default remains off and the agent's selection does not enable its tools or local MCP servers.
 Automatically permitting FSEvents for tools would restore directory watching without the operator accepting this additional authority.
 On macOS, Box discloses the limitation for every selected table before the agent starts, including stdio MCP servers that remain unstarted, and repeats the disclosure when a server starts.
