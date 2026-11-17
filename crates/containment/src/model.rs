@@ -654,7 +654,7 @@ impl PathGrant {
     }
 
     /// Walk the chain once: [`Self::reachable_paths`], the caller's spelling parent-canonical, and
-    /// each link node between the two ends, a linked folder on a link's target path included.
+    /// each link node between the two ends, a linked folder below the caller's own folder included.
     ///
     /// A grant whose parent is canonical and which holds no link, or one, gives back exactly
     /// [`Self::reachable_paths`].
@@ -668,21 +668,25 @@ impl PathGrant {
 
         record(parent_canonical(&self.original), &mut nodes);
 
-        // **Each link the lookup follows after the caller's own folder.** For `helper` pointing at
-        // `current/file`, where `current` links to `data`, the lookup follows `current` as well,
-        // and macOS refuses the open unless that link node is granted too. The walk starts at the
-        // caller's folder, canonical, so a link above the caller's spelling, such as `/var` on
-        // macOS, is not a node, as before.
+        // **Each link the lookup follows after the caller's own folder.** Every hop of the final
+        // name is a node, as before. A linked folder is a node only below the caller's own folder:
+        // for `helper` pointing at `current/file`, where `current` links to `data` beside it, the
+        // lookup follows `current` as well, and macOS refuses the open unless that link node is
+        // granted too. A linked folder anywhere else, such as `/var`, `/bin` or `/etc` reached by
+        // an absolute target, is a floor entry, not a derived node: the floor judges canonical
+        // spellings, so a derived link node would escape it.
         let Some(name) = self.original.file_name() else {
             return nodes;
         };
         let Some(mut folder) = self.original.parent().and_then(|p| p.canonicalize().ok()) else {
             return nodes;
         };
+        let own = folder.clone();
         let mut pending: std::collections::VecDeque<std::ffi::OsString> =
             std::collections::VecDeque::from([name.to_os_string()]);
         let mut hops = 0;
         while let Some(component) = pending.pop_front() {
+            let last = pending.is_empty();
             let component = Path::new(&component);
             if component == Path::new(".") {
                 continue;
@@ -700,7 +704,13 @@ impl PathGrant {
             if hops > MAXIMUM_LINK_HOPS {
                 break;
             }
-            record(candidate, &mut nodes);
+            let below_own = own != Path::new("/")
+                && candidate
+                    .parent()
+                    .is_some_and(|parent| parent.starts_with(&own));
+            if last || below_own {
+                record(candidate, &mut nodes);
+            }
             if target.is_absolute() {
                 folder = PathBuf::from("/");
             }
@@ -921,5 +931,63 @@ mod traversal_node_tests {
             link.traversal_paths(),
             vec![root.join("gcc"), root.join("cc")]
         );
+    }
+
+    /// **A linked folder outside the caller's own folder is not a node**, as `/var` is not for
+    /// macOS's `/etc/localtime`, while each hop of the final name still is.
+    #[test]
+    fn a_linked_folder_outside_the_callers_folder_is_not_a_node() {
+        let directory = tempfile::tempdir().expect("a folder");
+        let root = directory.path().canonicalize().expect("canonical");
+        // `etc/localtime -> <root>/var/db/zoneinfo/Region`, with `var -> private/var` and
+        // `private/var/db/zoneinfo -> tz/2026/zoneinfo`, as on macOS.
+        std::fs::create_dir_all(root.join("etc")).expect("etc");
+        std::fs::create_dir_all(root.join("private/var/db/tz/2026/zoneinfo")).expect("tz");
+        std::fs::write(root.join("private/var/db/tz/2026/zoneinfo/Region"), "x").expect("zone");
+        std::os::unix::fs::symlink("private/var", root.join("var")).expect("var");
+        std::os::unix::fs::symlink("tz/2026/zoneinfo", root.join("private/var/db/zoneinfo"))
+            .expect("zoneinfo");
+        let localtime = root.join("etc/localtime");
+        std::os::unix::fs::symlink(root.join("var/db/zoneinfo/Region"), &localtime)
+            .expect("localtime");
+        let granted = PathGrant::new(&localtime, Operation::Read, Scope::File).expect("granted");
+        assert_eq!(
+            granted.traversal_paths(),
+            vec![
+                root.join("private/var/db/tz/2026/zoneinfo/Region"),
+                localtime.clone()
+            ]
+        );
+
+        // An absolute target through a linked folder below the caller's own folder keeps it.
+        std::fs::create_dir_all(root.join("etc/data")).expect("data");
+        std::fs::write(root.join("etc/data/file"), "x").expect("file");
+        std::os::unix::fs::symlink("data", root.join("etc/current")).expect("current");
+        let helper = root.join("etc/helper");
+        std::os::unix::fs::symlink(root.join("etc/current/file"), &helper).expect("helper");
+        let granted = PathGrant::new(&helper, Operation::Read, Scope::File).expect("granted");
+        assert_eq!(
+            granted.traversal_paths(),
+            vec![root.join("etc/data/file"), helper, root.join("etc/current")]
+        );
+    }
+
+    /// **A system folder link such as `/bin` is not a node** where the host has one.
+    #[test]
+    fn a_root_level_folder_link_is_not_a_node() {
+        let system = Path::new("/bin");
+        if !std::fs::symlink_metadata(system).is_ok_and(|metadata| metadata.is_symlink())
+            || !system.join("sh").exists()
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().expect("a folder");
+        let root = directory.path().canonicalize().expect("canonical");
+        let helper = root.join("helper");
+        std::os::unix::fs::symlink(system.join("sh"), &helper).expect("helper");
+        let granted = PathGrant::new(&helper, Operation::Read, Scope::File).expect("granted");
+        let nodes = granted.traversal_paths();
+        assert!(!nodes.iter().any(|node| node == system), "{nodes:?}");
+        assert!(nodes.contains(&helper), "{nodes:?}");
     }
 }

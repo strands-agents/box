@@ -466,8 +466,9 @@ the file the link resolves to, and the box also shows that file at the link's na
 program runs a helper by the name `PATH` finds. Granting only the target left that name missing,
 so cargo failed with `linker 'cc' not found` on Linux. The links in between, such as
 `/etc/alternatives/cc`, are not granted: Linux binds the file at the named path, and macOS allows
-reading the metadata of each link on the way, a linked folder on the target path included, such as
-`current` in `helper -> current/file`. The grant is built from one lookup of the link, compared
+reading the metadata of each link on the way. A linked folder is one of them only below the link's
+own folder, such as `current` in `helper -> current/file`. A linked folder anywhere else, such as
+`/var` or `/bin` reached by an absolute target, stays a floor entry. The grant is built from one lookup of the link, compared
 with the file the run approved, so a hop swapped after the spawn check is refused rather than
 granted. We rejected granting the folders that hold the links, such as
 `/usr/bin` or `/etc/alternatives`, because that grants every file in them. The link must sit in its
