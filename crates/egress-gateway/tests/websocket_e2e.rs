@@ -12,12 +12,14 @@ use credentials::{
     Backend, DestinationPattern, InjectMode, Locator, RouteSpec, Vault, VaultConfig,
 };
 use egress_gateway::{
-    AuditDecision, CapabilitySet, CredentialCapability, EffectAttempt, EffectInterceptor,
-    EffectOutcome, EffectPermit, MitmConfig, MitmInterceptor, ResponseLimits, StubEmitter,
+    AuditDecision, BackendDial, CapabilitySet, CredentialCapability, EffectAttempt,
+    EffectInterceptor, EffectOutcome, EffectPermit, MitmConfig, MitmInterceptor, ResponseLimits,
+    StubEmitter,
 };
 use harness::{SeenRequest, TlsUpstream, UpstreamTls, WorkloadClient, header_value};
 
 const HOST: &str = "realtime.example.test";
+const BACKEND: &str = "gw.example.test";
 const KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 const LIMIT: usize = 1024;
 const SECRET: &str = "sk_live_REALSECRET";
@@ -160,16 +162,41 @@ impl Session {
         limit: usize,
         handler: impl Fn(&mut UpstreamTls, &SeenRequest) + Send + Sync + 'static,
     ) -> Self {
-        let upstream = TlsUpstream::start_custom(HOST, handler);
-        let (controls, phantom) = if credential {
-            let (controls, phantom) = bearer(upstream.port());
-            (controls, Some(phantom))
-        } else {
-            (CapabilitySet::default(), None)
+        Self::open(credential, limit, None, handler)
+    }
+
+    fn open(
+        credential: bool,
+        limit: usize,
+        backend: Option<&str>,
+        handler: impl Fn(&mut UpstreamTls, &SeenRequest) + Send + Sync + 'static,
+    ) -> Self {
+        let upstream = TlsUpstream::start_custom(backend.unwrap_or(HOST), handler);
+        let port = upstream.port();
+        let (controls, phantom) = match (credential, backend) {
+            (false, _) => (CapabilitySet::default(), None),
+            (true, None) => {
+                let (controls, phantom) = bearer(port);
+                (controls, Some(phantom))
+            }
+            (true, Some(_)) => (box_owned(port), None),
         };
+        let backends = backend.map(|host| {
+            let dial = BackendDial {
+                host: host.to_string(),
+                port,
+                tls: true,
+                path_prefix: "/rt".to_string(),
+            };
+            (destination(port), dial)
+        });
         let config = MitmConfig {
             upstream_ca_pems: vec![upstream.ca_pem()],
-            dns_overrides: vec![(HOST.to_string(), "127.0.0.1".parse().unwrap())],
+            dns_overrides: vec![(
+                backend.unwrap_or(HOST).to_string(),
+                "127.0.0.1".parse().unwrap(),
+            )],
+            backends: backends.into_iter().collect(),
             response_limits: ResponseLimits {
                 max_body_bytes: limit,
             },
@@ -446,20 +473,63 @@ fn a_plain_handshake_is_refused_with_403() {
     assert_eq!(session.upstream.request_count(), 0);
 }
 
-fn bearer(port: u16) -> (CapabilitySet, String) {
+fn destination(port: u16) -> DestinationPattern {
+    DestinationPattern::parse(&format!("{HOST}:{port}")).unwrap()
+}
+
+fn secret(port: u16) -> Locator {
     let variable = format!("WEBSOCKET_E2E_SECRET_{port}");
     unsafe { std::env::set_var(&variable, SECRET) };
-    let pattern = || DestinationPattern::parse(&format!("{HOST}:{port}")).unwrap();
-    let route = RouteSpec::opaque(
-        pattern(),
-        Locator::parse_uri(&format!("env://{variable}")).unwrap(),
-        InjectMode::header("Bearer {}".to_string(), None).unwrap(),
-    );
+    Locator::parse_uri(&format!("env://{variable}")).unwrap()
+}
+
+fn bearer(port: u16) -> (CapabilitySet, String) {
+    let inject = InjectMode::header("Bearer {}".to_string(), None).unwrap();
+    let route = RouteSpec::opaque(destination(port), secret(port), inject);
     let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant").route(route)).unwrap();
     let phantom = opened.phantoms()[0].token().to_string();
     let store = Arc::new(opened.into_vault());
-    let controls = CapabilitySet::new(vec![CredentialCapability::new(pattern(), store)]);
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(destination(port), store)]);
     (controls, phantom)
+}
+
+fn box_owned(port: u16) -> CapabilitySet {
+    let inject = InjectMode::header("Bearer {}".to_string(), None).unwrap();
+    let route = RouteSpec::box_owned(destination(port), secret(port), inject);
+    let opened = Vault::open(VaultConfig::new(Backend::local(), "tenant").route(route)).unwrap();
+    let store = Arc::new(opened.into_vault());
+    CapabilitySet::new(vec![CredentialCapability::new(destination(port), store)])
+}
+
+#[test]
+fn a_websocket_through_a_backend_reroute_reaches_the_backend_and_is_judged_on_the_original() {
+    let mut session = Session::open(true, LIMIT, Some(BACKEND), echo(Arc::default()));
+    let head = session.handshake("");
+    assert!(head.starts_with("HTTP/1.1 101"), "{head}");
+    let seen = session.upstream.last_request();
+    let port = session.upstream.port();
+    assert_eq!(seen.header("host"), Some(format!("{BACKEND}:{port}")));
+    assert!(
+        seen.raw.starts_with("GET /rt/v1/realtime "),
+        "{:?}",
+        seen.raw.lines().next()
+    );
+    assert_eq!(
+        seen.header("authorization"),
+        Some(format!("Bearer {SECRET}"))
+    );
+
+    session.send(true, 1, b"leak");
+    let (_, opcode, payload) = read_frame(&mut session.client).unwrap();
+    let text = String::from_utf8(payload).unwrap();
+    assert_eq!(opcode, 1);
+    assert!(
+        !text.contains(SECRET) && text.starts_with("token="),
+        "{text}"
+    );
+    let records = session.records.records();
+    assert!(records.iter().any(|record| record.host == HOST));
+    assert!(!records.iter().any(|record| record.host == BACKEND));
 }
 
 #[test]
