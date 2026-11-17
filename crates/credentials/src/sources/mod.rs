@@ -63,8 +63,8 @@ pub(crate) use aws::{
 };
 pub(crate) use command::CommandSource;
 pub(crate) use credsd::{CREDSD_SCHEME, CredsdClient, resolve_credsd_socket};
-pub(crate) use env::EnvSource;
-pub(crate) use file::FileSource;
+pub(crate) use env::{EnvSource, SCHEME as ENV_SCHEME};
+pub(crate) use file::{FileSource, SCHEME as FILE_SCHEME};
 pub(crate) use op::OnePasswordSource;
 
 /// Return the raw URI-form reference string (`scheme://body`) for a URI-form locator.
