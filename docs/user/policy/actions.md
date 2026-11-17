@@ -319,6 +319,9 @@ What each caller records as a response:
 | `mcp:call` | For `tools/call`, `prompts/get`, and `resources/read`: when the call completes or ends indeterminately over stdio, or when the upstream response completes, fails, or reaches its deadline over HTTP | none |
 | A per-tool action, `<server>::Action::"<tool>"` | Beside each `mcp:call::response` for a `tools/call` that the per-tool action decided and allowed. Its `input` is the call's arguments, as its `::request` recorded them | `reply`, a string: `result`, `tool_error`, or `protocol_error` for the server's answer; `cancelled`; or `indeterminate` when the connection ended, when the reply only accepted an MCP task or asked for input (`resultType` other than `complete`), or when Box couldn't read an http reply in full (over 16 MiB, compressed, or cut off). `structured`, when the tool declares an `outputSchema` and the reply is a `result`: the reply's `structuredContent`, keeping only the fields the `outputSchema` declares, converted like `input`. An optional field that doesn't match its declared type is left out. Box records no `structured` when a required field doesn't match |
 
+In the Shell, a content write (a redirect, `tee`, or `cp`) records `descriptor_issued` when it
+opens the file, and nothing when it finishes. A time change from `touch` records `completed`.
+
 An MCP outcome is always a response, so Box never records `mcp:call::error` or a per-tool
 `::error`. The load refuses a `when temporal` clause that names one, because it could never match.
 A `tools/call` to a tool that no per-tool action declares records only `mcp:call::response`.
