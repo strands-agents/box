@@ -284,6 +284,7 @@ Linux ignores this selection.
 We make this access [an explicit process choice](decisions.md#file-watching-requires-explicit-acceptance-of-metadata-disclosure)
 because permitting the service does not constrain its subscriptions to declared filesystem grants.
 FSEvents can disclose denied names and event metadata for removed or renamed paths and some historical paths.
+It also answers a host-wide count of filesystem activity across other users and boxes and each volume's history-database identifier, and a root workload can delete a volume's recorded event history.
 An ancestor subscription can extend that disclosure outside the workspace.
 The event stream bypasses `fs:*` policy decisions, including experimental native filesystem mediation.
 Direct content and write checks still apply, but they do not provide filename or activity confidentiality through this service.

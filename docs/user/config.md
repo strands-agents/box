@@ -386,7 +386,7 @@ On macOS, the startup disclosure names each selected process before the agent st
 This includes stdio MCP servers that remain unstarted; Box repeats their disclosure when they start.
 
 ```text
-strands-box: [tool.dev] file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events; file-content and write restrictions still apply
+strands-box: [tool.dev] file watching: macOS FSEvents may disclose denied names and event metadata (including outside the workspace and from past events), a host-wide count of filesystem activity across other users and boxes, and each volume's history-database identifier; as root, it may also delete a volume's recorded event history; file-content and write restrictions still apply
 ```
 
 A record with any selected process requires version 35.
