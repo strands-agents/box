@@ -956,8 +956,10 @@ struct DisclosureInputs<'a> {
 pub(crate) fn file_watching_disclosure(table: &str) -> String {
     format!(
         "strands-box: {table} file watching: macOS FSEvents may disclose denied names \
-         and event metadata, including outside the workspace and from past events; \
-         file-content and write restrictions still apply"
+         and event metadata, including outside the workspace and from past events, as well \
+         as the host-wide event count and each volume's history identifier; file-content and \
+         write restrictions still apply, except that a root process can delete any volume's \
+         event history"
     )
 }
 

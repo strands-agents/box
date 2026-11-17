@@ -267,7 +267,7 @@ Linux does not provide that same discovery access.
 
 For a local server that needs macOS FSEvents, set `file-watching = true` in its
 `[mcp.<name>]` table. The agent's setting does not carry over, and remote HTTP servers refuse it.
-Read the [metadata limitation](config.md#file-watching) before enabling it.
+Read the [FSEvents limitations](config.md#file-watching) before enabling it.
 
 On Linux and macOS, a server can execute helpers and load native code from its readable and
 writable grants. For a Python extension outside the runtime minimum, grant `read` to its directory
