@@ -501,4 +501,8 @@ fn a_cut_off_message_records_the_bytes_the_other_side_took() {
         "{ended:?}"
     );
     assert!(delivered.len() < 10 + FLOOD, "{}", delivered.len());
+    assert!(
+        delivered.iter().skip(10).all(|&byte| byte == 0),
+        "a Close went into the frame"
+    );
 }
