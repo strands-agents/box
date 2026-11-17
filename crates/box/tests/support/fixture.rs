@@ -318,6 +318,11 @@ impl Request {
         &self.operator_home
     }
 
+    /// The workspace's host path, so a test can plant a file before the box exists.
+    pub fn workspace(&self) -> PathBuf {
+        self.operator_home.join("workspace")
+    }
+
     /// Set a variable in the environment the creating run runs with.
     pub fn env(mut self, name: &str, value: &str) -> Self {
         self.environment.push((name.to_string(), value.to_string()));
