@@ -160,7 +160,8 @@ changes to them:
 - A newer stored record version for a box that declares locations, as other optional features do.
 - In the policy crate, `Operator::with_locations`, which declares the locations and returns an
   error for a declaration Box can't use, and `Operator::locations`, which returns the resolved
-  directories that the startup message prints.
+  directories that the startup message prints. A directory that can't be resolved is the new error
+  `PolicyError::UnresolvableLocation`, which names the location and the directory.
 
 ## 7. Key decisions
 

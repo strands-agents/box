@@ -67,32 +67,30 @@ impl Locations {
     /// The policy operator anchored at `operator_home` with these locations, or the refusal that
     /// names the entry whose directory cannot be resolved.
     pub(crate) fn operator(&self, operator_home: &Path) -> Result<policy::Operator, ConfigError> {
-        let anchored = policy::Operator::unanchored().anchored_at(operator_home);
-        for (name, directories) in &self.0 {
-            for entry in directories {
-                let single = anchored
-                    .clone()
-                    .with_locations([(name.clone(), vec![expand(entry, operator_home)])]);
-                if let Err(error) = single {
-                    let detail = match &error {
-                        policy::PolicyError::Schema(message) => message
-                            .split_once(" cannot be resolved: ")
-                            .map_or(message.as_str(), |(_, reason)| reason)
-                            .to_string(),
-                        other => other.to_string(),
-                    };
-                    return Err(ConfigError::Contract {
-                        reason: format!(
-                            "`[locations] {name}` entry {entry:?} cannot be resolved: {detail}"
-                        ),
-                    });
-                }
-            }
-        }
-        anchored
+        policy::Operator::unanchored()
+            .anchored_at(operator_home)
             .with_locations(self.expanded(operator_home))
-            .map_err(|error| ConfigError::Contract {
-                reason: format!("`[locations]` cannot be resolved: {error}"),
+            .map_err(|error| match error {
+                policy::PolicyError::UnresolvableLocation {
+                    name,
+                    directory,
+                    reason,
+                } => {
+                    let entry = self.0.get(&name).and_then(|entries| {
+                        entries
+                            .iter()
+                            .find(|entry| expand(entry, operator_home) == directory)
+                    });
+                    let entry = entry.map_or_else(|| directory.display().to_string(), Clone::clone);
+                    ConfigError::Contract {
+                        reason: format!(
+                            "`[locations] {name}` entry {entry:?} cannot be resolved: {reason}"
+                        ),
+                    }
+                }
+                other => ConfigError::Contract {
+                    reason: format!("`[locations]` cannot be resolved: {other}"),
+                },
             })
     }
 

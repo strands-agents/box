@@ -65,10 +65,11 @@ impl Operator {
             for directory in directories {
                 let directory =
                     crate::path::resolve_host_directory(&directory).map_err(|reason| {
-                        PolicyError::Schema(format!(
-                            "location {name:?}: {} cannot be resolved: {reason}",
-                            directory.display()
-                        ))
+                        PolicyError::UnresolvableLocation {
+                            name: name.clone(),
+                            directory: directory.clone(),
+                            reason: reason.to_string(),
+                        }
                     })?;
                 if !resolved.contains(&directory) {
                     resolved.push(directory);
