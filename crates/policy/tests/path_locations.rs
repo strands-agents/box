@@ -1073,3 +1073,63 @@ when temporal {
     let secrets = operator(&[("secrets", &["/vault"])]);
     open(&secrets, text, &directory.path().join("declared"));
 }
+
+/// A held file rule refuses a misspelled location wherever its `temporal` block sits, including
+/// before the read or in a shape that a constant block would short-circuit.
+#[test]
+fn a_held_rule_refuses_a_misspelled_location_whatever_the_temporal_blocks_position() {
+    const BLOCK: &str = r#"temporal { formerly within 1h alpha::Action::"deploy"::response{} }"#;
+    let read = "context.input.locations.projcet";
+    let shapes = [
+        format!("unless {BLOCK}\nwhen {{ {read} }}"),
+        format!("when {{ !{BLOCK} && {read} }}"),
+        format!("when {{ {BLOCK} || {read} }}"),
+        format!("when {{ if {BLOCK} then false else {read} }}"),
+    ];
+    let directory = tempfile::tempdir().expect("history directory");
+    for (index, shape) in shapes.iter().enumerate() {
+        let text = format!(
+            "permit (principal, action == Box::Action::\"fs:write\", resource);\n\
+             @id(\"guarded\")\n\
+             forbid (principal, action == Box::Action::\"fs:write\", resource)\n{shape};\n"
+        );
+        let opened = PolicyEngine::open_staged(
+            &project(),
+            sources(&text),
+            &directory.path().join(index.to_string()),
+        );
+        let Err(error) = opened else {
+            panic!("open_staged must refuse the misspelled location: {text}");
+        };
+        assert!(error.to_string().contains("projcet"), "{text}: {error}");
+        let check = PolicyEngine::check(&project(), &sources(&text), false);
+        assert!(
+            !check.errors().is_empty() && check.unchecked().is_empty(),
+            "{text}: {:?}",
+            check.errors()
+        );
+    }
+}
+
+/// A misspelled field of a tool's own `locations` argument keeps Cedar's message, not advice
+/// about box.toml's `[locations]`.
+#[test]
+fn a_tool_argument_named_locations_keeps_cedars_message() {
+    const TOOLS: &str = r#"{"result": {"tools": [{"name": "route",
+        "inputSchema": {"type": "object", "properties": {"locations": {"type": "object",
+            "properties": {"home": {"type": "boolean"}, "work": {"type": "boolean"}},
+            "required": ["home", "work"]}}, "required": ["locations"]}}]}}"#;
+    let schema = policy::generate_mcp_schema("demo", TOOLS).expect("the demo schema generates");
+    let text = r#"
+@id("route")
+forbid (principal, action == demo::Action::"route", resource)
+when { context.input.locations.hmoe };
+"#;
+    let Err(error) = PolicyEngine::validate_with_mcp_schemas(&project(), &sources(text), &[schema])
+    else {
+        panic!("validate must refuse the misspelled tool field");
+    };
+    let message = error.to_string();
+    assert!(message.contains("hmoe"), "{message}");
+    assert!(!message.contains("[locations]"), "{message}");
+}

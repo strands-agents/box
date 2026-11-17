@@ -1011,6 +1011,11 @@ pub(crate) fn refuse_input_reads_before_discovery(
 
 /// A rendered rule with each `temporal { … }` expression replaced by `true`.
 fn without_temporal(rendered: &str) -> String {
+    without_temporal_as(rendered, "true")
+}
+
+/// `rendered` with each `temporal { ... }` block replaced by the Cedar literal `literal`.
+fn without_temporal_as(rendered: &str, literal: &str) -> String {
     const KEYWORD: &str = "temporal";
     let bytes = rendered.as_bytes();
     let mut out = String::with_capacity(rendered.len());
@@ -1036,7 +1041,7 @@ fn without_temporal(rendered: &str) -> String {
             if bytes.get(open) == Some(&b'{')
                 && let Some(close) = block_end(bytes, open)
             {
-                out.push_str("true");
+                out.push_str(literal);
                 index = close;
                 continue;
             }
@@ -1509,9 +1514,16 @@ pub(crate) fn refuse_undeclared_locations(
     {
         let policy_schema = PolicySchema::from_cedarschema_str(&base.source)
             .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
-        if let Ok(cedar_parsed) = dogwood_language::ParsedPolicySet::parse(&cedar_part, &service)
-            && let Ok(lowered) = cedar_parsed.lower(&policy_schema)
-        {
+        // A block replaced by one constant can short-circuit the read Cedar would check, so judge
+        // the rule with the blocks as `true` and again as `false`.
+        for cedar_part in [cedar_part.clone(), without_temporal_as(expanded, "false")] {
+            let Ok(cedar_parsed) = dogwood_language::ParsedPolicySet::parse(&cedar_part, &service)
+            else {
+                continue;
+            };
+            let Ok(lowered) = cedar_parsed.lower(&policy_schema) else {
+                continue;
+            };
             let validation = Validator::new().validate(&lowered);
             for error in validation.validation_errors() {
                 let message = error.to_string();
@@ -1540,7 +1552,8 @@ pub(crate) fn refuse_undeclared_locations(
             );
         }
     }
-    problems.dedup();
+    let mut seen = std::collections::HashSet::new();
+    problems.retain(|problem| seen.insert(problem.clone()));
     if problems.is_empty() {
         return Ok(());
     }
@@ -1780,8 +1793,10 @@ fn validation_finding(
 fn undeclared_location_name(message: &str) -> Option<String> {
     let (_, rest) = message.split_once("attribute `input.locations.")?;
     let (name, after) = rest.split_once('`')?;
-    (after.starts_with(" in context for ") && after.contains(" not found") && !name.contains('.'))
-        .then(|| name.to_string())
+    (after.starts_with(" in context for Box::Action::\"fs:")
+        && after.contains(" not found")
+        && !name.contains('.'))
+    .then(|| name.to_string())
 }
 
 /// The refusal of a rule that reads `context.input.locations.<name>` for an undeclared `name`.
