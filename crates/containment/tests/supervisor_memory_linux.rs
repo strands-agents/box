@@ -1,6 +1,9 @@
 //! Linux end-to-end proof for namespace supervisor memory isolation.
 
-#![cfg(all(target_os = "linux", target_arch = "aarch64"))]
+#![cfg(all(
+    target_os = "linux",
+    any(target_arch = "aarch64", target_arch = "x86_64")
+))]
 
 use std::path::Path;
 use std::process::Command;

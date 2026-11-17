@@ -395,8 +395,8 @@ def main():
     parser.add_argument("--revision", required=True, help="operator-recorded source revision of the package")
     parser.add_argument("--expect-native-refusal", action="store_true")
     args = parser.parse_args()
-    if platform.system() != "Linux" or platform.machine() != "aarch64":
-        parser.error("the installed Box containment package requires Linux ARM64")
+    if platform.system() != "Linux" or platform.machine() not in ("aarch64", "x86_64"):
+        parser.error("the installed Box containment package requires Linux ARM64 or x86-64")
     binary, probe = args.box.resolve(strict=True), args.probe.resolve(strict=True)
     for path in (binary, probe, binary.parent / "strands-box-contain-trampoline",
                  binary.parent / "strands-box-sock-alias"):

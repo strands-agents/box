@@ -285,8 +285,10 @@ We make this access [an explicit process choice](decisions.md#file-watching-requ
 because permitting the service does not constrain its subscriptions to declared filesystem grants.
 FSEvents can disclose denied names and event metadata for removed or renamed paths and some historical paths.
 An ancestor subscription can extend that disclosure outside the workspace.
+FSEvents also discloses the host-wide event count and each volume's history identifier.
 The event stream bypasses `fs:*` policy decisions, including experimental native filesystem mediation.
-Direct content and write checks still apply, but they do not provide filename or activity confidentiality through this service.
+Direct content and write checks still apply, except that a root process can delete any volume's event history.
+They do not provide filename or activity confidentiality through this service.
 The [configuration reference](../user/config.md#file-watching) gives the option and its startup disclosure.
 
 ### Linux root sandbox launches

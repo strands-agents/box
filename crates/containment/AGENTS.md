@@ -953,6 +953,19 @@ and its `P_PIDFD` form takes a descriptor from the permitted `pidfd_open`.
 `a_child_is_awaited_with_waitid_under_the_filters` checks `P_ALL` with `WNOHANG`, `P_PIDFD`, and
 `P_PID` under the filters.
 
+### Returning to a saved folder
+
+On native ARM64 Amazon Linux 2023 (kernel 6.18), Box `5ed679f1` refused `fchdir` with `EPERM`.
+Go's `testing.T.Chdir` saves the working folder as an open descriptor and goes back to it with
+`fchdir` when the test ends. Under Go 1.27.3, `go test ./pkg/cmd/pr/...` in cli/cli panicked with
+`testing.Chdir: chdir .: operation not permitted`. With `fchdir` permitted, the same tests passed.
+`fchdir` adds no reach beyond `chdir`: the kernel checks the same search permission on the open
+folder, and every relative path after it resolves as the permitted `*at(fd, …)` form does. With the
+native filesystem broker, `AT_FDCWD` resolves through `/proc/<pid>/cwd` with the same view check as
+an explicit descriptor (`RequestPath::new` in `crates/box/src/run/linux_enforcement/broker.rs`).
+`a_workload_returns_to_its_saved_folder_with_fchdir`
+saves a folder, enters a subfolder, and returns with `fchdir` under the real trampoline.
+
 ### W^X
 
 W^X closes three routes. Every writable mount, including `/tmp`, uses `MS_NOEXEC`. The permit filter
@@ -1299,3 +1312,21 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     bit still lands outside it. Unmeasured — read from `syscall.rs` and `view.rs`, and no Linux
     target was exercised. Seccomp **can** scope this, unlike the macOS flag argument, because the
     mode is a scalar.
+
+
+### Native policy and filesystem-information notifications
+
+Kevin approved one receiver in the existing containment supervisor on November 11, 2026,
+including the private forwarding protocol in the native-policy integration work. The selected
+native adapter adds its operations to the existing notification filter. Do not install a second
+listener: Linux rejects a new listener when an ancestor filter already has one, even when their
+system-call sets differ. The standalone kernel control returned `EBUSY` for the second installation.
+
+The supervisor retains its scoped authority for sanitized `statfs` answers. For native operations,
+it forwards a fixed 80-byte, little-endian request on the private startup socket. Box receives a
+copy of the listener for validation, descriptor injection, and replies, but never calls notification
+receive on that copy. Finish the supervisor startup acknowledgment before allowing Box to read the
+forwarding stream. The workload must close its forwarding-socket copy before execution.
+Forwarding uses a bounded, nonblocking send. A full buffer retains one request while the supervisor waits for write readiness and continues checking the reaper.
+A partial write or disconnected peer terminates supervision.
+Keep the existing namespace lifetime chain so supervisor failure terminates the workload.

@@ -112,8 +112,10 @@ is what closes the window between authorization and apply.
 `ContainmentConfig::allow_file_watching` permits lookup of `com.apple.FSEvents`.
 It defaults to off and is independent of `allow_runtime_services`.
 FSEvents can disclose denied names and event metadata, including outside the granted paths and
-from past events. The caller must disclose that cost when selecting it.
-Direct filesystem and other service rules do not change. Linux ignores this setting.
+from past events, as well as the host-wide event count and each volume's history identifier.
+A root process can also delete any volume's event history. The caller must disclose that cost
+when selecting it. Apart from that deletion, filesystem and other service rules do not change.
+Linux ignores this setting.
 
 The macOS backend always applies
 [`src/backend/macos/seatbelt-agent.sb`](src/backend/macos/seatbelt-agent.sb). The file is

@@ -67,8 +67,9 @@ resolves to an authority source that this run loaded, which no policy may open o
 
 These protections cover the current box's files.
 On macOS, a process that opts into [file watching](config.md#file-watching) can still
-receive names and event metadata for denied paths, including outside the workspace and from past events.
-FSEvents does not grant direct file-content or write access.
+receive names and event metadata for denied paths, including outside the workspace and from past events,
+as well as the host-wide event count and each volume's history identifier.
+FSEvents does not grant direct file-content or write access, except that a root process can delete any volume's event history.
 Keep other boxes' configuration, policy, and generated state outside the workload's write access.
 Apply the [placement and access guidance](config.md#protect-other-boxes) to filesystem grants and requests through Strands Shell and Monty.
 
