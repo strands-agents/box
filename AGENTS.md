@@ -18,11 +18,15 @@ An agent cannot approve its own change. Fix defects within the current contract.
 must change, name the affected surface or premise and what breaks when you ask for approval.
 `feature-critic` treats an unapproved change in either class as a BLOCKER.
 
-The frozen surfaces include the CLI verbs and flags; `box.toml` keys and filesystem lists; the four
-inputs (policy, credentials, name, workload); stored records; the broker protocol; aliases and their
-socket derivation; policy actions, attributes, and temporal observations; each mechanism crate's
-`pub use` set; and the composed environment, including `reserved_workload_environment`.
+The frozen surfaces include the `strands-box` verbs and flags; `box.toml` keys and filesystem
+lists; the four inputs (policy, credentials, name, workload); stored records; the broker protocol;
+aliases and their socket derivation; policy actions, attributes, and temporal observations; each
+mechanism crate's `pub use` set; and the composed environment, including
+`reserved_workload_environment`.
 Read [the box contract](crates/box/AGENTS.md#the-box-contract) before changing any of these.
+
+The `strands-box` library's public API in `crates/box/src/lib.rs` is not frozen. A pull request
+that adds to it needs a maintainer's approval.
 
 `docs/site-manifest.json` is a separate frozen external publication surface, and
 `docs/site-manifest-retirements.json` permanently reserves removed identities and routes. Their
@@ -46,7 +50,9 @@ test to make a suite pass.
 - **Compose the environment; never inherit it.** Harden the box's trusted process. It holds only
   its own box's plaintext secrets.
 - **One `run` owns one box directory and one policy engine.** Shell, Python, and egress share that
-  engine and its temporal history. Box is a binary with no library target or daemon. See
+  engine and its temporal history. Box has no daemon. The `strands-box` binary is a thin wrapper
+  over the `strands-box` library, and one process runs at most one box: `strands_box::run`
+  refuses a second call, which `box_library.rs::hardening_and_repeat_run` proves. See
   [one trusted process](docs/design/decisions.md#one-trusted-process-per-box),
   [one directory owner](docs/design/decisions.md#one-run-owns-one-box-directory), and
   [one policy engine](docs/design/decisions.md#one-policy-engine-per-box).
