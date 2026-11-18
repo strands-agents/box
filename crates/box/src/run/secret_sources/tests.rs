@@ -648,6 +648,7 @@ fn a_write_grant_over_an_argument_file_of_a_source_is_refused_and_starts_no_prog
 
 #[test]
 fn a_table_that_holds_a_credential_of_a_vault_is_refused_and_starts_no_program() {
+    use crate::record::config::secret_source::tests::environment;
     let program = StandIn::new(PRINTER);
     let entries = crate::record::config::secret_source::tests::entries(&format!(
         "{}pass-env = [\"OP_ACCOUNT\"]\npass-secret-env = [\"OP_SERVICE_ACCOUNT_TOKEN\", \"OP_SESSION_*\"]\n",
@@ -658,19 +659,18 @@ fn a_table_that_holds_a_credential_of_a_vault_is_refused_and_starts_no_program()
         ("OP_SESSION_team", "session_of_the_operator"),
         ("OP_ACCOUNT", "my.1password.com"),
     ];
-    let sources = SecretSources::for_tests_in(&entries, &operator).expect("the program is checked");
+    let sources = SecretSources::for_tests(&entries).expect("the program is checked");
+    let judge = |body: &str, operator: &[(&str, &str)]| {
+        sources.refuse_exposure_in(&agent_beside(body, &entries), &[], || environment(operator))
+    };
 
     // A value that an operator pasted into a table, under a name of its own, for a prefix entry.
-    let refusal = sources
-        .refuse_exposure(
-            &agent_beside(
-                "[env]\nGITHUB_TOKEN = \"session_of_the_operator\"\n",
-                &entries,
-            ),
-            &[],
-        )
-        .expect_err("the agent holds the session of the vault")
-        .to_string();
+    let refusal = judge(
+        "[env]\nGITHUB_TOKEN = \"session_of_the_operator\"\n",
+        &operator,
+    )
+    .expect_err("the agent holds the session of the vault")
+    .to_string();
     assert_eq!(
         refusal,
         "invalid `[agent]` table: `env.GITHUB_TOKEN` holds the value of the variable \
@@ -682,21 +682,59 @@ fn a_table_that_holds_a_credential_of_a_vault_is_refused_and_starts_no_program()
         "[env]\nOP_SERVICE_ACCOUNT_TOKEN = \"strands_box_placeholder\"\n",
         "[env]\nOP_ACCOUNT = \"my.1password.com\"\n",
     ] {
-        sources
-            .refuse_exposure(&agent_beside(body, &entries), &[])
-            .expect("the table holds no credential");
+        judge(body, &operator).expect("the table holds no credential");
     }
     // The same table beside an operator who sets no credential.
-    SecretSources::for_tests(&entries)
-        .expect("the program is checked")
-        .refuse_exposure(
-            &agent_beside(
-                "[env]\nGITHUB_TOKEN = \"session_of_the_operator\"\n",
-                &entries,
-            ),
-            &[],
-        )
+    judge("[env]\nGITHUB_TOKEN = \"session_of_the_operator\"\n", &[])
         .expect("no credential, no refusal");
+    assert_eq!(program.runs(), 0, "the check starts no program");
+}
+
+#[test]
+fn the_sources_read_each_credential_of_a_vault_when_they_judge_a_table() {
+    use crate::record::config::secret_source::tests::environment;
+    let program = StandIn::new(PRINTER);
+    let entries = crate::record::config::secret_source::tests::entries(&format!(
+        "{}pass-secret-env = [\"OP_SERVICE_ACCOUNT_TOKEN\", \"OP_SESSION_*\"]\n",
+        program.table("op", Path::new(SHELL))
+    ));
+    let sources = SecretSources::for_tests(&entries).expect("the program is checked");
+    let tables = agent_beside(
+        "[env]\nGITHUB_TOKEN = \"value_of_the_operator\"\n",
+        &entries,
+    );
+    // The variable that each refusal names, for one table and one set of sources.
+    let judged = |operator: &[(&str, &str)]| {
+        sources
+            .refuse_exposure_in(&tables, &[], || environment(operator))
+            .map_err(|refusal| {
+                ["OP_SERVICE_ACCOUNT_TOKEN", "OP_SESSION_team"]
+                    .into_iter()
+                    .find(|name| refusal.to_string().contains(name))
+            })
+    };
+
+    // The sources keep no value of an earlier operator: each call reads its own environment.
+    assert_eq!(
+        [
+            judged(&[("OP_SERVICE_ACCOUNT_TOKEN", "value_of_the_operator")]),
+            judged(&[]),
+            judged(&[("OP_SESSION_team", "value_of_the_operator")]),
+            judged(&[("OP_SERVICE_ACCOUNT_TOKEN", "another_value")]),
+        ],
+        [
+            Err(Some("OP_SERVICE_ACCOUNT_TOKEN")),
+            Ok(()),
+            Err(Some("OP_SESSION_team")),
+            Ok(()),
+        ]
+    );
+    // A configuration that declares no source copies no variable of the operator.
+    SecretSources::none()
+        .refuse_exposure_in(&tables, &[], || -> Vec<_> {
+            panic!("no source, no read of the environment")
+        })
+        .expect("no source, no judgement");
     assert_eq!(program.runs(), 0, "the check starts no program");
 }
 

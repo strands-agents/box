@@ -35,8 +35,9 @@ pub(crate) struct SecretSources {
     programs: BTreeMap<String, String>,
     /// The checked program of each declared scheme, and each file that its arguments name.
     commands: ConfiguredCommands,
-    /// Each variable of the operator that is a credential of a source's own vault.
-    credentials: Vec<VaultCredential>,
+    /// The checked declarations, which name the owner of each credential of a vault and hold no
+    /// value of the operator.
+    declared: DeclaredSources,
 }
 
 /// One configuration entry that names a secret in a declared scheme.
@@ -77,11 +78,7 @@ impl SecretSources {
         entries: &BTreeMap<String, SecretSourceEntry>,
         enabled: bool,
     ) -> Result<Self, BoxError> {
-        Self::over(
-            entries,
-            DeclaredSources::check(entries, enabled)?,
-            std::env::vars_os(),
-        )
+        Self::over(entries, || DeclaredSources::check(entries, enabled))
     }
 
     /// [`open`](Self::open) on a protected operating system, with the feature on.
@@ -89,45 +86,29 @@ impl SecretSources {
     pub(crate) fn for_tests(
         entries: &BTreeMap<String, SecretSourceEntry>,
     ) -> Result<Self, BoxError> {
-        Self::for_tests_in(entries, &[])
+        Self::over(entries, || Ok(DeclaredSources::for_tests(entries)))
     }
 
-    /// [`for_tests`](Self::for_tests) for an operator whose variables are `environment`.
-    #[cfg(test)]
-    pub(crate) fn for_tests_in(
-        entries: &BTreeMap<String, SecretSourceEntry>,
-        environment: &[(&str, &str)],
-    ) -> Result<Self, BoxError> {
-        Self::over(
-            entries,
-            DeclaredSources::for_tests(entries),
-            environment
-                .iter()
-                .map(|(name, value)| (name.into(), value.into())),
-        )
-    }
-
-    /// The sources of `entries`, whose checked declarations are `declared`, for an operator
-    /// whose variables are `environment`.
+    /// The sources of `entries`, whose checked declarations `check` gives.
     fn over(
         entries: &BTreeMap<String, SecretSourceEntry>,
-        declared: DeclaredSources,
-        environment: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+        check: impl Fn() -> Result<DeclaredSources, ConfigError>,
     ) -> Result<Self, BoxError> {
+        let declared = check()?;
         // A configuration that declares no source keeps the local sources as they are.
         if entries.is_empty() {
             return Ok(Self {
                 backend: Backend::local(),
                 programs: BTreeMap::new(),
                 commands: ConfiguredCommands::default(),
-                credentials: Vec::new(),
+                declared,
             });
         }
         let commands = ConfiguredCommands::of_secret_sources(entries)?;
-        let credentials = declared.vault_credentials(environment);
         let mut programs = BTreeMap::new();
         let mut checked = Vec::with_capacity(entries.len());
-        for (scheme, declaration) in declared.into_declarations() {
+        // The backend takes each declaration, so it gets the declarations of a second check.
+        for (scheme, declaration) in check()?.into_declarations() {
             let refuse = |reason: String| ConfigError::SecretSource {
                 scheme: scheme.clone(),
                 reason,
@@ -150,27 +131,44 @@ impl SecretSources {
             backend,
             programs,
             commands,
-            credentials,
+            declared,
         })
     }
 
     /// Refuse each process table in `tables` that lets a workload go around a source, so that
     /// no source program starts in that configuration: a grant that reaches a path that a
     /// source protects, a write grant that can change a file that a source runs, and a value
-    /// that holds a credential of a source's own vault.
+    /// that holds a credential of a source's own vault, as the operator's environment holds it
+    /// now.
     pub(crate) fn refuse_exposure(
         &self,
         tables: &ProcessTables,
         protected_sources: &[AuthoritySource],
     ) -> Result<(), BoxError> {
+        self.refuse_exposure_in(tables, protected_sources, std::env::vars_os)
+    }
+
+    /// [`refuse_exposure`](Self::refuse_exposure) for an operator whose variables `environment`
+    /// reads.
+    fn refuse_exposure_in<Environment>(
+        &self,
+        tables: &ProcessTables,
+        protected_sources: &[AuthoritySource],
+        environment: impl FnOnce() -> Environment,
+    ) -> Result<(), BoxError>
+    where
+        Environment: IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+    {
         // A configuration that declares no source has nothing to judge a table against.
         if !self.commands.has_sources() {
             return Ok(());
         }
+        // The copy of each value lasts for this check alone, and is wiped as the check returns.
+        let credentials = self.declared.vault_credentials(environment());
         for (table, spec) in &tables.tables {
             let reach = judge_lists(spec, table, tables, protected_sources)?;
             self.commands.validate_reach(table, &reach)?;
-            VaultCredential::refuse_held(&self.credentials, table, spec)?;
+            VaultCredential::refuse_held(&credentials, table, spec)?;
         }
         Ok(())
     }

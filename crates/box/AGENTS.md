@@ -448,17 +448,23 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     - On Linux, an absent protected path has no lowering, and `require_interpreter_route`
       cannot resolve it. Decide both before a declaration loads there.
   - **No workload holds the operator's value of a `pass-secret-env` variable.**
-    `DeclaredSources::vault_credentials` reads the operator's variables once, when the sources
-    open, and `VaultCredential::refuse_held` refuses a process table whose `env` value or
-    `command` element contains one of those values, under any name. The compare is on the
-    value alone, so a placeholder under the same name passes. An empty variable is no
-    credential. The compare has no shortest length: a short value, or a plain setting that a
-    prefix entry such as `OP_*` covers, stops a table that holds the same text. A floor would
-    let a short credential through with no word, so the user guide says what to do instead.
-    `VaultCredential` prints no value in its `Debug` form, and the refusal names the
-    variable and never the value. Box CLI cannot see a value that an operator pasted into the
-    `env` of an imported MCP server, so this is the only check for that case. Residual: the
-    trailing arguments of `run`, and a value in another encoding.
+    `SecretSources::refuse_exposure` reads the operator's variables when it runs, through
+    `DeclaredSources::vault_credentials`, and `VaultCredential::refuse_held` refuses a process
+    table whose `env` value or `command` element contains one of those values, under any name.
+    `SecretSources` holds the checked declarations and no value: a copy of a value lasts for
+    one check, and `CopiedValue` wipes it as it drops, also the value of a variable that no
+    source owns. `strands-box` does not depend on `zeroize`, so `wipe` is its own volatile
+    write. No test can observe a wipe of a value that drops. The `-D warnings` gate refuses a
+    `wipe` that no code calls. Residual: Box removes no variable from its own environment, so
+    the trusted process holds each value there for the whole run, with or without this copy.
+    The compare is on the value alone, so a placeholder under the same name passes. An empty
+    variable is no credential. The compare has no shortest length: a short value, or a plain
+    setting that a prefix entry such as `OP_*` covers, stops a table that holds the same text.
+    A floor would let a short credential through with no word, so the user guide says what to
+    do instead. `VaultCredential` prints no value in its `Debug` form, and the refusal names
+    the variable and never the value. Box CLI cannot see a value that an operator pasted into
+    the `env` of an imported MCP server, so this is the only check for that case. Residual:
+    the trailing arguments of `run`, and a value in another encoding.
   - The `pass-secret-env` refusal covers `env://NAME` and `secret://NAME` only. A bare `aws://`
     route signs with the ambient AWS identity, also when a `pass-secret-env` entry names an AWS
     key. The design pairs that route with a source that reads AWS Secrets Manager under the same

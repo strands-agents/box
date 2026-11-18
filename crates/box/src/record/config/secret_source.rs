@@ -172,13 +172,38 @@ pub(crate) fn protected_paths(entries: &BTreeMap<String, SecretSourceEntry>) -> 
         .collect()
 }
 
+/// One value that Box copied out of the operator's environment, which is wiped as it drops.
+struct CopiedValue(Vec<u8>);
+
+impl CopiedValue {
+    /// This value as text, which is empty for a value that is not text.
+    fn text(&self) -> &str {
+        std::str::from_utf8(&self.0).unwrap_or_default()
+    }
+}
+
+impl Drop for CopiedValue {
+    fn drop(&mut self) {
+        wipe(&mut self.0);
+    }
+}
+
+/// Write a zero over each byte of `bytes`, in a way that the compiler cannot leave out.
+fn wipe(bytes: &mut [u8]) {
+    for byte in bytes {
+        // SAFETY: `byte` is a live `&mut u8` of `bytes`, so the pointer is valid and aligned for
+        // one write.
+        unsafe { std::ptr::write_volatile(byte, 0) };
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
+
 /// One variable of the operator that is a credential of a declared source's own vault.
-#[derive(Clone, PartialEq, Eq)]
 pub(crate) struct VaultCredential {
     name: String,
     /// The scheme of the source whose `pass-secret-env` names the variable.
     scheme: String,
-    value: String,
+    value: CopiedValue,
 }
 
 impl std::fmt::Debug for VaultCredential {
@@ -212,7 +237,7 @@ impl VaultCredential {
         for (place, value) in values {
             if let Some(credential) = credentials
                 .iter()
-                .find(|credential| value.contains(&credential.value))
+                .find(|credential| value.contains(credential.value.text()))
             {
                 return Err(ConfigError::Process {
                     table: table.to_string(),
@@ -315,10 +340,13 @@ impl DeclaredSources {
         let mut credentials: Vec<VaultCredential> = environment
             .into_iter()
             .filter_map(|(name, value)| {
-                // A workload value is text, so a value that is not text is in none of them.
-                let (name, value) = (name.into_string().ok()?, value.into_string().ok()?);
+                // Each value is wiped as it drops: a variable that no source owns can be
+                // another secret of the operator.
+                let value = CopiedValue(value.into_encoded_bytes());
+                let name = name.into_string().ok()?;
                 let scheme = self.credential_owner(&name)?.to_string();
-                (!value.is_empty()).then_some(VaultCredential {
+                // A workload value is text, so a value that is not text is in none of them.
+                (!value.text().is_empty()).then_some(VaultCredential {
                     name,
                     scheme,
                     value,
@@ -630,7 +658,9 @@ pub(crate) mod tests {
     }
 
     /// The operator's variables `pairs`, as the process environment gives them.
-    fn environment(pairs: &[(&str, &str)]) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    pub(crate) fn environment(
+        pairs: &[(&str, &str)],
+    ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
         pairs
             .iter()
             .map(|(name, value)| (name.into(), value.into()))
@@ -660,7 +690,7 @@ pub(crate) mod tests {
                     (
                         credential.name.as_str(),
                         credential.scheme.as_str(),
-                        credential.value.as_str(),
+                        credential.value.text(),
                     )
                 })
                 .collect::<Vec<_>>(),
@@ -676,11 +706,18 @@ pub(crate) mod tests {
              VaultCredential { name: \"OP_SESSION_team\", scheme: \"op\", .. }]",
             "a debug print holds no value"
         );
-        assert_eq!(
+        assert!(
             DeclaredSources::none()
-                .vault_credentials(environment(&[("OP_SERVICE_ACCOUNT_TOKEN", "ops_token")])),
-            []
+                .vault_credentials(environment(&[("OP_SERVICE_ACCOUNT_TOKEN", "ops_token")]))
+                .is_empty()
         );
+    }
+
+    #[test]
+    fn a_wipe_writes_a_zero_over_each_byte_of_a_copied_value() {
+        let mut copied = b"ops_token".to_vec();
+        wipe(&mut copied);
+        assert_eq!(copied, [0; 9]);
     }
 
     /// One process table with `body` after its command.
