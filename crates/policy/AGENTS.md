@@ -175,8 +175,7 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `::a_server_that_never_lists_its_tools_unloads_the_kept_rule`. A namespace that this build's
   base schema declares is never read as a server, which
   `mcp_schema::tests::a_previous_build_of_the_box_actions_is_not_read_as_a_server` pins.
-- `body_bytes` and `payload_bytes` are the offer on a `::request` and the delivery on a
-  `::response`.
+- `body_bytes` is the offer on a `::request` and the delivery on a `::response`.
 - Sum an outbound budget over `http:request::response`, as `tests/policies/egress_byte_budget.dw`
   does. One exchange records one such event, at reply time, with the delivered request bytes and
   the reply's `output.status`. Pinned by

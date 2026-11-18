@@ -209,7 +209,7 @@ type WebSocketMessageInput = {
   port: Long,
   path: String,
   opcode: WebSocketOpcode,
-  payload_bytes: Long
+  body_bytes: Long
 };
 
 action "websocket:send" appliesTo {

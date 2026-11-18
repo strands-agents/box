@@ -66,7 +66,7 @@ before its effect:
 |---|---|---|
 | `EffectAttempt::Connect` | `host`, `port`, `address`, `http_visibility` | before one upstream socket opens, once per pinned address |
 | `EffectAttempt::HttpRequest` | `host`, `port`, `method`, `path`, `body_bytes`, `upgrade` | after the request is serialized, before it is written |
-| `EffectAttempt::WebSocketSend`, `WebSocketReceive` | `host`, `port`, `path`, `opcode`, `payload_bytes` | before any payload byte moves on: at the header of a binary message in one frame from the server, else after the whole message |
+| `EffectAttempt::WebSocketSend`, `WebSocketReceive` | `host`, `port`, `path`, `opcode`, `body_bytes` | before any payload byte moves on: at the header of a binary message in one frame from the server, else after the whole message |
 | `EffectAttempt::ResponseRelease` | `host`, `port`, `method`, `path`, `status` | after header controls and required catalog capture, before the workload receives bytes |
 
 No attempt carries a header, a body, or credential material. `path` excludes the

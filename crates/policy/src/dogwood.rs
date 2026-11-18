@@ -2090,7 +2090,7 @@ fn websocket_fields(
     port: u16,
     path: &str,
     opcode: crate::request::WebSocketOpcode,
-    payload_bytes: usize,
+    body_bytes: usize,
 ) -> Vec<(&'static str, Value)> {
     vec![
         (attr::HOST, Value::String(host.to_string())),
@@ -2103,7 +2103,7 @@ fn websocket_fields(
                 id: opcode.as_str().to_string(),
             },
         ),
-        (attr::PAYLOAD_BYTES, Value::Int(clamp(payload_bytes))),
+        (attr::BODY_BYTES, Value::Int(clamp(body_bytes))),
     ]
 }
 
@@ -2151,9 +2151,9 @@ fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
             port,
             path,
             opcode,
-            payload_bytes,
+            body_bytes,
             ..
-        } => websocket_fields(host, *port, path, *opcode, *payload_bytes),
+        } => websocket_fields(host, *port, path, *opcode, *body_bytes),
         Request::McpCall {
             server,
             method,

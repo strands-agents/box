@@ -155,7 +155,7 @@ pub enum EffectAttempt<'a> {
         /// The opcode of the message's first frame.
         opcode: WebSocketOpcode,
         /// The payload length, after the mask comes off.
-        payload_bytes: usize,
+        body_bytes: usize,
     },
     /// Sending one whole WebSocket message from the upstream to the workload.
     WebSocketReceive {
@@ -168,7 +168,7 @@ pub enum EffectAttempt<'a> {
         /// The opcode of the message's first frame.
         opcode: WebSocketOpcode,
         /// The payload length.
-        payload_bytes: usize,
+        body_bytes: usize,
     },
     /// Returning one serialized, governed HTTP response to the workload.
     ResponseRelease {

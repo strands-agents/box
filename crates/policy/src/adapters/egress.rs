@@ -924,14 +924,14 @@ fn websocket_request<'a>(effect: &EgressEffectAttempt<'a>) -> Option<Request<'a>
         port,
         path,
         opcode,
-        payload_bytes,
+        body_bytes,
     }
     | EgressEffectAttempt::WebSocketReceive {
         host,
         port,
         path,
         opcode,
-        payload_bytes,
+        body_bytes,
     }) = *effect
     else {
         return None;
@@ -954,7 +954,7 @@ fn websocket_request<'a>(effect: &EgressEffectAttempt<'a>) -> Option<Request<'a>
         port,
         path,
         opcode,
-        payload_bytes,
+        body_bytes,
     })
 }
 

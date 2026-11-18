@@ -211,7 +211,7 @@ load refuses an `operation` guard under no action.
 | `Fs` | one `Box::Action` selected by `operation` | `path: &ApprovedPath`, `operation: FsOperation` |
 | `Connect` | `Box::Action::"net:connect"` | `host: &str`, `ip: Option<IpAddr>`, `port: u16` |
 | `Http` | `Box::Action::"http:request"` | `host: &str`, `port: u16`, `method: &str`, `path: &str`, `body_bytes: usize`, `intercepted: bool`, `upgrade: &str` |
-| `WebSocket` | `Box::Action::"websocket:send"` or `"websocket:receive"`, selected by `direction` | `direction: WebSocketDirection`, `host: &str`, `port: u16`, `path: &str`, `opcode: WebSocketOpcode`, `payload_bytes: usize` |
+| `WebSocket` | `Box::Action::"websocket:send"` or `"websocket:receive"`, selected by `direction` | `direction: WebSocketDirection`, `host: &str`, `port: u16`, `path: &str`, `opcode: WebSocketOpcode`, `body_bytes: usize` |
 | `ShellExec` | `Box::Action::"shell:exec"` | `command`, `program`, `args`, `cwd` |
 | `ShellSpawn` | `Box::Action::"shell:spawn"` | the same, plus `program_path` |
 | `McpCall` | `Box::Action::"mcp:call"`, or `<normalized-server>::Action::"<tool>"` when `tool` and `arguments` are present | `server`, `method`, `tool`, `prompt`, `uri`, `arguments` |
@@ -476,8 +476,8 @@ that happened, because only `PolicyEngine::record` emits one.
 
 Rules written against history:
 
-- Each request event carries `body_bytes` and `payload_bytes` as offered; each response event
-  carries them as delivered. Pin the event kind (`::request` or `::response`) in
+- Each request event carries `body_bytes` as offered; each response event
+  carries it as delivered. Pin the event kind (`::request` or `::response`) in
   a predicate so a sum reads one quantity.
 - A window measures elapsed seconds. A rule over `net:connect` counts one event
   per pinned address; a rule over `http:request` counts one per exchange.

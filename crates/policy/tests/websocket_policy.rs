@@ -33,7 +33,7 @@ when { context.input.host == "realtime.example.com" && context.input.path == "/v
 @id("realtime_messages")
 permit (principal, action in [Box::Action::"websocket:send", Box::Action::"websocket:receive"], resource)
 when { context.input.host == "realtime.example.com" && context.input.path == "/v1/realtime" &&
-       context.input.payload_bytes <= 1048576 };
+       context.input.body_bytes <= 1048576 };
 @id("websocket_budget")
 @description("At most 10 MiB sent over WebSockets in 10 minutes.")
 forbid (principal, action == Box::Action::"websocket:send", resource)
@@ -41,7 +41,7 @@ when temporal {
   exists (total: Long). (
     (sum b for (b: Long), (t: Timepoint). where (
       formerly within 10m (
-        Box::Action::"websocket:send"::response{ input.payload_bytes: b } && tp(t)
+        Box::Action::"websocket:send"::response{ input.body_bytes: b } && tp(t)
       )
     )) == total && total >= 10485760
   )
@@ -142,23 +142,23 @@ fn handshake<'a>(host: &'a str, path: &'a str, upgrade: &'a str) -> EffectAttemp
     }
 }
 
-fn send(host: &str, opcode: WebSocketOpcode, payload_bytes: usize) -> EffectAttempt<'_> {
+fn send(host: &str, opcode: WebSocketOpcode, body_bytes: usize) -> EffectAttempt<'_> {
     EffectAttempt::WebSocketSend {
         host,
         port: 443,
         path: "/v1/realtime",
         opcode,
-        payload_bytes,
+        body_bytes,
     }
 }
 
-fn receive(host: &str, opcode: WebSocketOpcode, payload_bytes: usize) -> EffectAttempt<'_> {
+fn receive(host: &str, opcode: WebSocketOpcode, body_bytes: usize) -> EffectAttempt<'_> {
     EffectAttempt::WebSocketReceive {
         host,
         port: 443,
         path: "/v1/realtime",
         opcode,
-        payload_bytes,
+        body_bytes,
     }
 }
 
@@ -298,9 +298,9 @@ fn each_decision_records_the_events_the_design_names() {
         field(&events[1], &["output", "status"]),
         Some(Value::Int(101))
     );
-    let payload = |event| field(event, &["input", "payload_bytes"]);
-    assert_eq!(payload(&events[2]), Some(Value::Int(53)), "the offer");
-    assert_eq!(payload(&events[3]), Some(Value::Int(20)), "the delivery");
+    let body_bytes = |event| field(event, &["input", "body_bytes"]);
+    assert_eq!(body_bytes(&events[2]), Some(Value::Int(53)), "the offer");
+    assert_eq!(body_bytes(&events[3]), Some(Value::Int(20)), "the delivery");
     assert_eq!(
         history::identifier(&events[2]),
         history::identifier(&events[3])

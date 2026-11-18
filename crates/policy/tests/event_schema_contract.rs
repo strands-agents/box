@@ -173,7 +173,7 @@ fn every_public_producer_populates_the_reserved_fields_declared_by_its_schema() 
                     port: 443,
                     path: "/v1/realtime",
                     opcode: WebSocketOpcode::Text,
-                    payload_bytes: 5,
+                    body_bytes: 5,
                 },
                 Outcome::WebSocket {
                     direction,

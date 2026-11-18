@@ -280,7 +280,7 @@ pub enum Request<'a> {
         /// The opcode of the message's first frame.
         opcode: WebSocketOpcode,
         /// The payload length the message offers.
-        payload_bytes: usize,
+        body_bytes: usize,
     },
     /// One MCP request, with per-tool actions for `tools/call` and `mcp:call` for other methods.
     McpCall {

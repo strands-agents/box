@@ -145,7 +145,7 @@ workload. Both carry the same fields:
 | `port` | Long | The handshake's destination port. |
 | `path` | String | The handshake's URL path. |
 | `opcode` | `Box::WebSocketOpcode` | `text`, `binary`, `ping`, `pong`, or `close`, spelled `Box::WebSocketOpcode::"text"`. |
-| `payload_bytes` | Long | The message's payload length. |
+| `body_bytes` | Long | The message's payload length. |
 
 The two actions are one family, so one rule can read `context.input` for both. A message needs its
 own permit, so a `GET` permit admits a handshake and no message.
@@ -331,7 +331,7 @@ What each caller records as a response:
 | `fs:*` | When the operation ends. A `test -e`, `test -L`, or `test -r` in the Shell, or an `os.stat()`, `Path.exists()`, `Path.is_file()`, `Path.is_dir()`, or `Path.is_symlink()` in Python, that got an answer is a response even when the answer is "no": for example, a missing file in an existing folder. A check of a path inside the reachable paths that can't be resolved, such as one under a missing folder or under a folder the operating system won't let Box search, is also a response, although the reachable paths check refuses it. This holds only when the path has no `.` or `..` component, crosses no symbolic link, and isn't in Box's own state. Any other check that Box itself refuses is an error: the reach floor refuses it, or a guard refuses it because a path changed during the check. | `result`, spelled `Box::FsResponseResult::"<value>"`: `completed`, `descriptor_issued`, or `indeterminate` |
 | `net:connect` | When the connect attempt ends | none |
 | `http:request` | When the upstream response completes, fails, or reaches its deadline, once per exchange | `status`: the upstream's reply status, when received |
-| `websocket:send`, `websocket:receive` | When the gateway has sent the message on. `payload_bytes` counts the bytes the other side took. A message of which no byte reached the other side records `::error` | none |
+| `websocket:send`, `websocket:receive` | When the gateway has sent the message on. `body_bytes` counts the bytes the other side took. A message of which no byte reached the other side records `::error` | none |
 | `shell:exec`, `shell:spawn` | When the command ends | `status`: the exit status. When a signal ends the command, `status` is `128` plus the signal number. |
 | A tool grammar action, `Tool::<name>::Action::"<action>"` | When a program the Shell started ends | `status`, as on `shell:spawn` |
 | `mcp:call` | For `tools/call`, `prompts/get`, and `resources/read`: when the call completes or ends indeterminately over stdio, or when the upstream response completes, fails, or reaches its deadline over HTTP | none |

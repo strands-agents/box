@@ -33,20 +33,15 @@ impl EffectInterceptor for MessagePolicy {
         let entry = match attempt {
             EffectAttempt::HttpRequest { upgrade, .. } => format!("http {upgrade:?}"),
             EffectAttempt::WebSocketSend {
-                opcode,
-                payload_bytes,
-                ..
-            } => format!("send {opcode:?} {payload_bytes}"),
+                opcode, body_bytes, ..
+            } => format!("send {opcode:?} {body_bytes}"),
             EffectAttempt::WebSocketReceive {
-                opcode,
-                payload_bytes,
-                ..
-            } => format!("receive {opcode:?} {payload_bytes}"),
+                opcode, body_bytes, ..
+            } => format!("receive {opcode:?} {body_bytes}"),
             _ => return Ok(Box::new(Logged(None))),
         };
         self.0.lock().unwrap().push(entry.clone());
-        if matches!(attempt, EffectAttempt::WebSocketSend { payload_bytes, .. } if *payload_bytes > 100)
-        {
+        if matches!(attempt, EffectAttempt::WebSocketSend { body_bytes, .. } if *body_bytes > 100) {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, "too long"));
         }
         Ok(Box::new(Logged(Some((entry, Arc::clone(&self.0))))))

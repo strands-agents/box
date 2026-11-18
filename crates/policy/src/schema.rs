@@ -296,13 +296,12 @@ pub(crate) mod attr {
     pub(crate) const REPLY: &str = "reply";
     /// A tool's declared `structuredContent`, on its own `::response`.
     pub(crate) const STRUCTURED: &str = "structured";
-    /// `context.input.body_bytes` — HTTP body length (`http:request`).
+    /// `context.input.body_bytes` — HTTP body or WebSocket message length.
     pub(crate) const BODY_BYTES: &str = "body_bytes";
     /// `context.input.intercepted` — whether HTTP was seen through TLS interception.
     pub(crate) const INTERCEPTED: &str = "intercepted";
     pub(crate) const UPGRADE: &str = "upgrade";
     pub(crate) const OPCODE: &str = "opcode";
-    pub(crate) const PAYLOAD_BYTES: &str = "payload_bytes";
     /// `context.input.server` — the MCP server a tool call names (`mcp:call`).
     pub(crate) const SERVER: &str = "server";
     /// `context.input.tool` — the tool a `tools/call` names (`mcp:call`).
@@ -626,7 +625,7 @@ fn context_for(
             port,
             path,
             opcode,
-            payload_bytes,
+            body_bytes,
             ..
         } => vec![
             (
@@ -646,8 +645,8 @@ fn context_for(
                 enum_expr(WEBSOCKET_OPCODE_TYPE, opcode.as_str())?,
             ),
             (
-                attr::PAYLOAD_BYTES.to_string(),
-                RestrictedExpression::new_long(usize_to_cedar_long(*payload_bytes)?),
+                attr::BODY_BYTES.to_string(),
+                RestrictedExpression::new_long(usize_to_cedar_long(*body_bytes)?),
             ),
         ],
         Request::McpCall {
@@ -878,7 +877,7 @@ mod tests {
                 port: 443,
                 path: "/",
                 opcode: crate::request::WebSocketOpcode::Close,
-                payload_bytes: 2,
+                body_bytes: 2,
             },
             // Two arguments, so both optional positions are exercised.
             Request::ShellExec {
@@ -932,7 +931,7 @@ mod tests {
                 port: 443,
                 path: "/",
                 opcode,
-                payload_bytes: 0,
+                body_bytes: 0,
             };
             let identity = ActionIdentity::for_request(&request);
             assert!(

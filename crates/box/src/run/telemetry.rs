@@ -1277,7 +1277,7 @@ mod tests {
                 port: 443,
                 path: "/v1/realtime",
                 opcode: egress_gateway::WebSocketOpcode::Text,
-                payload_bytes: 5,
+                body_bytes: 5,
             })
             .err()
             .expect("no permit matches a message");

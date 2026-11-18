@@ -586,7 +586,7 @@ impl Session<'_> {
         &self,
         side: Side,
         opcode: u8,
-        payload_bytes: usize,
+        body_bytes: usize,
     ) -> Result<ClaimedEffectPermit, Fault> {
         let opcode = effect_opcode(opcode)
             .ok_or_else(|| Fault::protocol(side, 1002, "frame has an unknown opcode"))?;
@@ -597,14 +597,14 @@ impl Session<'_> {
                 port,
                 path,
                 opcode,
-                payload_bytes,
+                body_bytes,
             },
             Side::Server => EffectAttempt::WebSocketReceive {
                 host,
                 port,
                 path,
                 opcode,
-                payload_bytes,
+                body_bytes,
             },
         };
         l7::claim_effect(self.state, &attempt).map_err(|error| {
