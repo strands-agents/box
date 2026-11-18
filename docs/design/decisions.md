@@ -2668,8 +2668,8 @@ logs, such as a Langfuse target, can't name the word (`tool_calls_need_a_target_
 Keys arrive as the tool wrote them. `only_a_target_naming_tool_calls_receives_them_in_clear_text` and
 `startup_discloses_each_telemetry_target_that_takes_tool_calls` pin both halves.
 
-This follows the AgentCore gateway, which logs each `tools/call` request and response body whole to
-the customer's own CloudWatch Logs or S3 and leaves access to IAM. Box can't assume a target is the
+This follows managed MCP gateways, which log each `tools/call` request and response body whole to
+the customer's own log store and leave access to its permissions. Box can't assume a target is the
 operator's own, so the opt-in is per target, absent by default, and disclosed.
 
 The cost is that a target naming `tool_calls` receives any secret a tool takes or returns. Over http

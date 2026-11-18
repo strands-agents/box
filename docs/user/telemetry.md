@@ -82,6 +82,9 @@ receives only the records the words in the list name:
 | `metrics` | The workload's metrics. |
 | `tool_calls` | Each MCP tool call's arguments and output in clear text, and how it ended. A target receives these only when it names `tool_calls`. |
 
+A tool-call record is a log record, so Box refuses `tool_calls` at startup on a target that accepts no
+logs, such as a `langfuse`, `langsmith`, or `cloudwatch_traces` target.
+
 So `include = ["deny"]` writes a file of refusals, and leaves out the permits, control-plane records,
 and MCP routing diagnostics.
 
@@ -278,7 +281,7 @@ values:
 [telemetry.local]
 kind        = "file"
 destination = "~/boxes/helpdesk/records.jsonl"
-include     = ["deny", "permit", "trace", "logs", "tool_calls"]
+include     = ["deny", "permit", "trace", "logs", "metrics", "tool_calls"]
 ```
 
 A declared target replaces the default file, and a written `include` names everything the target
