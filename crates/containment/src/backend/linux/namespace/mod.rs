@@ -1597,6 +1597,78 @@ mod tests {
     }
 
     #[test]
+    fn a_name_is_created_without_replacing_one_with_renameat2_under_the_filters() {
+        let directory = tempfile::tempdir().expect("create the rename fixture");
+        let name = |leaf: &str| {
+            std::ffi::CString::new(directory.path().join(leaf).as_os_str().as_encoded_bytes())
+                .unwrap()
+        };
+        let (first, second, taken, third) =
+            (name("first"), name("second"), name("taken"), name("third"));
+        for leaf in ["first", "taken"] {
+            std::fs::write(directory.path().join(leaf), leaf).expect("write a rename fixture");
+        }
+        let kept = directory.path().join("kept");
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        let outcome = in_filtered_child(&filters, || {
+            let renameat2 =
+                |old: &std::ffi::CString, new: &std::ffi::CString, flags: libc::c_uint| {
+                    // SAFETY: both C strings stay live and name this test's own fixture folder.
+                    let result = unsafe {
+                        libc::syscall(
+                            libc::SYS_renameat2,
+                            libc::AT_FDCWD,
+                            old.as_ptr(),
+                            libc::AT_FDCWD,
+                            new.as_ptr(),
+                            flags,
+                        )
+                    };
+                    if result == 0 {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::last_os_error().raw_os_error())
+                    }
+                };
+            if renameat2(&first, &second, 0).is_err() {
+                return 10;
+            }
+            // The kernel, not the filter, answers a taken name: EEXIST, never EPERM.
+            if renameat2(&second, &taken, libc::RENAME_NOREPLACE) != Err(Some(libc::EEXIST)) {
+                return 11;
+            }
+            if renameat2(&second, &third, libc::RENAME_NOREPLACE).is_err() {
+                return 12;
+            }
+            if renameat2(&third, &taken, libc::RENAME_EXCHANGE) != Err(Some(libc::EPERM)) {
+                return 13;
+            }
+            if renameat2(&third, &second, libc::RENAME_WHITEOUT) != Err(Some(libc::EPERM)) {
+                return 14;
+            }
+            // tempfile's persist_noclobber is the call uv's cache lock makes.
+            let persisted = tempfile::NamedTempFile::new_in(directory.path())
+                .map_err(|_| ())
+                .and_then(|file| file.persist_noclobber(&kept).map_err(|_| ()));
+            if persisted.is_err() {
+                return 15;
+            }
+            0
+        });
+        assert_eq!(
+            outcome, 0,
+            "10 = renameat2 with no flags failed, 11 = RENAME_NOREPLACE onto a taken name did not \
+             fail with EEXIST (EPERM means the filter refused it, so tempfile cannot persist a \
+             file and uv cannot take its cache lock), 12 = RENAME_NOREPLACE onto a free name \
+             failed, 13/14 = RENAME_EXCHANGE or RENAME_WHITEOUT was not refused with EPERM, \
+             15 = tempfile's persist_noclobber failed, 40 = installing the filters failed"
+        );
+        assert!(kept.is_file(), "persist_noclobber must create its new name");
+    }
+
+    #[test]
     fn select_waits_on_held_descriptors_under_the_filters() {
         let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
             .compile()
