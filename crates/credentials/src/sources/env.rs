@@ -9,7 +9,7 @@ use crate::sources::uri_reference;
 use crate::{CredentialError, Locator, Result, Secret, redact_credential_ref};
 
 /// The scheme this source claims.
-const SCHEME: &str = "env";
+pub(crate) const SCHEME: &str = "env";
 
 /// Environment variable names `env://` refuses to read (case-insensitive).
 const DENYLIST: &[&str] = &[
