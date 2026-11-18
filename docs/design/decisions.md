@@ -4,10 +4,15 @@ This page records the reasons for Box's design. Each entry states a decision and
 residual risks, or required precautions. It also names a rejected alternative when that explains the
 decision.
 
-> This is a historical record of design choices. An entry explains the reasoning at the time of the
-> decision and can fall behind the code. The code owns current behaviour. Use an entry to understand
-> the reasoning, then read its named tests or crate to check current behaviour. Correct an entry if
-> it disagrees with the code.
+> An entry explains the reasoning at the time of the decision. The log can lag the code, and the
+> code owns current behaviour. Use an entry to understand the reasoning, then read the code and its
+> tests to check current behaviour. A change that goes against an entry either fits the code to the
+> entry or rewrites the entry, and a human approves the rewrite. A pull request that changes what
+> an entry says fixes that entry.
+
+An entry belongs here only when the user decided a choice that refuses or redirects a later change to a
+different part of Box. New and rewritten entries have a paragraph, then **Rejected.**, then
+**Cost.**, and name no test.
 
 Each entry has a stable anchor. Code and other documents link an entry by that anchor, so do not
 rename one.

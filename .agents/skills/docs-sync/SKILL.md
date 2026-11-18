@@ -96,14 +96,18 @@ A crate whose `pub use` facade or purpose moved owns a `README.md` that a consum
 section the change makes wrong. Report a crate `AGENTS.md` whose frozen surface, premise, or gate
 the diff moved, and the root `AGENTS.md` when the change moves a gate or a frozen surface it lists.
 
-### Step 6: Check `docs/design/decisions.md` for regression only
+### Step 6: Check `docs/design/decisions.md`
 
-1. Report an entry the diff **regresses**, and name the anchor. The diff rewrites that entry, or it
-   does not ship.
+1. **Decision entries.** A missing entry is never a finding. An entry that the code has passed by,
+   with no help from this diff, is never a finding: the log can lag the code. When the diff goes
+   against what an entry in `docs/design/decisions.md` says, report one note that names the
+   anchor, and it never blocks. The pull request then fits the code to the entry, or rewrites the
+   entry, and a human approves the rewrite. A pull request that changes what an entry says fixes
+   that entry.
 2. Report two entries that answer the same question in two ways.
-3. Never report a missing entry, and never report an aged one. An entry enters only through `/kd`,
-   and only after the user decides. A code change owes no entry, and the code is the authority where
-   an entry and the code already disagree.
+
+Do not sweep the log for stale names. An entry enters only through `/kd`, and only after the user
+decides.
 
 ### Step 7: Report
 
