@@ -107,13 +107,15 @@ jobs:
 
       - name: Cache cargo for the deterministic suite (macOS only)
         if: ${{ matrix.os == 'macos-latest' && inputs.containment_macos }}
-        # The cache above already holds the root target, release profile
-        # included. Only the standalone test-integ crate needs its own entry.
+        # A distinct shared-key keeps the release target and the standalone
+        # test-integ crate apart from the unit-test cache above.
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: containment-deterministic
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-          workspaces: test-integ
+          workspaces: |
+            .
+            test-integ
 
       - name: Fetch locked dependencies for offline metadata
         run: cargo fetch --locked
