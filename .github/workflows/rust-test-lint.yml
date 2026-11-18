@@ -79,10 +79,6 @@ jobs:
         # Free space for the all-targets build on the disposable Ubuntu runner.
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
 
-      - name: Enable experimental x86 runtime tests
-        if: runner.os == 'Linux' && runner.arch == 'X64'
-        run: echo "EXPERIMENTAL_X86_SUPPORT=TRUE" >> "$GITHUB_ENV"
-
       - name: Require Linux namespace support
         if: runner.os == 'Linux'
         run: |

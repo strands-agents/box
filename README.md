@@ -47,9 +47,8 @@ actions and elapsed time to decide what is allowed next. For example, a file rea
 through Shell or Python can cause the gateway to deny a later outbound HTTP request.
 
 **Preview:** Box supports local execution on Linux ARM64 and macOS with Apple silicon.
-Linux x86-64 is experimental and requires `EXPERIMENTAL_X86_SUPPORT=TRUE` in the
-environment of the box's trusted process. See the [Linux download instructions](docs/user/getting-started.md#linux)
-for release selection and the x86-64 startup opt-in.
+Linux x86-64 builds start without an environment opt-in. See the [Linux download instructions](docs/user/getting-started.md#linux)
+for release selection and the [Linux requirements](docs/user/linux-requirements.md) for tested configurations.
 We welcome feedback through [GitHub issues](https://github.com/strands-agents/box/issues).
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 
@@ -245,10 +244,9 @@ cargo build --release -p strands-box -p strands-box-containment
 Run the compiled binary as `./target/release/strands-box`. Keep its helper
 binaries in the same directory.
 
-The [release guide](docs/dev/releases.md) covers version selection and publication for macOS, Linux ARM64, and experimental Linux x86-64.
+The [release guide](docs/dev/releases.md) covers version selection and publication for macOS, Linux ARM64, and Linux x86-64.
 
 Linux workspace tests run on Ubuntu ARM64 and x86-64 with user, mount, and process namespaces enabled.
-The x86-64 jobs set `EXPERIMENTAL_X86_SUPPORT=TRUE` to test the experimental runtime.
 Unexpected prerequisite skips fail the job. The accepted alias-read limitation and missing
 credential-daemon fixture remain explicit in the report. Workspace and deterministic integration
 failures on either Linux architecture or macOS fail `CI Gate`.

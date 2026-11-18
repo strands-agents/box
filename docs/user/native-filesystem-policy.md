@@ -33,7 +33,6 @@ Signed macOS release artifacts include the experiment's code; unsigned build art
 ### Linux ARM64 requirements
 
 Linux x86-64 builds refuse this feature during configuration validation, before creating Box state or starting a workload.
-The `EXPERIMENTAL_X86_SUPPORT` environment variable enables the x86 baseline only; it does not enable native filesystem policy.
 
 The host must support seccomp user notifications, descriptor injection, BPF Linux Security Module hooks, and BPF type information.
 BPF lets Box attach the checks that prevent delete and rename from affecting a replacement file.

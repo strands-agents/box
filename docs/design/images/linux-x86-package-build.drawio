@@ -1,4 +1,4 @@
-<?xml version='1.0' encoding='utf-8'?>
+<?xml version='1.0' encoding='UTF-8'?>
 <mxfile host="drawio" type="device">
   <diagram id="linux-x86-package-build" name="Linux package build baseline">
     <mxGraphModel dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1080" pageHeight="900" math="0" shadow="0" background="#ffffff">
@@ -95,7 +95,7 @@
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="x86-opt-in" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;x86-64 remains experimental&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;Workload startup requires&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;EXPERIMENTAL_X86_SUPPORT=TRUE&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=22;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+        <mxCell id="x86-opt-in" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;Linux x86-64 startup&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;No runtime environment&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;opt-in required.&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=22;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
           <mxGeometry x="600" y="970" width="400" height="90" as="geometry" />
         </mxCell>
         <mxCell id="x86-missing" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold&quot;&gt;Missing x86-64 download&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;Archive or checksum is missing.&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:24px;font-weight:normal;color:#5F6B7A&quot;&gt;Stop without an ARM64 fallback.&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=22;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">

@@ -311,7 +311,7 @@ class ReleaseBundleTests(unittest.TestCase):
                 box = root / "box-core/box"
                 box.parent.mkdir()
                 box.write_text(
-                    '#!/bin/sh\n[ "$1" = run ] && [ "$EXPERIMENTAL_X86_SUPPORT" = TRUE ] || exit 96\n'
+                    '#!/bin/sh\n[ "$1" = run ] && [ "${EXPERIMENTAL_X86_SUPPORT+x}" != x ] || exit 96\n'
                     'printf "started\\n" >> "$RUN_LOG"\n'
                 )
                 box.chmod(0o755)
@@ -323,6 +323,7 @@ class ReleaseBundleTests(unittest.TestCase):
                     "DOWNLOAD_FIXTURE": str(fixture), "DOWNLOAD_LOG": str(root / "download.log"),
                     "RUN_LOG": str(root / "run.log"),
                 }
+                environment.pop("EXPERIMENTAL_X86_SUPPORT", None)
                 composed = subprocess.run(
                     ["bash", "-c", workflow_command("Compose release body (install block)")],
                     cwd=root, env=environment, capture_output=True, text=True,
@@ -457,15 +458,14 @@ class ReleaseBundleTests(unittest.TestCase):
                 self.assertNotIn("EXPERIMENTAL_LINUX_SUPPORT", body)
                 self.assertIn(f"box-{tag}-linux-arm64.tar.gz", body)
                 self.assertEqual(f"box-{tag}-linux-x86_64.tar.gz" in body, publish_x86)
-                self.assertEqual("EXPERIMENTAL_X86_SUPPORT=TRUE" in body, publish_x86)
+                self.assertNotIn("EXPERIMENTAL_X86_SUPPORT", body)
                 self.assertIn("sha256sum --check box-linux.sha256", body)
                 self.assertIn("### Manual Linux ARM64 install", body)
                 self.assertEqual("## Linux preview" in body, preview)
                 support = "macOS 15 or later on Apple silicon"
-                self.assertIn(support + (", ARM64 Linux, and experimental x86-64 Linux" if publish_x86
+                self.assertIn(support + (", ARM64 Linux, and x86-64 Linux" if publish_x86
                                          else " and ARM64 Linux"), body)
-                # Only the x86-64 archive is experimental.
-                self.assertEqual("experimental" in body.lower(), publish_x86)
+                self.assertNotIn("experimental", body.lower())
                 download = body.index("download.sh | ")
                 self.assertLess(download, body.index("### Manual Linux ARM64 install"))
                 # releases/latest never returns a prerelease, so a preview page
@@ -498,6 +498,14 @@ class ReleasePackageTests(unittest.TestCase):
         )
         for name in ("box", "strands-box-sock-alias", "strands-box-contain-trampoline"):
             self.executable(self.package / name, '#!/bin/sh\nprintf "%s\\n" "$PACKAGE_VERSION"\n')
+        self.executable(self.package / "box", "#!/bin/sh\n"
+                        'if [ "$1" = run ]; then\n'
+                        '  [ "${EXPERIMENTAL_LINUX_SUPPORT+x}" != x ] || exit 95\n'
+                        '  [ "${EXPERIMENTAL_X86_SUPPORT+x}" != x ] || exit 96\n'
+                        '  printf "Missing configuration: %s\\n" "$3" >&2\n'
+                        '  exit 1\n'
+                        'fi\n'
+                        'printf "%s\\n" "$PACKAGE_VERSION"\n')
         self.executable(self.root / "readelf", '#!/bin/sh\nprintf "%s\\n" "$PACKAGE_HEADER"\n')
         self.docker_arguments = self.root / "docker-arguments.json"
         self.executable(self.root / "docker", "#!/usr/bin/env python3\n"
@@ -516,7 +524,9 @@ class ReleasePackageTests(unittest.TestCase):
             ["bash", "-c", workflow_command(name)],
             cwd=self.root,
             env={**os.environ, "PATH": f"{self.root}:{os.environ['PATH']}",
-                 "DOCKER_ARGS": str(self.docker_arguments), **environment},
+                 "DOCKER_ARGS": str(self.docker_arguments), "RUNNER_TEMP": str(self.root),
+                 "EXPERIMENTAL_LINUX_SUPPORT": "TRUE", "EXPERIMENTAL_X86_SUPPORT": "TRUE",
+                 **environment},
             text=True,
             capture_output=True,
         )
@@ -537,6 +547,19 @@ class ReleasePackageTests(unittest.TestCase):
             "box", "strands-box-sock-alias", "strands-box-contain-trampoline",
         ])
         self.assertEqual({item["architecture"] for item in report}, {"x86_64"})
+
+    def test_x86_package_step_rejects_a_gated_or_wrongly_successful_startup(self):
+        for startup in ("gated", "accepts-missing-config"):
+            with self.subTest(startup=startup):
+                self.executable(self.package / "box", "#!/bin/sh\n"
+                                'if [ "$1" = run ]; then\n'
+                                + ('  printf "Experimental opt-in required\\n" >&2; exit 1\n'
+                                   if startup == "gated" else '  exit 0\n')
+                                + 'fi\nprintf "%s\\n" "$PACKAGE_VERSION"\n')
+                result = self.run_step("Check the x86-64 Linux package", PACKAGE_HEADER=self.header())
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("::error::Linux x86-64 startup", result.stdout)
+                self.assertFalse(self.docker_arguments.exists())
 
     def test_x86_package_step_propagates_architecture_and_library_failures(self):
         for header in (

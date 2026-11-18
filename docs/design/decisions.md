@@ -83,7 +83,7 @@ requirements, process hardening, filesystem grants, and containment checks still
 invalid configuration still fails before a workload starts.
 
 Every release, stable or Linux preview, includes macOS and Linux ARM64. The release workflow has no
-input that omits Linux ARM64, and only Linux x86-64 is opt-in, through `publish_linux_x86`. An input
+input that omits Linux ARM64, and only the Linux x86-64 archive is optional, through `publish_linux_x86`. An input
 that omits ARM64 would let a release drop a supported platform by accident.
 `test_stable_and_preview_publish_arm64_with_x86_off_by_default` pins the release contents. The
 release owner must establish Linux readiness before each release. Linux previews leave the latest
@@ -92,19 +92,18 @@ acceptance. The native filesystem policy experiment retains its separate configu
 feature controls.
 
 <a id="linux-x86-startup-requires-explicit-consent"></a>
-### Linux x86-64 startup requires an explicit experimental opt-in
+### Linux x86-64 startup does not require an environment opt-in
 
-Box requires `EXPERIMENTAL_X86_SUPPORT=TRUE` in its operator environment before executing a command
-on Linux x86-64. When the variable is missing or has any other value, Box refuses `run` and
-`policy generate-schema` before configuration reads, host callbacks, process hardening, or workload
-startup. The same check applies to the Rust library functions `run` and `generate_policy_schema`.
-Help and version output remain available.
+The Linux x86-64 command line and library use configuration-driven startup without a separate
+consent variable. `EXPERIMENTAL_X86_SUPPORT` has no effect, including when an existing script sets
+it to `TRUE`. Filesystem grants, syscall restrictions, and operating system prerequisites still apply.
 
-We accept the separate consent step for x86-64 callers and tests while support remains experimental.
-Enabling it by default would run workloads on x86-64 before the remaining compatibility and release
-checks are complete. This gate does not change filesystem grants, syscall permissions, or release
-readiness. It does not apply to ARM64, macOS, or the standalone containment library. The retired
-`EXPERIMENTAL_LINUX_SUPPORT` variable remains inactive.
+**Rejected.** The former experimental startup variable required a separate step for each caller
+and test without changing what the sandbox permits.
+
+**Cost.** The variable no longer prevents accidental x86-64 execution. Operators must qualify their
+environment and workloads; removing the gate does not authorize publication or establish security
+acceptance. The release workflow keeps its separate `publish_linux_x86` archive selector.
 
 <a id="native-filesystem-policy-requires-explicit-selection"></a>
 ### Native filesystem policy requires explicit selection
