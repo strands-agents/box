@@ -4,10 +4,15 @@ This page records the reasons for Box's design. Each entry states a decision and
 residual risks, or required precautions. It also names a rejected alternative when that explains the
 decision.
 
-> This is a historical record of design choices. An entry explains the reasoning at the time of the
-> decision and can fall behind the code. The code owns current behaviour. Use an entry to understand
-> the reasoning, then read its named tests or crate to check current behaviour. Correct an entry if
-> it disagrees with the code.
+> An entry explains the reasoning at the time of the decision. The log can lag the code, and the
+> code owns current behaviour. Use an entry to understand the reasoning, then read the code and its
+> tests to check current behaviour. A change that goes against an entry either fits the code to the
+> entry or rewrites the entry, and a human approves the rewrite. A pull request that changes what
+> an entry says fixes that entry.
+
+An entry belongs here only when the user decided a choice that refuses or redirects a later change to a
+different part of Box. New and rewritten entries have a paragraph, then **Rejected.**, then
+**Cost.**, and name no test.
 
 Each entry has a stable anchor. Code and other documents link an entry by that anchor, so do not
 rename one.
@@ -77,11 +82,12 @@ configuration. The cost is that the variable no longer prevents accidental Linux
 requirements, process hardening, filesystem grants, and containment checks still apply. A missing or
 invalid configuration still fails before a workload starts.
 
-Stable releases can include Linux ARM64, and `publish_linux=false` retains a macOS-only stable
-release without a workflow revert. Keeping Linux in preview only would prevent an accepted Linux
-build from using the stable channel. The release owner must establish Linux readiness before
-publishing its archive. Linux previews always include ARM64 Linux and leave the latest stable
-release unchanged. Removing the startup flag does not authorize a release or establish security
+Every release, stable or Linux preview, includes macOS and Linux ARM64. The release workflow has no
+input that omits Linux ARM64, and only Linux x86-64 is opt-in, through `publish_linux_x86`. An input
+that omits ARM64 would let a release drop a supported platform by accident.
+`test_stable_and_preview_publish_arm64_with_x86_off_by_default` pins the release contents. The
+release owner must establish Linux readiness before each release. Linux previews leave the latest
+stable release unchanged. Removing the startup flag does not authorize a release or establish security
 acceptance. The native filesystem policy experiment retains its separate configuration and Cargo
 feature controls.
 
@@ -466,13 +472,22 @@ the file the link resolves to, and the box also shows that file at the link's na
 program runs a helper by the name `PATH` finds. Granting only the target left that name missing,
 so cargo failed with `linker 'cc' not found` on Linux. The links in between, such as
 `/etc/alternatives/cc`, are not granted: Linux binds the file at the named path, and macOS allows
-the link nodes on the way. We rejected granting the folders that hold the links, such as
+reading the metadata of each link on the way, linked folders included. For a linked folder below
+the link's own folder, such as `current` in `helper -> current/file`, the path asked for through it,
+`current/file`, is granted the same way, because macOS tests that path's existence before it
+follows `current`. A linked folder anywhere else, such as `current` in
+`~/.local/bin/java -> ~/.sdkman/candidates/java/current/bin/java` or `/tmp` in a link to
+`/tmp/build/out`, gets no such path, so on macOS the link's own name may still fail to open. The grant is built from one lookup of the link, compared
+with the file the run approved, so a hop swapped after the spawn check is refused rather than
+granted. We rejected granting the folders that hold the links, such as
 `/usr/bin` or `/etc/alternatives`, because that grants every file in them. The link must sit in its
 own real folder, and every other list still refuses a link. A link inside a credential store is
 refused, because the store exception resolves the entry again at each spawn, and the link could be
 pointed at another file of the store during a run. A write, exec, list or metadata grant
 through a link would act on a name the operator did not state as that file.
-`a_read_entry_naming_a_link_to_a_file_reads_by_both_names` pins it.
+`a_read_entry_naming_a_link_to_a_file_reads_by_both_names`,
+`a_read_entry_naming_a_link_through_a_linked_folder_reads_by_both_names` and
+`a_link_hop_swapped_after_the_spawn_check_is_refused` pin it.
 
 <a id="the-runtime-minimum-is-two-sets-and-the-agent-takes-the-smaller-one"></a>
 ### The runtime minimum is two sets, and the agent takes only the smaller one

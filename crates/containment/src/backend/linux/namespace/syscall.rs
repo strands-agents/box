@@ -556,6 +556,11 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
     },
     #[cfg(target_arch = "x86_64")]
     PermittedSyscall {
+        name: "fork",
+        number: libc::SYS_fork,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
         name: "vfork",
         number: libc::SYS_vfork,
     },
@@ -952,7 +957,7 @@ pub(crate) struct SyscallFilters {
 /// The static system-call policy for one containment request.
 #[derive(Debug)]
 pub(crate) struct SyscallPolicy {
-    #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+    #[cfg(feature = "native-filesystem-policy")]
     native_filesystem: bool,
 }
 
@@ -960,12 +965,12 @@ impl SyscallPolicy {
     /// Derive the policy from one request.
     pub(crate) fn for_config(_network: &Network) -> Self {
         Self {
-            #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+            #[cfg(feature = "native-filesystem-policy")]
             native_filesystem: false,
         }
     }
 
-    #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+    #[cfg(feature = "native-filesystem-policy")]
     pub(crate) fn with_native_filesystem(mut self, enabled: bool) -> Self {
         self.native_filesystem = enabled;
         self
@@ -974,7 +979,7 @@ impl SyscallPolicy {
     /// Compile both filters before containment starts.
     pub(crate) fn compile(&self) -> Result<SyscallFilters, ContainmentError> {
         let permit_rules = build_permit_rules(WORKLOAD_PERMITTED, true)?;
-        #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+        #[cfg(feature = "native-filesystem-policy")]
         let permit_rules = {
             let mut rules = permit_rules;
             if self.native_filesystem {
@@ -1008,7 +1013,7 @@ impl SyscallPolicy {
         )?;
 
         let notification_rules = BTreeMap::from([(libc::SYS_statfs, Vec::new())]);
-        #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+        #[cfg(feature = "native-filesystem-policy")]
         let notification_rules = {
             let mut rules = notification_rules;
             if self.native_filesystem {
@@ -1454,10 +1459,10 @@ mod tests {
     #[test]
     fn permit_filter_has_the_expected_workload_and_installer_entries() {
         let x86_entries = usize::from(cfg!(target_arch = "x86_64"));
-        assert_eq!(WORKLOAD_PERMITTED.len(), 118 + 18 * x86_entries);
+        assert_eq!(WORKLOAD_PERMITTED.len(), 118 + 19 * x86_entries);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 121 + 19 * x86_entries);
+        assert_eq!(rules.len(), 121 + 20 * x86_entries);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);

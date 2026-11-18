@@ -1,7 +1,6 @@
 //! Path compatibility through the contained native syscall path.
 #![cfg(all(
     box_native_kernel_tests,
-    box_native_adapter_tests,
     target_os = "linux",
     target_arch = "aarch64",
     feature = "native-filesystem-policy",

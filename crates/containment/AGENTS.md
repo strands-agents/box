@@ -931,6 +931,26 @@ The raw `vfork` probe keeps the child entirely in one assembly block. It checks 
 `setuid` refusal using the child's own UID, then exits without returning into Rust or changing the
 shared userspace stack. The outside control can set its unchanged UID. The parent checks the
 child's distinct exit status and reaps it. The test supervisor bounds the whole probe.
+
+Native Amazon Linux 2023 x86-64 validation for `04cdbb86cb31fee82ac341d529d690cfccb6810b`
+found that a direct `SYS_fork` call returned `EPERM` when the permit was absent; the outside
+control created and reaped its child. With the permit present,
+`raw_fork_preserves_child_restrictions` creates and reaps the child and verifies inherited
+refusals from both syscall filters. Its `getpriority` probe checks the permit filter; its
+executable `mprotect` probe checks the restriction filter without executing the memory.
+Controls that relax either rule separately make the regression fail.
+
+Musl 1.2.5's C library also uses this syscall on x86-64: its `fork()` function calls `_Fork()`,
+whose [implementation](https://git.musl-libc.org/cgit/musl/tree/src/process/_Fork.c?h=v1.2.5)
+selects raw `SYS_fork` when defined. Musl's x86-64 syscall definitions include that entry.
+This source inspection explains the compatibility need; the measured test calls the syscall
+directly and does not qualify a complete musl-linked application.
+
+Linux v6.12 implements `fork` through `kernel_clone` with only `SIGCHLD` in
+[`kernel/fork.c`](https://github.com/torvalds/linux/blob/v6.12/kernel/fork.c#L2868-L2875).
+The already permitted, unrestricted `clone` call admits that operation. Keep this permit
+x86-64-only.
+
 Follow-up full-Box checks found that Python `os.rmdir`, Python `shutil.rmtree`, and `git clean -fd`
 could not remove their empty directories on x86: `rmdir` returned `EPERM`. All three outside
 controls and matched ARM64 checks completed cleanup; ARM64 used `unlinkat` with `AT_REMOVEDIR`. Linux v6.12 routes both calls through `do_rmdir`
@@ -1312,7 +1332,6 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     bit still lands outside it. Unmeasured — read from `syscall.rs` and `view.rs`, and no Linux
     target was exercised. Seccomp **can** scope this, unlike the macOS flag argument, because the
     mode is a scalar.
-
 
 ### Native policy and filesystem-information notifications
 

@@ -12,8 +12,6 @@ does not need. No YAML front matter.
 
 <One link to the reference that the operator needs next.>
 
-> **Status.** <One line if the contract still changes. Omit it if it is stable.>
-
 ## Before you start
 
 <Prerequisites as a list.>

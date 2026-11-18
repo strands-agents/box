@@ -233,11 +233,7 @@ pub(crate) struct Boundary {
     installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     native_filesystem_policy: bool,
     /// The executable, canonical and prepared.
@@ -378,14 +374,10 @@ impl Boundary {
         // is the one exec grant every profile carries. It is the identity the profile grants and the
         // string the box execs, so no token expands there, and one that appears is refused rather
         // than left to fail as a search miss.
-        if spec.program().contains(environment::OPENING) {
+        if let Some(reason) = environment::program_refusal(spec) {
             return Err(ConfigError::Process {
                 table: table.to_string(),
-                reason: format!(
-                    "`command` names the program as {:?}, and a program is never expanded; \
-                     write the path",
-                    spec.program()
-                ),
+                reason,
             }
             .into());
         }
@@ -510,14 +502,6 @@ impl Boundary {
         let mut interpreter_aliases: Vec<(PathBuf, PathBuf)> = Vec::new();
         #[cfg(not(target_os = "linux"))]
         let interpreter_aliases: Vec<(PathBuf, PathBuf)> = Vec::new();
-        // Each granted file's `/bin` or `/sbin` name on a merged-/usr Linux host, with its file.
-        #[cfg(target_os = "linux")]
-        let mut host_link_aliases: Vec<(PathBuf, PathBuf)> = Vec::new();
-        #[cfg(not(target_os = "linux"))]
-        let host_link_aliases: Vec<(PathBuf, PathBuf)> = Vec::new();
-        // Each `/bin` or `/sbin` name with each operation already granted on it.
-        #[cfg(target_os = "linux")]
-        let mut host_link_grants: Vec<(PathBuf, Operation)> = Vec::new();
         let mut interpreter_identities: Vec<&Path> = Vec::new();
         #[cfg(target_os = "linux")]
         let mut interpreter_exec_files: Vec<PathBuf> = Vec::new();
@@ -686,67 +670,24 @@ impl Boundary {
         // The box's private tree is refused beneath every grant.
         containment = containment.refuse(guard.private, Scope::Root)?;
         for grant in &reach.grants {
-            // An exec entry for the command or an interpreter is already granted by that path.
-            let covers_interpreter = grant.operation == Operation::Exec
+            if grant.operation == Operation::Exec
                 && grant.scope == Scope::File
-                && interpreter_exec_files.contains(&grant.resolved);
-            let already_granted = covers_interpreter
-                || grant.operation == Operation::Exec
-                    && grant.scope == Scope::File
-                    && grant.resolved == program_identity;
-            if !already_granted {
-                containment = if grant.credential_store {
-                    // The guards judge the canonical identity; the grant itself keeps the
-                    // authored path, which the credential-store exception validates on its own
-                    // terms.
-                    guard.judge(&grant.resolved, grant.operation, grant.scope)?;
-                    containment.allow_credential_store(
-                        &grant.lexical,
-                        grant.operation,
-                        grant.scope,
-                    )?
-                } else {
-                    // A link entry is granted by its own name, so the box shows the file there
-                    // too.
-                    let path = if grant.is_link() {
-                        &grant.lexical
-                    } else {
-                        &grant.resolved
-                    };
-                    allow_operator(containment, path, grant.operation, grant.scope)?
-                };
+                && (grant.resolved == program_identity
+                    || interpreter_exec_files.contains(&grant.resolved))
+            {
+                continue;
             }
-            // On a merged-/usr host `/bin` links to `usr/bin`, and a script a process writes at
-            // run time names its interpreter as `#!/bin/sh`. The file this entry shows at
-            // `/usr/bin/sh` is shown at `/bin/sh` too, with each operation an entry grants it:
-            // the same file, under a name the host gives it. An exec entry an interpreter spelling
-            // already covers gets no second name, so that interpreter keeps one exec grant.
-            #[cfg(target_os = "linux")]
-            if !grant.credential_store && !covers_interpreter {
-                let path = if grant.is_link() {
-                    &grant.lexical
-                } else {
-                    &grant.resolved
-                };
-                if let Some(spelled) = merged_usr_spelling(path, grant.scope)
-                    && !reach
-                        .grants
-                        .iter()
-                        .any(|other| other.lexical == spelled || other.resolved == spelled)
-                    && !host_link_grants.contains(&(spelled.clone(), grant.operation))
-                {
-                    containment =
-                        allow_operator(containment, &spelled, grant.operation, Scope::File)?;
-                    host_link_grants.push((spelled.clone(), grant.operation));
-                    if !interpreter_aliases
-                        .iter()
-                        .chain(&host_link_aliases)
-                        .any(|(shown, _)| *shown == spelled)
-                    {
-                        host_link_aliases.push((spelled, grant.resolved.clone()));
-                    }
-                }
-            }
+            containment = if grant.credential_store {
+                // The guards judge the canonical identity; the grant itself keeps the authored
+                // path, which the credential-store exception validates on its own terms.
+                guard.judge(&grant.resolved, grant.operation, grant.scope)?;
+                containment.allow_credential_store(&grant.lexical, grant.operation, grant.scope)?
+            } else {
+                // One lookup, compared with the approved identity and then granted as it is.
+                let prepared = grant.prepare(table)?;
+                guard.judge(prepared.resolved_path(), grant.operation, grant.scope)?;
+                containment.allow_prepared(prepared, grant.operation, grant.scope)?
+            };
         }
 
         if let Some(command) = reach.command.as_ref() {
@@ -823,7 +764,6 @@ impl Boundary {
             minimum: &minimum,
             interpreters: &interpreters,
             interpreter_aliases: &interpreter_aliases,
-            host_link_aliases: &host_link_aliases,
             enterable_workspace: enterable_workspace.as_deref(),
             home: &home,
             path: composed.get("PATH").map(String::as_str).unwrap_or_default(),
@@ -868,11 +808,7 @@ impl Boundary {
             installation,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             native_filesystem_policy: spec
                 .native_filesystem_policy
@@ -900,11 +836,7 @@ impl Boundary {
 
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     pub(crate) fn native_filesystem_policy(&self) -> bool {
         self.native_filesystem_policy
@@ -986,28 +918,6 @@ impl Boundary {
     }
 }
 
-/// The name a file grant also has on a merged-/usr host, where `/bin` and `/sbin` link to
-/// `usr/bin` and `usr/sbin`: `/bin/sh` for `/usr/bin/sh`. `None` for a folder grant, a path outside
-/// those folders, or a host whose `/bin` or `/sbin` is a real folder.
-#[cfg(target_os = "linux")]
-fn merged_usr_spelling(path: &Path, scope: Scope) -> Option<PathBuf> {
-    if scope != Scope::File {
-        return None;
-    }
-    [("/bin", "/usr/bin"), ("/sbin", "/usr/sbin")]
-        .into_iter()
-        .find_map(|(top, usr)| {
-            let rest = path.strip_prefix(usr).ok()?;
-            let top = Path::new(top);
-            let linked = std::fs::symlink_metadata(top)
-                .ok()?
-                .file_type()
-                .is_symlink()
-                && top.canonicalize().ok()? == Path::new(usr);
-            linked.then(|| top.join(rest))
-        })
-}
-
 /// What the startup disclosure states for one spec.
 struct DisclosureInputs<'a> {
     table: &'a str,
@@ -1015,8 +925,6 @@ struct DisclosureInputs<'a> {
     minimum: &'a [MinimumCell],
     interpreters: &'a [PathBuf],
     interpreter_aliases: &'a [(PathBuf, PathBuf)],
-    /// Each granted file's `/bin` or `/sbin` name on a merged-/usr Linux host, with its file.
-    host_link_aliases: &'a [(PathBuf, PathBuf)],
     enterable_workspace: Option<&'a Path>,
     home: &'a Path,
     path: &'a str,
@@ -1072,18 +980,6 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
         for (spelled, resolved) in inputs.interpreter_aliases {
             lines.push(format!(
                 "  alias       {} -> {}  (interpreter spelling)",
-                spelled.display(),
-                resolved.display()
-            ));
-        }
-    }
-    if !inputs.host_link_aliases.is_empty() {
-        lines.push(format!(
-            "strands-box: {table} host link names for configured access:"
-        ));
-        for (spelled, resolved) in inputs.host_link_aliases {
-            lines.push(format!(
-                "  alias       {} -> {}  (a /usr folder's link name)",
                 spelled.display(),
                 resolved.display()
             ));
@@ -1674,7 +1570,12 @@ pub(crate) mod environment {
     /// The three telemetry values Core derives from this run's attachment, and the one set a
     /// `${NAME}` may name.
     pub(crate) fn expandable(attachment: &Attachment) -> BTreeMap<String, String> {
-        let endpoint = format!("http://127.0.0.1:{}", attachment.telemetry_port);
+        expandable_at(attachment.telemetry_port)
+    }
+
+    /// The values [`expandable`] holds for a collector on `telemetry_port`.
+    fn expandable_at(telemetry_port: u16) -> BTreeMap<String, String> {
+        let endpoint = format!("http://127.0.0.1:{telemetry_port}");
         BTreeMap::from([
             (
                 "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT".to_string(),
@@ -1688,16 +1589,39 @@ pub(crate) mod environment {
         ])
     }
 
+    /// The refusal a `${...}` in `spec`'s program meets, because a program is never expanded.
+    pub(crate) fn program_refusal(spec: &ProcessSpec) -> Option<String> {
+        spec.program().contains(OPENING).then(|| {
+            format!(
+                "`command` names the program as {:?}, and a program is never expanded; \
+                 write the path",
+                spec.program()
+            )
+        })
+    }
+
+    /// The refusal that expanding `spec`'s fixed arguments meets in every run, if any.
+    pub(crate) fn argument_refusal(spec: &ProcessSpec) -> Option<String> {
+        arguments_with(spec, &expandable_at(0)).err()
+    }
+
     /// One spec's fixed arguments, expanded. The only place a spec's arguments are expanded.
     pub(crate) fn expanded_arguments(
         spec: &ProcessSpec,
         attachment: &Attachment,
     ) -> Result<Vec<String>, String> {
-        let values = expandable(attachment);
+        arguments_with(spec, &expandable(attachment))
+    }
+
+    /// One spec's fixed arguments, expanded from `values`.
+    fn arguments_with(
+        spec: &ProcessSpec,
+        values: &BTreeMap<String, String>,
+    ) -> Result<Vec<String>, String> {
         spec.fixed_arguments()
             .iter()
             .map(|argument| {
-                expanded(argument, &values)
+                expanded(argument, values)
                     .map_err(|reason| format!("`command` argument {argument:?}: {reason}"))
             })
             .collect()
@@ -1828,11 +1752,7 @@ mod tests {
                             &fixture.root,
                             #[cfg(any(
                                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                                all(
-                                    target_os = "linux",
-                                    feature = "native-filesystem-policy",
-                                    box_native_adapter_tests
-                                )
+                                all(target_os = "linux", feature = "native-filesystem-policy",)
                             ))]
                             None,
                         )
@@ -1844,11 +1764,7 @@ mod tests {
                             &fixture.root,
                             #[cfg(any(
                                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                                all(
-                                    target_os = "linux",
-                                    feature = "native-filesystem-policy",
-                                    box_native_adapter_tests
-                                )
+                                all(target_os = "linux", feature = "native-filesystem-policy",)
                             ))]
                             None,
                         )
@@ -1897,11 +1813,7 @@ mod tests {
                     &fixture.root,
                     #[cfg(any(
                         all(target_os = "macos", feature = "native-filesystem-policy"),
-                        all(
-                            target_os = "linux",
-                            feature = "native-filesystem-policy",
-                            box_native_adapter_tests
-                        )
+                        all(target_os = "linux", feature = "native-filesystem-policy",)
                     ))]
                     None,
                 ),
@@ -1925,11 +1837,7 @@ mod tests {
                 &fixture.root,
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
-                    all(
-                        target_os = "linux",
-                        feature = "native-filesystem-policy",
-                        box_native_adapter_tests
-                    )
+                    all(target_os = "linux", feature = "native-filesystem-policy",)
                 ))]
                 None,
             ),
@@ -5417,11 +5325,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
                     &fixture.root,
                     #[cfg(any(
                         all(target_os = "macos", feature = "native-filesystem-policy"),
-                        all(
-                            target_os = "linux",
-                            feature = "native-filesystem-policy",
-                            box_native_adapter_tests
-                        )
+                        all(target_os = "linux", feature = "native-filesystem-policy",)
                     ))]
                     None,
                 ),
@@ -5808,128 +5712,6 @@ write = ["/Users/example/box-demo/aws-tmp"]
             assert_interpreter_route(&boundary, &spelling, &interpreter);
             assert_interpreter_alias_disclosure(&boundary, &spelling, &interpreter);
         }
-    }
-
-    /// **On a merged-/usr host, a granted file in `/usr/bin` is shown at its `/bin` name too.** A
-    /// script a tool writes at run time names its interpreter that way, such as the `#!/bin/sh`
-    /// entry points uvx writes, and a missing `/bin/sh` fails its exec with `ENOENT`. A process
-    /// with no grant in `/usr/bin` gets no such name.
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn a_granted_file_in_usr_bin_is_shown_at_its_bin_name_on_a_merged_usr_host() {
-        let bin = Path::new("/bin");
-        let merged = std::fs::symlink_metadata(bin)
-            .is_ok_and(|metadata| metadata.file_type().is_symlink())
-            && bin
-                .canonicalize()
-                .is_ok_and(|real| real == Path::new("/usr/bin"));
-        if !merged {
-            println!("skipping: this host's /bin is not a link to usr/bin");
-            return;
-        }
-        let fixture = Fixture::new();
-        let plain = fixture
-            .try_translate_full(
-                &fixture.spec(),
-                "[tool.t]",
-                RuntimeReach::Leaf,
-                EgressMode::Gateway,
-            )
-            .expect("the fixture's own grants");
-        assert!(
-            !plain.disclosure().contains("host link names"),
-            "{}",
-            plain.disclosure()
-        );
-        let mut checked = 0;
-        // `sh` is a link to `dash` on Ubuntu, and `env` is a file of its own.
-        for name in ["sh", "env"] {
-            let granted = Path::new("/usr/bin").join(name);
-            let Ok(identity) = granted.canonicalize() else {
-                continue;
-            };
-            let fixture = Fixture::new();
-            let mut spec = fixture.spec();
-            spec.filesystem.read_file.push(granted.clone());
-            let boundary = fixture
-                .try_translate_full(&spec, "[tool.t]", RuntimeReach::Leaf, EgressMode::Gateway)
-                .expect("a read on a system program");
-            let spelled = bin.join(name);
-            assert_interpreter_route(&boundary, &spelled, &identity);
-            let disclosure = boundary.disclosure();
-            assert!(
-                disclosure.contains(&format!(
-                    "  alias       {} -> {}  (a /usr folder's link name)",
-                    spelled.display(),
-                    identity.display()
-                )),
-                "{disclosure}"
-            );
-            checked += 1;
-        }
-        assert!(
-            checked > 0,
-            "this host has neither /usr/bin/sh nor /usr/bin/env"
-        );
-
-        // Every operation the entries grant a file reaches its /bin name, and its startup line is
-        // printed once. A read entry first must not keep an exec entry off the name.
-        let bash = Path::new("/usr/bin/bash");
-        if bash.is_file() {
-            let fixture = Fixture::new();
-            let mut spec = fixture.spec();
-            spec.filesystem.read_file.push(bash.to_path_buf());
-            spec.filesystem.exec.push(bash.to_path_buf());
-            let boundary = fixture
-                .try_translate_full(&spec, "[agent]", RuntimeReach::Agent, EgressMode::Gateway)
-                .expect("read and exec on one system program");
-            let operations = operations_at(&boundary, &bin.join("bash"));
-            assert!(
-                operations.contains(&Operation::Read) && operations.contains(&Operation::Exec),
-                "/bin/bash must carry both entries' operations: {operations:?}"
-            );
-            let disclosure = boundary.disclosure();
-            assert_eq!(
-                disclosure.matches("  alias       /bin/bash -> ").count(),
-                1,
-                "{disclosure}"
-            );
-        }
-
-        // An exec entry for the command's own file is granted by the command, and still reaches
-        // the file's /bin name.
-        let command = Path::new("/bin/sh")
-            .canonicalize()
-            .expect("the fixture's command");
-        if command.starts_with("/usr/bin") {
-            let fixture = Fixture::new();
-            let mut spec = fixture.spec();
-            spec.filesystem.exec.push(command.clone());
-            let boundary = fixture
-                .try_translate_full(&spec, "[agent]", RuntimeReach::Agent, EgressMode::Gateway)
-                .expect("an exec entry for the command's own file");
-            let spelled = bin.join(command.file_name().expect("a file name"));
-            assert!(
-                operations_at(&boundary, &spelled).contains(&Operation::Exec),
-                "{} must be executable: {}",
-                spelled.display(),
-                boundary.containment_config_text()
-            );
-        }
-    }
-
-    /// The operations the containment config grants at `original`, the name as granted.
-    #[cfg(target_os = "linux")]
-    fn operations_at(boundary: &Boundary, original: &Path) -> Vec<Operation> {
-        let config: serde_json::Value =
-            serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
-        config["paths"]
-            .as_array()
-            .expect("path grants")
-            .iter()
-            .filter(|grant| grant["original"].as_str() == original.to_str())
-            .map(|grant| serde_json::from_value(grant["operation"].clone()).expect("an operation"))
-            .collect()
     }
 
     #[cfg(target_os = "linux")]

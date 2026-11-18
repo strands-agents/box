@@ -278,6 +278,43 @@ fn a_read_entry_naming_a_link_to_a_file_reads_by_both_names() {
     );
 }
 
+/// **A link whose target path crosses a linked folder reads by its own name**, and nothing beside.
+#[test]
+fn a_read_entry_naming_a_link_through_a_linked_folder_reads_by_both_names() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let request = Request::with_policy("file-link-folder", PERMIT_EVERY_EFFECT);
+    let tools = request.operator_home().join("tools");
+    let data = tools.join("data");
+    std::fs::create_dir_all(&data).expect("a data folder");
+    std::fs::write(data.join("file"), "linked contents\n").expect("a file");
+    std::fs::write(data.join("sibling"), "sibling only\n").expect("a sibling");
+    std::os::unix::fs::symlink("data", tools.join("current")).expect("a linked folder");
+    let helper = tools.join("helper");
+    std::os::unix::fs::symlink("current/file", &helper).expect("a link through it");
+    let box_ = request.agent_read(&[helper.as_path()]).expect();
+
+    let output = probe(
+        &box_,
+        &format!(
+            "read -r v < {} && printf 'LINK=%s\\n' \"$v\"; \
+             read -r v < {} && printf 'FILE=%s\\n' \"$v\"; \
+             read -r v < {} 2>/dev/null && printf 'SIBLING=%s\\n' \"$v\"; printf done",
+            shell_quote(&helper),
+            shell_quote(&data.join("file")),
+            shell_quote(&data.join("sibling"))
+        ),
+    );
+
+    assert_ran(&output);
+    let seen = stdout(&output);
+    assert!(seen.contains("LINK=linked contents"), "{output:?}");
+    assert!(seen.contains("FILE=linked contents"), "{output:?}");
+    assert!(!seen.contains("SIBLING="), "{output:?}");
+    assert!(seen.contains("done"), "{output:?}");
+}
+
 /// **`HOME` is the operator's home when `env.HOME` is unset, and the declared value when set.**
 #[test]
 fn home_is_the_operators_unless_the_agent_declares_one() {

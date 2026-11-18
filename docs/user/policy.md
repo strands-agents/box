@@ -10,9 +10,6 @@ Audience: an operator who wants to write or change a policy. [Write a policy and
 decided](tutorials/first-policy.md) walks through a first one, and [the action
 vocabulary](policy/actions.md) lists every field a rule can read.
 
-> **Status.** The action vocabulary and the context fields can change before 1.0.0. Pin the Box
-> build you install (`./box-core/box --version`).
-
 ## When the box asks policy
 
 Four parts of the box ask policy, each about its own boundary:

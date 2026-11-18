@@ -665,6 +665,9 @@ impl PathGrant {
     /// is spelled parent-canonical, and the walk follows at most [`MAXIMUM_LINK_HOPS`] links of each
     /// kind.
     ///
+    /// A linked directory below the caller's own folder also adds the path asked for through it,
+    /// such as `tools/current/file`, because macOS tests that path's existence before following it.
+    ///
     /// A grant whose parent is canonical and which holds no link, or one, gives back exactly
     /// [`Self::reachable_paths`].
     fn walk_traversal_nodes(&self) -> Vec<PathBuf> {
@@ -676,6 +679,11 @@ impl PathGrant {
         };
 
         record(parent_canonical(&self.original), &mut nodes);
+        let own = self
+            .original
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .unwrap_or_else(|| PathBuf::from("/"));
 
         let target_of = |link: &Path, target: PathBuf| match link.parent() {
             Some(parent) if target.is_relative() => parent.join(&target),
@@ -708,12 +716,34 @@ impl PathGrant {
                     continue;
                 }
                 let node = parent_canonical(ancestor);
-                if nodes.contains(&node) {
-                    continue;
+                // **The path asked for through a linked directory below the caller's own folder**,
+                // such as `tools/current/file` for `helper -> current/file`: macOS tests its
+                // existence before it follows `current`, and refuses the open without it. It names
+                // the file the grant already reaches. A linked directory anywhere else, such as
+                // `/var`, adds no such path, so a floor path gains none.
+                let asked = (own != Path::new("/")
+                    && node.parent().is_some_and(|parent| parent.starts_with(&own)))
+                .then(|| spelling.strip_prefix(ancestor).ok())
+                .flatten()
+                .filter(|rest| {
+                    rest.components()
+                        .all(|part| matches!(part, std::path::Component::Normal(_)))
+                })
+                .map(|rest| node.join(rest));
+                if !nodes.contains(&node) {
+                    nodes.push(node);
+                    // The rest of the spelling rides along, so a path asked for through the
+                    // link's own target names the same file too.
+                    if let Ok(target) = std::fs::read_link(ancestor) {
+                        let reached = target_of(ancestor, target);
+                        spellings.push(match spelling.strip_prefix(ancestor) {
+                            Ok(rest) if !rest.as_os_str().is_empty() => reached.join(rest),
+                            _ => reached,
+                        });
+                    }
                 }
-                nodes.push(node);
-                if let Ok(target) = std::fs::read_link(ancestor) {
-                    spellings.push(target_of(ancestor, target));
+                if let Some(asked) = asked {
+                    record(asked, &mut nodes);
                 }
             }
         }
@@ -893,6 +923,121 @@ pub enum BackendOverride {
         /// Whether Seatbelt extension tokens are enabled.
         extensions_enabled: bool,
     },
+}
+
+#[cfg(test)]
+mod traversal_node_tests {
+    use super::*;
+
+    /// **A linked folder on a link's target path is a traversal node**, with the path the lookup
+    /// asks for through it, and so is a linked folder another linked folder points through.
+    #[test]
+    fn a_linked_folder_on_a_links_target_path_is_a_node() {
+        let directory = tempfile::tempdir().expect("a folder");
+        let root = directory.path().canonicalize().expect("canonical");
+        std::fs::create_dir_all(root.join("store/data")).expect("data");
+        std::fs::write(root.join("store/data/file"), "x").expect("file");
+        std::fs::write(root.join("store/data/sibling"), "x").expect("sibling");
+        std::os::unix::fs::symlink("store", root.join("shelf")).expect("a linked folder");
+        std::os::unix::fs::symlink("shelf/data", root.join("current")).expect("a second one");
+        std::os::unix::fs::symlink("current/file", root.join("helper")).expect("a link");
+        let granted =
+            PathGrant::new(root.join("helper"), Operation::Read, Scope::File).expect("granted");
+        assert_eq!(
+            granted.traversal_paths(),
+            vec![
+                root.join("store/data/file"),
+                root.join("helper"),
+                root.join("current"),
+                root.join("current/file"),
+                root.join("shelf"),
+                root.join("shelf/data/file"),
+            ]
+        );
+    }
+
+    /// **A grant with no link has only its own node**, and a link to a file beside it adds only
+    /// the link.
+    #[test]
+    fn a_grant_with_no_linked_folder_keeps_its_nodes() {
+        let directory = tempfile::tempdir().expect("a folder");
+        let root = directory.path().canonicalize().expect("canonical");
+        std::fs::write(root.join("gcc"), "x").expect("file");
+        std::os::unix::fs::symlink("gcc", root.join("cc")).expect("a link");
+        let plain = PathGrant::new(root.join("gcc"), Operation::Read, Scope::File).expect("plain");
+        assert_eq!(plain.traversal_paths(), vec![root.join("gcc")]);
+        let link = PathGrant::new(root.join("cc"), Operation::Read, Scope::File).expect("link");
+        assert_eq!(
+            link.traversal_paths(),
+            vec![root.join("gcc"), root.join("cc")]
+        );
+    }
+
+    /// **A linked folder outside the caller's own folder adds no path through it**, as for macOS's
+    /// `/etc/localtime` through `/var`: the link itself is a node, as on `main`, but no spelling of
+    /// the file through it is, so a floor path gains no rule.
+    #[test]
+    fn a_linked_folder_outside_the_callers_folder_adds_no_path_through_it() {
+        let directory = tempfile::tempdir().expect("a folder");
+        let root = directory.path().canonicalize().expect("canonical");
+        // `etc/localtime -> <root>/var/db/zoneinfo/Region`, with `var -> private/var` and
+        // `private/var/db/zoneinfo -> tz/2026/zoneinfo`, as on macOS.
+        std::fs::create_dir_all(root.join("etc")).expect("etc");
+        std::fs::create_dir_all(root.join("private/var/db/tz/2026/zoneinfo")).expect("tz");
+        std::fs::write(root.join("private/var/db/tz/2026/zoneinfo/Region"), "x").expect("zone");
+        std::os::unix::fs::symlink("private/var", root.join("var")).expect("var");
+        std::os::unix::fs::symlink("tz/2026/zoneinfo", root.join("private/var/db/zoneinfo"))
+            .expect("zoneinfo");
+        let localtime = root.join("etc/localtime");
+        std::os::unix::fs::symlink(root.join("var/db/zoneinfo/Region"), &localtime)
+            .expect("localtime");
+        let granted = PathGrant::new(&localtime, Operation::Read, Scope::File).expect("granted");
+        assert_eq!(
+            granted.traversal_paths(),
+            vec![
+                root.join("private/var/db/tz/2026/zoneinfo/Region"),
+                localtime.clone(),
+                root.join("private/var/db/zoneinfo"),
+                root.join("var"),
+            ]
+        );
+
+        // An absolute target through a linked folder below the caller's own folder adds the path.
+        std::fs::create_dir_all(root.join("etc/data")).expect("data");
+        std::fs::write(root.join("etc/data/file"), "x").expect("file");
+        std::os::unix::fs::symlink("data", root.join("etc/current")).expect("current");
+        let helper = root.join("etc/helper");
+        std::os::unix::fs::symlink(root.join("etc/current/file"), &helper).expect("helper");
+        let granted = PathGrant::new(&helper, Operation::Read, Scope::File).expect("granted");
+        assert_eq!(
+            granted.traversal_paths(),
+            vec![
+                root.join("etc/data/file"),
+                helper,
+                root.join("etc/current"),
+                root.join("etc/current/file")
+            ]
+        );
+    }
+
+    /// **A system folder link such as `/bin` adds no path through it** where the host has one.
+    #[test]
+    fn a_root_level_folder_link_adds_no_path_through_it() {
+        let system = Path::new("/bin");
+        if !std::fs::symlink_metadata(system).is_ok_and(|metadata| metadata.is_symlink())
+            || !system.join("sh").exists()
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().expect("a folder");
+        let root = directory.path().canonicalize().expect("canonical");
+        let helper = root.join("helper");
+        std::os::unix::fs::symlink(system.join("sh"), &helper).expect("helper");
+        let granted = PathGrant::new(&helper, Operation::Read, Scope::File).expect("granted");
+        let nodes = granted.traversal_paths();
+        assert!(!nodes.contains(&system.join("sh")), "{nodes:?}");
+        assert!(nodes.contains(&helper), "{nodes:?}");
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]
