@@ -199,7 +199,7 @@ the download stops; the script does not substitute an ARM64 archive.
 
 The script verifies the checksum and extracts into temporary storage before changing destination files.
 Linux packages must contain executable `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` files.
-The Linux package requires glibc 2.34 or newer and the GCC runtime library (`libgcc_s.so.1`).
+The [Linux requirements](docs/user/linux-requirements.md) list the libraries, operating system permissions, and checks needed to run a workload.
 Before replacing files, the downloader runs the candidate's `box --version` in a private directory inside an existing destination.
 For a new destination, it uses the parent directory. This staging location must be writable and allow execution.
 Temporary download storage can prohibit execution (`noexec`).

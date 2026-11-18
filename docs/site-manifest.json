@@ -260,14 +260,25 @@
       }
     },
     {
+      "id": "linux-requirements",
+      "source": "docs/user/linux-requirements.md",
+      "slug": "reference/linux-requirements",
+      "title": "Linux requirements",
+      "description": "Check Linux libraries, sandbox setup permissions, startup errors, and tested configurations.",
+      "nav": {
+        "group": "Reference",
+        "order": 6
+      }
+    },
+    {
       "id": "cloud-deployments",
       "source": "docs/user/cloud-deployments.md",
       "slug": "reference/cloud-deployments",
       "title": "Cloud deployment profiles",
-      "description": "Check Linux environment requirements and service configuration for AgentCore Runtime and Lambda MicroVM deployments.",
+      "description": "Configure and check AgentCore Runtime and Lambda MicroVM deployments using the shared Linux requirements.",
       "nav": {
         "group": "Reference",
-        "order": 6
+        "order": 7
       }
     }
   ]

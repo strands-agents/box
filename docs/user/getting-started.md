@@ -44,7 +44,7 @@ Rules:
 ## Before you start
 
 Box supports macOS on Apple silicon and Linux ARM64 (64-bit Arm). Linux x86-64 is experimental.
-On Linux, use Amazon Linux 2023 for your CPU architecture with GNU C library (glibc) 2.34 or newer and the GCC runtime library (`libgcc_s.so.1`).
+Linux binaries use Amazon Linux 2023 as their build baseline. Check the [Linux requirements](./linux-requirements.md) for compatible libraries, setup permissions, and tested configurations.
 [Step 1](#step-1-download-box) installs Box on either platform.
 The Strands CLI walkthrough in steps 2–8 uses macOS. For that walkthrough, you need:
 
@@ -103,7 +103,7 @@ ARM64 does not require the flag. It does not change the sandbox permissions.
 After installation, continue with the [Amazon EKS coding example](tutorials/eks.md) or the [AgentCore Runtime shipment example](tutorials/agentcore-runtime.md).
 Steps 2–8 below follow the macOS Strands CLI example.
 
-Check [Linux setup requirements](cloud-deployments.md#shared-requirements) for the permissions Box needs at startup.
+Check the [Linux requirements](./linux-requirements.md) before running a workload; a successful `box --version` does not test sandbox startup.
 Use the [platform comparison](../design/platform-differences.md) when adapting a macOS configuration.
 
 <a id="build-from-source"></a>

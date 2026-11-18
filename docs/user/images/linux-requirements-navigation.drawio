@@ -1,0 +1,56 @@
+<?xml version='1.0' encoding='utf-8'?>
+<mxfile host="drawio" type="device">
+  <diagram id="linux-requirements-navigation" name="Linux requirements reference">
+    <mxGraphModel dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1080" pageHeight="560" math="0" shadow="0" background="#ffffff">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="requirements" value="&lt;div style=&quot;font-size:22px;line-height:26.40px&quot;&gt;Linux requirements&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=none;strokeWidth=2;dashed=0;verticalAlign=top;align=left;spacing=0;spacingLeft=16;spacingTop=6;fontSize=14;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="560" y="80" width="440" height="400" as="geometry" />
+        </mxCell>
+        <mxCell id="readme" value="README" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=none;strokeWidth=2;align=center;verticalAlign=middle;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="40" y="120" width="280" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="getting-started" value="Getting started" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=none;strokeWidth=2;align=center;verticalAlign=middle;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="40" y="240" width="280" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="cloud-deployments" value="Cloud deployments" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=none;strokeWidth=2;align=center;verticalAlign=middle;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="40" y="360" width="280" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="requirements-checks" value="Requirements and checks" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=nowrap;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="600" y="140" width="360" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="startup-troubleshooting" value="Startup troubleshooting" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=nowrap;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="600" y="260" width="360" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="tested-configurations" value="Tested configurations" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;whiteSpace=nowrap;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry x="600" y="380" width="360" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="link-readme" value="links to" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.2;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="readme" target="requirements">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="440" y="160" />
+            </Array>
+            <mxPoint x="0" y="-15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="link-getting-started" value="links to" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="getting-started" target="requirements">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="440" y="280" />
+            </Array>
+            <mxPoint x="0" y="-15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="link-cloud-deployments" value="links to" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.8;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=none;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="cloud-deployments" target="requirements">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="440" y="400" />
+            </Array>
+            <mxPoint x="0" y="-15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
