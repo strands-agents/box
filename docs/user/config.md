@@ -520,9 +520,8 @@ A script that a process writes or downloads at run time, such as a `#!/bin/sh` c
 `/sbin`, `/lib`, `/lib32`, `/lib64` or `/libx32` is a link into `/usr`, as on Debian, Ubuntu,
 Fedora and Amazon Linux, each sandbox has the same link at its top level. With
 `read_file = ["/usr/bin/sh"]`, `/bin/sh` then resolves to the granted file, and the script starts.
-A link reaches only what the sandbox already shows, so it grants nothing. A name that the sandbox
-already uses for a granted path, such as an interpreter spelling `/bin/sh`, stays a folder and gets
-no link.
+A link reaches only what the sandbox already shows, so it grants nothing. A grant or deny written
+with the link's name, such as `/bin/bash`, applies to the same file, at `/usr/bin/bash`.
 
 ## `[[agent.ingress]]`
 

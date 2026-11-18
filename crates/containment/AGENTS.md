@@ -996,12 +996,19 @@ Ubuntu 24.04 runner, `uvx mypy@1.15.0` printed `error: Failed to spawn: mypy`.
 
 `materialize` now writes each host link from `/bin`, `/sbin`, `/lib`, `/lib32`, `/lib64` or
 `/libx32` into the view root, after every mount and before the root is sealed read-only. A link is
-copied only when the host's entry is a link whose text is a relative path into `usr/`, and only when
-no planned mount sits at or under the name, so an interpreter spelling or loader bind under `/lib`
-keeps its place. A link resolves only to paths the view binds, so it adds no reach.
-`the_view_copies_the_hosts_merged_usr_links_where_no_mount_sits` pins the plan, and
+copied only when the host's entry is a link whose text is a relative path into `usr/`. `plan`
+mounts every path written through such a link at its `/usr` name (`view_spelling`): an interpreter
+spelling `/bin/bash` is bound at `/usr/bin/bash`, and the loader at `/lib64/ld-linux-x86-64.so.2`
+at `/usr/lib64/ld-linux-x86-64.so.2`. So no mount sits under a linked name, and the link is kept.
+The first version left a name with a mount under it a plain folder, which dropped `/bin` for any
+tool whose wrapper starts `#!/bin/bash`, and `/lib` and `/lib64` for any process with an exec file.
+A refusal goes through the same mapping, so a refusal of `/bin/bash` replaces a grant of
+`/usr/bin/bash`, and the link reaches only the empty overmount. A link resolves only to paths the
+view binds, so it adds no reach. Bind sources stay host paths, which name the same files.
+`the_view_copies_the_hosts_usr_links_and_mounts_each_name_under_usr` pins the plan, and
 `a_bin_sh_script_runs_through_the_hosts_bin_link` runs a `#!/bin/sh` script under the real
-trampoline with only `/usr/bin/sh` granted, and checks that `/bin/cat` stays absent.
+trampoline with only `/usr/bin/sh` granted, and checks that `/bin/cat` stays absent and that a
+refused `/usr/bin/cat` is empty through `/bin/cat`.
 
 ### W^X
 
