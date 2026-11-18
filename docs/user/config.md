@@ -94,10 +94,15 @@ telemetry. `box_dir` selects the box: one directory is one box. A `name` outside
 its limits is refused with ``box name "<name>" is invalid: <reason>; use one component of letters,
 digits, '.', '_', or '-'``.
 
-Box creates the directory `box_dir` names, with mode `0700`, and creates **no** directory above it.
-Create the parent yourself, or the run is refused with ``the box directory's parent does not exist;
-create it, because Box creates no directory above the one `box_dir` names``. Everything Box writes
-for a box is under `box_dir`, or under a path the file names. The example's
+If the directory named by `box_dir` does not exist, Box creates it with mode `0700` (owner-only
+access). Its parent must already exist and be writable. Box creates **no** directory above
+`box_dir`; a missing parent causes the run to fail with ``the box directory's parent does not exist;
+create it, because Box creates no directory above the one `box_dir` names``.
+
+If `box_dir` already exists, it must be owned by the user running Box and have mode `0700`.
+Box refuses to use an existing directory with a different owner or permissions. These requirements
+apply on both Linux and macOS. Everything Box writes for a box is under `box_dir` or another path
+specified in `box.toml`. The example's
 `box_dir` is `my-box/state`, under the `my-box` directory the operator made for the two files.
 
 `box_dir` may not be the agent's workspace or lie below it, and neither `box.toml` nor `policy.dw`
