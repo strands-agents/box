@@ -186,7 +186,7 @@ point.
    *outside* the feature's crate(s); `Cargo.toml` `members`/dependency changes not required by the
    task; churn in unrelated docs; touching `.agents/pocs/` for a `crates/` task (or vice-versa).
    Every `Cargo.lock` change needs a maintainer's approval before it merges, and the pull request
-   says which versions moved and why. Run `git diff <fork> -- Cargo.lock` and list each version
+   says which versions moved and why. Run `git diff <fork> -- '*Cargo.lock'` and list each version
    that moved under `DESIGN`. A moved version that the pull request body does not name and explain
    (or the caller's claims, before a pull request exists) is a finding.
 3. **Design fit — does this belong as built, or is it a foreign body?** Judge against the repo's OWN
@@ -218,8 +218,8 @@ point.
      lengths/ports; missing `#[must_use]` where dropping the value is a bug.
    - A `std::sync::Mutex` guard held across an `.await` (deadlock/blocking risk); blocking I/O in async.
 5b. **Pins.** The `test-critic` agent runs at the same time as you and proves that each new or
-    rewritten test fails without its change. Do not repeat that work. Copy its `PINS` block and
-    verdict into your report.
+    rewritten test fails without its change. Do not repeat that work, and do not report pins:
+    they are test-critic's verdict, and the caller reads both reports.
 
 6. **Feature-flag matrix integrity.** Features gate optional layers here. Verify the default-off
    build still enforces the baseline, and that no security-critical code is reachable *only* with a
@@ -406,12 +406,9 @@ PLATFORMS   (always present — silence here has already shipped a broken build)
 - other targets: <cargo check --target … result> | NOT COMPILED
 - dry-run build: <build URL + pass/fail> | not submitted, so cfg(linux) is UNVERIFIED
 
-PINS   (always present when the diff adds or rewrites a test: copied from test-critic)
-- test-critic PINS block, and its VERDICT: pins hold | pins missing | pins unproven
-
 VERDICT: ship | fix-then-ship | rework
-(any UNAPPROVED interface or premise change, a removed security test, an uncompiled platform, or a
- test-critic verdict of `pins missing` forces `rework` — it is not the author's call to
+(any UNAPPROVED interface or premise change, a removed security test, or an uncompiled platform
+ forces `rework` — it is not the author's call to
  absorb, and not yours either. A `DOCS` finding forces at least `fix-then-ship`, because the page
  and the code must agree in the same commit; operator-facing description the change makes wrong is
  a BLOCKER under check 0(a).)

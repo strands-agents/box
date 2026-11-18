@@ -182,7 +182,8 @@ cargo test -p strands-box --test site_manifest --locked --all-features
 commit**, after implementation is complete. It reviews code, runs the required gates, and checks
 docs against [What a change updates](#what-a-change-updates). Run
 [test-critic](.agents/agents/test-critic.md) at the same time when the diff adds or rewrites a test.
-It proves that each new test fails without its change.
+It proves that each new test fails without its change. Its `pins missing` verdict is a blocker, the
+same as a feature-critic blocker.
 Finish only when the gates pass and every finding is fixed or has a stated reason for leaving it.
 [Decision-critic](.agents/agents/decision-critic.md) reviews a decision or spec; it is not a code gate.
 A doc review reports only prose the diff makes wrong, or missing pages for surfaces the diff adds

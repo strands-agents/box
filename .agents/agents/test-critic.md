@@ -119,9 +119,13 @@ Paths: each crate under `crates/`, `test-integ/`, `test-native-filesystem/`, `te
 - **A test in an excluded package:** `crates/box-bench` (`box-bench`), `test-native-filesystem`
   (`strands-native-filesystem-tests`), `test-common` (`test-common`) and `test-workload/verdict`
   (`workload-verdict`) are outside the workspace. Run them with
-  `cargo test --manifest-path <dir>/Cargo.toml --all-features -- --exact <name>`. The workload
-  cells under `test-workload/` run real agents in the cloud, so report a change to one as
-  `not reached`.
+  `cargo test --manifest-path <dir>/Cargo.toml --all-features -- --exact <name>`.
+- **A Python test:** run the command CI uses, such as
+  `python3 -m unittest discover -s <dir> -p '<pattern>'` (see `ci.yml`, `rust-test-lint.yml` and
+  `containment-deterministic.yml`), or `python3 <file>` for
+  `test-workload/workload-native-filesystem/generator_test.py` (see `verdict-hermetic.yml`).
+- **A workload cell:** the agent cells under `test-workload/` run real agents in the cloud, so
+  report a change to one as `not reached`.
 - **Files that hold tests:** `grep -rlE "#\[(tokio::)?test" crates/*/src`. A file under a `tests/`
   directory inside `src/` is a unit test in its crate's `--lib` target. Undo only the lines a test
   checks, never a whole file that also holds tests.
