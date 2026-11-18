@@ -698,6 +698,18 @@ strands-box: [tool.check] interpreter aliases for configured access:
 The arrow maps the script's spelling to the file its configured grants already authorize.
 The section appears only when Box preserves an interpreter spelling.
 
+On a Linux host where `/bin` and `/sbin` link to `usr/bin` and `usr/sbin`, as on Ubuntu, a file
+entry in `/usr/bin` or `/usr/sbin` also shows its file at the `/bin` or `/sbin` name. A script that a
+process writes or downloads at run time often names its interpreter that way, such as `#!/bin/sh`,
+and without that name its exec fails with `No such file or directory`. The name reaches only the
+file the entry grants. A folder entry such as `read = ["/usr/bin"]` gets no such name. The names
+appear in their own section:
+
+```text
+strands-box: [tool.uvx] host link names for configured access:
+  alias       /bin/sh -> /usr/bin/dash  (a /usr folder's link name)
+```
+
 With no `filesystem` table, the process reaches its `command` and the runtime minimum. The
 command's own exec grant is implicit: a process may always run its `command`, and the startup
 disclosure shows that grant as `exec <command> (command, implicit)`. So removing a directory from
