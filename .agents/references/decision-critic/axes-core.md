@@ -48,7 +48,8 @@ that cannot support a defensible choice. `WEAKNESS` also covers miscalibrated de
   *was* forced by backpressure, but "invoke and attach are separate primitives" was a genuine
   design choice smuggled in as forced.
 - **Decision density.** Is this **over-decided**: a two-way-door, uncontested, in-workspace
-  triviality promoted to a full `/kd` (it should be a decision inside a spec)? Or
+  triviality promoted to a full `/kd` (it belongs on the design page or in the pull request body, as
+  [What earns an entry](../../skills/kd/SKILL.md#what-earns-an-entry) says)? Or
   **under-decided**: a genuinely contested, foundational, hard-to-reverse fork buried as a one-line
   spec decision that deserves a KD and group alignment? Use the repo's own bar: the `kd` skill's
   [What earns an entry](../../skills/kd/SKILL.md#what-earns-an-entry) test, "Which change to

@@ -273,7 +273,7 @@ remove that directory after the pins finish.
 
   ```sh
   cargo build -p strands-box --all-features
-  PATH="$PWD/target/debug:$PATH" bash test-integ/run.sh > /tmp/det.log 2>&1
+  PATH="$CARGO_TARGET_DIR/debug:$PATH" bash test-integ/run.sh > /tmp/det.log 2>&1
   echo "exit $?"; tail -n 30 /tmp/det.log; cat ~/det-results/verdict.json | head -c 2000
   ```
 

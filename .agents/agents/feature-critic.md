@@ -143,7 +143,7 @@ you did not compile.
 ### A stalled gate
 
 Do not wait out a gate that stops making progress. macOS has no `timeout`, so run a long gate in the
-background and poll it. Find the process with `ps -eo pid,etime,command | grep target/debug`, and on
+background and poll it. Find the process with `ps -eo pid,etime,command | grep /debug/deps/`, and on
 macOS run `sample <pid> 3 -f <file>`. Report the innermost frames. A gate that needed a signal to
 finish did not pass. Say which one. Wait on the process to exit, not on the end of its output: a
 child process can keep the output open after the process under test exits. Find that child before

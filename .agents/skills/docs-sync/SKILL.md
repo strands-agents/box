@@ -28,7 +28,8 @@ paths:
 - **Scope**: a diff, or `all` for the whole repository. The default is the diff from the fork point
   with `origin/main`, or with the base the caller names:
   `git diff $(git merge-base <base> HEAD)`, which includes the working tree, staged or not, plus
-  each new file that `git status --short` lists.
+  each new file that `git status --short` lists. If `git merge-base` prints nothing (a shallow
+  clone), stop and report it. Do not run `git diff` with no ref.
 - **Fix**: report only (the default), or fix each gap.
 
 ## Process
