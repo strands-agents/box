@@ -272,8 +272,8 @@ remove that directory after the pins finish.
   regressions that the in-repo `cargo test` does not. Run it against the box you just built:
 
   ```sh
-  cargo build -p strands-box --all-features
-  PATH="$CARGO_TARGET_DIR/debug:$PATH" bash test-integ/run.sh > /tmp/det.log 2>&1
+  cargo build -p strands-box -p strands-box-containment --all-features
+  PATH="${CARGO_TARGET_DIR:?set CARGO_TARGET_DIR first}/debug:$PATH" bash test-integ/run.sh > /tmp/det.log 2>&1
   echo "exit $?"; tail -n 30 /tmp/det.log; cat ~/det-results/verdict.json | head -c 2000
   ```
 
