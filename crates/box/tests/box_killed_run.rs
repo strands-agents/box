@@ -219,8 +219,9 @@ fn lifetime_permits(policy: &str) -> usize {
 }
 
 /// A killed run grants nothing after the kill and recovers no more requests than were issued.
-/// Default durability also preserves every returned permit. Experimental periodic durability can
-/// lose events before a completed flush. The completed-flush guarantee is checked by
+/// Per-event persistence (`--no-default-features`) also preserves every returned permit.
+/// Default batched persistence can lose events before a completed flush. The completed-flush
+/// guarantee is checked by
 /// `idle_timer_preserves_history_after_sigkill` in `crates/policy/tests/idle_history_flush.rs`;
 /// that test waits for a successful flush before killing and reopening the engine.
 #[test]
@@ -310,7 +311,7 @@ fn a_run_killed_mid_decision_leaves_a_recoverable_count_and_grants_nothing_after
         if !cfg!(feature = "experimental-idle-flush") {
             assert!(
                 recovered >= permitted,
-                "round {round}: default durability must recover every returned permit: \
+                "round {round}: per-event persistence must recover every returned permit: \
                  recovered={recovered} permitted={permitted} issued={issued} metered={metered}"
             );
         }

@@ -47,9 +47,9 @@ env:
   RUSTFLAGS: "-C debuginfo=0"
 
 jobs:
-  default-crash-recovery:
-    name: Default crash recovery (${{ matrix.os }})
-    # Keep the default durability assertion covered independently of all-feature builds.
+  history-persistence:
+    name: History persistence (${{ matrix.mode }}, ${{ matrix.os }})
+    # Exercise the batched default and the per-event opt-out independently of all-feature builds.
     if: ${{ inputs.filter == '' }}
     permissions:
       contents: read
@@ -58,11 +58,13 @@ jobs:
     cache-mode: read
     env:
       CARGO_INCREMENTAL: "0"
+      CARGO_FEATURE_ARGS: ${{ matrix.mode == 'per-event' && '--no-default-features' || '' }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(inputs.os) }}
+        mode: [default, per-event]
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -87,8 +89,8 @@ jobs:
           fi
           unshare --user --map-root-user --mount --pid --fork --mount-proc true
 
-      - name: Build default Box and launcher binaries
-        run: cargo build --locked -p strands-box -p strands-box-containment --bins
+      - name: Build Box and launcher binaries for the selected persistence mode
+        run: cargo build --locked -p strands-box -p strands-box-containment --bins $CARGO_FEATURE_ARGS
 
       - name: Install launcher images beside test binaries (Linux only)
         if: runner.os == 'Linux'
@@ -96,26 +98,26 @@ jobs:
           install -m 0755 target/debug/strands-box-sock-alias target/debug/deps/strands-box-sock-alias
           install -m 0755 target/debug/strands-box-contain-trampoline target/debug/deps/strands-box-contain-trampoline
 
-      - name: Test default crash durability
+      - name: Test crash recovery for the selected persistence mode
         shell: bash
         run: |
           set -o pipefail
           set +e
-          cargo test --locked -p strands-box --test box_killed_run -- --show-output \
-            2>&1 | tee default-crash-recovery.log
+          cargo test --locked -p strands-box $CARGO_FEATURE_ARGS --test box_killed_run -- --show-output \
+            2>&1 | tee crash-recovery.log
           test_status=$?
           set -e
           if [ "$test_status" -ne 0 ]; then
             exit "$test_status"
           fi
           if [ "$RUNNER_OS" = Linux ]; then
-            python3 scripts/check-linux-test-output.py default-crash-recovery.log | tee -a "$GITHUB_STEP_SUMMARY"
+            python3 scripts/check-linux-test-output.py crash-recovery.log | tee -a "$GITHUB_STEP_SUMMARY"
           fi
           python3 - <<'PYTHON'
           from pathlib import Path
           import re
 
-          output = Path("default-crash-recovery.log").read_text()
+          output = Path("crash-recovery.log").read_text()
           output = re.sub(r"\x1b\[[0-9;]*m", "", output)
           results = re.findall(r"^test result:.*$", output, re.MULTILINE)
           expected = "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out;"
@@ -123,12 +125,33 @@ jobs:
               raise SystemExit("Expected one passing crash-recovery test with no ignored or filtered cases.")
           PYTHON
 
-      - name: Upload default crash-recovery output
+      - name: Test the default idle history timer
+        if: matrix.mode == 'default'
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test --locked -p strands-box --lib \
+            run::hosted::tests::hosted_idle_timer_flushes_pending_history_without_shutdown \
+            -- --exact --show-output 2>&1 | tee default-idle-history.log
+          python3 - <<'PYTHON'
+          from pathlib import Path
+          import re
+
+          output = Path("default-idle-history.log").read_text()
+          output = re.sub(r"\x1b\[[0-9;]*m", "", output)
+          expected = "test run::hosted::tests::hosted_idle_timer_flushes_pending_history_without_shutdown ... ok"
+          if expected not in output or not re.search(r"^test result: ok\. 1 passed; 0 failed; 0 ignored;", output, re.MULTILINE):
+              raise SystemExit("Expected the default build to execute and pass the idle history test.")
+          PYTHON
+
+      - name: Upload history persistence output
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: default-crash-recovery-${{ matrix.os }}
-          path: default-crash-recovery.log
+          name: history-persistence-${{ matrix.mode }}-${{ matrix.os }}
+          path: |
+            crash-recovery.log
+            default-idle-history.log
           if-no-files-found: warn
 
   unit-test:
@@ -294,9 +317,11 @@ jobs:
           cargo fmt --manifest-path test-native-filesystem/Cargo.toml --check
           cargo clippy --manifest-path test-native-filesystem/Cargo.toml --locked --all-targets --all-features -- -D warnings
 
-      - name: Test native startup without the Cargo feature (macOS only)
+      - name: Test native startup without native enforcement in both history modes (macOS only)
         if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.filter == '' }}
-        run: cargo test --locked -p strands-box --no-default-features --test macos_file_enforcement
+        run: |
+          cargo test --locked -p strands-box --test macos_file_enforcement
+          cargo test --locked -p strands-box --no-default-features --test macos_file_enforcement
 
       - name: Test signed receipt checker (macOS only)
         if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.filter == '' }}

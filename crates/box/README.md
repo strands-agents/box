@@ -294,24 +294,38 @@ so nothing is reachable.
 Egress is the enforced principal. The proxy asks the policy per request, and no
 destination allowlist exists beside it.
 
-### Experimental history timer
+<a id="experimental-history-timer"></a>
+### History persistence
 
-The `experimental-idle-flush` Cargo feature in `crates/box/Cargo.toml` batches
-policy-history writes and adds a timer that persists pending history while Box is idle.
-It uses the public Dogwood 1.1.2 packages. The feature remains opt-in; default builds
-persist each event before returning.
+Box batches policy-history writes by default. The `experimental-idle-flush` Cargo
+feature in `crates/box/Cargo.toml` is enabled by default and selects this behavior.
+Both persistence modes use the public Dogwood 1.1.2 packages.
 
-With this feature, hosted Box selects thresholds of 1,000 events or one second,
-checked when an event arrives, and owns a separate one-second idle timer. One second
-is a polling target. A process crash before a completed flush can lose pending history.
-These values are prototype settings, not runtime configuration keys.
+Box selects thresholds of 1,000 events or one second, checked when an event arrives,
+and owns a separate one-second timer that also flushes while Box is idle. One second
+is a polling target, not a maximum persistence delay. A process crash before a
+completed flush can lose recent requests and outcomes. After restart, a count-based
+limit can admit requests that the missing events would have denied. These values
+are fixed by the build, not runtime configuration keys.
+
+To persist each event before returning from its submission, build Box and its helpers
+from the repository root with batching disabled:
+
+```sh
+cargo build --release --locked -p strands-box -p strands-box-containment --no-default-features
+```
+
+To retain the native filesystem policy build feature, also pass
+`--features native-filesystem-policy`. Its runtime selection remains separate.
+Passing `--all-features` or `--features experimental-idle-flush` enables batching again.
+There is no `box.toml` key for this build selection.
 
 After successful startup, explicit shutdown first stops the workload, closes policy reload and discovery admission,
 and joins the broker, discovery, native monitoring, and gateway connection workers.
 Box then stops and joins the timer and performs the final history flush. Gateway shutdown
 interrupts client sockets while allowing the existing upstream outcome handling to finish.
 Cleanup after a startup error is best effort; it does not certify that every producer stopped.
-Gateway workers are joined in default builds too; default history persistence remains per event.
+Gateway workers are joined in both persistence modes.
 Shutdown can wait for an upstream request or callback to finish; it has no fixed completion deadline.
 
 A recorded timer failure stops the supervised workload and makes the run fail, even if

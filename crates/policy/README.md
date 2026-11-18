@@ -18,8 +18,10 @@ enforcement point.
 
 ## Public Interface
 
-The façade exports **62 names with `--all-features`, and 54 by default.** The adapter features add
-six names. The `experimental-idle-flush` feature adds two timer types.
+A standalone build of this package exports **62 names with `--all-features`, and 54 by default.**
+The adapter features add six names. The `experimental-idle-flush` feature adds two timer types.
+The Box package enables these features in its own composition; it does not change this
+package's default feature set.
 
 `PrincipalKind` left on 2026-08-18. The three enforcement-point principals collapsed into one
 `Agent`, so a kind enum named a distinction that no longer exists.
@@ -37,7 +39,7 @@ six names. The `experimental-idle-flush` feature adds two timer types.
 | `Outcome`, `Delivery`, `FsResult` | One completed effect, submitted as history. |
 | `PendingToolResponse`, `McpReply` | The per-tool `::response` an allowed `tools/call` owes, from `refine_tool_call` to `record_tool_response` (or `record_tool_reply`, which reads the reply frame and its `structuredContent`), and how the call ended. |
 | `EffectivePolicy`, `ENGINE_ID` | Active engine and source identity. |
-| `PolicyError` | Startup, history-recording, and experimental history-flush errors. |
+| `PolicyError` | Startup, history-recording, and history-flush errors. |
 | `PolicyCheck`, `Finding`, `RuleRef`, `Location` | What `check` finds in a policy: each finding's message, rules, source location, and help. |
 | `SchemaStage`, `PolicyDiagnostic`, `PolicyStagingError` | Runtime MCP schema staging results and errors. |
 | `generate_mcp_schema`, `validate_mcp_schema_composition`, `compose_action_schema`, `McpSchemaError` | MCP schema generation, validation, composition, and errors. |
@@ -504,15 +506,20 @@ directory through `box_dir`; see [the upgrade procedure](../../docs/user/policy.
 Earlier activity does not carry over: counts start at zero, and prior events no longer satisfy
 history-based prerequisites. The adapter does not erase or convert existing history.
 
-## Experimental idle-history flushing
+<a id="experimental-idle-history-flushing"></a>
+## Periodic history persistence
 
 The `experimental-idle-flush` feature in `crates/policy/Cargo.toml` adds an owned timer
 for periodic persistence. The pinned public `dogwood-local-engine = "=1.1.2"` package
-provides the required durability and flush interfaces. Default builds continue to
-persist each event before returning.
+provides the required durability and flush interfaces. This feature is not enabled
+by default in the standalone policy package.
 
-`PolicyEngine::open` still uses the engine's default durability mode. Select periodic
-persistence explicitly, then start one timer on the same `Arc<PolicyEngine>`:
+`PolicyEngine::open` uses per-event persistence, even when the feature is compiled in.
+The caller must select periodic persistence explicitly. The Box package enables the
+feature by default and makes that selection; see its
+[history persistence settings](../box/README.md#experimental-history-timer).
+For another composition, select periodic persistence and start one timer on the same
+`Arc<PolicyEngine>`:
 
 ```text
 PolicyEngine::set_periodic_history(&self, max_events: u32, max_interval: Duration) -> Result<(), PolicyError>
@@ -544,7 +551,7 @@ earlier timer failures; it does not establish that pending history reached disk.
 
 A one-second interval is a polling target. The worker waits another interval after each
 flush completes. Scheduling, lock waits, and storage latency can extend persistence delay. A process crash before a completed flush can lose pending
-history. The prototype does not change these events to operating-system-managed storage.
+history. Enabling the timer does not protect unflushed events from a process crash.
 
 
 ## Effective Policy

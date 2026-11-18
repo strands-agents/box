@@ -118,9 +118,10 @@ The Shell asks once per command line, after it has resolved the program, and the
 operation the command makes, on the resolved path. See [the Shell asks policy at two
 levels](decisions.md#the-shell-checks-policy-at-two-levels).
 
-Each decision changes history. The engine appends the request before evaluating the rules and writes
-the append to disk before returning the verdict. After the operation runs, the caller records how it
-ended. Only these trusted callers write history, and the workload never does. See [only trusted
+Each decision changes history. The engine appends the request before evaluating the rules.
+Default builds batch persistence, so a returned verdict does not mean its event has reached disk.
+After the operation runs, the caller records how it ended. Only these trusted callers write
+history, and the workload never does. See [only trusted
 enforcement points submit history](decisions.md#only-trusted-enforcement-points-submit-history).
 
 ## What a history rule sees
@@ -130,7 +131,7 @@ A history rule, which Dogwood calls a temporal rule, is an ordinary `permit` or 
 context](decisions.md#temporal-rules-ride-the-closed-context). For each action, the history holds
 three kinds of event:
 
-- `::request` for every durably submitted attempt, whether it was allowed or denied.
+- `::request` for every recorded attempt, whether it was allowed or denied.
 - `::response` for an operation that happened, or may have happened.
 - `::error` for an operation that definitely didn't happen.
 
@@ -241,10 +242,11 @@ Dogwood's default, and a longer window refuses to load.
 ## Durable history
 
 Each box keeps one history file, `<box_dir>/private/dogwood.redb`, and a restart reuses it. See
-[history is durable per box](decisions.md#history-is-durable-per-box-and-has-no-rewind). That's what
-stops a restart from resetting a budget. The history follows these rules:
+[history is durable per box](decisions.md#history-is-durable-per-box-and-has-no-rewind). A restart
+recovers the last persisted history; a crash can lose newer events, allowing requests that would otherwise exceed a limit.
+The history follows these rules:
 
-- Opening the engine recovers the history in full, or the run fails. The box never falls back to an
+- Opening the engine recovers the persisted history in full, or the run fails. The box never falls back to an
   empty history. A damaged file refuses the next run and is left as it was found. The run also
   refuses when the box's record says it has run before but the history is missing or empty, and when
   a history exists but the record says the box has never run.
@@ -295,17 +297,20 @@ satisfied again. Box does not erase or convert the old directory's history. See
 [start with fresh history](../user/policy.md#start-with-fresh-history-after-a-dogwood-upgrade).
 
 *Figure: the Box policy adapter uses Dogwood 1.1.2 in a new box directory. The old history stays
-with the old directory. Default builds still commit events individually.*
+with the old directory. Box batches history by default.*
 
-![Before the upgrade, the Box policy adapter uses dogwood-language and dogwood-local-engine 1.0.0. After the upgrade, it uses both packages at 1.1.2 and dogwood-language depends on dogwood-syntax 1.1.2. The new box directory starts with fresh history; the old history remains separate. Cedar and redb versions remain fixed. In default builds, each event still commits individually.](images/dogwood-upgrade.png)
+![Before the upgrade, the Box policy adapter uses dogwood-language and dogwood-local-engine 1.0.0. After the upgrade, it uses both packages at 1.1.2 and dogwood-language depends on dogwood-syntax 1.1.2. The new box directory starts with fresh history; the old history remains separate. Cedar and redb versions remain fixed. Box batches history by default.](images/dogwood-upgrade.png)
 
 [Editable figure](images/dogwood-upgrade.drawio)
 
-### Experimental periodic persistence
+<a id="experimental-periodic-persistence"></a>
+### Periodic persistence by default
 
-The preceding durability rules describe default builds. The `experimental-idle-flush`
-Cargo feature in `crates/box/Cargo.toml` selects periodic persistence and starts a
-separate timer for pending history. Both modes use the pinned public Dogwood 1.1.2 packages.
+Default Box builds enable the `experimental-idle-flush` Cargo feature, select periodic
+persistence, and start a separate timer for pending history. The engine checks thresholds
+of 1,000 events or one second when an event arrives. A build with `--no-default-features`
+retains per-event persistence. Both modes use the pinned public Dogwood 1.1.2 packages.
+The [operator guide](../user/policy.md#history-persistence-and-process-crashes) gives the build selection.
 
 A process crash before a successful flush can lose recent requests and outcomes.
 After restart, a history rule can therefore see fewer events and admit additional
@@ -316,12 +321,12 @@ After successful startup, explicit hosted shutdown stops and joins event produce
 flushing the remaining history. A recorded timer failure stops the workload, and a final
 flush failure makes the run fail. If native monitoring cannot stop, Box reports the
 shutdown failure and stops the timer without claiming a completed final flush. The
-[experimental policy interface](../../crates/policy/README.md#experimental-idle-history-flushing)
+[policy persistence interface](../../crates/policy/README.md#experimental-idle-history-flushing)
 describes explicit timer shutdown, counters, and errors. The
 [hosted integration](../../crates/box/README.md#experimental-history-timer) describes producer
 shutdown and failure reporting.
 
-![An experimental Box timer periodically flushes history. Explicit shutdown stops and joins producers, stops the timer, then performs a final flush.](images/dogwood-idle-history-flush.png)
+![Box's default history timer periodically flushes history. Explicit shutdown stops and joins producers, stops the timer, then performs a final flush.](images/dogwood-idle-history-flush.png)
 
 The timer interval is a polling cadence. A process crash can lose unflushed history.
 Shutdown can wait for an upstream request or callback; the timer interval does not bound this wait.

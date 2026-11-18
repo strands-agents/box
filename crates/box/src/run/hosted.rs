@@ -2265,6 +2265,126 @@ permit (principal, action == alpha::Action::"read", resource);"#
 
     #[cfg(feature = "experimental-idle-flush")]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hosted_idle_timer_flushes_pending_history_without_shutdown() {
+        const SOURCE: &str = r#"
+permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource);
+forbid(principal, action == Box::Action::"fs:write", resource)
+when temporal {
+    formerly within 1h (Box::Action::"fs:read"::response{
+        input.operation: Box::FsReadOperation::"read_content"
+    })
+};
+"#;
+        let operator = tempfile::tempdir_in(
+            std::env::temp_dir()
+                .canonicalize()
+                .expect("canonical temporary directory"),
+        )
+        .expect("operator home");
+        let root = crate::record::layout::testing::box_root(operator.path(), "codex");
+        let record = record_with_mcp(&root, Vec::new());
+        let sources = vec![policy::Policy {
+            origin: root.policy(),
+            text: SOURCE.to_string(),
+        }];
+        let file = operator.path().join("read-marker");
+        std::fs::write(&file, b"read marker").expect("fixture file");
+        let path = policy::PathResolver::over([operator.path().to_path_buf()])
+            .expect("resolver")
+            .approve_host(&file)
+            .expect("read path");
+        let governed = policy::GovernedBox::assigned("codex");
+        let principal = policy::Principal::agent();
+        let allows_write = |authority: &PolicyEngine| {
+            authority
+                .decide(
+                    &governed,
+                    &principal,
+                    &policy::Request::Fs {
+                        path: &path,
+                        operation: policy::FsOperation::WriteContent,
+                    },
+                )
+                .0
+                .is_allow()
+        };
+        let recover_copy = |name: &str| {
+            let copied = operator.path().join(name);
+            std::fs::copy(root.dogwood_database(), &copied).expect("copy the persisted database");
+            PolicyEngine::open(sources.clone(), &copied).expect("copied history recovers")
+        };
+        let (mut hosted, _collector, engine) =
+            open_hosted_with_sources(&operator, &root, &record, sources.clone());
+        assert!(
+            allows_write(&recover_copy("without-read.redb")),
+            "the control must allow writes without a recorded read"
+        );
+        let (verdict, request) = engine.decide(
+            &governed,
+            &principal,
+            &policy::Request::Fs {
+                path: &path,
+                operation: policy::FsOperation::ReadContent,
+            },
+        );
+        assert!(verdict.is_allow(), "{verdict:?}");
+        assert_eq!(
+            std::fs::read(&file).expect("permitted read"),
+            b"read marker"
+        );
+        engine
+            .record(
+                &governed,
+                &principal,
+                &request.expect("read token"),
+                &policy::Outcome::Fs {
+                    path: &file,
+                    operation: policy::FsOperation::ReadContent,
+                    result: policy::FsResult::Completed,
+                },
+            )
+            .expect("read outcome records");
+        assert!(
+            !allows_write(&engine),
+            "the live history must contain the read"
+        );
+
+        // Use the worker and persistence settings installed by HostedBox::open.
+        let flusher = hosted._history_flusher.as_ref().expect("worker exists");
+        // One completion could be in flight. Two ensure a flush started after the read.
+        let minimum_successes = flusher.snapshot().successes + 2;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let snapshot = flusher.snapshot();
+                assert_eq!(snapshot.failures, 0, "{snapshot:?}");
+                assert!(snapshot.last_error.is_none(), "{snapshot:?}");
+                if snapshot.successes >= minimum_successes {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the hosted timer must complete a flush while submissions are idle");
+        assert!(
+            !allows_write(&recover_copy("after-idle-timer.redb")),
+            "the timer must persist the read while the host and engine remain alive"
+        );
+        assert!(
+            hosted._history_flusher.is_some(),
+            "the hosted timer is still owned"
+        );
+        assert!(
+            Arc::strong_count(&engine) > 1,
+            "the hosted engine is still shared"
+        );
+        hosted
+            .shutdown()
+            .expect("explicit hosted shutdown succeeds");
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn hosted_shutdown_flushes_pending_history_without_dropping_the_engine() {
         const SOURCE: &str = r#"
 permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource);

@@ -207,8 +207,9 @@ has an option the action doesn't declare, so it reads as `unmodeled` and records
 response. Add an option to the `test` action only when the option can't point the tests at another
 crate.
 
-History is durable for each box. A test that passed before you restart the box still allows a
-push after the restart, within the hour.
+Persisted history survives a box restart. A recorded passing test still allows a push within
+the hour after restart if that outcome was saved. A process crash before a completed flush can
+lose the outcome; see [history persistence and process crashes](policy.md#history-persistence-and-process-crashes).
 
 A temporal predicate names one action, and never a group. A predicate such as
 `Tool::git::Action::"*"::response{}` is refused at startup, because history records each action and
