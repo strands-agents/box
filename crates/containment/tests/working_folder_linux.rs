@@ -61,8 +61,7 @@ fn an_inherited_folder_handle_cannot_be_entered_with_fchdir() {
         return;
     }
     let outside = tempfile::tempdir().expect("folder outside the grants");
-    let canary = outside.path().join("canary");
-    std::fs::write(&canary, "outside").expect("write canary");
+    std::fs::write(outside.path().join("canary"), "outside").expect("write canary");
     let folder = std::fs::File::open(outside.path()).expect("open folder outside the grants");
     // SAFETY: `folder` is open, and `F_DUPFD` returns a new descriptor without close-on-exec.
     let raw = unsafe { libc::fcntl(folder.as_raw_fd(), libc::F_DUPFD, 900) };
@@ -70,10 +69,11 @@ fn an_inherited_folder_handle_cannot_be_entered_with_fchdir() {
     // SAFETY: `F_DUPFD` returned a new descriptor that this value now owns.
     let inherited = unsafe { OwnedFd::from_raw_fd(raw) };
     let descriptor = inherited.as_raw_fd().to_string();
+    // The probe reads the canary by file name, so only a working folder inside `outside` finds it.
     let args = [
         OsStr::new("--enter-inherited-folder"),
         OsStr::new(&descriptor),
-        canary.as_os_str(),
+        OsStr::new("canary"),
     ];
 
     let probe = Path::new(env!("CARGO_BIN_EXE_containment-test-probe"));

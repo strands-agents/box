@@ -917,7 +917,7 @@ fn return_to_locked_folder(args: &[String]) -> ExitCode {
 }
 
 /// `--enter-inherited-folder <fd> <canary>`: enter the folder open at `<fd>` with `fchdir`, then
-/// read `<canary>` by absolute path. Prints `fchdir: <outcome>` and `canary: <outcome>`, where an
+/// read the file name `<canary>` relative to the working folder. Prints `fchdir: <outcome>` and `canary: <outcome>`, where an
 /// outcome is `ok` or the raw error number.
 #[cfg(target_os = "linux")]
 fn enter_inherited_folder(args: &[String]) -> ExitCode {
