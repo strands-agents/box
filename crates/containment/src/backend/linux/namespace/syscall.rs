@@ -1260,6 +1260,12 @@ fn build_permit_rules(
         libc::SYS_setresgid,
         setresgid_rules()?,
     )?;
+    insert_permitted_scoped(
+        &mut rules,
+        "renameat2",
+        libc::SYS_renameat2,
+        renameat2_rules()?,
+    )?;
     #[cfg(target_arch = "x86_64")]
     insert_permitted_scoped(
         &mut rules,
@@ -1306,6 +1312,24 @@ fn x86_thread_setup_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
         ])
         .map_err(filter_error)?,
     ])
+}
+
+/// `renameat2` with no flags is the permitted `renameat`, and `RENAME_NOREPLACE` only adds "fail if
+/// the new name exists". The `tempfile` crate creates a name with `RENAME_NOREPLACE` and falls back
+/// to a hard link only on `ENOSYS` or `EINVAL`, so the permit table's `EPERM` failed every
+/// `tempfile` persist, such as uv's cache lock. `RENAME_EXCHANGE` and `RENAME_WHITEOUT` stay refused.
+fn renameat2_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
+    [0, u64::from(libc::RENAME_NOREPLACE)]
+        .into_iter()
+        .map(|flags| {
+            SeccompRule::new(vec![
+                // The kernel reads the flags as an unsigned int, so match their low 32 bits.
+                SeccompCondition::new(4, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, flags)
+                    .map_err(filter_error)?,
+            ])
+            .map_err(filter_error)
+        })
+        .collect()
 }
 
 fn setresuid_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
@@ -1462,10 +1486,12 @@ mod tests {
         assert_eq!(WORKLOAD_PERMITTED.len(), 118 + 19 * x86_entries);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 121 + 20 * x86_entries);
+        assert_eq!(rules.len(), 122 + 20 * x86_entries);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
+        // No flags, or RENAME_NOREPLACE; RENAME_EXCHANGE and RENAME_WHITEOUT match neither.
+        assert_eq!(rules[&libc::SYS_renameat2].len(), 2);
         assert!(
             !WORKLOAD_PERMITTED
                 .iter()
