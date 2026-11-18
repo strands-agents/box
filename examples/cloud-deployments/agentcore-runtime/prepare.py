@@ -11,7 +11,7 @@ import sys
 import tempfile
 
 ROOT = Path(__file__).resolve().parent
-BOX_REVISION = "e4ca8b80359b2213d684de31cd6ef32e0d61478a"
+BOX_REVISION = "e39544d49188b82933264b83159c7ccc278ced5a"
 BINARIES = {"strands-box": "box", "strands-box-contain-trampoline": "strands-box-contain-trampoline",
             "strands-box-sock-alias": "strands-box-sock-alias"}
 
