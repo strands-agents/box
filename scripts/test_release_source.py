@@ -466,8 +466,12 @@ class ReleaseBundleTests(unittest.TestCase):
                                          else " and ARM64 Linux"), body)
                 # Only the x86-64 archive is experimental.
                 self.assertEqual("experimental" in body.lower(), publish_x86)
-                download = body.index("download.sh | sh")
+                download = body.index("download.sh | ")
                 self.assertLess(download, body.index("### Manual Linux ARM64 install"))
+                # releases/latest never returns a prerelease, so a preview page
+                # must not offer the unpinned downloader.
+                self.assertEqual("download.sh | sh" in body, not preview)
+                self.assertIn(f"download.sh | BOX_VERSION={tag} sh", body)
                 # Raw build names must not leak into the public asset set.
                 extra = release / f"box-{tag}-x86_64-unknown-linux-gnu.tar.gz"
                 extra.write_bytes(b"unexpected")

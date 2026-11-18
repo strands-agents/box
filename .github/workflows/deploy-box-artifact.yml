@@ -793,6 +793,18 @@ jobs:
 
           This release supports ${platforms}. Download Box Core into a local directory:
 
+          EOF
+          # The unpinned downloader resolves releases/latest, which never returns
+          # a prerelease, so a preview page offers only the pinned command.
+          if [ "$LINUX_PREVIEW" = "true" ]; then
+            cat >> body.md <<EOF
+          \`\`\`sh
+          curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | BOX_VERSION=${NEW_TAG} sh
+          \`\`\`
+
+          EOF
+          else
+            cat >> body.md <<EOF
           \`\`\`sh
           curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | sh
           \`\`\`
@@ -803,6 +815,9 @@ jobs:
           curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | BOX_VERSION=${NEW_TAG} sh
           \`\`\`
 
+          EOF
+          fi
+          cat >> body.md <<EOF
           The downloader picks the archive for your platform from the assets below, verifies it against \`SHA256SUMS.txt\`, and unpacks its files into \`./box-core\`. Nothing is installed: your \`\$PATH\` and system directories are untouched. Override the directory with \`BOX_DOWNLOAD_DIR=/some/path\`. Write a \`box.toml\` and a policy, then run the box by path (\`./box-core/box run --config ./box.toml\`).
 
           EOF
