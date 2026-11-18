@@ -72,8 +72,12 @@ The five `fs:*` actions carry the same three fields:
 | `operation` | `Box::Fs<Verb>Operation` | The exact verb. The table below gives the spelling and the values for each action. |
 | `locations` | Record of Bool | One field for each location that [`[locations]`](../config.md#locations) in `box.toml` declares, `true` when that location holds `path`. The record is empty when `box.toml` declares none. |
 
-A path is in a location when it is one of the location's directories or below one, by whole path
-components, so `/work-old/notes.md` is not in `/work`. A path can be in more than one location.
+A location is shorthand for two comparisons of `path`. With `project = ["/work"]`,
+`context.input.locations.project` is exactly
+`context.input.path == "/work" || context.input.path like "/work/*"`, with any `*` in a root read
+as a plain character, so `/work-old/notes.md` is not in `/work`. A root is written as `path` spells
+it, `~/…` under the operator's home, and is not resolved; `box.toml` refuses a root no path can
+match, as [`[locations]`](../config.md#locations) lists. A path can be in more than one location.
 A rule reads a location in one of two ways:
 
 - **Strict:** `context.input.locations.project`. The rule must apply, so a rule that names a

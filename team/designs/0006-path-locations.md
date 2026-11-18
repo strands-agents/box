@@ -8,7 +8,7 @@ directory a name in `box.toml`, and write the policy against that name instead.
 ```toml
 # box.toml
 [locations]
-project = ["/Users/dev/src/app"]
+project = ["~/src/app"]
 ```
 
 ```text
@@ -46,7 +46,7 @@ characters in it can change what a rule means, so every value would have to be e
 
 ```toml
 [locations]
-project = ["/Users/dev/src/app"]
+project = ["~/src/app"]
 caches = ["~/.cache/my-agent", "~/.npm"]
 ```
 
@@ -54,31 +54,35 @@ caches = ["~/.cache/my-agent", "~/.npm"]
 - A name starts with a letter and holds only letters, digits and `_`, so a rule can write
   `locations.my_cache`. A name is at most 64 characters long. Cedar's reserved words, such as
   `if` and `in`, aren't allowed.
-- A directory is an absolute path, `~` for the whole home, or starts with `~/`.
+- A directory is written the way `context.input.path` spells a path: `~` for the whole home,
+  `~/…` below it, and an absolute path elsewhere.
 - An empty list is an error, because the name would label nothing. Listing the same directory
   twice in one location is an error too.
 - Without a `[locations]` table, every file request carries an empty `locations`, and a policy
   that doesn't mention locations works as it does today.
 
-Box resolves each directory once, when it loads the policy, with the same rule it uses for a
-file's path. So `/Users/dev/src/app` and `~/src/app` name the same place, and a directory reached
-through a symlink, such as `/tmp/work` on macOS, matches the files under `/private/tmp/work`.
+Box doesn't resolve a directory (D6). When it loads the policy, it refuses one that no path could
+match and says what to write instead:
 
-- **A directory that doesn't exist yet** is fine. Box resolves its nearest existing parent and adds
-  the missing names back, so `~/.cache/my-agent` matches once the agent creates it.
-- **A directory Box can't resolve** stops the box from starting, and the error names the location.
-  That covers a broken symlink, a folder Box has no permission to search, and a path that is a
-  file.
+- `/Users/dev/src/app`, under the home: write `~/src/app`.
+- `/tmp/work` on macOS, through a symlink: write `/private/tmp/work`.
+- `/Users`, which holds the home: add `~` to the list, because files in the home are spelled
+  `~/…`.
+
+A directory that doesn't exist yet is fine when the folder it would be created in passes the same
+checks, so `~/.cache/my-agent` matches once the agent creates it. A directory Box can't check,
+such as a broken symlink, a folder Box has no permission to search, or a file, stops the box from
+starting, and the error names the location.
 
 ## 3. How does Box decide which locations a file is in?
 
-A file is in a location when it's one of the location's directories, or anywhere inside one.
+A file is in a location when its `context.input.path` is one of the location's directories, or
+anywhere inside one. That is exactly the rule an author would write by hand (D6).
 
-- **Whole folder names only.** `/work-old/notes.md` is not in `/work`. Box already checks paths
-  this way (`a_sibling_with_a_shared_prefix_is_not_inside_the_root`).
-- **Same path the rule already sees.** Box checks the path after following symlinks, the same path
-  that `context.input.path` holds. So a location and a path rule never disagree about where a file
-  is.
+- **Whole folder names only.** `/work-old/notes.md` is not in `/work`.
+- **Same text the rule already sees.** Box compares the text in `context.input.path`, which is the
+  path after following symlinks. A request and its recorded response carry the same text, so they
+  always agree.
 - **A file can be in several locations.** See D5.
 
 Box works this out in one place in the policy code. The Strands Shell, Monty, and the macOS native
@@ -141,8 +145,10 @@ One PR after this doc. It adds the `[locations]` table, the `locations` field, t
 - `/work-old` is not in `/work`.
 - A misspelled location name stops the box from starting.
 - A policy that uses a location stops the box from starting when `box.toml` declares none.
-- A location written as an absolute path under the home matches the `~/...` paths in requests.
-- A location under a symlinked folder matches, whether or not it exists yet.
+- A rule on a location decides every path the same way as the two `path` comparisons it stands
+  for.
+- A directory under the home written as an absolute path, one through a symlink, and one that
+  holds the home are each refused with the spelling to write.
 - A time-based budget on `project` counts writes that are also in `docs`.
 - A rule using `has` loads when the location isn't declared, and matches when it is.
 - A history from the previous release opens. Its events still count toward budgets that don't name
@@ -159,9 +165,10 @@ changes to them:
 - What time-based rules see: each `fs:*` event in history records `locations`.
 - A newer stored record version for a box that declares locations, as other optional features do.
 - In the policy crate, `Operator::with_locations`, which declares the locations and returns an
-  error for a declaration Box can't use, and `Operator::locations`, which returns the resolved
-  directories that the startup message prints. A directory that can't be resolved is the new error
-  `PolicyError::UnresolvableLocation`, which names the location and the directory.
+  error for a declaration Box can't use, and `Operator::locations`, which returns the directories
+  as written, which the startup message prints. Two new errors name the location and the
+  directory: `PolicyError::UnmatchableLocation`, for a directory no path could match, with the
+  spelling to write, and `PolicyError::UnresolvableLocation`, for one Box can't check.
 
 ## 7. Key decisions
 
@@ -236,6 +243,26 @@ in both. A rule on `project` and a rule on `docs` both apply to it. If one is a 
 The other option was to give each file only the most specific location. Then declaring `docs` would
 take files out of `project`, and the `project` rules would stop applying to them. With both,
 adding a location never changes what an existing rule matches.
+
+### D6. A location is shorthand for two path comparisons
+
+`context.input.locations.project` means exactly
+`context.input.path == "<root>" || context.input.path like "<root>/*"`, for each directory listed
+under `project`. The directories are written the way `path` spells a path and aren't resolved, so
+a location never matches more or less than the rule an author would write by hand. For example,
+with `project = ["~/src/app"]`, these two rules match the same files:
+
+```text
+when { context.input.locations.project };
+when { context.input.path == "~/src/app" || context.input.path like "~/src/app/*" };
+```
+
+This gives one way to think about a location. It also means a request and its recorded response
+compare the same text, so they always agree.
+
+It costs some spellings. A directory through a symlink, one under the home written as an absolute
+path, or one that holds the home would match nothing, so Box refuses it when it loads the policy
+and says what to write instead (section 2).
 
 ## 8. Limitations
 

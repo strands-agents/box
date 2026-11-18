@@ -333,11 +333,12 @@ distinction: `Box::Action::"fs:read"::response{ input.path: …, input.operation
 
 #### Named locations
 
-`Operator::with_locations` gives directories a name. Every filesystem input carries
-`locations`, a closed record with one required `Bool` per declared name, true when that location
-has the request's path as one of its directories or below one. The record is empty for an operator
-with no location. The match uses whole path components, so `/work-old/notes.md` is not in `/work`.
-A path can be in several locations, and each of their fields is true.
+`Operator::with_locations` gives roots a name. Every filesystem input carries `locations`, a
+closed record with one required `Bool` per declared name. A location is shorthand for two
+comparisons of `path`: the field is true exactly when
+`context.input.path == "<root>" || context.input.path like "<root>/*"` holds for one of its roots,
+with any `*` in a root read as a plain character. So `/work-old/notes.md` is not in `/work`, and a
+path can be in several locations. The record is empty for an operator with no location.
 
 ```text
 permit (principal, action == Box::Action::"fs:write", resource)
@@ -348,21 +349,23 @@ when { context.input.locations.project };
 because Cedar types `has` on a closed record that lacks the field as false. The engine neither
 refuses nor reports such a rule, because `has` is the author marking the location optional.
 
-A location names directories and grants no reach. `with_locations` resolves each directory the
-way `PathResolver::approve_host` resolves a requested path, so a root spelled through a symbolic
-link, or one that does not exist yet below a linked parent, matches the canonical path a request
-carries. A rule that reads an undeclared location without `has` is a load error in `open_staged`,
-`validate`, and `check`, also when the rule waits for an MCP schema. `open` and
-`open_with_mcp_schemas` declare no location. `with_locations` returns `PolicyError::Schema` for a
-bad declaration: a name that is not a letter followed by at most 63 letters, digits, or `_`, or
-that Cedar reserves, an empty directory list, a directory that is relative or has a `.` or `..`
-component, or a directory that cannot be resolved, such as a broken symbolic link or one below a
-folder that refuses to be searched. It also refuses locations for an operator with no home, so
-call `Operator::anchored_at` first, because an outcome names a path under the home as `~/…`.
-`Operator::locations` returns the resolved directories, the spelling a rule matches.
+A location names roots and grants no reach. A root is written as `path` spells a path: `~` for the
+home, `~/…` below it, and absolute elsewhere. It is not expanded or resolved, so a request and its
+outcome compare the same reported text. `with_locations` returns `PolicyError::UnmatchableLocation`
+for a root that no reported path can match, with the spelling to write: an absolute root under the
+home (`write "~/…"`), a root whose existing part crosses a symbolic link (`write "<resolved>"`), a
+root that holds the home when its list lacks `~` (`add "~" to the list`), and a root with a
+trailing slash or an empty component. A root that does not exist yet passes when its nearest
+existing folder does. It returns `PolicyError::UnresolvableLocation` for a root it cannot check,
+such as a broken symbolic link, a file, or one below a folder that refuses to be searched, and
+`PolicyError::Schema` for a bad name, an empty list, or a root that is relative or has a `.` or
+`..` component. It refuses locations for an operator with no home, so call `Operator::anchored_at`
+first. `Operator::locations` returns the roots as written. A rule that reads an undeclared location
+without `has` is a load error in `open_staged`, `validate`, and `check`, also when the rule waits
+for an MCP schema. `open` and `open_with_mcp_schemas` declare no location.
 
-The response of a filesystem request records the record of the path it names, with `~/…`
-expanded under the operator's home. A temporal predicate reads one location as a field, so
+The response of a filesystem request records the record of the path it names, matched the same
+way. A temporal predicate reads one location as a field, so
 `Box::Action::"fs:write"::response{ input.locations.project: true }` matches every write in
 `project`, whatever other location also holds it. History keeps the names, so an event recorded
 before a location moved still counts under its name.

@@ -111,7 +111,9 @@ path, a wildcard, or an IP address is a load error. See
 
 `[locations]` maps each location name to a non-empty list of absolute or `~/` directories. A
 filesystem rule reads `context.input.locations.<name>`, true when that location holds the request's
-path, so the policy names a location and not its directories. A location grants no reach, and `run` discloses
+path, so the policy names a location and not its directories. A location is shorthand for
+`path == "<root>" || path like "<root>/*"`: Box passes each root to the policy as written, and the
+policy refuses one no reported path can match. A location grants no reach, and `run` discloses
 each one on stderr. See [`[locations]`](../../docs/user/config.md#locations).
 
 **`[agent]` and each `[tool.<label>]` hold the same four fields.** `[agent]` is the process the

@@ -249,14 +249,14 @@ its limits.
 
 ## `[locations]`
 
-Each key in `[locations]` is a location name, and its value lists one or more directories. A
-filesystem rule in the policy reads `context.input.locations.<name>`, which is true when that
-location holds the request's path, so the rule does not spell the directory:
+Each key in `[locations]` is a location name, and its value lists one or more directories, called
+roots. A filesystem rule in the policy reads `context.input.locations.<name>`, which is true when
+that location holds the request's path, so the rule does not spell the directory:
 
 ```toml
 [locations]
-project = ["/Users/dev/src/app"]
-caches = ["~/.cache/my-agent", "~/.npm"]
+project = ["~/src/app"]
+caches = ["~/.cache/my-agent", "/srv/cache"]
 ```
 
 ```text
@@ -265,29 +265,36 @@ permit (principal, action == Box::Action::"fs:write", resource)
 when { context.input.locations.project };
 ```
 
+A location is shorthand for two path comparisons. With `project = ["~/src/app"]`,
+`context.input.locations.project` means exactly
+`context.input.path == "~/src/app" || context.input.path like "~/src/app/*"`, with a `*` in a root
+read as a plain character. So a path is in a location when its spelling in `context.input.path`
+is a root or lies below one by whole components: `~/src/app-old` is not in `~/src/app`. A path
+can be in more than one location, and a rule on each of them applies to it.
+[The filesystem actions](policy/actions.md#filesystem) describe the `locations` field.
+
+Write each root the way `context.input.path` spells a path: `~` for the operator's home, `~/…`
+below it, and an absolute path elsewhere. Box doesn't expand or resolve a root, so a root that
+crosses a symbolic link would match nothing. Box refuses a root no path can match, and says what
+to write instead:
+
 | Rule | Refusal |
 |---|---|
 | A name starts with an ASCII letter, holds at most 64 ASCII letters, digits, or `_`, and is not one of Cedar's reserved words (`true`, `false`, `if`, `then`, `else`, `in`, `is`, `like`, `has`). | ``` `[locations] <name>` is not a location name``` |
 | A location lists at least one directory. | ``` `[locations] <name>` lists no directory``` |
-| Each directory is absolute, is `~` for the whole home, or starts with `~/`. | ``` `[locations] <name>` entry "<entry>" is refused: it is neither absolute nor `~/`-relative``` |
-| A `~/` directory has no empty component after `~/`, so `~//etc` is refused. | ``` `[locations] <name>` entry "<entry>" is refused: it holds an empty component after `~/` ``` |
-| A directory has no `.` or `..` component. | ``` `[locations] <name>` entry "<entry>" is refused: it holds a `.` or `..` component``` |
-| A location lists each directory once. | ``` `[locations] <name>` lists "<entry>" twice``` |
-| A directory resolves: it is not, and is not below, a broken symbolic link or a file, and no folder on its way refuses to be searched. | ``` `[locations] <name>` entry "<entry>" cannot be resolved: <reason>``` |
+| Each root is absolute, is `~` for the whole home, or starts with `~/`. | ``` `[locations] <name>` entry "<entry>" is refused: it is neither absolute nor `~/`-relative``` |
+| A `~/` root has no empty component after `~/`, so `~//etc` is refused. | ``` `[locations] <name>` entry "<entry>" is refused: it holds an empty component after `~/` ``` |
+| A root has no `.` or `..` component. | ``` `[locations] <name>` entry "<entry>" is refused: it holds a `.` or `..` component``` |
+| A location lists each root once. | ``` `[locations] <name>` lists "<entry>" twice``` |
+| A root under the home is written `~/…`. | ``` `[locations] <name>` entry "<entry>" can never match a reported path: a path under the operator home is reported as `~/…`; write "~/<rest>"``` |
+| A root crosses no symbolic link, such as `/tmp` on macOS, which is `/private/tmp`. | ``` … can never match a reported path: it crosses a symbolic link, and a path is reported as resolved; write "<resolved>"``` |
+| A root that holds the home, such as `/Users`, is listed with `~`, because a path in the home is spelled `~/…`. | ``` … can never match a reported path: it holds the operator home, and a path in the home is reported as `~/…`, so this root matches none of them; add "~" to the list``` |
+| A root has no trailing slash and no empty component. | ``` … can never match a reported path: a reported path has no trailing slash; write "<root>"``` |
+| A root, or the folder it would be created in, can be checked: it is not, and is not below, a broken symbolic link or a file, and no folder on its way refuses to be searched. | ``` `[locations] <name>` entry "<entry>" cannot be resolved: <reason>``` |
 
-The box expands `~` and `~/` against the operator's home. It then resolves each directory the same way it
-resolves a request's path: it follows the symbolic links in the directory, and when the directory
-doesn't exist yet, it follows them in the nearest folder above it that does. So a directory that
-you create later under a linked folder still matches. A path matches by its resolved spelling, as
-`path` does. The box resolves the directories once, when it builds the policy for `run` or for a
-check. A directory that you replace with a symbolic link after that no longer matches files through
-the link. A directory that is a broken symbolic link, or lies below one, is refused, and so is one
-that the box can't resolve for another reason, such as a folder on its way that refuses to be
-searched. Two locations may list the same directory.
-
-A path is in a location when it is one of the location's directories or below one, by whole path
-components. A path can be in more than one location, and a rule on each of them applies to it.
-[The filesystem actions](policy/actions.md#filesystem) describe the `locations` field.
+A root that doesn't exist yet is accepted when its nearest existing folder passes the same checks,
+so `~/.cache/my-agent` matches once the agent creates it. Box checks the roots once, when it builds
+the policy for `run` or for a check. Two locations may list the same root.
 
 A location grants no access. The agent still reaches a directory only through
 [`[agent.filesystem]`](#agentfilesystem-and-toolnamefilesystem) and a policy permit. A rule that
@@ -298,12 +305,11 @@ location, such as `input.locations.<name>: true`, is always strict, so a rule wi
 load where this file doesn't declare the name, even beside `has`. [The filesystem
 actions](policy/actions.md#filesystem) show both forms.
 
-The startup disclosure prints one line for each location, after the agent's filesystem grants. It
-prints each directory as resolved, which is the spelling a rule matches, and spells one under the
-operator's home `~/…`. For an operator whose home is `/Users/dev`, the table above prints:
+The startup disclosure prints one line for each location, after the agent's filesystem grants,
+with each root as written:
 
 ```text
-strands-box: [locations] caches: ~/.cache/my-agent, ~/.npm  (a name for policy rules; grants no access)
+strands-box: [locations] caches: ~/.cache/my-agent, /srv/cache  (a name for policy rules; grants no access)
 strands-box: [locations] project: ~/src/app  (a name for policy rules; grants no access)
 ```
 

@@ -208,9 +208,13 @@ Every filesystem request and its `::response` or `::error` carry `input.location
 one Bool for each location that [`box.toml` declares](../user/config.md#locations), true when that
 location holds the path. A box that declares none carries an empty record. The record is closed,
 so a rule that reads an undeclared location, such as `context.input.locations.projcet`, refuses to
-load, and a rule that tests `has` first loads in any box. The request's record comes from its
-resolved path. An outcome names the path as the caller reported it, which is `~/…` under the
-operator's home, so Box expands that spelling under the home and matches it again. A history rule
+load, and a rule that tests `has` first loads in any box. A location is shorthand for two
+comparisons of `path`: `locations.project` is true exactly when
+`path == "<root>" || path like "<root>/*"` holds for one of its roots, with `*` read as a plain
+character. Roots are written as `path` spells a path (`~/…` under the home) and are not resolved,
+so the request and its outcome compare the same reported text and always agree. A root no
+reported path can match, such as one through a symbolic link or an absolute one under the home, is
+refused at load with the spelling to write instead. A history rule
 reads one location as a field, such as `input.locations.project: true`, so a budget on `project`
 counts every write there, including one in a nested location too. History keeps the names, not the
 directories: if a later run points `project` somewhere else, the earlier events still count as
