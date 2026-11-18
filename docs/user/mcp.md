@@ -341,6 +341,16 @@ to the server in both modes.
 With `secret.ref = "env://NAME"`, `box run` reads `NAME` from its own environment. The agent gets
 a placeholder in `NAME`, and the gateway swaps in the real value on each request to the server.
 
+### Catalog discovery
+
+Box keeps separate tool descriptions for each HTTP address and MCP session. The harness must
+list tools at the same address and session it uses to call them. A list from `/status` cannot
+change how Box checks calls to `/mcp`, even when both paths share a configured host. Existing
+`destinations` entries need no changes.
+
+The address includes the HTTP method, scheme, host, port, path, and query. If the harness changes
+that address or its `Mcp-Session-Id`, it must list tools there before calling them.
+
 ### Remote destination matching
 
 For MCP policy, Box compares the request's host with the explicit host in each `destinations`
@@ -439,6 +449,21 @@ try an implicit shell for an unrecognized executable.
 Failures before the broker selects a route report status 125. After readiness, an incompatible
 protocol version or program identifier also reports 125. After readiness, a closed stream or read
 error ends the alias with status 0. Unrelated recognized frames are ignored.
+
+### HTTP request and catalog errors
+
+The gateway refuses an HTTP MCP request with a top-level `result` or `error`, even when it
+also names a `method`. It returns status 403 with `MCP frame refused` and does not forward the
+request. Remove these response fields from request messages, including fields set to `null`.
+A `tools/list` request must also have `jsonrpc = "2.0"`, a string or integer identifier, and a
+string cursor when present. A repeated or invalid `Mcp-Session-Id` header also causes refusal.
+
+If the tool catalog is not accepted, list tools again at the call's address and session. Box
+accepts a list only when its response identifier matches the request. A malformed refresh removes
+the accepted list for that source; other addresses and sessions keep their lists. Box caches up
+to 64 address/session combinations per configured server at a time. A new list can replace an
+older cached source. If your source was evicted, list its tools again before calling them.
+Eviction preserves shared policy history and any reply already pending for that source.
 
 For a request the policy refuses, see [troubleshooting](./mcp-policy.md#troubleshooting).
 

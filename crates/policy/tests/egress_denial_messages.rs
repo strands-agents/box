@@ -354,12 +354,18 @@ fn remote_mcp_refusals_form_rpc_errors_only_for_valid_request_ids() {
         r#"{"jsonrpc":"2.0","id":{},"method":"tools/list"}"#,
         r#"{"jsonrpc":"1.0","id":7,"method":"tools/list"}"#,
     ] {
-        let response = tls_response(&handle, &upstream, frame.as_bytes());
-        assert_eq!(
-            response_body(&response),
-            format!("http:request gate: {default_deny}")
-        );
-        assert_eq!(upstream.request_count(), 0);
+        for method in ["tools/list", "ping", "notifications/initialized"] {
+            let frame = frame.replace("tools/list", method);
+            let response = tls_response(&handle, &upstream, frame.as_bytes());
+            let expected = if method == "tools/list" {
+                "MCP frame refused".to_string()
+            } else {
+                format!("http:request gate: {default_deny}")
+            };
+            assert!(response.starts_with("HTTP/1.1 403 "));
+            assert_eq!(response_body(&response), expected, "{frame}");
+            assert_eq!(upstream.request_count(), 0);
+        }
     }
 }
 

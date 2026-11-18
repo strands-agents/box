@@ -53,8 +53,14 @@ flowchart LR
     commit --> accept["The catalogs accept the tool names"]
 ```
 
-The policy engine keeps one fragment for each server. For each commit, it combines the fragments, validates the whole policy against them, and commits
-the result. The last commit therefore includes every server's schema. Commits run one at a time.
+The policy engine installs one fragment for each configured server. A catalog change combines
+these fragments, validates the policy against them, and commits the result. HTTP catalogs retain
+separate fragments for each address and MCP session. Before a tool call, Box selects a cached
+request schema from that source and evaluates the call while holding the same authority lock.
+A cache miss validates the source against the currently served rules. Selecting a request schema
+leaves the installed policy and schema unchanged, so source switches add no durable schema records.
+Actual catalog and policy commits invalidate these cached validations and run one at a time.
+All calls use the same policy engine and temporal history.
 Each server commits when its list is complete:
 
 | Commit | When | What it adds | Engine readiness |
@@ -141,14 +147,50 @@ time remaining under the original deadline. Each modern page request carries its
 | 2 | Policy decides each request as `http:request` and its MCP frame as `mcp:call`. It also decides `initialize` for an http server. | `Undiscovered` |
 | 3 | `mcp:call` decides `tools/list`. A refusal is a 403. | `Failed` if refused |
 | 4 | The gateway forwards the request and reads the whole response. | `Undiscovered` |
-| 5 | Before it writes the response, the gateway hands the page to the tool catalogs, with the request's `Mcp-Session-Id` and cursor. | `Listing` |
+| 5 | Before writing the response, the gateway supplies its source identity, request identifier, `Mcp-Session-Id`, and cursor. The catalogs accept only the matching response. | `Listing` |
 | 6 | On the last page the catalogs stage the schema, on the request's thread. Once every http server is `Ready` or `Failed`, the gateway reports that http discovery is complete. | `Ready` |
 | 7 | The gateway writes the response, and the harness sees the last page. | `Ready` |
 
 The gateway reports completion before writing the last response. Unlike the broker, it does not
-wait until the harness has the tools. On failure, it withdraws the server's accepted tools and
-writes the failure to stderr, but still sends the response to the harness. An http server that fails stays
-reachable, and each call to its tools is refused.
+wait until the harness has the tools. On failure, it withdraws the accepted tools for that address
+and session and writes the failure to stderr, but still sends the response to the harness. The
+address remains reachable, but its tool calls are refused until its catalog is accepted again.
+Other sources keep their accepted tools.
+
+### Separate HTTP catalog sources
+
+*Calls to `/alpha` and `/beta` use separate catalogs and argument schemas. Both paths use one
+policy engine and one shared history. The same separation applies when session identifiers differ.*
+
+![Two separate groups show catalogs and calls for the /alpha and /beta addresses. Each catalog supplies only its own call path with an argument schema. Both call paths join one policy engine, which records schema and policy changes in one shared history.](images/catalog-source-isolation.png)
+
+[Editable diagram](images/catalog-source-isolation.drawio).
+
+A source identifies the connected scheme, host, and port; the HTTP method and forwarded path and
+query; and the request's `Mcp-Session-Id`, when present. The gateway computes an opaque endpoint
+digest after credential edits. The source metadata contains that digest rather than the forwarded
+path and query. Existing request fields still carry the original path.
+Session identifiers and endpoint digests are omitted from the source type's debug output.
+
+A catalog can validate calls only to its own source. Pagination stays within that source and follows
+the expected cursor. JSON and server-sent event responses must contain one matching response with
+`jsonrpc = "2.0"`; repeated JSON keys and conflicting responses are refused. Box neither guesses
+a catalog URL nor changes the operator's `destinations` entries.
+
+Box caches at most 64 sources per configured server within the shared discovery-data budget.
+A new list can replace an older cached source. Box prefers sources without unfinished lists,
+then sources without accepted catalogs, and then the least recently used source. Calls to an
+evicted source are refused until that source lists its tools again. A pending call keeps its
+own reply schema, and eviction does not reset policy history. Failed first lists do not retain
+source slots. A list that cannot fit after remote cache reclamation is refused.
+
+Each call uses a validated request schema from its source's accepted catalog. Switching between
+unchanged catalogs does not reinstall the policy or write schema changes to history. Box
+invalidates cached request schemas when accepted catalogs or policy state change. All sources
+continue to use one policy engine and one shared history.
+
+HTTP source isolation does not establish that a server describes its own behavior truthfully.
+Headers other than `Mcp-Session-Id` do not distinguish sources at the same address.
 
 ## The parts and their states
 
@@ -156,7 +198,7 @@ Five components handle discovery. All of them run in the box's trusted process.
 
 | Part | What it does | State it holds |
 |---|---|---|
-| The tool catalogs | One set per box, shared by both kinds of server. They collect a server's pages, stage its schema, and check each `tools/call` against the accepted tool names. | Each server's discovery state and accepted tools, and each unfinished list |
+| The tool catalogs | One set per box, shared by both kinds of server. They collect a server's pages, stage its schema, and check each `tools/call` against the accepted tool names. | Each declared server's discovery state; accepted tools and unfinished lists, separated by source for HTTP |
 | The MCP broker | Relays each stdio connection, holds the last page's reply, and reports when every stdio server is done. | Each connection's pending lists and held replies; whether the stdio side is done |
 | The egress gateway and its policy hook | Relays each http request, hands each `tools/list` reply to the catalogs, and reports when every http server is done. | None of its own |
 | The policy engine | Validates the policy against the combined schema, and commits it. | Its readiness, either `Discovering` or `Ready` |
@@ -184,6 +226,9 @@ stateDiagram-v2
 - `Failed` means discovery failed. The reason identifies the failed step.
 
 `Ready` and `Failed` both count as complete for startup.
+
+Box tracks each HTTP source separately. The configured server reports `Ready` when at least one
+source has an accepted catalog. Other sources still need their own accepted catalogs before calls.
 
 Box uses these states to track discovery. [When startup is
 complete](./mcp.md#when-startup-is-complete) describes the operator-visible outcomes. A `Ready`
@@ -248,7 +293,8 @@ server's rules are already committed, so no request waits on the missing server.
 
 A harness can list a server again when it reconnects, opens a second window, or receives
 `notifications/tools/list_changed`. On a stdio server each connection is its own server process, and
-its list reaches that process.
+its list reaches that process. For HTTP, the comparison and replacement below apply only to the
+catalog for the list's address and MCP session.
 
 Box compares the new list's fingerprint with the accepted one. The fingerprint is each tool's name
 and `inputSchema`, sorted by name, and the list's `$defs`. A description, a title, or tool order
@@ -260,16 +306,17 @@ doesn't change it.
 | A different fingerprint | It commits, and replaces the accepted tools | It commits, and replaces the accepted tools |
 | It fails | The accepted tools stay | The accepted tools are withdrawn |
 
-While a changed list commits, only tools named in both lists pass the catalog check. A server can
-change its tools 16 times in one run. After that, its accepted tools stay, and stderr names it.
+While a changed list commits, only tools named in both lists pass the catalog check. A catalog can
+change 16 times in one run for each stdio server, or 16 times while an HTTP source remains cached.
+After that, its accepted tools stay, and stderr names the configured server. Evicting an HTTP
+source removes its change counter; a fresh list starts a new retained catalog.
 
 ## Pages, limits, and failures
 
 Box captures a list only along its own cursor chain. The first request has no cursor. Each later
-request must name the preceding page's `nextCursor` on the same connection. On an http
-server, `Mcp-Session-Id` is the connection. A list that starts with a cursor, or a cursor that
-doesn't continue the chain, still reaches the harness, but Box doesn't capture it. So the harness
-can't shape what Box captures, and the pages always come from the server.
+request must name the preceding page's `nextCursor` on the same connection. For HTTP, the request
+address and `Mcp-Session-Id` identify the source. A list that starts with a cursor, or a cursor that
+doesn't continue that source's chain, still reaches the harness, but Box doesn't capture it.
 
 | Limit | Value | When a list goes over it |
 |---|---|---|
@@ -277,12 +324,15 @@ can't shape what Box captures, and the pages always come from the server.
 | Bytes in one list | 8 MiB | The list fails |
 | Discovery data in one run | 32 MiB, checked best-effort | The list that goes over it fails |
 | Unfinished lists for one server | 4 | A new list replaces the oldest unfinished one |
-| Catalog changes for one server | 16 in one run | The accepted tools stay |
+| Catalog changes | 16 per stdio server per run; 16 per retained HTTP source | The accepted tools stay |
+| Cached HTTP sources per configured server | 64 at a time | A new list replaces an older source; the evicted source must list again |
 | Time for a stdio server to answer a captured list | 30 seconds | The server fails |
 
-A failure stays with its server:
+A discovery failure is attributed to its stdio server or HTTP source. Admitting or staging a list
+can separately reclaim older remote catalogs to stay within cache limits, even if that new list
+later fails. Apart from this cache reclamation, other addresses and sessions keep their catalogs:
 
-| Failure | That server | The other servers |
+| Failure | Affected server or HTTP source | The other servers and HTTP sources |
 |---|---|---|
 | `shell:spawn` refuses a stdio server | It never starts | Unaffected |
 | Policy refuses `tools/list` | `Failed` with zero tools, and each call to its tools is refused | Unaffected |

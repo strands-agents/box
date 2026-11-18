@@ -175,6 +175,8 @@ pub struct PendingToolResponse {
     pub(crate) request_id: crate::RequestId,
     pub(crate) identity: crate::schema::ActionIdentity,
     pub(crate) input: dogwood_language::Value,
+    /// The request-selected schema, retained while another source may become active.
+    pub(crate) output_schema: std::sync::Arc<crate::mcp_input::ToolInputs>,
 }
 
 impl std::fmt::Debug for PendingToolResponse {

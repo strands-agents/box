@@ -1,0 +1,82 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<mxfile host="drawio" type="device">
+  <diagram id="catalog-source-isolation" name="Catalog source isolation">
+    <mxGraphModel dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1400" pageHeight="980" math="0" shadow="0" background="#ffffff">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="Separate catalogs, shared policy state" style="text;html=1;whiteSpace=nowrap;strokeColor=none;fillColor=none;align=center;verticalAlign=top;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;align=left;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="40" width="1120" height="40" />
+        </mxCell>
+        <mxCell id="source-alpha" value="&lt;div style=&quot;font-size:22px;line-height:26.40px&quot;&gt;Address /alpha&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:22px;font-weight:normal;color:#5F6B7A&quot;&gt;Own catalog and schema&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#7D8998;fillColor=none;strokeWidth=2;dashed=1;dashPattern=8 6;verticalAlign=top;align=left;spacing=0;spacingLeft=40;spacingTop=20;fontSize=22;fontStyle=1;fontColor=#5A6B86;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="120" width="480" height="560" />
+        </mxCell>
+        <mxCell id="source-beta" value="&lt;div style=&quot;font-size:22px;line-height:26.40px&quot;&gt;Address /beta&lt;/div&gt;&lt;div style=&quot;font-size:18px;line-height:22px;font-weight:normal;color:#5F6B7A&quot;&gt;Own catalog and schema&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#7D8998;fillColor=none;strokeWidth=2;dashed=1;dashPattern=8 6;verticalAlign=top;align=left;spacing=0;spacingLeft=40;spacingTop=20;fontSize=22;fontStyle=1;fontColor=#5A6B86;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="680" y="120" width="480" height="560" />
+        </mxCell>
+        <mxCell id="catalog-alpha" value="" style="rounded=0;html=1;strokeColor=#232F3E;fillColor=none;strokeWidth=2;dashed=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="80" y="240" width="400" height="160" />
+        </mxCell>
+        <mxCell id="catalog-alpha-label" value="&lt;div style=&quot;line-height:28.80px&quot;&gt;Catalog for /alpha&lt;/div&gt;&lt;div style=&quot;line-height:27.20px&quot;&gt;&lt;i&gt;&lt;span style=&quot;color:#5F6B7A&quot;&gt;Tool list + argument schema&lt;/span&gt;&lt;/i&gt;&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;strokeColor=none;fillColor=none;align=center;verticalAlign=top;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="80" y="292" width="400" height="56" />
+        </mxCell>
+        <mxCell id="catalog-beta" value="" style="rounded=0;html=1;strokeColor=#232F3E;fillColor=none;strokeWidth=2;dashed=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="720" y="240" width="400" height="160" />
+        </mxCell>
+        <mxCell id="catalog-beta-label" value="&lt;div style=&quot;line-height:28.80px&quot;&gt;Catalog for /beta&lt;/div&gt;&lt;div style=&quot;line-height:27.20px&quot;&gt;&lt;i&gt;&lt;span style=&quot;color:#5F6B7A&quot;&gt;Tool list + argument schema&lt;/span&gt;&lt;/i&gt;&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;strokeColor=none;fillColor=none;align=center;verticalAlign=top;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="720" y="292" width="400" height="56" />
+        </mxCell>
+        <mxCell id="call-alpha" value="" style="rounded=0;html=1;strokeColor=#232F3E;fillColor=none;strokeWidth=2;dashed=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="80" y="480" width="400" height="160" />
+        </mxCell>
+        <mxCell id="call-alpha-label" value="&lt;div style=&quot;line-height:28.80px&quot;&gt;Call to /alpha&lt;/div&gt;&lt;div style=&quot;line-height:27.20px&quot;&gt;&lt;i&gt;&lt;span style=&quot;color:#5F6B7A&quot;&gt;Selects /alpha schema&lt;/span&gt;&lt;/i&gt;&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;strokeColor=none;fillColor=none;align=center;verticalAlign=top;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="80" y="532" width="400" height="56" />
+        </mxCell>
+        <mxCell id="call-beta" value="" style="rounded=0;html=1;strokeColor=#232F3E;fillColor=none;strokeWidth=2;dashed=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="720" y="480" width="400" height="160" />
+        </mxCell>
+        <mxCell id="call-beta-label" value="&lt;div style=&quot;line-height:28.80px&quot;&gt;Call to /beta&lt;/div&gt;&lt;div style=&quot;line-height:27.20px&quot;&gt;&lt;i&gt;&lt;span style=&quot;color:#5F6B7A&quot;&gt;Selects /beta schema&lt;/span&gt;&lt;/i&gt;&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;strokeColor=none;fillColor=none;align=center;verticalAlign=top;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="720" y="532" width="400" height="56" />
+        </mxCell>
+        <mxCell id="engine" value="" style="rounded=0;html=1;strokeColor=#232F3E;fillColor=none;strokeWidth=2;dashed=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="200" y="800" width="400" height="160" />
+        </mxCell>
+        <mxCell id="engine-label" value="&lt;div style=&quot;line-height:28.80px&quot;&gt;One policy engine&lt;/div&gt;&lt;div style=&quot;line-height:27.20px&quot;&gt;&lt;i&gt;&lt;span style=&quot;color:#5F6B7A&quot;&gt;Checks every call&lt;/span&gt;&lt;/i&gt;&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;strokeColor=none;fillColor=none;align=center;verticalAlign=top;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="200" y="852" width="400" height="56" />
+        </mxCell>
+        <mxCell id="history" value="" style="rounded=0;html=1;strokeColor=#232F3E;fillColor=none;strokeWidth=2;dashed=0;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="760" y="800" width="400" height="160" />
+        </mxCell>
+        <mxCell id="history-label" value="&lt;div style=&quot;line-height:28.80px&quot;&gt;One policy history&lt;/div&gt;&lt;div style=&quot;line-height:27.20px&quot;&gt;&lt;i&gt;&lt;span style=&quot;color:#5F6B7A&quot;&gt;Shared across sources&lt;/span&gt;&lt;/i&gt;&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;strokeColor=none;fillColor=none;align=center;verticalAlign=top;spacing=0;fontSize=24;fontStyle=0;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="760" y="852" width="400" height="56" />
+        </mxCell>
+        <mxCell id="schema-alpha" value="matching schema" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;" edge="1" parent="1" source="catalog-alpha" target="call-alpha">
+          <mxGeometry as="geometry" relative="1">
+            <mxPoint as="offset" x="100" y="0" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="schema-beta" value="matching schema" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;" edge="1" parent="1" source="catalog-beta" target="call-beta">
+          <mxGeometry as="geometry" relative="1">
+            <mxPoint as="offset" x="100" y="0" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="evaluate-alpha" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.2;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;" edge="1" parent="1" source="call-alpha" target="engine">
+          <mxGeometry as="geometry" relative="1" />
+        </mxCell>
+        <mxCell id="evaluate-beta" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.8;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;" edge="1" parent="1" source="call-beta" target="engine">
+          <mxGeometry as="geometry" relative="1">
+            <Array as="points">
+              <mxPoint x="920" y="720" />
+              <mxPoint x="520" y="720" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="history-changes" value="changes" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;fontFamily=Arial,Helvetica,sans-serif;labelBackgroundColor=none;" edge="1" parent="1" source="engine" target="history">
+          <mxGeometry as="geometry" relative="1">
+            <mxPoint as="offset" x="0" y="-15" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::Path;
 use std::str::FromStr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use cedar_policy::EntityUid;
 use dogwood_local_engine::DurableError;
@@ -12,7 +12,7 @@ use dogwood_local_engine::DurableError;
 use super::{Policy, SchemaStage, authored};
 use crate::check::{Finding, Refused, RuleRef, annotated_id};
 use crate::dogwood::{
-    DogwoodEngine, check_canonical_policy_set, expand_policy_source,
+    DogwoodEngine, RequestSchema, check_canonical_policy_set, expand_policy_source,
     refuse_input_reads_before_discovery, rule_conditions, validate_canonical_policy_set,
 };
 use crate::request::ActionRequest;
@@ -36,6 +36,13 @@ struct CandidatePolicy {
 }
 
 #[derive(Debug, Clone)]
+struct SourceRequestSchema {
+    server: String,
+    fragment: Weak<str>,
+    schema: Result<Arc<RequestSchema>, Arc<PolicyError>>,
+}
+
+#[derive(Debug, Clone)]
 struct ProposalState {
     operator: Operator,
     candidates: Vec<CandidatePolicy>,
@@ -47,6 +54,7 @@ struct ProposalState {
     previous_schemas: BTreeMap<String, String>,
     /// The pending rules installed under `previous_schemas`, so that they keep their history.
     retained: BTreeSet<usize>,
+    request_schemas: Vec<SourceRequestSchema>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +80,11 @@ struct LiveAuthority {
     /// cannot ride the coarse `mcp:call` permit with its argument constraint unenforced. Empty
     /// until `finish_mcp_discovery` degrades, and empty again once a complete bundle installs.
     degraded_tools: BTreeSet<(String, String)>,
+}
+
+enum StagedAuthority<'a> {
+    Accepted(MutexGuard<'a, LiveAuthority>),
+    Rejected { reason: String },
 }
 
 pub(super) struct Authority {
@@ -162,6 +175,7 @@ impl Authority {
             pending: BTreeMap::new(),
             previous_schemas: BTreeMap::new(),
             retained: BTreeSet::new(),
+            request_schemas: Vec::new(),
         };
         let complete = proposal.complete_policy_set();
         refuse_input_reads_before_discovery(&complete).map_err(Refused::into_error)?;
@@ -274,6 +288,7 @@ impl Authority {
             .commit_staged(&complete, effective_schema)
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
         proposed.mark_all_ready();
+        proposed.request_schemas.clear();
         live.readiness = Readiness::Ready;
         live.pending_tools = BTreeSet::new();
         live.degraded_tools.clear();
@@ -288,20 +303,37 @@ impl Authority {
         server: &str,
         fragment: String,
     ) -> Result<SchemaStage, PolicyStagingError> {
-        let mut proposal_guard = self
+        let mut proposal = self
             .proposal
             .lock()
             .map_err(|_| PolicyStagingError::Durable("policy staging lock poisoned".to_string()))?;
-        let Some(current) = proposal_guard.as_ref() else {
-            return Ok(SchemaStage::Rejected {
+        match self.stage_mcp_schema_locked(&mut proposal, server, &fragment)? {
+            StagedAuthority::Accepted(live) => Ok(SchemaStage::Accepted {
+                authority_ready: live.readiness == Readiness::Ready,
+            }),
+            StagedAuthority::Rejected { reason } => Ok(SchemaStage::Rejected { reason }),
+        }
+    }
+
+    /// Returns the selected schema's authority while its live lock remains held.
+    fn stage_mcp_schema_locked<'a>(
+        &'a self,
+        proposal: &mut Option<ProposalState>,
+        server: &str,
+        fragment: &str,
+    ) -> Result<StagedAuthority<'a>, PolicyStagingError> {
+        let Some(current) = proposal.as_ref() else {
+            return Ok(StagedAuthority::Rejected {
                 reason: "the authority was not opened for runtime staging".to_string(),
             });
         };
         let mut proposed = current.clone();
-        proposed.schemas.insert(server.to_string(), fragment);
+        proposed
+            .schemas
+            .insert(server.to_string(), fragment.to_string());
         let named_schemas = proposed.named_schemas();
         if let Err(error) = crate::mcp_schema::validate_mcp_schema_composition(&named_schemas) {
-            return Ok(SchemaStage::Rejected {
+            return Ok(StagedAuthority::Rejected {
                 reason: error.to_string(),
             });
         }
@@ -322,15 +354,14 @@ impl Authority {
                 match live.engine.commit_staged(&complete, effective_schema) {
                     Ok(()) => {
                         proposed.mark_all_ready();
-                        *proposal_guard = Some(proposed);
+                        proposed.request_schemas.clear();
+                        *proposal = Some(proposed);
                         live.readiness = Readiness::Ready;
                         live.pending_tools = BTreeSet::new();
                         live.degraded_tools.clear();
-                        Ok(SchemaStage::Accepted {
-                            authority_ready: true,
-                        })
+                        Ok(StagedAuthority::Accepted(live))
                     }
-                    Err(DurableError::Rejected(reason)) => Ok(SchemaStage::Rejected { reason }),
+                    Err(DurableError::Rejected(reason)) => Ok(StagedAuthority::Rejected { reason }),
                     Err(error) => Err(PolicyStagingError::Durable(error.to_string())),
                 }
             }
@@ -339,19 +370,19 @@ impl Authority {
                     PolicyStagingError::Durable("policy authority lock poisoned".to_string())
                 })?;
                 if live.readiness == Readiness::Ready {
-                    return Ok(SchemaStage::Rejected {
+                    return Ok(StagedAuthority::Rejected {
                         reason: complete_error.to_string(),
                     });
                 }
                 drop(live);
 
                 if let Err(error) = proposed.validate_ready(&schemas) {
-                    return Ok(SchemaStage::Rejected {
+                    return Ok(StagedAuthority::Rejected {
                         reason: error.to_string(),
                     });
                 }
                 if let Err(error) = proposed.classify(&schemas) {
-                    return Ok(SchemaStage::Rejected {
+                    return Ok(StagedAuthority::Rejected {
                         reason: error.to_string(),
                     });
                 }
@@ -384,11 +415,9 @@ impl Authority {
                     .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
                 live.pending_tools = pending_typed_tools(&proposed);
                 live.readiness = Readiness::Discovering;
-                drop(live);
-                *proposal_guard = Some(proposed);
-                Ok(SchemaStage::Accepted {
-                    authority_ready: false,
-                })
+                proposed.request_schemas.clear();
+                *proposal = Some(proposed);
+                Ok(StagedAuthority::Accepted(live))
             }
         }
     }
@@ -441,6 +470,9 @@ impl Authority {
             .as_ref()
             .map(pending_typed_tools)
             .unwrap_or_default();
+        if let Some(proposal) = proposal.as_mut() {
+            proposal.request_schemas.clear();
+        }
         live.degraded_tools = degraded;
         live.pending_tools = BTreeSet::new();
         live.readiness = Readiness::Ready;
@@ -545,6 +577,60 @@ impl Authority {
         let Ok(live) = self.live.lock() else {
             return (Decision::internal_fault(), None);
         };
+        Self::refine_tool_call_locked(
+            &live,
+            live.engine.request_schema(),
+            governed,
+            principal,
+            request,
+            identity,
+        )
+    }
+
+    /// Selects a validated request view without changing the installed policy or schema.
+    pub(super) fn refine_tool_call_with_schema(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request: &Request<'_>,
+        identity: &ActionIdentity,
+        server: &str,
+        fragment: &Arc<str>,
+    ) -> (Decision, Option<PendingToolResponse>) {
+        let Ok(mut proposal) = self.proposal.lock() else {
+            return (Decision::internal_fault(), None);
+        };
+        let Some(proposal) = proposal.as_mut() else {
+            return (Decision::internal_fault(), None);
+        };
+        let request_schema = match proposal.request_schema(server, fragment) {
+            Ok(schema) => schema,
+            Err(error) => {
+                eprintln!("policy: warn: {error}; denying");
+                return (Decision::internal_fault(), None);
+            }
+        };
+        let Ok(live) = self.live.lock() else {
+            return (Decision::internal_fault(), None);
+        };
+        Self::refine_tool_call_locked(
+            &live,
+            &request_schema,
+            governed,
+            principal,
+            request,
+            identity,
+        )
+    }
+
+    fn refine_tool_call_locked(
+        live: &LiveAuthority,
+        request_schema: &RequestSchema,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request: &Request<'_>,
+        identity: &ActionIdentity,
+    ) -> (Decision, Option<PendingToolResponse>) {
         if let ActionIdentity::McpTool { namespace, tool } = identity {
             let key = (namespace.clone(), tool.clone());
             if live.degraded_tools.contains(&key) {
@@ -557,17 +643,16 @@ impl Authority {
         let Ok(action) = identity.cedar_uid() else {
             return (Decision::internal_fault(), None);
         };
-        let (decision, pending) = if live.engine.declares_tool_action(&action) {
-            let (decision, request_id, input) =
-                live.engine
-                    .decide_recording(governed, principal, ActionRequest::Request(request));
-            let pending = request_id
-                .zip(input)
-                .map(|(request_id, input)| PendingToolResponse {
-                    request_id,
-                    identity: identity.clone(),
-                    input,
-                });
+        let (decision, pending) = if request_schema.declares_tool_action(&action) {
+            let (decision, request_id, input) = live.engine.decide_recording_with_schema(
+                governed,
+                principal,
+                ActionRequest::Request(request),
+                request_schema,
+            );
+            let pending = request_id.zip(input).map(|(request_id, input)| {
+                request_schema.pending_tool_response(request_id, identity.clone(), input)
+            });
             (decision, pending)
         } else {
             (Decision::no_match(), None)
@@ -670,6 +755,75 @@ impl Authority {
 }
 
 impl ProposalState {
+    fn request_schema(
+        &mut self,
+        server: &str,
+        fragment: &Arc<str>,
+    ) -> Result<Arc<RequestSchema>, Arc<PolicyError>> {
+        self.request_schemas
+            .retain(|entry| entry.fragment.strong_count() != 0);
+        if let Some(schema) = self.request_schemas.iter().find_map(|entry| {
+            entry.fragment.upgrade().and_then(|source| {
+                (entry.server == server && Arc::ptr_eq(&source, fragment))
+                    .then(|| entry.schema.clone())
+            })
+        }) {
+            return schema;
+        }
+        let schema = self
+            .validate_request_schema(server, fragment)
+            .map(Arc::new)
+            .map_err(Arc::new);
+        self.request_schemas.push(SourceRequestSchema {
+            server: server.to_string(),
+            fragment: Arc::downgrade(fragment),
+            schema: schema.clone(),
+        });
+        schema
+    }
+
+    fn validate_request_schema(
+        &self,
+        server: &str,
+        fragment: &str,
+    ) -> Result<RequestSchema, PolicyError> {
+        if !self.schemas.contains_key(server) {
+            return Err(PolicyError::Schema(
+                "the server has no accepted schema".to_string(),
+            ));
+        }
+        let named_schemas: Vec<(&str, &str)> = self
+            .schemas
+            .iter()
+            .map(|(name, source)| {
+                (
+                    name.as_str(),
+                    if name == server {
+                        fragment
+                    } else {
+                        source.as_str()
+                    },
+                )
+            })
+            .collect();
+        crate::mcp_schema::validate_mcp_schema_composition(&named_schemas)
+            .map_err(|error| PolicyError::Schema(error.to_string()))?;
+        let schemas: Vec<String> = named_schemas
+            .iter()
+            .map(|(_, source)| source.to_string())
+            .collect();
+        validate_canonical_policy_set(
+            &self.ready_policy_set(),
+            &self.grammar_schemas,
+            &schemas,
+            &self.operator,
+            &self.ready_positions(),
+        )?;
+        // Requests need only this source's gate; other fragments participate in policy validation above.
+        composed_action_schema(&self.grammar_schemas, &[fragment.to_string()])
+            .map(RequestSchema::from)
+    }
+
     fn complete_policy_set(&self) -> Vec<String> {
         self.candidates
             .iter()
@@ -1223,6 +1377,7 @@ pub(super) fn check_staged(
         pending: BTreeMap::new(),
         previous_schemas: BTreeMap::new(),
         retained: BTreeSet::new(),
+        request_schemas: Vec::new(),
     };
     let unlocated = |findings: Vec<Finding>| -> Vec<Finding> {
         findings.into_iter().map(Finding::without_span).collect()
@@ -1393,6 +1548,425 @@ permit(principal, action == Box::Action::"mcp:call", resource) when { context.in
             panic!("simulated state transition panic");
         }));
         assert!(result.is_err(), "the poison panic must occur");
+    }
+
+    fn refine_with_schema(
+        authority: &Authority,
+        fragment: &Arc<str>,
+        arguments: &serde_json::Value,
+    ) -> Decision {
+        let request = Request::McpCall {
+            server: "alpha",
+            method: "tools/call",
+            tool: Some("read"),
+            prompt: None,
+            uri: None,
+            arguments: Some(arguments),
+        };
+        authority
+            .refine_tool_call_with_schema(
+                &governed(),
+                &Principal::agent(),
+                &request,
+                &crate::schema::ActionIdentity::mcp_tool("alpha", "read"),
+                "alpha",
+                fragment,
+            )
+            .0
+    }
+
+    fn accept_schema(authority: &Authority, server: &str, fragment: &str) {
+        assert!(matches!(
+            authority
+                .stage_mcp_schema(server, fragment.to_string())
+                .expect("schema stages"),
+            SchemaStage::Accepted { .. }
+        ));
+    }
+
+    #[test]
+    fn a_tool_call_selects_its_own_source_schema() {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = Authority::open_staged(
+            &Operator::unanchored(),
+            staged_source(),
+            &history.path().join("history.redb"),
+        )
+        .expect("the staged authority opens");
+        let first: Arc<str> = generated("alpha", "read", "value").into();
+        let second: Arc<str> = generated("alpha", "read", "label").into();
+        accept_schema(&authority, "alpha", &first);
+        accept_schema(&authority, "alpha", &second);
+        let first_arguments = serde_json::json!({"value": "first"});
+        let second_arguments = serde_json::json!({"label": "second"});
+
+        assert!(refine_with_schema(&authority, &first, &first_arguments).is_allow());
+        assert!(refine_with_schema(&authority, &second, &second_arguments).is_allow());
+        assert!(matches!(
+            refine_with_schema(&authority, &first, &second_arguments),
+            Decision::Deny {
+                reason: DenyReason::InternalFault,
+                ..
+            }
+        ));
+        assert!(refine_with_schema(&authority, &first, &first_arguments).is_allow());
+    }
+
+    #[test]
+    fn a_refused_source_schema_denies_the_call_and_keeps_the_live_schema() {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = Authority::open_staged(
+            &Operator::unanchored(),
+            staged_source(),
+            &history.path().join("history.redb"),
+        )
+        .expect("the staged authority opens");
+        let accepted: Arc<str> = generated("alpha", "read", "value").into();
+        let wrong_server: Arc<str> = generated("beta", "read", "value").into();
+        accept_schema(&authority, "alpha", &accepted);
+        let arguments = serde_json::json!({"value": "ready"});
+
+        assert!(refine_with_schema(&authority, &accepted, &arguments).is_allow());
+        assert!(matches!(
+            refine_with_schema(&authority, &wrong_server, &arguments),
+            Decision::Deny {
+                reason: DenyReason::InternalFault,
+                ..
+            }
+        ));
+        assert_eq!(
+            authority
+                .proposal
+                .lock()
+                .expect("proposal lock")
+                .as_ref()
+                .expect("staged authority")
+                .schemas
+                .get("alpha"),
+            Some(&accepted.to_string())
+        );
+        assert!(refine_with_schema(&authority, &accepted, &arguments).is_allow());
+    }
+
+    #[test]
+    fn cached_source_views_are_revalidated_after_policy_reload() {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = Authority::open_staged(
+            &Operator::unanchored(),
+            staged_source(),
+            &history.path().join("history.redb"),
+        )
+        .expect("the staged authority opens");
+        let label: Arc<str> = generated("alpha", "read", "label").into();
+        let value: Arc<str> = generated("alpha", "read", "value").into();
+        accept_schema(&authority, "alpha", &label);
+        accept_schema(&authority, "alpha", &value);
+        assert!(
+            refine_with_schema(&authority, &label, &serde_json::json!({"label": "blocked"}))
+                .is_allow()
+        );
+        assert!(
+            refine_with_schema(&authority, &value, &serde_json::json!({"value": "blocked"}))
+                .is_allow()
+        );
+
+        let mut policies = staged_source();
+        policies.extend(source(
+            r#"forbid(principal, action == alpha::Action::"read", resource)
+when { context.input.value == "blocked" };"#,
+        ));
+        authority
+            .reload(&policies)
+            .expect("the typed forbid reloads");
+        assert!(
+            matches!(
+                refine_with_schema(&authority, &label, &serde_json::json!({"label": "blocked"})),
+                Decision::Deny {
+                    reason: DenyReason::InternalFault,
+                    ..
+                }
+            ),
+            "the cached source must validate against the new rule"
+        );
+        assert!(
+            matches!(
+                refine_with_schema(&authority, &value, &serde_json::json!({"value": "blocked"})),
+                Decision::Deny {
+                    reason: DenyReason::Forbidden,
+                    ..
+                }
+            ),
+            "the reloaded forbid must use the selected source's arguments"
+        );
+        assert!(
+            refine_with_schema(&authority, &value, &serde_json::json!({"value": "allowed"}))
+                .is_allow()
+        );
+    }
+
+    fn source_with_pending_beta() -> Vec<Policy> {
+        source(
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "alpha" || context.input.server == "beta" };
+permit(principal, action == alpha::Action::"read", resource);
+permit(principal, action == beta::Action::"read", resource);
+forbid(principal, action == beta::Action::"read", resource)
+when temporal { formerly within 1h ( alpha::Action::"read"::request{ input.value: "past" } ) };
+"#,
+        )
+    }
+
+    fn refine_beta(authority: &Authority) -> Decision {
+        let arguments = serde_json::json!({"value": "ready"});
+        let request = Request::McpCall {
+            server: "beta",
+            method: "tools/call",
+            tool: Some("read"),
+            prompt: None,
+            uri: None,
+            arguments: Some(&arguments),
+        };
+        authority
+            .refine_tool_call(
+                &governed(),
+                &Principal::agent(),
+                &request,
+                &ActionIdentity::mcp_tool("beta", "read"),
+            )
+            .0
+    }
+
+    #[test]
+    fn cached_source_views_follow_the_ready_subset_when_another_server_stages() {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = Authority::open_staged(
+            &Operator::unanchored(),
+            source_with_pending_beta(),
+            &history.path().join("history.redb"),
+        )
+        .expect("the staged authority opens");
+        let label: Arc<str> = generated("alpha", "read", "label").into();
+        let value: Arc<str> = generated("alpha", "read", "value").into();
+        accept_schema(&authority, "alpha", &label);
+        accept_schema(&authority, "alpha", &value);
+        assert!(
+            refine_with_schema(&authority, &label, &serde_json::json!({"label": "ready"}))
+                .is_allow(),
+            "a source must validate against the served subset while beta is pending"
+        );
+        assert!(matches!(
+            refine_beta(&authority),
+            Decision::Deny {
+                reason: DenyReason::PolicyPending,
+                ..
+            }
+        ));
+
+        accept_schema(&authority, "beta", &generated("beta", "read", "value"));
+        assert!(
+            matches!(
+                refine_with_schema(&authority, &label, &serde_json::json!({"label": "ready"})),
+                Decision::Deny {
+                    reason: DenyReason::InternalFault,
+                    ..
+                }
+            ),
+            "the newly installed temporal rule must invalidate the older source view"
+        );
+        assert!(
+            refine_with_schema(&authority, &value, &serde_json::json!({"value": "past"}))
+                .is_allow()
+        );
+        assert!(
+            matches!(
+                refine_beta(&authority),
+                Decision::Deny {
+                    reason: DenyReason::Forbidden,
+                    ..
+                }
+            ),
+            "the selected source request must reach the shared temporal history"
+        );
+    }
+
+    #[test]
+    fn cached_source_calls_keep_retained_history_while_another_server_rediscovers() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("history.redb");
+        let value: Arc<str> = generated("alpha", "read", "value").into();
+        let beta = generated("beta", "read", "value");
+        let first =
+            Authority::open_staged(&Operator::unanchored(), source_with_pending_beta(), &path)
+                .expect("first authority opens");
+        accept_schema(&first, "alpha", &value);
+        accept_schema(&first, "beta", &beta);
+        assert!(
+            refine_with_schema(&first, &value, &serde_json::json!({"value": "past"})).is_allow()
+        );
+        assert!(
+            matches!(
+                refine_beta(&first),
+                Decision::Deny {
+                    reason: DenyReason::Forbidden,
+                    ..
+                }
+            ),
+            "the first run must seed the temporal forbid"
+        );
+        drop(first);
+
+        let reopened =
+            Authority::open_staged(&Operator::unanchored(), source_with_pending_beta(), &path)
+                .expect("history reopens");
+        accept_schema(&reopened, "alpha", &value);
+        assert!(
+            !reopened
+                .proposal
+                .lock()
+                .expect("proposal lock")
+                .as_ref()
+                .expect("staged")
+                .retained
+                .is_empty(),
+            "beta's unresolved rule must remain installed from history"
+        );
+        assert!(matches!(
+            refine_beta(&reopened),
+            Decision::Deny {
+                reason: DenyReason::PolicyPending,
+                ..
+            }
+        ));
+        for _ in 0..2 {
+            assert!(
+                refine_with_schema(&reopened, &value, &serde_json::json!({"value": "ready"}))
+                    .is_allow(),
+                "the ready source must serve both a cache miss and hit while beta is pending"
+            );
+        }
+        accept_schema(&reopened, "beta", &beta);
+        assert!(
+            matches!(
+                refine_beta(&reopened),
+                Decision::Deny {
+                    reason: DenyReason::Forbidden,
+                    ..
+                }
+            ),
+            "cached source calls must not reset the retained rule's previous-run history"
+        );
+    }
+
+    #[test]
+    fn source_views_keep_degraded_tools_held_after_discovery_finishes() {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = Authority::open_staged(
+            &Operator::unanchored(),
+            source_with_pending_beta(),
+            &history.path().join("history.redb"),
+        )
+        .expect("the staged authority opens");
+        let value: Arc<str> = generated("alpha", "read", "value").into();
+        accept_schema(&authority, "alpha", &value);
+        assert!(
+            refine_with_schema(&authority, &value, &serde_json::json!({"value": "ready"}))
+                .is_allow()
+        );
+        assert!(matches!(
+            refine_beta(&authority),
+            Decision::Deny {
+                reason: DenyReason::PolicyPending,
+                ..
+            }
+        ));
+        assert_eq!(
+            authority
+                .finish_mcp_discovery()
+                .expect("discovery finishes"),
+            vec!["beta"]
+        );
+        assert!(
+            authority
+                .proposal
+                .lock()
+                .expect("proposal lock")
+                .as_ref()
+                .expect("staged")
+                .request_schemas
+                .is_empty(),
+            "discovery completion must retire earlier request views"
+        );
+        assert!(
+            refine_with_schema(&authority, &value, &serde_json::json!({"value": "ready"}))
+                .is_allow()
+        );
+        assert!(
+            matches!(
+                refine_beta(&authority),
+                Decision::Deny {
+                    reason: DenyReason::NoMatch,
+                    ..
+                }
+            ),
+            "a missing source cannot ride the coarse grant after discovery finishes"
+        );
+    }
+
+    #[test]
+    fn source_view_cache_releases_catalogs_that_no_longer_have_an_owner() {
+        let history = tempfile::tempdir().expect("history directory");
+        let authority = Authority::open_staged(
+            &Operator::unanchored(),
+            staged_source(),
+            &history.path().join("history.redb"),
+        )
+        .expect("the staged authority opens");
+        let first: Arc<str> = generated("alpha", "read", "value").into();
+        let second: Arc<str> = generated("alpha", "read", "label").into();
+        accept_schema(&authority, "alpha", &first);
+        accept_schema(&authority, "alpha", &second);
+        assert!(
+            refine_with_schema(&authority, &first, &serde_json::json!({"value": "ready"}))
+                .is_allow()
+        );
+        assert!(
+            refine_with_schema(&authority, &second, &serde_json::json!({"label": "ready"}))
+                .is_allow()
+        );
+        assert_eq!(
+            authority
+                .proposal
+                .lock()
+                .expect("proposal lock")
+                .as_ref()
+                .expect("staged")
+                .request_schemas
+                .len(),
+            2
+        );
+        let expired = Arc::downgrade(&first);
+        drop(first);
+        assert!(
+            expired.upgrade().is_none(),
+            "the cache must not own an accepted catalog fragment"
+        );
+        assert!(
+            refine_with_schema(&authority, &second, &serde_json::json!({"label": "ready"}))
+                .is_allow()
+        );
+        assert_eq!(
+            authority
+                .proposal
+                .lock()
+                .expect("proposal lock")
+                .as_ref()
+                .expect("staged")
+                .request_schemas
+                .len(),
+            1,
+            "the next source call removes expired views"
+        );
     }
 
     #[test]

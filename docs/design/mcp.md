@@ -337,7 +337,11 @@ and an optional argument becomes an optional field. The rule therefore tests `ha
 
 During staging, Box adds the schema to the policy engine and validates the policy against it.
 The engine then loads and enforces the rule above. A later list that changes the
-tools replaces them, and a list that does not change them commits nothing. Box writes no schema file, so each run learns the tools again. To read a server's action names and argument types before
+tools replaces that source's accepted list, and an unchanged list commits nothing. For HTTP,
+a source consists of the request address and MCP session. Each call uses that source's generated
+schema. Box selects a validated request schema and checks the call under the same policy lock.
+Selecting another unchanged catalog does not reinstall the policy or write a schema record.
+All sources share one policy history. Box writes no separate schema file, so each run learns the tools again. To read a server's action names and argument types before
 writing a rule, run `strands-box policy generate-schema`, which does the same generation offline.
 
 For the pages, the limits, and what happens when a server lists again, see [how Box discovers MCP

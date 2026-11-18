@@ -84,6 +84,24 @@ impl std::fmt::Debug for McpFrame<'_> {
     }
 }
 
+/// The remote MCP endpoint and protocol session used for catalog discovery and tool calls.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct McpSource<'a> {
+    /// An opaque digest of the HTTP method, connected scheme, host, port, and forwarded path and query.
+    pub endpoint: [u8; 32],
+    /// The single `Mcp-Session-Id` header the request carries, when present.
+    pub session: Option<&'a str>,
+}
+
+impl std::fmt::Debug for McpSource<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("McpSource")
+            .field("endpoint", &"<opaque>")
+            .field("session", &self.session.map(|_| "<redacted>"))
+            .finish()
+    }
+}
+
 /// An outbound operation presented immediately before its external effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -126,6 +144,8 @@ pub enum EffectAttempt<'a> {
         /// The MCP frame this request carries, when its destination is a configured remote MCP
         /// server; `None` otherwise. Present drives the `mcp:call` gate alongside `http:request`.
         mcp: Option<McpFrame<'a>>,
+        /// The actual endpoint and protocol session for `mcp`, without exposing the request query.
+        mcp_source: Option<McpSource<'a>>,
     },
     /// Returning one serialized, governed HTTP response to the workload.
     ResponseRelease {
@@ -183,6 +203,10 @@ pub enum EffectOutcome {
 /// One `tools/list` reply from a remote MCP server, with the request it answers.
 #[derive(Clone, Copy)]
 pub struct McpListReply<'a> {
+    /// The same endpoint digest carried by the originating request's `McpSource`.
+    pub endpoint: [u8; 32],
+    /// The originating JSON-RPC identifier serialized as JSON, preserving its string or number type.
+    pub request_id: &'a str,
     /// The `Mcp-Session-Id` the request carried.
     pub session: Option<&'a str>,
     /// The `params.cursor` the request carried.

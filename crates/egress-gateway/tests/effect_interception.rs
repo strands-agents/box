@@ -83,6 +83,7 @@ impl AttemptSnapshot {
                 body_bytes,
                 intercepted: _,
                 mcp: _,
+                mcp_source: _,
             } => Self::HttpRequest {
                 host: (*host).to_string(),
                 port: *port,
@@ -1199,18 +1200,105 @@ fn response_release_denial_sends_no_upstream_head_or_body() {
 }
 
 #[test]
-fn mcp_calls_stream_but_tools_list_waits_for_catalog_staging() {
-    use std::io::Read;
-    use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+fn malformed_catalog_requests_never_reach_the_upstream() {
+    let host = "catalog-request.test";
+    let upstream = TlsUpstream::start(host);
+    let shared = Arc::new(Mutex::new(Vec::new()));
+    let handle = MitmInterceptor::start(
+        MitmConfig {
+            mcp_servers: vec![(host.to_string(), "test-server".to_string())],
+            ..config_for(host, &upstream)
+        },
+        no_injection(),
+        Arc::new(RecordingInterceptor::allowing(shared)),
+    )
+    .unwrap();
+    let valid = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    for (body, extra_headers) in [
+        (r#"{"jsonrpc":"2.0","method":"tools/list"}"#, vec![]),
+        (
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"cursor":false}}"#,
+            vec![],
+        ),
+        (
+            valid,
+            vec![("Mcp-Session-Id", "first"), ("mcp-session-id", "second")],
+        ),
+    ] {
+        let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+        client.set_read_timeout(Duration::from_secs(3));
+        client.send_request("POST", "/mcp", &extra_headers, body.as_bytes());
+        assert_eq!(client.read_status(), 403);
+    }
+    assert_eq!(upstream.request_count(), 0);
+    let mut client = WorkloadClient::connect(proxy_port(&handle), host, upstream.port());
+    client.set_read_timeout(Duration::from_secs(3));
+    client.send_request("POST", "/mcp", &[], valid.as_bytes());
+    assert_eq!(client.read_status(), 200);
+    assert_eq!(
+        upstream.request_count(),
+        1,
+        "valid discovery reaches the same upstream"
+    );
+}
 
-    struct CatalogInterceptor {
-        effects: RecordingInterceptor,
-        staged: SyncSender<Vec<u8>>,
-        proceed: Mutex<Receiver<()>>,
+#[test]
+fn catalog_sources_follow_backend_routes_and_http_upgrades() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Source {
+        endpoint: [u8; 32],
+        session: Option<String>,
     }
 
-    impl EffectInterceptor for CatalogInterceptor {
+    #[derive(Clone, Debug)]
+    struct Request {
+        source: Source,
+        method: String,
+        host: String,
+        port: u16,
+        path: String,
+        intercepted: bool,
+    }
+
+    struct Sources {
+        effects: RecordingInterceptor,
+        requests: Mutex<Vec<Request>>,
+        catalogs: Mutex<Vec<Source>>,
+    }
+
+    impl EffectInterceptor for Sources {
         fn intercept(&self, attempt: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>> {
+            if let EffectAttempt::HttpRequest {
+                host,
+                port,
+                path,
+                intercepted,
+                mcp: Some(frame),
+                mcp_source,
+                ..
+            } = attempt
+            {
+                let source = mcp_source.expect("the MCP request carries a source");
+                let method = match frame {
+                    McpFrame::ToolCall { .. } => "tools/call",
+                    McpFrame::List { method, .. } => method,
+                    _ => panic!("unexpected MCP request"),
+                };
+                self.requests.lock().unwrap().push(Request {
+                    source: Source {
+                        endpoint: source.endpoint,
+                        session: source.session.map(str::to_string),
+                    },
+                    method: method.to_string(),
+                    host: (*host).to_string(),
+                    port: *port,
+                    path: (*path).to_string(),
+                    intercepted: *intercepted,
+                });
+            }
             self.effects.intercept(attempt)
         }
 
@@ -1220,6 +1308,225 @@ fn mcp_calls_stream_but_tools_list_waits_for_catalog_staging() {
             reply: egress_gateway::McpListReply<'_>,
         ) -> io::Result<()> {
             assert_eq!(server, "test-server");
+            assert_eq!(reply.request_id, "1");
+            assert_eq!(reply.cursor, None);
+            let response: serde_json::Value = serde_json::from_slice(reply.body).unwrap();
+            assert_eq!(response["result"]["tools"], serde_json::json!([]));
+            self.catalogs.lock().unwrap().push(Source {
+                endpoint: reply.endpoint,
+                session: reply.session.map(str::to_string),
+            });
+            Ok(())
+        }
+    }
+
+    const REPLY: &[u8] = concat!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n",
+        "Content-Length: 59\r\nConnection: close\r\n\r\n",
+        r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[],"content":[]}}"#,
+    )
+    .as_bytes();
+
+    for upstream_tls in [true, false] {
+        let backend_host = "catalog-backend.test";
+        let original = "catalog-original.test";
+        let tls = upstream_tls.then(|| TlsUpstream::start_with_response(backend_host, REPLY));
+        let plain = (!upstream_tls).then(|| TcpListener::bind("127.0.0.1:0").unwrap());
+        let port = match (&tls, &plain) {
+            (Some(upstream), _) => upstream.port(),
+            (_, Some(listener)) => listener.local_addr().unwrap().port(),
+            _ => unreachable!(),
+        };
+        let plain_seen = Arc::new(Mutex::new(Vec::new()));
+        let plain_thread = plain.map(|listener| {
+            let seen = Arc::clone(&plain_seen);
+            std::thread::spawn(move || {
+                for accepted in listener.incoming().take(8) {
+                    let mut stream = accepted.unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    let head = harness::read_http_head(&mut stream);
+                    let length = harness::header_value(&head, "content-length")
+                        .unwrap()
+                        .parse()
+                        .unwrap();
+                    let mut body = vec![0; length];
+                    stream.read_exact(&mut body).unwrap();
+                    seen.lock().unwrap().push(harness::SeenRequest {
+                        raw: head + std::str::from_utf8(&body).unwrap(),
+                    });
+                    stream.write_all(REPLY).unwrap();
+                }
+            })
+        });
+        let sources = Arc::new(Sources {
+            effects: RecordingInterceptor::allowing(Arc::new(Mutex::new(Vec::new()))),
+            requests: Mutex::new(Vec::new()),
+            catalogs: Mutex::new(Vec::new()),
+        });
+        let handle = MitmInterceptor::start(
+            MitmConfig {
+                mcp_servers: vec![
+                    (original.to_string(), "test-server".to_string()),
+                    (backend_host.to_string(), "test-server".to_string()),
+                ],
+                dns_overrides: vec![(backend_host.to_string(), "127.0.0.1".parse().unwrap())],
+                upstream_ca_pems: tls.as_ref().map(TlsUpstream::ca_pem).into_iter().collect(),
+                upgrade_http: vec![original.to_string()],
+                backends: vec![(
+                    destination(original, 443),
+                    egress_gateway::BackendDial {
+                        host: backend_host.to_string(),
+                        port,
+                        tls: upstream_tls,
+                        path_prefix: "/edge".to_string(),
+                    },
+                )],
+                ..MitmConfig::default()
+            },
+            no_injection(),
+            Arc::clone(&sources) as Arc<dyn EffectInterceptor>,
+        )
+        .unwrap();
+        let routes = [
+            (original, 443, "/mcp?tenant=one", true),
+            (backend_host, port, "/edge/mcp?tenant=one", upstream_tls),
+            (original, 80, "/mcp?tenant=one", false),
+            (backend_host, port, "/other/mcp?tenant=one", upstream_tls),
+        ];
+        for (index, (host, request_port, path, client_tls)) in routes.into_iter().enumerate() {
+            for request in [
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
+            ] {
+                let response = if client_tls {
+                    let mut client =
+                        WorkloadClient::connect(proxy_port(&handle), host, request_port);
+                    client.set_read_timeout(Duration::from_secs(3));
+                    client.send_request(
+                        "POST",
+                        path,
+                        &[("Mcp-Session-Id", "route-session")],
+                        request.as_bytes(),
+                    );
+                    client.read_response()
+                } else {
+                    let mut stream =
+                        TcpStream::connect(("127.0.0.1", proxy_port(&handle))).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(3)))
+                        .unwrap();
+                    write!(stream,
+                        "POST http://{host}:{request_port}{path} HTTP/1.1\r\nHost: {host}:{request_port}\r\nMcp-Session-Id: route-session\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{request}",
+                        request.len(),
+                    ).unwrap();
+                    let mut response = String::new();
+                    stream.read_to_string(&mut response).unwrap();
+                    response
+                };
+                assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+                let seen = match &tls {
+                    Some(upstream) => upstream.last_request(),
+                    None => plain_seen.lock().unwrap().last().unwrap().clone(),
+                };
+                let forwarded = if index == 3 {
+                    "/other/mcp?tenant=one"
+                } else {
+                    "/edge/mcp?tenant=one"
+                };
+                assert!(
+                    seen.raw
+                        .starts_with(&format!("POST {forwarded} HTTP/1.1\r\n")),
+                    "{}",
+                    seen.raw
+                );
+                assert_eq!(seen.header("host"), Some(format!("{backend_host}:{port}")));
+                assert_eq!(
+                    seen.header("mcp-session-id").as_deref(),
+                    Some("route-session")
+                );
+            }
+            let requests = sources.requests.lock().unwrap();
+            let listed = &requests[index * 2];
+            let called = &requests[index * 2 + 1];
+            assert_eq!(listed.method, "tools/list");
+            assert_eq!(called.method, "tools/call");
+            assert_eq!(listed.source, called.source);
+            assert_eq!(sources.catalogs.lock().unwrap()[index], listed.source);
+            assert_eq!(listed.source.session.as_deref(), Some("route-session"));
+            for request in [listed, called] {
+                assert_eq!(request.host, host);
+                assert_eq!(
+                    request.port,
+                    if request_port == 80 {
+                        443
+                    } else {
+                        request_port
+                    }
+                );
+                assert_eq!(request.path, path.split_once('?').unwrap().0);
+                assert_eq!(request.intercepted, client_tls);
+            }
+            if index == 3 {
+                assert_ne!(
+                    listed.source, requests[0].source,
+                    "another forwarded path is a different source"
+                );
+            } else {
+                assert_eq!(
+                    listed.source, requests[0].source,
+                    "the same actual route shares one source across backend routing and upgrade"
+                );
+            }
+        }
+        assert_eq!(sources.requests.lock().unwrap().len(), 8);
+        assert_eq!(sources.catalogs.lock().unwrap().len(), 4);
+        if let Some(upstream) = tls {
+            assert_eq!(upstream.request_count(), 8);
+        }
+        if let Some(thread) = plain_thread {
+            thread.join().unwrap();
+            assert_eq!(plain_seen.lock().unwrap().len(), 8);
+        }
+    }
+}
+
+#[test]
+fn mcp_calls_stream_but_tools_list_waits_for_catalog_staging() {
+    use std::io::Read;
+    use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+
+    struct CatalogInterceptor {
+        effects: RecordingInterceptor,
+        staged: SyncSender<Vec<u8>>,
+        proceed: Mutex<Receiver<()>>,
+        endpoint: Mutex<Option<[u8; 32]>>,
+    }
+
+    impl EffectInterceptor for CatalogInterceptor {
+        fn intercept(&self, attempt: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>> {
+            if let EffectAttempt::HttpRequest {
+                mcp: Some(_),
+                mcp_source,
+                ..
+            } = attempt
+            {
+                let source = mcp_source.expect("the MCP request carries its source");
+                assert_eq!(source.session, Some("test-session"));
+                *self.endpoint.lock().unwrap() = Some(source.endpoint);
+            }
+            self.effects.intercept(attempt)
+        }
+
+        fn stage_mcp_catalog(
+            &self,
+            server: &str,
+            reply: egress_gateway::McpListReply<'_>,
+        ) -> io::Result<()> {
+            assert_eq!(server, "test-server");
+            assert_eq!(Some(reply.endpoint), *self.endpoint.lock().unwrap());
+            assert_eq!(reply.request_id, "1");
             assert_eq!(reply.session, Some("test-session"));
             assert_eq!(reply.cursor, Some("page-one"));
             self.staged.send(reply.body.to_vec()).unwrap();
@@ -1248,6 +1555,7 @@ fn mcp_calls_stream_but_tools_list_waits_for_catalog_staging() {
                 effects: RecordingInterceptor::allowing(shared.clone()),
                 staged: staged_tx,
                 proceed: Mutex::new(proceed_rx),
+                endpoint: Mutex::new(None),
             }),
         )
         .unwrap();
@@ -1869,6 +2177,7 @@ fn attempt_schema_never_carries_body_or_header_content() {
         body_bytes: 42,
         intercepted: true,
         mcp: None,
+        mcp_source: None,
     };
 
     let rendered = format!("{attempt:?}").to_ascii_lowercase();
@@ -1891,6 +2200,10 @@ fn attempt_schema_never_carries_body_or_header_content() {
                 server: "prod",
                 tool,
                 arguments: r#"{"password":"the-secret-value"}"#,
+            }),
+            mcp_source: Some(egress_gateway::McpSource {
+                endpoint: [7; 32],
+                session: Some("the-secret-value"),
             }),
         };
         let rendered = format!("{attempt:?}").to_ascii_lowercase();

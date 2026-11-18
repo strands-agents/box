@@ -74,13 +74,50 @@ pub(crate) struct DogwoodEngine {
     engine: Mutex<DurableTemporalEngine>,
     request_scope: Arc<()>,
     rule_ids: HashMap<PolicyToken, RuleId>,
-    request_schema: cedar_policy::Schema,
-    tool_actions: std::collections::HashSet<cedar_policy::EntityUid>,
-    tool_inputs: crate::mcp_input::ToolInputs,
+    request_schema: RequestSchema,
     /// Outcome events the history refused, recorded before the next decision.
     pending_outcomes: Mutex<Vec<EventBuilder>>,
     #[cfg(test)]
     fixed_clock: Option<Arc<AtomicI64>>,
+}
+
+/// The validated request gate and tool input/output types for one schema selection.
+#[derive(Debug)]
+pub(crate) struct RequestSchema {
+    cedar: cedar_policy::Schema,
+    tool_actions: std::collections::HashSet<cedar_policy::EntityUid>,
+    tool_inputs: Arc<crate::mcp_input::ToolInputs>,
+}
+
+impl From<ActionSchema> for RequestSchema {
+    fn from(schema: ActionSchema) -> Self {
+        Self {
+            cedar: schema.cedar,
+            tool_actions: schema.tool_actions,
+            tool_inputs: Arc::new(schema.tool_inputs),
+        }
+    }
+}
+
+impl RequestSchema {
+    pub(crate) fn declares_tool_action(&self, action: &cedar_policy::EntityUid) -> bool {
+        self.tool_actions.contains(action)
+    }
+
+    /// Retains the selected output schema and conformed input until the reply arrives.
+    pub(crate) fn pending_tool_response(
+        &self,
+        request_id: RequestId,
+        identity: ActionIdentity,
+        input: Value,
+    ) -> crate::PendingToolResponse {
+        crate::PendingToolResponse {
+            request_id,
+            identity,
+            input,
+            output_schema: Arc::clone(&self.tool_inputs),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -268,9 +305,7 @@ impl DogwoodEngine {
                 rule_ids: rule_ids(&engine),
                 engine: Mutex::new(engine),
                 request_scope: Arc::new(()),
-                request_schema: effective_schema.cedar,
-                tool_actions: effective_schema.tool_actions,
-                tool_inputs: effective_schema.tool_inputs,
+                request_schema: effective_schema.into(),
                 pending_outcomes: Mutex::new(Vec::new()),
                 #[cfg(test)]
                 fixed_clock: None,
@@ -284,12 +319,7 @@ impl DogwoodEngine {
         let effective_schema = action_schema(&[])?;
         let engine = open_history(history, durable_config())
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
-        Self::from_staging_engine(
-            engine,
-            effective_schema.cedar,
-            effective_schema.tool_actions,
-            effective_schema.tool_inputs,
-        )
+        Self::from_staging_engine(engine, effective_schema.into())
     }
 
     pub(crate) fn open_for_staging_file(
@@ -302,12 +332,7 @@ impl DogwoodEngine {
         drop(history);
         let engine = recover_history(log, label, durable_config(), SNAPSHOT_INTERVAL)
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
-        Self::from_staging_engine(
-            engine,
-            effective_schema.cedar,
-            effective_schema.tool_actions,
-            effective_schema.tool_inputs,
-        )
+        Self::from_staging_engine(engine, effective_schema.into())
     }
 
     #[cfg(test)]
@@ -319,19 +344,12 @@ impl DogwoodEngine {
         let config = durable_config().with_fault_injector(faults);
         let engine = open_history(history, config)
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
-        Self::from_staging_engine(
-            engine,
-            effective_schema.cedar,
-            effective_schema.tool_actions,
-            effective_schema.tool_inputs,
-        )
+        Self::from_staging_engine(engine, effective_schema.into())
     }
 
     fn from_staging_engine(
         engine: DurableTemporalEngine,
-        request_schema: cedar_policy::Schema,
-        tool_actions: std::collections::HashSet<cedar_policy::EntityUid>,
-        tool_inputs: crate::mcp_input::ToolInputs,
+        request_schema: RequestSchema,
     ) -> Result<Self, PolicyStagingError> {
         if engine.has_policy() && engine.event_schema().as_deref() != Some(EVENTS_DWSCHEMA) {
             return Err(PolicyStagingError::Durable(
@@ -344,8 +362,6 @@ impl DogwoodEngine {
             engine: Mutex::new(engine),
             request_scope: Arc::new(()),
             request_schema,
-            tool_actions,
-            tool_inputs,
             pending_outcomes: Mutex::new(Vec::new()),
             #[cfg(test)]
             fixed_clock: None,
@@ -353,7 +369,23 @@ impl DogwoodEngine {
     }
 
     pub(crate) fn declares_tool_action(&self, action: &cedar_policy::EntityUid) -> bool {
-        self.tool_actions.contains(action)
+        self.request_schema.declares_tool_action(action)
+    }
+
+    pub(crate) fn request_schema(&self) -> &RequestSchema {
+        &self.request_schema
+    }
+
+    /// Retain the request's schema until its reply arrives, even if another source is selected.
+    #[cfg(test)]
+    pub(crate) fn pending_tool_response(
+        &self,
+        request_id: RequestId,
+        identity: ActionIdentity,
+        input: Value,
+    ) -> crate::PendingToolResponse {
+        self.request_schema
+            .pending_tool_response(request_id, identity, input)
     }
 
     /// Record the `::response` of one per-tool `tools/call`, with its request's `input` and `output.reply`.
@@ -367,6 +399,7 @@ impl DogwoodEngine {
             request_id,
             identity,
             input,
+            output_schema,
         } = response;
         self.verify_request_id(&request_id)?;
         let mut output = vec![(attr::REPLY, Value::String(reply.eid().to_string()))];
@@ -376,7 +409,7 @@ impl DogwoodEngine {
             && let Some(projected) = identity
                 .cedar_uid()
                 .ok()
-                .and_then(|action| self.tool_inputs.project_output(&action, structured))
+                .and_then(|action| output_schema.project_output(&action, structured))
         {
             output.push((attr::STRUCTURED, json_value(&projected)));
         }
@@ -391,7 +424,7 @@ impl DogwoodEngine {
 
     /// A tool call's arguments with each union member placed in its declared `typeChoice` record.
     fn conformed_arguments(
-        &self,
+        request_schema: &RequestSchema,
         request: ActionRequest<'_>,
         identity: &ActionIdentity,
     ) -> Result<Option<serde_json::Value>, PolicyError> {
@@ -402,7 +435,9 @@ impl DogwoodEngine {
         else {
             return Ok(None);
         };
-        self.tool_inputs.conform(&identity.cedar_uid()?, arguments)
+        request_schema
+            .tool_inputs
+            .conform(&identity.cedar_uid()?, arguments)
     }
 
     /// Parse, lower, and strict-validate sources against canonical plus MCP schemas.
@@ -438,9 +473,7 @@ impl DogwoodEngine {
         reconcile_staged_policy_set(&mut engine, canonical_policies, installed_schema)?;
         self.rule_ids = rule_ids(&engine);
         drop(engine);
-        self.request_schema = request_schema.cedar;
-        self.tool_actions = request_schema.tool_actions;
-        self.tool_inputs = request_schema.tool_inputs;
+        self.request_schema = request_schema.into();
         Ok(())
     }
 
@@ -490,9 +523,7 @@ impl DogwoodEngine {
             rule_ids: rule_ids(&engine),
             engine: Mutex::new(engine),
             request_scope: Arc::new(()),
-            request_schema: effective_schema.cedar,
-            tool_actions: effective_schema.tool_actions,
-            tool_inputs: effective_schema.tool_inputs,
+            request_schema: effective_schema.into(),
             pending_outcomes: Mutex::new(Vec::new()),
             fixed_clock: None,
         })
@@ -534,9 +565,7 @@ impl DogwoodEngine {
             rule_ids: rule_ids(&engine),
             engine: Mutex::new(engine),
             request_scope: Arc::new(()),
-            request_schema: effective_schema.cedar,
-            tool_actions: effective_schema.tool_actions,
-            tool_inputs: effective_schema.tool_inputs,
+            request_schema: effective_schema.into(),
             pending_outcomes: Mutex::new(Vec::new()),
             fixed_clock: Some(now),
         })
@@ -577,6 +606,17 @@ impl DogwoodEngine {
         principal: &Principal,
         request: ActionRequest<'_>,
     ) -> (Decision, Option<RequestId>, Option<Value>) {
+        self.decide_recording_with_schema(governed, principal, request, &self.request_schema)
+    }
+
+    /// Records and decides through a selected request gate without changing the installed policy.
+    pub(crate) fn decide_recording_with_schema(
+        &self,
+        governed: &GovernedBox,
+        principal: &Principal,
+        request: ActionRequest<'_>,
+        request_schema: &RequestSchema,
+    ) -> (Decision, Option<RequestId>, Option<Value>) {
         let recorded = match self.pending_outcomes.lock() {
             Ok(mut pending) => self.submit_pending(&mut pending),
             Err(_) => Err("pending outcome lock poisoned".to_string()),
@@ -586,13 +626,14 @@ impl DogwoodEngine {
             return (Decision::internal_fault(), None, None);
         }
         let identity = request.identity();
-        let conformed_arguments = match self.conformed_arguments(request, &identity) {
-            Ok(arguments) => arguments,
-            Err(error) => {
-                eprintln!("policy: warn: {error}; denying");
-                return (Decision::internal_fault(), None, None);
-            }
-        };
+        let conformed_arguments =
+            match Self::conformed_arguments(request_schema, request, &identity) {
+                Ok(arguments) => arguments,
+                Err(error) => {
+                    eprintln!("policy: warn: {error}; denying");
+                    return (Decision::internal_fault(), None, None);
+                }
+            };
         let conformed = conformed_arguments
             .as_ref()
             .and_then(|arguments| with_arguments(request, arguments));
@@ -613,15 +654,18 @@ impl DogwoodEngine {
         // builds each request through a schema-bound gate rather than restating the
         // principal/action pairings.
         let gate = match request {
-            ActionRequest::Request(request) => {
-                crate::schema::to_cedar_request(principal, request, &identity, &self.request_schema)
-                    .map(|_| ())
-            }
+            ActionRequest::Request(request) => crate::schema::to_cedar_request(
+                principal,
+                request,
+                &identity,
+                &request_schema.cedar,
+            )
+            .map(|_| ()),
             ActionRequest::Grammar(request) => crate::schema::to_cedar_input_request(
                 principal,
                 &identity,
                 request.input(),
-                &self.request_schema,
+                &request_schema.cedar,
             )
             .map(|_| ()),
         };
@@ -3283,11 +3327,11 @@ when temporal { formerly within 1h ( desk::Action::"reset"::response{ input.user
         assert!(decision.is_allow());
         let (decision, request_id, input) = refine(&engine);
         assert!(decision.is_allow(), "the first reset is in budget");
-        let pending = crate::PendingToolResponse {
-            request_id: request_id.expect("a tool request id"),
-            identity: crate::schema::ActionIdentity::mcp_tool("desk", "reset"),
-            input: input.expect("the recorded input"),
-        };
+        let pending = engine.pending_tool_response(
+            request_id.expect("a tool request id"),
+            crate::schema::ActionIdentity::mcp_tool("desk", "reset"),
+            input.expect("the recorded input"),
+        );
 
         engine.advance_clock(-400);
         let coarse = engine.observe_outcome(

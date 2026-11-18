@@ -11,13 +11,14 @@ not rename during the freeze.
 
 ## Public Contract
 
-The façade exports 36 names (`src/lib.rs`): 31 unconditional, and 5 behind the default-on
+The façade exports 37 names (`src/lib.rs`): 32 unconditional, and 5 behind the default-on
 `tls-intercept` feature — `BackendDial`, `MitmConfig`, `MitmHandle`, `MitmInterceptor`,
 `ResponseLimits` — which stay behind it. `BackendDial` is a `MitmConfig.backends` entry, consumed by
 `strands-box`'s `run/hosted.rs`. `ReplyObserver` is exported for `policy`'s egress adapter, which
-records how an HTTP MCP tool call ended. `audit::Decision` exits as `AuditDecision`. `normalize_host`
-and `is_bindable_host` are the one host spelling, exported for `policy::spelling`, which refuses a
-host literal no bound host can equal. A 37th name needs a named external caller.
+records how an HTTP MCP tool call ended. `McpSource` is exported for that adapter to select the
+catalog for the actual upstream endpoint and protocol session. `audit::Decision` exits as
+`AuditDecision`. `normalize_host` and `is_bindable_host` are the one host spelling, exported for `policy::spelling`, which refuses a
+host literal no bound host can equal. A 38th name needs a named external caller.
 
 - Keep implementation modules private, re-export the supported surface from `src/lib.rs`, and keep
   `#![warn(missing_docs, unreachable_pub)]` enabled.
@@ -66,6 +67,9 @@ The gateway holds no destination deny list. A metadata or link-local address is 
   `Attachment::advisory_reason` onto `InterceptedRequest::advisory_note`, and the request leg
   journals it on the allow `EgressDecision` (destination, reason, correlation).
 - Keep secret-bearing headers and body content out of effect attempts.
+- Bind `McpSource` to the actual upstream scheme, host, and port, and the exact forwarded method,
+  path, and query after credentials and backend prefixes. Capture `Mcp-Session-Id` after request
+  header edits. Preserve logical policy routing and the workload-side `intercepted` value.
 - Keep audit values to routing, decision, reason, and correlation data.
 - Fail startup on duplicate per-pattern capabilities. There is no visibility check, because
   [no connection is opaque](../../docs/design/decisions.md#no-connection-is-opaque-to-the-boundary).
@@ -84,7 +88,7 @@ The capability modules carry no authority.
 
 Three divergences from `docs/conventions.md` are live, and none is license to rename:
 
-- No root noun: 36 exports, no single type reached by one verb, `Interceptor` a one-method port, and
+- No root noun: 37 exports, no single type reached by one verb, `Interceptor` a one-method port, and
   `MitmInterceptor::start` taking three arguments and returning `MitmHandle`.
 - A bare `Emitter` export; `credentials` demoted its same-named trait to `pub(crate)`.
 - `Mitm*` states the mechanism, and `ProxyError`'s "proxy" strings diverge from the crate name.

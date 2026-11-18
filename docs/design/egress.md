@@ -181,6 +181,9 @@ Matches across chunk boundaries are redacted before delivery.
 
 HTTP MCP `tools/list` keeps bounded capture for each page and the existing schema-staging order
 ([runtime tool discovery](decisions.md#remote-tool-schemas-are-discovered-at-runtime-in-memory)).
+The gateway attaches the actual request's source identity and identifier to each captured page.
+The policy hook matches the response and keeps its catalog separate from other addresses and MCP
+sessions. See [separate HTTP catalog sources](mcp-discovery.md#separate-http-catalog-sources).
 The default 16 MiB cap still applies to requests and these catalog responses.
 
 For an HTTP MCP `tools/call`, the gateway asks the server for an uncompressed reply, and copies the
