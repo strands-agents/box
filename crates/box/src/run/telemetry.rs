@@ -102,6 +102,9 @@ struct RemoteToolCall {
 thread_local! {
     /// How many permits this thread wrapped to observe a reply, for the tests that pin when.
     static OBSERVING_PERMITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many tool-call records this thread built, so a test can see that none was built for a
+    /// box whose targets take none.
+    static TOOL_CALLS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 thread_local! {
@@ -521,6 +524,9 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
             } => remote_mcp_decision(frame, refusal, &observations),
             _ => ordinary_egress_decision(&identity, refusal, &observations),
         };
+        // Copy a call's arguments only when some target takes tool-call records, so a box whose
+        // targets take none does no work for them on the enforcement path.
+        let wants_tool_calls = self.recorder.wants_tool_calls();
         let tool_call = match effect {
             EgressEffectAttempt::HttpRequest {
                 mcp:
@@ -530,7 +536,7 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
                         arguments,
                     }),
                 ..
-            } => Some(RemoteToolCall {
+            } if wants_tool_calls => Some(RemoteToolCall {
                 server: (*server).to_string(),
                 tool: (*tool).to_string(),
                 arguments: (*arguments).to_string(),
@@ -542,7 +548,7 @@ impl EgressEffectInterceptor for EgressDecisionInterceptor {
         // Only when some target takes tool-call records: the copy counts against the gateway's
         // shared budget, so reading a reply nobody records would cost the policy's own reads.
         let result = match (result, &tool_call) {
-            (Ok(permit), Some(call)) if self.recorder.wants_tool_calls() => {
+            (Ok(permit), Some(call)) => {
                 #[cfg(test)]
                 OBSERVING_PERMITS.with(|count| count.set(count.get() + 1));
                 Ok(Box::new(ObservingPermit {
@@ -869,6 +875,11 @@ impl DecisionRecorder {
     ///
     /// Text that does not parse records no field, since a target can name no path in it.
     pub(crate) fn tool_called(&self, server: &str, tool: &str, arguments: &str) {
+        if !self.wants_tool_calls() {
+            return;
+        }
+        #[cfg(test)]
+        TOOL_CALLS_BUILT.with(|count| count.set(count.get() + 1));
         if let Some(collector) = &self.collector {
             let arguments = serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
             collector.tool_call(
@@ -886,6 +897,11 @@ impl DecisionRecorder {
         reply: &str,
         output: Option<&serde_json::Value>,
     ) {
+        if !self.wants_tool_calls() {
+            return;
+        }
+        #[cfg(test)]
+        TOOL_CALLS_BUILT.with(|count| count.set(count.get() + 1));
         if let Some(collector) = &self.collector {
             collector.tool_call(
                 telemetry::ToolCall::completed(server, tool, reply, output)
@@ -1794,6 +1810,48 @@ mod tests {
             1,
             "a target takes tool calls, so the call is wrapped"
         );
+    }
+
+    /// With no target taking tool calls, the box builds no tool-call record: neither a call nor a
+    /// completion, and over http it copies no call's arguments.
+    #[tokio::test]
+    async fn no_tool_call_record_is_built_when_no_target_takes_tool_calls() {
+        let built = |recorder: &Arc<DecisionRecorder>| {
+            let before = TOOL_CALLS_BUILT.with(std::cell::Cell::get);
+            recorder.tool_called("demo", "add", r#"{"a":1}"#);
+            recorder.tool_completed(
+                "demo",
+                "add",
+                "result",
+                Some(&serde_json::json!({"sum": 1})),
+            );
+            TOOL_CALLS_BUILT.with(std::cell::Cell::get) - before
+        };
+        let (_none, nobody) = tool_call_recorder(None);
+        assert_eq!(
+            built(&nobody),
+            0,
+            "nobody takes tool calls, so nothing is built"
+        );
+        let directory = tempfile::tempdir().expect("tempdir");
+        let (_some, somebody) = tool_call_recorder(Some(&directory.path().join("t.jsonl")));
+        assert_eq!(
+            built(&somebody),
+            2,
+            "a target takes tool calls, so both are built"
+        );
+
+        // Over http, the call's arguments are not copied for a box whose targets take none.
+        EgressDecisionInterceptor::over(Arc::new(ObservedProbe), nobody)
+            .intercept(&remote_tool_attempt(r#"{"a":1}"#))
+            .expect("the call is admitted");
+        let copied = PENDING_EGRESS_DECISION.with(|pending| {
+            pending
+                .borrow()
+                .as_ref()
+                .is_some_and(|pending| pending.tool_call.is_some())
+        });
+        assert!(!copied, "no tool call is held for a box that records none");
     }
 
     /// With a target taking tool calls, the box reads the reply even when the policy does not,
