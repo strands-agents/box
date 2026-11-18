@@ -307,7 +307,6 @@ that `forbid` and the per-tool action. The agent gets each refusal as an MCP err
 | `MCP command matches multiple servers` | No exact entry matched, and more than one wildcard entry matched the received command. The launch is refused. |
 | The harness shows the server with zero tools | A rule refuses `tools/list` for the server. |
 | `the MCP tool catalog is not accepted` | The agent called a tool before the server's `tools/list` succeeded. |
-| `arguments "<a>" and "<b>" of tool "<tool>" normalize to the same Cedar identifier` | Two arguments of one tool, or of one object in its arguments, differ only in characters that a plain name can't hold, such as `zone-id` and `zone_id`. Box can't generate the server's schema, so the catalog isn't accepted. The server must rename one of them. |
 | `the tool is not in the accepted MCP catalog` | The server's `tools/list` does not name the tool, spelled exactly. |
 | A refusal that says `[default-deny]` | No `mcp:call` permit names the server. |
 | A refusal that says `[default-deny]`, and the startup warning `a per-tool rule never loaded` printed | Box cannot enforce a per-tool rule and refuses the calls it can identify. See [When a rule cannot load](#when-a-rule-cannot-load) for causes and fixes. |

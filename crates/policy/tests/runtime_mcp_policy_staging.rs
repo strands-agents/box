@@ -1703,6 +1703,85 @@ permit(principal, action == zones::Action::"list-records", resource);
 }
 
 #[test]
+fn two_arguments_that_normalize_alike_are_decided_apart() {
+    let history = tempfile::tempdir().expect("history directory");
+    let authority = staged(
+        vec![source(
+            "staged.dw",
+            r#"
+permit(principal, action == Box::Action::"mcp:call", resource)
+when { context.input.server == "zones" };
+forbid(principal, action == zones::Action::"list_records", resource)
+when { context.input has zone_id && context.input.zone_id == "private" };
+permit(principal, action == zones::Action::"list_records", resource);
+"#,
+        )],
+        &history.path().join("dogwood.redb"),
+    );
+    let tools = json!({
+        "result": {
+            "tools": [{
+                "name": "list_records",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "zone-id": {"type": "string"},
+                        "zone_id": {"type": "string"}
+                    }
+                }
+            }]
+        }
+    });
+    assert_eq!(
+        authority
+            .stage_mcp_schema(
+                "zones",
+                generate_mcp_schema("zones", &tools.to_string()).expect("the schema generates"),
+            )
+            .expect("the schema stages"),
+        SchemaStage::Accepted {
+            authority_ready: true,
+        }
+    );
+    assert!(
+        authority
+            .finish_mcp_discovery()
+            .expect("discovery completes")
+            .is_empty()
+    );
+
+    let decide = |arguments: serde_json::Value| {
+        authority
+            .refine_tool_call(
+                &GovernedBox::assigned("test-box"),
+                &Principal::agent(),
+                "zones",
+                "list_records",
+                &arguments,
+            )
+            .0
+    };
+    assert!(
+        matches!(
+            decide(json!({"zone_id": "private"})),
+            Decision::Deny {
+                reason: DenyReason::Forbidden,
+                ..
+            }
+        ),
+        "the forbid reads zone_id"
+    );
+    assert!(
+        decide(json!({"zone-id": "private"})).is_allow(),
+        "zone-id is another argument, which the forbid does not name"
+    );
+    assert!(
+        !decide(json!({"zone_id_2": "private"})).is_allow(),
+        "the identifier Box generates for zone-id is not an argument of the tool"
+    );
+}
+
+#[test]
 fn a_union_argument_is_decided_by_the_policy() {
     let history = tempfile::tempdir().expect("history directory");
     let authority = staged(
