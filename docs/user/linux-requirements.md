@@ -1,36 +1,41 @@
 # Linux requirements
 
-Box needs compatible executables and libraries, plus permission to create its Linux sandboxes.
+Box needs executables that can load on your Linux system and permission to create its sandbox.
+Here, workload means the program you configure Box to run.
 These requirements apply when you run Box directly on Linux, in a virtual machine, or inside a container.
-Check them under the same operating system identity and container settings that will start Box.
+Check them using the Linux user account and container settings that will start Box.
 
 ## Builds and architectures
 
-Linux release binaries use Amazon Linux 2023 as their build baseline.
-Another distribution must provide the libraries and setup permissions below; its name alone does not establish compatibility.
+Linux release executables are built on Amazon Linux 2023.
+Other distributions must provide the libraries and permissions below. Check them on the distribution you intend to use.
 Box does not specify a minimum kernel version. Check the required operations and your actual workload.
 
-ARM64 is supported. Linux x86-64 is experimental and requires the
-[`EXPERIMENTAL_X86_SUPPORT=TRUE` startup opt-in](./getting-started.md#linux).
+ARM64 (64-bit Arm) is supported. Linux x86-64 is experimental.
+To start a sandbox on x86-64, [set Box's `EXPERIMENTAL_X86_SUPPORT` environment variable to `TRUE`](./getting-started.md#linux).
 A release may omit an architecture. Check its archive and checksum before downloading, or
 [build from source](./getting-started.md#build-from-source).
 The [tested configurations](#tested-configurations) below record specific checks, not a promise about every distribution or container runtime.
 
 ## Requirements
 
+Linux release packages contain three executables: `box`, `strands-box-contain-trampoline`, and `strands-box-sock-alias`.
+The latter two are helper programs used by Box. An executable's loader loads the shared libraries it needs.
+
 A namespace gives a process a separate view of resources such as process IDs, mounts, or networking.
-A Linux capability grants a specific privilege. A seccomp filter restricts the system calls a process can use.
-Box must be able to create its namespaces, then remove setup privileges and install its workload restrictions.
+A Linux capability grants a specific privilege. A system call is a request from a program to the kernel.
+A seccomp filter restricts the system calls a process can use.
+Before starting the workload, Box must create its namespaces, remove setup privileges, and install the workload restrictions.
 
 | Requirement | Required value or operation | How to check | What failure means |
 | --- | --- | --- | --- |
 | Architecture | A matching ARM64 or experimental x86-64 build for Box and the workload. | Run `uname -m`; expect `aarch64` or `x86_64`, matching the archive. | A mismatched executable cannot start natively. |
 | GNU C library (glibc) and loader | For release binaries, glibc 2.34 or newer and the matching loader. | Follow [Check the installed binaries](#check-the-installed-binaries). | The main executable or a helper cannot load. |
 | GCC runtime library | `libgcc_s.so.1` for the executable's architecture. | Check that `ldd` resolves every library for all three executables. | An executable with a missing library cannot load. |
-| Namespaces | User, mount, process, interprocess communication, and hostname namespaces; a network namespace for default networking. | [Start the intended workload](#check-sandbox-startup) under its deployment identity. | Box cannot create the sandbox and does not start the workload. |
-| Identity and mounts | Identity mapping, bind mounts, private temporary filesystems, a process filesystem at `/proc`, and root replacement. | Check sandbox startup inside the actual runtime or container. | Box cannot construct the workload's filesystem and process view. |
-| Workload restrictions | Capability removal, `no_new_privs` to prevent privilege gains on execution, and seccomp filter installation. | Check sandbox startup; inspect any setup error. | Box refuses to start without the required restrictions. |
-| Box executables | Keep all three executables from the same build together on storage that allows execution. Helpers must be regular executable files. | Check file permissions and storage mounts. | Box refuses helper symlinks and helpers without execution permission. |
+| Namespaces | User, mount, process, interprocess communication, and hostname namespaces; a network namespace for default networking. | [Start the intended workload](#check-sandbox-startup) using the Linux user account that will run Box. | Box cannot create the sandbox and does not start the workload. |
+| User IDs and file system setup | Map user and group IDs into the sandbox. Expose files with bind mounts, create private temporary file systems, mount process information at `/proc`, and replace the sandbox's file system root. | Check sandbox startup in the service or container that will run Box. | Box cannot prepare the sandbox and does not start the workload. |
+| Workload restrictions | Capability removal, `no_new_privs` to prevent privilege gains on execution, and seccomp filter installation. | Check sandbox startup; inspect any setup error. | Box does not start the workload without the required restrictions. |
+| Box executables | Keep all three executables from the same build together on storage that allows execution. Helpers must be regular executable files. | Check file permissions and storage mounts. | Box cannot use a helper that is a symbolic link or lacks execution permission. |
 | Private storage | Writable temporary storage and separate directories for Box state and task workspaces. | Check [state-directory ownership and permissions](./config.md#keys), temporary storage, and workspace permissions. Keep Box state outside paths the workload can write. | Box cannot prepare its private state or workspace. |
 | System interfaces | `/dev/urandom`, `/dev/null`, process and identity information in `/proc`, and Unix-domain sockets for local communication. | Check sandbox startup and the workload's required operations. | Setup or local communication fails. |
 | Application dependencies | The workload's interpreters, libraries, certificates, and tools, with access permitted by `box.toml`. | Run the workload and its tools inside Box. | Box can start while an application operation still fails. |
@@ -42,8 +47,7 @@ Installing packages cannot override an operating system or container permission 
 
 First [download Box and verify its release checksum](./getting-started.md#step-1-download-box).
 The commands here use the guide's `./box-core` directory.
-Release packages contain `box`, `strands-box-contain-trampoline`, and `strands-box-sock-alias`.
-An unrenamed source build calls the main executable `strands-box`.
+By default, a source build names the main executable `strands-box`.
 
 Record the architecture, kernel, and C library separately:
 
@@ -57,7 +61,7 @@ getconf GNU_LIBC_VERSION
 `uname -r` identifies the kernel being tested; it does not establish that sandbox setup is permitted.
 In a container, the Linux machine or virtual machine supplies the kernel, while the image supplies the libraries.
 
-Check library resolution for each executable:
+Check that the system can find each executable's required libraries:
 
 ```sh
 ldd ./box-core/box
@@ -75,41 +79,46 @@ This checks that the main executable loads. It does not create a sandbox or test
 
 ## Check sandbox startup
 
-Run Box with the configuration and operating system identity you intend to deploy.
+Run Box with the configuration and Linux user account you intend to use.
 Use `box run --config` with your configuration file, as shown in the
 [Linux installation instructions](./getting-started.md#linux) and [configuration reference](./config.md).
-On x86-64, set the experimental startup opt-in first.
+On x86-64, set `EXPERIMENTAL_X86_SUPPORT=TRUE` first.
 
-Check that the workload starts, performs a permitted operation, and cannot perform a file operation outside its configured access.
-A version check or a standalone user-namespace probe does not test Box's complete setup.
-A probe can also run under a different executable-specific security policy from Box's launcher.
+After the configured program starts inside Box, use that program to check its access. Use disposable files for these checks.
+
+1. Perform an operation that the configuration permits and check its output or file change.
+2. Attempt a file operation outside the program's configured access and check that the operation fails.
+3. Check outside Box that files protected from writes retain their original contents.
+
+A version check or a separate test of user namespace creation does not test Box's complete setup.
+The operating system can also apply different security rules to a diagnostic program and Box's launcher.
 For deployment checks that include cancellation, timeouts, and cleanup, use
 [Check the deployment](./cloud-deployments.md#check-the-deployment).
 
 ## Operating system and container permissions
 
 AppArmor profiles restrict what a Linux program may do.
-Where the operating system restricts unprivileged user namespaces, its policy must permit Box's
-`strands-box-contain-trampoline` launcher to create them.
+The operating system may restrict user namespace creation by accounts without administrator privileges.
+Its policy must permit Box's `strands-box-contain-trampoline` launcher to create those namespaces.
 A permission for an unrelated diagnostic program does not establish that Box has that permission.
 
 When Box runs inside a container, the container's own seccomp and AppArmor policies apply before Box installs its restrictions.
-They must permit namespace and filesystem setup, including `unshare`, `mount`, `umount2`, and `pivot_root`.
-Container rules that hide paths under `/proc` or mount them read-only can also prevent Box from mounting its own process filesystem.
+They must permit the system calls Box uses to create its namespaces and file system, including `unshare`, `mount`, `umount2`, and `pivot_root`.
+Container rules that hide paths under `/proc` or mount them read-only can also prevent Box from mounting its own process file system.
 Check these restrictions inside the deployed container, not only in its image definition.
 Box's workload policy does not grant these operating system permissions.
-The [Amazon EKS example's container settings](./tutorials/eks.md#cluster-baseline) show one tested configuration.
+The [Amazon Elastic Kubernetes Service (Amazon EKS) example's container settings](./tutorials/eks.md#cluster-baseline) show one tested configuration.
 Those settings are not minimum permissions for every container runtime.
 
 Use the failed setup operation to identify what needs configuration:
 
 | Error fragment | What failed | What to check |
 | --- | --- | --- |
-| `cannot run the Linux package` | The downloader could not execute the staged main binary. | Read the preceding loader error. Check architecture, libraries, and execution permission on the installation filesystem. |
-| `this identity may not create a user namespace` | The namespace availability check failed. | Check operating system namespace policy and the container's system-call filter under the intended identity. |
+| `cannot run the Linux package` | Box's download script could not run the downloaded main executable. | Read the preceding loader error. Check architecture, libraries, and execution permission on the file system where you installed Box. |
+| `this identity may not create a user namespace` | The user account running the check could not create a user namespace. | Check operating system namespace policy and the container's system-call filter using the Linux user account that will run Box. |
 | `denying setgroups`, `writing the UID map`, or `writing the GID map` | Box could not prepare user and group ID mappings. | Check the launcher's namespace permission and access to the new namespace's identity files in `/proc`. |
-| `mounting a fresh proc at` | Box could not mount its process filesystem. | Check mount permissions and outer masked or read-only `/proc` mounts. These restrictions were one cause in the container test below. |
-| `installing the namespace permit filter` | Box could not install a required system-call filter. | Check kernel filter support and restrictions imposed by the outer runtime. |
+| `mounting a fresh proc at` | Box could not mount the file system that provides process information. | Check mount permissions and the container's hidden or read-only `/proc` paths. These restrictions were one cause in the container test below. |
+| `installing the namespace permit filter` | Box could not install a required system-call filter. | Check kernel filter support and restrictions imposed by the service or container running Box. |
 
 `EPERM` means an operation was not permitted; it does not identify which policy layer refused it.
 Check the surrounding operating system or container diagnostics before changing a permission.
@@ -125,17 +134,19 @@ Each record identifies the configuration and checks that passed. Repeat the chec
 
 ### Ubuntu and Colima compatibility checks
 
-The following compatibility checks used Box v0.2.3 without changes to its binaries.
+The following compatibility checks used Box v0.2.3 without changes to its executables.
 This table summarizes observed results; it does not provide a complete setup procedure or test harness.
 Both configurations used the same Ubuntu 24.04.4 ARM64 virtual machine, Linux `6.8.0-117-generic`,
-and Colima `0.10.3`. Colima provides the Linux virtual machine on the Mac used for these checks.
+and Colima `0.10.3`. Colima manages the Linux virtual machine on the Mac used for these checks.
 
 | Execution environment | Configuration needed for startup | Observed result |
 | --- | --- | --- |
-| Directly in the Ubuntu virtual machine | An executable-specific AppArmor permission for Box's launcher to create user namespaces. | Startup, Bash, the host OS's Python, file access controls, and isolation between consecutive runs passed. |
-| Ubuntu 24.04 ARM64 container using Docker `29.5.2` in the same virtual machine | Adjusted Docker's system-call filter, AppArmor profile, and system-path restrictions to permit Box's setup operations. AppArmor remained enforced, with restrictions on setup-call arguments and mount destinations. | The same checks passed without privileged mode or added container capabilities. |
+| Directly in the Ubuntu virtual machine | An executable-specific AppArmor permission for Box's launcher to create user namespaces. | Startup, Bash, Ubuntu's Python, and the file access checks described below passed. |
+| Ubuntu 24.04 ARM64 container using Docker `29.5.2` in the same virtual machine | Adjusted Docker's system-call filter, AppArmor profile, and system-path restrictions to permit Box's setup operations. AppArmor remained enforced. The adjusted security profiles restricted system-call arguments and mount destinations. | The same checks passed without privileged mode or added container capabilities. |
 
-Both default configurations refused sandbox startup. The configured runs allowed granted file operations,
-refused private reads and writes to read-only paths, and left the original files unchanged.
+Box could not start a sandbox with the default Ubuntu or Docker configuration.
+The configured runs read and wrote permitted test files. Reads from the ungranted test files and writes to the read-only test files failed.
+Checks outside Box confirmed that those protected files retained their original contents.
+A later run without a grant to an earlier run's output file could not read that file.
 These checks did not cover Claude, Codex, interactive sessions, networking, long-running workloads, or other kernels.
 They establish compatibility for the listed configurations, not a minimum kernel version or a complete deployment test.

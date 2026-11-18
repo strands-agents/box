@@ -45,7 +45,7 @@ Rules:
 
 Box supports macOS on Apple silicon and Linux ARM64 (64-bit Arm). Linux x86-64 is experimental.
 Check the [macOS requirements](./macos-requirements.md) for the release package, workload dependencies, and startup checks.
-Linux binaries use Amazon Linux 2023 as their build baseline. Check the [Linux requirements](./linux-requirements.md) for compatible libraries, setup permissions, and tested configurations.
+Linux release executables are built on Amazon Linux 2023. Check the [Linux requirements](./linux-requirements.md) for required libraries, permissions to create the sandbox, and tested configurations.
 [Step 1](#step-1-download-box) installs Box on either platform.
 The Strands CLI walkthrough in steps 2–8 uses macOS. For that walkthrough, you need:
 

@@ -264,7 +264,7 @@
       "source": "docs/user/linux-requirements.md",
       "slug": "reference/linux-requirements",
       "title": "Linux requirements",
-      "description": "Check Linux libraries, sandbox setup permissions, startup errors, and tested configurations.",
+      "description": "Check Linux libraries, permissions to create the sandbox, startup errors, and tested configurations.",
       "nav": {
         "group": "Reference",
         "order": 6
@@ -275,7 +275,7 @@
       "source": "docs/user/macos-requirements.md",
       "slug": "reference/macos-requirements",
       "title": "macOS requirements",
-      "description": "Check the macOS release package, workload dependencies, sandbox startup, and optional native filesystem policy prerequisites.",
+      "description": "Check the macOS release package, program dependencies, sandbox startup, and requirements for optional native filesystem policy.",
       "nav": {
         "group": "Reference",
         "order": 7
