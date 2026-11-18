@@ -2623,12 +2623,12 @@ settings written out.
 ### Every box records by default, to a file the workload cannot reach
 
 An absent `telemetry` key means one `file` target that takes every signal but tool calls: every
-effective denial and permit, the box's own control-plane records and MCP routing diagnostics, and the
-harness's relayed spans, logs, and metrics.
-A box that makes a thousand decisions without recording any cannot be audited. The default provides
-those records even when the operator has configured nothing. The file sits in the box's own private
-tree, which a deny-only floor refuses to the workload whatever a permit says. A declared target
-replaces the default instead of adding to it. The file has no size bound or rotation.
+effective denial and permit, the box's own control-plane records and MCP routing diagnostics, and
+the harness's relayed spans, logs, and metrics. A box that makes a thousand decisions without
+recording any cannot be audited. The default provides those records even when the operator has
+configured nothing. The file sits in the box's own private tree, which a deny-only floor refuses to
+the workload whatever a permit says. A declared target replaces the default instead of adding to it.
+The file has no size bound or rotation.
 
 <a id="a-target-names-a-set-of-signals"></a>
 ### A target names a set of signals, an absent list takes every signal but tool calls, and `accepts` narrows by payload
@@ -2638,34 +2638,36 @@ replaces the default instead of adding to it. The file has no size bound or rota
 agent's relayed log records and the box's unmatched MCP routing diagnostics. `metrics` names the
 agent's relayed metric records. `tool_calls` names each MCP tool call and how it ended. A target
 names a set, with no ordering, and no signal contains another. A target that names no `include`
-receives every signal except `tool_calls`, which `an_absent_include_takes_every_signal_but_tool_calls`
-pins; see [tool-call values reach only a target that asks for
-them](#tool-call-values-reach-only-a-target-that-asks-for-them). An empty list, a repeated word, and a
-misspelled word are each refused before the box exists. The agent's log records and metrics reach
-every target whatever `include` names. `accepts` on an `otlp` target is a second filter, by OTLP
-payload and not by signal: the exporter sends no `traces`, `logs`, or `metrics` batch that the list
-leaves out, which `a_traces_only_target_is_sent_no_other_payload` pins. Each vendor kind stores one
-payload, so a Langfuse target receives no log or metric batch, because Langfuse answers `404` on those
-routes and each batch would count as a loss. The cost is that an operator who reads only `include` can
-expect a log record that an `accepts` list keeps out. The box relays harness signals without
-producing them. The harness's exporter settings determine whether those records exist.
+receives every signal except `tool_calls`, which
+`an_absent_include_takes_every_signal_but_tool_calls` pins; see [tool-call values reach only a
+target that asks for them](#tool-call-values-reach-only-a-target-that-asks-for-them). An empty list,
+a repeated word, and a misspelled word are each refused before the box exists. The agent's log
+records and metrics reach every target whatever `include` names. `accepts` on an `otlp` target is a
+second filter, by OTLP payload and not by signal: the exporter sends no `traces`, `logs`, or
+`metrics` batch that the list leaves out, which `a_traces_only_target_is_sent_no_other_payload`
+pins. Each vendor kind stores one payload, so a Langfuse target receives no log or metric batch,
+because Langfuse answers `404` on those routes and each batch would count as a loss. The cost is
+that an operator who reads only `include` can expect a log record that an `accepts` list keeps out.
+The box relays harness signals without producing them. The harness's exporter settings determine
+whether those records exist.
 
 <a id="tool-call-values-reach-only-a-target-that-asks-for-them"></a>
 ### Tool-call values reach only a target that asks for them, in clear text
 
 A policy author, or a tool that drafts policy from the decision log, learns rules from what an
-agent's tool calls carried and how they ended. So the box records each MCP tool call's arguments when
-the call is decided, and how it ended with its `structuredContent` when it ends, on stdio and http
-alike. These values are what the agent and the server chose, so either can hold a secret, and a
+agent's tool calls carried and how they ended. So the box records each MCP tool call's arguments
+when the call is decided, and how it ended with its `structuredContent` when it ends, on stdio and
+http alike. These values are what the agent and the server chose, so either can hold a secret, and a
 target can be a vendor's endpoint.
 
 The values go on a `strands-box.tool` log record, never on a decision or its span, as maps of
 flattened fields in clear text. Only a target that names `tool_calls` in its `include` receives that
-record. A target with no `include`, including the box's own default file, doesn't, and at startup Box
-prints one stderr line for each target that does. Naming the word is the operator's choice of who may
-read every argument and output. The record is a log and never a span, so a target that accepts no
-logs, such as a Langfuse target, can't name the word (`tool_calls_need_a_target_that_accepts_logs`).
-Keys arrive as the tool wrote them. `only_a_target_naming_tool_calls_receives_them_in_clear_text` and
+record. A target with no `include`, including the box's own default file, doesn't, and at startup
+Box prints one stderr line for each target that does. Naming the word is the operator's choice of
+who may read every argument and output. The record is a log and never a span, so a target that
+accepts no logs, such as a Langfuse target, can't name the word
+(`tool_calls_need_a_target_that_accepts_logs`). Keys arrive as the tool wrote them.
+`only_a_target_naming_tool_calls_receives_them_in_clear_text` and
 `startup_discloses_each_telemetry_target_that_takes_tool_calls` pin both halves.
 
 This follows managed MCP gateways, which log each `tools/call` request and response body whole to
@@ -2673,12 +2675,12 @@ the customer's own log store and leave access to its permissions. Box can't assu
 operator's own, so the opt-in is per target, absent by default, and disclosed.
 
 The cost is that a target naming `tool_calls` receives any secret a tool takes or returns. Over http
-it also makes Box read every tool reply, and those copies share the gateway's budget with the replies
-per-tool rules read, so under many concurrent large replies a rule's read can be abandoned and record
-`indeterminate`, which fails closed. `a_reply_is_read_when_a_target_takes_tool_calls` pins the read.
-A call refused before the per-tool check, by `mcp:call` or because the tool isn't listed, is recorded
-too, because it shows what the agent tried. Values keep their JSON type, so `true` and `"true"` stay
-apart.
+it also makes Box read every tool reply, and those copies share the gateway's budget with the
+replies per-tool rules read, so under many concurrent large replies a rule's read can be abandoned
+and record `indeterminate`, which fails closed. `a_reply_is_read_when_a_target_takes_tool_calls`
+pins the read. A call refused before the per-tool check, by `mcp:call` or because the tool isn't
+listed, is recorded too, because it shows what the agent tried. Values keep their JSON type, so
+`true` and `"true"` stay apart.
 
 Rejected:
 
@@ -2769,8 +2771,8 @@ bounds their size, and validates before it retains anything. Tool arguments, pro
 headers, and arbitrary baggage are excluded from correlation context, and a caller-supplied
 identifier is never evidence of caller identity. A tool call's arguments are recorded only on its
 own record, and reach only a target that names `tool_calls`; see [tool-call values reach only a
-target that asks for them](#tool-call-values-reach-only-a-target-that-asks-for-them). Roughly half of all decisions arrive unparented and join by `strands.box.run.id`
-alone.
+target that asks for them](#tool-call-values-reach-only-a-target-that-asks-for-them). Roughly half
+of all decisions arrive unparented and join by `strands.box.run.id` alone.
 
 <a id="the-policy-attribute-names-are-this-products-own"></a>
 ### The policy attribute names are this product's own, and the set is fixed

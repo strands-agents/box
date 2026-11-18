@@ -31,13 +31,13 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 
 - The lifecycle is `PolicyEngine::open` → `decide` → `record` → `effective`.
   `PolicyEngine::validate` and `PolicyEngine::check` sit off it and return no authority.
-- The root `pub use` set is the whole API: `EgressPolicyInterceptor`, `ReplyReader`, `RenameDestination`,
-  `ScriptPermit`, `ScriptPolicyInterceptor`, `ScriptRefusal`, `ShellPolicyInterceptor`,
-  `CatalogRefusal`, `CatalogStage`, `CompleteCatalog`, `DiscoveryFailure`, `ListPage`,
-  `MAXIMUM_LIST_BYTES`, `MAXIMUM_LIST_PAGES`, `McpServerKind`, `ServerDiscovery`, `ToolCatalogs`,
-  `Finding`, `Location`, `PolicyCheck`, `RuleRef`, `Decision`, `DenyReason`, `PolicyAttribution`,
-  `RuleId`, `event_schema_source`, `PolicyDiagnostic`, `PolicyError`, `PolicyStagingError`,
-  `McpSchemaError`, `compose_action_schema`, `generate_mcp_schema`,
+- The root `pub use` set is the whole API: `EgressPolicyInterceptor`, `ReplyReader`,
+  `RenameDestination`, `ScriptPermit`, `ScriptPolicyInterceptor`, `ScriptRefusal`,
+  `ShellPolicyInterceptor`, `CatalogRefusal`, `CatalogStage`, `CompleteCatalog`, `DiscoveryFailure`,
+  `ListPage`, `MAXIMUM_LIST_BYTES`, `MAXIMUM_LIST_PAGES`, `McpServerKind`, `ServerDiscovery`,
+  `ToolCatalogs`, `Finding`, `Location`, `PolicyCheck`, `RuleRef`, `Decision`, `DenyReason`,
+  `PolicyAttribution`, `RuleId`, `event_schema_source`, `PolicyDiagnostic`, `PolicyError`,
+  `PolicyStagingError`, `McpSchemaError`, `compose_action_schema`, `generate_mcp_schema`,
   `validate_mcp_schema_composition`, `DecisionObserver`, `Delivery`, `FsResult`, `McpReply`,
   `Outcome`, `PendingToolResponse`, `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`,
   `EffectivePolicy`, `Policy`, `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`,

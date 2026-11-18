@@ -3,8 +3,9 @@
 //! A declared target REPLACES the box's default destination, so this module owns both halves — what
 //! an operator may write, and the collector request a run builds from what was stored.
 //!
-//! An absent `include` means every signal, so a target receives the harness's own spans, logs and
-//! metrics without naming one. The six words below are how an operator narrows that.
+//! An absent `include` means every signal except `tool_calls`, so a target receives the harness's own
+//! spans, logs and metrics without naming one, and a tool call's values only when it names the word.
+//! The six words below are how an operator narrows or extends that.
 //!
 //! The `telemetry` crate's own items are imported by name rather than qualified, because this module
 //! shares its spelling and `telemetry::Signal` would read as `self::Signal`.

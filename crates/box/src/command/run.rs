@@ -206,7 +206,6 @@ fn write_left_out_tools(
     Ok(())
 }
 
-/// One line for each bare name a `[tool]` answers to in the hosted Shell, and the file it runs.
 /// Disclose each telemetry target that receives MCP tool-call values in clear text.
 fn write_tool_call_disclosures(
     record: &Record,
@@ -226,6 +225,7 @@ fn write_tool_call_disclosures(
     Ok(())
 }
 
+/// One line for each bare name a `[tool]` answers to in the hosted Shell, and the file it runs.
 fn write_bare_name_disclosures(
     names: &crate::run::commands::BareNames,
     mut output: impl std::io::Write,

@@ -192,19 +192,19 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   `box.toml` takes six words: `deny`, `permit`, `trace`, `logs`, `metrics`, and `tool_calls`. Box
   expands them.
 - **A tool call carries its values in clear text, so it reaches only a target that names
-  `tool_calls`.** `Signal::default_signals` is every signal except `ToolCalls`, and both `Target::new`
-  and `Target::opened_file` start from it, so neither a target with no `include` nor the box's
-  default file receives one. `only_a_target_naming_tool_calls_receives_them_in_clear_text` (two
-  unnamed targets beside a named one, one of them opened) and
+  `tool_calls`.** `Signal::default_signals` is every signal except `ToolCalls`, and both
+  `Target::new` and `Target::opened_file` start from it, so neither a target with no `include` nor
+  the box's default file receives one. `only_a_target_naming_tool_calls_receives_them_in_clear_text`
+  (two unnamed targets beside a named one, one of them opened) and
   `the_default_set_is_every_signal_but_tool_calls` are the pins; both fail when the filter in
   `default_signals` is removed. Two designs came before this one and were withdrawn. A per-tool,
-  per-field `tool_fields` list redacted every other value in the exporter; operators rarely wrote the
-  MCP servers they run, so they could not choose the fields, and each list went stale. Its first
+  per-field `tool_fields` list redacted every other value in the exporter; operators rarely wrote
+  the MCP servers they run, so they could not choose the fields, and each list went stale. Its first
   version kept every field name visible, and a token-shaped key such as `ghp_…` reached every target
   as a name. **Do not reintroduce redaction by key shape**, for the reason the shell entry above
   gives: no syntactic rule separates a secret from a plain name. Keys are copied as the tool wrote
-  them; a key holding `.` can spell another key's path, and the first one flattened keeps it.
-  **A target that accepts no logs cannot name `tool_calls`**, because the record is a log and never a
+  them; a key holding `.` can spell another key's path, and the first one flattened keeps it. **A
+  target that accepts no logs cannot name `tool_calls`**, because the record is a log and never a
   span: before this refusal, a Langfuse target naming it passed startup, was disclosed as receiving
   tool calls, and received none. `tool_calls_need_a_target_that_accepts_logs` pins it.
 - **`agent_logs` and `agent_metrics` are UNCONDITIONAL, and no list narrows them away.**

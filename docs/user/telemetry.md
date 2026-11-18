@@ -16,9 +16,9 @@ A box with no `[telemetry]` table writes one file inside its own box directory:
 <box_dir>/private/telemetry/records.jsonl
 ```
 
-That target receives every record except tool calls: each effective denial, each effective permit, the box's own
-control-plane records and MCP routing diagnostics, and the workload's relayed spans, log records, and
-metrics. The workload cannot reach the file.
+That target receives every record except tool calls: each effective denial, each effective permit,
+the box's own control-plane records and MCP routing diagnostics, and the workload's relayed spans,
+log records, and metrics. The workload cannot reach the file.
 
 The file grows for as long as the box is used. Rotate or remove it as the operator's own task.
 
@@ -36,7 +36,7 @@ own writes no record to `private/telemetry/records.jsonl`.
 [telemetry.decisions]                  # every decision this box takes, recorded
 kind        = "file"
 destination = "~/boxes/codex/records.jsonl"
-include     = ["deny", "permit", "trace", "logs"]
+include     = ["deny", "permit", "trace", "logs", "metrics"]
 ```
 
 A `file` table takes three keys. An unknown key is refused.
@@ -70,8 +70,8 @@ Declare one target per file. Two boxes that append to one file can tear a line.
 
 ## `include`
 
-Omit `include` and the target receives every record except tool calls. Write `include` and the target
-receives only the records the words in the list name:
+Omit `include` and the target receives every record except tool calls. Write `include` and the
+target receives only the records the words in the list name:
 
 | Word | The target then receives |
 |---|---|
@@ -82,8 +82,8 @@ receives only the records the words in the list name:
 | `metrics` | The workload's metrics. |
 | `tool_calls` | Each MCP tool call's arguments and output in clear text, and how it ended. A target receives these only when it names `tool_calls`. |
 
-A tool-call record is a log record, so Box refuses `tool_calls` at startup on a target that accepts no
-logs, such as a `langfuse`, `langsmith`, or `cloudwatch_traces` target.
+A tool-call record is a log record, so Box refuses `tool_calls` at startup on a target that accepts
+no logs, such as a `langfuse`, `langsmith`, or `cloudwatch_traces` target.
 
 So `include = ["deny"]` writes a file of refusals, and leaves out the permits, control-plane records,
 and MCP routing diagnostics.
@@ -263,18 +263,19 @@ an http server alike:
 | `strands.box.tool.completion` | the call ends | `strands.box.tool.server`, `.name`, `.reply`, and `.output` when the reply carried `structuredContent` |
 
 `strands.box.tool.reply` holds one of `result`, `tool_error`, `protocol_error`, `cancelled`, or
-`indeterminate`, as [`output.reply`](policy/actions.md) defines them. A refused call has no completion.
-Both records carry `jsonrpc.request.id`, which joins them to each other and to the call's decision.
+`indeterminate`, as [`output.reply`](policy/actions.md) defines them. A refused call has no
+completion. Both records carry `jsonrpc.request.id`, which joins them to each other and to the
+call's decision.
 
-`.arguments` and `.output` are maps of the call's fields, flattened into the paths a rule writes after
-`context.input.` or `output.structured.`: an object's member is `parent.member`, and an array's
-element is `parent.N`. So `{"profile": {"email": "a@b"}}` becomes the field `profile.email`.
+`.arguments` and `.output` are maps of the call's fields, flattened into the paths a rule writes
+after `context.input.` or `output.structured.`: an object's member is `parent.member`, and an
+array's element is `parent.N`. So `{"profile": {"email": "a@b"}}` becomes the field `profile.email`.
 
 **Tool-call values are in clear text, so a target receives them only when it names `tool_calls`.** A
-target with no `include`, and the box's own default file, receives none. An argument or an output can
-hold anything a tool takes or returns, including a password, a token, or a customer's data, and Box
-can't tell which field does. So name `tool_calls` only on a target whose readers may see all of it,
-such as a file on your own machine, and not on a vendor's endpoint you wouldn't trust with those
+target with no `include`, and the box's own default file, receives none. An argument or an output
+can hold anything a tool takes or returns, including a password, a token, or a customer's data, and
+Box can't tell which field does. So name `tool_calls` only on a target whose readers may see all of
+it, such as a file on your own machine, and not on a vendor's endpoint you wouldn't trust with those
 values:
 
 ```toml
@@ -285,8 +286,8 @@ include     = ["deny", "permit", "trace", "logs", "metrics", "tool_calls"]
 ```
 
 A declared target replaces the default file, and a written `include` names everything the target
-receives, so list the other signals you still want beside `tool_calls`. At startup, Box prints one line
-on stderr for each target that receives tool calls, naming where they go.
+receives, so list the other signals you still want beside `tool_calls`. At startup, Box prints one
+line on stderr for each target that receives tool calls, naming where they go.
 
 A tool-call record is a log record, so a target that accepts no logs can't name `tool_calls`: Box
 refuses it with a message that says `tool-call records are logs and it accepts no logs`. That
@@ -303,15 +304,15 @@ A value keeps its JSON type: a string, `true` or `false`, or a number, so `true`
 apart. An integer too large for 64 bits arrives as its digits in a string, and a JSON `null` arrives
 as an empty array, which no flattened value can otherwise be.
 
-A call refused before it reaches the server, by the coarse `mcp:call` check or because the tool isn't
-listed, is recorded too, because it shows what the agent tried.
+A call refused before it reaches the server, by the coarse `mcp:call` check or because the tool
+isn't listed, is recorded too, because it shows what the agent tried.
 
 A tool-call record produces no span.
 
-**Over http, a target that takes tool calls makes Box read every tool reply.** Reading a reply copies
-it through the gateway's budget, which every reply being read at once shares (64 MiB). The policy
-already reads the reply of every tool in the server's tool list once Box has read that list, so the
-extra copies are for replies the policy doesn't read.
+**Over http, a target that takes tool calls makes Box read every tool reply.** Reading a reply
+copies it through the gateway's budget, which every reply being read at once shares (64 MiB). The
+policy already reads the reply of every tool in the server's tool list once Box has read that list,
+so the extra copies are for replies the policy doesn't read.
 
 ### A control-plane record
 
