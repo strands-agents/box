@@ -105,6 +105,11 @@ path = "tests/working_folder_linux.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "root_links_linux"
+path = "tests/root_links_linux.rs"
+required-features = ["test-support"]
+
+[[test]]
 name = "inherited_handles_macos"
 path = "tests/inherited_handles_macos.rs"
 required-features = ["test-support"]
