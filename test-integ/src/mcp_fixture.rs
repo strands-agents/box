@@ -1,10 +1,8 @@
 //! The stdio MCP fetch server fixture that the MCP cases share.
-//!
-//! Each case keeps its own `FETCH_PROGRAM` name as a literal in its own file, because the Linux CI step
-//! that pre-creates the MCP fixture paths finds the names with a grep over `tests/containment/*.rs`.
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use crate::{BoxFixture, find_box};
 
@@ -20,21 +18,24 @@ pub fn box_sibling(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// Where the server binary is placed: `/usr/bin` on Linux; a canonical test-owned dir on macOS,
-/// injected onto the box PATH and granted read and exec.
+/// The canonical server directory, outside every case's agent write grants.
 pub fn server_dir() -> PathBuf {
-    #[cfg(target_os = "macos")]
-    {
-        let dir = PathBuf::from("/tmp/strands-det-mcp-bin");
-        std::fs::create_dir_all(&dir).expect("create the macOS MCP server dir");
-        // Canonical, so the grant names the path the kernel checks (`/tmp` is `/private/tmp`).
-        dir.canonicalize()
-            .expect("canonicalize the macOS MCP server dir")
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        PathBuf::from("/usr/bin")
-    }
+    static DIRECTORY: OnceLock<PathBuf> = OnceLock::new();
+    DIRECTORY
+        .get_or_init(|| {
+            let base = std::env::var_os("DET_BOX_ROOT")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| crate::user_home().join(".det-harness-boxes"));
+            std::fs::create_dir_all(&base).expect("DET_ERROR: create the MCP fixture root");
+            tempfile::Builder::new()
+                .prefix("mcp-bin-")
+                .tempdir_in(base)
+                .expect("DET_ERROR: create the MCP server directory")
+                .keep()
+                .canonicalize()
+                .expect("DET_ERROR: canonicalize the MCP server directory")
+        })
+        .clone()
 }
 
 /// The box's broker socket.
@@ -61,12 +62,10 @@ pub fn place_server(program: &str) {
 /// Declare the `fetch` MCP server, started as `program`, in its default (gateway) posture.
 pub fn with_fetch_server(config: String, program: &str) -> String {
     let quote = |s: &str| serde_json::to_string(s).unwrap();
-    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut tables = format!(
         "\n[mcp.fetch]\ntype = \"stdio\"\ncommand = [{}]\n",
         quote(program)
     );
-    #[cfg(target_os = "macos")]
     {
         let dir = quote(&server_dir().display().to_string());
         tables.push_str(&format!("[mcp.fetch.filesystem]\nread = [{dir}]\n"));

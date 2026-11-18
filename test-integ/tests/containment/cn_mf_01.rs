@@ -22,7 +22,7 @@ include!("../probes/fetch_server.rs");
 fn with_fetch_server(config: String, grant: &Path) -> String {
     let quote = |s: &str| serde_json::to_string(s).unwrap();
     let mut reads = vec![quote(&grant.display().to_string())];
-    if Platform::current() == Platform::Macos {
+    {
         let dir = quote(&server_dir().display().to_string());
         reads.push(dir);
     }

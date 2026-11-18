@@ -1,7 +1,6 @@
 use std::process::Command;
 
 use strands_det_harness::egress::{GATEWAY_ORIGIN_HEADER, HostRecorder, RECORDER_BODY};
-#[cfg(target_os = "macos")]
 use strands_det_harness::mcp_fixture::server_dir;
 use strands_det_harness::mcp_fixture::{box_sibling, broker_socket, place_server};
 use strands_det_harness::{BoxFixture, RunResult, det_case};
@@ -60,15 +59,11 @@ permit (principal, action == Box::Action::"mcp:call", resource)
 /// Add the `fetch` MCP server in its DEFAULT (gateway) posture, proxy-aware, pointed at `url`.
 fn with_fetch_server(config: String, url: &str) -> String {
     let quote = |s: &str| serde_json::to_string(s).unwrap();
-    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
     let mut tables = format!(
         "\n[mcp.fetch]\ntype = \"stdio\"\ncommand = [{}]\n[mcp.fetch.env]\nFIXTURE_FETCH_PROXY = \"1\"\nFIXTURE_FETCH_TARGET = {}\n",
         quote(FETCH_PROGRAM),
         quote(url),
     );
-    // macOS Seatbelt reads the binary in place, so the leaf needs read+exec of the server dir (Linux
-    // needs neither — /usr/bin binds and the baseline exec grant covers it).
-    #[cfg(target_os = "macos")]
     {
         let dir = quote(&server_dir().display().to_string());
         tables.push_str(&format!("[mcp.fetch.filesystem]\nread = [{dir}]\n"));
@@ -95,9 +90,6 @@ fn call_reach(b: &BoxFixture, url: &str) -> (String, RunResult) {
         probe_output = String::from_utf8_lossy(&output.stdout).into_owned()
             + &String::from_utf8_lossy(&output.stderr);
     };
-    // macOS: inject the server dir onto the box's operator PATH (it is not on the default PATH).
-    // Linux: /usr/bin is already on PATH.
-    #[cfg(target_os = "macos")]
     let run = {
         let path = format!(
             "{}:{}",
@@ -106,8 +98,6 @@ fn call_reach(b: &BoxFixture, url: &str) -> (String, RunResult) {
         );
         b.run_sh_with_config_meanwhile_env(edit, BLOCK, &[("PATH", path.as_str())], meanwhile)
     };
-    #[cfg(not(target_os = "macos"))]
-    let run = b.run_sh_with_config_meanwhile(edit, BLOCK, meanwhile);
     (probe_output, run)
 }
 

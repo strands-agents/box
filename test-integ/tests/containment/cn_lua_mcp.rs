@@ -1,6 +1,5 @@
 use std::process::Command;
 
-#[cfg(target_os = "macos")]
 use strands_det_harness::mcp_fixture::server_dir;
 use strands_det_harness::mcp_fixture::{
     box_sibling, broker_socket, place_server, with_fetch_server,
@@ -50,7 +49,6 @@ fn lua_then_broker_call(b: &BoxFixture) -> (String, RunResult) {
         broker = String::from_utf8_lossy(&output.stdout).into_owned()
             + &String::from_utf8_lossy(&output.stderr);
     };
-    #[cfg(target_os = "macos")]
     let run = {
         let path = format!(
             "{}:{}",
@@ -64,12 +62,6 @@ fn lua_then_broker_call(b: &BoxFixture) -> (String, RunResult) {
             meanwhile,
         )
     };
-    #[cfg(not(target_os = "macos"))]
-    let run = b.run_sh_with_config_meanwhile(
-        |config| with_fetch_server(config, FETCH_PROGRAM),
-        &cmd,
-        meanwhile,
-    );
     (broker, run)
 }
 
