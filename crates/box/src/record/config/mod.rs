@@ -3378,10 +3378,15 @@ env = {}
     /// refuses the box rather than resuming it without those records.
     #[test]
     fn a_target_naming_tool_calls_stamps_its_record_version() {
-        let version = |tool_calls_target| {
+        let version = |tool_calls_target: bool| {
+            let include = vec![telemetry::SignalGroup::Deny]
+                .into_iter()
+                .chain(tool_calls_target.then_some(telemetry::SignalGroup::ToolCalls))
+                .collect();
             record_version(
                 "box-0123456789abcdef",
                 false,
+                true,
                 &ExperimentalFeatures::default(),
                 &Limits::default(),
                 std::iter::empty(),
@@ -3389,7 +3394,10 @@ env = {}
                 false,
                 false,
                 &Gateway::default(),
-                tool_calls_target,
+                &BTreeMap::from([(
+                    "local".to_string(),
+                    telemetry::TelemetryEntry::file("/tmp/records.jsonl", Some(include)),
+                )]),
             )
         };
         assert_eq!(version(true), TOOL_CALLS_RECORD_VERSION);

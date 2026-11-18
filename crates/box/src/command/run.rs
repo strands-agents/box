@@ -216,8 +216,10 @@ fn write_tool_call_disclosures(
         if entry.takes_tool_calls() {
             writeln!(
                 output,
-                "strands-box: [telemetry.{label}] receives each MCP tool call's arguments and \
-                 output in clear text, including any secret a tool takes or returns"
+                "strands-box: [telemetry.{label}] names tool_calls, so {} receives each MCP tool \
+                 call's arguments and output in clear text, including any secret a tool takes or \
+                 returns",
+                entry.shown_destination()
             )?;
         }
     }
@@ -743,12 +745,8 @@ mod tests {
     #[test]
     fn startup_discloses_each_telemetry_target_that_takes_tool_calls() {
         use crate::record::config::telemetry::{SignalGroup, TelemetryEntry};
-        let entry = |include: Option<Vec<SignalGroup>>| TelemetryEntry {
-            kind: ::telemetry::TargetKind::File,
-            destination: "/tmp/records.jsonl".to_string(),
-            include,
-            secret: None,
-        };
+        let entry =
+            |include: Option<Vec<SignalGroup>>| TelemetryEntry::file("/tmp/records.jsonl", include);
         let mut record = record_with(None, BTreeMap::new());
         record.telemetry = BTreeMap::from([
             (
@@ -764,8 +762,9 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(output).expect("the disclosure is UTF-8"),
-            "strands-box: [telemetry.local] receives each MCP tool call's arguments and output in \
-             clear text, including any secret a tool takes or returns\n"
+            "strands-box: [telemetry.local] names tool_calls, so /tmp/records.jsonl receives each \
+             MCP tool call's arguments and output in clear text, including any secret a tool takes \
+             or returns\n"
         );
     }
 

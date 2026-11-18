@@ -283,10 +283,16 @@ include     = ["deny", "permit", "trace", "logs", "tool_calls"]
 
 A declared target replaces the default file, and a written `include` names everything the target
 receives, so list the other signals you still want beside `tool_calls`. At startup, Box prints one line
-on stderr for each target that receives tool calls.
+on stderr for each target that receives tool calls, naming where they go.
 
-A key that isn't a plain name of letters, digits, `_`, `-`, and `$`, at most 64 characters, is written
-as `*`, so a key holding `.` can't pass for a nested path. At most 64 fields are reported per record,
+A tool-call record is a log record, so a target that accepts no logs can't name `tool_calls`: Box
+refuses it with a message that says `tool-call records are logs and it accepts no logs`. That
+covers `langfuse`, `langsmith`, `cloudwatch_traces`, and an `otlp` target whose `accepts`
+leaves out `logs`.
+
+Keys arrive as the tool wrote them. When two keys flatten to one path, such as `"a.b"` and
+`{"a": {"b": …}}`, the first is kept and the second is counted as left out. At most 64 fields are
+reported per record,
 each value at most 4 KiB; when a call has more, the record also carries
 `strands.box.tool.arguments_omitted` or `strands.box.tool.output_omitted` with the count left out.
 

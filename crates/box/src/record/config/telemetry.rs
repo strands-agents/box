@@ -251,6 +251,34 @@ pub(crate) struct TelemetryEntry {
 }
 
 impl TelemetryEntry {
+    /// A `file` target at `destination` naming `include`, with every other key absent.
+    #[cfg(test)]
+    pub(crate) fn file(destination: &str, include: Option<Vec<SignalGroup>>) -> Self {
+        Self {
+            kind: TelemetryKind::File,
+            destination: destination.to_string(),
+            include,
+            secret: None,
+            accepts: None,
+            headers: None,
+            log_group: None,
+            log_stream: None,
+            project: None,
+            region: None,
+        }
+    }
+
+    /// Where this target sends records, as a disclosure names it: its destination, or its kind
+    /// when the kind supplies the address.
+    pub(crate) fn shown_destination(&self) -> String {
+        let destination = self.destination.trim();
+        if destination.is_empty() {
+            format!("the {} endpoint", self.kind.spelling())
+        } else {
+            destination.to_string()
+        }
+    }
+
     /// Whether this target names `tool_calls`, the only way it receives a tool call's values.
     pub(crate) fn takes_tool_calls(&self) -> bool {
         self.include
@@ -1403,12 +1431,8 @@ mod tests {
     /// leaves it out does not.
     #[test]
     fn an_include_list_selects_or_leaves_out_tool_calls() {
-        let entry = |include: Option<Vec<SignalGroup>>| TelemetryEntry {
-            kind: TargetKind::File,
-            destination: "/tmp/records.jsonl".to_string(),
-            include,
-            secret: None,
-        };
+        let entry =
+            |include: Option<Vec<SignalGroup>>| TelemetryEntry::file("/tmp/records.jsonl", include);
         let naming = target_for(
             &entry(Some(vec![SignalGroup::ToolCalls])),
             None,
@@ -1433,22 +1457,12 @@ mod tests {
     fn names_tool_calls_finds_only_a_target_naming_the_word() {
         let telemetry = BTreeMap::from([(
             "decisions".to_string(),
-            TelemetryEntry {
-                kind: TargetKind::File,
-                destination: "/tmp/records.jsonl".to_string(),
-                include: Some(vec![SignalGroup::ToolCalls]),
-                secret: None,
-            },
+            TelemetryEntry::file("/tmp/records.jsonl", Some(vec![SignalGroup::ToolCalls])),
         )]);
         assert!(names_tool_calls(&telemetry));
         let other = BTreeMap::from([(
             "decisions".to_string(),
-            TelemetryEntry {
-                kind: TargetKind::File,
-                destination: "/tmp/records.jsonl".to_string(),
-                include: Some(vec![SignalGroup::Deny]),
-                secret: None,
-            },
+            TelemetryEntry::file("/tmp/records.jsonl", Some(vec![SignalGroup::Deny])),
         )]);
         assert!(!names_tool_calls(&other));
     }

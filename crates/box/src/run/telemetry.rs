@@ -1796,17 +1796,29 @@ mod tests {
         );
     }
 
-    /// A target that takes tool calls gets each reply read, even one the policy does not read,
-    /// because the record carries the tool's output.
+    /// With a target taking tool calls, the box reads the reply even when the policy does not,
+    /// and that target receives the tool's `structuredContent` in clear text.
     #[tokio::test]
     async fn a_reply_is_read_when_a_target_takes_tool_calls() {
         let directory = tempfile::tempdir().expect("tempdir");
-        let (_collector, recorder) =
-            tool_call_recorder(Some(&directory.path().join("tools.jsonl")));
+        let path = directory.path().join("tools.jsonl");
+        let (collector, recorder) = tool_call_recorder(Some(&path));
         let mut permit = capture_probe(recorder)
             .intercept(&remote_tool_attempt(r#"{"a":1}"#))
             .expect("the call is admitted");
-        assert!(permit.reply_observer(Some("1")).is_some());
+        let observer = permit
+            .reply_observer(Some("1"))
+            .expect("a target takes tool calls, so the box reads the reply");
+        observer.finished(
+            br#"{"jsonrpc":"2.0","id":1,"result":{"content":[],"structuredContent":{"sum":"raw-sum-77"}}}"#,
+        );
+        collector.drained().await;
+        let text = std::fs::read_to_string(&path).expect("the tool-call records");
+        assert!(text.contains("strands.box.tool.completion"), "{text}");
+        assert!(
+            text.contains("raw-sum-77"),
+            "the output arrives in clear text: {text}"
+        );
     }
 
     /// With no policy observer, the box's own observer finishes at the reply, so a stream the

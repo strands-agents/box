@@ -363,6 +363,16 @@ impl TelemetryConfig {
     /// Refuse an `accepts`, a header, or a vault the target's kind cannot honour.
     fn validate_otlp_shape(target: &Target) -> Result<()> {
         let refuse = |reason: String| Err(TelemetryError::Config { reason });
+        // A tool-call record is a log and never a span, so a target that takes no logs would
+        // receive none of the records it named.
+        if target.signals.contains(&Signal::ToolCalls) && !target.accepts().contains(&Payload::Logs)
+        {
+            return refuse(format!(
+                "the {} target names tool_calls, but tool-call records are logs and it accepts no \
+                 logs, so none would reach it; send tool_calls to a target that accepts logs",
+                target.kind.as_str()
+            ));
+        }
         if target.kind == TargetKind::File {
             if target.accepts.is_some() || !target.headers.is_empty() || target.vault.is_some() {
                 return refuse(
@@ -644,6 +654,29 @@ mod tests {
                 .contains("logs twice")
         );
         otlp(endpoint().accepting(vec![Payload::Traces])).expect("one payload is accepted");
+    }
+
+    /// **A target that takes no logs cannot name `tool_calls`**, because a tool-call record is a log
+    /// and is never turned into a span; one that takes logs can.
+    #[test]
+    fn tool_calls_need_a_target_that_accepts_logs() {
+        let validated = |accepts: Vec<Payload>| {
+            TelemetryConfig::for_box("b")
+                .with_target(
+                    Target::new(TargetKind::Otlp, "https://vendor.example")
+                        .receiving(vec![Signal::PolicyDenied, Signal::ToolCalls])
+                        .accepting(accepts),
+                )
+                .validate()
+                .map_err(|error| error.to_string())
+        };
+        assert!(
+            validated(vec![Payload::Traces])
+                .expect_err("a traces-only target")
+                .contains("accepts no logs")
+        );
+        validated(vec![Payload::Logs]).expect("a target that takes logs");
+        validated(vec![Payload::Traces, Payload::Logs]).expect("and one that takes both");
     }
 
     /// **The exporter owns the transport headers**, so a target cannot replace the body's type or

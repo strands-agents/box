@@ -202,8 +202,11 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   MCP servers they run, so they could not choose the fields, and each list went stale. Its first
   version kept every field name visible, and a token-shaped key such as `ghp_…` reached every target
   as a name. **Do not reintroduce redaction by key shape**, for the reason the shell entry above
-  gives: no syntactic rule separates a secret from a plain name. A non-plain key still becomes `*`,
-  so a key holding `.` cannot fake a nested path.
+  gives: no syntactic rule separates a secret from a plain name. Keys are copied as the tool wrote
+  them; a key holding `.` can spell another key's path, and the first one flattened keeps it.
+  **A target that accepts no logs cannot name `tool_calls`**, because the record is a log and never a
+  span: before this refusal, a Langfuse target naming it passed startup, was disclosed as receiving
+  tool calls, and received none. `tool_calls_need_a_target_that_accepts_logs` pins it.
 - **`agent_logs` and `agent_metrics` are UNCONDITIONAL, and no list narrows them away.**
   `Collector::start` unions `Signal::always_received()` into every target's lane, by the maintainers'
   direction on 2026-09-29, so `include = ["deny"]` holds the refusals **and** the agent's own log

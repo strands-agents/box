@@ -2663,7 +2663,9 @@ The values go on a `strands-box.tool` log record, never on a decision or its spa
 flattened fields in clear text. Only a target that names `tool_calls` in its `include` receives that
 record. A target with no `include`, including the box's own default file, doesn't, and at startup Box
 prints one stderr line for each target that does. Naming the word is the operator's choice of who may
-read every argument and output. `only_a_target_naming_tool_calls_receives_them_in_clear_text` and
+read every argument and output. The record is a log and never a span, so a target that accepts no
+logs, such as a Langfuse target, can't name the word (`tool_calls_need_a_target_that_accepts_logs`).
+Keys arrive as the tool wrote them. `only_a_target_naming_tool_calls_receives_them_in_clear_text` and
 `startup_discloses_each_telemetry_target_that_takes_tool_calls` pin both halves.
 
 This follows the AgentCore gateway, which logs each `tools/call` request and response body whole to

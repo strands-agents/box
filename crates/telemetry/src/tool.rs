@@ -1,4 +1,7 @@
-//! An MCP tool call's flattened argument and output fields, in clear text, bounded in count and size.
+//! An MCP tool call's flattened argument and output fields, as a tool-call record carries them.
+//!
+//! The values are raw. Only a target whose `include` names `tool_calls` receives a tool-call
+//! record, so the operator's choice of target is what decides who sees them.
 
 use std::collections::HashMap;
 
@@ -25,12 +28,6 @@ const MAXIMUM_FIELDS: usize = 64;
 /// Outside the map, because a map key is a data path, and data can spell any path.
 pub(crate) const ARGUMENTS_OMITTED: &str = "strands.box.tool.arguments_omitted";
 pub(crate) const OUTPUT_OMITTED: &str = "strands.box.tool.output_omitted";
-
-/// What stands in for an object key that is not a plain name.
-const UNNAMED: &str = "*";
-
-/// The longest object key the record copies.
-const MAXIMUM_KEY_CHARS: usize = 64;
 
 /// Scalar fields flattened out of one JSON value, as dotted paths.
 ///
@@ -91,7 +88,7 @@ impl ToolFields {
         let mut fields = Self::default();
         if let serde_json::Value::Object(members) = value {
             for (name, member) in members {
-                fields.flatten(segment(name), member);
+                fields.flatten(name, member);
             }
         }
         fields
@@ -101,7 +98,7 @@ impl ToolFields {
         match value {
             serde_json::Value::Object(members) => {
                 for (name, member) in members {
-                    self.flatten(&format!("{path}.{}", segment(name)), member);
+                    self.flatten(&format!("{path}.{name}"), member);
                 }
             }
             serde_json::Value::Array(elements) => {
@@ -110,7 +107,7 @@ impl ToolFields {
                 }
             }
             scalar => {
-                // Two keys that are not plain names share one path; keep the first.
+                // A key that holds a `.` can spell a nested path; keep the first.
                 if self.fields.len() >= MAXIMUM_FIELDS
                     || self.fields.iter().any(|(known, _)| known == path)
                 {
@@ -140,19 +137,6 @@ impl ToolFields {
     pub(crate) fn omitted(&self) -> Option<i64> {
         (self.omitted > 0).then(|| i64::try_from(self.omitted).unwrap_or(i64::MAX))
     }
-}
-
-/// One object key as a path segment: the key itself when it is a plain name, else [`UNNAMED`].
-///
-/// Only a name of letters, digits, `_`, `-`, and `$` is copied, so a key holding `.` cannot fake a
-/// nested path.
-fn segment(name: &str) -> &str {
-    let plain = !name.is_empty()
-        && name.chars().count() <= MAXIMUM_KEY_CHARS
-        && name
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || "_-$".contains(character));
-    if plain { name } else { UNNAMED }
 }
 
 #[cfg(test)]
@@ -186,19 +170,18 @@ mod tests {
     }
 
     #[test]
-    fn a_key_that_is_not_a_plain_name_is_not_copied() {
+    fn a_key_is_kept_as_the_tool_wrote_it() {
         let fields = ToolFields::of(&json!({
-            "members": {"alice@example.com": "admin", "bob@example.com": "staff"},
-            "user_name": "carol"
+            "members": {"alice@example.com": "admin"},
+            "a.b": 1,
+            "a": {"b": 2}
         }));
-        let text = format!("{fields:?}");
-        assert!(!text.contains("example.com"), "{text}");
         let mut paths = fields.paths();
         paths.sort_unstable();
-        assert_eq!(paths, ["members.*", "user_name"]);
+        assert_eq!(paths, ["a.b", "members.alice@example.com"]);
         assert_eq!(
             fields.omitted, 1,
-            "the second unnamed key is counted, not copied"
+            "a second field on one path is counted, not copied"
         );
     }
 
