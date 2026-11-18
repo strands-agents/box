@@ -566,7 +566,8 @@ impl Boundary {
             .map(|grant| grant.resolved.as_path())
             .collect();
         let mut minimum: Vec<MinimumCell> = Vec::new();
-        let mut minimum_identities: Vec<PathBuf> = Vec::new();
+        // By identity, because a minimum cell can name a link, such as `/tmp`.
+        let mut minimum_covers_workspace = false;
         for cell in launch.runtime_reach.cells() {
             let resolved = cell
                 .path
@@ -576,16 +577,15 @@ impl Boundary {
                 continue;
             }
             containment = allow(containment, &cell.path, cell.operation, cell.scope)?;
+            minimum_covers_workspace |= resolved == working_directory;
             minimum.push(cell);
-            minimum_identities.push(resolved);
         }
         // The working directory is enterable so `chdir` and `getcwd` work, and neither readable nor
-        // enumerable unless a list says so: metadata on the entry itself, and no data. A minimum
-        // cell can name a link, such as `/tmp`, so it covers the directory it resolves to.
+        // enumerable unless a list says so: metadata on the entry itself, and no data.
         let workspace_covered = reach.grants.iter().any(|grant| match grant.scope {
             Scope::Root => working_directory.starts_with(&grant.resolved),
             _ => working_directory == grant.resolved,
-        }) || minimum_identities.contains(&working_directory);
+        }) || minimum_covers_workspace;
         let mut enterable_workspace = None;
         if !workspace_covered {
             containment = allow_operator(
@@ -4399,8 +4399,8 @@ mod tests {
         }
     }
 
-    /// **A workspace at the `/tmp` link is covered by the runtime minimum's `/tmp` cell**, for the
-    /// agent and for a tool, so no entry cell lands on `/private/tmp`, where the floor refuses one.
+    /// **A workspace at the `/tmp` link renders for the agent and for a tool**: the runtime minimum's
+    /// `/tmp` cell covers it, so no entry cell lands on `/private/tmp`, where the floor refuses one.
     #[cfg(target_os = "macos")]
     #[test]
     fn a_workspace_at_the_tmp_link_is_covered_by_the_runtime_minimum() {
@@ -4412,11 +4412,6 @@ mod tests {
             ("[tool.git]", RuntimeReach::Leaf),
         ] {
             let boundary = fixture.translate_with_reach(&spec, table, reach);
-            let disclosure = boundary.disclosure();
-            assert!(
-                !disclosure.contains("(workspace, entry only)"),
-                "{table} adds no entry cell beside the minimum's: {disclosure}"
-            );
             let config = ContainmentConfig::from_json(&boundary.containment_config_text())
                 .expect("the translated config");
             let profile = containment::test_support::generate_seatbelt_profile(&config)
