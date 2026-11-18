@@ -46,7 +46,7 @@ use crate::run::contain::boundary::{
 };
 use crate::run::credential;
 use crate::run::lock::{BoxLive, Lock};
-use crate::run::secret_sources::SecretSources;
+use crate::run::secret_sources::RouteSecrets;
 use crate::run::telemetry;
 
 type RunningPolicy = (Arc<PolicyEngine>, Arc<telemetry::Collector>);
@@ -845,7 +845,7 @@ impl HostedBox {
         policy: Arc<PolicyEngine>,
         commands: Arc<ConfiguredCommands>,
         collector: Arc<telemetry::Collector>,
-        secrets: &SecretSources,
+        secrets: RouteSecrets,
         protected_sources: &[AuthoritySource],
         owned: Lock,
         workspace: &Path,
@@ -2147,7 +2147,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             policy,
             commands,
             Arc::clone(&collector),
-            &SecretSources::none(),
+            RouteSecrets::none(),
             &[],
             owned,
             &workspace,
@@ -2228,7 +2228,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
                 policy,
                 Arc::new(ConfiguredCommands::load(&record).expect("the commands load")),
                 collector,
-                &SecretSources::none(),
+                RouteSecrets::none(),
                 &[],
                 owned,
                 &workspace,

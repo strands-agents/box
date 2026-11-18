@@ -53,20 +53,20 @@ the record when the configuration loads. A route in that scheme then works as an
 does, with two differences: the program supplies the secret, and `secret.env` names the variable
 that holds the placeholder.
 
-When a run starts, Box opens the program file of each table and keeps its identity, as it does for
-a configured tool. It prints one line for each table on stderr, with the program. It then runs the
-program once for each secret, outside every sandbox, before any workload starts. It reads the
-secrets of telemetry targets first, because the collector needs them to open. It reads the others
-after the startup checks that need no secret and come before the box opens: the policy, the
-credential preflights, the tool commands, and the tool grammars. So the second read doesn't ask
-the operator to sign in for a box that one of those checks stops. A check that Box makes when it
-opens the box comes after that read, such as the refusal of a write grant over a tool command or
-over the Box installation. One backend holds each secret that a program returned, so a telemetry
-target and a route that name one secret share one run of the program.
-Each vault then takes its secret from that backend, and the backend drops its copies. No later
-step can read through a declared source. A program that returns no secret stops startup. The
-program's own words go to stderr alone, and the refusal and the record name the configuration
-entry.
+When a run starts, Box opens the program file of each table and keeps its identity, as it does for a
+configured tool. It prints one line for each table on stderr, with the program. It does both before
+it stores the record of a new box directory, so a run that stops here leaves that directory empty.
+It then runs the program once for each secret, outside every sandbox, before any workload starts. It
+reads the secrets of telemetry targets first, because the collector needs them to open. It reads the
+others after the startup checks that need no secret and come before the box opens: the policy, the
+credential preflights, the tool commands, and the tool grammars. So the second read doesn't ask the
+operator to sign in for a box that one of those checks stops. A check that Box makes when it opens
+the box comes after that read, such as the refusal of a write grant over a tool command or over the
+Box installation. One backend holds each secret that a program returned, so a telemetry target and a
+route that name one secret share one run of the program. Each vault then takes its secret from that
+backend, and the backend drops its copies. No later step can read through a declared source. A
+program that returns no secret stops startup. The program's own words go to stderr alone, and the
+refusal and the record name the configuration entry.
 
 Between two runs, a workload must not replace the program. So Box treats the program as it treats
 a configured tool command. It refuses a write grant that covers the path in `command`, the file

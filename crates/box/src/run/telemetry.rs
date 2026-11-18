@@ -796,7 +796,7 @@ fn deny_reason(reason: &DenyReason) -> &'static str {
 pub(crate) fn open(
     layout: &crate::record::layout::BoxRoot,
     stored: &crate::record::config::Record,
-    secrets: &crate::run::secret_sources::SecretSources,
+    secrets: &crate::run::secret_sources::TelemetrySecrets,
 ) -> Result<Arc<Collector>, BoxError> {
     let directory = layout.telemetry_directory();
     layout.create_child_directory(&directory)?;

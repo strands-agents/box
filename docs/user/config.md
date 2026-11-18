@@ -1125,7 +1125,11 @@ Each of these stops the box before the workload starts:
   strands-box: error: `[egress.github] secret.ref` names a secret that the secret source `op` (/opt/homebrew/bin/op) did not return, so the box does not start
   ```
 
-  Sign in to the vault or correct the reference, then start the box again.
+  Sign in to the vault or correct the reference, then start the box again. When the entry is a
+  `[telemetry.<name>]` target and the run is the first one of a new box directory, also remove
+  the box directory before you start the box again. Box stores the box record before it reads
+  that secret, so the next run otherwise stops and says that
+  [the history is absent](policy.md#a-reused-box-whose-history-and-record-disagree).
 - A write grant covers the program, a symbolic link on the way to it, or a folder that holds
   one of them: ``this write grant can change
   [secret-source.op] command /opt/homebrew/Caskroom/1password-cli/2.42.0/op or its path. Keep the

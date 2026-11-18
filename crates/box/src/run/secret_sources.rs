@@ -1,14 +1,12 @@
-//! The declared secret sources of one run: each checked program, and the one backend that reads
-//! through them.
+//! The declared secret sources of one run, as three types that fix the order of startup: the one
+//! check, the two reads, and the end of the reads.
 //!
 //! | Step | Owner |
 //! |---|---|
-//! | Check each program file before a secret is read | [`SecretSources::open`] |
-//! | Refuse a write grant over a program before it first starts | [`SecretSources::refuse_writable_programs`] |
-//! | Name each source and its program on stderr | [`SecretSources::disclose`] |
-//! | Find each entry whose secret a source reads | [`SecretSources::telemetry_uses`], [`SecretSources::route_uses`] |
-//! | Read each of those secrets, and state each outcome | [`SecretSources::fetch`] |
-//! | Drop each held secret after the vaults open | [`SecretSources::close`] |
+//! | Check each program file, refuse a write grant over one, and name each source on stderr | [`SecretSources::check`] |
+//! | Read the secret of each telemetry target, and state each outcome | [`SecretSources::fetch_telemetry`] |
+//! | Read each other secret, and state each outcome | [`TelemetrySecrets::fetch_routes`] |
+//! | Drop each held secret after the vaults open | [`RouteSecrets`], which the vaults consume |
 
 use std::collections::BTreeMap;
 
@@ -16,7 +14,7 @@ use credentials::{Backend, Locator};
 
 use crate::error::{BoxError, ConfigError};
 use crate::record::config::egress::EgressEntry;
-use crate::record::config::secret_source::{DeclaredSources, SecretSourceEntry};
+use crate::record::config::secret_source::{DeclaredSources, SecretSourceEntry, routed_scheme};
 use crate::record::config::{AuthoritySource, ProcessTables, Record};
 use crate::run::commands::ConfiguredCommands;
 use crate::run::contain::boundary::judge_lists;
@@ -26,7 +24,7 @@ use crate::run::telemetry::{ControlOperation, ControlRecord};
 const NO_SECRET: &str = "the secret source returned no secret; the standard error of the box \
                          holds the reason";
 
-/// The declared secret sources of one run.
+/// The checked secret sources of one run, which no read has used yet.
 #[derive(Debug)]
 pub(crate) struct SecretSources {
     backend: Backend,
@@ -35,14 +33,28 @@ pub(crate) struct SecretSources {
     programs: BTreeMap<String, String>,
     /// The checked program of each declared scheme.
     commands: ConfiguredCommands,
+    /// Each telemetry target whose secret a source reads.
+    telemetry: Vec<SecretUse>,
+    /// Each egress route, remote MCP server, and backend whose secret a source reads.
+    routes: Vec<SecretUse>,
 }
+
+/// The secret sources of one run after the read of each telemetry secret, with which the
+/// collector opens.
+#[derive(Debug)]
+pub(crate) struct TelemetrySecrets(SecretSources);
+
+/// The secret sources of one run after the read of each secret, which the vaults consume.
+#[derive(Debug)]
+pub(crate) struct RouteSecrets(SecretSources);
 
 /// One configuration entry that names a secret in a declared scheme.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct SecretUse {
+struct SecretUse {
     /// The table and the key, such as `[egress.github] secret.ref`.
     entry: String,
-    reference: String,
+    /// The reference as `credentials` parses it, which the backend routes by its scheme.
+    locator: Locator,
 }
 
 /// One read of a secret through a declared source, as the collector records it.
@@ -69,25 +81,76 @@ impl Fetched {
 }
 
 impl SecretSources {
-    /// Check the program file of each `[secret-source.<scheme>]` table of a configuration whose
-    /// `[experimental-features] secret-sources` is `enabled`, and build the one backend.
-    pub(crate) fn open(
+    /// Check the program file of each `[secret-source.<scheme>]` table of `record`, refuse each
+    /// write grant over one, and write one line for each source to `disclosure`.
+    pub(crate) fn check(
+        record: &Record,
+        protected_sources: &[AuthoritySource],
+        disclosure: impl std::io::Write,
+    ) -> Result<Self, BoxError> {
+        let enabled = record.experimental_features.secret_sources;
+        let declared = DeclaredSources::check(&record.secret_source, enabled)?;
+        Self::checked_for_record(record, declared, protected_sources, disclosure)
+    }
+
+    /// [`check`](Self::check) of `record`, whose checked declarations are `declared`.
+    fn checked_for_record(
+        record: &Record,
+        declared: DeclaredSources,
+        protected_sources: &[AuthoritySource],
+        disclosure: impl std::io::Write,
+    ) -> Result<Self, BoxError> {
+        let entries = &record.secret_source;
+        let tables = record.process_tables();
+        Self::checked(entries, declared, &tables, protected_sources, disclosure)
+            .map(|sources| sources.reading(record))
+    }
+
+    /// [`check`](Self::check) for a caller that reads `references` alone and holds no record:
+    /// when no reference names a scheme of `entries`, no program runs, so no table is checked.
+    pub(crate) fn check_for_references<'a>(
         entries: &BTreeMap<String, SecretSourceEntry>,
         enabled: bool,
+        tables: &ProcessTables,
+        references: impl IntoIterator<Item = &'a str>,
+        disclosure: impl std::io::Write,
     ) -> Result<Self, BoxError> {
-        Self::over(entries, DeclaredSources::check(entries, enabled)?)
+        let read = references.into_iter().any(|reference| {
+            routed_scheme(reference).is_ok_and(|scheme| entries.contains_key(&scheme))
+        });
+        let none = BTreeMap::new();
+        let entries = if read { entries } else { &none };
+        let declared = DeclaredSources::check(entries, enabled)?;
+        Self::checked(entries, declared, tables, &[], disclosure)
     }
 
-    /// [`open`](Self::open) on a protected operating system, with the feature on.
-    #[cfg(test)]
-    pub(crate) fn for_tests(
+    /// The one order of the check, which each constructor follows: the program files, the write
+    /// grants, then the lines.
+    fn checked(
         entries: &BTreeMap<String, SecretSourceEntry>,
+        declared: DeclaredSources,
+        tables: &ProcessTables,
+        protected_sources: &[AuthoritySource],
+        disclosure: impl std::io::Write,
     ) -> Result<Self, BoxError> {
-        Self::over(entries, DeclaredSources::for_tests(entries))
+        let sources = Self::open(entries, declared)?;
+        sources.refuse_writable_programs(tables, protected_sources)?;
+        sources
+            .disclose(disclosure)
+            .map_err(|source| ConfigError::Disclosure { source })?;
+        Ok(sources)
     }
 
-    /// The sources of `entries`, whose checked declarations are `declared`.
-    fn over(
+    /// These sources with each entry of `record` whose secret they read.
+    fn reading(mut self, record: &Record) -> Self {
+        self.telemetry = self.telemetry_uses(record);
+        self.routes = self.route_uses(record);
+        self
+    }
+
+    /// The sources of `entries`, whose checked declarations are `declared`, with the program
+    /// file of each one checked and held open.
+    fn open(
         entries: &BTreeMap<String, SecretSourceEntry>,
         declared: DeclaredSources,
     ) -> Result<Self, BoxError> {
@@ -97,6 +160,8 @@ impl SecretSources {
                 backend: Backend::local(),
                 programs: BTreeMap::new(),
                 commands: ConfiguredCommands::default(),
+                telemetry: Vec::new(),
+                routes: Vec::new(),
             });
         }
         let commands = ConfiguredCommands::of_secret_sources(entries)?;
@@ -125,12 +190,14 @@ impl SecretSources {
             backend,
             programs,
             commands,
+            telemetry: Vec::new(),
+            routes: Vec::new(),
         })
     }
 
     /// Refuse each write grant in `tables` that can change the program of a source, so that no
     /// source program starts in a configuration that lets a workload replace it.
-    pub(crate) fn refuse_writable_programs(
+    fn refuse_writable_programs(
         &self,
         tables: &ProcessTables,
         protected_sources: &[AuthoritySource],
@@ -152,32 +219,25 @@ impl SecretSources {
         Ok(())
     }
 
-    /// The sources of a record that declares none.
-    #[cfg(test)]
-    pub(crate) fn none() -> Self {
-        Self::open(&BTreeMap::new(), false).expect("no declaration, no refusal")
-    }
-
-    /// The sources of `record`.
-    pub(crate) fn of(record: &Record) -> Result<Self, BoxError> {
-        Self::open(
-            &record.secret_source,
-            record.experimental_features.secret_sources,
-        )
-    }
-
-    /// The one backend that reads each secret of this run.
+    /// The one backend that reads each secret of this run, for a caller that holds no record.
     pub(crate) fn backend(&self) -> &Backend {
         &self.backend
     }
 
     /// Whether a source of this run reads the secret that `reference` names.
     pub(crate) fn reads(&self, reference: &str) -> bool {
-        scheme_of(reference).is_some_and(|scheme| self.programs.contains_key(scheme))
+        self.locator(reference).is_some()
+    }
+
+    /// `reference` as `credentials` parses it, when a source of this run reads its secret.
+    fn locator(&self, reference: &str) -> Option<Locator> {
+        Locator::parse_uri(reference)
+            .ok()
+            .filter(|locator| self.programs.contains_key(locator.scheme()))
     }
 
     /// One line for each declared source, with the program that reads its secrets.
-    pub(crate) fn disclose(&self, mut output: impl std::io::Write) -> std::io::Result<()> {
+    fn disclose(&self, mut output: impl std::io::Write) -> std::io::Result<()> {
         for (scheme, program) in &self.programs {
             writeln!(
                 output,
@@ -189,15 +249,15 @@ impl SecretSources {
     }
 
     /// Each telemetry target of `record` whose secret a declared source reads.
-    pub(crate) fn telemetry_uses(&self, record: &Record) -> Vec<SecretUse> {
+    fn telemetry_uses(&self, record: &Record) -> Vec<SecretUse> {
         record
             .telemetry
             .iter()
             .filter_map(|(name, target)| {
-                let reference = target.secret.as_ref()?.reference.trim();
-                self.reads(reference).then(|| SecretUse {
+                let locator = self.locator(target.secret.as_ref()?.reference.trim())?;
+                Some(SecretUse {
                     entry: format!("[telemetry.{name}] secret.ref"),
-                    reference: reference.to_string(),
+                    locator,
                 })
             })
             .collect()
@@ -205,7 +265,7 @@ impl SecretSources {
 
     /// Each egress route, remote MCP server, and backend of `record` whose secret a declared
     /// source reads.
-    pub(crate) fn route_uses(&self, record: &Record) -> Vec<SecretUse> {
+    fn route_uses(&self, record: &Record) -> Vec<SecretUse> {
         let entries = |table: &'static str, entries: &BTreeMap<String, EgressEntry>| {
             entries
                 .iter()
@@ -216,9 +276,11 @@ impl SecretSources {
                         .iter()
                         .filter_map(|backend| backend.auth.as_ref())
                         .map(|auth| ("backends.auth.ref", auth));
-                    own.chain(backends).map(move |(key, secret)| SecretUse {
-                        entry: format!("[{table}.{name}] {key}"),
-                        reference: secret.reference.clone(),
+                    own.chain(backends).filter_map(move |(key, secret)| {
+                        Some(SecretUse {
+                            entry: format!("[{table}.{name}] {key}"),
+                            locator: self.locator(&secret.reference)?,
+                        })
                     })
                 })
                 .collect::<Vec<_>>()
@@ -226,28 +288,36 @@ impl SecretSources {
         entries("egress", &record.egress)
             .into_iter()
             .chain(entries("mcp", &record.remote_mcp))
-            .filter(|secret| self.reads(&secret.reference))
             .collect()
+    }
+
+    /// Read the secret of each telemetry target until one read fails, and send the words of the
+    /// program to `diagnostics` alone.
+    pub(crate) fn fetch_telemetry(
+        self,
+        diagnostics: impl std::io::Write,
+    ) -> (Vec<Fetched>, Result<TelemetrySecrets, BoxError>) {
+        let (fetched, read) = self.fetch(&self.telemetry, diagnostics);
+        (fetched, read.map(|()| TelemetrySecrets(self)))
     }
 
     /// Read the secret of each entry in `uses` until one read fails, and send the words of the
     /// program to `diagnostics` alone.
-    pub(crate) fn fetch(
+    fn fetch(
         &self,
         uses: &[SecretUse],
         mut diagnostics: impl std::io::Write,
     ) -> (Vec<Fetched>, Result<(), BoxError>) {
         let mut fetched = Vec::with_capacity(uses.len());
         for secret in uses {
-            let scheme = scheme_of(&secret.reference).unwrap_or_default();
+            let scheme = secret.locator.scheme();
             let program = self
                 .programs
                 .get(scheme)
                 .map(String::as_str)
                 .unwrap_or_default();
             // The value is wiped as it drops; each vault reads it again from the backend.
-            let read = Locator::parse_uri(&secret.reference)
-                .and_then(|locator| self.backend.resolve(&locator).map(drop));
+            let read = self.backend.resolve(&secret.locator).map(drop);
             fetched.push(Fetched {
                 entry: secret.entry.clone(),
                 detail: format!(
@@ -270,16 +340,38 @@ impl SecretSources {
         }
         (fetched, Ok(()))
     }
+}
 
-    /// Drop each secret that the backend holds, so no later step reads through a declared source.
-    pub(crate) fn close(&self) {
+/// The end of the sources drops each secret that the backend holds, so no later step reads
+/// through a declared source.
+impl Drop for SecretSources {
+    fn drop(&mut self) {
         self.backend.close_declared();
     }
 }
 
-/// The text before `://` in `reference`.
-fn scheme_of(reference: &str) -> Option<&str> {
-    reference.split_once("://").map(|(scheme, _)| scheme)
+impl TelemetrySecrets {
+    /// The one backend that reads each secret of this run, for the collector.
+    pub(crate) fn backend(&self) -> &Backend {
+        &self.0.backend
+    }
+
+    /// Read the secret of each egress route, remote MCP server, and backend until one read
+    /// fails, and send the words of the program to `diagnostics` alone.
+    pub(crate) fn fetch_routes(
+        self,
+        diagnostics: impl std::io::Write,
+    ) -> (Vec<Fetched>, Result<RouteSecrets, BoxError>) {
+        let (fetched, read) = self.0.fetch(&self.0.routes, diagnostics);
+        (fetched, read.map(|()| RouteSecrets(self.0)))
+    }
+}
+
+impl RouteSecrets {
+    /// The one backend that reads each secret of this run, for the vaults.
+    pub(crate) fn backend(&self) -> &Backend {
+        &self.0.backend
+    }
 }
 
 /// `text` with each control character escaped, as each startup line spells a path.

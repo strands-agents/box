@@ -6,11 +6,10 @@ use std::process::ExitCode;
 
 use policy::{event_schema_source, generate_mcp_schema};
 
-use crate::error::{BoxError, ConfigError, McpSchemaError};
+use crate::error::{BoxError, McpSchemaError};
 use crate::record::config::egress::EgressSecret;
 use crate::record::config::{
-    RemoteMcpServer, read_mcp_servers, read_remote_mcp_servers, read_secret_sources,
-    read_tool_grammars,
+    read_mcp_servers, read_remote_mcp_servers, read_secret_sources, read_tool_grammars,
 };
 use crate::record::layout::operator_home_directory;
 use crate::run::secret_sources::SecretSources;
@@ -32,7 +31,18 @@ pub(crate) async fn generate_schema(
     let remote_servers = read_remote_mcp_servers(&config)?;
     // Check each declared program and read each secret that it holds before a stdio server
     // starts, so a source that fails stops the run first, as it stops `run` before a workload.
-    let secrets = secret_sources(&config, &remote_servers)?;
+    let (entries, enabled, tables) = read_secret_sources(&config)?;
+    let references = remote_servers
+        .iter()
+        .filter_map(|server| server.secret.as_ref())
+        .map(|secret| secret.reference.as_str());
+    let secrets = SecretSources::check_for_references(
+        &entries,
+        enabled,
+        &tables,
+        references,
+        std::io::stderr(),
+    )?;
     for server in &remote_servers {
         if let Some(secret) = &server.secret
             && secrets.reads(&secret.reference)
@@ -96,30 +106,6 @@ pub(crate) async fn generate_schema(
     println!("Generated {}", action_path.display());
     println!("Generated {}", event_path.display());
     Ok(ExitCode::SUCCESS)
-}
-
-/// The declarations of `config`, checked as a run checks them when a server in `servers` names a
-/// secret in a declared scheme.
-fn secret_sources(config: &Path, servers: &[RemoteMcpServer]) -> Result<SecretSources, BoxError> {
-    let (entries, enabled, tables) = read_secret_sources(config)?;
-    let read = servers.iter().any(|server| {
-        server
-            .secret
-            .as_ref()
-            .and_then(|secret| secret.reference.split_once("://"))
-            .is_some_and(|(scheme, _)| entries.contains_key(scheme))
-    });
-    if !read {
-        // No program runs, so no program file is checked.
-        return SecretSources::open(&Default::default(), enabled);
-    }
-    let secrets = SecretSources::open(&entries, enabled)?;
-    // No program starts for a configuration whose write grants let a workload replace it.
-    secrets.refuse_writable_programs(&tables, &[])?;
-    secrets
-        .disclose(std::io::stderr().lock())
-        .map_err(|source| ConfigError::Disclosure { source })?;
-    Ok(secrets)
 }
 
 /// What `used` makes of the secret of `server`, which is read through `secrets` and wiped after.

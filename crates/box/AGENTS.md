@@ -331,13 +331,29 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     declaration is looked up with their scheme. A reference that `Locator` refuses has no
     scheme, so no source reads it: `op://` with nothing after it is refused as a locator on a
     route, and as a reference in no scheme on a telemetry target.
-    `a_declared_source_reads_a_reference_by_the_scheme_that_credentials_routes` pins it.
+    `a_declared_source_reads_a_reference_by_the_scheme_that_credentials_routes` pins it. At a
+    run, `SecretSources::locator` is the second place that asks `Locator`: it parses each
+    reference once and each read keeps that value, so the scheme that finds the program and the
+    reference that `Backend::resolve` gets are one value.
+    `the_sources_read_a_reference_by_the_scheme_that_credentials_routes` pins it.
   - A record that holds a declaration or a `secret.env` key is `SECRET_SOURCE_RECORD_VERSION`.
   - **A run reads each declared secret once, before a workload starts.**
-    `run::secret_sources::SecretSources` owns the path. Keep each part:
-    - `SecretSources::open` loads each program through `ConfiguredCommand::load`, the check of a
-      configured tool command, and gives the opened file to `credentials::Backend::declared`. It
-      runs before the first read. A configuration with no declaration gets `Backend::local()`.
+    `run::secret_sources` owns the path, and its three types hold the order of startup. Keep
+    each part:
+    - **The order is `SecretSources::check`, `SecretSources::fetch_telemetry`,
+      `TelemetrySecrets::fetch_routes`, then the vaults, which consume `RouteSecrets`.** Each
+      step takes the value of the step before it, and only that step returns it. So no caller
+      reads a secret before the check, opens the collector before the first read, or opens a
+      vault before the second. The module has no other function that builds or reads, no
+      visible field, and no test-only item: each test door is in its `tests` module. Do not add
+      a constructor, a `Clone`, or a `Default` to one of the three types, and do not make
+      `open`, `refuse_writable_programs`, `disclose`, or `fetch` visible outside the module. A
+      wrong order is then a compile error, which no test can show, so
+      `only_the_check_builds_the_sources_and_only_they_read` pins the list of doors.
+    - `SecretSources::check` first loads each program through `ConfiguredCommand::load`, the
+      check of a configured tool command, and gives the opened file to
+      `credentials::Backend::declared`. A configuration with no declaration gets
+      `Backend::local()`.
     - `ConfiguredCommands::load` holds the program of each declaration beside the tool commands,
       so `validate_reach` refuses a write grant over it and `mutation_refusal` refuses a change
       through the Shell or Monty. The record stores no program identity, so between two runs
@@ -352,20 +368,37 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
       `each_link_on_the_way_to_a_secret_source_program_is_protected` pins both.
     - Residual: the protection covers element 0 of `command` alone. It does not cover a file
       that the program loads or that an argument names, such as a script after an interpreter.
-    - `SecretSources::refuse_writable_programs` judges the write grants of each process table
-      against the source programs before the first read, in `run` and in
-      `policy generate-schema`. `ApprovedReach::judge_with` makes the same check, but it runs
-      after both read steps, so alone it refuses a box whose program has already run with the
-      vault's credentials. A configuration with no declaration skips the early check, so the
-      order of its refusals does not change. Both judgements take their tables from
-      `Record::process_tables`, so a table that one judges, the other judges too.
+    - `SecretSources::check` then judges the write grants of each process table against the
+      source programs, and last writes one line for each source. A refusal returns no value, so
+      no program starts and no line names a source. `run` and `policy generate-schema` both get
+      their sources from this one order. `ApprovedReach::judge_with` makes the same check of the
+      grants, but it runs after both read steps, so alone it refuses a box whose program has
+      already run with the vault's credentials. A configuration with no declaration skips the
+      early check, so the order of its refusals does not change. Both judgements take their
+      tables from `Record::process_tables`, so a table that one judges, the other judges too.
       `a_write_grant_over_a_secret_source_program_is_refused` asserts that the program did not
-      start.
+      start, and `a_write_grant_over_a_source_program_is_refused_and_starts_no_program` that the
+      check wrote no line.
     - One backend serves the run: the telemetry secret, each vault of `run::credential`, and
       `policy generate-schema`. A second backend would run a program twice for one secret. Do not
       call `Backend::local()` in those paths. The one exception is `telemetry::preflight_aws`: an
       `aws://` reference is in no declared scheme, and a signed route reads nothing through the
       backend.
+    - **`command::run::prepare_contract` calls `SecretSources::check` before
+      `BoxRoot::initialize_first_use` commits the record.** The check reads the tables of the
+      record, starts no program, and reads no box state, so a refusal stores nothing, as a
+      refusal of the configuration does.
+      After the commit and before `hosted` opens the policy, the box directory has a record and
+      no history, and `verify_history_matches_record` refuses the next run of that directory. So
+      a refusal there on the first run of a new box directory needs a wipe: do not move a check
+      of the sources after the commit.
+      `a_new_box_directory_starts_after_the_cause_of_a_secret_source_refusal_is_gone` pins it.
+      Residual: the read of a telemetry secret runs a program, so it holds the run lock, which
+      exists only after the commit. A telemetry secret that the program does not return on the
+      first run still needs a wipe, as each refusal of `telemetry::open` does.
+      `a_telemetry_secret_that_is_not_returned_on_a_first_run_still_strands_the_box_directory`
+      pins that limit, so it fails when the gap closes: remove it, this residual, and the
+      sentence of `docs/user/config.md` together.
     - `command::run::execute` reads in two steps. The telemetry secrets come before
       `telemetry::open`, because the collector needs them. The others come in `hosted`, after
       these checks, which need no secret: the policy, the credsd preflight, the `aws://` telemetry
@@ -374,18 +407,30 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
       commands and the Box installation after the read, so those refusals can follow a sign-in.
       A read that fails in the first step has no collector, so stderr alone states it.
       `policy generate-schema` checks the programs and reads each declared secret before it starts
-      a stdio MCP server, which is a workload-named program.
-    - `SecretSources::fetch` is the only place that reads a declared secret for a run. It writes
-      the error of `credentials` to stderr and returns `ConfigError::SecretFetch`, which holds no
-      text of that error. The `box_stopped` record takes its reason from the returned error, so a
-      `credentials` error in it would put the program's stderr in a record. `op` prints the item
-      and vault names there. `a_failed_fetch_names_its_entry_and_stops_the_later_reads` pins it.
+      a stdio MCP server, which is a workload-named program. It has no record, so it calls
+      `SecretSources::check_for_references`, which checks no table when no remote MCP server
+      names a secret in a declared scheme.
+    - `SecretSources::fetch`, which the two read steps call, is the only place that reads a
+      declared secret for a run. It writes the error of `credentials` to stderr and returns
+      `ConfigError::SecretFetch`, which holds no text of that error. The `box_stopped` record
+      takes its reason from the returned error, so a `credentials` error in it would put the
+      program's stderr in a record. `op` prints the item and vault names there.
+      `a_failed_fetch_names_its_entry_and_stops_the_later_reads` pins it. A vault that opens
+      before the route read runs the program itself, and its failure
+      (`Internal::CredentialProjection`) holds the `credentials` error. So `credential::project`
+      is the only function of `run::credential` that another module can call to open a route
+      vault, and it takes `RouteSecrets`. Keep `workspace` and `backend_capabilities` private.
+      `only_project_opens_a_route_vault_for_another_module` pins it.
     - A `secret_fetched` record states one read of one configuration entry: the entry, the
       source, the program, and the reference with its body redacted. Two entries with one secret
       give two records and one run of the program.
-    - `credential::project` calls `SecretSources::close` after it opens each vault, and
-      `HostedBox::open` calls `project`. Each vault holds its secret by then, and a closed backend
-      refuses each later read through a declared source.
+    - `credential::project` consumes `RouteSecrets`, and `HostedBox::open` calls `project`. The
+      drop of `SecretSources`, which each later type holds, calls `Backend::close_declared`. So
+      the sources close when `project` returns, with no call that a caller can forget. Each
+      vault holds its secret by then, and a closed backend refuses each later read through a
+      declared source, also through a clone that an earlier step kept. A run that stops before
+      the vaults open closes the sources too.
+      `the_sources_read_no_secret_after_the_vaults_take_them` pins it.
     - Each failure names the entry that holds the reference, because `credentials` redacts the
       reference body and never names a `#FIELD`.
     - A route in a declared scheme provisions its `secret.env` variable through
