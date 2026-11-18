@@ -29,7 +29,7 @@ command exits, even when the writer keeps the pipe open. A command that does rea
 waits for it until the Shell's timeout, or, with `shell.timeout = false`, until its caller stops
 it.
 
-A command receives at most `[limits.shell] max_stdin` bytes of this input, 64 KiB by default. Past
+A command receives at most `[limits.shell] max_stdin` bytes of this input, 1 MiB by default. Past
 that, the box discards the rest, so the limit never blocks the writer. Forwarding ends when the
 command exits, so a writer that is still writing then can get a broken pipe. A command that does not
 read its input is not affected. A command that reads past the limit gets no end of input: it waits

@@ -97,15 +97,19 @@ fn configured_shell_output_limits_control_source_loading_and_capture() {
         ("", false),
         ("[limits.shell]\nmax_input = 524288\n", false),
         (
-            "[limits.shell]\nmax_input = 128\nmax_output = 262144\n",
+            "[limits.shell]\nmax_input = 128\nmax_output = 4194304\n",
             true,
         ),
         ("[limits.shell]\nmax_input = 128\nmax_output = 0\n", true),
     ] {
         let box_ = Request::with_config("shell-output-size", PERMISSIVE_POLICY, settings).expect();
-        let script = format!("#{}\nprintf SOURCE_LOADED\n", "x".repeat(100 * 1024));
+        let script = format!("#{}\nprintf SOURCE_LOADED\n", "x".repeat(2 * 1024 * 1024));
         std::fs::write(box_.workspace().join("large.sh"), script).unwrap();
-        std::fs::write(box_.workspace().join("large.txt"), "x".repeat(100 * 1024)).unwrap();
+        std::fs::write(
+            box_.workspace().join("large.txt"),
+            "x".repeat(2 * 1024 * 1024),
+        )
+        .unwrap();
         let output = box_.bash(
             r#"zsh -c '. ./large.sh'; printf '\nsource_status=%s\n' "$?"
                zsh -c 'value=$(cat large.txt); printf "captured=%s\n" "${#value}"'"#,
@@ -113,7 +117,7 @@ fn configured_shell_output_limits_control_source_loading_and_capture() {
         if accepted {
             assert_eq!(
                 stdout(&output),
-                "SOURCE_LOADED\nsource_status=0\ncaptured=102400\n",
+                "SOURCE_LOADED\nsource_status=0\ncaptured=2097152\n",
                 "{}",
                 stderr(&output)
             );
@@ -129,7 +133,7 @@ fn configured_shell_output_limits_control_source_loading_and_capture() {
                 stdout(&output)
             );
             assert!(
-                !stdout(&output).contains("captured=102400"),
+                !stdout(&output).contains("captured=2097152"),
                 "{}",
                 stdout(&output)
             );

@@ -251,7 +251,7 @@ fails the command the way the operation's own error would. The
 ## Execution limits
 
 The stored configuration supplies `max_input` and `max_output` whenever the broker constructs
-Strands Shell, including each new call. Omitted sizes retain the 256 KiB input and 64 KiB output
+Strands Shell, including each new call. Omitted sizes retain the 256 KiB input and 1 MiB output
 defaults; an explicit `0` disables the corresponding Shell size limit. The output limit also bounds
 script files that Shell loads with `source`.
 The broker's framing and streamed-output budgets remain separate.

@@ -4552,6 +4552,32 @@ done"#;
         }));
     }
 
+    /// With no `[limits]`, a command substitution holds a whole 1 MiB stdin.
+    #[test]
+    fn a_default_box_holds_a_one_mebibyte_stdin_in_a_substitution() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let limits = crate::record::config::limits::ShellLimits::default();
+            let mut spec = connection_spec(marker.path());
+            let owned = Arc::get_mut(&mut spec).expect("one owner");
+            owned.max_stdin = limits.max_stdin();
+            owned.max_output = limits.max_output();
+            let (_dir, socket) = serving_socket(spec);
+            let out = marker
+                .path()
+                .canonicalize()
+                .expect("marker resolves")
+                .join("out");
+            let source = format!(r#"x=$(cat); printf %s "${{#x}}" > {}"#, out.display());
+            let (mut reader, _writer) =
+                call_with_input(&socket, &vec![b'x'; 1024 * 1024], &source).await;
+            let (stderr, status) = stderr_and_status(&mut reader).await;
+            assert_eq!(status, 0, "{stderr}");
+            assert_eq!(std::fs::read_to_string(&out).unwrap(), "1048576");
+        }));
+    }
+
     /// An `Input` frame longer than one encoded chunk is refused before it is decoded.
     #[test]
     fn an_overlong_input_frame_is_refused_and_the_call_does_not_run() {
