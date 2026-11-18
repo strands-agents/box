@@ -510,6 +510,11 @@ impl Boundary {
         let mut interpreter_aliases: Vec<(PathBuf, PathBuf)> = Vec::new();
         #[cfg(not(target_os = "linux"))]
         let interpreter_aliases: Vec<(PathBuf, PathBuf)> = Vec::new();
+        // Each granted file's `/bin` or `/sbin` name on a merged-/usr Linux host, with its file.
+        #[cfg(target_os = "linux")]
+        let mut host_link_aliases: Vec<(PathBuf, PathBuf)> = Vec::new();
+        #[cfg(not(target_os = "linux"))]
+        let host_link_aliases: Vec<(PathBuf, PathBuf)> = Vec::new();
         let mut interpreter_identities: Vec<&Path> = Vec::new();
         #[cfg(target_os = "linux")]
         let mut interpreter_exec_files: Vec<PathBuf> = Vec::new();
@@ -699,6 +704,31 @@ impl Boundary {
                 };
                 allow_operator(containment, path, grant.operation, grant.scope)?
             };
+            // On a merged-/usr host `/bin` links to `usr/bin`, and a script a process writes at
+            // run time names its interpreter as `#!/bin/sh`. The file this grant shows at
+            // `/usr/bin/sh` is shown at `/bin/sh` too: the same file, under a name the host gives it.
+            #[cfg(target_os = "linux")]
+            if !grant.credential_store {
+                let path = if grant.is_link() {
+                    &grant.lexical
+                } else {
+                    &grant.resolved
+                };
+                if let Some(spelled) = merged_usr_spelling(path, grant.scope)
+                    && !reach
+                        .grants
+                        .iter()
+                        .any(|other| other.lexical == spelled || other.resolved == spelled)
+                    && !interpreter_aliases
+                        .iter()
+                        .chain(&host_link_aliases)
+                        .any(|(shown, _)| *shown == spelled)
+                {
+                    containment =
+                        allow_operator(containment, &spelled, grant.operation, Scope::File)?;
+                    host_link_aliases.push((spelled, grant.resolved.clone()));
+                }
+            }
         }
 
         if let Some(command) = reach.command.as_ref() {
@@ -775,6 +805,7 @@ impl Boundary {
             minimum: &minimum,
             interpreters: &interpreters,
             interpreter_aliases: &interpreter_aliases,
+            host_link_aliases: &host_link_aliases,
             enterable_workspace: enterable_workspace.as_deref(),
             home: &home,
             path: composed.get("PATH").map(String::as_str).unwrap_or_default(),
@@ -937,6 +968,28 @@ impl Boundary {
     }
 }
 
+/// The name a file grant also has on a merged-/usr host, where `/bin` and `/sbin` link to
+/// `usr/bin` and `usr/sbin`: `/bin/sh` for `/usr/bin/sh`. `None` for a folder grant, a path outside
+/// those folders, or a host whose `/bin` or `/sbin` is a real folder.
+#[cfg(target_os = "linux")]
+fn merged_usr_spelling(path: &Path, scope: Scope) -> Option<PathBuf> {
+    if scope != Scope::File {
+        return None;
+    }
+    [("/bin", "/usr/bin"), ("/sbin", "/usr/sbin")]
+        .into_iter()
+        .find_map(|(top, usr)| {
+            let rest = path.strip_prefix(usr).ok()?;
+            let top = Path::new(top);
+            let linked = std::fs::symlink_metadata(top)
+                .ok()?
+                .file_type()
+                .is_symlink()
+                && top.canonicalize().ok()? == Path::new(usr);
+            linked.then(|| top.join(rest))
+        })
+}
+
 /// What the startup disclosure states for one spec.
 struct DisclosureInputs<'a> {
     table: &'a str,
@@ -944,6 +997,8 @@ struct DisclosureInputs<'a> {
     minimum: &'a [MinimumCell],
     interpreters: &'a [PathBuf],
     interpreter_aliases: &'a [(PathBuf, PathBuf)],
+    /// Each granted file's `/bin` or `/sbin` name on a merged-/usr Linux host, with its file.
+    host_link_aliases: &'a [(PathBuf, PathBuf)],
     enterable_workspace: Option<&'a Path>,
     home: &'a Path,
     path: &'a str,
@@ -999,6 +1054,18 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
         for (spelled, resolved) in inputs.interpreter_aliases {
             lines.push(format!(
                 "  alias       {} -> {}  (interpreter spelling)",
+                spelled.display(),
+                resolved.display()
+            ));
+        }
+    }
+    if !inputs.host_link_aliases.is_empty() {
+        lines.push(format!(
+            "strands-box: {table} host link names for configured access:"
+        ));
+        for (spelled, resolved) in inputs.host_link_aliases {
+            lines.push(format!(
+                "  alias       {} -> {}  (a /usr folder's link name)",
                 spelled.display(),
                 resolved.display()
             ));
@@ -5723,6 +5790,69 @@ write = ["/Users/example/box-demo/aws-tmp"]
             assert_interpreter_route(&boundary, &spelling, &interpreter);
             assert_interpreter_alias_disclosure(&boundary, &spelling, &interpreter);
         }
+    }
+
+    /// **On a merged-/usr host, a granted file in `/usr/bin` is shown at its `/bin` name too.** A
+    /// script a tool writes at run time names its interpreter that way, such as the `#!/bin/sh`
+    /// entry points uvx writes, and a missing `/bin/sh` fails its exec with `ENOENT`. A process
+    /// with no grant in `/usr/bin` gets no such name.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_granted_file_in_usr_bin_is_shown_at_its_bin_name_on_a_merged_usr_host() {
+        let bin = Path::new("/bin");
+        let merged = std::fs::symlink_metadata(bin)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            && bin
+                .canonicalize()
+                .is_ok_and(|real| real == Path::new("/usr/bin"));
+        if !merged {
+            println!("skipping: this host's /bin is not a link to usr/bin");
+            return;
+        }
+        let fixture = Fixture::new();
+        let plain = fixture
+            .try_translate_full(
+                &fixture.spec(),
+                "[tool.t]",
+                RuntimeReach::Leaf,
+                EgressMode::Gateway,
+            )
+            .expect("the fixture's own grants");
+        assert!(
+            !plain.disclosure().contains("host link names"),
+            "{}",
+            plain.disclosure()
+        );
+        let mut checked = 0;
+        // `sh` is a link to `dash` on Ubuntu, and `env` is a file of its own.
+        for name in ["sh", "env"] {
+            let granted = Path::new("/usr/bin").join(name);
+            let Ok(identity) = granted.canonicalize() else {
+                continue;
+            };
+            let fixture = Fixture::new();
+            let mut spec = fixture.spec();
+            spec.filesystem.read_file.push(granted.clone());
+            let boundary = fixture
+                .try_translate_full(&spec, "[tool.t]", RuntimeReach::Leaf, EgressMode::Gateway)
+                .expect("a read on a system program");
+            let spelled = bin.join(name);
+            assert_interpreter_route(&boundary, &spelled, &identity);
+            let disclosure = boundary.disclosure();
+            assert!(
+                disclosure.contains(&format!(
+                    "  alias       {} -> {}  (a /usr folder's link name)",
+                    spelled.display(),
+                    identity.display()
+                )),
+                "{disclosure}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "this host has neither /usr/bin/sh nor /usr/bin/env"
+        );
     }
 
     #[cfg(target_os = "linux")]

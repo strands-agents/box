@@ -294,8 +294,10 @@ interpreters are part of the code the operator must trust.
 
    On Linux, `interpreter aliases for configured access` lists preserved interpreter spellings
    before the runtime-minimum section. Each line maps a spelling to a file the process's existing
-   grants authorize. These mappings add no executable or library access. The
-   [configuration reference](../user/config.md#agentfilesystem-and-toolnamefilesystem) shows the output.
+   grants authorize. These mappings add no executable or library access. On a host where `/bin`
+   and `/sbin` link to the `/usr` folders, `host link names for configured access` lists the `/bin`
+   or `/sbin` name of each granted file in `/usr/bin` or `/usr/sbin`, which reaches only that file.
+   The [configuration reference](../user/config.md#agentfilesystem-and-toolnamefilesystem) shows the output.
 7. It starts the trampoline, which becomes the agent, and waits for the workload to end.
 
 During shutdown, Box stops and reaps the workload before closing the broker and gateway.
