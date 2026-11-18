@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "experimental-idle-flush")]
+use std::time::Duration;
 
 use dogwood_language::{
     Decision as DogwoodDecision, Event, EventBuilder, LoweredPolicySet, PolicySchema,
@@ -766,6 +768,12 @@ impl DogwoodEngine {
 
     #[cfg(feature = "experimental-idle-flush")]
     pub(crate) fn flush_history(&self) -> Result<(), PolicyError> {
+        let mut pending = self
+            .pending_outcomes
+            .lock()
+            .map_err(|_| PolicyError::Evaluation("pending outcome lock poisoned".to_string()))?;
+        self.submit_pending(&mut pending)
+            .map_err(PolicyError::OutcomeKept)?;
         self.engine
             .lock()
             .map_err(|_| {
@@ -3346,6 +3354,101 @@ when temporal { formerly within 1h ( desk::Action::"reset"::response{ input.user
         assert!(
             !decision.is_allow(),
             "once the clock recovers, the kept tool leg counts toward the budget"
+        );
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    fn history_with_a_kept_outcome() -> (tempfile::TempDir, Arc<DogwoodEngine>) {
+        let history = tempfile::tempdir().expect("history directory");
+        let engine = Arc::new(
+            DogwoodEngine::open_with_test_clock(
+                BUDGET,
+                &history.path().join("dogwood.redb"),
+                1_000_000,
+            )
+            .expect("policy loads"),
+        );
+        engine
+            .set_periodic_history(u32::MAX, Duration::from_secs(3600))
+            .expect("automatic flush thresholds remain out of reach");
+        let request_id = permitted_http_request(&engine);
+        engine.flush_history().expect("the request is persisted");
+        engine.advance_clock(-400);
+        let outcome = engine.observe_outcome(
+            &governed(),
+            &Principal::agent(),
+            &request_id,
+            &delivered(101),
+        );
+        assert!(
+            matches!(outcome, Err(PolicyError::OutcomeKept(_))),
+            "{outcome:?}"
+        );
+        (history, engine)
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    #[test]
+    fn explicit_history_flush_reports_an_outcome_that_is_still_refused() {
+        let (_history, engine) = history_with_a_kept_outcome();
+        let flush = engine.flush_history();
+        assert!(
+            matches!(flush, Err(PolicyError::OutcomeKept(_))),
+            "a successful flush must not leave a refused outcome unreported: {flush:?}"
+        );
+        assert_eq!(
+            engine
+                .pending_outcomes
+                .lock()
+                .expect("pending outcomes")
+                .len(),
+            1
+        );
+        engine.advance_clock(410);
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    #[test]
+    fn explicit_history_flush_persists_a_kept_outcome_before_engine_drop() {
+        let (history, engine) = history_with_a_kept_outcome();
+        let recovered_allows = |name: &str| {
+            let copied = history.path().join(name);
+            std::fs::copy(history.path().join("dogwood.redb"), &copied)
+                .expect("copy the persisted history");
+            let recovered = DogwoodEngine::open_with_test_clock(BUDGET, &copied, 1_000_020)
+                .expect("copied history recovers");
+            recovered
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http()),
+                )
+                .0
+                .is_allow()
+        };
+        assert!(
+            recovered_allows("before.redb"),
+            "the control excludes the kept outcome"
+        );
+        engine.advance_clock(410);
+        engine
+            .flush_history()
+            .expect("the recovered clock permits the kept outcome");
+        assert!(
+            !recovered_allows("after.redb"),
+            "explicit flush must persist the completed outcome before engine Drop"
+        );
+        assert!(
+            engine
+                .pending_outcomes
+                .lock()
+                .expect("pending outcomes")
+                .is_empty()
+        );
+        assert_eq!(
+            Arc::strong_count(&engine),
+            1,
+            "the original engine remains alive"
         );
     }
 

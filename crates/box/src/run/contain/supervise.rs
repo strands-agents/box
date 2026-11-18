@@ -754,7 +754,7 @@ impl Contained {
             let _ = self.group.stop().await;
         }
         let termination_result = self.group.release().await;
-        let native_result = self.hosted.stop_native();
+        let shutdown_result = self.hosted.shutdown();
         // A piped run never claimed the terminal, so there is nothing to give back.
         let terminal_result = match self.terminal.as_mut() {
             Some(terminal) => terminal.restore(),
@@ -776,16 +776,18 @@ impl Contained {
         // including the failures before a `HostedBox` exists. A run that ends in an error still
         // keeps its records, because this collector outlives the `?`-returns below.
 
-        let status = match completion {
-            Completion::Workload(result) => result?,
-            Completion::Hosted(failure) => return Err(failure),
-        };
-        termination_result?;
-        native_result?;
-        terminal_result?;
-        #[cfg(unix)]
-        diagnostics_result?;
-        contained_exit_code(status, setup_result)
+        let outcome = (|| {
+            let status = match completion {
+                Completion::Workload(result) => result?,
+                Completion::Hosted(failure) => return Err(failure),
+            };
+            termination_result?;
+            terminal_result?;
+            #[cfg(unix)]
+            diagnostics_result?;
+            contained_exit_code(status, setup_result)
+        })();
+        crate::run::hosted::with_shutdown(outcome, shutdown_result)
     }
 }
 

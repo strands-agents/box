@@ -295,9 +295,9 @@ satisfied again. Box does not erase or convert the old directory's history. See
 [start with fresh history](../user/policy.md#start-with-fresh-history-after-a-dogwood-upgrade).
 
 *Figure: the Box policy adapter uses Dogwood 1.1.2 in a new box directory. The old history stays
-with the old directory. Events still commit individually.*
+with the old directory. Default builds still commit events individually.*
 
-![Before the upgrade, the Box policy adapter uses dogwood-language and dogwood-local-engine 1.0.0. After the upgrade, it uses both packages at 1.1.2 and dogwood-language depends on dogwood-syntax 1.1.2. The new box directory starts with fresh history; the old history remains separate. Cedar and redb versions remain fixed, and each event still commits individually.](images/dogwood-upgrade.png)
+![Before the upgrade, the Box policy adapter uses dogwood-language and dogwood-local-engine 1.0.0. After the upgrade, it uses both packages at 1.1.2 and dogwood-language depends on dogwood-syntax 1.1.2. The new box directory starts with fresh history; the old history remains separate. Cedar and redb versions remain fixed. In default builds, each event still commits individually.](images/dogwood-upgrade.png)
 
 [Editable figure](images/dogwood-upgrade.drawio)
 
@@ -305,21 +305,26 @@ with the old directory. Events still commit individually.*
 
 The preceding durability rules describe default builds. The `experimental-idle-flush`
 Cargo feature in `crates/box/Cargo.toml` selects periodic persistence and starts a
-separate timer for pending history. It requires Dogwood interfaces that the pinned
-public engine package does not provide.
+separate timer for pending history. Both modes use the pinned public Dogwood 1.1.2 packages.
 
 A process crash before a successful flush can lose recent requests and outcomes.
 After restart, a history rule can therefore see fewer events and admit additional
 requests under a count-based limit. The timer flushes while Box is idle, but its
 one-second interval is a polling cadence, not a maximum persistence delay.
 
-The timer guard joins its worker and attempts a final flush during normal teardown.
-This does not establish that all event producers have stopped. The
+After successful startup, explicit hosted shutdown stops and joins event producers before stopping the timer and
+flushing the remaining history. A recorded timer failure stops the workload, and a final
+flush failure makes the run fail. If native monitoring cannot stop, Box reports the
+shutdown failure and stops the timer without claiming a completed final flush. The
 [experimental policy interface](../../crates/policy/README.md#experimental-idle-history-flushing)
-describes explicit shutdown, counters, and errors; the
-[hosted integration](../../crates/box/README.md#experimental-history-timer) records
-its remaining shutdown limits.
+describes explicit timer shutdown, counters, and errors. The
+[hosted integration](../../crates/box/README.md#experimental-history-timer) describes producer
+shutdown and failure reporting.
 
+![An experimental Box timer periodically flushes history. Explicit shutdown stops and joins producers, stops the timer, then performs a final flush.](images/dogwood-idle-history-flush.png)
+
+The timer interval is a polling cadence. A process crash can lose unflushed history.
+Shutdown can wait for an upstream request or callback; the timer interval does not bound this wait.
 
 ## What refuses to load
 

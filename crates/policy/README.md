@@ -507,10 +507,9 @@ history-based prerequisites. The adapter does not erase or convert existing hist
 ## Experimental idle-history flushing
 
 The `experimental-idle-flush` feature in `crates/policy/Cargo.toml` adds an owned timer
-for persistence experiments. It requires Dogwood's `Durability::Periodic`, `set_durability`,
-and `flush` interfaces, which the pinned `dogwood-local-engine = "=1.0.0"` package does
-not provide. The feature cannot build with the current public dependency selection.
-Default builds continue to use the pinned public packages.
+for periodic persistence. The pinned public `dogwood-local-engine = "=1.1.2"` package
+provides the required durability and flush interfaces. Default builds continue to
+persist each event before returning.
 
 `PolicyEngine::open` still uses the engine's default durability mode. Select periodic
 persistence explicitly, then start one timer on the same `Arc<PolicyEngine>`:
@@ -521,6 +520,7 @@ PolicyEngine::start_history_flusher(self: &Arc<Self>, interval: Duration) -> Res
 PolicyEngine::flush_history(&self) -> Result<(), PolicyError>
 HistoryFlusher::snapshot(&self) -> HistoryFlushSnapshot
 HistoryFlusher::shutdown(self) -> Result<HistoryFlushSnapshot, PolicyError>
+HistoryFlusher::stop(self) -> Result<HistoryFlushSnapshot, PolicyError>
 ```
 
 Here, `Arc` and `Duration` are the standard library's shared pointer and time-span types.
@@ -529,10 +529,15 @@ The engine's thresholds are checked when events arrive. The separate timer calls
 A successful call can do no work if no history is pending. The snapshot counts calls,
 not disk synchronizations.
 
+Each flush first retries completed outcomes that Box retained after a recording failure.
+If any outcome remains refused, the flush returns an error.
+
 Keep the guard alive while producers can submit events. Stop and join those producers
 before calling `shutdown`; shutdown wakes and joins the timer, then flushes once.
 It returns any observed flush error, even if a later retry succeeds. Dropping the guard
-also joins it and normally flushes, but can only report errors to stderr.
+also joins it and normally flushes, but can only report errors to stderr. If producers
+cannot stop, `stop` joins the timer without an additional final flush. It still reports
+earlier timer failures; it does not establish that pending history reached disk.
 
 A one-second interval is a polling target. The worker waits another interval after each
 flush completes. Scheduling, lock waits, and storage latency can extend persistence delay. A process crash before a completed flush can lose pending

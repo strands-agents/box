@@ -70,10 +70,17 @@ jobs:
           ref: ${{ inputs.ref }}
           persist-credentials: false
 
+      - name: Enable experimental x86 runtime tests
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: echo "EXPERIMENTAL_X86_SUPPORT=TRUE" >> "$GITHUB_ENV"
+
       - name: Require Linux namespace support
         if: runner.os == 'Linux'
         run: |
-          test "$(uname -m)" = aarch64
+          case "$(uname -m)" in
+            aarch64|x86_64) ;;
+            *) echo "Unsupported Linux test architecture" >&2; exit 1 ;;
+          esac
           knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
           if [ -e "$knob" ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

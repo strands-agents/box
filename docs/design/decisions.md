@@ -993,16 +993,26 @@ durability interface and starts an independent timer on the existing policy engi
 history can be flushed even when events stop arriving. This experiment accepts the loss of recent
 requests and outcomes if the process crashes before a successful flush; after restart, a history
 rule can admit requests that those missing events would have denied. The timer's interval is a
-polling cadence, not a maximum persistence delay. Normal timer teardown joins its worker and
-attempts a final flush, but callers must stop event producers first, and hosted teardown does not
-establish that ordering. Errors during guard destruction reach stderr and do not change the
-selected exit result.
+polling cadence, not a maximum persistence delay. After successful startup, explicit hosted
+shutdown stops the workload and
+joins the broker, discovery, native monitoring, and gateway connection workers before stopping
+the timer and performing its final flush. Gateway shutdown interrupts client sockets and joins
+workers after their existing outcome handling finishes. Recorded timer failures stop the workload;
+final-flush failures make the run fail. Each flush retries completed outcomes retained after a
+recording failure and returns an error if any remain refused. An earlier run failure remains visible
+alongside a shutdown
+failure. If native monitoring cannot stop, Box reports the failure and joins the timer without an
+additional final flush. Cleanup after a startup error remains best effort: a native-monitor
+stop failure can leave callbacks active while the timer destructor attempts a flush. Startup
+still returns an error; this path does not certify that all producers stopped. Destruction
+remains a fallback that reports failures to stderr.
 
 The policy crate's matching feature exposes `PolicyEngine::set_periodic_history` to select
 persistence thresholds, `PolicyEngine::flush_history` to persist submitted history explicitly,
 and `PolicyEngine::start_history_flusher` to start one owned timer for that engine.
 `HistoryFlusher` owns the timer: `HistoryFlusher::snapshot` observes completed calls, and
 `HistoryFlusher::shutdown` joins the worker, attempts a final flush, and returns observed errors.
+`HistoryFlusher::stop` joins without that final flush when producers cannot stop.
 `HistoryFlushSnapshot` carries call counts, elapsed time, and retained errors, not a count of
 persisted events. These interfaces are limited to the experiment; they keep Dogwood's engine-library
 types private and do not select periodic persistence for default releases. See the

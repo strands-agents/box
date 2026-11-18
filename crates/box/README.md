@@ -296,22 +296,28 @@ destination allowlist exists beside it.
 
 ### Experimental history timer
 
-The `experimental-idle-flush` Cargo feature in `crates/box/Cargo.toml` adds a timer
-that persists pending policy history while a hosted Box run is idle. It requires
-Dogwood engine interfaces that the pinned public dependency does not yet provide.
-The feature is for integration validation; default builds retain their existing
-history behavior.
+The `experimental-idle-flush` Cargo feature in `crates/box/Cargo.toml` batches
+policy-history writes and adds a timer that persists pending history while Box is idle.
+It uses the public Dogwood 1.1.2 packages. The feature remains opt-in; default builds
+persist each event before returning.
 
 With this feature, hosted Box selects thresholds of 1,000 events or one second,
 checked when an event arrives, and owns a separate one-second idle timer. One second
 is a polling target. A process crash before a completed flush can lose pending history.
 These values are prototype settings, not runtime configuration keys.
 
-The timer joins and attempts a final flush when its guard is dropped. This does not
-establish a complete hosted shutdown guarantee: gateway connection threads can still
-submit events after listener teardown. Timer failures are retained and reported to
-stderr; the destructor cannot change the selected exit result. Production integration
-still needs producer draining and shutdown error handling.
+After successful startup, explicit shutdown first stops the workload, closes policy reload and discovery admission,
+and joins the broker, discovery, native monitoring, and gateway connection workers.
+Box then stops and joins the timer and performs the final history flush. Gateway shutdown
+interrupts client sockets while allowing the existing upstream outcome handling to finish.
+Cleanup after a startup error is best effort; it does not certify that every producer stopped.
+Gateway workers are joined in default builds too; default history persistence remains per event.
+Shutdown can wait for an upstream request or callback to finish; it has no fixed completion deadline.
+
+A recorded timer failure stops the supervised workload and makes the run fail, even if
+a later flush succeeds. A final-flush failure also makes the run fail; an earlier run
+failure remains visible. If native monitoring cannot stop, Box reports the failure and
+stops the timer without claiming a final flush after all producers stopped.
 
 The [policy timer interface](../policy/README.md#experimental-idle-history-flushing)
 describes explicit shutdown and completed-call counters.

@@ -61,6 +61,11 @@ impl HistoryFlusher {
         self.finish(true)
     }
 
+    /// Stop and join the worker without a final flush when event producers cannot be stopped.
+    pub fn stop(mut self) -> Result<HistoryFlushSnapshot, PolicyError> {
+        self.finish(false)
+    }
+
     fn finish(&mut self, final_flush: bool) -> Result<HistoryFlushSnapshot, PolicyError> {
         if self.closed {
             return Ok(self.snapshot());
@@ -312,6 +317,36 @@ mod tests {
             .expect("failed shutdown released ownership")
             .shutdown()
             .expect("replacement worker shuts down");
+    }
+
+    #[test]
+    fn stopping_without_a_final_flush_releases_the_worker_without_flushing() {
+        let directory = tempfile::tempdir().expect("temporary history directory");
+        let engine = Arc::new(
+            PolicyEngine::open(Vec::new(), &directory.path().join("history.redb"))
+                .expect("history opens"),
+        );
+        let calls = Arc::new(AtomicU64::new(0));
+        let observed = Arc::clone(&calls);
+        let mut flusher = engine
+            .start_history_flusher(Duration::from_secs(3600))
+            .expect("worker starts");
+        flusher.worker.flush = Arc::new(move || {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        let stopped = flusher.stop().expect("worker stops without a final flush");
+        assert_eq!(stopped.attempts, 0);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "neither stop nor Drop may flush"
+        );
+        engine
+            .start_history_flusher(Duration::from_secs(3600))
+            .expect("stop released worker ownership")
+            .stop()
+            .expect("replacement stops");
     }
 
     #[test]
