@@ -7,8 +7,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 
 pub(crate) const DEFAULT_SHELL_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) const DEFAULT_SHELL_MAX_INPUT: usize = 256 * 1024;
-pub(crate) const DEFAULT_SHELL_MAX_OUTPUT: usize = 64 * 1024;
-pub(crate) const DEFAULT_SHELL_MAX_STDIN: usize = 64 * 1024;
+pub(crate) const DEFAULT_SHELL_MAX_OUTPUT: usize = 1024 * 1024;
+pub(crate) const DEFAULT_SHELL_MAX_STDIN: usize = 1024 * 1024;
 
 /// The time the broker leaves for Shell to report a timeout and release its work.
 pub(crate) const SHELL_TIMEOUT_GRACE: Duration = Duration::from_secs(5);
@@ -146,7 +146,8 @@ mod tests {
             let limits: Limits = toml::from_str(text).unwrap();
             assert_eq!(limits.shell.timeout(), Some(Duration::from_secs(30)));
             assert_eq!(limits.shell.max_input(), 262144);
-            assert_eq!(limits.shell.max_output(), 65536);
+            assert_eq!(limits.shell.max_output(), 1048576);
+            assert_eq!(limits.shell.max_stdin(), 1048576);
             assert!(limits.is_default());
             assert_eq!(toml::to_string(&limits).unwrap(), "");
         }
@@ -159,7 +160,8 @@ mod tests {
                 toml::from_str(&format!("[shell]\ntimeout = {seconds}\n")).unwrap();
             assert_eq!(limits.shell.timeout(), Some(Duration::from_secs(seconds)));
             assert_eq!(limits.shell.max_input(), 262144);
-            assert_eq!(limits.shell.max_output(), 65536);
+            assert_eq!(limits.shell.max_output(), 1048576);
+            assert_eq!(limits.shell.max_stdin(), 1048576);
             assert!(!limits.is_default());
             assert_eq!(
                 toml::to_string(&limits).unwrap(),
@@ -250,7 +252,7 @@ mod tests {
                 limits.shell.max_output(),
                 expected["shell"]
                     .get("max_output")
-                    .map_or(65536, |value| value.as_integer().unwrap() as usize)
+                    .map_or(1048576, |value| value.as_integer().unwrap() as usize)
             );
         }
     }

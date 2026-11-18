@@ -725,7 +725,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   Claude Code 2.1.292 gives its Bash tool such a stdin, and collecting to EOF before the Call made
   every agent command wait 10 s and fail. A command that reads such a stdin waits until the Shell
   deadline. The alias forwards every byte, and the broker applies `[limits.shell] max_stdin`
-  (`ShellLimits::max_stdin`, 64 KiB by default, never 0): it feeds exactly the first `max_stdin`
+  (`ShellLimits::max_stdin`, 1 MiB by default, never 0): it feeds exactly the first `max_stdin`
   bytes, discards the rest, sends no Denied, and ignores `InputEof`, so the writer never blocks or
   gets EPIPE, a command that does not read is unaffected, and one that reads past the cap waits for
   the Shell deadline and fails; a failed Call then gets a stderr note that its input was cut. On a
