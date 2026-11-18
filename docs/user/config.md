@@ -347,7 +347,7 @@ Both tables hold one process, in one shape:
 | `[<table>.filesystem]` | table | The path lists the process's own system calls reach. Eight for `[agent]`; six for a `[tool.<name>]`, which has no `metadata` or `exec` list. |
 | `native-filesystem-policy` | boolean | Optional override of the global experimental setting for this process and its descendants. See [workload selection](native-filesystem-policy.md#select-workloads). |
 | `file-watching` | boolean | `false` by default. On macOS, permit FSEvents for this process and its descendants, with the [limitations](#file-watching). Linux ignores this setting. |
-| `executable-memory` | boolean | `false` by default. On Linux, permit writable and executable memory for this process and its descendants, which a JIT runtime such as Node or Java needs. A runtime that calls native code, such as Python through `ctypes`, can then run any bytes. macOS ignores this setting. |
+| `executable-memory` | boolean | `false` by default. On Linux, permit writable and executable memory for this process and its descendants, with the [cost](#executable-memory). macOS ignores this setting. |
 | `[tool.<name>.grammar]` | table | Experimental, and `[tool.<name>]` only. The tool grammar for the program this tool runs. See [`[tool.<name>.grammar]`](#toolnamegrammar). |
 | `[[agent.ingress]]` | list of tables | `[agent]` only. Where callers reach the agent's servers, one entry per port. See [`[[agent.ingress]]`](#agentingress). |
 
@@ -463,6 +463,39 @@ strands-box: [tool.dev] file watching: macOS FSEvents may disclose denied names 
 ```
 
 A record with any selected process requires version 35.
+For rollback, remove the key from every process table, then follow the
+[rollback steps](native-filesystem-policy.md#stored-configuration-and-rollback).
+Older builds do not recognize the key, even when its value is `false`.
+
+### Executable memory
+
+`executable-memory = true` permits writable and executable memory on Linux for the selected process and its descendants.
+Set it on an existing `[agent]`, `[tool.<name>]`, or local stdio `[mcp.<name>]` table.
+Each table selects the setting independently; an agent's selection does not enable its tools or MCP servers.
+Omission and `false` keep that memory refused. The setting has no effect on macOS, which accepts the key.
+
+A JIT runtime such as Node, Java, or Bun needs it, and so does Python `ctypes` with a libffi that writes its callbacks into memory.
+For npm, add the setting to that tool's table:
+
+```toml
+[tool.npm]
+command = ["npm"]
+executable-memory = true
+```
+
+**The process can run code it writes into memory**, not only the programs its grants let it start.
+A runtime that calls native code, such as Python through `ctypes`, can run any bytes this way.
+The syscall filter, filesystem grants, and network policy still apply to that code.
+Only the `mmap` and `mprotect` rules lift; `memfd_create`, `pkey_mprotect`, descriptor `execveat`, and the `noexec` mounts stay refused.
+
+On Linux, the startup disclosure names each selected process before the agent starts.
+This includes stdio MCP servers that remain unstarted; Box repeats their disclosure when they start.
+
+```text
+strands-box: [tool.npm] executable memory: may run code it writes into memory, as a JIT runtime does; a runtime that calls native code, such as Python through ctypes, may run any bytes this way
+```
+
+A record with any selected process requires version 38.
 For rollback, remove the key from every process table, then follow the
 [rollback steps](native-filesystem-policy.md#stored-configuration-and-rollback).
 Older builds do not recognize the key, even when its value is `false`.
@@ -1079,7 +1112,7 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | `network.contain_egress` | bool | For `stdio`: `true` by default. `false` gives this one server direct network access, with no gateway, no policy decision per request, and no credential injection. |
 | `native-filesystem-policy` | boolean | For `stdio`: override the global experimental filesystem policy setting. Remote `http` entries refuse this field. See [workload selection](native-filesystem-policy.md#select-workloads). |
 | `file-watching` | boolean | For `stdio`: `false` by default. Permit macOS FSEvents with the [limitations](#file-watching). Linux ignores this setting. Remote `http` entries refuse this field. |
-| `executable-memory` | boolean | For `stdio`: `false` by default. Permit writable and executable memory on Linux, as for a [process table](#agent-and-toolname). macOS ignores this setting. Remote `http` entries refuse this field. |
+| `executable-memory` | boolean | For `stdio`: `false` by default. Permit writable and executable memory on Linux, with the [cost](#executable-memory). macOS ignores this setting. Remote `http` entries refuse this field. |
 | `destinations` | string array | For `http`: the hosts the server answers on. |
 | `secret.ref` | string | For `http`: the credential the gateway attaches on the way out. |
 | `backends` | table array | For `http`: a backend to re-route the server's requests to, at most one. The same shape and rules as an `[egress.<name>]` backend; a `stdio` table refuses it. See [Backends](mcp.md#backends). |

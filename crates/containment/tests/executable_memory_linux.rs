@@ -47,6 +47,8 @@ fn executable_memory_probe() {
                 libc::syscall(libc::SYS_pkey_mprotect, page, LENGTH, libc::PROT_READ, -1) != 0
             ),
             "memfd_create": refusal(libc::syscall(libc::SYS_memfd_create, c"jit".as_ptr(), 0) < 0),
+            // The same filter as `mmap` and `mprotect` refuses this, so the key lifts no other rule.
+            "ipv6_socket": refusal(libc::socket(libc::AF_INET6, libc::SOCK_STREAM, 0) < 0),
         })
     };
     println!("{MARKER}{report}");
@@ -101,6 +103,10 @@ fn probe(config: ContainmentConfig) -> serde_json::Value {
 
 #[test]
 fn executable_memory_lifts_only_the_jit_routes() {
+    if !the_host_can_build_a_view() {
+        println!("skipping: this host cannot build a namespace mount view");
+        return;
+    }
     assert_eq!(
         probe(ContainmentConfig::new()),
         serde_json::json!({
@@ -108,6 +114,7 @@ fn executable_memory_lifts_only_the_jit_routes() {
             "mprotect": libc::EPERM,
             "pkey_mprotect": libc::EPERM,
             "memfd_create": libc::EPERM,
+            "ipv6_socket": libc::EPERM,
         })
     );
     assert_eq!(
@@ -117,6 +124,50 @@ fn executable_memory_lifts_only_the_jit_routes() {
             "mprotect": null,
             "pkey_mprotect": libc::EPERM,
             "memfd_create": libc::EPERM,
+            "ipv6_socket": libc::EPERM,
         })
     );
+}
+
+fn the_host_can_build_a_view() -> bool {
+    // SAFETY: the child uses syscalls only and calls `_exit`.
+    let child = unsafe { libc::fork() };
+    if child < 0 {
+        return true;
+    }
+    if child == 0 {
+        // SAFETY: syscall-only child.
+        unsafe {
+            let namespaces = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
+            if libc::unshare(namespaces) != 0 {
+                libc::_exit(10);
+            }
+            let inner = libc::fork();
+            if inner < 0 {
+                libc::_exit(12);
+            }
+            if inner == 0 {
+                if libc::mount(
+                    c"proc".as_ptr(),
+                    c"/proc".as_ptr(),
+                    c"proc".as_ptr(),
+                    0,
+                    std::ptr::null(),
+                ) != 0
+                {
+                    libc::_exit(11);
+                }
+                libc::_exit(0);
+            }
+            let mut inner_status = 0;
+            libc::waitpid(inner, &mut inner_status, 0);
+            let mounted = libc::WIFEXITED(inner_status) && libc::WEXITSTATUS(inner_status) == 0;
+            libc::_exit(if mounted { 0 } else { 11 });
+        }
+    }
+
+    let mut status = 0;
+    // SAFETY: wait for this process's child.
+    unsafe { libc::waitpid(child, &mut status, 0) };
+    libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
 }

@@ -201,6 +201,7 @@ impl ContainmentConfig {
         self
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn executable_memory(&self) -> bool {
         self.executable_memory
     }
