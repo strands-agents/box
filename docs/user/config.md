@@ -702,8 +702,10 @@ On a Linux host where `/bin` and `/sbin` link to `usr/bin` and `usr/sbin`, as on
 entry in `/usr/bin` or `/usr/sbin` also shows its file at the `/bin` or `/sbin` name. A script that a
 process writes or downloads at run time often names its interpreter that way, such as `#!/bin/sh`,
 and without that name its exec fails with `No such file or directory`. The name reaches only the
-file the entry grants. A folder entry such as `read = ["/usr/bin"]` gets no such name. The names
-appear in their own section:
+file the entry grants, with the operations its entries grant: a tool, which may run any file it
+reaches, or a process with an `exec` entry for the file can run it there, and a process that may
+only read the file can't. Only file entries get these names. The names appear in their own
+section:
 
 ```text
 strands-box: [tool.uvx] host link names for configured access:

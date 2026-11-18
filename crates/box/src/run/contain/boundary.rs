@@ -515,6 +515,9 @@ impl Boundary {
         let mut host_link_aliases: Vec<(PathBuf, PathBuf)> = Vec::new();
         #[cfg(not(target_os = "linux"))]
         let host_link_aliases: Vec<(PathBuf, PathBuf)> = Vec::new();
+        // Each `/bin` or `/sbin` name with each operation already granted on it.
+        #[cfg(target_os = "linux")]
+        let mut host_link_grants: Vec<(PathBuf, Operation)> = Vec::new();
         let mut interpreter_identities: Vec<&Path> = Vec::new();
         #[cfg(target_os = "linux")]
         let mut interpreter_exec_files: Vec<PathBuf> = Vec::new();
@@ -683,30 +686,37 @@ impl Boundary {
         // The box's private tree is refused beneath every grant.
         containment = containment.refuse(guard.private, Scope::Root)?;
         for grant in &reach.grants {
-            if grant.operation == Operation::Exec
+            // An exec entry for the command or an interpreter is already granted by that path.
+            let already_granted = grant.operation == Operation::Exec
                 && grant.scope == Scope::File
                 && (grant.resolved == program_identity
-                    || interpreter_exec_files.contains(&grant.resolved))
-            {
-                continue;
-            }
-            containment = if grant.credential_store {
-                // The guards judge the canonical identity; the grant itself keeps the authored
-                // path, which the credential-store exception validates on its own terms.
-                guard.judge(&grant.resolved, grant.operation, grant.scope)?;
-                containment.allow_credential_store(&grant.lexical, grant.operation, grant.scope)?
-            } else {
-                // A link entry is granted by its own name, so the box shows the file there too.
-                let path = if grant.is_link() {
-                    &grant.lexical
+                    || interpreter_exec_files.contains(&grant.resolved));
+            if !already_granted {
+                containment = if grant.credential_store {
+                    // The guards judge the canonical identity; the grant itself keeps the
+                    // authored path, which the credential-store exception validates on its own
+                    // terms.
+                    guard.judge(&grant.resolved, grant.operation, grant.scope)?;
+                    containment.allow_credential_store(
+                        &grant.lexical,
+                        grant.operation,
+                        grant.scope,
+                    )?
                 } else {
-                    &grant.resolved
+                    // A link entry is granted by its own name, so the box shows the file there
+                    // too.
+                    let path = if grant.is_link() {
+                        &grant.lexical
+                    } else {
+                        &grant.resolved
+                    };
+                    allow_operator(containment, path, grant.operation, grant.scope)?
                 };
-                allow_operator(containment, path, grant.operation, grant.scope)?
-            };
+            }
             // On a merged-/usr host `/bin` links to `usr/bin`, and a script a process writes at
-            // run time names its interpreter as `#!/bin/sh`. The file this grant shows at
-            // `/usr/bin/sh` is shown at `/bin/sh` too: the same file, under a name the host gives it.
+            // run time names its interpreter as `#!/bin/sh`. The file this entry shows at
+            // `/usr/bin/sh` is shown at `/bin/sh` too, with each operation an entry grants it:
+            // the same file, under a name the host gives it.
             #[cfg(target_os = "linux")]
             if !grant.credential_store {
                 let path = if grant.is_link() {
@@ -719,14 +729,18 @@ impl Boundary {
                         .grants
                         .iter()
                         .any(|other| other.lexical == spelled || other.resolved == spelled)
-                    && !interpreter_aliases
-                        .iter()
-                        .chain(&host_link_aliases)
-                        .any(|(shown, _)| *shown == spelled)
+                    && !host_link_grants.contains(&(spelled.clone(), grant.operation))
                 {
                     containment =
                         allow_operator(containment, &spelled, grant.operation, Scope::File)?;
-                    host_link_aliases.push((spelled, grant.resolved.clone()));
+                    host_link_grants.push((spelled.clone(), grant.operation));
+                    if !interpreter_aliases
+                        .iter()
+                        .chain(&host_link_aliases)
+                        .any(|(shown, _)| *shown == spelled)
+                    {
+                        host_link_aliases.push((spelled, grant.resolved.clone()));
+                    }
                 }
             }
         }
@@ -5853,6 +5867,65 @@ write = ["/Users/example/box-demo/aws-tmp"]
             checked > 0,
             "this host has neither /usr/bin/sh nor /usr/bin/env"
         );
+
+        // Every operation the entries grant a file reaches its /bin name, and its startup line is
+        // printed once. A read entry first must not keep an exec entry off the name.
+        let bash = Path::new("/usr/bin/bash");
+        if bash.is_file() {
+            let fixture = Fixture::new();
+            let mut spec = fixture.spec();
+            spec.filesystem.read_file.push(bash.to_path_buf());
+            spec.filesystem.exec.push(bash.to_path_buf());
+            let boundary = fixture
+                .try_translate_full(&spec, "[agent]", RuntimeReach::Agent, EgressMode::Gateway)
+                .expect("read and exec on one system program");
+            let operations = operations_at(&boundary, &bin.join("bash"));
+            assert!(
+                operations.contains(&Operation::Read) && operations.contains(&Operation::Exec),
+                "/bin/bash must carry both entries' operations: {operations:?}"
+            );
+            let disclosure = boundary.disclosure();
+            assert_eq!(
+                disclosure.matches("  alias       /bin/bash -> ").count(),
+                1,
+                "{disclosure}"
+            );
+        }
+
+        // An exec entry for the command's own file is granted by the command, and still reaches
+        // the file's /bin name.
+        let command = Path::new("/bin/sh")
+            .canonicalize()
+            .expect("the fixture's command");
+        if command.starts_with("/usr/bin") {
+            let fixture = Fixture::new();
+            let mut spec = fixture.spec();
+            spec.filesystem.exec.push(command.clone());
+            let boundary = fixture
+                .try_translate_full(&spec, "[agent]", RuntimeReach::Agent, EgressMode::Gateway)
+                .expect("an exec entry for the command's own file");
+            let spelled = bin.join(command.file_name().expect("a file name"));
+            assert!(
+                operations_at(&boundary, &spelled).contains(&Operation::Exec),
+                "{} must be executable: {}",
+                spelled.display(),
+                boundary.containment_config_text()
+            );
+        }
+    }
+
+    /// The operations the containment config grants at `original`, the name as granted.
+    #[cfg(target_os = "linux")]
+    fn operations_at(boundary: &Boundary, original: &Path) -> Vec<Operation> {
+        let config: serde_json::Value =
+            serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
+        config["paths"]
+            .as_array()
+            .expect("path grants")
+            .iter()
+            .filter(|grant| grant["original"].as_str() == original.to_str())
+            .map(|grant| serde_json::from_value(grant["operation"].clone()).expect("an operation"))
+            .collect()
     }
 
     #[cfg(target_os = "linux")]
