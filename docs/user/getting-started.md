@@ -102,7 +102,8 @@ Box requires the exact value `TRUE` for `run` and `policy generate-schema`, incl
 their Rust library entry points. Help and version output do not require the flag.
 ARM64 does not require the flag. It does not change the sandbox permissions.
 
-After installation, continue with the [Amazon EKS coding example](tutorials/eks.md) or the [AgentCore Runtime shipment example](tutorials/agentcore-runtime.md).
+After installation, run the [native Linux example](./linux-requirements.md#run-a-native-linux-example) to check sandbox startup and file access without model credentials.
+For a cloud workload, continue with the [Amazon EKS coding example](tutorials/eks.md) or the [AgentCore Runtime shipment example](tutorials/agentcore-runtime.md).
 Steps 2–8 below follow the macOS Strands CLI example.
 
 Check the [Linux requirements](./linux-requirements.md) before running a workload; a successful `box --version` does not test sandbox startup.

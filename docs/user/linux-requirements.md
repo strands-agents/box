@@ -95,6 +95,113 @@ The operating system can also apply different security rules to a diagnostic pro
 For deployment checks that include cancellation, timeouts, and cleanup, use
 [Check the deployment](./cloud-deployments.md#check-the-deployment).
 
+### Run a native Linux example
+
+Use this example to check startup and file access without a coding agent or model credentials.
+It runs the host OS's Bash to count input lines and write a report.
+
+First [download Box](./getting-started.md#step-1-download-box) and complete the binary checks above.
+Run the block below from the directory that contains `box-core`, using your normal account without `sudo`.
+You need Bash on `PATH` and the standard Linux utilities `cat`, `cmp`, `cp`, `id`, `mkdir`, and `mktemp`.
+On x86-64, keep `EXPERIMENTAL_X86_SUPPORT=TRUE` exported as described in the [Linux installation instructions](./getting-started.md#linux).
+
+Each run creates a fresh directory under `/tmp` and prints its location.
+The fixed directory template keeps paths safe to insert into TOML, regardless of your account name or installation path.
+The example leaves its files in place for inspection and does not overwrite an earlier run.
+
+In `box.toml`, the `[agent]` table's `command` field selects Bash and the script it reads.
+The `[agent.filesystem]` lists grant reads to the script, input, and read-only control file, plus reads and writes to the output directory.
+The `config` subdirectory holds `box.toml` and Box's private state, selected by `box_dir`.
+Bash receives no grants to this subdirectory.
+Bash opens the files itself, so this example needs no policy file or grants to other programs.
+
+```sh
+bash <<'SETUP'
+set -eu
+umask 077
+if [ "$(id -u)" -eq 0 ]; then
+  printf 'Run this example as your normal account, without sudo.\n' >&2
+  exit 1
+fi
+test -x ./box-core/box
+example_dir=$(mktemp -d /tmp/box-linux.XXXXXX)
+printf 'Example files: %s\n' "$example_dir"
+mkdir "$example_dir/config" "$example_dir/workspace" "$example_dir/output"
+printf 'alpha\nbeta\ngamma\n' > "$example_dir/input.txt"
+printf 'read-only original\n' > "$example_dir/read-only.txt"
+printf 'ungranted original\n' > "$example_dir/ungranted.txt"
+cp "$example_dir/read-only.txt" "$example_dir/read-only.before"
+cp "$example_dir/ungranted.txt" "$example_dir/ungranted.before"
+test -r "$example_dir/ungranted.txt"
+test -w "$example_dir/read-only.txt"
+
+cat > "$example_dir/workload.sh" <<'WORKLOAD'
+set -eu
+example_dir=$1
+printf 'Workload started\n'
+count=0
+while IFS= read -r line; do
+  count=$((count + 1))
+done < "$example_dir/input.txt"
+printf 'Input lines: %s\n' "$count" > "$example_dir/output/report.txt"
+printf 'Allowed read and write: %s lines\n' "$count"
+if IFS= read -r line < "$example_dir/ungranted.txt"; then
+  printf 'ERROR: the ungranted read succeeded.\n' >&2
+  exit 1
+fi
+printf 'Ungranted read failed as expected\n'
+IFS= read -r line < "$example_dir/read-only.txt"
+test "$line" = 'read-only original'
+printf 'Read-only file read succeeded\n'
+if printf 'changed\n' > "$example_dir/read-only.txt"; then
+  printf 'ERROR: the read-only overwrite succeeded.\n' >&2
+  exit 1
+fi
+printf 'Read-only overwrite failed as expected\n'
+printf 'Workload completed\n'
+WORKLOAD
+
+cat > "$example_dir/config/box.toml" <<TOML
+name = "linux-example"
+box_dir = "$example_dir/config/state"
+
+[agent]
+command = ["bash", "--noprofile", "--norc", "$example_dir/workload.sh", "$example_dir"]
+workspace = "$example_dir/workspace"
+
+[agent.filesystem]
+read_file = ["$example_dir/workload.sh", "$example_dir/input.txt", "$example_dir/read-only.txt"]
+read = ["$example_dir/output"]
+write = ["$example_dir/output"]
+TOML
+
+./box-core/box run --config "$example_dir/config/box.toml"
+printf 'Input lines: 3\n' | cmp - "$example_dir/output/report.txt"
+cmp "$example_dir/read-only.before" "$example_dir/read-only.txt"
+cmp "$example_dir/ungranted.before" "$example_dir/ungranted.txt"
+printf 'Outside checks passed: report matches and protected files are unchanged.\n'
+SETUP
+```
+
+Alongside Box's startup disclosure, expect these confirmation messages:
+
+```text
+Workload started
+Allowed read and write: 3 lines
+Ungranted read failed as expected
+Read-only file read succeeded
+Read-only overwrite failed as expected
+Workload completed
+Outside checks passed: report matches and protected files are unchanged.
+```
+
+Bash also prints an error for each failed file operation, such as `No such file or directory` and `Read-only file system`.
+The `Workload started` message must appear before those failures.
+A setup error without that message does not pass the check; use the troubleshooting table below.
+The final checks run outside Box: they verify the report and compare both protected files with their original contents.
+The block exits with a nonzero status if Box fails, an ungranted operation succeeds, or a file comparison fails.
+After the block finishes, you can remove the printed example directory.
+
 ## Operating system and container permissions
 
 AppArmor profiles restrict what a Linux program may do.
