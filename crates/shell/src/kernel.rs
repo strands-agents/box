@@ -156,7 +156,7 @@ impl ShellKernel {
     /// Resolve `path` per `follow`, keeping the identity an effect must still find.
     async fn resolve(&self, proc: &Process, path: &str, follow: Follow) -> Resolved {
         let generation = self.backend.generation.lock().await;
-        let abs = resolve::absolute(&proc.cwd, path);
+        let abs = strands_shell::vfs::absolute(&proc.cwd, path);
         let vfs = self.backend.memory.vfs.lock().await;
         let mounts = &self.backend.mounts;
         let resolved = match follow {
@@ -629,7 +629,7 @@ impl Kernel for ShellKernel {
             .await
             .into_iter()
             .filter(|candidate| {
-                let abs = resolve::absolute(&proc.cwd, candidate);
+                let abs = strands_shell::vfs::absolute(&proc.cwd, candidate);
                 !mounts.serves(&abs) || mounts.is_mount_point(&abs)
             })
             .collect();
