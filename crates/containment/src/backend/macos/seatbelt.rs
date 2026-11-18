@@ -448,6 +448,7 @@ fn descriptor_path(descriptor: libc::c_int) -> Option<std::path::PathBuf> {
 }
 
 /// The profile for one request, naming no inherited stream.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn render_profile(config: &ContainmentConfig) -> Result<String> {
     render_profile_with_streams(config, &InheritedStreams::default())
 }

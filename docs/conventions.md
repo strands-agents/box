@@ -6,8 +6,9 @@ House style for a crate under `crates/`, derived from the established siblings
 directory layout and the package names agree.
 
 > **One crate cited below no longer exists in the tree.** `journal`
-> predates the 2026-07-12 crate reset; [`Cargo.toml`](../Cargo.toml) lists the live members. `box` is
-> `[[bin]]`-only, so the `lib.rs` façade items below do not apply to it. Their examples are kept because each is a
+> predates the 2026-07-12 crate reset; [`Cargo.toml`](../Cargo.toml) lists the live members. `box` is a
+> thin binary over a narrow `lib.rs` library, not a mechanism crate, so the mechanism-crate façade
+> items below do not apply to it. Their examples are kept because each is a
 > worked illustration of the rule it sits under — read them as *the shape to copy*,
 > not as a file to open. Where you need a live reference, use `containment`. This is a **mechanical checklist** — each item is
 phrased so an agent (or a reviewer, or a CI gate) can verify it by reading the
