@@ -141,9 +141,7 @@ pub(crate) fn read_remote_mcp_servers(path: &Path) -> Result<Vec<RemoteMcpServer
         if let Some(scheme) = remote
             .secret
             .as_ref()
-            .and_then(|secret| secret.reference.split_once("://"))
-            .map(|(scheme, _)| scheme)
-            .filter(|scheme| declared.declares(scheme))
+            .and_then(|secret| declared.source_of(&secret.reference))
         {
             return Err(ConfigError::SecretSourceFetch {
                 scheme: scheme.to_string(),

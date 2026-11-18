@@ -360,9 +360,7 @@ fn telemetry_secret_uri(reference: &str, sources: &DeclaredSources) -> Result<St
         || SIGNING_SCHEMES
             .iter()
             .any(|scheme| reference.starts_with(scheme))
-        || reference
-            .split_once("://")
-            .is_some_and(|(scheme, _)| sources.declares(scheme))
+        || sources.source_of(reference).is_some()
     {
         reference.to_string()
     } else {
@@ -1121,6 +1119,23 @@ mod tests {
             telemetry_secret_uri("aws-secretsmanager://box/telemetry#OTLP_KEY", &none).is_err(),
             "a declared scheme is read only in a configuration that declares it"
         );
+        // The scheme is the one that `credentials` routes by, after the trim. A declared scheme
+        // with nothing after it is no reference, so it is refused here, and no part is echoed.
+        assert_eq!(
+            telemetry_secret_uri(" op://Personal/Vendor/key ", &declared)
+                .expect("the scheme is declared"),
+            "op://Personal/Vendor/key"
+        );
+        let undeclared = telemetry_secret_uri("vault://kv/box/telemetry", &declared)
+            .expect_err("no table declares the scheme");
+        for reference in ["op://", "OP://Personal/Vendor/key", "op ://key"] {
+            assert_eq!(
+                telemetry_secret_uri(reference, &declared)
+                    .expect_err("credentials routes this text to no declared source"),
+                undeclared,
+                "for {reference:?}"
+            );
+        }
     }
 
     /// **A telemetry target cannot send out the credential of a declared source's vault**, under

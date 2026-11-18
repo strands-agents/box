@@ -4,11 +4,12 @@
 //! |---|---|
 //! | [`SecretSourceEntry`] | one `[secret-source.<scheme>]` table, as the operator writes it |
 //! | [`DeclaredSources`] | the checked declarations that each secret reference is judged against |
+//! | [`routed_scheme`] | the one place that finds the scheme of a secret reference, as `credentials` routes it |
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use credentials::SecretSourceCommand;
+use credentials::{CredentialError, Locator, SecretSourceCommand};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
@@ -154,6 +155,14 @@ impl DeclaredSources {
         self.declarations.contains_key(scheme)
     }
 
+    /// The scheme of the declared source that reads the secret that `reference` names.
+    pub(crate) fn source_of(&self, reference: &str) -> Option<&str> {
+        let scheme = routed_scheme(reference).ok()?;
+        self.declarations
+            .get_key_value(&scheme)
+            .map(|(declared, _)| declared.as_str())
+    }
+
     /// The scheme of a source whose `pass-secret-env` names the variable `name`.
     pub(crate) fn credential_owner(&self, name: &str) -> Option<&str> {
         self.declarations
@@ -167,6 +176,12 @@ impl DeclaredSources {
     pub(crate) fn for_tests(entries: &BTreeMap<String, SecretSourceEntry>) -> Self {
         Self::check_on(entries, true, true).expect("the test declarations are valid")
     }
+}
+
+/// The scheme by which `credentials` routes `reference` to a source, or its refusal of a text that
+/// is no reference.
+pub(crate) fn routed_scheme(reference: &str) -> Result<String, CredentialError> {
+    Locator::parse_uri(reference).map(|locator| locator.scheme().to_string())
 }
 
 /// Whether a secret reference names a scheme that a `[secret-source.<scheme>]` table can declare.
@@ -253,6 +268,59 @@ pub(crate) mod tests {
             !DeclaredSources::check_on(&BTreeMap::new(), false, true)
                 .expect("no table needs no switch")
                 .enabled()
+        );
+    }
+
+    #[test]
+    fn a_declared_source_reads_a_reference_by_the_scheme_that_credentials_routes() {
+        let sources = declared();
+        for (reference, source) in [
+            ("op://Personal/GitHub/token", Some("op")),
+            ("op://item#FIELD", Some("op")),
+            ("op://a://b", Some("op")),
+            (
+                "aws-secretsmanager://box/telemetry#KEY",
+                Some("aws-secretsmanager"),
+            ),
+            // No table declares the scheme.
+            ("vault://kv/key", None),
+            ("env://NAME", None),
+            ("aws://", None),
+            // `credentials` refuses the text as a reference, so no source reads it.
+            ("op://", None),
+            ("://orphan", None),
+            ("op:/item", None),
+            ("op", None),
+            ("", None),
+            // The scheme is the text before `://` as written: no trim, and no change of case.
+            (" op://item", None),
+            ("op ://item", None),
+            ("OP://item", None),
+        ] {
+            assert_eq!(sources.source_of(reference), source, "for {reference:?}");
+            // The answer is for the scheme that `credentials` routes the reference by.
+            let routed = Locator::parse_uri(reference).ok();
+            assert_eq!(
+                routed_scheme(reference).ok().as_deref(),
+                routed.as_ref().map(Locator::scheme),
+                "for {reference:?}"
+            );
+            assert_eq!(
+                source,
+                routed
+                    .as_ref()
+                    .map(Locator::scheme)
+                    .filter(|scheme| sources.declares(scheme)),
+                "for {reference:?}"
+            );
+        }
+        assert_eq!(DeclaredSources::none().source_of("op://item"), None);
+        assert_eq!(
+            routed_scheme("op://")
+                .expect_err("nothing follows the scheme")
+                .to_string(),
+            "credential error: malformed credential reference (expected `scheme://locator`): \
+             \"op://[REDACTED]\""
         );
     }
 

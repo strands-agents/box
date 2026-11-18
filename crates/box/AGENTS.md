@@ -322,6 +322,16 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     no effect, so no key of the feature loads and no record moves to its version without the
     switch. `grammar` and `[[agent.ingress]]` refuse themselves the same way.
   - A refusal of a telemetry `secret.ref` echoes no part of the value, the scheme included.
+  - **`secret_source::routed_scheme` is the one place that finds the scheme of a reference for
+    a declared source.** It asks `credentials::Locator`, which is what `Backend::resolve` routes
+    by, so Box and the backend cannot name two schemes for one reference.
+    `DeclaredSources::source_of` answers "which declared source reads this reference" for each
+    caller. Do not split a reference on `://` to ask that question. `EgressSecret::deliverable`
+    and `validate_secret` split to sort a reference into its kind and to word a refusal, and no
+    declaration is looked up with their scheme. A reference that `Locator` refuses has no
+    scheme, so no source reads it: `op://` with nothing after it is refused as a locator on a
+    route, and as a reference in no scheme on a telemetry target.
+    `a_declared_source_reads_a_reference_by_the_scheme_that_credentials_routes` pins it.
   - A record that holds a declaration or a `secret.env` key is `SECRET_SOURCE_RECORD_VERSION`.
   - **This build reads no secret through a declaration.** `command::run::refuse_declared_sources`
     stops a run after the load checks, and `read_remote_mcp_servers` stops `policy generate-schema`

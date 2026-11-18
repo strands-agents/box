@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::env::{checked_provisioned_name, checked_provisioned_name_without_value};
-use super::secret_source::{DeclaredSources, declarable, vault_credential_refusal};
+use super::secret_source::{DeclaredSources, declarable, routed_scheme, vault_credential_refusal};
 use super::{
     AWS_SCHEME, BASIC_AUTH_PLACEMENT, BEARER_PREFIX, CREDSD_SCHEME, DEFAULT_HEADER,
     HEADER_PLACEMENT, INJECT_ALWAYS, INJECT_PHANTOM, QUERY_PARAM_PLACEMENT, URL_PATH_PLACEMENT,
@@ -180,8 +180,8 @@ fn validate_against_sources(
     };
     match secret.deliverable() {
         Some((SecretScheme::Declared, _)) => {
-            let scheme = secret.scheme();
-            if !sources.declares(scheme) {
+            let scheme = secret.routed_scheme()?;
+            if !sources.declares(&scheme) {
                 return refuse(format!(
                     "secret scheme {scheme:?} has no `[secret-source.{scheme}]` table: declare \
                      the secret source that reads it, which Box loads on macOS only, or use \
@@ -792,11 +792,13 @@ impl EgressSecret {
         Some((scheme, value))
     }
 
-    /// The text before `://`, or the empty text for a reference that is not a URI.
-    fn scheme(&self) -> &str {
-        self.reference
-            .split_once("://")
-            .map_or("", |(scheme, _)| scheme)
+    /// The scheme by which `credentials` routes this reference, or the refusal of a reference
+    /// that `credentials` does not parse.
+    fn routed_scheme(&self) -> Result<String, ConfigError> {
+        routed_scheme(&self.reference).map_err(|source| ConfigError::Locator {
+            locator: self.reference.clone(),
+            source,
+        })
     }
 
     /// The workload variable that holds this secret's placeholder, with the scheme that places
@@ -1298,7 +1300,7 @@ impl EgressEntry {
             (Some((SecretScheme::Declared, _)), None) => refuse(&format!(
                 "a reference in the {}:// scheme needs secret.env: it names the variable that \
                  holds the placeholder in the workload, as in secret.env = \"GH_TOKEN\"",
-                secret.scheme()
+                secret.routed_scheme()?
             )),
             (Some((SecretScheme::Env, name)), Some(variable)) if variable != name => {
                 refuse(&format!(
@@ -2447,6 +2449,30 @@ mod tests {
         );
         load_with(&route("op://Private/GitHub/token"), &declared())
             .expect("a declared provider makes the route valid");
+    }
+
+    /// **A reference that `credentials` does not parse has no scheme to look up**, so a declarable
+    /// scheme with nothing after it is refused as a locator, with or without a declaration.
+    #[test]
+    fn a_reference_with_nothing_after_a_declarable_scheme_is_refused_as_a_locator() {
+        for (scheme, extra) in [
+            ("op", ""),
+            ("op", "secret.env = \"TOKEN\"\n"),
+            ("vault", ""),
+            ("vault", "secret.env = \"TOKEN\"\n"),
+        ] {
+            let route = format!(
+                "[egress.a]\ndestinations = [\"api.test\"]\nsecret.ref = \"{scheme}://\"\n{extra}"
+            );
+            assert_eq!(
+                declared_refusal(&route),
+                format!(
+                    "credential locator \"{scheme}://\" is invalid: credential error: malformed \
+                     credential reference (expected `scheme://locator`): \"{scheme}://[REDACTED]\""
+                ),
+                "for {scheme} with {extra:?}"
+            );
+        }
     }
 
     /// **A route in a declared scheme names its placeholder variable**, and the route places the

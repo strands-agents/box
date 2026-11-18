@@ -335,7 +335,7 @@ message does: Box prefixes every line it prints with `strands-box:`.
 | `` `<key>` does not apply to a `<kind>` target `` | A key belongs to another kind. |
 | ``a `cloudwatch_logs` target needs `log_group` and `log_stream` `` | A CloudWatch Logs target names no group or stream. |
 | ``needs `region`, an AWS region such as `us-west-2` `` | A CloudWatch target names no region, or an invalid one. |
-| `` `secret.ref` names no scheme this box reads `` | The reference is a literal value, or its scheme is not `env://`, `secret://`, `aws://`, `credsd://`, or a [declared scheme](config.md#secret-sourcescheme). |
+| `` `secret.ref` names no scheme this box reads `` | The reference is a literal value, or its scheme is not `env://`, `secret://`, `aws://`, `credsd://`, or a [declared scheme](config.md#secret-sourcescheme). A declared scheme with nothing after `://` is refused in the same way. |
 | `its destination is neither https nor loopback` | A credential would cross the network in the clear. |
 | `` the `aws://` credential cannot sign `` | The profile is missing, or holds no static keys. The run stops before the workload starts. |
 
