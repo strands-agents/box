@@ -46,6 +46,7 @@ const KERNEL_METHODS: &[(&str, Served)] = &[
     ("symlink", Served::Box),
     ("read_link", Served::Box),
     ("set_permissions", Served::Box),
+    ("set_times", Served::Box),
     ("now", Served::Box),
     ("check_url", Served::Box),
     ("resolve_credential", Served::Default),

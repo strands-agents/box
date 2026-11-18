@@ -196,6 +196,7 @@ impl BrokerHost {
         let spawn_credentials = record.tool_credential_paths();
         let phantoms = phantoms.to_vec();
         let shell_limits = record.limits.shell.clone();
+        let monty = record.monty;
         // Resolved here, where the `BoxRoot` is in hand. `BoxRoot::open` created it.
         let mcp_working_directory = layout.mcp_working_directory();
         let mcp_working_directory_handle = Arc::new(layout.open_mcp_working_directory()?);
@@ -229,6 +230,7 @@ impl BrokerHost {
                     recorder,
                     host_spawner,
                     host_programs,
+                    monty,
                     shell_limits,
                     &ready_sender,
                     shutdown_receiver,
@@ -511,6 +513,7 @@ fn host(
     recorder: Arc<crate::run::telemetry::DecisionRecorder>,
     host_spawner: Option<crate::run::hosted::ToolSpawner>,
     host_programs: box_shell::HostPrograms,
+    monty: bool,
     limits: ShellLimits,
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
     shutdown: oneshot::Receiver<()>,
@@ -534,6 +537,7 @@ fn host(
             max_input: limits.max_input(),
             max_stdin: limits.max_stdin(),
             max_output: limits.max_output(),
+            monty,
             command_timeout: limits.timeout(),
             request_timeout: limits
                 .timeout()
@@ -2053,6 +2057,7 @@ done"#;
             max_input: DEFAULT_SHELL_MAX_INPUT,
             max_stdin: DEFAULT_SHELL_MAX_STDIN,
             max_output: DEFAULT_SHELL_MAX_OUTPUT,
+            monty: true,
             command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
             request_timeout: Some(SERVE_REQUEST_TIMEOUT),
             reach: Arc::new(
@@ -2306,6 +2311,7 @@ done"#;
             max_input: DEFAULT_SHELL_MAX_INPUT,
             max_stdin: DEFAULT_SHELL_MAX_STDIN,
             max_output: DEFAULT_SHELL_MAX_OUTPUT,
+            monty: true,
             command_timeout: command_timeout.into(),
             request_timeout: request_timeout.into(),
             reach: Arc::new(
@@ -5130,6 +5136,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 max_input: DEFAULT_SHELL_MAX_INPUT,
                 max_stdin: DEFAULT_SHELL_MAX_STDIN,
                 max_output: DEFAULT_SHELL_MAX_OUTPUT,
+                monty: true,
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
@@ -5449,6 +5456,7 @@ done"#,
                 max_input: DEFAULT_SHELL_MAX_INPUT,
                 max_stdin: DEFAULT_SHELL_MAX_STDIN,
                 max_output: DEFAULT_SHELL_MAX_OUTPUT,
+                monty: true,
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
@@ -5611,6 +5619,7 @@ done"#;
                 max_input: DEFAULT_SHELL_MAX_INPUT,
                 max_stdin: DEFAULT_SHELL_MAX_STDIN,
                 max_output: DEFAULT_SHELL_MAX_OUTPUT,
+                monty: true,
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
@@ -6839,6 +6848,49 @@ done"#;
                 run_in(&socket, &workspace, words("python3", &["-c", "print('RAN')"])).await;
             assert_eq!(status, 126, "a denied python3 is a refused command: {output}");
             assert!(!output.contains("RAN"), "the script must not run: {output}");
+        }));
+    }
+
+    /// With `monty: false` the spec installs no Monty runner, so a Python alias's `run` never
+    /// reaches Monty. `python3 --version` goes to the program the spec maps the name to, and this
+    /// spec permits no `shell:spawn`, so the Shell refuses that file. Every other spec in these
+    /// tests sets `monty: true`, so this is the test that fails if `ShellSpec` installs Monty
+    /// whatever `monty` says.
+    #[test]
+    fn with_monty_off_a_python_run_goes_to_the_declared_program_not_monty() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            let mut spec = Arc::try_unwrap(connection_spec(marker.path()))
+                .ok()
+                .expect("a spec no one else holds");
+            let mut programs = std::collections::BTreeMap::new();
+            for name in ["python3", "python"] {
+                let program = workspace.join(format!("declared-{name}"));
+                std::fs::write(&program, "#!/bin/sh\n").expect("a declared program");
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+                    .expect("make the declared program executable");
+                programs.insert(name.to_string(), program);
+            }
+            spec.host_programs = Arc::new(programs.clone());
+            spec.monty = false;
+            let (_dir, socket) = serving_socket(Arc::new(spec));
+
+            for (name, program) in &programs {
+                let (output, status) =
+                    run_in(&socket, &workspace, words(name, &["--version"])).await;
+                assert!(
+                    !output.contains("Monty"),
+                    "{name} must not be Monty: {output}"
+                );
+                assert_eq!(status, 126, "{name} must meet the spawn decision: {output}");
+                assert!(
+                    output.contains(&program.display().to_string()),
+                    "{name} must be judged as its declared file: {output}"
+                );
+            }
         }));
     }
 

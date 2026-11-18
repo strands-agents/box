@@ -169,6 +169,11 @@ strands-shell: tee: policy denied this operation on '~/project/notes.md' [policy
 - The rule counts `fs:write::response` events with result `completed`, which the box records when a
   content write finishes. A refused write does not count, and a write still in flight does not count
   yet, so a burst of writes started together can exceed the budget by the size of the burst.
+- In the Shell, a redirect, `tee`, or `cp` records `descriptor_issued` when it opens the file, not
+  `completed`, so this rule doesn't count it. Only a time change from `touch` records `completed`.
+- A `touch` changes a file's times as a `write_content` write, so it counts toward the budget. Only
+  a plain `touch` that creates a file doesn't count; with `-d`, `-t`, or `-r` it then sets the new
+  file's times, and that counts.
 - The `when` clause limits the `forbid` to content writes. A `mkdir` is `fs:write` with operation
   `create_dir`, so the budget leaves it alone. A rename is `fs:move`, and a delete is `fs:delete`;
   each needs its own rule.
@@ -786,6 +791,32 @@ when { context.input.path like "*/secrets.env" };
 Actions are in the same family when their names start the same way before the `:`. So
 `fs:read`, `fs:write`, and `fs:delete` can share one rule, and `net:connect` and `http:request`
 can't. Each MCP tool action is a family of its own.
+
+### A rule that lists a built-in action beside an MCP tool's action
+
+An action list can't name a built-in action, such as `fs:read`, beside an MCP tool's action, or
+the actions of two servers. Box can't check the list until the server reports its tools, and it
+never checks a list of mixed kinds at all. So the rule would never take effect, and the built-in
+action would go unenforced. This rule refuses to load:
+
+```text
+@id("both_doors")
+forbid (principal, action in [Box::Action::"fs:read", filesrv::Action::"read_file"], resource);
+```
+
+```text
+policy lists actions of more than one namespace: rule @id("both_doors") lists [Box::Action::"fs:read"] beside [filesrv::Action::"read_file"], and an action list of more than one namespace never takes effect; write one rule for each namespace
+```
+
+To fix it, write one rule for each:
+
+```text
+@id("both_doors_file")
+forbid (principal, action == Box::Action::"fs:read", resource);
+
+@id("both_doors_tool")
+forbid (principal, action == filesrv::Action::"read_file", resource);
+```
 
 A rule that checks `context.input` and names no action gets the same error. Name the action the
 rule is for in its scope, as `action == Box::Action::"fs:read"`. A test such as

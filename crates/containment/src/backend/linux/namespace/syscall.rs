@@ -199,6 +199,13 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "chdir",
         number: libc::SYS_chdir,
     },
+    // `fchdir` enters a folder the workload already holds open, so it reaches nothing `chdir`
+    // cannot. Go's `testing.T.Chdir` returns to the saved folder with it when a test ends, and
+    // a refusal there panics the test.
+    PermittedSyscall {
+        name: "fchdir",
+        number: libc::SYS_fchdir,
+    },
     PermittedSyscall {
         name: "fchmod",
         number: libc::SYS_fchmod,
@@ -1447,10 +1454,10 @@ mod tests {
     #[test]
     fn permit_filter_has_the_expected_workload_and_installer_entries() {
         let x86_entries = usize::from(cfg!(target_arch = "x86_64"));
-        assert_eq!(WORKLOAD_PERMITTED.len(), 117 + 18 * x86_entries);
+        assert_eq!(WORKLOAD_PERMITTED.len(), 118 + 18 * x86_entries);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 120 + 19 * x86_entries);
+        assert_eq!(rules.len(), 121 + 19 * x86_entries);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);

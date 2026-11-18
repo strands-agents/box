@@ -8,8 +8,8 @@ use std::time::SystemTime;
 
 use strands_shell::Shell;
 use strands_shell::os::{
-    CommandFallback, CommandRequest, DirEntry, Fd, FileStat, HttpRequest, HttpResponse, Kernel,
-    OpenFlags, Process,
+    CommandFallback, CommandRequest, DirEntry, Fd, FileStat, FileTimes, HttpRequest, HttpResponse,
+    Kernel, OpenFlags, Process,
 };
 use strands_shell::vfs_kernel::VfsKernel;
 
@@ -891,6 +891,29 @@ impl Kernel for ShellKernel {
             self.backend
                 .memory
                 .set_permissions(proc, &resolved.path, mode)
+                .await
+        }
+        .await;
+        permit.report(changed).await
+    }
+
+    async fn set_times(&self, proc: &Process, path: &str, times: FileTimes) -> io::Result<()> {
+        let (resolved, permit) = self
+            .admit_path(proc, path, Follow::Yes, FsOperation::SetTimes)
+            .await?;
+        let changed = async {
+            let _generation = self.guard(&resolved).await?;
+            if self.backend.mounts.serves(&resolved.path) {
+                let (host_path, _) = self
+                    .backend
+                    .mounts
+                    .resolve_host(&resolved.path)
+                    .ok_or_else(not_found)?;
+                return host::set_times(&host_path, times, resolved.host.as_ref());
+            }
+            self.backend
+                .memory
+                .set_times(proc, &resolved.path, times)
                 .await
         }
         .await;

@@ -145,6 +145,8 @@ pub struct Request {
     policy: PathBuf,
     /// Extra tables appended after `[agent]`: `[egress.*]`, `[mcp.*]`, `[tool.*]`, `[telemetry.*]`.
     config_body: Option<String>,
+    /// Raw `box.toml` lines written before `[agent]`, such as `monty = false`.
+    top_level: Vec<String>,
     /// What the creating run should see in its environment.
     ///
     /// Carried rather than set on this process: an `env://` locator dereferences in
@@ -257,6 +259,7 @@ impl Request {
             name: format!("{name}-{}", std::process::id()),
             policy: PathBuf::new(),
             config_body: None,
+            top_level: Vec::new(),
             environment: Vec::new(),
             agent: AgentTable::default(),
             with_agent_home: true,
@@ -313,6 +316,13 @@ impl Request {
         self
     }
 
+    /// Add one top-level `box.toml` line, such as `monty = false`. It goes before `[agent]`,
+    /// because a key written after a table header belongs to that table.
+    pub fn top_level(mut self, line: &str) -> Self {
+        self.top_level.push(line.to_string());
+        self
+    }
+
     /// The operator home, so a test can plant a file the run will read.
     pub fn operator_home(&self) -> &Path {
         &self.operator_home
@@ -339,6 +349,10 @@ impl Request {
         );
         if !self.policy.as_os_str().is_empty() {
             toml.push_str("policy = \"policy.dw\"\n");
+        }
+        for line in &self.top_level {
+            toml.push_str(line);
+            toml.push('\n');
         }
         toml.push_str(&format!(
             "\n[agent]\ncommand = {{command}}\nworkspace = {}\n",

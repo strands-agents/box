@@ -128,8 +128,9 @@ Both tables hold the same four fields, and a `[tool.<label>]` also holds `gramma
 that decides a spawn of a bound program.
 
 `[agent]`, each `[tool.<label>]`, and each stdio `[mcp.<name>]` also take `file-watching`,
-`false` by default, which permits macOS FSEvents for that process alone. It can disclose denied names
-and event metadata, so Box prints that limitation at startup. See
+`false` by default, which permits macOS FSEvents for that process alone. It can disclose denied names,
+event metadata, the host-wide event count, and each volume's history identifier. A root process can
+also delete any volume's event history. Box prints these limitations at startup. See
 [file watching](../../docs/user/config.md#file-watching).
 
 `filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,

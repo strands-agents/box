@@ -160,6 +160,14 @@ the same four plus `network`. One translator turns each of them into a set of sa
   take the same lists without `metadata` and `exec`. A directory entry covers its tree, and a file
   entry is exact. `write` doesn't imply `read`.
 
+On Linux, the trusted process prepares filesystem grants for each new sandbox launch.
+It keeps open references to the objects it approved and sends their recorded identities to the launcher.
+The launcher reopens each grant's path and refuses a different object before applying the sandbox.
+
+This check covers the handoff for one launch. It compares object identity, not file contents.
+A replacement directory can be selected when grants are prepared for a later launch.
+Configured tool commands and denied paths retain their separate identity checks.
+
 ### Script interpreter grants on Linux
 
 Box reads a declared script's `#!` line before building its sandbox. It follows the named
@@ -285,8 +293,10 @@ We make this access [an explicit process choice](decisions.md#file-watching-requ
 because permitting the service does not constrain its subscriptions to declared filesystem grants.
 FSEvents can disclose denied names and event metadata for removed or renamed paths and some historical paths.
 An ancestor subscription can extend that disclosure outside the workspace.
+FSEvents also discloses the host-wide event count and each volume's history identifier.
 The event stream bypasses `fs:*` policy decisions, including experimental native filesystem mediation.
-Direct content and write checks still apply, but they do not provide filename or activity confidentiality through this service.
+Direct content and write checks still apply, except that a root process can delete any volume's event history.
+They do not provide filename or activity confidentiality through this service.
 The [configuration reference](../user/config.md#file-watching) gives the option and its startup disclosure.
 
 ### Linux root sandbox launches

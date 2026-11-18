@@ -1,0 +1,59 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1120 460" width="1120" height="460" font-family="-apple-system, Segoe UI, Helvetica, Arial, sans-serif" role="img" aria-label="How a batch reaches a destination">
+<title>How a batch reaches a destination</title>
+<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1f2933"/></marker></defs>
+<rect width="1120" height="460" fill="#ffffff"/>
+<rect x="20" y="40" width="830" height="370" rx="10" fill="#f5f7fa" stroke="#9aa5b1" stroke-width="1.2" stroke-dasharray="6 4"/>
+<text x="32" y="30" font-size="13" font-weight="bold" fill="#52606d" text-anchor="start">strands-box run (the trusted process)</text>
+<text x="870" y="30" font-size="13" font-weight="bold" fill="#52606d" text-anchor="start">Destinations</text>
+<rect x="40" y="70" width="210" height="96" rx="6" fill="#ffffff" stroke="#1f2933" stroke-width="1.4"/>
+<text x="52" y="92" font-size="14" font-weight="bold" fill="#1f2933" text-anchor="start">Box records</text>
+<text x="52" y="112" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">permit and deny decisions</text>
+<text x="52" y="129" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">control-plane events</text>
+<text x="52" y="146" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">(policy installed, box started…)</text>
+<rect x="40" y="230" width="210" height="118" rx="6" fill="#ffffff" stroke="#1f2933" stroke-width="1.4"/>
+<text x="52" y="252" font-size="14" font-weight="bold" fill="#1f2933" text-anchor="start">OTLP receiver</text>
+<text x="52" y="272" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">the agent's spans, logs, metrics</text>
+<text x="52" y="289" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">strips strands.box.* attributes</text>
+<text x="52" y="306" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">stamps the box's identity</text>
+<rect x="300" y="140" width="160" height="96" rx="6" fill="#ffffff" stroke="#1f2933" stroke-width="1.4"/>
+<text x="312" y="162" font-size="14" font-weight="bold" fill="#1f2933" text-anchor="start">Per-target queue</text>
+<text x="312" y="182" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">one per target</text>
+<text x="312" y="199" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">batch every 1 s</text>
+<text x="312" y="216" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">or 512 records</text>
+<rect x="500" y="140" width="150" height="96" rx="6" fill="#ffffff" stroke="#1f2933" stroke-width="1.4"/>
+<text x="512" y="162" font-size="14" font-weight="bold" fill="#1f2933" text-anchor="start">Exporter</text>
+<text x="512" y="182" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">builds the OTLP</text>
+<text x="512" y="199" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">request for its</text>
+<text x="512" y="216" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">target</text>
+<rect x="690" y="120" width="145" height="136" rx="6" fill="#fdf3e1" stroke="#c47f17" stroke-width="2"/>
+<text x="702" y="142" font-size="14" font-weight="bold" fill="#1f2933" text-anchor="start">Target's vault</text>
+<text x="702" y="162" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">swaps in the key</text>
+<text x="702" y="179" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">(header or Basic auth)</text>
+<text x="702" y="196" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">or signs with SigV4</text>
+<text x="702" y="213" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start"></text>
+<text x="702" y="230" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">one vault per target</text>
+<text x="697" y="288" font-size="12" font-weight="normal" fill="#52606d" text-anchor="start">key from env://, file://,</text>
+<text x="697" y="304" font-size="12" font-weight="normal" fill="#52606d" text-anchor="start">op://, credsd:// or</text>
+<text x="697" y="320" font-size="12" font-weight="normal" fill="#52606d" text-anchor="start">aws-secretsmanager://</text>
+<rect x="880" y="60" width="210" height="66" rx="6" fill="#ffffff" stroke="#1f2933" stroke-width="1.4"/>
+<text x="892" y="82" font-size="14" font-weight="bold" fill="#1f2933" text-anchor="start">Langfuse</text>
+<text x="892" y="102" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">Basic auth, traces</text>
+<rect x="880" y="148" width="210" height="66" rx="6" fill="#ffffff" stroke="#1f2933" stroke-width="1.4"/>
+<text x="892" y="170" font-size="14" font-weight="bold" fill="#1f2933" text-anchor="start">LangSmith</text>
+<text x="892" y="190" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">x-api-key, traces</text>
+<rect x="880" y="236" width="210" height="66" rx="6" fill="#ffffff" stroke="#1f2933" stroke-width="1.4"/>
+<text x="892" y="258" font-size="14" font-weight="bold" fill="#1f2933" text-anchor="start">CloudWatch Logs</text>
+<text x="892" y="278" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">SigV4, logs</text>
+<rect x="880" y="324" width="210" height="66" rx="6" fill="#ffffff" stroke="#1f2933" stroke-width="1.4"/>
+<text x="892" y="346" font-size="14" font-weight="bold" fill="#1f2933" text-anchor="start">X-Ray</text>
+<text x="892" y="366" font-size="12.5" font-weight="normal" fill="#52606d" text-anchor="start">SigV4, traces</text>
+<path d="M250,118 L275,118 L275,175 L300,175" fill="none" stroke="#1f2933" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M250,289 L275,289 L275,205 L300,205" fill="none" stroke="#1f2933" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M460,188 L500,188" fill="none" stroke="#1f2933" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M650,188 L690,188" fill="none" stroke="#1f2933" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M835,188 L858,188 L858,93 L880,93" fill="none" stroke="#c47f17" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M835,188 L858,188 L858,181 L880,181" fill="none" stroke="#c47f17" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M835,188 L858,188 L858,269 L880,269" fill="none" stroke="#c47f17" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M835,188 L858,188 L858,357 L880,357" fill="none" stroke="#c47f17" stroke-width="1.6" marker-end="url(#arrow)"/>
+<text x="560" y="440" text-anchor="middle" font-size="12" font-weight="normal" fill="#c47f17">Each batch is posted straight to the destination: not through the egress gateway, and with no policy decision per send.</text>
+</svg>

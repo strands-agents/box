@@ -799,10 +799,16 @@ pub(crate) fn open(
     let directory = layout.telemetry_directory();
     layout.create_child_directory(&directory)?;
 
-    let request =
+    let mut request =
         crate::record::config::telemetry::config_for(&stored.box_id, &stored.telemetry, layout)?;
+    if std::env::var_os(FAILURE_REPORT_VARIABLE).is_some_and(|value| !value.is_empty()) {
+        request = request.reporting_failures();
+    }
     Ok(Arc::new(telemetry::open(request)?))
 }
+
+/// The operator's variable that prints each failed telemetry batch to stderr with its full cause.
+const FAILURE_REPORT_VARIABLE: &str = "STRANDS_BOX_TELEMETRY_DEBUG";
 
 #[cfg(test)]
 mod tests {

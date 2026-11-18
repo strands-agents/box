@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries twelve keys. `name` and `box_dir` are required.
+The file carries thirteen keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -83,9 +83,10 @@ The file carries twelve keys. `name` and `box_dir` are required.
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
 | `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, and ingress. Each is disabled by default. |
 | `[limits]` | table | Execution limits for Strands Shell. |
+| `monty` | boolean | Whether a bare `python3` or `python` in the Shell runs Monty, Box's built-in Python subset. `true` by default. With `false`, both names resolve like any other program: a `[tool.python3]` or `[tool.python]`, else the host's `PATH`. |
 | `[gateway]` | table | Settings for every request through the egress gateway: `upgrade_http`, the hosts whose plain `http://` on port 80 the gateway sends as `https://` on port 443. See [`[gateway]`](#gateway). |
 
-The example uses five of the twelve: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the thirteen: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -152,7 +153,9 @@ A native `filesystem.deny` entry does not restrict these requests through the bo
 On macOS, a write folder refuses most calls that set a file's times: `utimensat`, which `touch`
 calls, and `setattrlist`, which `cp -p` and `rsync -t` use. Only `utimes` works. So `touch`,
 `cp -p`, and `rsync -t` fail with `Operation not permitted`. The `file-attributes` switch lets a
-write folder set them. The key goes at the top of the file, above the first table:
+write folder set them. This applies to programs that run in a sandbox. The Shell's built-in `touch`
+runs outside the sandbox and doesn't need the switch. The key goes at the top of the file, above
+the first table:
 
 ```toml
 file-attributes = true
@@ -244,6 +247,64 @@ it. A box that sets the list stores its record at version 32, and an older build
 [Upgrade plain HTTP to HTTPS](egress.md#upgrade-plain-http-to-https) describes the behaviour and
 its limits.
 
+## `monty`
+
+`monty` decides what a bare `python3` or `python` in the Shell runs. It is `true` by default: both
+names run Monty, Box's built-in Python subset ([Python in a box](monty.md)), even when a
+`[tool.python3]` is declared or the host's `PATH` has a Python. Startup names a Python table that
+Monty leaves unused.
+
+```toml
+monty = false
+```
+
+With `false`, Box installs no Monty, and both names resolve like any other program the Shell
+starts. A tool whose command file is named `python3` or `python` answers that name, and otherwise
+the host's `PATH` decides. Each spawn needs a `shell:spawn` permit, and nothing falls back to Monty.
+Startup says which file each name runs, or that neither a tool nor `PATH` has it.
+
+Box treats the Python tool like any other tool. It adds no grants and doesn't inspect the install,
+so the tool's table lists what Python reads and writes. Python's own reads and writes take no
+`fs:read` or `fs:write` decision: they meet only these lists, which startup prints under
+`[tool.python3] runs <file> with no policy decision over these paths`. Policy still decides the
+spawn of `python3` itself, and each command the agent's shell runs. A working setup:
+
+```toml
+monty = false
+
+[tool.python3]
+command = ["/opt/runtime/.venv/bin/python3"]
+
+[tool.python3.filesystem]
+read = ["/path/to/project", "/opt/runtime/.venv", "/opt/homebrew/Cellar", "/opt/homebrew/opt"]
+write = ["/path/to/project"]
+```
+
+```cedar
+permit (principal, action == Box::Action::"shell:spawn", resource)
+when {
+  context.input.program_path == "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14" &&
+  ["python3", "python"].contains(context.input.program)
+};
+```
+
+`program_path` is the file the venv's `python3` resolves to, with every link followed. The `read`
+list covers the venv, Python's own install, and the libraries its modules load; on macOS with
+Homebrew those are under `/opt/homebrew/Cellar`, reached through `/opt/homebrew/opt`. A bare
+`python` needs a `[tool.python]` too, and a versioned name such as `python3.14` is a separate
+program that needs its own permit.
+
+Keep the venv and Python's install out of every write grant and every `fs:write` rule. A file
+written into `site-packages`, such as a `.pth`, runs at every Python start, later also outside the
+box. Box refuses a write grant that can change the tool's command or its path
+([Configured command integrity](#configured-command-integrity)), but not one that reaches the rest
+of the venv. A program the Shell starts receives no standard input yet, so a piped
+`printf x | python3 -c '...'` reads an empty stdin. A `python3` that would read its program from
+stdin, such as `python3 <<'EOF'` or `printf 'print(1)' | python3`, exits 2 with
+`reading a program from stdin is not supported` instead of running an empty program.
+
+A box that sets `monty = false` stores its record at version 37, and an older build refuses it.
+
 ## `[experimental-features]`
 
 Native filesystem policy checks require a compatible, signed build and explicit selection:
@@ -280,7 +341,7 @@ Both tables hold one process, in one shape:
 | `env` | table | The literal environment. `HOME` and `PATH` default to the operator's own; every other variable is present only when `env` names it. |
 | `[<table>.filesystem]` | table | The path lists the process's own system calls reach. Eight for `[agent]`; six for a `[tool.<name>]`, which has no `metadata` or `exec` list. |
 | `native-filesystem-policy` | boolean | Optional override of the global experimental setting for this process and its descendants. See [workload selection](native-filesystem-policy.md#select-workloads). |
-| `file-watching` | boolean | `false` by default. On macOS, permit FSEvents for this process and its descendants, with the [metadata limitation](#file-watching). Linux ignores this setting. |
+| `file-watching` | boolean | `false` by default. On macOS, permit FSEvents for this process and its descendants, with the [limitations](#file-watching). Linux ignores this setting. |
 | `[tool.<name>.grammar]` | table | Experimental, and `[tool.<name>]` only. The tool grammar for the program this tool runs. See [`[tool.<name>.grammar]`](#toolnamegrammar). |
 | `[[agent.ingress]]` | list of tables | `[agent]` only. Where callers reach the agent's servers, one entry per port. See [`[[agent.ingress]]`](#agentingress). |
 
@@ -379,11 +440,12 @@ The process still needs the filesystem grants required by its runtime and applic
 **FSEvents can disclose names and event metadata for denied paths.**
 This includes removed or renamed paths and some historical events.
 A subscription to an accessible ancestor can disclose paths outside the workspace.
+FSEvents also discloses the host-wide event count and each volume's history identifier.
 Filesystem `deny` entries do not fully filter this event stream.
-Direct file-content access and write restrictions still apply.
+Direct file-content access and write restrictions still apply, except that a root process can delete any volume's event history.
 FSEvents events do not pass through `fs:*` policy decisions, including experimental native filesystem policy checks.
 
-Use this option only when that metadata disclosure is acceptable.
+Use this option only when these limitations are acceptable.
 Keep it disabled when denied filenames or activity must remain confidential, and use the application's polling mode if available.
 Node directory watchers can report `EMFILE` when FSEvents is unavailable; this error does not necessarily mean that file descriptors are exhausted.
 
@@ -391,7 +453,7 @@ On macOS, the startup disclosure names each selected process before the agent st
 This includes stdio MCP servers that remain unstarted; Box repeats their disclosure when they start.
 
 ```text
-strands-box: [tool.dev] file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events; file-content and write restrictions still apply
+strands-box: [tool.dev] file watching: macOS FSEvents may disclose denied names and event metadata, including outside the workspace and from past events, as well as the host-wide event count and each volume's history identifier; file-content and write restrictions still apply, except that a root process can delete any volume's event history
 ```
 
 A record with any selected process requires version 35.
@@ -531,7 +593,7 @@ mounted aliases, and enclosing directories.
 | List | What each entry grants |
 |---|---|
 | `read` | Read the path. A directory entry covers everything below it. |
-| `write` | Write the path. On macOS, add `read` to permit reads, and setting a file's times needs [`file-attributes`](#file-attributes). Linux requires explicit read access across the entire write scope. |
+| `write` | Write the path. On macOS, add `read` to permit reads, and a sandboxed program that sets a file's times needs [`file-attributes`](#file-attributes). Linux requires explicit read access across the entire write scope. |
 | `read_file` | Read one exact file. The entry names a file. |
 | `write_file` | Write one exact file. Linux requires explicit read access to that file. The entry names an existing file. |
 | `list` | List the directory without content access on macOS. Linux refuses this list. |
@@ -541,6 +603,7 @@ mounted aliases, and enclosing directories.
 
 On macOS, opting into [file watching](#file-watching) permits an event stream that can
 disclose denied names and activity despite these direct-access restrictions.
+A root process can also delete any volume's event history.
 
 On Linux, root and non-root launches support directory writes with explicit read and write grants.
 Permitted file creation retains the launcher's underlying file identity.
@@ -679,6 +742,9 @@ Create the path first, or name the existing directory above it. The same rule ho
 `containment config failed: path does not exist: <path>`. In the example, the CLI install,
 `strands-home`, the preload file, and the project all exist before the first `run`, because the
 tutorial's earlier steps made them.
+
+On Linux, `filesystem grant object changed while loading config` means a granted path selected a different object during that launch's preparation.
+Let the filesystem update finish, then retry the launch.
 
 **A `write` grant alone is not runnable.** The agent's sandbox refuses to map code from a writable
 grant. When the agent's `command` or one of its interpreters lies inside a writable grant, the
@@ -965,7 +1031,7 @@ read = ["~/.local/share/uv/tools/mcp-server-fetch", "~/.local/share/uv/python"]
 | `argument_wildcards` | bool | For `stdio`: `false` by default. `true` lets this server's whole-argument `*` entries match and forward caller-supplied values. See [argument wildcards](mcp.md#argument-wildcards). |
 | `network.contain_egress` | bool | For `stdio`: `true` by default. `false` gives this one server direct network access, with no gateway, no policy decision per request, and no credential injection. |
 | `native-filesystem-policy` | boolean | For `stdio`: override the global experimental filesystem policy setting. Remote `http` entries refuse this field. See [workload selection](native-filesystem-policy.md#select-workloads). |
-| `file-watching` | boolean | For `stdio`: `false` by default. Permit macOS FSEvents with the [metadata limitation](#file-watching). Linux ignores this setting. Remote `http` entries refuse this field. |
+| `file-watching` | boolean | For `stdio`: `false` by default. Permit macOS FSEvents with the [limitations](#file-watching). Linux ignores this setting. Remote `http` entries refuse this field. |
 | `destinations` | string array | For `http`: the hosts the server answers on. |
 | `secret.ref` | string | For `http`: the credential the gateway attaches on the way out. |
 | `backends` | table array | For `http`: a backend to re-route the server's requests to, at most one. The same shape and rules as an `[egress.<name>]` backend; a `stdio` table refuses it. See [Backends](mcp.md#backends). |
@@ -985,11 +1051,68 @@ started reads with `jq`.
 
 | Key | Type | Meaning |
 |---|---|---|
-| `kind` | string | `file` or `otlp`. |
-| `destination` | string | For `file`, an absolute or `~/`-relative path. Inside this box's `box_dir` it must lie under `private/`; outside the box any path is accepted. For `otlp`, the collector endpoint. |
+| `kind` | string | `file`, `otlp`, or a vendor: `langfuse`, `langsmith`, `cloudwatch_logs`, or `cloudwatch_traces`. Required. |
+| `destination` | string | For `file`, an absolute or `~/`-relative path. Inside this box's `box_dir` it must lie under `private/`; outside the box any path is accepted. For `otlp`, the collector endpoint. For `langfuse` and `langsmith`, the base address, which defaults to the vendor's cloud. A CloudWatch kind takes `region` instead, and refuses `destination`. |
 | `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, or `metrics`. `trace` names the agent's own spans and the box's control-plane records. `logs` includes unmatched MCP routing diagnostics. **Absent means every signal**, so write `include` only to narrow the target. An empty list is refused, and so is a repeated word. |
-| `secret.ref` | string | `env://NAME` or `secret://NAME`, attached on the way out. |
-| `secret.header` | string | Defaults to `Authorization` with a `Bearer ` prefix. |
+| `accepts` | string array | For `otlp`: which OTLP payloads the endpoint takes, from `traces`, `logs`, and `metrics`. Absent means all three. The box sends no batch of a payload the list leaves out. |
+| `headers` | table | For `otlp`: fixed headers sent on every request. A header that carries a credential or a signature is refused here. |
+| `secret.ref` | string | `env://NAME`, `secret://NAME`, `aws://PROFILE`, or `credsd://ENVIRONMENT`. `aws://` and `credsd://` sign each request with SigV4. A literal value is refused. |
+| `secret.placement` | string | For `otlp`: `header` (default) or `basic_auth`. `basic_auth` sends a `user:password` secret as `Authorization: Basic`. |
+| `secret.header` | string | For `otlp`: the header the secret lands in. Defaults to `Authorization`. |
+| `secret.prefix` | string | For `otlp`: text before the secret in the header. Defaults to `Bearer ` on `Authorization`, and empty elsewhere. |
+| `project` | string | For `langsmith`: the project the spans go to. |
+| `region` | string | For a CloudWatch kind: the AWS region, such as `us-west-2`. Required. |
+| `log_group`, `log_stream` | string | For `cloudwatch_logs`: where the log records go. Both are required. |
+
+A vendor kind sets the vendor's path, headers, payloads, and credential placement itself. Write
+only what is yours:
+
+```toml
+[telemetry.langfuse]
+kind = "langfuse"
+destination = "https://us.cloud.langfuse.com"
+secret.ref = "env://LANGFUSE_AUTH"            # public-key:secret-key
+
+[telemetry.langsmith]
+kind = "langsmith"
+project = "my-project"
+secret.ref = "env://LANGSMITH_API_KEY"
+
+[telemetry.cloudwatch_logs]
+kind = "cloudwatch_logs"
+region = "us-west-2"
+log_group = "my-group"
+log_stream = "my-stream"
+secret.ref = "aws://my-profile"
+
+[telemetry.cloudwatch_traces]
+kind = "cloudwatch_traces"
+region = "us-west-2"
+secret.ref = "aws://my-profile"
+```
+
+| Kind | Sends | Credential |
+|---|---|---|
+| `langfuse` | spans, to `<destination>/api/public/otel`, with `x-langfuse-ingestion-version: 4` | Basic auth, from a `public-key:secret-key` secret |
+| `langsmith` | spans, to `<destination>/otel`, with `Langsmith-Project` when `project` is set | `x-api-key` |
+| `cloudwatch_logs` | log records, to `https://logs.<region>.amazonaws.com`, with `x-aws-log-group` and `x-aws-log-stream` | SigV4 for `logs`, from `aws://` or `credsd://` |
+| `cloudwatch_traces` | spans, to `https://xray.<region>.amazonaws.com` | SigV4 for `xray`, from `aws://` or `credsd://` |
+
+A vendor kind refuses each key it sets itself: `headers`, `accepts`, `secret.header`,
+`secret.prefix`, and `secret.placement`. The message is ``a `<kind>` target sets `<key>` itself, so
+leave it out``. A key that belongs to another kind is refused with
+`` `<key>` does not apply to a `<kind>` target ``. Box stores each vendor target as the `otlp`
+target it stands for. For a vendor Box does not know, write `kind = "otlp"` with `accepts`,
+`headers`, and `secret` yourself.
+
+A secret needs an `https://` destination unless the destination is loopback. Box checks each
+`aws://` and `credsd://` telemetry credential before the workload starts, so a profile that cannot
+sign or a daemon that does not answer stops the run.
+
+When the run ends, Box prints one stderr line if an export to a configured target failed, or if the
+final export did not finish in time. Set `STRANDS_BOX_TELEMETRY_DEBUG` to any non-empty value in the
+environment of `strands-box run` to also print each failed export as it happens, with its full cause
+and the start of the endpoint's answer, with each credential Box attached redacted.
 
 A file destination inside the box directory and outside `private/` is refused: `"<path>" is inside
 the box directory <path> but outside its private tree, where a process could truncate it; name a
@@ -1002,7 +1125,8 @@ more of: deny, permit, trace, logs, metrics`, and a repeated word with `the targ
 ### Agent logs and metrics are unconditional
 
 Every target receives the agent's log records and metrics. `include = ["deny"]` delivers the
-refusals, the agent's log records, and the agent's metrics.
+refusals, the agent's log records, and the agent's metrics. `accepts` is the exception: an endpoint
+that takes only `traces`, such as a `langfuse` target, is sent no log or metric batch.
 
 `logs` also selects the box's unmatched MCP routing diagnostics. A target with an explicit
 `include` list receives these diagnostics only when the list names `logs`.

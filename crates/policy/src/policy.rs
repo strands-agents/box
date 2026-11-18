@@ -1674,7 +1674,8 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
             &Operator::unanchored(),
             source(
                 r#"permit(principal, action, resource);
-                   forbid(principal, action in [alpha::Action::"read", beta::Action::"read"], resource);"#,
+                   forbid(principal, action == alpha::Action::"read", resource)
+                   when { context.input.never_declared == "x" };"#,
             ),
             &history.path().join("dogwood.redb"),
         )

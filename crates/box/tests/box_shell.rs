@@ -1814,6 +1814,57 @@ fn every_python_alias_reaches_the_broker() {
     }
 }
 
+/// **`monty = false` in `box.toml` turns Monty off in the running box.** With a `[tool.python3]`
+/// declared, `python3 --version` runs the declared file, both through the `python3` alias and
+/// through `zsh`, and Monty's version never appears. This covers the whole path: the key in the
+/// record, the bare-name map, the Shell built with no Monty runner, and the alias. Every other test
+/// here runs with Monty on.
+#[test]
+fn with_monty_off_python3_runs_the_declared_tool_through_the_alias() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    const POLICY: &str = r#"
+permit(principal, action == Box::Action::"shell:exec", resource);
+permit(principal, action == Box::Action::"shell:spawn", resource)
+when { context.input.program_path == "{workspace}/declared-python/python3" };
+"#;
+    const TOOL: &str = "[tool.python3]\ncommand = [\"{workspace}/declared-python/python3\"]\n";
+    let request = Request::with_config("monty-off-tool", POLICY, TOOL).top_level("monty = false");
+    let program = request.workspace().join("declared-python/python3");
+    std::fs::create_dir_all(program.parent().expect("the program's folder"))
+        .expect("create the declared program's folder");
+    compile_command_integrity_probe(
+        &program,
+        r#"fn main() {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    println!("DECLARED_PYTHON3 {}", arguments.join(" "));
+}
+"#,
+    );
+    let box_ = request.expect();
+
+    let output = box_.bash(
+        r#"python3 --version; echo "alias=$?"
+           zsh -lc "python3 --version"; echo "zsh=$?""#,
+    );
+
+    let seen = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(
+        !seen.contains("Monty"),
+        "with monty = false, python3 must not be Monty: {output:?}"
+    );
+    assert_eq!(
+        seen.matches("DECLARED_PYTHON3 --version").count(),
+        2,
+        "the alias and zsh must each run the declared python3: {output:?}"
+    );
+    assert!(
+        seen.contains("alias=0") && seen.contains("zsh=0"),
+        "both calls must exit 0: {output:?}"
+    );
+}
+
 /// A box whose agent may read `{workspace}/sub`, which holds a `here.txt` and a `show.py` of its
 /// own. The workspace holds a different `here.txt`, so a command run in the wrong folder reads the
 /// wrong file instead of failing.
