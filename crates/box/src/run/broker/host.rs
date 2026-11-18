@@ -6851,6 +6851,49 @@ done"#;
         }));
     }
 
+    /// With `monty: false` the spec installs no Monty runner, so a Python alias's `run` never
+    /// reaches Monty. `python3 --version` goes to the program the spec maps the name to, and this
+    /// spec permits no `shell:spawn`, so the Shell refuses that file. Every other spec in these
+    /// tests sets `monty: true`, so this is the test that fails if `ShellSpec` installs Monty
+    /// whatever `monty` says.
+    #[test]
+    fn with_monty_off_a_python_run_goes_to_the_declared_program_not_monty() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            let mut spec = Arc::try_unwrap(connection_spec(marker.path()))
+                .ok()
+                .expect("a spec no one else holds");
+            let mut programs = std::collections::BTreeMap::new();
+            for name in ["python3", "python"] {
+                let program = workspace.join(format!("declared-{name}"));
+                std::fs::write(&program, "#!/bin/sh\n").expect("a declared program");
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+                    .expect("make the declared program executable");
+                programs.insert(name.to_string(), program);
+            }
+            spec.host_programs = Arc::new(programs.clone());
+            spec.monty = false;
+            let (_dir, socket) = serving_socket(Arc::new(spec));
+
+            for (name, program) in &programs {
+                let (output, status) =
+                    run_in(&socket, &workspace, words(name, &["--version"])).await;
+                assert!(
+                    !output.contains("Monty"),
+                    "{name} must not be Monty: {output}"
+                );
+                assert_eq!(status, 126, "{name} must meet the spawn decision: {output}");
+                assert!(
+                    output.contains(&program.display().to_string()),
+                    "{name} must be judged as its declared file: {output}"
+                );
+            }
+        }));
+    }
+
     /// The Program's own directory raises no `change_dir` decision, so a policy that refuses every
     /// `change_dir` still runs a command there. Any other folder meets that refusal and runs nothing.
     #[test]
