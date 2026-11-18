@@ -43,6 +43,9 @@ decision talks about still exist?" Never go further than existence.
 - **An entry in `docs/design/decisions.md`, or a draft with `Status: Decided`:** the user has decided
   it. Do not re-litigate it on taste. Flag it only if it **contradicts another entry or a tenet in
   `docs/design/tenets.md`**, or if a new artifact in the review set is inconsistent with it.
+  Staleness alone is never a finding. The log can lag the code, so a name or a premise that the
+  code has passed by, in an entry that the change does not add or rewrite, is not a finding. A
+  missing entry is never a finding either.
 - Honor the repo tenet **"nothing is decided just because it's written"**: you flag weak reasoning;
   you do **not** ratify or declare anything decided. You never edit or author — the author fixes via
   `/kd` / `/spec`.
@@ -102,10 +105,11 @@ decision talks about still exist?" Never go further than existence.
     labeled "two-way door" whose *downstream consequences* are actually one-way (e.g. a shape other
     crates will build on) is mis-labeled — and that mislabeling is how load-bearing decisions skip the
     scrutiny they deserve.
-11. **Liveness — does the entry describe a world that still exists?** Repo rule: *"a decision that
-    moves rewrites the entry it moves."* A stale entry is worse than a missing one, because readers
-    trust it. Four `grep`s for names, and this tier is **BLOCKER** — the entry's answer is false, not
-    merely dated:
+11. **Liveness — does the entry describe a world that still exists?** Apply this axis to a draft,
+    a spec, and a new or rewritten entry. In an entry that the change does not add or rewrite, a
+    stale name is not a finding. Repo rule: *"a pull request that changes what an entry says fixes
+    that entry."* Four `grep`s for names, and this tier is **BLOCKER** — the text the change writes
+    is false, not merely dated:
 
     - **Every symbol, flag, file and test it names still exists.** Measured 2026-08-23: one entry
       documented a `--interpreter` flag and the check enforcing it, both deleted; a sibling's answer
@@ -117,6 +121,8 @@ decision talks about still exist?" Never go further than existence.
       `grep -rn '<anchor-id>' --include='*.md' --include='*.rs' .`
     - **A draft's `Status:` matches reality.** A `Proposed` draft whose decision already shipped is
       stale, and so is a `Decided` draft with no matching entry in `decisions.md`.
+    - **A new or rewritten entry has the shape in `kd`:** a paragraph, then `**Rejected.**`, then
+      `**Cost.**`, under about 150 words, and no test name. A shape fault is a WEAKNESS.
 
     Spec notes too. Measured: one said a defect stayed open pending a fix through a library façade
     after that façade was deleted, so it named an impossible route.
