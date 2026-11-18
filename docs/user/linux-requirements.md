@@ -98,6 +98,8 @@ They must permit namespace and filesystem setup, including `unshare`, `mount`, `
 Container rules that hide paths under `/proc` or mount them read-only can also prevent Box from mounting its own process filesystem.
 Check these restrictions inside the deployed container, not only in its image definition.
 Box's workload policy does not grant these operating system permissions.
+The [Amazon EKS example's container settings](./tutorials/eks.md#cluster-baseline) show one tested configuration.
+Those settings are not minimum permissions for every container runtime.
 
 Use the failed setup operation to identify what needs configuration:
 
@@ -114,7 +116,17 @@ Check the surrounding operating system or container diagnostics before changing 
 
 ## Tested configurations
 
-The following compatibility checks used Box v0.2.3 on November 17, 2026, without changes to its binaries.
+These examples record settings and results for specific Box revisions and environments:
+
+- [Amazon Linux 2023 ARM64 on Amazon EKS](../../examples/cloud-deployments/eks/README.md#tested-configuration).
+- [Debian 12 ARM64 on Google Compute Engine](../../examples/cloud-deployments/gcp/README.md#tested-configuration).
+
+Each record identifies the configuration and checks that passed. Repeat the checks for your Box build and deployment.
+
+### Ubuntu and Colima compatibility checks
+
+The following compatibility checks used Box v0.2.3 without changes to its binaries.
+This table summarizes observed results; it does not provide a complete setup procedure or test harness.
 Both configurations used the same Ubuntu 24.04.4 ARM64 virtual machine, Linux `6.8.0-117-generic`,
 and Colima `0.10.3`. Colima provides the Linux virtual machine on the Mac used for these checks.
 
