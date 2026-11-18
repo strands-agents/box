@@ -467,13 +467,22 @@ the file the link resolves to, and the box also shows that file at the link's na
 program runs a helper by the name `PATH` finds. Granting only the target left that name missing,
 so cargo failed with `linker 'cc' not found` on Linux. The links in between, such as
 `/etc/alternatives/cc`, are not granted: Linux binds the file at the named path, and macOS allows
-the link nodes on the way. We rejected granting the folders that hold the links, such as
+reading the metadata of each link on the way, linked folders included. For a linked folder below
+the link's own folder, such as `current` in `helper -> current/file`, the path asked for through it,
+`current/file`, is granted the same way, because macOS tests that path's existence before it
+follows `current`. A linked folder anywhere else, such as `current` in
+`~/.local/bin/java -> ~/.sdkman/candidates/java/current/bin/java` or `/tmp` in a link to
+`/tmp/build/out`, gets no such path, so on macOS the link's own name may still fail to open. The grant is built from one lookup of the link, compared
+with the file the run approved, so a hop swapped after the spawn check is refused rather than
+granted. We rejected granting the folders that hold the links, such as
 `/usr/bin` or `/etc/alternatives`, because that grants every file in them. The link must sit in its
 own real folder, and every other list still refuses a link. A link inside a credential store is
 refused, because the store exception resolves the entry again at each spawn, and the link could be
 pointed at another file of the store during a run. A write, exec, list or metadata grant
 through a link would act on a name the operator did not state as that file.
-`a_read_entry_naming_a_link_to_a_file_reads_by_both_names` pins it.
+`a_read_entry_naming_a_link_to_a_file_reads_by_both_names`,
+`a_read_entry_naming_a_link_through_a_linked_folder_reads_by_both_names` and
+`a_link_hop_swapped_after_the_spawn_check_is_refused` pin it.
 
 <a id="the-runtime-minimum-is-two-sets-and-the-agent-takes-the-smaller-one"></a>
 ### The runtime minimum is two sets, and the agent takes only the smaller one
