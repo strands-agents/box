@@ -326,7 +326,11 @@ impl Drop for ChildFixture {
 fn killed_child(mode: &str) -> (tempfile::TempDir, Json) {
     let directory = tempfile::Builder::new()
         .prefix(&format!("idle-history-{mode}-"))
-        .tempdir()
+        .tempdir_in(
+            std::env::temp_dir()
+                .canonicalize()
+                .expect("canonical temporary directory"),
+        )
         .expect("the fixture directory opens");
     fs::write(directory.path().join("trigger.txt"), b"read marker")
         .expect("the read fixture exists");
@@ -591,7 +595,11 @@ fn concurrent_submissions_keep_each_request_and_outcome_once_in_order() {
 fn a_second_timer_is_rejected_and_shutdown_releases_ownership() {
     let directory = tempfile::Builder::new()
         .prefix("idle-history-timer-ownership-")
-        .tempdir()
+        .tempdir_in(
+            std::env::temp_dir()
+                .canonicalize()
+                .expect("canonical temporary directory"),
+        )
         .expect("fixture directory");
     let policy = open_policy(directory.path(), WRITE_POLICY);
     policy

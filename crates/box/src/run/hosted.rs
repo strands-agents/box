@@ -2275,7 +2275,12 @@ when temporal {
     })
 };
 "#;
-        let operator = tempfile::tempdir().expect("operator home");
+        let operator = tempfile::tempdir_in(
+            std::env::temp_dir()
+                .canonicalize()
+                .expect("canonical temporary directory"),
+        )
+        .expect("operator home");
         let root = crate::record::layout::testing::box_root(operator.path(), "codex");
         let record = record_with_mcp(&root, Vec::new());
         let sources = vec![policy::Policy {
