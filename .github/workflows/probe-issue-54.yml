@@ -2,7 +2,7 @@ name: probe-issue-54
 # PROBE ONLY: measure upstream trust modes for issue 54 on macOS. Not for merge.
 on:
   push:
-    branches: [probe/issue-54-upstream-trust]
+    branches: [feature/probe-issue-54-upstream-trust]
 permissions:
   contents: read
 jobs:
