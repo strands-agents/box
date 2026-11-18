@@ -46,8 +46,16 @@ det_case! {
         } else {
             let path = b.exec_tree().join("git");
             std::fs::copy(&git, &path).expect("DET_ERROR: copy the second Git identity");
-            let control = std::process::Command::new(&path).arg("--version").output()
-                .expect("DET_ERROR: run the second Git identity on the host");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let control = loop {
+                match std::process::Command::new(&path).arg("--version").output() {
+                    Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                        && std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    result => break result.expect("DET_ERROR: run the second Git identity on the host"),
+                }
+            };
             assert!(crate::phase3::text(control).contains("git version"));
             path
         };
