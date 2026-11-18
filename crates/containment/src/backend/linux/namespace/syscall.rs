@@ -199,6 +199,13 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "chdir",
         number: libc::SYS_chdir,
     },
+    // `fchdir` enters a folder the workload already holds open, so it reaches nothing `chdir`
+    // cannot. Go's `testing.T.Chdir` returns to the saved folder with it when a test ends, and
+    // a refusal there panics the test.
+    PermittedSyscall {
+        name: "fchdir",
+        number: libc::SYS_fchdir,
+    },
     PermittedSyscall {
         name: "fchmod",
         number: libc::SYS_fchmod,
@@ -267,6 +274,20 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "pwrite64",
         number: libc::SYS_pwrite64,
     },
+    // libuv copies a file with `copy_file_range`, then `sendfile`, and reads `EPERM` from either
+    // as a real failure, so Node's `fs.copyFile` and every scaffolder built on it stop. An `EINVAL`
+    // from `sendfile` would also let libuv fall back to read and write, but the permit keeps the
+    // kernel copy, which is faster for a large file across filesystems. Both calls move bytes
+    // between two descriptors the workload already holds, and the kernel requires the same read
+    // and write modes on them that `read` and `write` do.
+    PermittedSyscall {
+        name: "copy_file_range",
+        number: libc::SYS_copy_file_range,
+    },
+    PermittedSyscall {
+        name: "sendfile",
+        number: libc::SYS_sendfile,
+    },
     PermittedSyscall {
         name: "ppoll",
         number: libc::SYS_ppoll,
@@ -275,6 +296,19 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
     PermittedSyscall {
         name: "poll",
         number: libc::SYS_poll,
+    },
+    // The libcurl that cargo vendors waits on its sockets with `select()`, which glibc issues as
+    // `pselect6` (glibc 2.32 and older issue `select` on x86_64), so an `EPERM` here fails every
+    // cargo download with "Unrecoverable error in select/poll". Like `ppoll`, it only waits on
+    // descriptors the process already holds.
+    PermittedSyscall {
+        name: "pselect6",
+        number: libc::SYS_pselect6,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "select",
+        number: libc::SYS_select,
     },
     PermittedSyscall {
         name: "readlinkat",
@@ -522,6 +556,11 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
     },
     #[cfg(target_arch = "x86_64")]
     PermittedSyscall {
+        name: "fork",
+        number: libc::SYS_fork,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
         name: "vfork",
         number: libc::SYS_vfork,
     },
@@ -544,6 +583,13 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
     PermittedSyscall {
         name: "wait4",
         number: libc::SYS_wait4,
+    },
+    // Go's os/exec waits for a child with `waitid` before it reaps it with `wait4`, so an `EPERM`
+    // here fails every child a Go program starts (`gh` cannot run `git`). Like `wait4`, it reaches
+    // only the caller's own children, and the pidfd it can name comes from the permitted `pidfd_open`.
+    PermittedSyscall {
+        name: "waitid",
+        number: libc::SYS_waitid,
     },
     PermittedSyscall {
         name: "prlimit64",
@@ -910,17 +956,38 @@ pub(crate) struct SyscallFilters {
 
 /// The static system-call policy for one containment request.
 #[derive(Debug)]
-pub(crate) struct SyscallPolicy;
+pub(crate) struct SyscallPolicy {
+    #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+    native_filesystem: bool,
+}
 
 impl SyscallPolicy {
     /// Derive the policy from one request.
     pub(crate) fn for_config(_network: &Network) -> Self {
-        Self
+        Self {
+            #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+            native_filesystem: false,
+        }
+    }
+
+    #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+    pub(crate) fn with_native_filesystem(mut self, enabled: bool) -> Self {
+        self.native_filesystem = enabled;
+        self
     }
 
     /// Compile both filters before containment starts.
     pub(crate) fn compile(&self) -> Result<SyscallFilters, ContainmentError> {
         let permit_rules = build_permit_rules(WORKLOAD_PERMITTED, true)?;
+        #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+        let permit_rules = {
+            let mut rules = permit_rules;
+            if self.native_filesystem {
+                // The notification filter must mediate this path-based call before it can run.
+                rules.insert(libc::SYS_truncate, Vec::new());
+            }
+            rules
+        };
         let permit = compile_filter(
             permit_rules,
             SeccompAction::Errno(libc::EPERM as u32),
@@ -945,8 +1012,19 @@ impl SyscallPolicy {
             SeccompAction::Errno(libc::EPERM as u32),
         )?;
 
+        let notification_rules = BTreeMap::from([(libc::SYS_statfs, Vec::new())]);
+        #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+        let notification_rules = {
+            let mut rules = notification_rules;
+            if self.native_filesystem {
+                for number in super::native_filesystem::OPERATIONS {
+                    rules.insert(*number, Vec::new());
+                }
+            }
+            rules
+        };
         let mut filesystem_queries = compile_filter(
-            BTreeMap::from([(libc::SYS_statfs, Vec::new())]),
+            notification_rules,
             SeccompAction::Allow,
             SeccompAction::Trace(0),
         )?;
@@ -1381,10 +1459,10 @@ mod tests {
     #[test]
     fn permit_filter_has_the_expected_workload_and_installer_entries() {
         let x86_entries = usize::from(cfg!(target_arch = "x86_64"));
-        assert_eq!(WORKLOAD_PERMITTED.len(), 113 + 17 * x86_entries);
+        assert_eq!(WORKLOAD_PERMITTED.len(), 118 + 19 * x86_entries);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 116 + 18 * x86_entries);
+        assert_eq!(rules.len(), 121 + 20 * x86_entries);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
@@ -1649,6 +1727,72 @@ mod tests {
                 .iter()
                 .any(|instruction| instruction.k == number)
         );
+    }
+
+    #[test]
+    fn child_waits_are_permitted_and_unmediated() {
+        let filters = SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("filters compile");
+        for (name, number) in [("wait4", libc::SYS_wait4), ("waitid", libc::SYS_waitid)] {
+            assert!(
+                WORKLOAD_PERMITTED
+                    .iter()
+                    .any(|entry| entry.name == name && entry.number == number),
+                "'{name}' is absent from the permit table, so a Go program gets EPERM when it \
+                 waits for a child and gh cannot run git"
+            );
+            assert!(!MEDIATED.iter().any(|entry| entry.name == name));
+            let number = u32::try_from(number).expect("syscall numbers are small");
+            assert!(
+                filters
+                    .permit
+                    .iter()
+                    .any(|instruction| instruction.k == number)
+            );
+            assert!(
+                !filters
+                    .restrictions
+                    .iter()
+                    .any(|instruction| instruction.k == number)
+            );
+        }
+    }
+
+    #[test]
+    fn select_waits_are_permitted_and_unmediated() {
+        let required = [
+            ("pselect6", libc::SYS_pselect6),
+            #[cfg(target_arch = "x86_64")]
+            ("select", libc::SYS_select),
+        ];
+        let filters = SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("filters compile");
+        for (name, number) in required {
+            assert!(
+                WORKLOAD_PERMITTED
+                    .iter()
+                    .any(|entry| entry.name == name && entry.number == number),
+                "'{name}' is absent from the permit table, so cargo's vendored libcurl gets \
+                 EPERM from select() and every download fails with 'Unrecoverable error in \
+                 select/poll'"
+            );
+            assert!(!MEDIATED.iter().any(|entry| entry.name == name));
+            let number = u32::try_from(number).expect("syscall numbers are small");
+            assert!(
+                filters
+                    .permit
+                    .iter()
+                    .any(|instruction| instruction.k == number)
+            );
+            assert!(
+                !filters
+                    .restrictions
+                    .iter()
+                    .any(|instruction| instruction.k == number)
+            );
+        }
     }
 
     #[test]

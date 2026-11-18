@@ -34,7 +34,8 @@ policy = { package = "strands-box-policy", path = "../policy", features = [
     "script-adapter",
 ] }
 telemetry = { package = "strands-box-telemetry", path = "../telemetry" }
-strands-shell = { path = "../shell" }
+box-shell = { package = "strands-box-shell", path = "../shell" }
+strands-shell = { git = "https://github.com/strands-agents/shell", rev = "39daa83d7f155d5b164f794f783e35598f49064e", default-features = false }
 # The interpreter behind the `python3`/`python` aliases
 # (docs/design/decisions.md#interpreters-are-brokered-aliases). Published crates, not
 # a fork: `monty` drives the run loop and `monty-types` carries the OS-call vocabulary the
@@ -43,8 +44,8 @@ monty = "1.0.0"
 monty-types = "1.0.0"
 # The routed HTTP client for a Monty `fetch(url)`
 # (docs/design/decisions.md#a-monty-script-reaches-the-network-through-one-fetch-function). It
-# dials this box's egress gateway and trusts only its intercept CA, mirroring the vendored Shell's
-# proxy path. Same pin and features as `shell`, already in the lockfile via that crate, so
+# dials this box's egress gateway and trusts only its intercept CA, mirroring the Shell's
+# proxy path. Same pin and features as `strands-shell`, already in the lockfile via that crate, so
 # this adds no version the lockfile does not already hold.
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 clap = { version = "4", features = ["derive"] }
@@ -58,13 +59,16 @@ sha2 = "0.11"
 # base64. Already in the lockfile via `credentials` and `egress-gateway`, so this adds
 # nothing the lockfile does not already hold.
 base64 = { version = "0.23", default-features = false, features = ["std"] }
-# `Bytes` is the payload type the vendored Shell's channel descriptors carry
+# `Bytes` is the payload type the Shell's channel descriptors carry
 # (`FdKind::ChannelWriter { tx: mpsc::Sender<Bytes> }`), so a Program's streaming ends
 # speak it directly rather than copying through a second representation.
 bytes = "1"
 tempfile = "3"
 thiserror = "2"
 toml = "1"
+# The parsed host the Shell's SSRF floor reads, as the egress client parses it, and the host and
+# port a telemetry destination's credential is bound to.
+url = "2"
 
 # Test-only, enabled by `test-support`: a TLS client for `box-egress-probe` and a TLS
 # listener for the recording upstream the credential end-to-end tests run against.
@@ -82,7 +86,7 @@ tokio = { version = "1", features = [
 ] }
 
 [features]
-native-filesystem-policy = []
+native-filesystem-policy = ["containment/native-filesystem-policy"]
 # Builds `box-egress-probe` and the credential end-to-end tests. The probe is a real
 # binary, so its TLS deps are optional dependencies this feature enables rather than
 # dev-dependencies (a `[[bin]]` cannot see those).
@@ -106,6 +110,16 @@ required-features = ["test-support"]
 [[bin]]
 name = "box-inherited-handles-probe"
 path = "tests/support/inherited_handles_probe.rs"
+required-features = ["test-support"]
+
+# Drives `close_inherited_descriptors` and its fallbacks
+# (`crates/box/src/bin/strands-box-sock-alias/close_descriptors.rs`, included here by path) from a
+# freshly spawned process, so wiping the descriptor table above stderr -- the very thing under
+# test -- cannot disturb this probe's own caller the way running it in-process or in a forked
+# `cargo test` worker would.
+[[bin]]
+name = "box-close-range-probe"
+path = "tests/support/close_range_probe.rs"
 required-features = ["test-support"]
 
 # A stdio MCP server (`reach` tool; proxy-unaware direct + proxy-aware $HTTPS_PROXY modes) and the
@@ -145,6 +159,11 @@ required-features = ["test-support"]
 [[test]]
 name = "box_inherited_handles"
 path = "tests/box_inherited_handles.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "box_close_range"
+path = "tests/box_close_range.rs"
 required-features = ["test-support"]
 
 [[test]]

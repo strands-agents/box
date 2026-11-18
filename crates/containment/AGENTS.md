@@ -149,6 +149,15 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   - **It adds no rule to any profile a box renders today.** Box canonicalizes every path it owns
     before granting it, `/etc` is one link whose head already rendered, and no other floor path is a
     link. The growth is bounded by the links a caller's own program carries.
+  - **A linked directory on the chain is a node too.** The kernel reads a folder link as it reads a
+    file link, and the walk once recorded only file links. A Homebrew venv's command
+    (`venv/bin/python3.14 -> /opt/homebrew/opt/python@3.14/bin/python3.14`) then failed to exec
+    with `Operation not permitted` unless a read grant happened to cover `/opt/homebrew/opt`,
+    because nothing rendered the `opt/python@3.14` folder link. So the walk adds each linked
+    directory any spelling on the chain passes through, parent-canonical, and walks that link's own
+    target. Being nodes, they are judged by the floor and the refusals like the rest.
+    `an_executable_reached_through_a_linked_folder_crosses_the_boundary` pins it under a real
+    profile.
   - **A firmlink spelling still renders a dead rule, and that residual is not closed.**
     `parent_canonical` is `realpath`, which does not collapse a firmlink, so a link target spelled
     through `/System/Volumes/Data` renders a node rule the kernel never matches and the exec is
@@ -755,6 +764,15 @@ by reading `src/` belongs in `src/` — the README describes the shape.
     Adding one `(allow mach-lookup)` line let the inherited bootstrap right reach
     `com.apple.pasteboard.1`, `com.apple.system.notification_center`, and `com.apple.SecurityServer`
     with a live port. The uncontained control reaches all three, which is what attributes the refusal.
+  - **Apple's certificate check needs `com.apple.trustd.agent`, and Secure Transport also needs
+    `com.apple.SecurityServer`.** Measured on macOS 26 arm64 against `api.github.com`: with both
+    denied, Go 1.26, Go 1.27 with a 1.26 `go.mod`, and `reqwest` 0.13 with
+    `rustls-platform-verifier` fail with `OSStatus -26276`, and `native-tls` fails with `-9808`.
+    trustd alone fixes the first three, and SecurityServer fixes `native-tls`. A login-keychain
+    generic password stayed unreadable through `/usr/bin/security` with both allowed, because the
+    profile refuses the keychain files. Data-protection and iCloud items were not measured; `secd`
+    stays denied. Only `Network::AllowAll` renders the two, by
+    `the_trust_services_render_only_with_native_egress`.
   - **`TIOCSTI` on the inherited PTY slave is refused by the *platform*, not by the profile.** The
     uncontained control measured the same `EPERM`, so the `file-ioctl` grant is not what closes it.
     Re-measure with the control if a macOS release changes this; a restored `TIOCSTI` would be a write
@@ -913,6 +931,26 @@ The raw `vfork` probe keeps the child entirely in one assembly block. It checks 
 `setuid` refusal using the child's own UID, then exits without returning into Rust or changing the
 shared userspace stack. The outside control can set its unchanged UID. The parent checks the
 child's distinct exit status and reaps it. The test supervisor bounds the whole probe.
+
+Native Amazon Linux 2023 x86-64 validation for `04cdbb86cb31fee82ac341d529d690cfccb6810b`
+found that a direct `SYS_fork` call returned `EPERM` when the permit was absent; the outside
+control created and reaped its child. With the permit present,
+`raw_fork_preserves_child_restrictions` creates and reaps the child and verifies inherited
+refusals from both syscall filters. Its `getpriority` probe checks the permit filter; its
+executable `mprotect` probe checks the restriction filter without executing the memory.
+Controls that relax either rule separately make the regression fail.
+
+Musl 1.2.5's C library also uses this syscall on x86-64: its `fork()` function calls `_Fork()`,
+whose [implementation](https://git.musl-libc.org/cgit/musl/tree/src/process/_Fork.c?h=v1.2.5)
+selects raw `SYS_fork` when defined. Musl's x86-64 syscall definitions include that entry.
+This source inspection explains the compatibility need; the measured test calls the syscall
+directly and does not qualify a complete musl-linked application.
+
+Linux v6.12 implements `fork` through `kernel_clone` with only `SIGCHLD` in
+[`kernel/fork.c`](https://github.com/torvalds/linux/blob/v6.12/kernel/fork.c#L2868-L2875).
+The already permitted, unrestricted `clone` call admits that operation. Keep this permit
+x86-64-only.
+
 Follow-up full-Box checks found that Python `os.rmdir`, Python `shutil.rmtree`, and `git clean -fd`
 could not remove their empty directories on x86: `rmdir` returned `EPERM`. All three outside
 controls and matched ARM64 checks completed cleanup; ARM64 used `unlinkat` with `AT_REMOVEDIR`. Linux v6.12 routes both calls through `do_rmdir`
@@ -923,6 +961,30 @@ scopes.
 
 The Claude trace also showed a nonfatal `link` maintenance failure. That entry remains unpermitted;
 this change does not expand hard-link access or claim warning-free CLI behavior.
+
+### Waiting for a child
+
+On native ARM64 Amazon Linux 2023, Box `70eb3afcecfbe435371a60d557c6644eb83c0a06` refused `waitid`
+with `EPERM`. Go's `os/exec` calls `waitid` before it reaps a child with `wait4`, so every child of a
+Go program failed. `gh` 2.103.3 in a box printed `failed to run git: waitid: operation not permitted`
+for `gh pr create --dry-run` and `gh pr status`. With `waitid` permitted, both commands ran `git` and
+exited 0. `waitid` adds no reach beyond `wait4`: the kernel limits both to the caller's own children,
+and its `P_PIDFD` form takes a descriptor from the permitted `pidfd_open`.
+`a_child_is_awaited_with_waitid_under_the_filters` checks `P_ALL` with `WNOHANG`, `P_PIDFD`, and
+`P_PID` under the filters.
+
+### Returning to a saved folder
+
+On native ARM64 Amazon Linux 2023 (kernel 6.18), Box `5ed679f1` refused `fchdir` with `EPERM`.
+Go's `testing.T.Chdir` saves the working folder as an open descriptor and goes back to it with
+`fchdir` when the test ends. Under Go 1.27.3, `go test ./pkg/cmd/pr/...` in cli/cli panicked with
+`testing.Chdir: chdir .: operation not permitted`. With `fchdir` permitted, the same tests passed.
+`fchdir` adds no reach beyond `chdir`: the kernel checks the same search permission on the open
+folder, and every relative path after it resolves as the permitted `*at(fd, …)` form does. With the
+native filesystem broker, `AT_FDCWD` resolves through `/proc/<pid>/cwd` with the same view check as
+an explicit descriptor (`RequestPath::new` in `crates/box/src/run/linux_enforcement/broker.rs`).
+`a_workload_returns_to_its_saved_folder_with_fchdir`
+saves a folder, enters a subfolder, and returns with `fchdir` under the real trampoline.
 
 ### W^X
 
@@ -944,6 +1006,36 @@ result instead of failing it.** `umask` has no failing return, so the filter's `
 caller as a mask of every bit. A linker read that mask, added the execute bits it left, and wrote
 output nothing could run — with every call it made reporting success. When you leave a call out,
 check what its wrapper returns on failure, and pin the *effect* rather than the answer.
+
+### Optimized copies
+
+`copy_file_range` and `sendfile` are permitted. libuv tries `copy_file_range`, then `sendfile`, then
+read and write. It falls back to read and write only when `sendfile` returns `EINVAL`, `EIO`,
+`ENOTSOCK`, or `EXDEV`, so `EPERM` and `ENOSYS` stop the copy. Measured on November 13, 2026, on
+ARM64 kernel 6.18 with Node 22.22.2 `--jitless` through the trampoline: before the permit,
+`fs.copyFileSync` and `fs.cp` failed with `EPERM`; after it, both copied the file. Go's
+`http.FileServer` also sends a file with `sendfile`: with `EPERM`, the response had status 200 and
+stopped after 512 bytes.
+
+**`EINVAL` from `sendfile` would also fix both, and the permit is kept for speed.** Measured on the
+same host, outside a box with a seccomp filter that set only these two calls, with `copy_file_range`
+answering `EXDEV` (a copy across filesystems): Node copied one 512 MB file from xfs to tmpfs in 217 to
+270 ms with `sendfile`, and in 501 to 533 ms with `EINVAL`. For 3000 files of 8 KB, the two ranges
+overlapped (291 to 627 ms and 349 to 432 ms). Python's `shutil.copyfile` and Go's `io.Copy` between
+files worked with every answer.
+
+Both calls act only on descriptors the workload already holds, and the kernel checks the same read
+and write modes that `read` and `write` check. `sendfile` has no address argument, so a socket
+destination reaches only a peer that `connect` already reached. `optimized_copies_linux` copies into
+a file, a pipe, and a socket, and checks that a read-only grant, an ungranted path, and an inherited
+descriptor stay closed.
+
+Residual: from Linux 5.12, `sendfile` into a pipe calls `splice_file_to_pipe`, which is the path of
+Dirty Pipe (CVE-2022-0847). Kernels 5.12 to 5.14, 5.15.0 to 5.15.24, and 5.16.0 to 5.16.10 have
+that defect, and on them a workload can change the page cache of a file it can only read. `splice`,
+`vmsplice`, `tee`, and io_uring stay refused, but seccomp cannot see the type of a descriptor, so it
+cannot refuse a pipe destination alone. Box does not defend against an unpatched kernel. If that
+changes, answer `sendfile` with `EINVAL` instead of permitting it, and accept the slower copy.
 
 ### The namespace launcher
 
@@ -1238,3 +1330,21 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     bit still lands outside it. Unmeasured — read from `syscall.rs` and `view.rs`, and no Linux
     target was exercised. Seccomp **can** scope this, unlike the macOS flag argument, because the
     mode is a scalar.
+
+
+### Native policy and filesystem-information notifications
+
+Kevin approved one receiver in the existing containment supervisor on November 11, 2026,
+including the private forwarding protocol in the native-policy integration work. The selected
+native adapter adds its operations to the existing notification filter. Do not install a second
+listener: Linux rejects a new listener when an ancestor filter already has one, even when their
+system-call sets differ. The standalone kernel control returned `EBUSY` for the second installation.
+
+The supervisor retains its scoped authority for sanitized `statfs` answers. For native operations,
+it forwards a fixed 80-byte, little-endian request on the private startup socket. Box receives a
+copy of the listener for validation, descriptor injection, and replies, but never calls notification
+receive on that copy. Finish the supervisor startup acknowledgment before allowing Box to read the
+forwarding stream. The workload must close its forwarding-socket copy before execution.
+Forwarding uses a bounded, nonblocking send. A full buffer retains one request while the supervisor waits for write readiness and continues checking the reaper.
+A partial write or disconnected peer terminates supervision.
+Keep the existing namespace lifetime chain so supervisor failure terminates the workload.

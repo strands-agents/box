@@ -131,7 +131,11 @@ can take one of the five interpreter names.
 
 `bin/` comes first on the agent's `PATH`, so a harness that runs `zsh` gets the alias. Tools and
 local MCP servers get neither the alias nor `bin/` on their `PATH`. The alias uses its invocation
-name to select an interpreter. For an MCP program name, it also sends the arguments. `strands-box`
+name to select where its request goes. A shell name sends one command to Strands Shell. A Python
+name sends its name and its arguments, unchanged, to Strands Shell, whose own `python3` runs Monty.
+Both send the directory the alias was run from, and the broker starts the command there only after
+the decision a `cd` gets. No alias asks for Monty directly, and the broker refuses a request that
+does. For an MCP program name, the alias sends the arguments. `strands-box`
 starts the server whose alias name and declared arguments match after policy permits it.
 The server's configured executable path remains separate from its alias name. See
 [MCP executable filenames name their aliases](decisions.md#mcp-executable-filenames-name-their-aliases).
@@ -141,8 +145,12 @@ The alias then replaces itself with the ordinary program inside the agent's sand
 Fallback searches the agent's effective `PATH`, skipping the alias directory and links to its own
 image. An absent or empty `PATH` searches `/usr/bin:/bin`, never the working directory. It retains
 the arguments, working directory, composed environment, and standard streams.
-The alias reads no standard input before the routing response. It still closes inherited descriptors
-above standard error. Fallback adds no sandbox grants and receives no MCP server credentials.
+The alias reads no standard input before the routing response. It closes inherited descriptors above
+standard error before it creates the runtime or connects to the broker. Linux uses `close_range`,
+then `/proc/self/fd` if that syscall is unavailable. macOS asks `proc_pidinfo` for the open descriptor
+list because the sandbox does not grant read access to `/dev/fd`. Other unix targets enumerate
+`/dev/fd`. Each platform retains the bounded descriptor-table sweep only as a last fallback.
+Fallback adds no sandbox grants and receives no MCP server credentials.
 Protocol errors, ambiguous matches, and policy denials remain failures.
 
 The alias derives `run/box.sock` from its own location. The caller cannot select another socket. The

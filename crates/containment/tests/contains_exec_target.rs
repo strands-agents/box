@@ -364,6 +364,38 @@ fn an_executable_reached_through_a_link_chain_crosses_the_boundary() {
     );
 }
 
+/// **A program whose link chain passes through a linked folder still crosses the boundary.** This
+/// is a Homebrew venv's shape: `venv/bin/tool -> <root>/opt/pkg/bin/tool`, where `opt/pkg` is a
+/// link to the keg `Cellar/pkg/1.0`, and the keg's `bin/tool` links to the program. The kernel
+/// reads the `opt/pkg` folder link on the way, so the profile needs metadata on it; none of the
+/// chain's own file links names it, and nothing else in this fixture grants it.
+#[test]
+fn an_executable_reached_through_a_linked_folder_crosses_the_boundary() {
+    let directory = tempfile::tempdir().expect("chain fixtures");
+    let root = directory
+        .path()
+        .canonicalize()
+        .expect("canonical chain root");
+    let keg_bin = root.join("Cellar/pkg/1.0/bin");
+    std::fs::create_dir_all(&keg_bin).expect("the keg's bin");
+    std::fs::create_dir_all(root.join("opt")).expect("opt");
+    std::fs::create_dir_all(root.join("venv/bin")).expect("the venv's bin");
+    std::os::unix::fs::symlink(Path::new("/usr/bin/true"), keg_bin.join("tool"))
+        .expect("the keg's link to the program");
+    std::os::unix::fs::symlink("../Cellar/pkg/1.0", root.join("opt/pkg")).expect("the folder link");
+    let command = root.join("venv/bin/tool");
+    std::os::unix::fs::symlink(root.join("opt/pkg/bin/tool"), &command)
+        .expect("the venv's link into opt");
+
+    let output = run_contained(&command, &command, &BTreeMap::new());
+
+    assert!(
+        output.status.success(),
+        "a chain through a linked folder must exec: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 #[test]
 fn a_different_executable_is_denied_after_containment() {
     let output = run_contained(

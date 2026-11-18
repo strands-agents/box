@@ -22,8 +22,9 @@ Four parts of the box ask policy, each about its own boundary:
   `fs:*`.
 - **Monty**, the Python interpreter the box runs for the agent's scripts. It asks once per file
   operation, as `fs:*`.
-- **The egress gateway.** It asks once per connection, as `net:connect`, once per HTTP request, as
-  `http:request`, and once per MCP request over HTTP, as `mcp:call`.
+- **The egress gateway.** It asks once per connection, as `net:connect`, and once per HTTP request,
+  as `http:request`. It asks `mcp:call` for MCP requests whose host matches a declared server,
+  except the protocol methods listed in the [action reference](policy/actions.md#mcp).
 - **The MCP broker.** It asks once per request to a local MCP server, as `mcp:call`. On a
   `tools/call` it asks a second time, as the tool's own generated action. At startup it asks once
   for each declared server, as `shell:spawn`.
@@ -127,9 +128,11 @@ actions. [The action vocabulary](policy/actions.md) lists the fields of each one
   shell resolves its first word to a program. `shell:exec` for a program the shell implements, such
   as `cat` or `grep`, and `shell:spawn` for a program of the surrounding OS, such as `git`, and for
   the start of each stdio MCP server `box.toml` declares.
-- **[MCP](policy/actions.md#mcp)**: a request to an MCP server. `mcp:call` for each request, on
-  every method, and one generated `<server>::Action::"<tool>"` for each discovered tool, decided
-  on a `tools/call` after `mcp:call` permitted it.
+- **[MCP](policy/actions.md#mcp)**: a request through a declared MCP server, with
+  [host-based matching](mcp.md#remote-destination-matching) for remote servers.
+  `mcp:call` decides each request except the protocol methods listed in the action reference.
+  One generated `<server>::Action::"<tool>"` per discovered tool decides a `tools/call` after
+  `mcp:call` permitted it.
 
 ## Common rules
 
@@ -166,6 +169,11 @@ strands-shell: tee: policy denied this operation on '~/project/notes.md' [policy
 - The rule counts `fs:write::response` events with result `completed`, which the box records when a
   content write finishes. A refused write does not count, and a write still in flight does not count
   yet, so a burst of writes started together can exceed the budget by the size of the burst.
+- In the Shell, a redirect, `tee`, or `cp` records `descriptor_issued` when it opens the file, not
+  `completed`, so this rule doesn't count it. Only a time change from `touch` records `completed`.
+- A `touch` changes a file's times as a `write_content` write, so it counts toward the budget. Only
+  a plain `touch` that creates a file doesn't count; with `-d`, `-t`, or `-r` it then sets the new
+  file's times, and that counts.
 - The `when` clause limits the `forbid` to content writes. A `mkdir` is `fs:write` with operation
   `create_dir`, so the budget leaves it alone. A rename is `fs:move`, and a delete is `fs:delete`;
   each needs its own rule.
@@ -183,14 +191,14 @@ happens at load when a budget is written as a `permit`.
 
 ### A rate limit on one host
 
-At most sixty completed requests to one host in ten minutes. The sixty-first is refused until the
-oldest counted request is more than ten minutes old. Write it beside a `permit` for `api.github.com`
-on `http:request`, such as the `github_request` rule in
+This rule refuses new requests to `api.github.com` when Box has recorded at least sixty response
+outcomes for that host in the last ten minutes. Pending exchanges do not count yet. Write it
+beside a `permit` for `api.github.com` on `http:request`, such as the `github_request` rule in
 [the `[egress.<name>]` table](egress.md#example).
 
 ```text
 @id("github_rate_limit")
-@description("At most 60 requests to api.github.com completed in 10 minutes.")
+@description("Refuse requests when at least 60 response outcomes for api.github.com were recorded in the last 10 minutes.")
 forbid (principal, action == Box::Action::"http:request", resource)
 when { context.input.host == "api.github.com" }
 when temporal {
@@ -204,8 +212,11 @@ when temporal {
 };
 ```
 
-- The rule counts `http:request::response` events for the host, which the box records when the
-  reply arrives. A refused request does not count, and one still in flight does not count yet.
+- The rule counts `http:request::response` events for the host, using their recording times for
+  the ten-minute window. The gateway records the outcome when the exchange ends, including failure
+  or timeout. A refused request or a request that definitely failed to reach upstream does not
+  count. Pending exchanges do not count yet, so several requests can pass before earlier exchanges
+  end. Those requests can make the total exceed the limit.
 - The `when` clause scopes the `forbid` to the one host, so a request to any other host is
   unaffected. The same shape on `net:connect` limits connections rather than requests.
 - The agent receives a `403` whose body names the rule, as `[policy: github_rate_limit]`, and its
@@ -415,6 +426,42 @@ policy denied this operation on 'example.com:443' [default-deny]: No permit poli
 
 A `[egress.<name>]` table with no matching permit leaves the host unreachable. A permit with no
 binding sends the request with a placeholder in place of the secret, which the provider rejects.
+
+## Start with fresh history after a Dogwood upgrade
+
+This upgrade to Dogwood 1.1.2 requires a new box directory. If the configured directory contains
+unsupported history, Box refuses to start the workload. The error directs you to start with a new
+box directory; Box does not erase or convert the old history. Later restarts reuse the new history.
+
+A new directory starts with no recorded activity. Counts and usage budgets start over. An earlier
+read no longer satisfies a rule that requires that read before a write. If those resets are not
+acceptable, keep using the existing build and box directory.
+
+To use the new build with fresh history:
+
+1. Stop the old Box run.
+2. Copy its configuration beside the original as `box-1.1.2.toml`. Keep the original configuration
+   and the complete old box directory intact.
+3. In the copy, set `box_dir` to a new absolute path outside the workload workspace. Its parent
+   directory must exist. Keep the policy, tool grammar, credential references, and workload settings.
+4. Check each `[telemetry.<label>]` table in the copy. For a target with `kind = "file"` whose
+   `destination` points inside the old box directory, change `destination` to an absolute path under
+   the new directory's `private/` directory. Keep the target's other settings. Otherwise, the new
+   build continues to write telemetry records to the old directory.
+5. Run the new Box executable with the copied configuration:
+
+   ```sh
+   ./box-core/box run --config /absolute/path/to/box-1.1.2.toml
+   ```
+
+Replace the configuration path with your copy's absolute path. `run` creates the new box state
+and starts the configured workload. Keeping the configuration beside the original preserves
+relative policy paths. Credential references must still resolve in the operator environment.
+If `[agent] workspace` is absent, run from the same working directory as before.
+
+Do not copy generated box state or `private/dogwood.redb` into the new directory. Retaining the
+old directory keeps its history available to the old build. Activity in the new directory does
+not appear in the old one; there is no conversion between them.
 
 ## Troubleshooting load failures
 
@@ -780,6 +827,32 @@ when { context.input.path like "*/secrets.env" };
 Actions are in the same family when their names start the same way before the `:`. So
 `fs:read`, `fs:write`, and `fs:delete` can share one rule, and `net:connect` and `http:request`
 can't. Each MCP tool action is a family of its own.
+
+### A rule that lists a built-in action beside an MCP tool's action
+
+An action list can't name a built-in action, such as `fs:read`, beside an MCP tool's action, or
+the actions of two servers. Box can't check the list until the server reports its tools, and it
+never checks a list of mixed kinds at all. So the rule would never take effect, and the built-in
+action would go unenforced. This rule refuses to load:
+
+```text
+@id("both_doors")
+forbid (principal, action in [Box::Action::"fs:read", filesrv::Action::"read_file"], resource);
+```
+
+```text
+policy lists actions of more than one namespace: rule @id("both_doors") lists [Box::Action::"fs:read"] beside [filesrv::Action::"read_file"], and an action list of more than one namespace never takes effect; write one rule for each namespace
+```
+
+To fix it, write one rule for each:
+
+```text
+@id("both_doors_file")
+forbid (principal, action == Box::Action::"fs:read", resource);
+
+@id("both_doors_tool")
+forbid (principal, action == filesrv::Action::"read_file", resource);
+```
 
 A rule that checks `context.input` and names no action gets the same error. Name the action the
 rule is for in its scope, as `action == Box::Action::"fs:read"`. A test such as

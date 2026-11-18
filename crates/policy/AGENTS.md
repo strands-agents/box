@@ -6,7 +6,7 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   names, readable attributes, and what `when temporal { … }` observes. An operator's policy file is
   their source code.
 - Fix the Box integration, the schema, and the event mapping behind the façade without approval.
-- `dogwood-language` and `dogwood-local-engine` are published crates, pinned at `=1.0.0`.
+- `dogwood-language` and `dogwood-local-engine` are published crates, pinned at `=1.1.2`.
 - Close a gap listed here; never widen one. Never delete or `#[ignore]` a test that pins one.
 
 ## Read This First: Durable Dogwood History
@@ -152,6 +152,15 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   across a tool action and another family is refused, not parked; a rule scoped to one tool action
   loads. Pinned by
   `tests/runtime_mcp_policy_staging.rs::a_rule_that_reads_the_input_across_a_tool_action_is_refused_before_its_schema_stages`.
+- A pending rule is dropped when discovery finishes. Cedar refuses a set of mixed types, so an
+  action list that names actions of more than one action type (a `Box::Action` beside an MCP
+  tool's action, a tool grammar's, or the actions of two servers) never validates. The load refuses
+  it whether or not it reads the input (`spelling::refuse_mixed_action_namespaces`). Pinned by
+  `tests/load_time_rule_checks.rs::an_action_list_across_namespaces_refuses_validate_and_open`.
+  A rule that names the two in a condition and not in its head loads, and it is not enforced until
+  every server it names has listed its tools. The gateway forces `identity` on every MCP frame, so
+  a workload cannot make a listed catalog fail to stage by asking for a compressed reply. A
+  workload that never lists a server, or abandons a list, still leaves that rule unenforced.
 - An MCP union argument reads as its generated `typeChoice` record. `ToolInputs::conform` places a
   bare value in every member it matches, before the request gate and the event, so a rule on a
   duplicate member still fires. It refuses a value that matches none, including a value already in
@@ -195,8 +204,7 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
    [`decisions.md`](../../docs/design/decisions.md).
 2. Reconcile the public names across the code, the tests, and `README.md`.
 3. Run `build`, `test`, `clippy --all-targets`, and `fmt --check` for `-p strands-box-policy`, each
-   with and without `--all-features`, plus `RUSTDOCFLAGS="-D warnings" cargo doc`. Vendored
-   clippy warnings from `strands-shell` are expected; policy-owned warnings must be zero.
+   with and without `--all-features`, plus `RUSTDOCFLAGS="-D warnings" cargo doc`. Policy-owned clippy warnings must be zero.
 4. Give a temporal change a long-run test, because a short one passes on a sawtooth.
 5. Run `feature-critic` before you commit. Keep `Cargo.lock`, `egress-gateway`, and `credentials`
    unchanged.
@@ -213,12 +221,11 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   and a plain path outside every root is `Unresolvable` when its parent is missing and `Unreachable`
   when it is not. This is the existence-oracle class on host binds. Give one reason for every
   refusal of a path the caller may not reach.
-- LIVE GAP: `like` is case-sensitive and macOS is not, so `policy.DW` stays exposed. Do not widen
-  the pattern to `*.dw`, which over-denies an ordinary `.dw` file.
-- `SELF_DEFENDED_FILES` is `["box.toml", "policy.dw"]`, and it is public.
-  `box/src/record/layout.rs` names the same two files as `RECORD_FILE` and `POLICY_FILE`. Add no
-  `*.cedar` rule and no speculative entry. A
-  defended filename costs an escalation chain, as `mcp.toml` did.
+- `SELF_DEFENDED_FILES` is `["box.toml", "policy.dw"]`. It is a public export that nothing in the
+  workspace reads, so an entry defends nothing. The box defends its record and policy by the
+  authority-directory subtraction
+  (`a_project_entry_subtracts_the_directory_holding_this_boxs_authority`), not by this list.
+  `box/src/record/layout.rs` names the same two files as `RECORD_FILE` and `POLICY_FILE`.
 - Raise three legs for a `FilesystemPair`: the source as the pair operation, the source as
   `fs:read_content`, and the destination. Do not reduce it to two. A rename whose destination
   exists raises a fourth, `fs:delete` on the destination, because the rename removes what it held.

@@ -35,7 +35,8 @@ see the [platform comparison](../design/platform-differences.md).
 **`policy.dw` governs each request through the box's trusted process, and the policy engine enforces
 it:** each command line and file operation in Strands Shell (the box's shell), each file operation
 in Monty (the box's Python), each connection and HTTP request through the egress gateway, and each
-MCP request. [When the box asks policy](policy.md#when-the-box-asks-policy) lists them, and
+MCP request through a declared server. Remote MCP checks require a
+[matching configured host](mcp.md#remote-destination-matching). [When the box asks policy](policy.md#when-the-box-asks-policy) lists the decisions, and
 [policy limitations](#policy-limitations) says what a broad permit reaches. An
 [`[egress.<name>]`](egress.md) credential is attached to a request only after policy permits it. The
 table binds the credential, and the policy's permits open the destination.
@@ -65,6 +66,10 @@ resolves to an authority source that this run loaded, which no policy may open o
 ```
 
 These protections cover the current box's files.
+On macOS, a process that opts into [file watching](config.md#file-watching) can still
+receive names and event metadata for denied paths, including outside the workspace and from past events,
+as well as the host-wide event count and each volume's history identifier.
+FSEvents does not grant direct file-content or write access, except that a root process can delete any volume's event history.
 Keep other boxes' configuration, policy, and generated state outside the workload's write access.
 Apply the [placement and access guidance](config.md#protect-other-boxes) to filesystem grants and requests through Strands Shell and Monty.
 
@@ -112,6 +117,8 @@ records why, the item links it.
   your home, including `~/.aws` and `~/.ssh`. A `permit` on `fs:read` with no path condition grants
   all of them. Write every filesystem rule with a path condition. See
   [where policy sits](../design/policy.md#where-policy-sits).
+- **Remote MCP tool restrictions apply only to matching configured hosts.** [Restrict other routes](mcp-policy.md#scope-of-remote-server-rules)
+  when every request to the application must use those restrictions.
 - **Box does not check that the rules of a policy agree with one another.** Two permits that admit
   the same requests load without a word. Write every cap as a `forbid`.
   [A cap written as a permit](policy.md#a-cap-written-as-a-permit) describes what the load does

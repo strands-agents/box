@@ -38,7 +38,7 @@ use crate::run::broker::program::{
     Chunk, DrainOutcome, InputRefusal, Program, ProgramControl, ProgramOutput,
 };
 use crate::run::broker::protocol::{
-    BOUNDARY_FAILURE_STATUS, Body, DeniedKind, Frame, Interpreter, MAX_CHUNK_BYTES,
+    BOUNDARY_FAILURE_STATUS, Body, Command, DeniedKind, Frame, Interpreter, MAX_CHUNK_BYTES,
     MAX_ENCODED_CHUNK_BYTES, MAX_PROGRAMS_PER_CONNECTION, PROTOCOL_VERSION, ProgramId, SignalKind,
     Stream, decode_payload, encode_payload, read_frame, write_frame,
 };
@@ -83,6 +83,13 @@ const OUTBOUND_FRAME_DEPTH: usize = 64;
 
 /// How often a running Call is checked for a pending `Signal`.
 const SIGNAL_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+/// The status of a `run` whose directory the box refused, the Shell's status for a refused effect.
+const DIRECTORY_REFUSED_STATUS: i32 = 126;
+
+/// Why an `open` in Python mode is refused.
+const PYTHON_MODE_REMOVED: &str = "the python mode was removed in protocol 9; the python3 alias \
+     sends a run to a Shell program, so Python runs only through the Shell";
 
 struct ConnectionTask<T> {
     task: Option<tokio::task::JoinHandle<T>>,
@@ -189,6 +196,7 @@ impl BrokerHost {
         let spawn_credentials = record.tool_credential_paths();
         let phantoms = phantoms.to_vec();
         let shell_limits = record.limits.shell.clone();
+        let monty = record.monty;
         // Resolved here, where the `BoxRoot` is in hand. `BoxRoot::open` created it.
         let mcp_working_directory = layout.mcp_working_directory();
         let mcp_working_directory_handle = Arc::new(layout.open_mcp_working_directory()?);
@@ -222,6 +230,7 @@ impl BrokerHost {
                     recorder,
                     host_spawner,
                     host_programs,
+                    monty,
                     shell_limits,
                     &ready_sender,
                     shutdown_receiver,
@@ -327,7 +336,7 @@ async fn authorize_mcp_start(
     );
     let capture = crate::run::telemetry::ObservationCapture::begin();
     let admitted = interceptor
-        .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+        .intercept(&box_shell::EffectAttempt::ShellSpawn {
             command: &command,
             program: server.program(),
             program_path: &host_program_path,
@@ -503,7 +512,8 @@ fn host(
     phantoms: Vec<ProvisionedVariable>,
     recorder: Arc<crate::run::telemetry::DecisionRecorder>,
     host_spawner: Option<crate::run::hosted::ToolSpawner>,
-    host_programs: strands_shell::os::HostPrograms,
+    host_programs: box_shell::HostPrograms,
+    monty: bool,
     limits: ShellLimits,
     ready: &std::sync::mpsc::Sender<io::Result<()>>,
     shutdown: oneshot::Receiver<()>,
@@ -527,6 +537,7 @@ fn host(
             max_input: limits.max_input(),
             max_stdin: limits.max_stdin(),
             max_output: limits.max_output(),
+            monty,
             command_timeout: limits.timeout(),
             request_timeout: limits
                 .timeout()
@@ -868,8 +879,13 @@ async fn serve_transport(
                     }
                     // `Interpreter` is closed, so this match is exhaustive by construction and a new
                     // kind cannot be added without an exec-authority decision.
+                    //
+                    // **Python is refused: the Shell is the only way to Monty.** Version 9 aliases
+                    // send `run` to a Shell Program, so a `shell:exec` decision covers every route.
+                    // A Python Program ran Monty with no command decision, and only a client the
+                    // workload wrote itself could still open one.
                     if let Interpreter::Python = interpreter {
-                        python.insert(id);
+                        deny(&frames, id, DeniedKind::TransportError, PYTHON_MODE_REMOVED).await?;
                         continue;
                     }
                     // One MCP server, started outside the cage.
@@ -938,7 +954,8 @@ async fn serve_transport(
                     }
                     let opened = spec.backend().and_then(|backend| {
                         let shell = spec.build_on(Arc::clone(&backend), &spec.recorder)?;
-                        Program::adopt(shell, spec.max_stdin).map(|program| (backend, program))
+                        Program::adopt(shell, spec.command_timeout, spec.max_stdin)
+                            .map(|program| (backend, program))
                     });
                     match opened {
                         Ok((backend, (program, output, control))) => {
@@ -964,11 +981,21 @@ async fn serve_transport(
                         }
                     }
                 }
-                Body::Call {
-                    source,
-                    correlation,
-                } => {
-                    let correlation = *correlation;
+                body @ (Body::Call { .. } | Body::Run { .. }) => {
+                    // A `run` is a Call that starts in the caller's directory. Its command becomes
+                    // Shell text here, in the trusted process, never in the alias.
+                    let (source, directory, correlation) = match body {
+                        Body::Call {
+                            source,
+                            correlation,
+                        } => (source, None, *correlation),
+                        Body::Run {
+                            command,
+                            directory,
+                            correlation,
+                        } => (command_text(command), Some(directory), *correlation),
+                        _ => return Err(invalid_input("a transport client sent an unknown call")),
+                    };
                     if mcp.contains_key(&id) {
                         deny(
                         &frames,
@@ -1074,9 +1101,17 @@ async fn serve_transport(
                     let frames = frames.clone();
                     let finished = finished.clone();
                     let request_timeout = spec.request_timeout;
+                    let reach = Arc::clone(&spec.reach);
                     tokio::task::spawn_local(async move {
                         let status = correlation
-                            .scope(run_call(&mut slot, &source, id, request_timeout, &frames))
+                            .scope(run_call_in(
+                                &mut slot,
+                                directory.as_deref().map(|directory| (directory, &*reach)),
+                                &source,
+                                id,
+                                request_timeout,
+                                &frames,
+                            ))
                             .await
                             .unwrap_or(BOUNDARY_FAILURE_STATUS);
                         // A send failure means the connection is already gone, which drops the slot
@@ -1289,7 +1324,7 @@ fn open_program_count(
 }
 
 struct ProgramSlot {
-    backend: Arc<dyn strands_shell::os::Kernel>,
+    backend: Arc<box_shell::Filesystem>,
     program: Program,
     output: ProgramOutput,
     control: ProgramControl,
@@ -1421,6 +1456,93 @@ async fn deny(
 /// The connection's writer is gone, so nothing can be answered.
 fn closed_transport() -> io::Error {
     io::Error::new(io::ErrorKind::BrokenPipe, "the transport writer closed")
+}
+
+/// Shell text that runs `command`.
+///
+/// Each word is single-quoted, the quoting the Shell's own `xargs` and `find -exec` give a word
+/// before they run a command, and here every word is quoted, the program name too. So each
+/// argument reaches the program as one literal word, and none is read as an expansion, an
+/// assignment, or a reserved word.
+fn command_text(command: Command) -> String {
+    match command {
+        Command::Text(text) => text,
+        Command::Words { name, arguments } => std::iter::once(&name)
+            .chain(&arguments)
+            .map(|word| format!("'{}'", word.replace('\'', r"'\''")))
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+/// Enter `directory`, when one is given, and only then drive the Call.
+///
+/// A directory the Program can't enter runs nothing: the refusal goes to stderr, and the status is
+/// [`DIRECTORY_REFUSED_STATUS`]. Entering counts against the Call's deadline.
+async fn run_call_in(
+    slot: &mut ProgramSlot,
+    directory: Option<(&str, &Reach)>,
+    command: &str,
+    id: ProgramId,
+    request_timeout: Option<Duration>,
+    frames: &tokio::sync::mpsc::Sender<OutboundFrame>,
+) -> io::Result<i32> {
+    let Some((directory, reach)) = directory else {
+        return run_call(slot, command, id, request_timeout, frames).await;
+    };
+    let started = tokio::time::Instant::now();
+    let entered = match request_timeout {
+        Some(timeout) => {
+            match tokio::time::timeout(timeout, slot.program.enter(directory, reach)).await {
+                Ok(entered) => entered,
+                Err(_) => {
+                    deny(
+                        frames,
+                        id,
+                        DeniedKind::Timeout,
+                        "the call exceeded its deadline",
+                    )
+                    .await?;
+                    return Ok(BOUNDARY_FAILURE_STATUS);
+                }
+            }
+        }
+        None => slot.program.enter(directory, reach).await,
+    };
+    if let Err(error) = entered {
+        // Through the Program's output budget and chunking, because the directory is the
+        // caller's own text and can be as long as a frame.
+        let refusal = format!("strands-box: cannot start in {directory}: {error}\n");
+        let mut pending = Vec::new();
+        let chunk = Chunk {
+            stream: Stream::Stderr,
+            data: refusal.into_bytes().into(),
+        };
+        if slot.output.admit(chunk, &mut pending) == DrainOutcome::CapReached {
+            deny(frames, id, DeniedKind::OverBudget, OUTPUT_BUDGET_SPENT).await?;
+        }
+        flush(frames, id, &mut pending).await?;
+        return Ok(DIRECTORY_REFUSED_STATUS);
+    }
+    // `timeout` polls `enter` before its timer, so a synchronous lookup that overran still returns
+    // `Ok`. The command must not start once the deadline has passed.
+    let remaining = match request_timeout {
+        Some(timeout) => match timeout.checked_sub(started.elapsed()) {
+            Some(remaining) if !remaining.is_zero() => Some(remaining),
+            _ => {
+                deny(
+                    frames,
+                    id,
+                    DeniedKind::Timeout,
+                    "the call exceeded its deadline",
+                )
+                .await?;
+                return Ok(BOUNDARY_FAILURE_STATUS);
+            }
+        },
+        None => None,
+    };
+    run_call(slot, command, id, remaining, frames).await
 }
 
 /// Drive one Call, forwarding output as it is produced.
@@ -1935,6 +2057,7 @@ done"#;
             max_input: DEFAULT_SHELL_MAX_INPUT,
             max_stdin: DEFAULT_SHELL_MAX_STDIN,
             max_output: DEFAULT_SHELL_MAX_OUTPUT,
+            monty: true,
             command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
             request_timeout: Some(SERVE_REQUEST_TIMEOUT),
             reach: Arc::new(
@@ -2188,6 +2311,7 @@ done"#;
             max_input: DEFAULT_SHELL_MAX_INPUT,
             max_stdin: DEFAULT_SHELL_MAX_STDIN,
             max_output: DEFAULT_SHELL_MAX_OUTPUT,
+            monty: true,
             command_timeout: command_timeout.into(),
             request_timeout: request_timeout.into(),
             reach: Arc::new(
@@ -2572,7 +2696,7 @@ done"#;
         runtime.block_on(local.run_until(async {
             let (_directory, socket) = serving_socket(spec);
 
-            // The vendored Shell's own `timeout` stops this and reports non-zero; the point
+            // The Shell's own `timeout` stops this and reports non-zero; the point
             // is that the client is answered at all rather than left waiting.
             let response = tokio::time::timeout(
                 SHORT_COMMAND_TIMEOUT + Duration::from_secs(10),
@@ -2661,7 +2785,8 @@ done"#;
                 .build_on(Arc::clone(&backend), &spec.recorder)
                 .expect("Shell");
             let (program, output, control) =
-                Program::adopt(shell, DEFAULT_SHELL_MAX_STDIN).expect("program");
+                Program::adopt(shell, spec.command_timeout, DEFAULT_SHELL_MAX_STDIN)
+                    .expect("program");
             let mut slot = ProgramSlot {
                 backend,
                 program,
@@ -2734,7 +2859,8 @@ done"#;
                 .build_on(Arc::clone(&backend), &spec.recorder)
                 .expect("unlimited Shell");
             let (program, output, control) =
-                Program::adopt(shell, DEFAULT_SHELL_MAX_STDIN).expect("program");
+                Program::adopt(shell, spec.command_timeout, DEFAULT_SHELL_MAX_STDIN)
+                    .expect("program");
             let mut slot = ProgramSlot {
                 backend,
                 program,
@@ -4223,6 +4349,99 @@ done"#;
         }));
     }
 
+    /// Lua reads input that the alias forwards and keeps open as empty, and never waits for it.
+    #[test]
+    fn lua_reads_forwarded_input_as_empty_and_never_waits() {
+        for (source, expected) in [
+            ("lua -e 'print(1)'", "1\n"),
+            ("lua -e 'print(\"[\" .. io.read(\"*a\") .. \"]\")'", "[]\n"),
+            ("lua; echo after", "after\n"),
+        ] {
+            let (runtime, local) = runtime();
+            runtime.block_on(local.run_until(async {
+                let marker = tempfile::tempdir().expect("marker");
+                let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+                let (mut reader, mut writer) = transport(&socket).await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Open {
+                        mode: Interpreter::Shell,
+                    },
+                )
+                .await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Input {
+                        data: encode_payload(b"print('OUTSIDE')"),
+                    },
+                )
+                .await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Call {
+                        correlation: Default::default(),
+                        source: source.to_string(),
+                    },
+                )
+                .await;
+                let (out, status) =
+                    tokio::time::timeout(Duration::from_secs(5), collect_bytes(&mut reader, 1))
+                        .await
+                        .unwrap_or_else(|_| panic!("{source}: Lua waited for forwarded input"));
+                assert_eq!(
+                    (String::from_utf8_lossy(&out).as_ref(), status),
+                    (expected, 0),
+                    "{source}"
+                );
+            }));
+        }
+    }
+
+    /// A pipe inside one Shell command still reaches Lua's stdin, as input or as source.
+    #[test]
+    fn lua_reads_a_pipe_inside_a_shell_command() {
+        for (source, expected) in [
+            ("echo x | lua -e 'print(io.read())'", "x\n"),
+            ("echo 'print(7)' | lua", "7\n"),
+        ] {
+            let (runtime, local) = runtime();
+            runtime.block_on(local.run_until(async {
+                let marker = tempfile::tempdir().expect("marker");
+                let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+                let (mut reader, mut writer) = transport(&socket).await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Open {
+                        mode: Interpreter::Shell,
+                    },
+                )
+                .await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Call {
+                        correlation: Default::default(),
+                        source: source.to_string(),
+                    },
+                )
+                .await;
+                let (out, status) =
+                    tokio::time::timeout(Duration::from_secs(5), collect_bytes(&mut reader, 1))
+                        .await
+                        .expect("the pipe ends");
+                assert_eq!(
+                    (String::from_utf8_lossy(&out).as_ref(), status),
+                    (expected, 0),
+                    "{source}"
+                );
+            }));
+        }
+    }
+
     /// Read frames until this Program exits, returning its stderr and status.
     async fn stderr_and_status(reader: &mut tokio::net::unix::OwnedReadHalf) -> (String, i32) {
         let mut stderr = Vec::new();
@@ -4330,6 +4549,32 @@ done"#;
             let (stderr, status) = stderr_and_status(&mut reader).await;
             assert_ne!(status, 0);
             assert!(stderr.contains("stdin is more than 1000 bytes"), "{stderr}");
+        }));
+    }
+
+    /// With no `[limits]`, a command substitution holds a whole 1 MiB stdin.
+    #[test]
+    fn a_default_box_holds_a_one_mebibyte_stdin_in_a_substitution() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let limits = crate::record::config::limits::ShellLimits::default();
+            let mut spec = connection_spec(marker.path());
+            let owned = Arc::get_mut(&mut spec).expect("one owner");
+            owned.max_stdin = limits.max_stdin();
+            owned.max_output = limits.max_output();
+            let (_dir, socket) = serving_socket(spec);
+            let out = marker
+                .path()
+                .canonicalize()
+                .expect("marker resolves")
+                .join("out");
+            let source = format!(r#"x=$(cat); printf %s "${{#x}}" > {}"#, out.display());
+            let (mut reader, _writer) =
+                call_with_input(&socket, &vec![b'x'; 1024 * 1024], &source).await;
+            let (stderr, status) = stderr_and_status(&mut reader).await;
+            assert_eq!(status, 0, "{stderr}");
+            assert_eq!(std::fs::read_to_string(&out).unwrap(), "1048576");
         }));
     }
 
@@ -4917,6 +5162,7 @@ while test ! -e "$1"; do sleep 0.01; done"#;
                 max_input: DEFAULT_SHELL_MAX_INPUT,
                 max_stdin: DEFAULT_SHELL_MAX_STDIN,
                 max_output: DEFAULT_SHELL_MAX_OUTPUT,
+                monty: true,
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
@@ -5236,6 +5482,7 @@ done"#,
                 max_input: DEFAULT_SHELL_MAX_INPUT,
                 max_stdin: DEFAULT_SHELL_MAX_STDIN,
                 max_output: DEFAULT_SHELL_MAX_OUTPUT,
+                monty: true,
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
@@ -5398,6 +5645,7 @@ done"#;
                 max_input: DEFAULT_SHELL_MAX_INPUT,
                 max_stdin: DEFAULT_SHELL_MAX_STDIN,
                 max_output: DEFAULT_SHELL_MAX_OUTPUT,
+                monty: true,
                 command_timeout: Some(DEFAULT_SHELL_TIMEOUT),
                 request_timeout: Some(SERVE_REQUEST_TIMEOUT),
                 reach: Arc::new(
@@ -5914,17 +6162,21 @@ done"#;
         }));
     }
 
-    /// **A Python Program refuses `Input`, `InputEof` and `Signal` by name.**
+    /// How long a test waits for a refusal the daemon sends at once.
+    const REFUSAL_WAIT: Duration = Duration::from_secs(5);
+
+    /// **An `open` in Python mode is refused, so the Shell is the only way to Monty.**
     ///
-    /// A Python Program lives in its own set and `control_for` consults only `programs` and
-    /// `running`, so `Input` answered "transport program 3 is not open" for a Program that was open,
-    /// and `InputEof` and `Signal` were dropped in silence — no way to interrupt a running script and
-    /// no frame saying so. Nothing covered any of the three.
+    /// A Python Program ran Monty with no `shell:exec` decision, so a policy that forbids
+    /// `shell:exec` on `python3` did not stop a client the workload wrote itself. Nothing is opened:
+    /// a `call` for the same id is refused as not open and runs nothing, and the connection keeps
+    /// serving a Shell Program.
     #[test]
-    fn a_python_program_refuses_input_and_signal_by_name() {
+    fn an_open_in_python_mode_is_refused_and_runs_nothing() {
         let (runtime, local) = runtime();
         runtime.block_on(local.run_until(async {
             let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
             let (_dir, socket) = serving_socket(connection_spec(marker.path()));
             let (mut reader, mut writer) = transport(&socket).await;
 
@@ -5936,38 +6188,69 @@ done"#;
                 },
             )
             .await;
+            // Bounded, so a regression fails here rather than at the 300-second idle timeout.
+            let frame = tokio::time::timeout(REFUSAL_WAIT, read_frame::<Frame, _>(&mut reader))
+                .await
+                .expect("the refusal must arrive promptly")
+                .expect("read a frame")
+                .expect("an answer");
+            assert_eq!(frame.program, 3);
+            assert!(
+                matches!(
+                    frame.body,
+                    Body::Denied { kind: DeniedKind::TransportError, ref reason }
+                        if reason.contains("python mode was removed")
+                ),
+                "an open in Python mode must be refused by name: {frame:?}"
+            );
 
-            for body in [
-                Body::Input {
-                    data: encode_payload(b"ignored"),
+            put(
+                &mut writer,
+                3,
+                Body::Call {
+                    source: "open('ran.txt', 'w').write('RAN')".to_string(),
+                    correlation: Default::default(),
                 },
-                Body::InputEof,
-                Body::Signal {
-                    kind: SignalKind::Interrupt,
+            )
+            .await;
+            // Bounded, so a regression fails here rather than at the 300-second idle timeout.
+            let frame = tokio::time::timeout(REFUSAL_WAIT, read_frame::<Frame, _>(&mut reader))
+                .await
+                .expect("the refusal must arrive promptly")
+                .expect("read a frame")
+                .expect("an answer");
+            assert!(
+                matches!(
+                    frame.body,
+                    Body::Denied { kind: DeniedKind::TransportError, ref reason }
+                        if reason.contains("not open")
+                ),
+                "a call for the refused id must find nothing open: {frame:?}"
+            );
+            assert!(
+                !workspace.join("ran.txt").exists(),
+                "the refused Program must run nothing"
+            );
+
+            put(
+                &mut writer,
+                4,
+                Body::Open {
+                    mode: Interpreter::Shell,
                 },
-            ] {
-                let named = format!("{body:?}");
-                put(&mut writer, 3, body).await;
-                let outcome = read_frame::<Frame, _>(&mut reader).await;
-                let Ok(Some(frame)) = outcome else {
-                    panic!("{named} must be answered, not dropped: {outcome:?}");
-                };
-                match frame.body {
-                    Body::Denied { kind, reason } => {
-                        assert_eq!(kind, DeniedKind::TransportError, "{named}");
-                        assert!(
-                            !reason.contains("not open"),
-                            "{named}: the Program IS open; that message was the defect: {reason}"
-                        );
-                        assert!(
-                            reason.contains("no input") || reason.contains("no signal"),
-                            "{named}: the refusal must say what a Python program does not take: \
-                             {reason}"
-                        );
-                    }
-                    other => panic!("{named} must be refused by name, got {other:?}"),
-                }
-            }
+            )
+            .await;
+            put(
+                &mut writer,
+                4,
+                Body::Call {
+                    source: "printf still_serving".to_string(),
+                    correlation: Default::default(),
+                },
+            )
+            .await;
+            let (output, status) = collect(&mut reader, 4).await;
+            assert_eq!((output.as_str(), status), ("still_serving", 0));
         }));
     }
 
@@ -6362,6 +6645,474 @@ done"#;
             assert!(
                 response.0.contains("legacy_ok"),
                 "version 1 must keep working: {response:?}"
+            );
+        }));
+    }
+
+    // ── `run`: the caller's directory, and a command as words ─────────────────
+
+    /// The connection-lifetime spec, judged by `policy_text` instead.
+    fn spec_under(marker_directory: &Path, policy_text: &str) -> Arc<ShellSpec> {
+        let mut spec = Arc::try_unwrap(connection_spec(marker_directory))
+            .ok()
+            .expect("a spec no one else holds");
+        spec.policy = open_policy_text(policy_text);
+        Arc::new(spec)
+    }
+
+    /// The box's working directory in these specs: the canonical marker directory.
+    fn working_directory_of(marker: &tempfile::TempDir) -> PathBuf {
+        marker
+            .path()
+            .canonicalize()
+            .expect("the marker directory resolves")
+    }
+
+    /// One Shell Program, one `run`, over a fresh connection: what every alias does.
+    async fn run_in(socket: &Path, directory: &Path, command: Command) -> (String, i32) {
+        let (mut reader, mut writer) = transport(socket).await;
+        put(
+            &mut writer,
+            1,
+            Body::Open {
+                mode: Interpreter::Shell,
+            },
+        )
+        .await;
+        put(
+            &mut writer,
+            1,
+            Body::Run {
+                command,
+                directory: directory.display().to_string(),
+                correlation: Default::default(),
+            },
+        )
+        .await;
+        put(&mut writer, 1, Body::InputEof).await;
+        collect(&mut reader, 1).await
+    }
+
+    fn words(name: &str, arguments: &[&str]) -> Command {
+        Command::Words {
+            name: name.to_string(),
+            arguments: arguments.iter().map(ToString::to_string).collect(),
+        }
+    }
+
+    /// Every word, the program name too, is one single-quoted literal.
+    #[test]
+    fn a_command_as_words_becomes_single_quoted_shell_text() {
+        assert_eq!(
+            command_text(words("python3", &["-c", "print('$(x)')", ""])),
+            r#"'python3' '-c' 'print('\''$(x)'\'')' ''"#
+        );
+        assert_eq!(command_text(words("python3", &[])), "'python3'");
+        assert_eq!(
+            command_text(Command::Text("printf ok".to_string())),
+            "printf ok",
+            "text is the Shell's to parse, unchanged"
+        );
+    }
+
+    /// The Shell reads each quoted word back as exactly the caller's argument: no expansion, no
+    /// command substitution, no word splitting, and an empty argument survives.
+    #[test]
+    fn a_command_as_words_keeps_every_argument_literal() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            std::fs::write(workspace.join("x"), "kept")
+                .expect("a file a substitution would remove");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+
+            let arguments = [
+                "$(rm x)",
+                "`rm x`",
+                "$HOME",
+                "a b",
+                "",
+                "it's",
+                "\"double\"",
+                "line one\nline two",
+                "*",
+                "x;rm x",
+                "-c",
+            ];
+            let (output, status) = run_in(
+                &socket,
+                &workspace,
+                words("printf", &[&["<%s>\n"][..], &arguments[..]].concat()),
+            )
+            .await;
+            assert_eq!(status, 0, "{output}");
+            let expected: String = arguments.iter().map(|word| format!("<{word}>\n")).collect();
+            assert_eq!(
+                output, expected,
+                "every argument must arrive as one literal word"
+            );
+            assert!(
+                workspace.join("x").exists(),
+                "no argument may run as a command"
+            );
+
+            // A word that would be an assignment unquoted is still the program's name.
+            let (output, status) = run_in(&socket, &workspace, words("NAME=value", &[])).await;
+            assert_eq!(
+                status, 127,
+                "a quoted name is a command, not an assignment: {output}"
+            );
+        }));
+    }
+
+    /// A `run` in a folder the policy permits starts there, so a relative path means what it meant
+    /// to the caller.
+    #[test]
+    fn a_run_starts_in_the_callers_directory() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            let sub = workspace.join("sub");
+            std::fs::create_dir(&sub).expect("a sub folder");
+            std::fs::write(sub.join("here.txt"), "SUB_FILE").expect("a file in sub");
+            std::fs::write(workspace.join("here.txt"), "WORKSPACE_FILE")
+                .expect("a file in the top");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+
+            let (output, status) = run_in(
+                &socket,
+                &sub,
+                Command::Text("pwd; printf '%s\\n' \"$PWD\"; cat here.txt".to_string()),
+            )
+            .await;
+            assert_eq!(status, 0, "{output}");
+            let sub_text = sub.display().to_string();
+            assert_eq!(
+                output,
+                format!("{sub_text}\n{sub_text}\nSUB_FILE"),
+                "the command must run in the caller's directory and read its file"
+            );
+
+            let (output, status) = run_in(
+                &socket,
+                &workspace,
+                Command::Text("cat here.txt".to_string()),
+            )
+            .await;
+            assert_eq!((output.as_str(), status), ("WORKSPACE_FILE", 0));
+        }));
+    }
+
+    /// A Python alias's `run` reaches the Shell's own `python3`, which is Monty, and reads its
+    /// script from the caller's directory.
+    #[test]
+    fn a_python_run_reaches_the_shells_python_and_reads_the_callers_script() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            let sub = workspace.join("sub");
+            std::fs::create_dir(&sub).expect("a sub folder");
+            std::fs::write(sub.join("show.py"), "print('SCRIPT_IN_SUB')\n").expect("a script");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+
+            for name in ["python3", "python"] {
+                let (output, status) =
+                    run_in(&socket, &workspace, words(name, &["-c", "print(40 + 2)"])).await;
+                assert_eq!((output.as_str(), status), ("42\n", 0), "{name}");
+
+                let (output, status) =
+                    run_in(&socket, &workspace, words(name, &["--version"])).await;
+                assert_eq!(status, 0, "{output}");
+                assert!(output.contains("Monty"), "{name} is Monty: {output}");
+
+                let (output, status) = run_in(&socket, &sub, words(name, &["show.py"])).await;
+                assert_eq!(
+                    (output.as_str(), status),
+                    ("SCRIPT_IN_SUB\n", 0),
+                    "{name} must find a script that exists only in the caller's directory"
+                );
+            }
+        }));
+    }
+
+    /// A bare `python3`, and `python3 -`, are refused by the Shell's own `python3` with status 2,
+    /// never run as an empty script.
+    #[test]
+    fn a_python_run_with_no_script_is_refused_by_the_shell() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+
+            for arguments in [&[][..], &["-"][..]] {
+                let (output, status) =
+                    run_in(&socket, &workspace, words("python3", arguments)).await;
+                assert_eq!(status, 2, "python3 {arguments:?} must be refused: {output}");
+                assert!(output.contains("python:"), "the Shell says why: {output}");
+            }
+        }));
+    }
+
+    /// A Python alias's `run` is a Shell command, so it needs a `shell:exec` permit.
+    #[test]
+    fn a_python_run_needs_a_shell_exec_permit() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            let spec = spec_under(
+                marker.path(),
+                r#"permit(principal == Box::Agent::"self", action == Box::Action::"fs:read", resource);"#,
+            );
+            let (_dir, socket) = serving_socket(spec);
+
+            let (output, status) =
+                run_in(&socket, &workspace, words("python3", &["-c", "print('RAN')"])).await;
+            assert_eq!(status, 126, "a denied python3 is a refused command: {output}");
+            assert!(!output.contains("RAN"), "the script must not run: {output}");
+        }));
+    }
+
+    /// With `monty: false` the spec installs no Monty runner, so a Python alias's `run` never
+    /// reaches Monty. `python3 --version` goes to the program the spec maps the name to, and this
+    /// spec permits no `shell:spawn`, so the Shell refuses that file. Every other spec in these
+    /// tests sets `monty: true`, so this is the test that fails if `ShellSpec` installs Monty
+    /// whatever `monty` says.
+    #[test]
+    fn with_monty_off_a_python_run_goes_to_the_declared_program_not_monty() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            let mut spec = Arc::try_unwrap(connection_spec(marker.path()))
+                .ok()
+                .expect("a spec no one else holds");
+            let mut programs = std::collections::BTreeMap::new();
+            for name in ["python3", "python"] {
+                let program = workspace.join(format!("declared-{name}"));
+                std::fs::write(&program, "#!/bin/sh\n").expect("a declared program");
+                std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+                    .expect("make the declared program executable");
+                programs.insert(name.to_string(), program);
+            }
+            spec.host_programs = Arc::new(programs.clone());
+            spec.monty = false;
+            let (_dir, socket) = serving_socket(Arc::new(spec));
+
+            for (name, program) in &programs {
+                let (output, status) =
+                    run_in(&socket, &workspace, words(name, &["--version"])).await;
+                assert!(
+                    !output.contains("Monty"),
+                    "{name} must not be Monty: {output}"
+                );
+                assert_eq!(status, 126, "{name} must meet the spawn decision: {output}");
+                assert!(
+                    output.contains(&program.display().to_string()),
+                    "{name} must be judged as its declared file: {output}"
+                );
+            }
+        }));
+    }
+
+    /// The Program's own directory raises no `change_dir` decision, so a policy that refuses every
+    /// `change_dir` still runs a command there. Any other folder meets that refusal and runs nothing.
+    #[test]
+    fn only_a_folder_other_than_the_programs_own_meets_the_change_dir_decision() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            let sub = workspace.join("sub");
+            std::fs::create_dir(&sub).expect("a sub folder");
+            let spec = spec_under(
+                marker.path(),
+                r#"permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
+                   permit(principal == Box::Agent::"self", action == Box::Action::"fs:read", resource);
+                   permit(principal == Box::Agent::"self", action == Box::Action::"fs:write", resource);
+                   forbid(principal, action == Box::Action::"fs:read", resource)
+                   when { context.input.operation == Box::FsReadOperation::"change_dir" };"#,
+            );
+            let (_dir, socket) = serving_socket(spec);
+
+            let (output, status) =
+                run_in(&socket, &workspace, Command::Text("printf RAN".to_string())).await;
+            assert_eq!(
+                (output.as_str(), status),
+                ("RAN", 0),
+                "the Program's own directory needs no decision"
+            );
+
+            let (output, status) = run_in(
+                &socket,
+                &sub,
+                Command::Text("printf RAN > ran.txt".to_string()),
+            )
+            .await;
+            assert_eq!(status, DIRECTORY_REFUSED_STATUS, "{output}");
+            assert!(
+                output.contains(&format!("strands-box: cannot start in {}", sub.display())),
+                "the refusal must name the directory: {output}"
+            );
+            assert!(
+                !sub.join("ran.txt").exists() && !workspace.join("ran.txt").exists(),
+                "a refused directory must run nothing, here or anywhere else"
+            );
+        }));
+    }
+
+    /// A folder outside the reachable paths, a missing one, a file, a relative one, and one longer
+    /// than an output chunk are each refused, and the command never runs.
+    ///
+    /// So are `/`, `/tmp`, and a `..` spelling that leaves the reachable paths: the Shell's
+    /// in-memory tree holds `/` and `/tmp`, and a policy permits `change_dir` on them, but a
+    /// command run there would read and write nothing on the host.
+    #[test]
+    fn a_folder_the_box_cannot_enter_is_refused_and_runs_nothing() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            std::fs::write(workspace.join("file.txt"), "a file").expect("a file");
+            let outside = tempfile::tempdir().expect("a folder outside the reachable paths");
+            let outside = outside
+                .path()
+                .canonicalize()
+                .expect("the outside folder resolves");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+
+            for directory in [
+                outside.clone(),
+                workspace.join("missing"),
+                workspace.join("file.txt"),
+                PathBuf::from("relative"),
+                // Longer than one output chunk, so the refusal that names it is split.
+                PathBuf::from(format!("/{}", "d".repeat(200 * 1024))),
+                PathBuf::from("/"),
+                PathBuf::from("/tmp"),
+                PathBuf::from("/made/up/absolute"),
+                // Inside the reachable paths as spelled, and the in-memory `/tmp` once resolved.
+                PathBuf::from(format!(
+                    "{}{}/tmp",
+                    workspace.display(),
+                    "/..".repeat(workspace.components().count())
+                )),
+            ] {
+                let (output, status) =
+                    run_in(&socket, &directory, Command::Text("printf RAN".to_string())).await;
+                assert_eq!(status, DIRECTORY_REFUSED_STATUS, "{directory:?}: {output}");
+                assert!(
+                    output.starts_with("strands-box: cannot start in ") && !output.contains("RAN"),
+                    "{directory:?} must be refused before the command runs: {output}"
+                );
+            }
+        }));
+    }
+
+    /// **A folder entered after the deadline runs nothing.** `timeout` polls the entry before its
+    /// timer, so a lookup that overran still finishes; the command must then not start. A zero
+    /// deadline has always passed once the entry returns, so this needs no real slowness. Repeated,
+    /// because without the check the command runs only when the Call happens to be polled first.
+    #[test]
+    fn a_run_whose_folder_entry_passes_the_deadline_runs_nothing() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let workspace = working_directory_of(&marker);
+            let sub = workspace.join("sub");
+            std::fs::create_dir(&sub).expect("a sub folder");
+            let (_dir, socket) = serving_socket(spec_with(
+                marker.path(),
+                DEFAULT_SHELL_TIMEOUT,
+                Duration::ZERO,
+            ));
+
+            for attempt in 0..20 {
+                let (mut reader, mut writer) = transport(&socket).await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Open {
+                        mode: Interpreter::Shell,
+                    },
+                )
+                .await;
+                put(
+                    &mut writer,
+                    1,
+                    Body::Run {
+                        command: Command::Text("printf RAN > ran.txt".to_string()),
+                        directory: sub.display().to_string(),
+                        correlation: Default::default(),
+                    },
+                )
+                .await;
+                let mut timed_out = false;
+                let status = loop {
+                    let frame =
+                        tokio::time::timeout(REFUSAL_WAIT, read_frame::<Frame, _>(&mut reader))
+                            .await
+                            .expect("the daemon must answer promptly")
+                            .expect("read a frame")
+                            .expect("an answer");
+                    match frame.body {
+                        Body::Denied {
+                            kind: DeniedKind::Timeout,
+                            ..
+                        } => timed_out = true,
+                        Body::Exit { status } => break status,
+                        Body::Output { .. } => {}
+                        other => panic!("attempt {attempt}: unexpected {other:?}"),
+                    }
+                };
+                assert!(
+                    timed_out,
+                    "attempt {attempt}: the deadline must be reported"
+                );
+                assert_eq!(status, BOUNDARY_FAILURE_STATUS, "attempt {attempt}");
+                assert!(
+                    !sub.join("ran.txt").exists(),
+                    "attempt {attempt}: a command past its deadline must not start"
+                );
+            }
+        }));
+    }
+
+    /// An alias built for version 8, before `run` existed, is refused by version.
+    #[test]
+    fn the_version_before_run_is_refused() {
+        let (runtime, local) = runtime();
+        runtime.block_on(local.run_until(async {
+            let marker = tempfile::tempdir().expect("marker");
+            let (_dir, socket) = serving_socket(connection_spec(marker.path()));
+            let mut stream = UnixStream::connect(&socket).await.expect("connect");
+            write_frame(
+                &mut stream,
+                &serde_json::json!({
+                    "version": 8,
+                    "program": 1,
+                    "frame_type": "open",
+                    "body": { "mode": "python" },
+                }),
+            )
+            .await
+            .expect("write the frame");
+            let frame = read_frame::<Frame, _>(&mut stream)
+                .await
+                .expect("read the refusal")
+                .expect("a frame");
+            assert!(
+                matches!(
+                    frame.body,
+                    Body::Denied { kind: DeniedKind::VersionMismatch, ref reason }
+                        if reason.contains("unsupported protocol version 8")
+                ),
+                "{frame:?}"
             );
         }));
     }

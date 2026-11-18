@@ -15,6 +15,7 @@ use strands_shell::os::{STDERR, STDIN, STDOUT};
 use tokio::sync::mpsc;
 
 use super::protocol::{MAX_CALL_OUTPUT_BYTES, MAX_CHUNK_BYTES, Stream};
+use super::reach::Reach;
 
 /// The stdin channel depth, in frames. Bytes wait in the Program's [`StdinQueue`], which merges
 /// them, so a frame count never limits a writer.
@@ -27,7 +28,13 @@ const OUTPUT_CHANNEL_DEPTH: usize = 64;
 /// One program: the private state a Call mutates.
 pub(crate) struct Program {
     shell: strands_shell::Shell,
+    kernel: Arc<box_shell::ShellKernel>,
     cancel: Arc<AtomicBool>,
+    /// The Shell's own bound on one Call, re-armed when each Call starts.
+    timeout: Option<std::time::Duration>,
+    /// The streams a Call's diagnostics that the Shell captured rather than wrote are sent to.
+    stdout: mpsc::WeakSender<Bytes>,
+    stderr: mpsc::WeakSender<Bytes>,
 }
 
 /// The half a concurrent task holds while a Call is in flight.
@@ -131,18 +138,19 @@ pub(crate) struct ProgramOutput {
 impl Program {
     /// Wrap a freshly built Shell, installing the three standard channel descriptors.
     pub(crate) fn adopt(
-        mut shell: strands_shell::Shell,
+        hosted: super::shell::HostedShell,
+        timeout: Option<std::time::Duration>,
         input_limit: usize,
     ) -> io::Result<(Self, ProgramOutput, ProgramControl)> {
+        let super::shell::HostedShell { mut shell, kernel } = hosted;
         let (stdin_tx, stdin_rx) = mpsc::channel(INPUT_CHANNEL_DEPTH);
         let stdin = Arc::new(StdinQueue::default());
         tokio::spawn(pump_stdin(Arc::clone(&stdin), stdin_tx));
         let (stdout_tx, stdout_rx) = mpsc::channel(OUTPUT_CHANNEL_DEPTH);
         let (stderr_tx, stderr_rx) = mpsc::channel(OUTPUT_CHANNEL_DEPTH);
 
-        // The writers reach a builtin only because the vendored fork inherits them — see
-        // `shell/UPSTREAM.md`.
         shell.proc.set_outside_reader(STDIN, stdin_rx);
+        let (stdout, stderr) = (stdout_tx.downgrade(), stderr_tx.downgrade());
         shell.proc.set_channel_writer(STDOUT, stdout_tx);
         shell.proc.set_channel_writer(STDERR, stderr_tx);
 
@@ -150,7 +158,11 @@ impl Program {
         Ok((
             Self {
                 shell,
+                kernel,
                 cancel: Arc::clone(&cancel),
+                timeout,
+                stdout,
+                stderr,
             },
             ProgramOutput {
                 stdout_rx,
@@ -175,15 +187,70 @@ impl Program {
     /// Run one Call and return its status. Its bytes reach [`ProgramOutput`] while this future is
     /// pending, so a caller must poll both concurrently.
     pub(crate) async fn call(&mut self, command: &str) -> CallOutcome {
+        match super::shell::deadline(self.timeout) {
+            Ok(deadline) => self.shell.proc.deadline = deadline,
+            Err(error) => {
+                Self::forward(&self.stderr, format!("strands-box: {error}\n")).await;
+                return CallOutcome { status: 1 };
+            }
+        }
         let output = self.shell.run(command).await;
+        self.kernel.settle();
+        Self::forward(&self.stdout, output.stdout).await;
+        Self::forward(&self.stderr, output.stderr).await;
         CallOutcome {
             status: output.status,
         }
     }
 
-    pub(crate) fn use_shell(&mut self, mut shell: strands_shell::Shell) {
+    /// Send text the Shell captured to the stream it belongs to.
+    async fn forward(stream: &mpsc::WeakSender<Bytes>, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(sender) = stream.upgrade() {
+            let _ = sender.send(Bytes::from(text)).await;
+        }
+    }
+
+    pub(crate) fn use_shell(&mut self, hosted: super::shell::HostedShell) {
+        let super::shell::HostedShell { mut shell, kernel } = hosted;
         std::mem::swap(&mut self.shell.proc, &mut shell.proc);
         self.shell = shell;
+        self.kernel = kernel;
+    }
+
+    /// Move into `directory` through the decision a `cd` gets, unless the Program is already there.
+    ///
+    /// Like `cd`, a move sets `OLDPWD` and `PWD`. A refusal leaves the working directory unchanged.
+    /// A folder that only the Shell's in-memory tree holds, such as its own `/tmp`, is refused both
+    /// as spelled and as resolved, because a command run there reads and writes nothing on the host.
+    pub(super) async fn enter(&mut self, directory: &str, reach: &Reach) -> io::Result<()> {
+        let spelled = std::path::Path::new(directory);
+        if self.shell.proc.cwd == spelled {
+            return Ok(());
+        }
+        if !spelled.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the directory is not an absolute path",
+            ));
+        }
+        if !reach.names_a_host_path(spelled) {
+            return Err(no_host_folder());
+        }
+        let before = self.shell.proc.cwd.clone();
+        let kernel = Arc::clone(self.shell.kernel());
+        kernel.change_dir(&mut self.shell.proc, directory).await?;
+        if !reach.names_a_host_path(&self.shell.proc.cwd) {
+            self.shell.proc.cwd = before;
+            return Err(no_host_folder());
+        }
+        let previous = before.to_string_lossy().into_owned();
+        let current = self.shell.proc.cwd.to_string_lossy().into_owned();
+        self.shell.proc.set_env("OLDPWD", previous);
+        self.shell.proc.set_env("PWD", current);
+        Ok(())
     }
 }
 
@@ -235,6 +302,14 @@ impl ProgramOutput {
         }
         DrainOutcome::Within
     }
+}
+
+/// A folder outside the operator's home, the agent's home, and the workspace.
+fn no_host_folder() -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        "outside this box's home and every declared bind",
+    )
 }
 
 /// Whether a drain stayed inside the Program's output budget.

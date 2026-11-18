@@ -214,7 +214,12 @@ fn select_tool_with_commands(
             trailing: args.to_vec(),
             shebang_interpreters: ShebangInterpreters::MustBeListed,
         }),
-        None => Err(no_match()),
+        None => Err(refuse(
+            "no `[tool.<name>] command` matches this program and its leading arguments. The \
+             `[tool.<name>]` tables are fixed when the box starts, so a program created during \
+             the run runs only under an `[agent.filesystem] exec` entry"
+                .to_string(),
+        )),
     }
 }
 
@@ -268,7 +273,7 @@ fn caller_exec_covers(caller: &ProcessSpec, program: &Path) -> bool {
 
 #[derive(Clone)]
 pub(crate) struct ToolSpawner {
-    spawn: strands_shell::os::HostSpawner,
+    spawn: box_shell::HostSpawner,
     selection: Arc<ToolSelection>,
 }
 
@@ -323,7 +328,7 @@ impl ToolSelection {
 }
 
 impl ToolSpawner {
-    pub(crate) fn spawn(&self) -> strands_shell::os::HostSpawner {
+    pub(crate) fn spawn(&self) -> box_shell::HostSpawner {
         Arc::clone(&self.spawn)
     }
 
@@ -342,18 +347,25 @@ impl ToolSpawner {
 /// Build the hook that runs a host binary in its own boundary
 /// (docs/design/decisions.md#the-box-runs-a-host-binary-through-the-spawn-host-seam).
 ///
-/// The box installs this on the hosted Shell in place of the vendored crate's built-in spawn. Each
+/// The box's kernel runs every host binary the Shell does not implement through this. Each
 /// call selects the tool the invocation matches, translates that tool's `ProcessSpec` through the
 /// same translator the agent used, runs it through the trampoline, and hands the captured output
 /// back.
+#[allow(clippy::too_many_arguments)]
 fn tool_spawner(
     site: Site<'_>,
     approved: Arc<ApprovedReach>,
     workspace: PathBuf,
     recorder: Arc<telemetry::DecisionRecorder>,
-    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
-        super::macos_enforcement::Registration,
-    >,
+    #[cfg(any(
+        all(target_os = "macos", feature = "native-filesystem-policy"),
+        all(
+            target_os = "linux",
+            feature = "native-filesystem-policy",
+            box_native_adapter_tests
+        )
+    ))]
+    registration: Option<super::native_enforcement::Registration>,
 ) -> ToolSpawner {
     let attachment = site.attachment.clone();
     let layout = site.layout.clone();
@@ -366,85 +378,98 @@ fn tool_spawner(
         commands: Arc::clone(approved.commands()),
     });
     let spawn_selection = Arc::clone(&selection);
-    let spawn: strands_shell::os::HostSpawner =
-        Arc::new(move |spawn: strands_shell::os::HostSpawn| {
-            let recorder = Arc::clone(&recorder);
-            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-            let registration = registration.clone();
-            let selection = Arc::clone(&spawn_selection);
-            let layout = layout.clone();
-            let approved = Arc::clone(&approved);
-            let protected_sources = protected_sources.clone();
-            Box::pin(async move {
-                let mut selected = selection
-                    .select(&spawn.program, &spawn.invoked, &spawn.args)
-                    .map_err(|error| std::io::Error::other(error.to_string()))?;
-                let cwd = caller_directory(&spawn.cwd, &selected.spec, &selection.workspace);
-                let table = selected.table.clone();
-                // The reach this run judged for the table; every declared table was judged, so a miss
-                // is refused.
-                let reach = approved.table(&table).ok_or_else(|| {
-                    std::io::Error::other(format!("{table} has no reach judged for this run"))
-                })?;
-                if let Some(command) = reach.command.as_ref() {
-                    selected.spec.command[0] = command.invoked().display().to_string();
-                }
-                let site = Site {
-                    attachment: &selection.attachment,
-                    layout: &layout,
-                    stored: &selection.record,
-                    protected_sources: &protected_sources,
-                };
-                let boundary = Boundary::translate(
-                    &selected.spec,
-                    Launch {
-                        table: &table,
-                        trailing: &selected.trailing,
-                        fallback_workspace: &cwd,
-                        shebang_interpreters: selected.shebang_interpreters,
-                        // A spawned host binary is the toolchain case: it loads frameworks and
-                        // libraries the agent's own program never touches.
-                        runtime_reach: RuntimeReach::Leaf,
-                        argument_zero: Some(&spawn.invoked),
-                        egress: EgressMode::for_spec(&selected.spec),
-                        approved: Some(reach),
-                    },
-                    &site,
-                )
+    let spawn: box_shell::HostSpawner = Arc::new(move |spawn: box_shell::HostSpawn| {
+        let recorder = Arc::clone(&recorder);
+        #[cfg(any(
+            all(target_os = "macos", feature = "native-filesystem-policy"),
+            all(
+                target_os = "linux",
+                feature = "native-filesystem-policy",
+                box_native_adapter_tests
+            )
+        ))]
+        let registration = registration.clone();
+        let selection = Arc::clone(&spawn_selection);
+        let layout = layout.clone();
+        let approved = Arc::clone(&approved);
+        let protected_sources = protected_sources.clone();
+        Box::pin(async move {
+            let mut selected = selection
+                .select(&spawn.program, &spawn.invoked, &spawn.args)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
-                if boundary.working_directory() != spawn.cwd.as_path() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::PermissionDenied,
-                        "the tool working directory does not match the policy-approved directory",
-                    ));
-                }
-                // Recorded before the run, so a call the agent cancels or outlasts still leaves it.
-                if selected.spec.native_egress() {
-                    let label = table
-                        .strip_prefix("[tool.")
-                        .and_then(|rest| rest.strip_suffix(']'))
-                        .unwrap_or(&table);
-                    recorder.record(telemetry::EffectiveDecision::enforcement_permit(
-                        "egress:native",
-                        label.to_string(),
-                        "native-egress",
-                    ));
-                }
-                let captured = crate::run::contain::supervise::LeafBox::run(
-                    boundary,
-                    &layout,
-                    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-                    registration,
-                )
-                .await
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-                Ok(strands_shell::os::HostSpawnOutcome {
-                    status: captured.status,
-                    stdout: captured.stdout,
-                    stderr: captured.stderr,
-                })
+            let cwd = caller_directory(&spawn.cwd, &selected.spec, &selection.workspace);
+            let table = selected.table.clone();
+            // The reach this run judged for the table; every declared table was judged, so a miss
+            // is refused.
+            let reach = approved.table(&table).ok_or_else(|| {
+                std::io::Error::other(format!("{table} has no reach judged for this run"))
+            })?;
+            if let Some(command) = reach.command.as_ref() {
+                selected.spec.command[0] = command.invoked().display().to_string();
+            }
+            let site = Site {
+                attachment: &selection.attachment,
+                layout: &layout,
+                stored: &selection.record,
+                protected_sources: &protected_sources,
+            };
+            let boundary = Boundary::translate(
+                &selected.spec,
+                Launch {
+                    table: &table,
+                    trailing: &selected.trailing,
+                    fallback_workspace: &cwd,
+                    shebang_interpreters: selected.shebang_interpreters,
+                    // A spawned host binary is the toolchain case: it loads frameworks and
+                    // libraries the agent's own program never touches.
+                    runtime_reach: RuntimeReach::Leaf,
+                    argument_zero: Some(&spawn.invoked),
+                    egress: EgressMode::for_spec(&selected.spec),
+                    approved: Some(reach),
+                },
+                &site,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if boundary.working_directory() != spawn.cwd.as_path() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "the tool working directory does not match the policy-approved directory",
+                ));
+            }
+            // Recorded before the run, so a call the agent cancels or outlasts still leaves it.
+            if selected.spec.native_egress() {
+                let label = table
+                    .strip_prefix("[tool.")
+                    .and_then(|rest| rest.strip_suffix(']'))
+                    .unwrap_or(&table);
+                recorder.record(telemetry::EffectiveDecision::enforcement_permit(
+                    "egress:native",
+                    label.to_string(),
+                    "native-egress",
+                ));
+            }
+            let captured = crate::run::contain::supervise::LeafBox::run(
+                boundary,
+                &layout,
+                #[cfg(any(
+                    all(target_os = "macos", feature = "native-filesystem-policy"),
+                    all(
+                        target_os = "linux",
+                        feature = "native-filesystem-policy",
+                        box_native_adapter_tests
+                    )
+                ))]
+                registration,
+            )
+            .await
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            Ok(box_shell::HostSpawnOutcome {
+                status: captured.status,
+                stdout: captured.stdout,
+                stderr: captured.stderr,
             })
-        });
+        })
+    });
     ToolSpawner { spawn, selection }
 }
 
@@ -457,8 +482,15 @@ fn tool_spawner(
 /// crossing the thread boundary. A contained MCP leaf reuses the parent's gateway and policy exactly
 /// as a tool leaf does; it owns no second [`HostedBox`].
 pub(crate) struct McpLeafLauncher {
-    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-    registration: Option<super::macos_enforcement::Registration>,
+    #[cfg(any(
+        all(target_os = "macos", feature = "native-filesystem-policy"),
+        all(
+            target_os = "linux",
+            feature = "native-filesystem-policy",
+            box_native_adapter_tests
+        )
+    ))]
+    registration: Option<super::native_enforcement::Registration>,
     attachment: Attachment,
     layout: BoxRoot,
     record: Record,
@@ -478,12 +510,25 @@ impl McpLeafLauncher {
         approved: Arc<ApprovedReach>,
         protected_sources: Vec<AuthoritySource>,
         workspace: PathBuf,
-        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
-            super::macos_enforcement::Registration,
-        >,
+        #[cfg(any(
+            all(target_os = "macos", feature = "native-filesystem-policy"),
+            all(
+                target_os = "linux",
+                feature = "native-filesystem-policy",
+                box_native_adapter_tests
+            )
+        ))]
+        registration: Option<super::native_enforcement::Registration>,
     ) -> Self {
         Self {
-            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            #[cfg(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(
+                    target_os = "linux",
+                    feature = "native-filesystem-policy",
+                    box_native_adapter_tests
+                )
+            ))]
             registration,
             attachment,
             layout,
@@ -610,7 +655,14 @@ impl McpLeafLauncher {
         crate::run::contain::supervise::LeafBox::spawn_streaming(
             boundary,
             &self.layout,
-            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            #[cfg(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(
+                    target_os = "linux",
+                    feature = "native-filesystem-policy",
+                    box_native_adapter_tests
+                )
+            ))]
             self.registration.clone(),
         )
         .await
@@ -665,8 +717,15 @@ pub(crate) struct HostedBox {
     /// The broker serving this box's aliases.
     broker: Option<BrokerHost>,
 
-    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-    _file_monitor: Option<super::macos_enforcement::FileMonitor>,
+    #[cfg(any(
+        all(target_os = "macos", feature = "native-filesystem-policy"),
+        all(
+            target_os = "linux",
+            feature = "native-filesystem-policy",
+            box_native_adapter_tests
+        )
+    ))]
+    _file_monitor: Option<super::native_enforcement::FileMonitor>,
 
     /// A fatal cross-door completion verdict from the discovery coordinator,
     /// raced against the broker and the registry in [`stopped`](Self::stopped).
@@ -694,8 +753,15 @@ pub(crate) struct HostedBox {
 }
 
 impl HostedBox {
-    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-    pub(crate) fn native_registration(&self) -> Option<super::macos_enforcement::Registration> {
+    #[cfg(any(
+        all(target_os = "macos", feature = "native-filesystem-policy"),
+        all(
+            target_os = "linux",
+            feature = "native-filesystem-policy",
+            box_native_adapter_tests
+        )
+    ))]
+    pub(crate) fn native_registration(&self) -> Option<super::native_enforcement::Registration> {
         self._file_monitor
             .as_ref()
             .map(|monitor| monitor.registration())
@@ -787,6 +853,12 @@ impl HostedBox {
         owned: Lock,
         workspace: &Path,
         home: &Path,
+        #[cfg(all(
+            target_os = "linux",
+            feature = "native-filesystem-policy",
+            box_native_adapter_tests
+        ))]
+        entry_guard: Option<std::sync::Arc<crate::run::native_enforcement::EntryGuard>>,
     ) -> Result<Self, BoxError> {
         // Whatever a previous owner left is stale, because the lock above just proved nothing of
         // this box is running.
@@ -811,7 +883,7 @@ impl HostedBox {
         // provisioned to the workload and stripped at the gateway) and its box-owned backend token
         // (attached at the gateway, never placed in the workload environment). One control per
         // destination.
-        let credential::BackendProjection {
+        let credential::Projection {
             capabilities: backend_capabilities,
             workload_environment: backend_environment,
         } = credential::backend_capabilities(&record.backend_credentials()?)?;
@@ -975,13 +1047,34 @@ impl HostedBox {
         )?);
         let broker_listener = BrokerHost::bind(root)?;
         #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-        let file_monitor = if record.experimental_features.native_filesystem_policy {
-            Some(super::macos_enforcement::FileMonitor::start(
+        let monitor_required = record.experimental_features.native_filesystem_policy;
+        #[cfg(all(
+            target_os = "linux",
+            feature = "native-filesystem-policy",
+            box_native_adapter_tests
+        ))]
+        let monitor_required = super::native_enforcement::selected(record);
+        #[cfg(any(
+            all(target_os = "macos", feature = "native-filesystem-policy"),
+            all(
+                target_os = "linux",
+                feature = "native-filesystem-policy",
+                box_native_adapter_tests
+            )
+        ))]
+        let file_monitor = if monitor_required {
+            Some(super::native_enforcement::FileMonitor::start(
                 Arc::clone(&policy),
                 Arc::clone(&recorder),
                 root.name(),
                 &crate::record::layout::operator_home_directory()?,
                 coordinator_fatal_sender.clone(),
+                #[cfg(all(
+                    target_os = "linux",
+                    feature = "native-filesystem-policy",
+                    box_native_adapter_tests
+                ))]
+                entry_guard,
             )?)
         } else {
             None
@@ -998,7 +1091,14 @@ impl HostedBox {
             Arc::clone(&approved),
             workspace.to_path_buf(),
             Arc::clone(&recorder),
-            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            #[cfg(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(
+                    target_os = "linux",
+                    feature = "native-filesystem-policy",
+                    box_native_adapter_tests
+                )
+            ))]
             file_monitor.as_ref().map(|monitor| monitor.registration()),
         ));
         // Every stdio MCP server is started contained, as a streaming leaf, through the same inputs.
@@ -1012,7 +1112,14 @@ impl HostedBox {
                 Arc::clone(&approved),
                 protected_sources.to_vec(),
                 workspace.to_path_buf(),
-                #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+                #[cfg(any(
+                    all(target_os = "macos", feature = "native-filesystem-policy"),
+                    all(
+                        target_os = "linux",
+                        feature = "native-filesystem-policy",
+                        box_native_adapter_tests
+                    )
+                ))]
                 file_monitor.as_ref().map(|monitor| monitor.registration()),
             ))
         });
@@ -1041,7 +1148,14 @@ impl HostedBox {
         Ok(Self {
             discovery: Some(discovery),
             broker: Some(broker),
-            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            #[cfg(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(
+                    target_os = "linux",
+                    feature = "native-filesystem-policy",
+                    box_native_adapter_tests
+                )
+            ))]
             _file_monitor: file_monitor,
             coordinator_fatal,
             _proxy: proxy,
@@ -1083,7 +1197,14 @@ impl HostedBox {
     }
 
     pub(crate) fn stop_native(&mut self) -> Result<(), BoxError> {
-        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+        #[cfg(any(
+            all(target_os = "macos", feature = "native-filesystem-policy"),
+            all(
+                target_os = "linux",
+                feature = "native-filesystem-policy",
+                box_native_adapter_tests
+            )
+        ))]
         if self._file_monitor.is_some() {
             if let Some(discovery) = &self.discovery {
                 discovery.close();
@@ -1218,6 +1339,7 @@ mod tests {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             box_id: root.name().to_string(),
@@ -1225,6 +1347,7 @@ mod tests {
             name: "codex".to_string(),
             policy: None,
             agent: Some(ProcessSpec {
+                file_watching: false,
                 native_filesystem_policy: None,
                 command: vec!["/bin/sh".to_string()],
                 workspace: None,
@@ -1452,7 +1575,7 @@ mod tests {
             Principal::agent(),
             GovernedBox::assigned("codex"),
         )
-        .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+        .intercept(&box_shell::EffectAttempt::ShellSpawn {
             command: program,
             program,
             program_path,
@@ -1567,7 +1690,7 @@ mod tests {
             None,
             Default::default(),
         )
-        .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+        .intercept(&box_shell::EffectAttempt::ShellSpawn {
             command: "git-mcp",
             program: &server.display().to_string(),
             program_path: &program.display().to_string(),
@@ -1589,7 +1712,7 @@ mod tests {
             Principal::agent(),
             GovernedBox::assigned("codex"),
         )
-        .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+        .intercept(&box_shell::EffectAttempt::ShellSpawn {
             command: "git-mcp",
             program: &server.display().to_string(),
             program_path: &program.display().to_string(),
@@ -1785,7 +1908,7 @@ mod tests {
                 None,
                 Default::default(),
             )
-            .intercept(&strands_shell::EffectAttempt::ShellSpawn {
+            .intercept(&box_shell::EffectAttempt::ShellSpawn {
                 command: spec.program(),
                 program: spec.program(),
                 program_path: &program.granted_path().display().to_string(),
@@ -2028,6 +2151,12 @@ permit (principal, action == alpha::Action::"read", resource);"#
             owned,
             &workspace,
             &workspace,
+            #[cfg(all(
+                target_os = "linux",
+                feature = "native-filesystem-policy",
+                box_native_adapter_tests
+            ))]
+            None,
         )
         .expect("the box is hosted");
         (hosted, collector)
@@ -2043,6 +2172,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
         let vendor = home.join("vendor");
         std::fs::create_dir(&vendor).expect("a readable tree");
         let tool = |read: PathBuf| ProcessSpec {
+            file_watching: false,
             native_filesystem_policy: None,
             command: vec!["/bin/sh".to_string()],
             workspace: None,
@@ -2101,6 +2231,12 @@ permit (principal, action == alpha::Action::"read", resource);"#
                 owned,
                 &workspace,
                 &workspace,
+                #[cfg(all(
+                    target_os = "linux",
+                    feature = "native-filesystem-policy",
+                    box_native_adapter_tests
+                ))]
+                None,
             )
         })
         .err()
@@ -2917,7 +3053,14 @@ while :; do :; done"#
                 approved,
                 Vec::new(),
                 workspace,
-                #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+                #[cfg(any(
+                    all(target_os = "macos", feature = "native-filesystem-policy"),
+                    all(
+                        target_os = "linux",
+                        feature = "native-filesystem-policy",
+                        box_native_adapter_tests
+                    )
+                ))]
                 None,
             );
             let server = crate::record::config::mcp::McpServer {
@@ -2973,7 +3116,14 @@ while :; do :; done"#
                 approved,
                 admitted.clone(),
                 telemetry::DecisionRecorder::discarding(),
-                #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+                #[cfg(any(
+                    all(target_os = "macos", feature = "native-filesystem-policy"),
+                    all(
+                        target_os = "linux",
+                        feature = "native-filesystem-policy",
+                        box_native_adapter_tests
+                    )
+                ))]
                 None,
             );
             let program = Path::new("/bin/sh").canonicalize().expect("host shell");
@@ -2994,12 +3144,11 @@ while :; do :; done"#
                 .build()
                 .expect("tool runtime");
             let refusal = runtime
-                .block_on((spawner.spawn())(strands_shell::os::HostSpawn {
+                .block_on((spawner.spawn())(box_shell::HostSpawn {
                     program,
                     invoked: PathBuf::from("/bin/sh"),
                     args,
                     cwd: checked,
-                    env: Vec::new(),
                 }))
                 .err()
                 .expect("the changed directory must refuse the launch");
@@ -3015,6 +3164,7 @@ while :; do :; done"#
 
     fn selection_record(tools: &[(&str, &[&str])]) -> Record {
         let spec = |command: &[&str]| ProcessSpec {
+            file_watching: false,
             native_filesystem_policy: None,
             command: command.iter().map(|part| (*part).to_string()).collect(),
             workspace: None,
@@ -3029,6 +3179,7 @@ while :; do :; done"#
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
@@ -3505,6 +3656,10 @@ while :; do :; done"#
                 .contains("no `[tool.<name>] command` matches this program"),
             "{error}"
         );
+        assert!(
+            !error.to_string().contains("fixed when the box starts"),
+            "a program a table names is a tool, so its refusal is about arguments: {error}"
+        );
     }
 
     /// **A program under a caller `deny` entry is refused** even inside a caller `exec` entry.
@@ -3593,6 +3748,12 @@ while :; do :; done"#
                 .contains("no `[tool.<name>] command` matches this program"),
             "{error}"
         );
+        assert!(
+            error
+                .to_string()
+                .contains("runs only under an `[agent.filesystem] exec` entry"),
+            "a program no table names says that tools are fixed at start: {error}"
+        );
     }
 
     /// **The credential map is keyed by the identity the decision names**: a tool declared through a
@@ -3640,6 +3801,7 @@ while :; do :; done"#
         }
         let workspace = root_path.join("workspace");
         let mut tool = ProcessSpec {
+            file_watching: false,
             native_filesystem_policy: None,
             command: vec!["/bin/sh".to_string()],
             workspace: None,

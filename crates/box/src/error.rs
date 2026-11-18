@@ -224,7 +224,7 @@ pub(crate) enum ConfigError {
     ExperimentalX86Support,
 
     #[error(
-        "experimental feature `{feature}` requires a macOS build with `native-filesystem-policy`"
+        "experimental feature `{feature}` requires a supported macOS or Linux ARM64 build with `native-filesystem-policy`"
     )]
     ExperimentalFeatureUnavailable { feature: &'static str },
 
@@ -329,6 +329,19 @@ pub(crate) enum ConfigError {
         "box record identity {found:?} is invalid; select an empty `box_dir`, or remove the stale box state before the next run"
     )]
     RecordIdentity { found: String },
+
+    #[error(
+        "box ID {found:?} is invalid; a box ID is a prefix of 1 to {max} letters, digits, `.`, `_`, \
+         or `-` that does not start with `.` or `-`, then `-` and 16 lowercase hexadecimal digits",
+        max = crate::record::config::MAXIMUM_BOX_IDENTITY_PREFIX
+    )]
+    SuppliedIdentity { found: String },
+
+    #[error(
+        "box ID {supplied:?} does not match this box, whose ID is {stored:?}; pass {stored:?}, or \
+         select an empty `box_dir` for a new box"
+    )]
+    IdentityMismatch { stored: String, supplied: String },
 
     #[error(
         "{path} carries `{key}`, which this build does not read; write {replacement} instead. Edit \

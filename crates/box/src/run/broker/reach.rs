@@ -1187,6 +1187,7 @@ mod linked_command_mutation_tests {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             box_id: "linked-command-reach".to_string(),
@@ -1197,6 +1198,7 @@ mod linked_command_mutation_tests {
             tool: BTreeMap::from([(
                 "reader".to_string(),
                 ProcessSpec {
+                    file_watching: false,
                     native_filesystem_policy: None,
                     command: vec![command.display().to_string()],
                     workspace: None,

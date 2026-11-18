@@ -16,7 +16,7 @@ use dogwood_language::{
 use dogwood_local_engine::Clock as DurableClock;
 use dogwood_local_engine::{
     DurableConfig, DurableError, DurableLog, DurableTemporalEngine, Outcome as DurableOutcome,
-    PolicyToken, Verb,
+    PolicyToken, Verb, Write,
 };
 
 use crate::check::{Finding, Refused, RuleRef, annotated_id};
@@ -145,6 +145,7 @@ fn recover_history(
     config: DurableConfig,
     interval: u64,
 ) -> Result<DurableTemporalEngine, DurableError> {
+    check_history_generation(&log)?;
     let summarized = log
         .get_snapshot()
         .map_err(|error| DurableError::Log(error.to_string()))?
@@ -155,6 +156,41 @@ fn recover_history(
         let _ = engine.checkpoint();
     }
     Ok(engine)
+}
+
+/// Box-owned compatibility generation for saved policy and event history.
+/// Bump only when recovery or policy/state identity changes make existing history
+/// incompatible. A compatible Dogwood package upgrade does not change this value.
+const HISTORY_GENERATION_KEY: &str = "box.dogwood.history-generation";
+const HISTORY_GENERATION: &[u8] = b"1";
+const SERVICE_SCHEMA_KEY: &str = "dogwood_server_service_schema";
+
+/// Accept current history or mark a store that has no saved policy or activity.
+fn check_history_generation(log: &DurableLog) -> Result<(), DurableError> {
+    let log_error = |error: dogwood_local_engine::LogError| DurableError::Log(error.to_string());
+    match log.get_meta(HISTORY_GENERATION_KEY).map_err(log_error)? {
+        Some(generation) if generation == HISTORY_GENERATION => Ok(()),
+        Some(_) => Err(DurableError::Log(
+            "unsupported Box history format; stop Box and start with a new Box directory; earlier activity will not carry over".to_owned(),
+        )),
+        None => {
+            if log.next_offset() != 0
+                || log.base_offset() != 0
+                || log.get_snapshot().map_err(log_error)?.is_some()
+                || log.get_meta(SERVICE_SCHEMA_KEY).map_err(log_error)?.is_some()
+            {
+                return Err(DurableError::Log(
+                    "existing history has no supported Box history format; stop Box and start with a new Box directory; earlier activity will not carry over".to_owned(),
+                ));
+            }
+            log.commit(&[Write::Meta {
+                key: HISTORY_GENERATION_KEY,
+                value: HISTORY_GENERATION,
+            }])
+            .map_err(log_error)?;
+            Ok(())
+        }
+    }
 }
 
 /// A path that names the open file itself, so no directory entry is resolved again.
@@ -719,6 +755,15 @@ impl DogwoodEngine {
             .engine
             .lock()
             .map_err(|_| "dogwood durable engine lock poisoned".to_string())?;
+        #[cfg(all(target_os = "linux", box_native_test_faults))]
+        if std::thread::current().name() == Some("linux-native-policy")
+            && std::env::var("BOX_NATIVE_TEST_FAULT").as_deref() == Ok("policy-lock")
+        {
+            eprintln!("NATIVE_TEST_FAULT=policy-lock");
+            loop {
+                std::thread::park();
+            }
+        }
         let offset = engine.log_offset();
         offset
             .checked_add(1)
@@ -913,25 +958,105 @@ pub(crate) fn rule_conditions(expanded: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Refuse a macro-expanded rule that names the removed `ip` attribute, or reads `context.input`
-/// without one action family, before an MCP action schema stages.
+/// Refuse a macro-expanded rule that names the removed `ip` attribute, reads `context.input`
+/// without one action family, or lists actions of more than one action type, before an MCP action
+/// schema stages.
+///
+/// Each rule is judged on its own. A rule that does not parse or lower yet, such as one that waits
+/// for a tool schema, must not hide another rule's refusal. A rule whose own condition does not
+/// lower still has its action list judged, because the list needs only the head, and a rule whose
+/// head cannot be read is refused.
 pub(crate) fn refuse_input_reads_before_discovery(expanded: &[String]) -> Result<(), Refused> {
-    let source = expanded
-        .iter()
-        .map(|policy| without_temporal(policy))
-        .collect::<Vec<_>>()
-        .join("\n");
     let policy_schema = PolicySchema::from_cedarschema_str(&action_schema(&[])?.source)
         .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
-    let Ok(parsed) = dogwood_language::ParsedPolicySet::parse(&source, &service_schema()?) else {
-        return Ok(());
+    let service = service_schema()?;
+    let lower = |text: &str| {
+        dogwood_language::ParsedPolicySet::parse(text, &service)
+            .ok()?
+            .lower(&policy_schema)
+            .ok()
     };
-    let Ok(lowered) = parsed.lower(&policy_schema) else {
-        return Ok(());
-    };
-    let rule_of = |cedar_policy_id: &str| rule_ref(&lowered, cedar_policy_id, &[]);
-    crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &rule_of)?;
-    crate::spelling::refuse_input_across_families(lowered.as_cedar(), &rule_of)
+    for (ordinal, rule) in expanded.iter().enumerate() {
+        let positions = [ordinal];
+        let Some(lowered) = lower(&without_temporal(rule)) else {
+            // A rule whose head cannot be read is refused, not skipped: its action list could
+            // hide a mixed list that would otherwise load and be dropped.
+            let head = rule_head(rule)
+                .and_then(|head| lower(&head))
+                .ok_or_else(|| {
+                    PolicyError::Schema(format!(
+                        "rule {} cannot be inspected at load: its action list could not be read",
+                        ordinal + 1
+                    ))
+                })?;
+            let rule_of = |id: &str| rule_ref(&head, id, &positions);
+            crate::spelling::refuse_mixed_action_namespaces(head.as_cedar(), &rule_of)?;
+            continue;
+        };
+        let rule_of = |cedar_policy_id: &str| rule_ref(&lowered, cedar_policy_id, &positions);
+        crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &rule_of)?;
+        crate::spelling::refuse_input_across_families(lowered.as_cedar(), &rule_of)?;
+        crate::spelling::refuse_mixed_action_namespaces(lowered.as_cedar(), &rule_of)?;
+    }
+    Ok(())
+}
+
+/// A rule cut after its head, `forbid(principal, action, resource)`, with its annotations kept and
+/// every `when`, `unless` and `temporal` body dropped. `None` when the text holds no head.
+fn rule_head(rendered: &str) -> Option<String> {
+    let bytes = rendered.as_bytes();
+    let mut index = 0;
+    let mut open = None;
+    while index < bytes.len() {
+        if bytes[index] == b'"' {
+            index = string_end(bytes, index);
+            continue;
+        }
+        let word_start = index == 0
+            || !(bytes[index - 1].is_ascii_alphanumeric()
+                || bytes[index - 1] == b'_'
+                || bytes[index - 1] == b'@');
+        if word_start {
+            for effect in ["forbid", "permit"] {
+                if rendered[index..].starts_with(effect) {
+                    let after = index + effect.len();
+                    let paren = after
+                        + rendered[after..]
+                            .bytes()
+                            .take_while(u8::is_ascii_whitespace)
+                            .count();
+                    if bytes.get(paren) == Some(&b'(') {
+                        open = Some(paren);
+                    }
+                }
+            }
+            if open.is_some() {
+                break;
+            }
+        }
+        index += 1;
+    }
+    let open = open?;
+    let mut depth = 0usize;
+    let mut index = open;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' => {
+                index = string_end(bytes, index);
+                continue;
+            }
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(format!("{};", &rendered[..=index]));
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
 }
 
 /// A rendered rule with each `temporal { … }` expression replaced by `true`.
@@ -1120,6 +1245,7 @@ pub(crate) fn check_against(
     let rule_of = |cedar_policy_id: &str| rule_ref(&lowered, cedar_policy_id, positions);
     crate::spelling::refuse_removed_address_attribute(lowered.as_cedar(), &rule_of)?;
     crate::spelling::refuse_input_across_families(lowered.as_cedar(), &rule_of)?;
+    crate::spelling::refuse_mixed_action_namespaces(lowered.as_cedar(), &rule_of)?;
     let cap_warnings = crate::cap::judge(&parsed, &lowered, positions)?;
 
     // Strict schema validation, and it is load-bearing: `lower` alone accepts a
@@ -2462,9 +2588,169 @@ when temporal {
     }
 
     #[test]
+    fn fresh_history_keeps_its_generation_and_activity_after_restart() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        let engine = DogwoodEngine::open(BUDGET, &path).expect("fresh history opens");
+        let request_id = permitted_http_request(&engine);
+        engine
+            .observe_outcome(
+                &governed(),
+                &Principal::agent(),
+                &request_id,
+                &delivered(150),
+            )
+            .expect("activity records");
+        drop(engine);
+        for _ in 0..2 {
+            let log = DurableLog::open(&path).expect("history log opens");
+            assert_eq!(
+                log.get_meta(HISTORY_GENERATION_KEY).unwrap(),
+                Some(HISTORY_GENERATION.to_vec())
+            );
+            drop(log);
+            let engine = DogwoodEngine::open(BUDGET, &path).expect("current history reopens");
+            assert!(
+                !engine
+                    .decide(
+                        &governed(),
+                        &Principal::agent(),
+                        ActionRequest::Request(&http())
+                    )
+                    .0
+                    .is_allow()
+            );
+        }
+    }
+
+    #[test]
+    fn old_history_is_refused_without_changing_records_through_path_or_file() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        std::fs::write(
+            &path,
+            include_bytes!("../tests/fixtures/history_1_0_0.redb"),
+        )
+        .unwrap();
+        let saved = || {
+            let log = DurableLog::open(&path).unwrap();
+            let mut records = Vec::new();
+            log.scan_from(0, |offset, bytes| records.push((offset, bytes.to_vec())))
+                .unwrap();
+            (
+                records,
+                log.get_snapshot().unwrap(),
+                log.base_offset(),
+                log.next_offset(),
+            )
+        };
+        let before = saved();
+        assert!(!before.0.is_empty(), "fixture contains actual old records");
+        for through_file in [false, true] {
+            let result = if through_file {
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
+                    .unwrap();
+                DogwoodEngine::open_for_staging_file(file, path.clone())
+            } else {
+                DogwoodEngine::open_for_staging(&path)
+            };
+            let error = match result {
+                Ok(_) => panic!("old history returned an authority"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("existing history has no supported Box history format"),
+                "{error}"
+            );
+            assert_eq!(saved(), before, "refusal changed old history");
+            let log = DurableLog::open(&path).unwrap();
+            assert_eq!(log.get_meta(HISTORY_GENERATION_KEY).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn unmarked_state_is_never_treated_as_a_fresh_history() {
+        for case in ["record", "pruned", "snapshot", "schema"] {
+            let history = tempfile::tempdir().expect("history directory");
+            let path = history.path().join("dogwood.redb");
+            let log = DurableLog::open(&path).unwrap();
+            match case {
+                "record" => {
+                    log.append(b"old record").unwrap();
+                }
+                "pruned" => {
+                    log.append(b"old record").unwrap();
+                    log.prune_below(1, 10).unwrap();
+                }
+                "snapshot" => {
+                    log.commit(&[Write::Snapshot(&dogwood_local_engine::Snapshot {
+                        up_to_offset: 0,
+                        payload: b"old snapshot".to_vec(),
+                    })])
+                    .unwrap();
+                }
+                "schema" => {
+                    log.commit(&[Write::Meta {
+                        key: SERVICE_SCHEMA_KEY,
+                        value: b"old schema",
+                    }])
+                    .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            let error = check_history_generation(&log).expect_err("existing state is refused");
+            assert!(
+                error.to_string().contains("start with a new Box directory"),
+                "{case}: {error}"
+            );
+            assert_eq!(
+                log.get_meta(HISTORY_GENERATION_KEY).unwrap(),
+                None,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn unsupported_history_generations_are_refused_without_overwriting_them() {
+        for generation in [b"".as_slice(), b"0", b"2", b"1.1.2", b"1\0", b"\xff"] {
+            let history = tempfile::tempdir().expect("history directory");
+            let path = history.path().join("dogwood.redb");
+            let log = DurableLog::open(&path).unwrap();
+            log.commit(&[Write::Meta {
+                key: HISTORY_GENERATION_KEY,
+                value: generation,
+            }])
+            .unwrap();
+            drop(log);
+            let error = match DogwoodEngine::open_for_staging(&path) {
+                Ok(_) => panic!("unsupported history returned an authority"),
+                Err(error) => error,
+            };
+            assert!(
+                error.to_string().contains("unsupported Box history format"),
+                "{error}"
+            );
+            let log = DurableLog::open(&path).unwrap();
+            assert_eq!(
+                log.get_meta(HISTORY_GENERATION_KEY).unwrap().as_deref(),
+                Some(generation)
+            );
+        }
+    }
+
+    #[test]
     fn staged_open_reports_an_incompatible_history_schema_as_durable() {
         let history = tempfile::tempdir().expect("history directory");
         let path = history.path().join("dogwood.redb");
+        let log = DurableLog::open(&path).expect("empty history opens");
+        check_history_generation(&log).expect("current history generation recorded");
+        drop(log);
         {
             let mut durable =
                 DurableTemporalEngine::open(&path, SNAPSHOT_INTERVAL).expect("history opens");
@@ -3136,7 +3422,7 @@ when temporal {
     }
 
     #[test]
-    #[ignore = "Dogwood 1.0.0 temporal gensyms are not stable: #59"]
+    #[ignore = "Dogwood 1.1.2 temporal gensyms are not stable: #59"]
     fn expansion_is_stable_under_whitespace_and_keeps_each_call_distinct() {
         let expanded = |source: &str| {
             parse_policy_source(source)
@@ -3169,7 +3455,6 @@ when temporal {
     }
 
     #[test]
-    #[ignore = "Dogwood 1.0.0 temporal gensyms are not stable: #59"]
     fn a_generated_binder_never_takes_an_authored_name() {
         for ordinal in 0..TWO_MACRO_CALLS.len() + 64 {
             let authored = format!("t_{ordinal}");
@@ -3776,7 +4061,7 @@ when temporal {
 "#;
 
     #[test]
-    #[ignore = "Dogwood 1.0.0 temporal gensyms are not stable: #59"]
+    #[ignore = "Dogwood 1.1.2 temporal gensyms are not stable: #59"]
     fn a_whitespace_only_edit_keeps_an_exhausted_macro_budget_closed() {
         let history = tempfile::tempdir().expect("history directory");
         let path = history.path().join("dogwood.redb");
@@ -3871,5 +4156,32 @@ mod authored_positions {
             .map(RuleRef::position)
             .collect();
         assert_eq!(positions, [4, 8]);
+    }
+}
+
+#[cfg(test)]
+mod rule_heads {
+    use super::*;
+
+    #[test]
+    fn a_rule_whose_head_cannot_be_read_is_refused_not_skipped() {
+        let error = refuse_input_reads_before_discovery(&["not a rule".to_string()])
+            .expect_err("a rule with no readable head must be refused");
+        let message = error.into_error().to_string();
+        assert!(
+            message.contains("rule 1 cannot be inspected at load"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_rule_whose_condition_alone_does_not_lower_keeps_its_head() {
+        let rule = r#"@id("r") forbid(principal, action in [Box::Action::"fs:read", svc::Action::"x"], resource) when { context.input.x.unsupported() };"#;
+        let error = refuse_input_reads_before_discovery(&[rule.to_string()])
+            .expect_err("the mixed list is refused from the head");
+        assert!(matches!(
+            error.into_error(),
+            PolicyError::MixedActionNamespaces(_)
+        ));
     }
 }

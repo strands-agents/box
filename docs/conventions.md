@@ -6,8 +6,9 @@ House style for a crate under `crates/`, derived from the established siblings
 directory layout and the package names agree.
 
 > **One crate cited below no longer exists in the tree.** `journal`
-> predates the 2026-07-12 crate reset; [`Cargo.toml`](../Cargo.toml) lists the live members. `box` is
-> `[[bin]]`-only, so the `lib.rs` façade items below do not apply to it. Their examples are kept because each is a
+> predates the 2026-07-12 crate reset; [`Cargo.toml`](../Cargo.toml) lists the live members. `box` is a
+> thin binary over a narrow `lib.rs` library, not a mechanism crate, so the mechanism-crate façade
+> items below do not apply to it. Their examples are kept because each is a
 > worked illustration of the rule it sits under — read them as *the shape to copy*,
 > not as a file to open. Where you need a live reference, use `containment`. This is a **mechanical checklist** — each item is
 phrased so an agent (or a reviewer, or a CI gate) can verify it by reading the
@@ -38,8 +39,7 @@ Verify per crate under its `<crate-path>/` (for example,
 - [ ] **The package name is the product name plus the crate directory.**
 
       > **Adopted 2026-08-11.** Owned box packages use the `strands-box` product name.
-      > The vendored `strands-shell` keeps its upstream name because its `UPSTREAM.md`
-      > pins it, and `.agents/pocs/` is unchanged because it is outside the workspace.
+      > `.agents/pocs/` is unchanged because it is outside the workspace.
 
       A crate at
       `crates/<name>/` is the package `strands-box-<name>`, and `crates/box` is the
@@ -49,10 +49,6 @@ Verify per crate under its `<crate-path>/` (for example,
 
       **The package name identifies the product.** The repository is `box`;
       the product is `strands-box`. The box is a binary target.
-
-      **Vendored crates keep their upstream names.** `strands-shell` is a pinned copy
-      with an `UPSTREAM.md`; renaming it would make a re-vendor a merge. It is outside
-      this rule by construction, not by exception.
 - [ ] **Explicit `[lib]` block splits package name from import name.** `Cargo.toml`
       has `[lib]` with `name = "<name>"` (the short, unprefixed import name) and
       `path = "src/lib.rs"`. So the package is `strands-box-credentials` but code does
@@ -254,8 +250,8 @@ warning count the root `AGENTS.md` prescribes:
 cargo clippy -p <owned-crate> --all-targets --all-features -- -D warnings
 ```
 
-**It is unpassable for a crate that pulls in a vendored path dependency or a
-platform-conditional backend.** Measured on 2026-08-20:
+**It is unpassable for a crate that pulls in a platform-conditional backend.** Measured on
+2026-08-20, while Box still held a copy of the Shell:
 `cargo clippy -p strands-box --all-targets -- -D warnings` exits `101` with 58 errors, and none of
 them is in `crates/box`. Forty-four come from `containment`'s `backend/macos` and
 `backend/linux`, which are dead code on the other platform, and fourteen come from the vendored
@@ -268,6 +264,3 @@ directory, which must print `0`:
 cargo clippy -p <package-name> --all-targets --all-features 2>&1 \
   | grep -c -- '--> crates/<crate-directory>'
 ```
-
-This is why `-D warnings` is not set workspace-wide. The vendored crates carry upstream lint
-failures, so the check for them is an *unchanged* count, never zero.

@@ -1,8 +1,9 @@
 //! Python, as one interpreter behind the box's one broker socket. Monty is the implementation.
 //!
-//! No listener and no protocol of its own: `run::broker::host` dispatches an
-//! `Interpreter::Python` Call here. The interpreter is stateless per Call, which is why this is a
-//! function rather than a host.
+//! No listener and no protocol of its own: the Shell's `python3` reaches `drive_monty` through the
+//! script hook `run::broker::shell` installs. `run_python`, the route an `Interpreter::Python` Call
+//! took, is unreachable since protocol 9 refuses that mode. The interpreter is stateless per Call,
+//! which is why this is a function rather than a host.
 
 mod clock;
 mod effects;
@@ -344,12 +345,22 @@ fn abort_error(aborted: Result<RunProgress, MontyException>) -> MontyException {
 }
 
 /// A script that raised, reported the way CPython reports one.
+///
+/// A failed import usually means the agent wanted a package Monty doesn't have, so its note says
+/// how the operator turns real Python on.
 fn raised(exception: &MontyException, captured: String) -> PythonOutcome {
+    let note = match exception.exc_type() {
+        ExcType::ModuleNotFoundError | ExcType::ImportError => format!(
+            "this box's Python is Monty, Box's built-in Python subset. {}",
+            box_shell::REAL_PYTHON_HINT
+        ),
+        _ => "this box's Python is Monty, a subset — see the box's docs".to_string(),
+    };
     PythonOutcome {
         status: SCRIPT_RAISED_STATUS,
         stdout: captured,
         stderr: format!(
-            "{}: {}\n(this box's Python is Monty, a subset — see the box's docs)\n",
+            "{}: {}\n({note})\n",
             exception.exc_type(),
             exception.message().unwrap_or_default()
         ),

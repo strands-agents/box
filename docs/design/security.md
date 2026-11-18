@@ -50,6 +50,36 @@ can connect without gateway checks, credential injection, or gateway traffic rec
 The egress gateway has no built-in metadata block.
 The [egress guide](egress.md#cloud-instance-metadata) describes the required restrictions.
 
+### Remote MCP tool restrictions
+
+For a remote Model Context Protocol (MCP) server, Box applies MCP policy to requests whose
+host matches a declared hostname or IP address in `box.toml`. The server's `[mcp.<name>]` table supplies its
+policy name. This [destination matching](../user/mcp.md#remote-destination-matching) does not
+identify every address that can reach the same application.
+
+A request to an unmatched hostname or IP address still needs network and HTTP permission.
+If those permissions allow another address for the same application, a workload can call it
+through that address without the configured server's MCP tool restrictions. A tool restriction
+therefore does not guarantee that the application cannot perform the same operation through
+another permitted route.
+
+The operator must restrict alternative routes when the task requires all access to an application
+to use its MCP tool restrictions. Declare each intended hostname or IP address under the same server and limit
+network and HTTP access to those destinations. The [MCP policy guide](../user/mcp-policy.md#scope-of-remote-server-rules)
+explains this configuration. Box still owns enforcement of the applicable network, HTTP, and MCP
+rules. A matching request that bypasses an applicable MCP rule indicates an enforcement defect.
+
+*Figure: Both addresses reach the same example server, and network and HTTP policy permit both.
+Only `localhost` is declared for MCP policy, so its tool restriction does not apply to requests
+sent to `127.0.0.1`.*
+
+![An agent sends a delete_repo tool call through Box's network and HTTP checks, which permit it.
+Box then matches the destination. The declared localhost route receives a tool-policy denial.
+The undeclared 127.0.0.1 route receives no MCP tool check and reaches the same example server,
+where the tool executes.](images/mcp-destination-matching.png)
+
+The [editable diagram](images/mcp-destination-matching.drawio) shows the same request paths.
+
 ### Credential values and credential use
 
 For credentials sourced from environment variables, Box gives contained processes

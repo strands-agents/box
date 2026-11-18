@@ -79,7 +79,8 @@ PolicyEngine::validate(&[Policy]) -> Result<(), PolicyError>
 PolicyEngine::check(&Operator, &[Policy], complete: bool) -> PolicyCheck
 ```
 
-`validate` answers "would `open` accept this text", and returns no authority. Use it
+`validate` checks policy text and returns no authority. It does not inspect saved history or prove
+that a history file can be opened. Use it
 when you must refuse bad policy text *before* writing it, and you must not open a
 second `PolicyEngine` to find out. `open` and `validate` share one private composition,
 so a validator that accepts text the authority would refuse is not expressible. Its
@@ -428,11 +429,19 @@ Other facts in those events remain available until normal history pruning remove
 | `ShellSpawn` | the same, plus `program_path` |
 | `Fs` | `path`, `operation`, `result` |
 
-One HTTP exchange records exactly one `http:request::response`, at reply time. Its
-`input.body_bytes` is the delivered request, and its `output.status` is the reply. A request
-that got no reply records the same event with no `output`, so a rule on `output.status`
-does not match it. A rule reads `status` in a temporal predicate over `::response`; a decision
-carries no `output`.
+An admitted HTTP request records one outcome when its exchange ends. Completed, partial,
+or uncertain delivery records `http:request::response`; a definite delivery failure records
+`http:request::error`. Once the request is sent, the gateway waits for the upstream response to
+complete, fail, or reach its deadline before recording the outcome. The response event's
+`input.body_bytes` is the recorded count of request bytes known to have reached the operating
+system. Its `output.status` is the received reply status. An exchange that got no reply records
+no `output`, so a rule on `output.status` does not match it. A rule reads `status` in a temporal
+predicate over `::response`; a decision carries no `output`.
+
+A byte budget over these response events uses recording times for its window. Pending exchanges
+contribute no bytes yet, so stalled or concurrent exchanges can exceed the threshold. A rule that
+only compares the recorded sum with a threshold also excludes the next request's size, so that
+request can exceed it.
 
 A response names the same action whose request was authorized, so a rule joins a
 `shell:exec::request` to its own response and to no other.
@@ -478,6 +487,21 @@ Rules written against history:
   drops state outside each rule's window. After each 10,000 submitted events, the durable
   engine attempts a checkpoint. A successful checkpoint snapshots monitor state and removes
   the covered log records. A failed checkpoint increases the durable log replay depth.
+
+## Dogwood 1.1.2 history
+
+The runtime pins both `dogwood-language` and `dogwood-local-engine` to `1.1.2`.
+`PolicyEngine::open` marks a new history with Box-owned compatibility generation `1` under
+`box.dogwood.history-generation`. This generation identifies compatible saved policies and activity;
+it is independent of the Dogwood package version. Change it only when recovery or policy/state
+identity changes make saved history incompatible. Compatible package upgrades retain the generation.
+The adapter refuses previously used history without a supported generation before recovery or
+policy reconciliation.
+
+To adopt this build, deliberately select a new history file. Box operators select a new box
+directory through `box_dir`; see [the upgrade procedure](../../docs/user/policy.md#start-with-fresh-history-after-a-dogwood-upgrade).
+Earlier activity does not carry over: counts start at zero, and prior events no longer satisfy
+history-based prerequisites. The adapter does not erase or convert existing history.
 
 ## Effective Policy
 
@@ -532,9 +556,9 @@ this boundary serves. The interceptor holds all three and passes the box into ev
 
 The interceptor maps connect and HTTP request attempts to `Request::Connect` and
 `Request::Http`. A response release raises **no request and no decision**, and its permit
-records nothing. The gateway consumes the request permit at reply time with
-`EffectOutcome::Replied`, so the one `http:request::response` an exchange records carries
-the reply as `output.status`, which only a `when temporal { … }` rule reads.
+records nothing. The gateway consumes the request permit when the exchange ends and records
+the matching HTTP outcome. An `http:request::response` event carries delivered request bytes
+and any reply status in `output.status`, which only a `when temporal { … }` rule reads.
 
 1. `intercept` evaluates the typed attempt with `PolicyEngine::decide`.
 2. A denial returns `io::ErrorKind::PermissionDenied`.

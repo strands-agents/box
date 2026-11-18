@@ -33,8 +33,10 @@ fn contained(config: &ContainmentConfig, directory: &Path, arguments: &[&str]) -
 
 #[test]
 fn a_contained_build_runs_its_library_and_a_new_launch_keeps_operator_bytes_private() {
-    if !cfg!(target_arch = "aarch64") {
-        println!("skipping: Linux containment supports ARM64 (aarch64), not this architecture");
+    if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
+        println!(
+            "skipping: Linux containment supports ARM64 (aarch64) or x86-64 (x86_64), not this architecture"
+        );
         return;
     }
     let directory = tempfile::tempdir().unwrap();

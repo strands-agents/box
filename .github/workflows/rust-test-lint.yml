@@ -24,10 +24,10 @@ on:
         type: string
         default: ""
       os:
-        description: 'JSON array of runner OSes for the test matrix. Default runs both; a dispatch narrows it, e.g. ["macos-latest"].'
+        description: 'JSON array of runner OSes for the test matrix. Default runs all three runners; a dispatch narrows it, e.g. ["macos-latest"].'
         required: false
         type: string
-        default: '["ubuntu-24.04-arm", "macos-latest"]'
+        default: '["ubuntu-24.04-arm", "ubuntu-24.04", "macos-latest"]'
       run_lint:
         description: "Run the lint job. Default true (normal CI); a scoped dispatch sets it false to skip fmt/clippy and save minutes."
         required: false
@@ -52,9 +52,9 @@ jobs:
     permissions:
       contents: read
     runs-on: ${{ matrix.os }}
-    # Cargo test on the full workspace typically finishes in a few minutes;
-    # 30 min caps a hung step instead of running to the 6-hour default.
-    timeout-minutes: 30
+    # Allow a cold build and the complete workspace suite on slower runners.
+    # The x86 runner can still be making progress after 30 minutes.
+    timeout-minutes: 45
     strategy:
       # Report every OS's outcome even if one fails. A single Linux failure
       # is not a reason to hide the macOS one.
@@ -70,13 +70,20 @@ jobs:
 
       - name: Free disk (Linux only)
         if: runner.os == 'Linux'
-        # Free space for the all-targets build on the disposable Ubuntu ARM64 runner.
+        # Free space for the all-targets build on the disposable Ubuntu runner.
         run: sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+
+      - name: Enable experimental x86 runtime tests
+        if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: echo "EXPERIMENTAL_X86_SUPPORT=TRUE" >> "$GITHUB_ENV"
 
       - name: Require Linux namespace support
         if: runner.os == 'Linux'
         run: |
-          test "$(uname -m)" = aarch64
+          case "$(uname -m)" in
+            aarch64|x86_64) ;;
+            *) echo "Unsupported Linux test architecture" >&2; exit 1 ;;
+          esac
           knob=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
           if [ -e "$knob" ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
@@ -85,12 +92,15 @@ jobs:
 
       - name: Cache cargo
         # Wraps actions/cache with keys tuned for cargo (registry, git, target).
-        # rust-cache keys include the runner OS, so each matrix leg gets its
-        # own cache line rather than fighting over one entry. Only a push to the
+        # rust-cache keys include the runner OS and architecture, so each
+        # matrix leg gets its own cache entry. Only a push to the
         # default branch writes the cache; same guard as verdict-hermetic.yml.
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      - name: Fetch locked dependencies for offline metadata
+        run: cargo fetch --locked
 
       - name: Install non-framework Python (macOS only)
         if: matrix.os == 'macos-latest'
@@ -142,6 +152,10 @@ jobs:
         env:
           FAIL_FAST_FLAG: ${{ !inputs.fail_fast && '--no-fail-fast' || '' }}
           FILTER: ${{ inputs.filter }}
+          # ubuntu-latest is a stock GitHub-hosted runner (kernel well above 5.9, no seccomp
+          # block), so close_range is available and the fast-path test must exercise it rather
+          # than skip. Setting this makes a skip there a hard failure instead of a quiet pass.
+          BOX_REQUIRE_CLOSE_RANGE: "1"
         run: |
           set -o pipefail
           set +e
@@ -152,12 +166,25 @@ jobs:
           python3 scripts/check-linux-test-output.py linux-workspace-tests.log | tee -a "$GITHUB_STEP_SUMMARY"
           exit "$test_status"
 
-      - name: Upload Linux workspace test output
+      - name: Test Linux native filesystem forwarding
+        if: ${{ !cancelled() && runner.os == 'Linux' && inputs.filter == '' }}
+        shell: bash
+        run: |
+          set -o pipefail
+          RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--cfg box_native_adapter_tests" \
+            cargo test --locked -p strands-box-containment --lib --all-features \
+            backend::linux::namespace::filesystem_queries::forwarding_tests:: \
+            -- --test-threads=1 2>&1 | tee linux-native-forwarding-tests.log
+          grep -F 'test result: ok. 3 passed; 0 failed; 0 ignored;' linux-native-forwarding-tests.log
+
+      - name: Upload Linux test output
         if: ${{ always() && runner.os == 'Linux' }}
         uses: actions/upload-artifact@v7
         with:
           name: workspace-tests-${{ matrix.os }}
-          path: linux-workspace-tests.log
+          path: |
+            linux-workspace-tests.log
+            linux-native-forwarding-tests.log
           if-no-files-found: warn
 
       - name: Run tests (macos)
@@ -230,36 +257,7 @@ jobs:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       - name: cargo fmt
-        # Owned-crate fmt is the gate. The vendored `strands-shell` and its
-        # `strands-shell-macros` sibling are skipped for the same reason as the
-        # clippy step below: upstream is the source of truth for that tree, and
-        # a fix belongs upstream.
-        run: |
-          cargo fmt --check \
-            -p strands-box \
-            -p strands-box-containment \
-            -p strands-box-credentials \
-            -p strands-box-egress-gateway \
-            -p strands-box-policy \
-            -p strands-box-telemetry
+        run: cargo fmt --all --check
 
       - name: cargo clippy
-        # Follow the root AGENTS.md verification rules for owned and vendored warnings.
-        # `cargo clippy -p` / `--exclude` cannot skip a
-        # workspace crate that is a build dependency of an owned crate, so the
-        # lints are allowed at the driver level. The set was measured against
-        # the current pinned upstream — add a lint when it fires on a fresh
-        # sync, drop one when its `UPSTREAM.md` records an upstream fix. Every
-        # entry stays fatal on owned code because `#[warn(<lint>)]` at the
-        # owned crate root overrides `-A`, which is why this driver-level allow
-        # does not weaken the owned gate.
-        run: |
-          cargo clippy --workspace --all-targets --all-features -- \
-            -D warnings \
-            -A clippy::too_many_arguments \
-            -A clippy::only_used_in_recursion \
-            -A clippy::await_holding_refcell_ref \
-            -A clippy::explicit_auto_deref \
-            -A clippy::chunks_exact_to_as_chunks \
-            -A dead_code \
-            -A non_snake_case
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
