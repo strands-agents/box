@@ -89,13 +89,14 @@ For each test:
 
 Run independent tests in one `cargo test` call when they share one undo. A test that would hang
 rather than fail without its change needs a bound (`recv_timeout`, a deadline). If it has none,
-report it as `can hang`.
+report it as `can hang`: a test that hangs instead of failing is not a pin.
 
 ## Per area
 
 ### Core area
 
-Paths: each crate under `crates/`, and `test-integ/`.
+Paths: each crate under `crates/`, `test-integ/`, `test-native-filesystem/`, `test-common/`, and
+`test-workload/`.
 
 - **Build step:**
 
@@ -109,13 +110,21 @@ Paths: each crate under `crates/`, and `test-integ/`.
 - **A test in a crate:** `cargo test -p <package> --all-features --lib -- --exact <path>` for a
   unit test, and `cargo test -p <package> --all-features --test <file> -- --exact <name>` for a
   test in `crates/<crate>/tests/<file>.rs`. `crates/box` is `strands-box`, and each other
-  `crates/<name>` is `strands-box-<name>`. `--all-features` is required: `box_shell` and
+  workspace crate `crates/<name>` is `strands-box-<name>`. `--all-features` is required: `box_shell` and
   `box_credentials` need `test-support`, so a run without it skips them. Take the path from
   `cargo test -p <package> --all-features --lib -- --list`, without its trailing `: test`.
 - **A `test-integ` case:** it drives the built `strands-box` binary. Put the build's `target/debug`
   first on `PATH`, then run `bash test-integ/run.sh <name>`. A filtered run reports `RED` for the
   cases it did not run, so read the row for the case under review.
-- **Files that hold tests:** `grep -rlE "mod [a-z_]*tests" crates/*/src`.
+- **A test in an excluded package:** `crates/box-bench` (`box-bench`), `test-native-filesystem`
+  (`strands-native-filesystem-tests`), `test-common` (`test-common`) and `test-workload/verdict`
+  (`workload-verdict`) are outside the workspace. Run them with
+  `cargo test --manifest-path <dir>/Cargo.toml --all-features -- --exact <name>`. The workload
+  cells under `test-workload/` run real agents in the cloud, so report a change to one as
+  `not reached`.
+- **Files that hold tests:** `grep -rlE "#\[(tokio::)?test" crates/*/src`. A file under a `tests/`
+  directory inside `src/` is a unit test in its crate's `--lib` target. Undo only the lines a test
+  checks, never a whole file that also holds tests.
 - **Test-support files:** each `test_support.rs` file, each `tests/support/` directory, each
   `*tests.rs` file, and `test-integ/`.
 - **Enforced outside the diff:** the operating system's sandbox (Seatbelt on macOS, namespaces on
@@ -149,10 +158,9 @@ CLAIMS WITH NO FAILING TEST
 VERDICT: pins hold | pins missing | pins unproven
 ```
 
-- `pins missing`: any test passed with its change undone, pins only part of its claim, or is built
-  differently from production, or a claim has no failing test. The caller treats it as a blocker,
+- `pins missing`: any test passed with its change undone, pins only part of its claim, is built
+  differently from production, or can hang, or a claim has no failing test. The caller treats it as a blocker,
   the same as a `feature-critic` blocker.
 - `pins unproven`: no pin is missing, but any test is `not reached` or `fails at the diff`. It is
   not a blocker. The caller names each of those tests, and the host where it can run.
-- `pins hold`: no pin is missing or unproven. Other `not a pin` lines and `can hang` lines are
-  information only.
+- `pins hold`: no pin is missing or unproven. Other `not a pin` lines are information only.
