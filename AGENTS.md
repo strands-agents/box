@@ -18,11 +18,15 @@ An agent cannot approve its own change. Fix defects within the current contract.
 must change, name the affected surface or premise and what breaks when you ask for approval.
 `feature-critic` treats an unapproved change in either class as a BLOCKER.
 
-The frozen surfaces include the CLI verbs and flags; `box.toml` keys and filesystem lists; the four
-inputs (policy, credentials, name, workload); stored records; the broker protocol; aliases and their
-socket derivation; policy actions, attributes, and temporal observations; each mechanism crate's
-`pub use` set; and the composed environment, including `reserved_workload_environment`.
+The frozen surfaces include the `strands-box` verbs and flags; `box.toml` keys and filesystem
+lists; the four inputs (policy, credentials, name, workload); stored records; the broker protocol;
+aliases and their socket derivation; policy actions, attributes, and temporal observations; each
+mechanism crate's `pub use` set; and the composed environment, including
+`reserved_workload_environment`.
 Read [the box contract](crates/box/AGENTS.md#the-box-contract) before changing any of these.
+
+The `strands-box` library's public API in `crates/box/src/lib.rs` is not frozen. A pull request
+that adds to it needs a maintainer's approval.
 
 `docs/site-manifest.json` is a separate frozen external publication surface, and
 `docs/site-manifest-retirements.json` permanently reserves removed identities and routes. Their
@@ -46,7 +50,9 @@ test to make a suite pass.
 - **Compose the environment; never inherit it.** Harden the box's trusted process. It holds only
   its own box's plaintext secrets.
 - **One `run` owns one box directory and one policy engine.** Shell, Python, and egress share that
-  engine and its temporal history. Box is a binary with no library target or daemon. See
+  engine and its temporal history. Box has no daemon. The `strands-box` binary is a thin wrapper
+  over the `strands-box` library, and one process runs at most one box: `strands_box::run`
+  refuses a second call, which `box_library.rs::hardening_and_repeat_run` proves. See
   [one trusted process](docs/design/decisions.md#one-trusted-process-per-box),
   [one directory owner](docs/design/decisions.md#one-run-owns-one-box-directory), and
   [one policy engine](docs/design/decisions.md#one-policy-engine-per-box).
@@ -98,8 +104,10 @@ Do not grant the agent `process-exec*`, the host OS's shell, or an inherited `PA
 for metadata pairing and fork-filter limits.
 
 The broader execution and metadata grants for a tool or MCP server apply only to its own sandbox.
-Keep the agent's profile unchanged by those exceptions, including its write-xor-execute restrictions.
-**Before changing a profile**, read [macOS measurements](crates/containment/AGENTS.md#macos-measured)
+Keep the agent's macOS sandbox profile unchanged by those exceptions, including its
+write-xor-execute restrictions.
+**Before changing a macOS sandbox profile**, read
+[macOS measurements](crates/containment/AGENTS.md#macos-measured)
 and the tool and MCP rules linked above. Preserve
 `the_agent_profile_never_carries_broad_exec` and `a_leaf_carries_broad_exec_and_the_main_box_does_not`.
 
@@ -187,14 +195,14 @@ squash, or force-push. Rebase onto `main` only to resolve a conflict.
 
 The first commit has a subject, then exactly these three sections in order:
 
-- `## Problem` — what is wrong and what it costs, before describing a solution.
-- `## Solution` — what changed and every interface that moved. Name a rejected alternative only
+- `## Problem`: what is wrong and what it costs, before describing a solution.
+- `## Solution`: what changed and every interface that moved. Name a rejected alternative only
   when a reviewer needs the reason.
-- `## Tests` — what ran and what it proved. Put a named test beside each behaviour claim.
+- `## Tests`: what ran and what it proved. Put a named test beside each behaviour claim.
   State what did not run and what remains broken.
 
 Later commits need only a subject that names the feedback or defect addressed.
-Follow [the pull request template](.github/PULL_REQUEST_TEMPLATE.md).
+Follow [the pull request template](.github/pull_request_template.md).
 Lead with the problem and reasoning the diff cannot show. State each decision the change depends on,
 checks continuous integration cannot perform, and deferred follow-ups with their reasons.
 Do not repeat the file list.

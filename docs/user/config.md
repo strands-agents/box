@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries twelve keys. `name` and `box_dir` are required.
+The file carries thirteen keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -83,9 +83,10 @@ The file carries twelve keys. `name` and `box_dir` are required.
 | `file-attributes` | boolean | Whether write folders on macOS may also set file times, and with them set-ID bits, the group, the owner, and access control lists. `false` by default. |
 | `[experimental-features]` | table | Optional experimental features: native filesystem policy checks, tool grammars, and ingress. Each is disabled by default. |
 | `[limits]` | table | Execution limits for Strands Shell. |
+| `monty` | boolean | Whether a bare `python3` or `python` in the Shell runs Monty, Box's built-in Python subset. `true` by default. With `false`, both names resolve like any other program: a `[tool.python3]` or `[tool.python]`, else the host's `PATH`. |
 | `[gateway]` | table | Settings for every request through the egress gateway: `upgrade_http`, the hosts whose plain `http://` on port 80 the gateway sends as `https://` on port 443. See [`[gateway]`](#gateway). |
 
-The example uses five of the twelve: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the thirteen: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -93,10 +94,15 @@ telemetry. `box_dir` selects the box: one directory is one box. A `name` outside
 its limits is refused with ``box name "<name>" is invalid: <reason>; use one component of letters,
 digits, '.', '_', or '-'``.
 
-Box creates the directory `box_dir` names, with mode `0700`, and creates **no** directory above it.
-Create the parent yourself, or the run is refused with ``the box directory's parent does not exist;
-create it, because Box creates no directory above the one `box_dir` names``. Everything Box writes
-for a box is under `box_dir`, or under a path the file names. The example's
+If the directory named by `box_dir` does not exist, Box creates it with mode `0700` (owner-only
+access). Its parent must already exist and be writable. Box creates **no** directory above
+`box_dir`; a missing parent causes the run to fail with ``the box directory's parent does not exist;
+create it, because Box creates no directory above the one `box_dir` names``.
+
+If `box_dir` already exists, it must be owned by the user running Box and have mode `0700`.
+Box refuses to use an existing directory with a different owner or permissions. These requirements
+apply on both Linux and macOS. Everything Box writes for a box is under `box_dir` or another path
+specified in `box.toml`. The example's
 `box_dir` is `my-box/state`, under the `my-box` directory the operator made for the two files.
 
 `box_dir` may not be the agent's workspace or lie below it, and neither `box.toml` nor `policy.dw`
@@ -186,8 +192,8 @@ group, the owner, and access control lists on files in its writable grants`. Lin
 |---|---|---|---|
 | `shell.timeout` | positive integer or `false` | `30` | Seconds allowed for one submitted Strands Shell call, including its commands and pipelines. `false` disables the Shell and broker execution deadlines. |
 | `shell.max_input` | nonnegative integer | `262144` | Bytes of command text submitted to Strands Shell. `0` disables this limit. |
-| `shell.max_output` | nonnegative integer | `65536` | Bytes in each Shell output buffer, including command substitution. Shell also applies this limit when loading script files with `source`. `0` disables this limit. |
-| `shell.max_stdin` | positive integer | `65536` | Bytes of standard input that one command run through the `zsh`, `bash`, or `sh` alias receives from outside the Shell. Past it, the rest is discarded and the command gets no end of input, so a command that reads past it fails at the Shell timeout; a command that acts as its input arrives has acted on the first part by then. `0` is a load error. |
+| `shell.max_output` | nonnegative integer | `1048576` | Bytes in each Shell output buffer, including command substitution. Shell also applies this limit when loading script files with `source`, and when `python3` reads a script file. `0` disables this limit. |
+| `shell.max_stdin` | positive integer | `1048576` | Bytes of standard input that one command run through the `zsh`, `bash`, or `sh` alias receives from outside the Shell. Past it, the rest is discarded and the command gets no end of input, so a command that reads past it fails at the Shell timeout; a command that acts as its input arrives has acted on the first part by then. `0` is a load error. |
 
 To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent nested table is
 `[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
@@ -201,7 +207,7 @@ are load errors.
 Size limits accept a positive integer byte count or `0` to disable that limit. Negative numbers,
 booleans (including `false`), strings, fractions, and values the platform cannot represent are load
 errors. Omission preserves each default independently.
-For a larger source file, set `[limits.shell] max_output = 262144` to allow up to 256 KiB.
+For a larger source file, set `[limits.shell] max_output = 4194304` to allow up to 4 MiB.
 This also enlarges Shell's output buffers. A larger `max_input` alone does not enlarge source-file reads.
 Stdout and stderr captures have separate buffers; `max_output` is not a combined output or
 total memory budget. Oversized command text is refused with `input too large`, but the current
@@ -245,6 +251,64 @@ upgraded request on port 443, as it decides HTTPS to that host, and a credential
 it. A box that sets the list stores its record at version 32, and an older build refuses it.
 [Upgrade plain HTTP to HTTPS](egress.md#upgrade-plain-http-to-https) describes the behaviour and
 its limits.
+
+## `monty`
+
+`monty` decides what a bare `python3` or `python` in the Shell runs. It is `true` by default: both
+names run Monty, Box's built-in Python subset ([Python in a box](monty.md)), even when a
+`[tool.python3]` is declared or the host's `PATH` has a Python. Startup names a Python table that
+Monty leaves unused.
+
+```toml
+monty = false
+```
+
+With `false`, Box installs no Monty, and both names resolve like any other program the Shell
+starts. A tool whose command file is named `python3` or `python` answers that name, and otherwise
+the host's `PATH` decides. Each spawn needs a `shell:spawn` permit, and nothing falls back to Monty.
+Startup says which file each name runs, or that neither a tool nor `PATH` has it.
+
+Box treats the Python tool like any other tool. It adds no grants and doesn't inspect the install,
+so the tool's table lists what Python reads and writes. Python's own reads and writes take no
+`fs:read` or `fs:write` decision: they meet only these lists, which startup prints under
+`[tool.python3] runs <file> with no policy decision over these paths`. Policy still decides the
+spawn of `python3` itself, and each command the agent's shell runs. A working setup:
+
+```toml
+monty = false
+
+[tool.python3]
+command = ["/opt/runtime/.venv/bin/python3"]
+
+[tool.python3.filesystem]
+read = ["/path/to/project", "/opt/runtime/.venv", "/opt/homebrew/Cellar", "/opt/homebrew/opt"]
+write = ["/path/to/project"]
+```
+
+```cedar
+permit (principal, action == Box::Action::"shell:spawn", resource)
+when {
+  context.input.program_path == "/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/bin/python3.14" &&
+  ["python3", "python"].contains(context.input.program)
+};
+```
+
+`program_path` is the file the venv's `python3` resolves to, with every link followed. The `read`
+list covers the venv, Python's own install, and the libraries its modules load; on macOS with
+Homebrew those are under `/opt/homebrew/Cellar`, reached through `/opt/homebrew/opt`. A bare
+`python` needs a `[tool.python]` too, and a versioned name such as `python3.14` is a separate
+program that needs its own permit.
+
+Keep the venv and Python's install out of every write grant and every `fs:write` rule. A file
+written into `site-packages`, such as a `.pth`, runs at every Python start, later also outside the
+box. Box refuses a write grant that can change the tool's command or its path
+([Configured command integrity](#configured-command-integrity)), but not one that reaches the rest
+of the venv. A program the Shell starts receives no standard input yet, so a piped
+`printf x | python3 -c '...'` reads an empty stdin. A `python3` that would read its program from
+stdin, such as `python3 <<'EOF'` or `printf 'print(1)' | python3`, exits 2 with
+`reading a program from stdin is not supported` instead of running an empty program.
+
+A box that sets `monty = false` stores its record at version 37, and an older build refuses it.
 
 ## `[experimental-features]`
 
@@ -678,6 +742,9 @@ Create the path first, or name the existing directory above it. The same rule ho
 `containment config failed: path does not exist: <path>`. In the example, the CLI install,
 `strands-home`, the preload file, and the project all exist before the first `run`, because the
 tutorial's earlier steps made them.
+
+On Linux, `filesystem grant object changed while loading config` means a granted path selected a different object during that launch's preparation.
+Let the filesystem update finish, then retry the launch.
 
 **A `write` grant alone is not runnable.** The agent's sandbox refuses to map code from a writable
 grant. When the agent's `command` or one of its interpreters lies inside a writable grant, the

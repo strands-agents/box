@@ -97,15 +97,19 @@ fn configured_shell_output_limits_control_source_loading_and_capture() {
         ("", false),
         ("[limits.shell]\nmax_input = 524288\n", false),
         (
-            "[limits.shell]\nmax_input = 128\nmax_output = 262144\n",
+            "[limits.shell]\nmax_input = 128\nmax_output = 4194304\n",
             true,
         ),
         ("[limits.shell]\nmax_input = 128\nmax_output = 0\n", true),
     ] {
         let box_ = Request::with_config("shell-output-size", PERMISSIVE_POLICY, settings).expect();
-        let script = format!("#{}\nprintf SOURCE_LOADED\n", "x".repeat(100 * 1024));
+        let script = format!("#{}\nprintf SOURCE_LOADED\n", "x".repeat(2 * 1024 * 1024));
         std::fs::write(box_.workspace().join("large.sh"), script).unwrap();
-        std::fs::write(box_.workspace().join("large.txt"), "x".repeat(100 * 1024)).unwrap();
+        std::fs::write(
+            box_.workspace().join("large.txt"),
+            "x".repeat(2 * 1024 * 1024),
+        )
+        .unwrap();
         let output = box_.bash(
             r#"zsh -c '. ./large.sh'; printf '\nsource_status=%s\n' "$?"
                zsh -c 'value=$(cat large.txt); printf "captured=%s\n" "${#value}"'"#,
@@ -113,7 +117,7 @@ fn configured_shell_output_limits_control_source_loading_and_capture() {
         if accepted {
             assert_eq!(
                 stdout(&output),
-                "SOURCE_LOADED\nsource_status=0\ncaptured=102400\n",
+                "SOURCE_LOADED\nsource_status=0\ncaptured=2097152\n",
                 "{}",
                 stderr(&output)
             );
@@ -129,7 +133,7 @@ fn configured_shell_output_limits_control_source_loading_and_capture() {
                 stdout(&output)
             );
             assert!(
-                !stdout(&output).contains("captured=102400"),
+                !stdout(&output).contains("captured=2097152"),
                 "{}",
                 stdout(&output)
             );
@@ -1812,6 +1816,57 @@ fn every_python_alias_reaches_the_broker() {
             "{name} must reach the broker: {output:?}"
         );
     }
+}
+
+/// **`monty = false` in `box.toml` turns Monty off in the running box.** With a `[tool.python3]`
+/// declared, `python3 --version` runs the declared file, both through the `python3` alias and
+/// through `zsh`, and Monty's version never appears. This covers the whole path: the key in the
+/// record, the bare-name map, the Shell built with no Monty runner, and the alias. Every other test
+/// here runs with Monty on.
+#[test]
+fn with_monty_off_python3_runs_the_declared_tool_through_the_alias() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    const POLICY: &str = r#"
+permit(principal, action == Box::Action::"shell:exec", resource);
+permit(principal, action == Box::Action::"shell:spawn", resource)
+when { context.input.program_path == "{workspace}/declared-python/python3" };
+"#;
+    const TOOL: &str = "[tool.python3]\ncommand = [\"{workspace}/declared-python/python3\"]\n";
+    let request = Request::with_config("monty-off-tool", POLICY, TOOL).top_level("monty = false");
+    let program = request.workspace().join("declared-python/python3");
+    std::fs::create_dir_all(program.parent().expect("the program's folder"))
+        .expect("create the declared program's folder");
+    compile_command_integrity_probe(
+        &program,
+        r#"fn main() {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    println!("DECLARED_PYTHON3 {}", arguments.join(" "));
+}
+"#,
+    );
+    let box_ = request.expect();
+
+    let output = box_.bash(
+        r#"python3 --version; echo "alias=$?"
+           zsh -lc "python3 --version"; echo "zsh=$?""#,
+    );
+
+    let seen = format!("{}{}", stdout(&output), stderr(&output));
+    assert!(
+        !seen.contains("Monty"),
+        "with monty = false, python3 must not be Monty: {output:?}"
+    );
+    assert_eq!(
+        seen.matches("DECLARED_PYTHON3 --version").count(),
+        2,
+        "the alias and zsh must each run the declared python3: {output:?}"
+    );
+    assert!(
+        seen.contains("alias=0") && seen.contains("zsh=0"),
+        "both calls must exit 0: {output:?}"
+    );
 }
 
 /// A box whose agent may read `{workspace}/sub`, which holds a `here.txt` and a `show.py` of its

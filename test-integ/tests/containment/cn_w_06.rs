@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use strands_det_harness::{det_case, sh_quote, user_home};
+use strands_det_harness::{det_case, host_output, sh_quote, user_home};
 
 fn reported_path(command: &str, args: &[&str]) -> PathBuf {
     let result = Command::new(command).args(args).output()
@@ -88,7 +88,7 @@ det_case! {
         std::fs::write(&witness, "HOST_CONTENT").expect("DET_ERROR: the host can write the witness");
         let ungranted = outside.join("program");
         std::fs::copy(b.built_tool(), &ungranted).expect("DET_ERROR: copy the ungranted program");
-        let host = Command::new(&ungranted).output().expect("DET_ERROR: run the ungranted host control");
+        let host = host_output(&mut Command::new(&ungranted)).expect("DET_ERROR: run the ungranted host control");
         assert!(host.status.success(), "DET_ERROR: the ungranted program must work outside Box");
         let protected = ws.join(".strands-box/box.toml");
         let config_bytes = std::fs::read(&protected)

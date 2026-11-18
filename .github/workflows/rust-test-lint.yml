@@ -52,9 +52,9 @@ jobs:
     permissions:
       contents: read
     runs-on: ${{ matrix.os }}
-    # Cargo test on the full workspace typically finishes in a few minutes;
-    # 30 min caps a hung step instead of running to the 6-hour default.
-    timeout-minutes: 30
+    # Allow a cold build and the complete workspace suite on slower runners.
+    # The x86 runner can still be making progress after 30 minutes.
+    timeout-minutes: 45
     strategy:
       # Report every OS's outcome even if one fails. A single Linux failure
       # is not a reason to hide the macOS one.
@@ -152,6 +152,10 @@ jobs:
         env:
           FAIL_FAST_FLAG: ${{ !inputs.fail_fast && '--no-fail-fast' || '' }}
           FILTER: ${{ inputs.filter }}
+          # ubuntu-latest is a stock GitHub-hosted runner (kernel well above 5.9, no seccomp
+          # block), so close_range is available and the fast-path test must exercise it rather
+          # than skip. Setting this makes a skip there a hard failure instead of a quiet pass.
+          BOX_REQUIRE_CLOSE_RANGE: "1"
         run: |
           set -o pipefail
           set +e

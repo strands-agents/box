@@ -125,7 +125,7 @@ impl Alias {
                 Ok(())
             });
         }
-        let mut child = command.spawn().unwrap();
+        let mut child = spawn_alias(&mut command).unwrap();
         child.stdin.take().unwrap().write_all(input).unwrap();
         let deadline = Instant::now() + Duration::from_secs(60);
         while child.try_wait().unwrap().is_none() {
@@ -140,6 +140,21 @@ impl Alias {
         assert!(broker.join().is_ok(), "broker failed: {output:?}");
         std::fs::remove_file(self.home.path().join("run/box.sock")).unwrap();
         output
+    }
+}
+
+fn spawn_alias(command: &mut Command) -> std::io::Result<std::process::Child> {
+    // A sibling test can inherit the copy's writer until its child releases it.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match command.spawn() {
+            Err(error)
+                if error.raw_os_error() == Some(libc::ETXTBSY) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => return result,
+        }
     }
 }
 

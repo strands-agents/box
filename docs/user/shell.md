@@ -29,7 +29,7 @@ command exits, even when the writer keeps the pipe open. A command that does rea
 waits for it until the Shell's timeout, or, with `shell.timeout = false`, until its caller stops
 it.
 
-A command receives at most `[limits.shell] max_stdin` bytes of this input, 64 KiB by default. Past
+A command receives at most `[limits.shell] max_stdin` bytes of this input, 1 MiB by default. Past
 that, the box discards the rest, so the limit never blocks the writer. Forwarding ends when the
 command exits, so a writer that is still writing then can get a broken pipe. A command that does not
 read its input is not affected. A command that reads past the limit gets no end of input: it waits
@@ -94,10 +94,11 @@ The Shell implements these, each in place of a program of the same name on the `
 - Files: `ls`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `ln`, `chmod`, `touch`, `mktemp`, `readlink`.
 - Data and network: `jq`, `curl`.
 - Interpreters: `sh` and `lash`, which run a script in the Shell; `lua`; and `python` and
-  `python3`, which run in Monty, Box's Python interpreter. Policy sees `sh` and `lash` as two
-  programs. `sh FILE` and `/bin/sh FILE` are both decided as `program == "sh"`, and `lash FILE` and
-  `/bin/lash FILE` as `program == "lash"`, so a rule meant for the Shell's script interpreter must
-  name both. `.` and `source` also run a file.
+  `python3`, which run in Monty, Box's Python interpreter. With
+  [`monty = false`](./config.md#monty), `python` and `python3` are external programs instead.
+  Policy sees `sh` and `lash` as two programs. `sh FILE` and `/bin/sh FILE` are both decided as
+  `program == "sh"`, and `lash FILE` and `/bin/lash FILE` as `program == "lash"`, so a rule meant
+  for the Shell's script interpreter must name both. `.` and `source` also run a file.
 
 Paths outside the operator's home, the agent's home, and the workspace, such as `/tmp`, exist only
 in the Shell's memory, for one command. A file written to `/tmp` is gone when the command ends.

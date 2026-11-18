@@ -1,5 +1,5 @@
 use crate::phase3::{git_identity, with_git};
-use strands_det_harness::{Platform, det_case, git_only_spawn_policy, sh_quote};
+use strands_det_harness::{Platform, det_case, git_only_spawn_policy, host_output, sh_quote};
 
 det_case! {
     name: cn_l_02,
@@ -46,7 +46,7 @@ det_case! {
         } else {
             let path = b.exec_tree().join("git");
             std::fs::copy(&git, &path).expect("DET_ERROR: copy the second Git identity");
-            let control = std::process::Command::new(&path).arg("--version").output()
+            let control = host_output(std::process::Command::new(&path).arg("--version"))
                 .expect("DET_ERROR: run the second Git identity on the host");
             assert!(crate::phase3::text(control).contains("git version"));
             path
