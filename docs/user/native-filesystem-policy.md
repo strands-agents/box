@@ -221,9 +221,15 @@ If MCP argument wildcards are enabled, replace the stars with concrete arguments
 Replace each absolute MCP executable path with a bare program name that the server's `PATH`
 resolves to the intended executable.
 Remove all `[[agent.ingress]]` entries and egress backends before returning to a binary that supports only version 21.
-Run once with the current build before switching binaries.
-This writes a version 21 record while retaining durable policy history.
+Before switching binaries, check that the older build can read both the configuration record and policy history.
+If both builds support the same policy history format, run once with the current build.
+This writes a version 21 record while retaining that history.
 Changing TOML alone does not rewrite an existing record.
+
+The [Dogwood 1.1.2 upgrade](policy.md#start-with-fresh-history-after-a-dogwood-upgrade) requires a new box directory.
+To return to the earlier build, use its preserved configuration and box directory.
+Keep the old and new directories separate.
+Activity recorded in the new directory does not carry back; Box does not convert that history.
 
 ## FAQ
 
@@ -287,7 +293,7 @@ Tests cover normal detached-child cleanup, but not every shutdown failure or enf
 
 ### Can I immediately return to an older binary?
 
-No, if the stored record requires a format version that the older binary does not support.
+Only when both the stored configuration record and policy history are compatible with the older binary.
 Follow [Stored configuration and rollback](#stored-configuration-and-rollback) before starting an older binary.
 Changing TOML alone does not rewrite the stored record.
 
