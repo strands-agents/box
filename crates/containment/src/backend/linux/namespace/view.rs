@@ -4976,7 +4976,9 @@ mod tests {
         );
 
         assert!(
-            entries.iter().any(|entry| entry.target == system_libc),
+            entries
+                .iter()
+                .any(|entry| entry.target == in_view(&system_libc)),
             "libm must use the system libc"
         );
         assert!(
