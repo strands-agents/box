@@ -96,7 +96,7 @@ the execution timeout for each submitted Strands Shell call. The default is 30 s
 For ten minutes, set `shell.timeout = 600`; for unlimited execution, set `shell.timeout = false`.
 The nested table `[limits.shell]` accepts the same values under `timeout`.
 `shell.max_input` and `shell.max_output` accept nonnegative integer byte counts, with defaults
-of 262144 and 1048576. Shell applies the output limit to both output buffers and source-file reads.
+of 262144 and 1048576. Shell applies the output limit to both output buffers and source-file reads, and Box applies it to each `curl` response body.
 Set either size to `0` to disable that Shell limit, or omit it to keep its default.
 `shell.max_stdin` is a positive byte count, 1048576 by default, of the standard input one command
 receives through a Shell alias; it cannot be disabled.

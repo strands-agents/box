@@ -187,7 +187,7 @@ group, the owner, and access control lists on files in its writable grants`. Lin
 |---|---|---|---|
 | `shell.timeout` | positive integer or `false` | `30` | Seconds allowed for one submitted Strands Shell call, including its commands and pipelines. `false` disables the Shell and broker execution deadlines. |
 | `shell.max_input` | nonnegative integer | `262144` | Bytes of command text submitted to Strands Shell. `0` disables this limit. |
-| `shell.max_output` | nonnegative integer | `1048576` | Bytes in each Shell output buffer, including command substitution. Shell also applies this limit when loading script files with `source`, and when `python3` reads a script file. `0` disables this limit. |
+| `shell.max_output` | nonnegative integer | `1048576` | Bytes in each Shell output buffer, including command substitution. Shell also applies it to each input that a command reads whole, such as a script loaded with `source`, a `python3` or `lua` script, the input of `jq`, `sed -i`, or `xargs`, and the file of `curl --json @file`. Box applies it to each `curl` response body. `0` disables this limit. |
 | `shell.max_stdin` | positive integer | `1048576` | Bytes of standard input that one command run through the `zsh`, `bash`, or `sh` alias receives from outside the Shell. Past it, the rest is discarded and the command gets no end of input, so a command that reads past it fails at the Shell timeout; a command that acts as its input arrives has acted on the first part by then. `0` is a load error. |
 
 To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent nested table is
