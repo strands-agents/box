@@ -742,9 +742,10 @@ happen after the box directory is created and before the workload starts.
 | A writable grant can change an installed Box program, a hard-link name, or an enclosing directory | `this write grant can change trusted Box executable <path> or its path. Keep the Box installation outside every process's write grants` |
 | A system directory or a credential store the box always refuses | `<path> is refused beneath every grant: <reason>` |
 
-Create the path first, or name the existing directory above it. The same rule holds for a
-`[tool.<name>] command` that names a file the workload has not built yet, which is refused with
-`containment config failed: path does not exist: <path>`. In the example, the CLI install,
+Create the path first, or name the existing directory above it. A `[tool.<name>] command` that names
+a file the workload has not built yet is not refused: Box
+[leaves that tool out](#a-tool-whose-program-is-not-installed) for the whole run, so build the file
+before `run`. In the example, the CLI install,
 `strands-home`, the preload file, and the project all exist before the first `run`, because the
 tutorial's earlier steps made them.
 
@@ -777,7 +778,46 @@ Their filesystem tables reject `exec`; only `[agent.filesystem]` accepts that li
 A tool table applies when a program the agent's shell starts begins with the tool's `command`: the
 same program, then the same fixed arguments. Box resolves each configured tool program before the
 workload starts and keeps that file identity for the run. The longest matching prefix wins.
-Every declared tool is selectable, and a program under one of the agent's own `exec` entries needs no table of its own.
+Every declared tool is selectable, unless Box leaves it out, and a program under one of the agent's
+own `exec` entries needs no table of its own.
+
+### A tool whose program is not installed
+
+When a tool's program is not installed, Box leaves that tool out and the box still starts. The
+program is not installed when:
+
+- nothing with a bare name's spelling exists in any directory on the tool's search path, or
+- nothing exists at an absolute path.
+
+A search-path entry that is a file, or that Box cannot search, holds nothing.
+
+A symbolic link to a file that doesn't exist counts as nothing. A symbolic link that loops does not
+count as nothing, so Box refuses to start.
+
+`run` prints one line for each tool it leaves out, before the workload starts:
+
+```text
+strands-box: [tool.tsx] left out: tsx not found
+```
+
+A left-out tool gets no filesystem grants, and Box does not check its lists. It runs nothing for
+the agent. Its grammar stays, so a policy that names its actions still loads. A grammar decides
+spawns by program name, so it still decides another `[tool]` or stdio `[mcp.<name>]` with the same
+program name. The startup line for that table says so:
+
+```text
+strands-box: [tool.system_git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
+```
+
+The set of tools is fixed when the run starts. A program installed
+during the run, or a file that appears later at the tool's path, does not run with the tool's
+grants.
+
+Box still refuses to start when the program exists and fails a check: it is not executable, it is
+not a regular file, or a write grant reaches it. A bare name counts as existing when any directory
+on the search path holds something with that name. Box also refuses a program that holds `${`,
+because a program is never expanded, and a `command` argument that names no value Box can expand in
+`${NAME}`. So a typo in a `command` path does not stop the box; check the `left out` lines.
 
 The example box declares no tool, so a program its shell names is a `shell:spawn` decision with no
 table behind it, and the example policy permits none. A git tool for the CLI's shell, with git from
@@ -805,12 +845,13 @@ tool's `env` for non-secret literals.
 
 ### Configured command integrity
 
-Each configured tool program must exist before the run starts. Box checks grants in `[agent]`,
-every `[tool.<name>]`, and every local `[mcp.<name>]` table against those programs.
+Box checks grants in `[agent]`, every `[tool.<name>]` it does not
+[leave out](#a-tool-whose-program-is-not-installed), and every local `[mcp.<name>]` table against
+those programs.
 
 | Condition | Refusal text | Next action |
 |---|---|---|
-| A command file is absent, or a bare command name has no executable match on its search path. | `path does not exist` or `cannot resolve bare executable` | Install the command before startup, or correct its path or `env.PATH`. |
+| A command path exists but is not an executable regular file. | `executable is not an executable regular file` | Correct the file's mode or the command's path. |
 | A writable grant can overwrite the command or replace its path, including a symbolic-link route or enclosing directory. | `this write grant can change` the command `or its path` | Keep configured tools outside every process's write grants. |
 | A writable directory contains another name for an operator-writable configured command. | `this write grant contains a hard link to a configured tool command` | Narrow the writable directory to exclude the command's hard-link names. |
 | Box cannot finish scanning a writable directory for configured-command hard links. | `cannot be inspected for configured command hard links` | Restore access to the directory, or narrow the writable grant. |
@@ -1216,9 +1257,9 @@ A `box_dir` whose parent does not exist is refused before anything is created. E
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload
 starts: a `workspace` that does not exist, an `env.HOME` inside or enclosing `box_dir`, a telemetry
 file destination inside the box directory and outside `private/`, a `filesystem` entry whose path
-does not exist or is a symbolic link, a `[tool.<name>] command` that names a missing file, an
-`[[agent.ingress]] listen` address that cannot be bound, and on macOS a `workload_port` that another
-process already listens on. The
+does not exist or is a symbolic link, an `[[agent.ingress]] listen` address that cannot be bound,
+and on macOS a `workload_port` that another process already listens on. A `[tool.<name>]` whose
+program is not installed is [left out](#a-tool-whose-program-is-not-installed) rather than refused. The
 box directory stays behind. It is empty when the refusal came before the record was written, and it
 holds the record when the refusal came after. The next `run` against it judges the file again and
 reports the same refusal until the file is fixed.

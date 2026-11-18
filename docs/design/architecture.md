@@ -270,6 +270,10 @@ interpreters are part of the code the operator must trust.
    canonical path and filesystem identity of each source file it opens.
    [Later steps use the validated identities](decisions.md#a-run-validates-once-then-acts-on-the-identity-it-approved),
    so replacing a source file cannot substitute a new configuration.
+   It then leaves out each `[tool.<name>]` whose program is not installed, and prints a
+   `left out` line for each on stderr. No later step sees a left-out tool, so it gets no grants,
+   no file of its own, and no tool selection. Its grammar stays in the policy and still decides
+   another table with the same program name.
 3. It opens the collector to record the steps that follow.
 4. It installs the policy. Parsing or validation errors stop startup. Box also
    [rejects rules it can prove will never match](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns).

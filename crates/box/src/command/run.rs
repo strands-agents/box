@@ -32,6 +32,8 @@ struct LockedRun {
     trailing: Vec<String>,
     policy: Option<Policy>,
     grammars: ToolGrammars,
+    /// The program each grammar in `grammars` decides, including a left-out tool's.
+    grammar_programs: std::collections::BTreeSet<String>,
     sources: Vec<AuthoritySource>,
     owned: Lock,
 }
@@ -102,19 +104,25 @@ pub(super) fn prepare_native(config: &Path, has_callback: bool) -> Result<Native
     Ok(NativeSetup { contract, guard })
 }
 
-/// One line for each `[tool]` and stdio `[mcp]` whose program a tool grammar decides in place of
-/// `shell:spawn`.
-fn write_grammar_disclosures(
-    record: &Record,
-    mut output: impl std::io::Write,
-) -> std::io::Result<()> {
-    use crate::record::config::grammar::{bound_name, called_name};
-    let programs: std::collections::BTreeSet<&str> = record
+/// The program that each `[tool]` grammar in `record` decides.
+fn grammar_programs(record: &Record) -> std::collections::BTreeSet<String> {
+    record
         .tool
         .values()
         .filter(|spec| spec.grammar.is_some())
-        .filter_map(bound_name)
-        .collect();
+        .filter_map(crate::record::config::grammar::bound_name)
+        .map(str::to_string)
+        .collect()
+}
+
+/// One line for each `[tool]` and stdio `[mcp]` whose program a tool grammar of `programs` decides
+/// in place of `shell:spawn`.
+fn write_grammar_disclosures(
+    record: &Record,
+    programs: &std::collections::BTreeSet<String>,
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    use crate::record::config::grammar::{bound_name, called_name};
     let tables =
         record
             .tool
@@ -173,6 +181,26 @@ fn write_monty_disclosures(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// One line for each `[tool]` this run leaves out because its program is not installed.
+fn write_left_out_tools(
+    left_out: &[crate::run::commands::LeftOut],
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    for tool in left_out {
+        let program: String = tool
+            .program
+            .chars()
+            .flat_map(char::escape_default)
+            .collect();
+        writeln!(
+            output,
+            "strands-box: {} left out: {program} not found",
+            tool.table
+        )?;
     }
     Ok(())
 }
@@ -349,8 +377,12 @@ async fn hosted(
         &commands,
         &crate::run::contain::executable::host_search_path(),
     )?);
-    write_grammar_disclosures(&locked.record, std::io::stderr().lock())
-        .map_err(|source| ConfigError::Disclosure { source })?;
+    write_grammar_disclosures(
+        &locked.record,
+        &locked.grammar_programs,
+        std::io::stderr().lock(),
+    )
+    .map_err(|source| ConfigError::Disclosure { source })?;
     let search_path = crate::run::contain::executable::host_search_path();
     let names = commands.bare_names(&locked.record, &search_path);
     write_bare_name_disclosures(&names, std::io::stderr().lock())
@@ -505,13 +537,19 @@ fn prepare_contract(
 
     request.verify_sources()?;
     drop(root_lock);
+    let mut record = request.record;
+    let grammar_programs = grammar_programs(&record);
+    let left_out = crate::run::commands::leave_out_absent(&mut record)?;
+    write_left_out_tools(&left_out, std::io::stderr().lock())
+        .map_err(|source| ConfigError::Disclosure { source })?;
     Ok(LockedRun {
         root,
-        record: request.record,
+        record,
         workspace,
         trailing: trailing_arguments(argv)?,
         policy: request.policy,
         grammars: request.grammars,
+        grammar_programs,
         sources: request.sources,
         owned,
     })
@@ -638,7 +676,8 @@ mod tests {
         );
         let mut output = Vec::new();
 
-        write_grammar_disclosures(&record, &mut output).expect("the disclosure writes");
+        write_grammar_disclosures(&record, &grammar_programs(&record), &mut output)
+            .expect("the disclosure writes");
 
         assert_eq!(
             String::from_utf8(output).expect("the disclosure is UTF-8"),
@@ -648,6 +687,35 @@ mod tests {
              `shell:spawn` rule applies to it\n\
              strands-box: [mcp.wrapped]: a spawn of `npm` is decided by its tool grammar, and no \
              `shell:spawn` rule applies to it\n"
+        );
+    }
+
+    /// **A left-out tool's grammar is still disclosed for each tool that it decides**: a spawn of
+    /// an installed `git` reads as the grammar of the `git` tool that the run leaves out.
+    #[test]
+    fn startup_discloses_a_left_out_tools_grammar_for_each_tool_it_still_decides() {
+        let optional: ProcessSpec = toml::from_str(
+            "command = [\"/nonexistent/strands-box/missing/git\"]\n[grammar]\nformat = 1\n\
+             program = \"git\"\n",
+        )
+        .expect("the tool parses");
+        let mut record = record_with(
+            None,
+            BTreeMap::from([
+                ("optional_git".to_string(), optional),
+                ("system_git".to_string(), spec("/usr/bin/git", &[], &[])),
+            ]),
+        );
+        let programs = grammar_programs(&record);
+        record.tool.remove("optional_git");
+        let mut output = Vec::new();
+
+        write_grammar_disclosures(&record, &programs, &mut output).expect("the disclosure writes");
+
+        assert_eq!(
+            String::from_utf8(output).expect("the disclosure is UTF-8"),
+            "strands-box: [tool.system_git]: a spawn of `git` is decided by its tool grammar, \
+             and no `shell:spawn` rule applies to it\n"
         );
     }
 
@@ -736,6 +804,29 @@ mod tests {
              runs the file of `[tool.git]`, whose label is that name\n\
              strands-box: [tool.brew_node], [tool.node]: these tables run different program paths, \
              so a bare `node` in the Shell runs the file that `PATH` finds\n"
+        );
+    }
+
+    #[test]
+    fn startup_names_each_tool_it_leaves_out() {
+        let left_out = [
+            crate::run::commands::LeftOut {
+                table: "[tool.tsx]".to_string(),
+                program: "tsx".to_string(),
+            },
+            crate::run::commands::LeftOut {
+                table: "[tool.node]".to_string(),
+                program: "/opt/node/bin/node\u{1b}[2J".to_string(),
+            },
+        ];
+        let mut output = Vec::new();
+
+        write_left_out_tools(&left_out, &mut output).expect("the disclosure writes");
+
+        assert_eq!(
+            String::from_utf8(output).expect("the disclosure is UTF-8"),
+            "strands-box: [tool.tsx] left out: tsx not found\n\
+             strands-box: [tool.node] left out: /opt/node/bin/node\\u{1b}[2J not found\n"
         );
     }
 

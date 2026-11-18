@@ -2171,6 +2171,45 @@ permit (principal, action == alpha::Action::"read", resource);"#
         assert!(refusal.contains("is not there"), "{refusal}");
     }
 
+    /// **A left-out tool's lists are not judged**, so the box opens with no reach for that table,
+    /// even when a list names a path that would refuse a tool that is installed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_left_out_tool_brings_no_reach() {
+        let operator = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(operator.path(), "codex");
+        let home = operator.path().canonicalize().expect("a canonical home");
+        let mut record = record(&root);
+        record.tool.insert(
+            "gone".to_string(),
+            ProcessSpec {
+                file_watching: false,
+                native_filesystem_policy: None,
+                command: vec![home.join("bin/gone").display().to_string()],
+                workspace: None,
+                env: Default::default(),
+                filesystem: crate::record::config::process::Filesystem {
+                    read: vec![home.join("absent")],
+                    write: vec![home.clone()],
+                    ..Default::default()
+                },
+                network: None,
+                grammar: None,
+                ingress: Vec::new(),
+            },
+        );
+
+        let left_out =
+            crate::run::commands::leave_out_absent(&mut record).expect("the tool is left out");
+        let hosted = crate::test_support::with_operator_home(operator.path(), || {
+            open_hosted(&operator, &root, &record)
+        });
+
+        assert_eq!(left_out.len(), 1);
+        assert!(hosted.approved().table("[agent]").is_some());
+        assert!(hosted.approved().table("[tool.gone]").is_none());
+        assert!(hosted.approved().commands().get("gone").is_none());
+    }
+
     #[cfg(unix)]
     fn place_aliases(root: &BoxRoot, record: &Record) {
         use std::os::unix::fs::PermissionsExt as _;
@@ -3449,6 +3488,68 @@ while :; do :; done"#
             .expect("a declared tool is selected");
 
         assert_eq!(selected.table, "[tool.sh]");
+    }
+
+    /// **A file that appears at a left-out tool's path never runs with that tool's reach**: the run
+    /// settled its tools before the file existed, so no table selects the file, and only an `exec`
+    /// entry of the caller's own runs it, in the caller's boundary.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_planted_at_a_left_out_tools_path_never_runs_with_its_reach() {
+        let root = tempfile::tempdir().expect("a directory");
+        let root = root.path().canonicalize().expect("canonical");
+        let bin = root.join("bin");
+        let planted = bin.join("late");
+        let mut record = selection_record(&[
+            ("sh", &["/bin/sh"]),
+            ("late", &[planted.to_str().expect("UTF-8")]),
+        ]);
+        let late = record.tool.get_mut("late").expect("the late tool");
+        late.filesystem.read = vec![root.join("secrets")];
+        late.filesystem.write = vec![root.clone()];
+        let left_out =
+            crate::run::commands::leave_out_absent(&mut record).expect("the tool is left out");
+        std::fs::create_dir_all(&bin).expect("a bin tree");
+        std::fs::copy(Path::new("/bin/sh").canonicalize().expect("sh"), &planted)
+            .expect("a planted file");
+        let planted = planted.canonicalize().expect("canonical");
+        let commands = crate::run::commands::ConfiguredCommands::load(&record).expect("commands");
+
+        let refusal = select_tool_with_commands(
+            &record,
+            &selection_attachment(),
+            &planted,
+            &planted,
+            &[],
+            &commands,
+        )
+        .err()
+        .expect("no table selects the planted file")
+        .to_string();
+        record.agent.as_mut().expect("an agent").filesystem.exec = vec![bin.clone()];
+        let caller = record.agent.clone().expect("an agent").filesystem;
+        let selected = select_tool_with_commands(
+            &record,
+            &selection_attachment(),
+            &planted,
+            &planted,
+            &[],
+            &commands,
+        )
+        .expect("the caller's own exec entry runs it");
+
+        assert_eq!(left_out.len(), 1);
+        assert!(commands.get("late").is_none());
+        assert!(
+            refusal.contains("no `[tool.<name>] command` matches"),
+            "{refusal}"
+        );
+        assert_eq!(selected.table, "[agent]");
+        assert_eq!(selected.spec.filesystem, caller);
+        assert_eq!(
+            selected.shebang_interpreters,
+            ShebangInterpreters::MustBeListed
+        );
     }
 
     /// **A program under one of the caller's own `exec` entries runs in the caller's boundary** when
