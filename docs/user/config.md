@@ -1064,6 +1064,9 @@ Each of these is refused when the configuration loads:
 - A `reads` or `deny` entry that is not absolute, is not `~`, and does not begin with `~/`.
 - A reference in a scheme that no table declares: ``secret scheme "op" has no `[secret-source.op]`
   table``.
+- A reference in a scheme that a table can declare, with nothing after `://`, such as `op://`. A
+  route, a remote MCP server, and a backend `auth` get ``credential locator "op://" is invalid``,
+  and a telemetry target gets ``names no scheme this box reads``. Name the secret after `://`.
 - A route or a remote MCP server in a declared scheme with no `secret.env`.
 - A `secret.env` key while `secret-sources` is off, on each operating system. With `env://NAME`
   the key has no effect, so you can also remove it: ``secret.env is experimental: set
