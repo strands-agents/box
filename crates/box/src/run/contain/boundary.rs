@@ -558,6 +558,8 @@ impl Boundary {
             .map(|grant| grant.resolved.as_path())
             .collect();
         let mut minimum: Vec<MinimumCell> = Vec::new();
+        // By identity, because a minimum cell can name a link, such as `/tmp`.
+        let mut minimum_covers_workspace = false;
         for cell in launch.runtime_reach.cells() {
             let resolved = cell
                 .path
@@ -567,6 +569,7 @@ impl Boundary {
                 continue;
             }
             containment = allow(containment, &cell.path, cell.operation, cell.scope)?;
+            minimum_covers_workspace |= resolved == working_directory;
             minimum.push(cell);
         }
         // The working directory is enterable so `chdir` and `getcwd` work, and neither readable nor
@@ -574,7 +577,7 @@ impl Boundary {
         let workspace_covered = reach.grants.iter().any(|grant| match grant.scope {
             Scope::Root => working_directory.starts_with(&grant.resolved),
             _ => working_directory == grant.resolved,
-        }) || minimum.iter().any(|cell| cell.path == working_directory);
+        }) || minimum_covers_workspace;
         let mut enterable_workspace = None;
         if !workspace_covered {
             containment = allow_operator(
@@ -4386,6 +4389,30 @@ mod tests {
                 )
             });
             assert!(error.to_string().contains(needle), "{error}");
+        }
+    }
+
+    /// **A workspace at the `/tmp` link renders for the agent and for a tool**: the runtime minimum's
+    /// `/tmp` cell covers it, so no entry cell lands on `/private/tmp`, where the floor refuses one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_workspace_at_the_tmp_link_is_covered_by_the_runtime_minimum() {
+        let fixture = Fixture::new();
+        let mut spec = fixture.spec();
+        spec.workspace = Some(PathBuf::from("/tmp"));
+        for (table, reach) in [
+            ("[agent]", RuntimeReach::Agent),
+            ("[tool.git]", RuntimeReach::Leaf),
+        ] {
+            let boundary = fixture.translate_with_reach(&spec, table, reach);
+            let config = ContainmentConfig::from_json(&boundary.containment_config_text())
+                .expect("the translated config");
+            let profile = containment::test_support::generate_seatbelt_profile(&config)
+                .unwrap_or_else(|error| panic!("{table} renders: {error}"));
+            assert!(
+                profile.contains("(allow file-read-metadata (literal \"/tmp\"))"),
+                "{table} renders metadata on the /tmp link: {profile}"
+            );
         }
     }
 

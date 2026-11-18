@@ -233,6 +233,17 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   and `/dev/null` as an ordinary file grant inside a forbidden tree. **A path carries one scope**, so
   the two `/tmp` cells serve different harnesses and no box may ask for both: a Bun-compiled agent
   takes the entry read, and V8 takes the descendant stat it needs to reserve its code range.
+- **The runtime minimum spells its `/tmp` cell as the link, `/tmp`, and not as `/private/tmp`.** A
+  `Metadata` + `Root` cell renders a metadata rule on the caller's spelling only when that spelling
+  differs from the resolved one, so `/private/tmp` renders no rule on the `/tmp` link node.
+  Measured 2026-11-17 on macOS 26.7.3 arm64: with that spelling, `lstat("/tmp")`,
+  `realpath("/tmp")`, and every path through `/tmp` failed with `EPERM` in the agent and in a tool,
+  also under a grant on `/private/tmp/<dir>`, and no list entry can add the rule. The box's
+  workspace check compares each minimum cell by identity for the same reason: by spelling, a
+  workspace at `/tmp` got an entry cell on `/private/tmp`, which the floor refuses. Guards:
+  `os_paths.rs::each_set_states_exactly_these_cells`,
+  `box_filesystem.rs::the_tmp_link_resolves_and_a_path_through_it_keeps_its_grants`, and
+  `boundary.rs::a_workspace_at_the_tmp_link_is_covered_by_the_runtime_minimum`.
 - **`(path-ancestors "/")` is an SBPL parse error**, and `sandbox-exec` reports
   `argument expected but none provided`. `ancestor_rule` renders nothing for `/`, which has no
   ancestor to name, so a grant on `/` renders its own rule and no ancestor rule.
