@@ -4,10 +4,15 @@ This page records the reasons for Box's design. Each entry states a decision and
 residual risks, or required precautions. It also names a rejected alternative when that explains the
 decision.
 
-> This is a historical record of design choices. An entry explains the reasoning at the time of the
-> decision and can fall behind the code. The code owns current behaviour. Use an entry to understand
-> the reasoning, then read its named tests or crate to check current behaviour. Correct an entry if
-> it disagrees with the code.
+> An entry explains the reasoning at the time of the decision. The log can lag the code, and the
+> code owns current behaviour. Use an entry to understand the reasoning, then read the code and its
+> tests to check current behaviour. A change that goes against an entry either fits the code to the
+> entry or rewrites the entry, and a human approves the rewrite. A pull request that changes what
+> an entry says fixes that entry.
+
+An entry belongs here only when the user decided a choice that refuses or redirects a later change to a
+different part of Box. New and rewritten entries have a paragraph, then **Rejected.**, then
+**Cost.**, and name no test.
 
 Each entry has a stable anchor. Code and other documents link an entry by that anchor, so do not
 rename one.
@@ -77,11 +82,12 @@ configuration. The cost is that the variable no longer prevents accidental Linux
 requirements, process hardening, filesystem grants, and containment checks still apply. A missing or
 invalid configuration still fails before a workload starts.
 
-Stable releases can include Linux ARM64, and `publish_linux=false` retains a macOS-only stable
-release without a workflow revert. Keeping Linux in preview only would prevent an accepted Linux
-build from using the stable channel. The release owner must establish Linux readiness before
-publishing its archive. Linux previews always include ARM64 Linux and leave the latest stable
-release unchanged. Removing the startup flag does not authorize a release or establish security
+Every release, stable or Linux preview, includes macOS and Linux ARM64. The release workflow has no
+input that omits Linux ARM64, and only Linux x86-64 is opt-in, through `publish_linux_x86`. An input
+that omits ARM64 would let a release drop a supported platform by accident.
+`test_stable_and_preview_publish_arm64_with_x86_off_by_default` pins the release contents. The
+release owner must establish Linux readiness before each release. Linux previews leave the latest
+stable release unchanged. Removing the startup flag does not authorize a release or establish security
 acceptance. The native filesystem policy experiment retains its separate configuration and Cargo
 feature controls.
 
@@ -380,7 +386,7 @@ access to it.
 one translator takes that type with a launch role. A spec holds four fields. `command` names the
 program and its fixed leading arguments. `workspace` sets the initial working directory and grants
 nothing. `env` supplies the literal environment with no inheritance from the surrounding OS.
-`filesystem` lists the paths the process's own syscalls can reach. It has eight lists for `[agent]`
+`filesystem` lists the paths the process's own syscalls can reach. It has nine lists for `[agent]`
 and six for `[tool.<name>]`. A tool refuses `metadata` and `exec` by name because its sandbox
 already discovers metadata and runs its toolchain through broad exec. Before this, the agent table
 and the tool table had grown apart, each with its own grant keys and its own translation. With one
@@ -413,8 +419,8 @@ the operator's home, because it runs as the operator and looks for its session t
 <a id="direct-filesystem-reach-is-declared-and-disclosed"></a>
 ### Direct filesystem reach is declared in the configuration and disclosed at startup
 
-`[agent.filesystem]` carries eight lists: `read`, `write`, `read_file`, `write_file`, `list`,
-`metadata`, `exec`, and `deny`. Each entry names one path on the surrounding OS that the process's
+`[agent.filesystem]` carries nine lists: `read`, `write`, `read_file`, `write_file`, `list`,
+`metadata`, `exec`, `deny`, and `deny_write`. Each entry names one path on the surrounding OS that the process's
 own syscalls can reach. Directory entries are recursive and file entries are exact. Paths are
 absolute or `~`-relative, with no wildcard syntax. `write` does not imply `read`. These keys let an
 unmodified coding agent edit files in a box. Its native file tools issue direct syscalls. When the
@@ -466,13 +472,22 @@ the file the link resolves to, and the box also shows that file at the link's na
 program runs a helper by the name `PATH` finds. Granting only the target left that name missing,
 so cargo failed with `linker 'cc' not found` on Linux. The links in between, such as
 `/etc/alternatives/cc`, are not granted: Linux binds the file at the named path, and macOS allows
-the link nodes on the way. We rejected granting the folders that hold the links, such as
+reading the metadata of each link on the way, linked folders included. For a linked folder below
+the link's own folder, such as `current` in `helper -> current/file`, the path asked for through it,
+`current/file`, is granted the same way, because macOS tests that path's existence before it
+follows `current`. A linked folder anywhere else, such as `current` in
+`~/.local/bin/java -> ~/.sdkman/candidates/java/current/bin/java` or `/tmp` in a link to
+`/tmp/build/out`, gets no such path, so on macOS the link's own name may still fail to open. The grant is built from one lookup of the link, compared
+with the file the run approved, so a hop swapped after the spawn check is refused rather than
+granted. We rejected granting the folders that hold the links, such as
 `/usr/bin` or `/etc/alternatives`, because that grants every file in them. The link must sit in its
 own real folder, and every other list still refuses a link. A link inside a credential store is
 refused, because the store exception resolves the entry again at each spawn, and the link could be
 pointed at another file of the store during a run. A write, exec, list or metadata grant
 through a link would act on a name the operator did not state as that file.
-`a_read_entry_naming_a_link_to_a_file_reads_by_both_names` pins it.
+`a_read_entry_naming_a_link_to_a_file_reads_by_both_names`,
+`a_read_entry_naming_a_link_through_a_linked_folder_reads_by_both_names` and
+`a_link_hop_swapped_after_the_spawn_check_is_refused` pin it.
 
 <a id="the-runtime-minimum-is-two-sets-and-the-agent-takes-the-smaller-one"></a>
 ### The runtime minimum is two sets, and the agent takes only the smaller one
@@ -1493,6 +1508,25 @@ File identity and link-count verification at launch still apply.
 
 A backend may make the file non-executable if it cannot preserve both write subtraction and
 write-xor-execute. Callers must not rely on write protection to preserve an execute grant.
+
+<a id="a-directory-inside-a-write-grant-can-be-write-protected"></a>
+### A directory inside a write grant can be write-protected
+
+`deny_write` names a directory inside a `write` directory. The agent can read it and run the
+programs that an `exec` grant covers there, but it cannot write anything below it. A Python virtual
+environment in a writable project is the case this serves: the operator creates it before the box
+starts, and the agent runs it but cannot replace it. Containment records the directory's device and
+inode and revalidates them at the backend's last safe point. macOS denies writes and hard links
+below the directory after the write root, and pins the directories between it and the write root.
+Linux overlays a read-only bind on the directory, which keeps execution when an `exec` grant covers
+it. A write protection grants nothing, so it is not a `deny` entry and not an operation. The
+agent, each tool, and each local MCP server take it, because a process that can write the directory's parent can replace the programs
+the agent runs from it, so each writer needs its own protection. A tool's leaf box keeps it with
+broad exec. As with a denial, the guarantee covers paths below the directory, so a file there that also has a hard link in a writable directory stays a residual risk.
+`a_write_protected_tree_runs_its_programs_and_refuses_writes` and
+`a_leaf_runs_from_a_write_protected_tree_and_refuses_writes` check each backend, and
+`a_deny_write_directory_reads_and_refuses_writes_inside_a_write_tree` and
+`a_deny_write_directory_refuses_writes_for_every_process` check the box.
 
 <a id="the-deny-only-floors-run-beneath-every-backend"></a>
 ### The deny-only floors run beneath every backend, in one module

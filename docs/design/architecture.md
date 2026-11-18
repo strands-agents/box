@@ -270,6 +270,10 @@ interpreters are part of the code the operator must trust.
    canonical path and filesystem identity of each source file it opens.
    [Later steps use the validated identities](decisions.md#a-run-validates-once-then-acts-on-the-identity-it-approved),
    so replacing a source file cannot substitute a new configuration.
+   It then leaves out each `[tool.<name>]` whose program is not installed, and prints a
+   `left out` line for each on stderr. No later step sees a left-out tool, so it gets no grants,
+   no file of its own, and no tool selection. Its grammar stays in the policy and still decides
+   another table with the same program name.
 3. It opens the collector to record the steps that follow.
 4. It installs the policy. Parsing or validation errors stop startup. Box also
    [rejects rules it can prove will never match](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-one-warns).
@@ -297,6 +301,11 @@ interpreters are part of the code the operator must trust.
    grants authorize. These mappings add no executable or library access. The
    [configuration reference](../user/config.md#agentfilesystem-and-toolnamefilesystem) shows the output.
 7. It starts the trampoline, which becomes the agent, and waits for the workload to end.
+
+Before a selected Linux workload starts, native filesystem setup probes whether the kernel can transfer path-only file handles.
+When that optional transfer is unsupported, Box reports the limit on stderr and refuses those opens.
+Other supported native operations remain available. Unexpected probe errors stop startup.
+The [native policy guide](../user/native-filesystem-policy.md#linux-arm64) explains this distinction.
 
 During shutdown, Box stops and reaps the workload before closing the broker and gateway.
 It then removes the record that identifies the running box and releases the run lock.

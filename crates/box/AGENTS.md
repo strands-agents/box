@@ -4,8 +4,8 @@ Follow [repository guidance](../../AGENTS.md).
 
 Read the **"`strands-box` is interface-frozen"** section of the
 [repository guidance](../../AGENTS.md) before changing anything here. A change to an
-observable surface — the CLI verbs and flags, `box.toml`'s keys, the four box inputs, the
-on-disk records (`Record` at `RECORD_VERSION` and each later record version through
+observable surface — the `strands-box` verbs and flags, `box.toml`'s keys, the four box inputs,
+the on-disk records (`Record` at `RECORD_VERSION` and each later record version through
 `SECRET_SOURCE_RECORD_VERSION`, with the `box_id` grammar `valid_box_identity` accepts,
 `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
 `PROTOCOL_VERSION`, the alias names and their socket derivation, the
@@ -35,7 +35,7 @@ The three `record/` modules each answer one question. `config` is `box.toml`: th
 plus one module per vocabulary. The modules are `process`, `filesystem`, `egress`, `env`, `mcp`,
 `secret_source`, and `telemetry`.
 `process` holds `ProcessSpec`, the one shape `[agent]` and each `[tool.<name>]` take, and the
-`Filesystem` that spec carries. `filesystem` translates the eight lists into containment cells.
+`Filesystem` that spec carries. `filesystem` translates the nine lists into containment cells.
 `layout` sites the filesystem. `config/mcp` is `box.toml`'s MCP
 declarations — identity, never authority. `workspace` finds a workspace's `.strands-box/`, which is
 where the operator's authored `box.toml` and `policy.dw` live; only `policy generate-schema` reads it
@@ -45,7 +45,7 @@ now, because `run` takes one `--config` path and searches nowhere. **That direct
 - **Four phases, in order.** `record::config` decides the four inputs — `Cli`, the `box.toml`
   wire record, and every refusal. `record::layout` sites the filesystem: one root, `BoxRoot`, with
   every other path computed from it. `run::contain::boundary` translates one `ProcessSpec` into a
-  boundary: the one exec literal, the eight lists as cells, the runtime minimum, the mediation
+  boundary: the one exec literal, the nine lists as cells, the runtime minimum, the mediation
   plumbing, and the composed environment.
   `run::contain::supervise` runs the child: process group, wait, exit code.
   *Why separate:* the types enforce a strict dependency order — a `BoxRoot` cannot exist
@@ -119,28 +119,28 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   stack frame where nothing names it.
 - **Flattening `error` into one `BoxError`** with `String` variants. That is the catch-all,
   re-created.
-- **Giving the crate a library target back.** **There is no `lib.rs` and no `[lib]` target**, so
-  nothing links the box and every caller reaches it as a process. `tests/library_surface.rs` went
-  with the façade. Every module is `pub(crate)`, and what the façade held is now a property of that
-  structure. Keep every part:
-  - Nothing outside the crate can name `run`, `contain`, or `record`, so `Boundary`, `Trampoline`, and
-    `Attachment` are unreachable. That matters most for `run`, because `flock` is per file
-    descriptor, so two in-process calls both succeed, and that breaks
-    [one policy engine per box](../../docs/design/decisions.md#one-policy-engine-per-box).
-  - `Boundary::assemble` and `Trampoline::command` stay `pub(crate)`. A caller that can assemble a
-    boundary can assemble a weaker one.
-  - `BoxError` is an **opaque struct** over a `pub(crate)` enum. Exposing the enum leaks nine
-    mechanism types.
-  - **No signature names or returns a `PolicyEngine`**, a host path, a working directory, an
-    environment overlay, or a proxy port. So nothing outside the box holds an authority object.
+- **Widening the `strands-box` library.** `src/lib.rs` is the crate's library, and `src/main.rs`
+  is a thin wrapper that calls `strands_box::run` and `strands_box::generate_policy_schema`. Every
+  module stays `pub(crate)`. The library's public API is not frozen, but a pull request that adds
+  to it needs a maintainer's approval. Keep every part:
+  - **One process runs at most one box.** `run` sets `STARTED` and refuses a second call, even for
+    a different box directory. The box lock refuses only a second run of the *same* box. A second
+    box in this process would hold two boxes' secrets and policy engines in one address space, which
+    breaks [one trusted process per box](../../docs/design/decisions.md#one-trusted-process-per-box).
+    `box_library.rs::hardening_and_repeat_run` proves the refusal.
+  - Nothing outside the crate can name the `run` or `record` modules, so `Boundary`, `Trampoline`,
+    and `Attachment` are unreachable. `Boundary::translate` and `trampoline::command` stay
+    `pub(crate)`. A caller that can assemble a boundary can assemble a weaker one.
+  - `BoxError` is an **opaque struct** over a `pub(crate)` enum. A public refusal wraps it or
+    exposes only a kind enum. Exposing the enum leaks nine mechanism types.
+  - **No public signature names or returns a `PolicyEngine`**, an environment overlay, or a proxy
+    port, and none returns a host path or working directory the box resolved. So nothing outside
+    the box holds an authority object.
 
-  **Nothing outside the box depends on a box crate, and that absence is the enforcement.** A
-  caller starts `strands-box run` as a child process and reaches it only through that process's
-  stdio. So it **cannot** open a `PolicyEngine`, build a `ContainmentConfig`, hold a proxy handle, or resolve a
-  secret, because no such type is in scope: one `Policy` per box holds by construction
-  rather than by discipline, and no CA private key and no resolved secret can exist in that address
-  space. A path dependency would buy nothing either way, because cargo ignores one on a
-  `[[bin]]`-only crate and only warns.
+  **A library caller shares the box's trusted process, so the caller is trusted.** It still
+  **cannot** open a `PolicyEngine`, build a `ContainmentConfig`, hold a proxy handle, or resolve a
+  secret through this crate, because the library puts no such type in scope. The workload reaches
+  the box only through its sandbox and `run/box.sock`.
 
   The limit: any crate depending on `strands-box-policy` can call `Policy::open`, whatever this
   crate exposes. The dependency graph and the manifest guard hold the one-instance rule.
@@ -266,7 +266,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   policy decides each upgraded request on port 443, as it decides a `CONNECT` to that host. `[agent]` and each
   `[tool.<label>]` hold one `ProcessSpec`, which is six fields — `command`, `workspace`, `env`,
   `filesystem`, `native-filesystem-policy`, and `grammar`. Only a `[tool.<label>]` takes
-  `grammar`, behind `[experimental-features] tool-grammars`, and `[agent]` refuses it. `filesystem` holds the path lists: eight for `[agent]`, six
+  `grammar`, behind `[experimental-features] tool-grammars`, and `[agent]` refuses it. `filesystem` holds the path lists: nine for `[agent]`, seven
   for a `[tool.<label>]`, which has no `metadata` or `exec` list: a leaf discovers metadata across the
   operator home ([a leaf discovers metadata](../../docs/design/decisions.md#a-leaf-discovers-existence-and-metadata-content-stays-gated))
   and runs its toolchain through broad exec on macOS
@@ -275,7 +275,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   are **not** among them: they belong to `Record`.
 
   **The box is the credential boundary. No process table selects what it reaches.** The agent gets
-  every declared `[tool.<label>]`, the alias of every stdio `[mcp.<name>]` program, and every egress route. Each tool and
+  every declared `[tool.<label>]` that the run does not leave out, the alias of every stdio `[mcp.<name>]` program, and every egress route. Each tool and
   each MCP leaf gets every egress route, and no alias and no broker socket, so it starts no tool.
   [The box is the credential boundary](../../docs/design/decisions.md#the-box-is-the-credential-boundary)
   owns why. **Do not add a per-process selection**: the gateway and the broker cannot tell
@@ -295,6 +295,17 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   Do not re-derive meaning from a string downstream: no `strip_prefix("env://")`, no host
   re-parsing, no second reserved-name check at projection time. `EgressRoute` carries
   `provisioned_name` so the scheme is interpreted in one place.
+- **A `[tool.<name>]` whose program is not installed is left out, in one place.**
+  `commands::leave_out_absent` removes it from the run's `Record` after `configure` stores the
+  record, so every later consumer sees one set of tools: credential disclosure, grammar binding,
+  bare names, approved reach, tool selection, and leaf translation. Not installed means nothing exists,
+  after links are followed, at an absolute path or at a bare name in any absolute search-path entry that Box can search.
+  So a non-executable or non-regular match still reaches its real refusal. Any other failure still
+  stops the box, and so does a program that holds `${` or an argument that no run can expand. The policy keeps the tool's grammar actions so a policy that names them still loads. The
+  grammar still decides another table with its program name, so the grammar disclosure reads the
+  grammars from the record before the trim. A link loop at a bare name is refused, not left out. Do not move the decision into a consumer: a consumer that resolves a left-out
+  tool later would admit a file planted at its path.
+  `hosted::tests::a_file_planted_at_a_left_out_tools_path_never_runs_with_its_reach` is the pin.
 - **A credential binding is not an authorization
   ([a binding is configuration](../../docs/design/decisions.md#a-credential-binding-is-configuration-not-a-policy-action)).**
   It says only what is attached to a request policy already permitted. Keep every refusal holding
@@ -380,7 +391,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   floors carry the boundary:
   - **A home is never a grant, and the agent's own syscalls reach almost nothing.** The profile
     grants its program, `bin/`, `run/box.sock`, `trust/`, the workspace at `Dir` scope, the cells
-    `run/contain/runtime_minimum.rs` states, and what the eight lists in `[agent.filesystem]` name.
+    `run/contain/runtime_minimum.rs` states, and what the nine lists in `[agent.filesystem]` name.
     Everything else is an interpreter request policy decides, and
     `box_filesystem.rs::reach_under_the_operator_home_is_only_what_is_listed` pins that naming the
     home as `HOME` reaches nothing under it.
@@ -771,7 +782,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   Claude Code 2.1.292 gives its Bash tool such a stdin, and collecting to EOF before the Call made
   every agent command wait 10 s and fail. A command that reads such a stdin waits until the Shell
   deadline. The alias forwards every byte, and the broker applies `[limits.shell] max_stdin`
-  (`ShellLimits::max_stdin`, 64 KiB by default, never 0): it feeds exactly the first `max_stdin`
+  (`ShellLimits::max_stdin`, 1 MiB by default, never 0): it feeds exactly the first `max_stdin`
   bytes, discards the rest, sends no Denied, and ignores `InputEof`, so the writer never blocks or
   gets EPIPE, a command that does not read is unaffected, and one that reads past the cap waits for
   the Shell deadline and fails; a failed Call then gets a stderr note that its input was cut. On a
@@ -1204,7 +1215,6 @@ stable `<a id>` anchor. Cite an entry by that anchor: a **relative link** from M
 `docs/design/decisions.md#<anchor>` in a code comment. Do not cite a decision by a number, because
 a number can land on the wrong target rather than on none, and a link fails visibly. A decision
 that reaches shipped code gets its entry in the same change.
-
 
 ### Linux native notification forwarding
 

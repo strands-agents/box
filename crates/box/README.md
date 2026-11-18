@@ -96,9 +96,9 @@ the execution timeout for each submitted Strands Shell call. The default is 30 s
 For ten minutes, set `shell.timeout = 600`; for unlimited execution, set `shell.timeout = false`.
 The nested table `[limits.shell]` accepts the same values under `timeout`.
 `shell.max_input` and `shell.max_output` accept nonnegative integer byte counts, with defaults
-of 262144 and 65536. Shell applies the output limit to both output buffers and source-file reads.
+of 262144 and 1048576. Shell applies the output limit to both output buffers and source-file reads, and Box applies it to each `curl` response body.
 Set either size to `0` to disable that Shell limit, or omit it to keep its default.
-`shell.max_stdin` is a positive byte count, 65536 by default, of the standard input one command
+`shell.max_stdin` is a positive byte count, 1048576 by default, of the standard input one command
 receives through a Shell alias; it cannot be disabled.
 Invalid or unrepresentable durations and sizes are load errors. Python retains its existing limits.
 See [execution limits](../../docs/user/config.md#limits).
@@ -134,13 +134,15 @@ also delete any volume's event history. Box prints these limitations at startup.
 [file watching](../../docs/user/config.md#file-watching).
 
 `filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
-`exec`, and `deny`. They give this process's own filesystem calls direct reach, because an
+`exec`, and `deny` — and also takes `deny_write`, which keeps an existing directory inside a
+`write` directory read-only. A tool and a local MCP server take `deny_write` too.
+They give this process's own filesystem calls direct reach, because an
 unmodified coding agent's `Read`, `Write` and `Edit` issue those calls and containment refuses every
 one. A directory entry is recursive, and a file entry is exact. `write` does not imply `read`. Linux
 is the residual: a writable bind reads there, and the startup disclosure says so on that entry's
 line.
 
-What a grant costs is that no `fs:*` decision records these operations, so the box prints each one
+Without experimental native filesystem policy, no `fs:*` decision records these operations, so the box prints each grant
 on stderr when it starts. A grant that would expose the box's own directory is refused, which
 `run_config.rs::a_tool_grant_cannot_expose_the_box_directory` pins, and a command inside a writable
 grant is disclosed as a warning, which `a_writable_command_is_disclosed_as_a_warning` pins.
@@ -353,7 +355,7 @@ only. The `secret.env` key needs the same switch, on each operating system. The 
 then valid on an egress route and a remote MCP server (with `secret.env`), and on a backend
 `auth.ref` and a telemetry `secret.ref` (with no placeholder variable). An `env://NAME` or
 `secret://NAME` reference is refused when a `pass-secret-env` entry names `NAME`. The record stores
-each declaration at record version 38. This build reads no secret through a declaration: `run`
+each declaration at record version 39. This build reads no secret through a declaration: `run`
 stops after the load checks, and `policy generate-schema` stops for a remote MCP server whose secret
 names a declared scheme. `record::config::secret_source` holds the table and its checks.
 

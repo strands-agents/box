@@ -26,7 +26,7 @@ Each has one reader and one test for what belongs there. The `docs-writer`, `doc
 |---|---|---|---|
 | `docs/user/` | An operator who runs a box | How do I use it? | An operator needs it to run Box, without the source and without the design guide. |
 | `docs/design/<topic>.md` | A security evaluator or a contributor | How does it work, and why trust it? | A reader must trust the mechanism, or a new contributor loses an hour to rediscover it. |
-| `docs/design/decisions.md` | A contributor or a reviewer | Why is it like this? | The user decides a choice through `/kd`. The page is a dated record and it ages, so a code change adds no entry here. |
+| `docs/design/decisions.md` | A contributor or a reviewer | Why is it like this? | The user decides, through `/kd`, a choice that refuses or redirects a later change to a different part of Box. The log can lag the code. A code change owes no entry, and a pull request that changes what an entry says fixes that entry. |
 | `docs/dev/` | A contributor | How do I work on this repository? | A build, test, or debug step needs more than the command. |
 | `docs/site-manifest.json` | An external documentation publisher | Which user pages publish, and at which routes and navigation positions? | A publishable page is added, removed, or moved, or its H1, purpose, route, or navigation changes. |
 | `docs/conventions.md` | A contributor who adds a crate or public surface | What does house style require? | The rule is mechanical, so a reviewer or a gate can check it. |
@@ -66,4 +66,5 @@ it.
 | Changes a build, test, or debug command, or a gate | `README.md`, the [verification rules](../../AGENTS.md#verify-before-commit), and `docs/dev/` when the step needs a guide. |
 | Adds a crate, or changes a crate's `pub use` facade | That crate's `README.md`, and `docs/conventions.md` when the change sets a new house rule. Recount the names from `src/lib.rs` and correct every count in the `README.md` and in the crate's `AGENTS.md`, because each states one. |
 | Changes the policy load, the policy grammar, or what a rule may spell | Each committed policy under `examples/` must still load, and each one a page shows must still match that page. |
-| Settles a choice that a reader could question or undo | No page in this commit. Offer `/kd` to the user, because an entry enters `docs/design/decisions.md` only after the user decides it. |
+| Settles a choice that passes the `kd` skill's test | No page in this commit. Offer `/kd` to the user, because an entry enters `docs/design/decisions.md` only after the user decides it. Every other choice is a sentence in the pull request. |
+| Goes against what an entry says | Fit the code to the entry, or rewrite the entry with `/kd`, and the user approves the rewrite. |

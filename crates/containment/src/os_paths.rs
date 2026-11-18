@@ -324,7 +324,10 @@ mod tests {
                     Scope::File,
                 ),
                 ("/dev/null", Operation::Write, Scope::File),
-                ("/private/tmp", Operation::Metadata, Scope::Root),
+                // The link spelling, so the profile also renders metadata on the `/tmp` link node.
+                // Measured: with `/private/tmp` here, `lstat("/tmp")` and every path through it
+                // fail with `EPERM`.
+                ("/tmp", Operation::Metadata, Scope::Root),
                 ("/etc", Operation::Metadata, Scope::Dir),
                 ("/var", Operation::Metadata, Scope::Dir),
             ],

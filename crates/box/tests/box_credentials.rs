@@ -422,7 +422,7 @@ fn a_declared_secret_source_is_stored_and_the_box_does_not_start() {
     let record = std::fs::read_to_string(box_.root().join("private/box.toml"))
         .expect("the load checks passed, so the record is stored");
     let record: toml::Value = toml::from_str(&record).expect("the record is TOML");
-    assert_eq!(record["version"].as_integer(), Some(38));
+    assert_eq!(record["version"].as_integer(), Some(39));
     assert_eq!(
         record["experimental-features"]["secret-sources"].as_bool(),
         Some(true)
