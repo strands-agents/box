@@ -20,8 +20,8 @@ const RESERVED_WORDS: [&str; 10] = [
 #[serde(transparent)]
 pub(crate) struct Locations(BTreeMap<String, Vec<String>>);
 
-/// Each location's directories, resolved as a filesystem rule matches them.
-pub(crate) type ResolvedLocations = BTreeMap<String, Vec<PathBuf>>;
+/// Each location's roots as written, which is the text a filesystem rule matches.
+pub(crate) type LocationRoots = BTreeMap<String, Vec<PathBuf>>;
 
 impl Locations {
     /// Whether no location is declared.
@@ -64,50 +64,45 @@ impl Locations {
         Ok(())
     }
 
-    /// The policy operator anchored at `operator_home` with these locations, or the refusal that
-    /// names the entry whose directory cannot be resolved.
+    /// The policy operator anchored at `operator_home` with these roots as written, or the refusal
+    /// that names the entry no reported path can match.
     pub(crate) fn operator(&self, operator_home: &Path) -> Result<policy::Operator, ConfigError> {
         policy::Operator::unanchored()
             .anchored_at(operator_home)
-            .with_locations(self.expanded(operator_home))
+            .with_locations(self.roots())
             .map_err(|error| match error {
                 policy::PolicyError::UnresolvableLocation {
                     name,
                     directory,
                     reason,
-                } => {
-                    let entry = self.0.get(&name).and_then(|entries| {
-                        entries
-                            .iter()
-                            .find(|entry| expand(entry, operator_home) == directory)
-                    });
-                    let entry = entry.map_or_else(|| directory.display().to_string(), Clone::clone);
-                    ConfigError::Contract {
-                        reason: format!(
-                            "`[locations] {name}` entry {entry:?} cannot be resolved: {reason}"
-                        ),
-                    }
-                }
+                } => ConfigError::Contract {
+                    reason: format!(
+                        "`[locations] {name}` entry {:?} cannot be resolved: {reason}",
+                        directory.display().to_string()
+                    ),
+                },
+                policy::PolicyError::UnmatchableLocation {
+                    name,
+                    directory,
+                    reason,
+                } => ConfigError::Contract {
+                    reason: format!(
+                        "`[locations] {name}` entry {:?} can never match a reported path: \
+                         {reason}",
+                        directory.display().to_string()
+                    ),
+                },
                 other => ConfigError::Contract {
-                    reason: format!("`[locations]` cannot be resolved: {other}"),
+                    reason: format!("`[locations]` is refused: {other}"),
                 },
             })
     }
 
-    /// Each location's directories with `~` expanded against `operator_home`, each listed once.
-    pub(crate) fn expanded(&self, operator_home: &Path) -> BTreeMap<String, Vec<PathBuf>> {
+    /// Each location's roots as written.
+    pub(crate) fn roots(&self) -> LocationRoots {
         self.0
             .iter()
-            .map(|(name, directories)| {
-                let mut expanded: Vec<PathBuf> = Vec::new();
-                for entry in directories {
-                    let directory = expand(entry, operator_home);
-                    if !expanded.contains(&directory) {
-                        expanded.push(directory);
-                    }
-                }
-                (name.clone(), expanded)
-            })
+            .map(|(name, entries)| (name.clone(), entries.iter().map(PathBuf::from).collect()))
             .collect()
     }
 }
@@ -133,17 +128,6 @@ fn invalid_name(name: &str) -> Option<&'static str> {
         return Some("it is a word Cedar reserves");
     }
     None
-}
-
-/// `entry` with a leading `~` or `~/` expanded against `operator_home`.
-fn expand(entry: &str, operator_home: &Path) -> PathBuf {
-    if entry == "~" {
-        return operator_home.to_path_buf();
-    }
-    match entry.strip_prefix("~/") {
-        Some(relative) => operator_home.join(relative),
-        None => PathBuf::from(entry),
-    }
 }
 
 /// Why `entry` is not a directory a location can name, or `None` when it is one.
@@ -287,51 +271,60 @@ mod tests {
     }
 
     #[test]
-    fn a_home_relative_entry_expands_against_the_operator_home() {
-        let home = Path::new("/nonexistent-box-home/operator");
-        let expanded =
-            locations(&[("caches", &["~/.cache/agent", "/absent/elsewhere", "~"])]).expanded(home);
-        assert_eq!(
-            expanded,
-            BTreeMap::from([(
-                "caches".to_string(),
-                vec![
-                    PathBuf::from("/nonexistent-box-home/operator/.cache/agent"),
-                    PathBuf::from("/absent/elsewhere"),
-                    PathBuf::from("/nonexistent-box-home/operator"),
-                ],
-            )]),
-            "a bare `~` names the whole home"
-        );
-    }
-
-    #[test]
-    fn a_linked_entry_is_resolved_by_the_policy_operator_and_appears_once() {
+    fn each_entry_reaches_the_operator_as_written() {
         let directory = tempfile::tempdir().expect("a temporary directory");
         let home = directory.path().canonicalize().expect("canonical");
-        std::fs::create_dir(home.join("real")).expect("the real directory");
-        std::os::unix::fs::symlink(home.join("real"), home.join("link")).expect("the link");
-        let table = locations(&[("project", &["~/link", "~/missing", "~/real"])]);
-        table.validate().expect("the table is valid");
-        assert_eq!(
-            table.expanded(&home),
-            BTreeMap::from([(
-                "project".to_string(),
-                vec![home.join("link"), home.join("missing"), home.join("real")],
-            )]),
-            "the table only expands and dedupes; it resolves no link"
-        );
+        let table = locations(&[("caches", &["~/.cache/agent", "/absent/elsewhere", "~"])]);
+        let written = BTreeMap::from([(
+            "caches".to_string(),
+            vec![
+                PathBuf::from("~/.cache/agent"),
+                PathBuf::from("/absent/elsewhere"),
+                PathBuf::from("~"),
+            ],
+        )]);
+        assert_eq!(table.roots(), written);
         assert_eq!(
             table
                 .operator(&home)
                 .expect("the operator builds")
                 .locations(),
-            &BTreeMap::from([(
-                "project".to_string(),
-                vec![home.join("real"), home.join("missing")],
-            )]),
-            "the operator resolves the link to its target, which then appears once"
+            &written,
+            "a root is not expanded or resolved"
         );
+    }
+
+    #[test]
+    fn an_entry_no_reported_path_can_match_is_refused_by_its_key() {
+        let directory = tempfile::tempdir().expect("a temporary directory");
+        let home = directory.path().canonicalize().expect("canonical");
+        std::fs::create_dir(home.join("real")).expect("the real directory");
+        std::os::unix::fs::symlink(home.join("real"), home.join("link")).expect("the link");
+        let absolute = home.join("real").display().to_string();
+        for (entry, reason) in [
+            (
+                "~/link",
+                "it crosses a symbolic link, and a path is reported as resolved; write \
+                 \"~/real\""
+                    .to_string(),
+            ),
+            (
+                absolute.as_str(),
+                "a path under the operator home is reported as `~/…`; write \"~/real\"".to_string(),
+            ),
+        ] {
+            let error = locations(&[("project", &["~/fine", entry])])
+                .operator(&home)
+                .expect_err(entry)
+                .to_string();
+            assert_eq!(
+                error,
+                format!(
+                    "invalid Box configuration: `[locations] project` entry {entry:?} can never \
+                     match a reported path: {reason}"
+                )
+            );
+        }
     }
 
     #[test]

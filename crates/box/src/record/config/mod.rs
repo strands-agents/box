@@ -61,7 +61,7 @@ use self::env::{LOADER_HOOK_PREFIXES, LOADER_HOOKS};
 use self::env::{reserved_workload_environment, valid_environment_name};
 use self::gateway::Gateway;
 use self::limits::Limits;
-use self::locations::{Locations, ResolvedLocations};
+use self::locations::{LocationRoots, Locations};
 use self::process::{ContainedMcp, ProcessSpec};
 use credentials::DestinationPattern;
 
@@ -1310,15 +1310,15 @@ pub(crate) fn read_checked_policy(
     ))
 }
 
-/// The operator a policy loads for, anchored at the operator's own home, with `locations` resolved
-/// against that home and returned as the operator holds them.
+/// The operator a policy loads for, anchored at the operator's own home, with the roots of
+/// `locations` as written, and those roots.
 pub(crate) fn policy_operator(
     locations: &Locations,
-) -> Result<(policy::Operator, ResolvedLocations), BoxError> {
+) -> Result<(policy::Operator, LocationRoots), BoxError> {
     let home = crate::record::layout::operator_home_directory()?;
     let operator = locations.operator(&home)?;
-    let resolved = operator.locations().clone();
-    Ok((operator, resolved))
+    let roots = operator.locations().clone();
+    Ok((operator, roots))
 }
 
 /// Read the authored policy text, keeping its origin for diagnostics and audit.
@@ -2423,18 +2423,12 @@ native-filesystem-policy = false
         let parsed = Record::parse(&encoded, Path::new("record.toml")).unwrap();
         assert_eq!(parsed, stored);
         assert_eq!(
-            parsed.locations.expanded(Path::new("/home/operator")),
+            parsed.locations.roots(),
             BTreeMap::from([
-                (
-                    "caches".to_string(),
-                    vec![PathBuf::from("/home/operator/.npm")]
-                ),
+                ("caches".to_string(), vec![PathBuf::from("~/.npm")]),
                 (
                     "project".to_string(),
-                    vec![
-                        PathBuf::from("/work/app"),
-                        PathBuf::from("/home/operator/src/app")
-                    ]
+                    vec![PathBuf::from("/work/app"), PathBuf::from("~/src/app")]
                 ),
             ])
         );
@@ -2517,23 +2511,22 @@ native-filesystem-policy = false
         let home = tempfile::tempdir().expect("operator home");
         let home = home.path().canonicalize().expect("canonical home");
         std::fs::create_dir(home.join("project")).expect("project directory");
-        std::os::unix::fs::symlink(home.join("project"), home.join("link")).expect("the link");
         let locations: Locations =
-            toml::from_str("project = [\"~/link\", \"~/project\", \"/absent/data\"]").unwrap();
-        let (operator, resolved) = crate::test_support::with_operator_home(&home, || {
+            toml::from_str("project = [\"~/project\", \"/absent/data\"]").unwrap();
+        let (operator, roots) = crate::test_support::with_operator_home(&home, || {
             policy_operator(&locations).expect("the operator builds")
         });
         let expected = BTreeMap::from([(
             "project".to_string(),
-            vec![home.join("project"), PathBuf::from("/absent/data")],
+            vec![PathBuf::from("~/project"), PathBuf::from("/absent/data")],
         )]);
-        assert_eq!(resolved, expected);
+        assert_eq!(roots, expected);
         assert_eq!(
             operator,
             policy::Operator::unanchored()
                 .anchored_at(home.clone())
                 .with_locations(expected)
-                .expect("the locations resolve")
+                .expect("the locations are accepted")
         );
         let (bare, none) = crate::test_support::with_operator_home(&home, || {
             policy_operator(&Locations::default()).expect("the operator builds")

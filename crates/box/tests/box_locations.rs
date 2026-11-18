@@ -31,7 +31,7 @@ fn a_rule_on_a_location_permits_a_write_inside_it_and_denies_one_outside() {
     let box_ = Request::with_config(
         "locations-project",
         PROJECT_WRITES,
-        &format!("[locations]\nproject = [\"{}\"]\n", fixture::PROJECT),
+        "[locations]\nproject = [\"~/workspace\"]\n",
     )
     .expect();
 
@@ -59,7 +59,7 @@ fn a_sibling_with_a_shared_prefix_is_not_in_the_location() {
     let box_ = Request::with_config(
         "locations-sibling",
         PROJECT_WRITES,
-        &format!("[locations]\nproject = [\"{}/app\"]\n", fixture::PROJECT),
+        "[locations]\nproject = [\"~/workspace/app\"]\n",
     )
     .expect();
     std::fs::create_dir_all(box_.workspace().join("app")).expect("the location's directory");
@@ -88,10 +88,7 @@ fn a_forbid_on_a_nested_location_beats_a_permit_on_the_outer_one() {
     let box_ = Request::with_config(
         "locations-nested",
         &policy,
-        &format!(
-            "[locations]\nproject = [\"{0}\"]\ndocs = [\"{0}/docs\"]\n",
-            fixture::PROJECT
-        ),
+        "[locations]\nproject = [\"~/workspace\"]\ndocs = [\"~/workspace/docs\"]\n",
     )
     .expect();
     std::fs::create_dir_all(box_.workspace().join("docs")).expect("the nested directory");
@@ -113,7 +110,7 @@ fn a_misspelled_location_stops_the_box_before_the_workload_starts() {
     let (_box, output) = Request::with_config(
         "locations-typo",
         &PROJECT_WRITES.replace("locations.project", "locations.projcet"),
-        &format!("[locations]\nproject = [\"{}\"]\n", fixture::PROJECT),
+        "[locations]\nproject = [\"~/workspace\"]\n",
     )
     .attempt();
     assert!(!output.status.success(), "{output:?}");
@@ -143,12 +140,12 @@ fn startup_discloses_each_location() {
     let (_box, output) = Request::with_config(
         "locations-disclosed",
         PROJECT_WRITES,
-        &format!("[locations]\nproject = [\"{}\"]\n", fixture::PROJECT),
+        "[locations]\nproject = [\"~/workspace\"]\n",
     )
     .attempt();
     assert!(output.status.success(), "{output:?}");
     assert!(
-        stderr(&output).contains("[locations] project:"),
+        stderr(&output).contains("[locations] project: ~/workspace  "),
         "{}",
         stderr(&output)
     );
