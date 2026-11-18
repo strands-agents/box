@@ -108,9 +108,15 @@ pub(crate) fn refuse_bad_locations(locations: &Locations) -> Result<(), PolicyEr
             )));
         }
         for directory in directories {
-            if !directory.is_absolute() || !is_normal(directory) {
+            let text = directory.to_string_lossy();
+            let shaped = match text.strip_prefix("~/") {
+                Some(rest) => !rest.is_empty() && is_normal(Path::new(rest)),
+                None => text == "~" || (directory.is_absolute() && is_normal(directory)),
+            };
+            if !shaped {
                 return Err(PolicyError::Schema(format!(
-                    "location {name:?}: {} is not an absolute directory without `.` or `..`",
+                    "location {name:?}: {} is not `~`, a `~/` path, or an absolute directory, \
+                     without `.` or `..`",
                     directory.display()
                 )));
             }
@@ -133,23 +139,26 @@ pub(crate) fn is_normal(path: &Path) -> bool {
         .any(|segment| segment == b".")
 }
 
-/// Each declared location name, in order, and whether it holds any of `paths`, which spell one file.
-pub(crate) fn held_locations<'a, 'p>(
-    locations: &'a Locations,
-    paths: impl IntoIterator<Item = &'p Path>,
-) -> Vec<(&'a str, bool)> {
-    let paths: Vec<&Path> = paths.into_iter().collect();
+/// Each declared location name, in order, and whether `reported` equals one of its roots or lies
+/// below one, as `path == "<root>" || path like "<root>/*"` decides with each `*` literal.
+pub(crate) fn held_locations<'a>(locations: &'a Locations, reported: &str) -> Vec<(&'a str, bool)> {
     locations
         .iter()
-        .map(|(name, directories)| {
-            let held = paths.iter().any(|path| {
-                directories
-                    .iter()
-                    .any(|directory| path.starts_with(directory))
-            });
+        .map(|(name, roots)| {
+            let held = roots
+                .iter()
+                .any(|root| path_in_root(reported, &root.to_string_lossy()));
             (name.as_str(), held)
         })
         .collect()
+}
+
+/// Whether `reported` is `root` or lies below it, as `path == "<root>" || path like "<root>/*"`.
+pub(crate) fn path_in_root(reported: &str, root: &str) -> bool {
+    reported == root
+        || reported
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('/') || root.ends_with('/'))
 }
 
 /// The effective action schema used for policy validation and request binding.
@@ -563,9 +572,12 @@ fn fs_operation_expr(operation: FsOperation) -> Result<RestrictedExpression, Pol
 }
 
 /// The `locations` record of a filesystem input: each declared name, true when it holds `path`.
-fn locations_expr(locations: &Locations, path: &Path) -> Result<RestrictedExpression, PolicyError> {
+fn locations_expr(
+    locations: &Locations,
+    reported: &str,
+) -> Result<RestrictedExpression, PolicyError> {
     RestrictedExpression::new_record(
-        held_locations(locations, [path])
+        held_locations(locations, reported)
             .into_iter()
             .map(|(name, held)| (name.to_string(), RestrictedExpression::new_bool(held))),
     )
@@ -702,7 +714,7 @@ fn context_for(
             fields.push((attr::OPERATION.to_string(), fs_operation_expr(*operation)?));
             fields.push((
                 attr::LOCATIONS.to_string(),
-                locations_expr(locations, path.as_path())?,
+                locations_expr(locations, &path.reported())?,
             ));
             fields
         }
@@ -1042,7 +1054,7 @@ mod tests {
         .map(|(name, directories)| (name.to_string(), directories))
         .collect();
         let held = |path: &str| {
-            held_locations(&locations, [Path::new(path)])
+            held_locations(&locations, path)
                 .into_iter()
                 .filter(|(_, held)| *held)
                 .map(|(name, _)| name)
@@ -1055,10 +1067,28 @@ mod tests {
         assert!(held("/work-old/notes.md").is_empty());
         assert!(held("/").is_empty());
         assert_eq!(
-            held_locations(&locations, [Path::new("/")]).len(),
+            held_locations(&locations, "/").len(),
             3,
             "every declared name is present"
         );
+    }
+
+    #[test]
+    fn a_root_matches_as_the_two_path_comparisons_with_each_star_literal() {
+        for (reported, root, held) in [
+            ("~", "~", true),
+            ("~/x", "~", true),
+            ("~x", "~", false),
+            ("/~/x", "~", false),
+            ("/a*b", "/a*b", true),
+            ("/a*b/c", "/a*b", true),
+            ("/axb/c", "/a*b", false),
+            ("/", "/", true),
+            ("/etc", "/", true),
+            ("~/x", "/", false),
+        ] {
+            assert_eq!(path_in_root(reported, root), held, "{reported} in {root}");
+        }
     }
 
     #[test]

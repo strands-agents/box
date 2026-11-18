@@ -279,7 +279,7 @@ fn a_bad_declaration_is_refused_by_with_locations() {
     let permit = r#"permit (principal, action == Box::Action::"fs:read", resource);"#;
     for accepted in ["P", "my_project_2", "permit", longest.as_str()] {
         assert!(
-            PolicyEngine::validate(&operator(&[(accepted, &["/"])]), &sources(permit)).is_ok(),
+            PolicyEngine::validate(&operator(&[(accepted, &["/srv"])]), &sources(permit)).is_ok(),
             "{accepted:?} is a valid name"
         );
     }
@@ -455,7 +455,7 @@ when { context.input.locations has secrets && context.input.locations.secrets };
 fn a_response_named_by_its_home_relative_spelling_carries_its_requests_locations() {
     let directory = tempfile::tempdir().expect("history directory");
     let history = directory.path().join("h.redb");
-    // A canonical home, because macOS links `/home`, and a root resolves through links.
+    // A canonical home, because macOS links `/home`, and a root crossing a link is refused.
     let home_dir = directory
         .path()
         .canonicalize()
@@ -463,7 +463,7 @@ fn a_response_named_by_its_home_relative_spelling_carries_its_requests_locations
         .join("dev");
     let home = Operator::unanchored()
         .anchored_at(&home_dir)
-        .with_locations([("project".to_string(), vec![home_dir.join("src/app")])])
+        .with_locations([("project".to_string(), vec![PathBuf::from("~/src/app")])])
         .expect("the locations resolve");
     let engine = open(&home, PROJECT_WRITE, &history);
     let approved = PathResolver::over([home_dir.clone()])
@@ -500,8 +500,8 @@ fn a_response_named_by_its_home_relative_spelling_carries_its_requests_locations
     assert_eq!(recorded_locations(&history), [project.clone(), project]);
 }
 
-/// A location rooted above the home holds a path reported as `~/…`, on the request and on the
-/// response the caller records with that spelling, and the home itself.
+/// A root that holds the home matches no path in it, because such a path is reported as `~/…`,
+/// so it refuses unless its location also lists `~`; with `~`, the location holds both.
 #[test]
 fn a_location_above_the_home_holds_home_relative_paths() {
     let directory = tempfile::tempdir().expect("history directory");
@@ -512,9 +512,24 @@ fn a_location_above_the_home_holds_home_relative_paths() {
         .join("users");
     let home_dir = users.join("me");
     std::fs::create_dir_all(&home_dir).expect("the home");
-    let operator = Operator::unanchored()
+    let Err(error) = Operator::unanchored()
         .anchored_at(&home_dir)
         .with_locations([("users".to_string(), vec![users.clone()])])
+    else {
+        panic!("a root that holds the home must refuse");
+    };
+    assert!(
+        matches!(error, policy::PolicyError::UnmatchableLocation { .. }),
+        "{error:?}"
+    );
+    assert!(
+        error.to_string().contains("add \"~\" to the list"),
+        "{error}"
+    );
+
+    let operator = Operator::unanchored()
+        .anchored_at(&home_dir)
+        .with_locations([("users".to_string(), vec![users.clone(), PathBuf::from("~")])])
         .expect("the locations resolve");
     let policy = r#"
 @id("users_write")
@@ -678,10 +693,7 @@ fn more_outstanding_requests_than_any_cap_record_their_own_locations() {
     const OUTSTANDING: usize = 4_200;
     let directory = tempfile::tempdir().expect("history directory");
     let history = directory.path().join("h.redb");
-    let nested = operator(&[
-        ("project", &["/nonexistent-box-home/dev/work"]),
-        ("docs", &["/nonexistent-box-home/dev/work/docs"]),
-    ]);
+    let nested = operator(&[("project", &["~/work"]), ("docs", &["~/work/docs"])]);
     let engine = open(
         &nested,
         r#"permit (principal, action == Box::Action::"fs:write", resource);"#,
@@ -751,30 +763,35 @@ fn more_outstanding_requests_than_any_cap_record_their_own_locations() {
     }
 }
 
+/// A root that does not exist yet under a linked parent refuses with the resolved spelling, and
+/// that spelling matches the canonical path a request carries once the directory is created.
 #[test]
-fn a_root_that_does_not_exist_yet_under_a_linked_parent_matches_once_created() {
+fn a_root_that_does_not_exist_yet_under_a_linked_parent_refuses_with_its_resolved_spelling() {
     let directory = tempfile::tempdir().expect("a temporary directory");
-    let real = directory.path().join("real");
+    let canonical = directory.path().canonicalize().expect("canonical");
+    let real = canonical.join("real");
     std::fs::create_dir(&real).expect("the real directory");
-    let link = directory.path().join("link");
+    let link = canonical.join("link");
     std::os::unix::fs::symlink(&real, &link).expect("the link");
-    let root = link.join("new").join("deeper");
+    let written = real.join("new/deeper");
+    assert_unmatchable(
+        &link.join("new/deeper"),
+        Path::new(HOME),
+        &format!(
+            "it crosses a symbolic link, and a path is reported as resolved; write \"{}\"",
+            written.display()
+        ),
+    );
+
     let declared = Operator::unanchored()
         .anchored_at(HOME)
-        .with_locations([("project".to_string(), vec![root.clone()])])
-        .expect("the locations resolve");
-    let engine = open(&declared, PROJECT_WRITE, &directory.path().join("h.redb"));
-
-    std::fs::create_dir_all(&root).expect("the root is created after the box starts");
-    // The request carries the canonical path, through the real directory and not the link.
-    let approved = PathResolver::over([directory.path().canonicalize().expect("canonical")])
+        .with_locations([("project".to_string(), vec![written.clone()])])
+        .expect("the resolved spelling is accepted before it exists");
+    let engine = open(&declared, PROJECT_WRITE, &canonical.join("h.redb"));
+    std::fs::create_dir_all(&written).expect("the root is created after the box starts");
+    let approved = PathResolver::over([canonical.clone()])
         .expect("the root is absolute")
-        .approve_host(
-            &real
-                .canonicalize()
-                .expect("canonical")
-                .join("new/deeper/file"),
-        )
+        .approve_host(&written.join("file"))
         .expect("the canonical path resolves");
     let (decision, _) = engine.decide(
         &GovernedBox::assigned("test-box"),
@@ -784,10 +801,186 @@ fn a_root_that_does_not_exist_yet_under_a_linked_parent_matches_once_created() {
             operation: FsOperation::WriteContent,
         },
     );
+    assert!(decision.is_allow(), "{decision:?}");
+}
+
+/// Assert that `with_locations` refuses `root` for an operator at `home` as unmatchable, with
+/// `reason`.
+fn assert_unmatchable(root: &Path, home: &Path, reason: &str) {
+    let Err(error) = Operator::unanchored()
+        .anchored_at(home)
+        .with_locations([("project".to_string(), vec![root.to_path_buf()])])
+    else {
+        panic!("with_locations must refuse {}", root.display());
+    };
+    let policy::PolicyError::UnmatchableLocation {
+        name,
+        directory,
+        reason: said,
+    } = &error
+    else {
+        panic!(
+            "expected UnmatchableLocation for {}, got {error:?}",
+            root.display()
+        );
+    };
+    assert_eq!((name.as_str(), directory.as_path()), ("project", root));
+    assert_eq!(said, reason, "{}", root.display());
     assert!(
-        decision.is_allow(),
-        "the root resolves through its linked parent: {decision:?}"
+        error.to_string().ends_with(&format!(
+            "location \"project\": {} can never match a reported path: {reason}",
+            root.display()
+        )),
+        "{error}"
     );
+}
+
+#[test]
+fn a_root_no_reported_path_can_match_is_refused_with_the_spelling_to_write() {
+    let directory = tempfile::tempdir().expect("a temporary directory");
+    let canonical = directory.path().canonicalize().expect("canonical");
+    let home = canonical.join("users/me");
+    std::fs::create_dir_all(home.join("real")).expect("the home");
+    std::os::unix::fs::symlink(home.join("real"), home.join("what")).expect("a linked ~/what");
+    // `/tmp` on macOS is a link to `/private/tmp`.
+    std::fs::create_dir_all(canonical.join("private/tmp/work")).expect("the real tmp");
+    std::os::unix::fs::symlink(canonical.join("private/tmp"), canonical.join("tmp"))
+        .expect("a linked tmp");
+
+    assert_unmatchable(
+        &home.join("src/app"),
+        &home,
+        "a path under the operator home is reported as `~/…`; write \"~/src/app\"",
+    );
+    assert_unmatchable(
+        &home,
+        &home,
+        "a path under the operator home is reported as `~/…`; write \"~\"",
+    );
+    assert_unmatchable(
+        &canonical.join("tmp/work"),
+        &home,
+        &format!(
+            "it crosses a symbolic link, and a path is reported as resolved; write \"{}\"",
+            canonical.join("private/tmp/work").display()
+        ),
+    );
+    assert_unmatchable(
+        &canonical.join("tmp/later"),
+        &home,
+        &format!(
+            "it crosses a symbolic link, and a path is reported as resolved; write \"{}\"",
+            canonical.join("private/tmp/later").display()
+        ),
+    );
+    assert_unmatchable(
+        Path::new("~/what"),
+        &home,
+        "it crosses a symbolic link, and a path is reported as resolved; write \"~/real\"",
+    );
+    assert_unmatchable(
+        &canonical.join("users"),
+        &home,
+        "it holds the operator home, and a path in the home is reported as `~/…`, so this root \
+         matches none of them; add \"~\" to the list",
+    );
+    assert_unmatchable(
+        Path::new("/srv/data/"),
+        &home,
+        "a reported path has no trailing slash; write \"/srv/data\"",
+    );
+    assert_unmatchable(
+        Path::new("/srv//data"),
+        &home,
+        "a reported path has no empty component; write \"/srv/data\"",
+    );
+
+    for accepted in [
+        PathBuf::from("~"),
+        PathBuf::from("~/real"),
+        PathBuf::from("~/not/yet"),
+        canonical.join("private/tmp/work"),
+        canonical.join("private/tmp/not-yet"),
+        PathBuf::from("/srv/data"),
+    ] {
+        Operator::unanchored()
+            .anchored_at(&home)
+            .with_locations([("project".to_string(), vec![accepted.clone()])])
+            .unwrap_or_else(|error| panic!("{} is accepted: {error}", accepted.display()));
+    }
+}
+
+/// A rule on a location decides every path exactly as the two path comparisons it stands for.
+#[test]
+fn a_location_decides_as_the_two_path_comparisons_it_stands_for() {
+    let directory = tempfile::tempdir().expect("history directory");
+    let by_location = |name: &str| {
+        format!(
+            "permit (principal, action == Box::Action::\"fs:write\", resource)\n\
+             when {{ context.input.locations.{name} }};"
+        )
+    };
+    let by_path = |root: &str| {
+        let pattern = root.replace('*', "\\*");
+        format!(
+            "permit (principal, action == Box::Action::\"fs:write\", resource)\n\
+             when {{ context.input.path == \"{root}\" || context.input.path like \"{pattern}/*\" }};"
+        )
+    };
+    let resolver = PathResolver::over([PathBuf::from("/")])
+        .expect("the root is absolute")
+        .reporting_under(HOME);
+    let paths = [
+        "/work",
+        "/work/a",
+        "/work/a/b.rs",
+        "/work-old/notes.md",
+        "/workspace",
+        "/elsewhere",
+        "/w*rk/x",
+        "/wxrk/x",
+        HOME,
+        "/nonexistent-box-home/dev/x",
+        "/nonexistent-box-home/dev/project/a",
+        "/nonexistent-box-home/dev-old/x",
+    ];
+    for (index, root) in ["/work", "/w*rk", "~", "~/project"].into_iter().enumerate() {
+        let declared = operator(&[("project", &[root])]);
+        let located = open(
+            &declared,
+            &by_location("project"),
+            &directory.path().join(format!("l{index}")),
+        );
+        let written = open(
+            &Operator::unanchored().anchored_at(HOME),
+            &by_path(root),
+            &directory.path().join(format!("p{index}")),
+        );
+        for path in paths {
+            let approved = resolver
+                .approve_virtual(Path::new(path))
+                .expect("the path resolves");
+            let decide = |engine: &PolicyEngine| {
+                engine
+                    .decide(
+                        &GovernedBox::assigned("test-box"),
+                        &Principal::agent(),
+                        &Request::Fs {
+                            path: &approved,
+                            operation: FsOperation::WriteContent,
+                        },
+                    )
+                    .0
+                    .is_allow()
+            };
+            assert_eq!(
+                decide(&located),
+                decide(&written),
+                "root {root}, path {path} reported as {}",
+                approved.reported()
+            );
+        }
+    }
 }
 
 #[test]
@@ -806,10 +999,10 @@ fn locations_without_an_operator_home_are_refused() {
     );
 }
 
-/// The operator states its home through a link, and a location's root resolves through it; a
-/// `~/…` outcome is matched under the home's canonical spelling as well.
+/// The operator states its home through a link, and a `~/…` root names the same text a request
+/// and its outcome report under the canonical home.
 #[test]
-fn a_home_relative_outcome_matches_under_the_canonical_home() {
+fn a_home_stated_through_a_link_matches_a_home_relative_root() {
     let directory = tempfile::tempdir().expect("a temporary directory");
     let real = directory.path().join("real-home");
     std::fs::create_dir_all(real.join("work")).expect("the home");
@@ -819,7 +1012,7 @@ fn a_home_relative_outcome_matches_under_the_canonical_home() {
     let history = directory.path().join("h.redb");
     let declared = Operator::unanchored()
         .anchored_at(&link)
-        .with_locations([("project".to_string(), vec![link.join("work")])])
+        .with_locations([("project".to_string(), vec![PathBuf::from("~/work")])])
         .expect("the locations resolve");
     let engine = open(&declared, PROJECT_WRITE, &history);
     let approved = PathResolver::over([canonical.clone()])
@@ -915,7 +1108,7 @@ fn a_root_under_a_directory_that_cannot_be_searched_is_refused() {
 }
 
 #[test]
-fn a_home_relative_outcome_matches_under_a_home_that_is_not_utf8() {
+fn a_home_relative_root_matches_under_a_home_that_is_not_utf8() {
     use std::os::unix::ffi::OsStrExt as _;
 
     let directory = tempfile::tempdir().expect("a temporary directory");
@@ -936,7 +1129,7 @@ fn a_home_relative_outcome_matches_under_a_home_that_is_not_utf8() {
     let history = directory.path().join("h.redb");
     let declared = Operator::unanchored()
         .anchored_at(&home)
-        .with_locations([("project".to_string(), vec![home.join("work")])])
+        .with_locations([("project".to_string(), vec![PathBuf::from("~/work")])])
         .expect("the locations resolve");
     let engine = open(&declared, PROJECT_WRITE, &history);
     let approved = PathResolver::over([home.clone()])
@@ -1243,7 +1436,7 @@ fn an_unresolvable_location_names_its_location_and_directory() {
     let link = directory.path().join("dangling");
     std::os::unix::fs::symlink(directory.path().join("missing"), &link).expect("the link");
     let error = Operator::unanchored()
-        .anchored_at(directory.path())
+        .anchored_at(HOME)
         .with_locations([("project".to_string(), vec![link.clone()])])
         .expect_err("a dangling root must refuse");
     let policy::PolicyError::UnresolvableLocation {

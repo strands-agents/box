@@ -80,8 +80,6 @@ pub(crate) struct DogwoodEngine {
     tool_inputs: crate::mcp_input::ToolInputs,
     /// The locations a filesystem event reports, from the request schema.
     locations: Locations,
-    /// Each spelling of the operator's home that a `~/…` outcome path is expanded under.
-    homes: Vec<PathBuf>,
     /// Outcome events the history refused, recorded before the next decision.
     pending_outcomes: Mutex<Vec<EventBuilder>>,
     #[cfg(test)]
@@ -243,7 +241,6 @@ impl DogwoodEngine {
                 tool_inputs: effective_schema.tool_inputs,
                 locations: effective_schema.locations,
                 pending_outcomes: Mutex::new(Vec::new()),
-                homes: operator.home_directories(),
                 #[cfg(test)]
                 fixed_clock: None,
             },
@@ -260,7 +257,7 @@ impl DogwoodEngine {
         let effective_schema = composed_action_schema(operator.locations(), &[], &[])?;
         let engine = open_history(history, durable_config())
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
-        Self::from_staging_engine(engine, effective_schema, operator.home_directories())
+        Self::from_staging_engine(engine, effective_schema)
     }
 
     pub(crate) fn open_for_staging_file(
@@ -274,7 +271,7 @@ impl DogwoodEngine {
         drop(history);
         let engine = recover_history(log, label, durable_config(), SNAPSHOT_INTERVAL)
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
-        Self::from_staging_engine(engine, effective_schema, operator.home_directories())
+        Self::from_staging_engine(engine, effective_schema)
     }
 
     #[cfg(test)]
@@ -286,13 +283,12 @@ impl DogwoodEngine {
         let config = durable_config().with_fault_injector(faults);
         let engine = open_history(history, config)
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
-        Self::from_staging_engine(engine, effective_schema, Vec::new())
+        Self::from_staging_engine(engine, effective_schema)
     }
 
     fn from_staging_engine(
         engine: DurableTemporalEngine,
         request_schema: ActionSchema,
-        homes: Vec<PathBuf>,
     ) -> Result<Self, PolicyStagingError> {
         if engine.has_policy() && engine.event_schema().as_deref() != Some(EVENTS_DWSCHEMA) {
             return Err(PolicyStagingError::Durable(
@@ -309,7 +305,6 @@ impl DogwoodEngine {
             tool_inputs: request_schema.tool_inputs,
             locations: request_schema.locations,
             pending_outcomes: Mutex::new(Vec::new()),
-            homes,
             #[cfg(test)]
             fixed_clock: None,
         })
@@ -454,7 +449,6 @@ impl DogwoodEngine {
             tool_inputs: effective_schema.tool_inputs,
             locations: effective_schema.locations,
             pending_outcomes: Mutex::new(Vec::new()),
-            homes: Vec::new(),
             fixed_clock: None,
         })
     }
@@ -518,7 +512,6 @@ impl DogwoodEngine {
             tool_inputs: effective_schema.tool_inputs,
             locations: effective_schema.locations,
             pending_outcomes: Mutex::new(Vec::new()),
-            homes: operator.home_directories(),
             fixed_clock: Some(now),
         })
     }
@@ -616,7 +609,7 @@ impl DogwoodEngine {
         }
         let fs_locations = match request {
             ActionRequest::Request(Request::Fs { path, .. }) => {
-                Some(location_value(&self.locations, [path.as_path()]))
+                Some(location_value(&self.locations, &path.reported()))
             }
             _ => None,
         };
@@ -679,40 +672,15 @@ impl DogwoodEngine {
     ) -> Result<(), PolicyError> {
         self.verify_request_id(request_id)?;
         let locations = match outcome {
-            Outcome::Fs { path, .. } => Some(self.outcome_locations(path)),
+            Outcome::Fs { path, .. } => {
+                Some(location_value(&self.locations, &path.to_string_lossy()))
+            }
             _ => None,
         };
         self.record_outcome(with_request_id(
             outcome_event(governed, principal, outcome, locations),
             request_id,
         ))
-    }
-
-    /// The `locations` of a filesystem outcome, matching a `~` or `~/…` path under each spelling of
-    /// the operator's home and any other path as given.
-    fn outcome_locations(&self, path: &Path) -> Value {
-        let relative = match path.to_str() {
-            Some("~") => Some(""),
-            Some(text) => text.strip_prefix("~/"),
-            None => None,
-        };
-        let Some(relative) = relative else {
-            return location_value(&self.locations, [path]);
-        };
-        // The load refuses declared locations without a home, so `homes` is empty only for a box
-        // that declares no location, and then the record is empty.
-        let expanded: Vec<PathBuf> = self
-            .homes
-            .iter()
-            .map(|home| {
-                if relative.is_empty() {
-                    home.clone()
-                } else {
-                    home.join(relative)
-                }
-            })
-            .collect();
-        location_value(&self.locations, expanded.iter().map(PathBuf::as_path))
     }
 
     /// Submit the `::response` of one completed action whose `input` is the JSON record `input`.
@@ -2418,9 +2386,9 @@ fn fs_operation_value(operation: crate::request::FsOperation) -> Value {
 }
 
 /// The `locations` record of a filesystem event, mirroring the Cedar mapping's `locations_expr`.
-fn location_value<'a>(locations: &Locations, paths: impl IntoIterator<Item = &'a Path>) -> Value {
+fn location_value(locations: &Locations, reported: &str) -> Value {
     Value::Object(
-        held_locations(locations, paths)
+        held_locations(locations, reported)
             .into_iter()
             .map(|(name, held)| (name.to_string(), Value::Bool(held)))
             .collect(),
