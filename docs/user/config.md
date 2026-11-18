@@ -778,7 +778,8 @@ program is not installed when:
 
 A search-path entry that is a file, or that Box cannot search, holds nothing.
 
-A symbolic link to a file that doesn't exist counts as nothing.
+A symbolic link to a file that doesn't exist counts as nothing. A symbolic link that loops does not
+count as nothing, so Box refuses to start.
 
 `run` prints one line for each tool it leaves out, before the workload starts:
 
@@ -787,8 +788,15 @@ strands-box: [tool.tsx] left out: tsx not found
 ```
 
 A left-out tool gets no filesystem grants, and Box does not check its lists. It runs nothing for
-the agent. Its grammar binds no file, so no spawn is decided as its actions. A policy that names
-those actions still loads. The set of tools is fixed when the run starts. A program installed
+the agent. Its grammar stays, so a policy that names its actions still loads. A grammar decides
+spawns by program name, so it still decides another `[tool]` or stdio `[mcp.<name>]` with the same
+program name. The startup line for that table says so:
+
+```text
+strands-box: [tool.system_git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
+```
+
+The set of tools is fixed when the run starts. A program installed
 during the run, or a file that appears later at the tool's path, does not run with the tool's
 grants.
 

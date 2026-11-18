@@ -300,8 +300,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   bare names, approved reach, tool selection, and leaf translation. Not installed means nothing exists,
   after links are followed, at an absolute path or at a bare name in any absolute search-path entry that Box can search.
   So a non-executable or non-regular match still reaches its real refusal. Any other failure still
-  stops the box, and so does a program that holds `${` or an argument that no run can expand. The policy keeps the tool's grammar actions so a policy that names them still loads, and no
-  file binds to them. Do not move the decision into a consumer: a consumer that resolves a left-out
+  stops the box, and so does a program that holds `${` or an argument that no run can expand. The policy keeps the tool's grammar actions so a policy that names them still loads. The
+  grammar still decides another table with its program name, so the grammar disclosure reads the
+  grammars from the record before the trim. A link loop at a bare name is refused, not left out. Do not move the decision into a consumer: a consumer that resolves a left-out
   tool later would admit a file planted at its path.
   `hosted::tests::a_file_planted_at_a_left_out_tools_path_never_runs_with_its_reach` is the pin.
 - **A credential binding is not an authorization

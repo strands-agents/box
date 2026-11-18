@@ -105,7 +105,8 @@ impl Resolver<'_> {
 }
 
 /// Whether `program` is not installed: nothing exists, after every symbolic link is followed, at an
-/// absolute path or at a bare name in any absolute `search_path` entry that the box can search.
+/// absolute path or at a bare name in any absolute `search_path` entry that the box can search. A
+/// link loop at the name, in a directory the box can search, is a broken install, not an absence.
 pub(crate) fn is_absent(program: &str, search_path: &OsStr) -> bool {
     let path = Path::new(program);
     if path.is_absolute() {
@@ -119,7 +120,13 @@ pub(crate) fn is_absent(program: &str, search_path: &OsStr) -> bool {
     path.components().count() == 1
         && std::env::split_paths(search_path)
             .filter(|directory| directory.is_absolute())
-            .all(|directory| std::fs::metadata(directory.join(path)).is_err())
+            .all(|directory| match std::fs::metadata(directory.join(path)) {
+                Ok(_) => false,
+                Err(error) => {
+                    error.raw_os_error() != Some(libc::ELOOP)
+                        || !std::fs::metadata(&directory).is_ok_and(|entry| entry.is_dir())
+                }
+            })
 }
 
 /// The search path that the hosted Shell finds a bare program name on: this process's `PATH`, else

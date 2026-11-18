@@ -1744,8 +1744,14 @@ mod left_out_tests {
         let locked = root.join("locked");
         std::fs::create_dir(&locked).expect("locked");
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("mode");
-        let odd_path = std::env::join_paths([bin.clone(), bin.join("present"), locked.clone()])
-            .expect("a search path");
+        std::os::unix::fs::symlink("looped", root.join("looped")).expect("a link loop");
+        let odd_path = std::env::join_paths([
+            bin.clone(),
+            bin.join("present"),
+            locked.clone(),
+            root.join("looped"),
+        ])
+        .expect("a search path");
         let mut record = with_tools(vec![
             ("present", spec(&["present"], Some(&bin))),
             ("odd_path", spec(&["tsx"], Some(Path::new(&odd_path)))),
@@ -1786,9 +1792,9 @@ mod left_out_tests {
         assert!(commands.get("bare").is_none());
     }
 
-    /// **Every other check on a tool's file still stops the box**: a file that is not executable
-    /// and a directory, by path and by bare name, and a relative path stay in the record, so the
-    /// load refuses them.
+    /// **Every other check on a tool's file still stops the box**: a file that is not executable,
+    /// a directory, and a link loop, by path and by bare name, and a relative path stay in the
+    /// record, so the load refuses them.
     #[test]
     fn a_program_that_exists_is_never_left_out() {
         let root = tempfile::tempdir().expect("root");
@@ -1797,6 +1803,7 @@ mod left_out_tests {
         executable(&plain, 0o644);
         let directory = root.join("directory");
         std::fs::create_dir(&directory).expect("directory");
+        std::os::unix::fs::symlink("looped", root.join("looped")).expect("a link loop");
         for (label, command, path) in [
             ("plain", plain.display().to_string(), None),
             ("directory", directory.display().to_string(), None),
@@ -1806,6 +1813,8 @@ mod left_out_tests {
                 "directory".to_string(),
                 Some(root.as_path()),
             ),
+            ("looped", root.join("looped").display().to_string(), None),
+            ("bare_looped", "looped".to_string(), Some(root.as_path())),
             ("relative", "bin/tool".to_string(), None),
         ] {
             let mut record = with_tools(vec![(label, spec(&[&command], path))]);
