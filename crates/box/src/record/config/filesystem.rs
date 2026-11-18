@@ -165,6 +165,9 @@ pub(crate) struct FilesystemContext<'a> {
     pub(crate) policy: Option<&'a Path>,
     /// The directory holding each authority source this run loaded, canonical.
     pub(crate) authority_directories: Vec<PathBuf>,
+    /// The files and directories `SSL_CERT_FILE` and `SSL_CERT_DIR` name, from which the egress
+    /// gateway reads the host's trusted roots.
+    pub(crate) upstream_trust: Vec<PathBuf>,
     /// Every directory a declared MCP program is searched for in, which is the operator's own
     /// `PATH`. A declared program is always a bare name, so the box resolves it there, outside
     /// containment, and a writable directory on that path is a program the workload chose.
@@ -420,6 +423,7 @@ pub(crate) fn judge_read_grant(path: &Path) -> Result<bool, (GrantRefusal, BoxEr
         operator_home: &home,
         policy: None,
         authority_directories: Vec::new(),
+        upstream_trust: Vec::new(),
         program_search_directories: Vec::new(),
     };
     entry_grant(Grant::Read, path, &context)
@@ -691,6 +695,30 @@ fn require_nothing_sensitive_stays_reachable(
             ),
         ));
     }
+
+    // The host trust the gateway reads is checked against WRITABLE grants too: writing it adds a
+    // root the gateway trusts for every upstream, which hands the injected credentials to whoever
+    // holds that root's key. A grant inside a named directory reaches a file the gateway reads.
+    for trust in &context.upstream_trust {
+        let inside = grants.iter().find(|grant| {
+            grant.operation == Operation::Write
+                && grant.resolved.starts_with(trust)
+                && !refused(&grant.resolved)
+        });
+        if let Some(grant) = reaching(trust).or(inside) {
+            return Err(refuse(
+                context,
+                &grant.authored,
+                &format!(
+                    "`{}` reaches {}, which `SSL_CERT_FILE` or `SSL_CERT_DIR` names, and the \
+                     egress gateway trusts every root certificate there. Remove the write, \
+                     subtract the path with `deny`, or run without that variable",
+                    grant.kind.key(),
+                    trust.display()
+                ),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -851,6 +879,7 @@ mod tests {
                 operator_home: &self.home,
                 policy: None,
                 authority_directories: Vec::new(),
+                upstream_trust: Vec::new(),
                 program_search_directories: Vec::new(),
             }
         }
@@ -1530,6 +1559,75 @@ mod tests {
             &context,
             &format!("read = [{:?}]", text(&home.join("scratch"))),
         );
+    }
+
+    /// **A write entry that reaches the host trust the gateway reads is refused.** Reading it stays
+    /// granted, and a `deny` that subtracts it lifts the refusal.
+    #[test]
+    fn a_writable_grant_over_upstream_trust_is_refused() {
+        let fixture = Fixture::new();
+        let home = &fixture.home;
+        std::fs::create_dir_all(home.join("scratch/certs")).expect("a certificate directory");
+        std::fs::write(home.join("scratch/roots.pem"), "").expect("a certificate file");
+        for trust in [home.join("scratch/roots.pem"), home.join("scratch/certs")] {
+            let context = FilesystemContext {
+                upstream_trust: vec![trust.clone()],
+                ..fixture.context()
+            };
+            let refusal = fixture.refusal(
+                &context,
+                &format!(
+                    "read = [{:?}]\nwrite = [{:?}]",
+                    text(&home.join("scratch")),
+                    text(&home.join("scratch"))
+                ),
+            );
+            assert!(refusal.contains("SSL_CERT_FILE"), "{refusal}");
+            fixture.reach(
+                &context,
+                &format!("read = [{:?}]", text(&home.join("scratch"))),
+            );
+            fixture.reach(
+                &context,
+                &format!(
+                    "read = [{:?}]\nwrite = [{:?}]\ndeny = [{:?}]",
+                    text(&home.join("scratch")),
+                    text(&home.join("scratch")),
+                    text(&trust)
+                ),
+            );
+        }
+
+        // A named file that is not there yet is judged by its place.
+        let context = FilesystemContext {
+            upstream_trust: vec![home.join("scratch/later.pem")],
+            ..fixture.context()
+        };
+        let refusal = fixture.refusal(
+            &context,
+            &format!(
+                "read = [{:?}]\nwrite = [{:?}]",
+                text(&home.join("scratch")),
+                text(&home.join("scratch"))
+            ),
+        );
+        assert!(refusal.contains("later.pem"), "{refusal}");
+
+        // A write inside a named directory reaches a file the gateway reads from it.
+        std::fs::write(home.join("scratch/certs/extra.pem"), "").expect("a file in it");
+        let context = FilesystemContext {
+            upstream_trust: vec![home.join("scratch/certs")],
+            ..fixture.context()
+        };
+        let refusal = fixture.refusal(
+            &context,
+            &format!(
+                "read_file = [{:?}]\nwrite_file = [{:?}]",
+                text(&home.join("scratch/certs/extra.pem")),
+                text(&home.join("scratch/certs/extra.pem"))
+            ),
+        );
+        assert!(refusal.contains("SSL_CERT_DIR"), "{refusal}");
     }
 
     /// **A write entry enclosing a directory on the MCP program search path is refused.**

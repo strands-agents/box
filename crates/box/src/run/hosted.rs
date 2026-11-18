@@ -931,6 +931,8 @@ impl HostedBox {
                 backends: backend_dials,
                 // The hosts whose plain HTTP on port 80 is decided and sent as HTTPS on 443.
                 upgrade_http: record.gateway.upgrade_http.clone(),
+                // The host's own trusted roots, beside the built-in ones.
+                upstream_host_roots: true,
                 ..MitmConfig::default()
             },
             capabilities,
@@ -942,6 +944,15 @@ impl HostedBox {
             Some(&trust_certificate),
         )
         .map_err(BoxError::from)?;
+        if let Some((added, ignored, errors)) = proxy.upstream_host_roots() {
+            eprintln!(
+                "strands-box: the egress gateway also trusts {added} root certificates from this \
+                 host's trust store for upstream servers ({ignored} ignored)"
+            );
+            for error in errors {
+                eprintln!("strands-box: warning: reading the host's trust store: {error}");
+            }
+        }
         let proxy_port = proxy
             .port()
             .ok_or_else(|| BoxError::from(DaemonError::NoProxyPort))?;

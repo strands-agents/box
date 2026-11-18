@@ -550,7 +550,11 @@ mod tests {
             controls: CapabilitySet::default(),
             config: super::super::MitmConfig::default(),
             ca: super::super::ca::EphemeralCa::generate(None, None).unwrap(),
-            upstream_config: Arc::new(super::super::tls::upstream_client_config(&[]).unwrap()),
+            upstream_config: Arc::new(
+                super::super::tls::upstream_client_config(&[], false)
+                    .unwrap()
+                    .0,
+            ),
             emitter: Box::new(StubEmitter::new()),
             effect_interceptor: policy,
             reply_copies: Arc::new(super::super::body::CopyBudget::for_limit(1024)),
@@ -797,7 +801,11 @@ mod tests {
             controls: CapabilitySet::default(),
             config,
             ca: super::super::ca::EphemeralCa::generate(None, None).unwrap(),
-            upstream_config: Arc::new(super::super::tls::upstream_client_config(&[]).unwrap()),
+            upstream_config: Arc::new(
+                super::super::tls::upstream_client_config(&[], false)
+                    .unwrap()
+                    .0,
+            ),
             emitter: Box::new(StubEmitter::new()),
             effect_interceptor: policy,
             reply_copies: Arc::new(super::super::body::CopyBudget::for_limit(1024)),

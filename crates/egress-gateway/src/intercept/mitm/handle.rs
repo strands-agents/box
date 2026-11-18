@@ -22,6 +22,7 @@ pub struct MitmHandle {
     stop: Arc<AtomicBool>,
     accept_thread: Option<JoinHandle<()>>,
     shutdown_connection: OnceLock<OwnedFd>,
+    host_roots: Option<super::tls::HostRoots>,
 }
 
 impl MitmHandle {
@@ -31,6 +32,7 @@ impl MitmHandle {
         ca_path: Option<PathBuf>,
         stop: Arc<AtomicBool>,
         accept_thread: JoinHandle<()>,
+        host_roots: Option<super::tls::HostRoots>,
     ) -> Self {
         Self {
             transport,
@@ -38,7 +40,16 @@ impl MitmHandle {
             stop,
             accept_thread: Some(accept_thread),
             shutdown_connection: OnceLock::new(),
+            host_roots,
         }
+    }
+
+    /// The roots added from the host's trust store, the certificates ignored, and the errors the
+    /// store reported, when the gateway read it.
+    pub fn upstream_host_roots(&self) -> Option<(usize, usize, &[String])> {
+        self.host_roots
+            .as_ref()
+            .map(|roots| (roots.added, roots.ignored, roots.errors.as_slice()))
     }
 
     /// The localhost port the proxy is listening on, if it bound a `TcpListener`.
@@ -157,6 +168,7 @@ mod tests {
             None,
             stop,
             accept_thread,
+            None,
         );
         (handle, path)
     }
@@ -177,7 +189,7 @@ mod tests {
                 }
             })
         };
-        MitmHandle::new(BoundTransport::Tcp(port), None, stop, accept_thread)
+        MitmHandle::new(BoundTransport::Tcp(port), None, stop, accept_thread, None)
     }
 
     /// `port()`/`unix_socket_path()` each report the transport actually bound.

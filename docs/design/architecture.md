@@ -284,8 +284,10 @@ interpreters are part of the code the operator must trust.
    Rules for `shell:spawn` do not apply to a spawn of those programs by the bound name.
    Box also prints, for each bare name a `[tool]` answers to, the file the Shell runs for it.
 5. It resolves bound secrets and starts the gateway with its own certificate authority.
+   The gateway reads the host's trusted roots once, and Box prints how many it added on stderr.
    It checks each process specification's filesystem grants, then binds the broker socket.
-   A grant it cannot check stops startup.
+   A grant it cannot check stops startup, and so does a writable grant over the host trust that
+   `SSL_CERT_FILE` or `SSL_CERT_DIR` names.
 6. It builds and discloses the sandbox grants for each tool, then for the agent.
    Box [prints every direct filesystem grant to stderr](decisions.md#direct-filesystem-reach-is-declared-and-disclosed)
    because those accesses do not produce `fs:*` decisions. If Box cannot build a tool's sandbox
