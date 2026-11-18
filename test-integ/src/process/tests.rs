@@ -388,3 +388,93 @@ while True:
         "request shutdown before using force"
     );
 }
+
+#[test]
+fn host_output_preserves_arguments_streams_and_nonzero_status() {
+    let output = host_output(Command::new("/bin/sh").args([
+        "-c",
+        "printf '<%s>\n' \"$@\"; printf 'error\n' >&2; exit 7",
+        "control",
+        "",
+        "two words",
+    ]))
+    .unwrap();
+    assert_eq!(output.status.code(), Some(7));
+    assert_eq!(output.stdout, b"<>\n<two words>\n");
+    assert_eq!(output.stderr, b"error\n");
+}
+
+#[test]
+fn host_output_returns_missing_program_without_waiting_for_the_retry_deadline() {
+    let tmp = tempfile::tempdir().unwrap();
+    let started = std::time::Instant::now();
+    let error = host_output(&mut Command::new(tmp.path().join("missing"))).unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    assert!(started.elapsed() < Duration::from_secs(1));
+}
+
+#[cfg(target_os = "linux")]
+fn held_host_executable() -> (tempfile::TempDir, std::path::PathBuf, std::fs::File) {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("shell");
+    std::fs::copy("/bin/sh", &path).unwrap();
+    let writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    let error = Command::new(&path)
+        .arg("-c")
+        .arg("exit 0")
+        .output()
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::ExecutableFileBusy);
+    (tmp, path, writer)
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn host_output_retries_until_the_executable_writer_closes() {
+    let (_tmp, path, writer) = held_host_executable();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let output = host_output(Command::new(path).args(["-c", "printf recovered"]));
+        sender.send(output).unwrap();
+    });
+    let before_close = receiver.recv_timeout(Duration::from_millis(100));
+    let waited = matches!(
+        before_close,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    );
+    drop(writer);
+    let result = if waited {
+        receiver.recv_timeout(Duration::from_secs(5))
+    } else {
+        before_close
+    };
+    worker.join().unwrap();
+    assert!(
+        waited,
+        "a busy start must wait for the writer or the deadline"
+    );
+    let output = result.unwrap().unwrap();
+    assert!(output.status.success());
+    assert_eq!(output.stdout, b"recovered");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn host_output_returns_the_busy_error_after_its_deadline() {
+    let (_tmp, path, writer) = held_host_executable();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let output = host_output(Command::new(path).args(["-c", "exit 0"]));
+        sender.send((started.elapsed(), output)).unwrap();
+    });
+    let bounded = receiver.recv_timeout(Duration::from_secs(5));
+    drop(writer);
+    worker.join().unwrap();
+    let (elapsed, result) = bounded.expect("a busy start must return within five seconds");
+    assert_eq!(
+        result.unwrap_err().kind(),
+        std::io::ErrorKind::ExecutableFileBusy
+    );
+    assert!(elapsed >= Duration::from_secs(2));
+}

@@ -111,6 +111,9 @@ A box makes five guarantees:
 - Every descendant of a contained process inherits its sandbox restrictions. Replacing the program
   with another one preserves those restrictions. Nothing widens a box after it applies. See
   [children inherit the boundary](decisions.md#children-inherit-the-boundary).
+  On Linux x86-64, Box permits both `fork` and `clone` for child-process creation.
+  A child created with `fork` inherits the parent's syscall filters and namespaces,
+  which define its isolated view of the system.
 - The sandbox protects the operator's files, credentials, and network from what runs inside. It
   doesn't make the box's own contents confidential, and it doesn't govern code the agent writes and
   gets run somewhere else. See [the sandbox protects the surrounding
@@ -155,10 +158,19 @@ the same four plus `network`. One translator turns each of them into a set of sa
   is `PWD`, `USER`, or an OTLP exporter name, which Box sets in every process. `LoadsCode` is a name
   that loads code before a program's first line, which a credential cannot take.
 
-- `filesystem` lists name paths and their access modes. The agent takes eight: `read`, `write`,
-  `read_file`, `write_file`, `list`, `metadata`, `exec`, and `deny`. A tool and a local MCP server
-  take the same lists without `metadata` and `exec`. A directory entry covers its tree, and a file
+- `filesystem` lists name paths and their access modes. The agent takes nine: `read`, `write`,
+  `read_file`, `write_file`, `list`, `metadata`, `exec`, `deny`, and `deny_write`. A tool and a
+  local MCP server take the same
+  lists without `metadata` and `exec`. A directory entry covers its tree, and a file
   entry is exact. `write` doesn't imply `read`.
+
+On Linux, the trusted process prepares filesystem grants for each new sandbox launch.
+It keeps open references to the objects it approved and sends their recorded identities to the launcher.
+The launcher reopens each grant's path and refuses a different object before applying the sandbox.
+
+This check covers the handoff for one launch. It compares object identity, not file contents.
+A replacement directory can be selected when grants are prepared for a later launch.
+Configured tool commands and denied paths retain their separate identity checks.
 
 ### Script interpreter grants on Linux
 

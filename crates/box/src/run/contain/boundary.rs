@@ -245,11 +245,7 @@ pub(crate) struct Boundary {
     installation: std::sync::Arc<crate::run::installation::TrustedInstallation>,
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     native_filesystem_policy: bool,
     /// The executable, canonical and prepared.
@@ -268,6 +264,10 @@ pub(crate) struct Boundary {
     containment_config: PathBuf,
     containment_config_file: std::fs::File,
     containment_digest: String,
+
+    /// Open grant references retained for this process launch.
+    #[cfg(target_os = "linux")]
+    _containment: ContainmentConfig,
 
     /// The process's environment, serialized for the trampoline.
     target_environment: String,
@@ -386,14 +386,10 @@ impl Boundary {
         // is the one exec grant every profile carries. It is the identity the profile grants and the
         // string the box execs, so no token expands there, and one that appears is refused rather
         // than left to fail as a search miss.
-        if spec.program().contains(environment::OPENING) {
+        if let Some(reason) = environment::program_refusal(spec) {
             return Err(ConfigError::Process {
                 table: table.to_string(),
-                reason: format!(
-                    "`command` names the program as {:?}, and a program is never expanded; \
-                     write the path",
-                    spec.program()
-                ),
+                reason,
             }
             .into());
         }
@@ -574,6 +570,8 @@ impl Boundary {
             .map(|grant| grant.resolved.as_path())
             .collect();
         let mut minimum: Vec<MinimumCell> = Vec::new();
+        // By identity, because a minimum cell can name a link, such as `/tmp`.
+        let mut minimum_covers_workspace = false;
         for cell in launch.runtime_reach.cells() {
             let resolved = cell
                 .path
@@ -583,6 +581,7 @@ impl Boundary {
                 continue;
             }
             containment = allow(containment, &cell.path, cell.operation, cell.scope)?;
+            minimum_covers_workspace |= resolved == working_directory;
             minimum.push(cell);
         }
         // The working directory is enterable so `chdir` and `getcwd` work, and neither readable nor
@@ -590,7 +589,7 @@ impl Boundary {
         let workspace_covered = reach.grants.iter().any(|grant| match grant.scope {
             Scope::Root => working_directory.starts_with(&grant.resolved),
             _ => working_directory == grant.resolved,
-        }) || minimum.iter().any(|cell| cell.path == working_directory);
+        }) || minimum_covers_workspace;
         let mut enterable_workspace = None;
         if !workspace_covered {
             containment = allow_operator(
@@ -699,14 +698,15 @@ impl Boundary {
                 guard.judge(&grant.resolved, grant.operation, grant.scope)?;
                 containment.allow_credential_store(&grant.lexical, grant.operation, grant.scope)?
             } else {
-                // A link entry is granted by its own name, so the box shows the file there too.
-                let path = if grant.is_link() {
-                    &grant.lexical
-                } else {
-                    &grant.resolved
-                };
-                allow_operator(containment, path, grant.operation, grant.scope)?
+                // One lookup, compared with the approved identity and then granted as it is.
+                let prepared = grant.prepare(table)?;
+                guard.judge(prepared.resolved_path(), grant.operation, grant.scope)?;
+                containment.allow_prepared(prepared, grant.operation, grant.scope)?
             };
+        }
+
+        for tree in &reach.write_protections {
+            containment = containment.protect_write_tree(tree)?;
         }
 
         if let Some(command) = reach.command.as_ref() {
@@ -761,6 +761,13 @@ impl Boundary {
         // Every exec identity inside a writable grant is disclosed, the command and each interpreter
         // hop alike.
         let writable_grant = |identity: &Path| {
+            if reach
+                .write_protections
+                .iter()
+                .any(|tree| identity.starts_with(tree))
+            {
+                return None;
+            }
             reach.grants.iter().find_map(|grant| {
                 (grant.operation == Operation::Write
                     && match grant.scope {
@@ -780,6 +787,7 @@ impl Boundary {
         let disclosure = disclosure(&DisclosureInputs {
             table,
             grants: &reach.grants,
+            write_protections: &reach.write_protections,
             minimum: &minimum,
             interpreters: &interpreters,
             interpreter_aliases: &interpreter_aliases,
@@ -827,11 +835,7 @@ impl Boundary {
             installation,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             native_filesystem_policy: spec
                 .native_filesystem_policy
@@ -844,6 +848,8 @@ impl Boundary {
             containment_config,
             containment_config_file,
             containment_digest,
+            #[cfg(target_os = "linux")]
+            _containment: containment,
             target_environment,
             disclosure,
             #[cfg(target_os = "linux")]
@@ -857,11 +863,7 @@ impl Boundary {
 
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     pub(crate) fn native_filesystem_policy(&self) -> bool {
         self.native_filesystem_policy
@@ -947,6 +949,7 @@ impl Boundary {
 struct DisclosureInputs<'a> {
     table: &'a str,
     grants: &'a [DirectGrant],
+    write_protections: &'a [PathBuf],
     minimum: &'a [MinimumCell],
     interpreters: &'a [PathBuf],
     interpreter_aliases: &'a [(PathBuf, PathBuf)],
@@ -992,6 +995,12 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
         lines.push("  (no filesystem entry)".to_string());
     }
     lines.extend(inputs.grants.iter().map(DirectGrant::disclosure));
+    lines.extend(
+        inputs
+            .write_protections
+            .iter()
+            .map(|tree| format!("  deny_write  {}  (read-only)", tree.display())),
+    );
     if !inputs.command_listed {
         lines.push(format!(
             "  exec        {}  (command, implicit)",
@@ -1595,7 +1604,12 @@ pub(crate) mod environment {
     /// The three telemetry values Core derives from this run's attachment, and the one set a
     /// `${NAME}` may name.
     pub(crate) fn expandable(attachment: &Attachment) -> BTreeMap<String, String> {
-        let endpoint = format!("http://127.0.0.1:{}", attachment.telemetry_port);
+        expandable_at(attachment.telemetry_port)
+    }
+
+    /// The values [`expandable`] holds for a collector on `telemetry_port`.
+    fn expandable_at(telemetry_port: u16) -> BTreeMap<String, String> {
+        let endpoint = format!("http://127.0.0.1:{telemetry_port}");
         BTreeMap::from([
             (
                 "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT".to_string(),
@@ -1609,16 +1623,39 @@ pub(crate) mod environment {
         ])
     }
 
+    /// The refusal a `${...}` in `spec`'s program meets, because a program is never expanded.
+    pub(crate) fn program_refusal(spec: &ProcessSpec) -> Option<String> {
+        spec.program().contains(OPENING).then(|| {
+            format!(
+                "`command` names the program as {:?}, and a program is never expanded; \
+                 write the path",
+                spec.program()
+            )
+        })
+    }
+
+    /// The refusal that expanding `spec`'s fixed arguments meets in every run, if any.
+    pub(crate) fn argument_refusal(spec: &ProcessSpec) -> Option<String> {
+        arguments_with(spec, &expandable_at(0)).err()
+    }
+
     /// One spec's fixed arguments, expanded. The only place a spec's arguments are expanded.
     pub(crate) fn expanded_arguments(
         spec: &ProcessSpec,
         attachment: &Attachment,
     ) -> Result<Vec<String>, String> {
-        let values = expandable(attachment);
+        arguments_with(spec, &expandable(attachment))
+    }
+
+    /// One spec's fixed arguments, expanded from `values`.
+    fn arguments_with(
+        spec: &ProcessSpec,
+        values: &BTreeMap<String, String>,
+    ) -> Result<Vec<String>, String> {
         spec.fixed_arguments()
             .iter()
             .map(|argument| {
-                expanded(argument, &values)
+                expanded(argument, values)
                     .map_err(|reason| format!("`command` argument {argument:?}: {reason}"))
             })
             .collect()
@@ -1749,11 +1786,7 @@ mod tests {
                             &fixture.root,
                             #[cfg(any(
                                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                                all(
-                                    target_os = "linux",
-                                    feature = "native-filesystem-policy",
-                                    box_native_adapter_tests
-                                )
+                                all(target_os = "linux", feature = "native-filesystem-policy",)
                             ))]
                             None,
                         )
@@ -1765,11 +1798,7 @@ mod tests {
                             &fixture.root,
                             #[cfg(any(
                                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                                all(
-                                    target_os = "linux",
-                                    feature = "native-filesystem-policy",
-                                    box_native_adapter_tests
-                                )
+                                all(target_os = "linux", feature = "native-filesystem-policy",)
                             ))]
                             None,
                         )
@@ -1818,11 +1847,7 @@ mod tests {
                     &fixture.root,
                     #[cfg(any(
                         all(target_os = "macos", feature = "native-filesystem-policy"),
-                        all(
-                            target_os = "linux",
-                            feature = "native-filesystem-policy",
-                            box_native_adapter_tests
-                        )
+                        all(target_os = "linux", feature = "native-filesystem-policy",)
                     ))]
                     None,
                 ),
@@ -1846,11 +1871,7 @@ mod tests {
                 &fixture.root,
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
-                    all(
-                        target_os = "linux",
-                        feature = "native-filesystem-policy",
-                        box_native_adapter_tests
-                    )
+                    all(target_os = "linux", feature = "native-filesystem-policy",)
                 ))]
                 None,
             ),
@@ -2208,6 +2229,50 @@ mod tests {
                 )
             })
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_boundary_keeps_unlinked_grants_open_until_it_drops() {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let fixture = Fixture::new();
+        let granted = fixture.path("retained-grant");
+        std::fs::write(&granted, "per-launch fixture").expect("write the granted file");
+        let granted = granted.canonicalize().expect("canonical granted file");
+        let metadata = std::fs::metadata(&granted).expect("record the granted object");
+        let identity = (metadata.dev(), metadata.ino());
+        let deleted = PathBuf::from(format!("{} (deleted)", granted.display()));
+        let has_open_reference = || {
+            std::fs::read_dir("/proc/self/fd")
+                .expect("inspect this process's open references")
+                .filter_map(Result::ok)
+                .any(|entry| {
+                    let path = entry.path();
+                    let Ok(target) = std::fs::read_link(&path) else {
+                        return false;
+                    };
+                    (target == granted || target == deleted)
+                        && std::fs::metadata(&path)
+                            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == identity)
+                })
+        };
+        assert!(!has_open_reference(), "the fixture holds no file reference");
+        let mut spec = fixture.spec();
+        spec.filesystem.read_file.push(granted.clone());
+        let boundary = fixture.translate(&spec, "[tool.reader]", &[]);
+        std::fs::remove_file(&granted).expect("unlink the granted fixture");
+        assert!(!granted.exists(), "the pathname no longer holds the object");
+        assert!(
+            has_open_reference(),
+            "the translated boundary must retain its approved object"
+        );
+
+        drop(boundary);
+        assert!(
+            !has_open_reference(),
+            "the object reference must be released with its boundary"
+        );
     }
 
     /// A `box.toml` written into `directory` and loaded as one authority source.
@@ -2581,6 +2646,79 @@ mod tests {
             .expect("a replaced deny path refuses the spawn")
             .to_string();
         assert!(refused.contains("was replaced"), "{refused}");
+    }
+
+    /// **A spawn refuses a reach whose `deny_write` directory was replaced** after the judgement,
+    /// or reached through a folder that became a link, so a tool protects the directory the run
+    /// approved.
+    #[test]
+    fn a_spawn_refuses_a_reach_whose_write_protected_directory_was_replaced() {
+        for case in ["replaced", "linked ancestor"] {
+            let fixture = Fixture::new();
+            let venv = fixture.path("scratch/deps/venv");
+            std::fs::create_dir_all(&venv).expect("a protected directory");
+            let mut spec = fixture.spec();
+            spec.filesystem = Filesystem {
+                read: vec![fixture.path("scratch")],
+                write: vec![fixture.path("scratch")],
+                deny_write: vec![venv.clone()],
+                ..Filesystem::default()
+            };
+            let record = Record {
+                tool: BTreeMap::from([("t".to_string(), spec.clone())]),
+                ..fixture.record.clone()
+            };
+            let approved = crate::test_support::with_operator_home(fixture.operator.path(), || {
+                ApprovedReach::judge(&record, &[])
+            })
+            .expect("every table is judged");
+            let fallback = fixture.path("project");
+            let translate = || {
+                crate::test_support::with_operator_home(fixture.operator.path(), || {
+                    Boundary::translate(
+                        &spec,
+                        Launch {
+                            table: "[tool.t]",
+                            trailing: &[],
+                            fallback_workspace: &fallback,
+                            shebang_interpreters: ShebangInterpreters::Granted,
+                            runtime_reach: RuntimeReach::Leaf,
+                            argument_zero: None,
+                            egress: EgressMode::Gateway,
+                            approved: approved.table("[tool.t]"),
+                        },
+                        &Site {
+                            attachment: &fixture.attachment,
+                            layout: &fixture.root,
+                            stored: &record,
+                            protected_sources: &[],
+                        },
+                    )
+                })
+            };
+            translate().expect("the judged reach is acted on");
+            if case == "replaced" {
+                std::fs::rename(&venv, fixture.path("scratch/deps/moved")).expect("move it");
+                std::fs::create_dir(&venv).expect("recreate the protected path");
+            } else {
+                std::fs::create_dir_all(fixture.path("scratch/real/venv")).expect("a target");
+                std::fs::rename(fixture.path("scratch/deps"), fixture.path("scratch/old"))
+                    .expect("move the parent");
+                std::os::unix::fs::symlink(
+                    fixture.path("scratch/real"),
+                    fixture.path("scratch/deps"),
+                )
+                .expect("a linked parent");
+            }
+            let refused = translate()
+                .err()
+                .unwrap_or_else(|| panic!("{case}: the spawn is refused"))
+                .to_string();
+            assert!(
+                refused.contains("since the run judged it"),
+                "{case}: {refused}"
+            );
+        }
     }
 
     #[test]
@@ -4359,6 +4497,30 @@ mod tests {
         }
     }
 
+    /// **A workspace at the `/tmp` link renders for the agent and for a tool**: the runtime minimum's
+    /// `/tmp` cell covers it, so no entry cell lands on `/private/tmp`, where the floor refuses one.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_workspace_at_the_tmp_link_is_covered_by_the_runtime_minimum() {
+        let fixture = Fixture::new();
+        let mut spec = fixture.spec();
+        spec.workspace = Some(PathBuf::from("/tmp"));
+        for (table, reach) in [
+            ("[agent]", RuntimeReach::Agent),
+            ("[tool.git]", RuntimeReach::Leaf),
+        ] {
+            let boundary = fixture.translate_with_reach(&spec, table, reach);
+            let config = ContainmentConfig::from_json(&boundary.containment_config_text())
+                .expect("the translated config");
+            let profile = containment::test_support::generate_seatbelt_profile(&config)
+                .unwrap_or_else(|error| panic!("{table} renders: {error}"));
+            assert!(
+                profile.contains("(allow file-read-metadata (literal \"/tmp\"))"),
+                "{table} renders metadata on the /tmp link: {profile}"
+            );
+        }
+    }
+
     /// **The translator refuses a declared home in trusted Box state**, for the agent and for a
     /// tool, so a spec reaching it by any route meets the same refusal the configuration does.
     #[test]
@@ -5295,11 +5457,7 @@ write = ["/Users/example/box-demo/aws-tmp"]
                     &fixture.root,
                     #[cfg(any(
                         all(target_os = "macos", feature = "native-filesystem-policy"),
-                        all(
-                            target_os = "linux",
-                            feature = "native-filesystem-policy",
-                            box_native_adapter_tests
-                        )
+                        all(target_os = "linux", feature = "native-filesystem-policy",)
                     ))]
                     None,
                 ),

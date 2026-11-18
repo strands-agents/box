@@ -17,8 +17,9 @@
 //!
 //! A write cell ends with one executable-mapping allow per exec grant it reaches, so the pair the
 //! floor warns about renders as stated. A refusal renders as `subpath` for a tree and as `literal`
-//! for one file. A write protection or a refusal strictly inside a write root fixes each directory
-//! between the two with the root's own identity pair, after the root's leaf allows.
+//! for one file. A write protection renders as `literal` for one file and as `subpath` for a
+//! write-protected tree. A write protection or a refusal strictly inside a write root fixes each
+//! directory between the two with the root's own identity pair, after the root's leaf allows.
 //!
 //! Two blocks are not cells. One refuses the existence test across the operator's home, allows it
 //! back on each granted path and its ancestor chain — over the subtree when the path is inside the
@@ -448,6 +449,7 @@ fn descriptor_path(descriptor: libc::c_int) -> Option<std::path::PathBuf> {
 }
 
 /// The profile for one request, naming no inherited stream.
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn render_profile(config: &ContainmentConfig) -> Result<String> {
     render_profile_with_streams(config, &InheritedStreams::default())
 }
@@ -610,6 +612,22 @@ pub(crate) fn render_profile_with_streams(
             fixed_ancestors.extend(
                 directories_between(protected.path(), &root.resolved)
                     .map(std::path::Path::to_path_buf),
+            );
+        }
+    }
+    for tree in config.write_protected_trees() {
+        let path = escaped(tree)?;
+        cells
+            .entry(WRITE_PROTECTION)
+            .or_default()
+            .push_str(&format!(
+                "(deny file-write* (subpath \"{path}\"))\n\
+                 {}(deny file-link (subpath \"{path}\"))\n",
+                write_leaf_denies("subpath", &path)
+            ));
+        for root in &write_roots {
+            fixed_ancestors.extend(
+                directories_between(tree, &root.resolved).map(std::path::Path::to_path_buf),
             );
         }
     }
@@ -814,7 +832,9 @@ pub(crate) fn render_profile_with_streams(
         .iter()
         .chain(config.write_protections())
         .chain(config.command_identities())
-        .flat_map(|required| required.path().ancestors())
+        .map(|required| required.path())
+        .chain(config.write_protected_trees())
+        .flat_map(std::path::Path::ancestors)
         .collect();
     for path in identity_paths {
         let path = escaped(path)?;

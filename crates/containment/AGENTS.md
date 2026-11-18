@@ -233,6 +233,17 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   and `/dev/null` as an ordinary file grant inside a forbidden tree. **A path carries one scope**, so
   the two `/tmp` cells serve different harnesses and no box may ask for both: a Bun-compiled agent
   takes the entry read, and V8 takes the descendant stat it needs to reserve its code range.
+- **The runtime minimum spells its `/tmp` cell as the link, `/tmp`, and not as `/private/tmp`.** A
+  `Metadata` + `Root` cell renders a metadata rule on the caller's spelling only when that spelling
+  differs from the resolved one, so `/private/tmp` renders no rule on the `/tmp` link node.
+  Measured 2026-11-17 on macOS 26.7.3 arm64: with that spelling, `lstat("/tmp")`,
+  `realpath("/tmp")`, and every path through `/tmp` failed with `EPERM` in the agent and in a tool,
+  also under a grant on `/private/tmp/<dir>`, and no list entry can add the rule. The box's
+  workspace check compares each minimum cell by identity for the same reason: by spelling, a
+  workspace at `/tmp` got an entry cell on `/private/tmp`, which the floor refuses. Guards:
+  `os_paths.rs::each_set_states_exactly_these_cells`,
+  `box_filesystem.rs::the_tmp_link_resolves_and_a_path_through_it_keeps_its_grants`, and
+  `boundary.rs::a_workspace_at_the_tmp_link_is_covered_by_the_runtime_minimum`.
 - **`(path-ancestors "/")` is an SBPL parse error**, and `sandbox-exec` reports
   `argument expected but none provided`. `ancestor_rule` renders nothing for `/`, which has no
   ancestor to name, so a grant on `/` renders its own rule and no ancestor rule.
@@ -931,6 +942,26 @@ The raw `vfork` probe keeps the child entirely in one assembly block. It checks 
 `setuid` refusal using the child's own UID, then exits without returning into Rust or changing the
 shared userspace stack. The outside control can set its unchanged UID. The parent checks the
 child's distinct exit status and reaps it. The test supervisor bounds the whole probe.
+
+Native Amazon Linux 2023 x86-64 validation for `04cdbb86cb31fee82ac341d529d690cfccb6810b`
+found that a direct `SYS_fork` call returned `EPERM` when the permit was absent; the outside
+control created and reaped its child. With the permit present,
+`raw_fork_preserves_child_restrictions` creates and reaps the child and verifies inherited
+refusals from both syscall filters. Its `getpriority` probe checks the permit filter; its
+executable `mprotect` probe checks the restriction filter without executing the memory.
+Controls that relax either rule separately make the regression fail.
+
+Musl 1.2.5's C library also uses this syscall on x86-64: its `fork()` function calls `_Fork()`,
+whose [implementation](https://git.musl-libc.org/cgit/musl/tree/src/process/_Fork.c?h=v1.2.5)
+selects raw `SYS_fork` when defined. Musl's x86-64 syscall definitions include that entry.
+This source inspection explains the compatibility need; the measured test calls the syscall
+directly and does not qualify a complete musl-linked application.
+
+Linux v6.12 implements `fork` through `kernel_clone` with only `SIGCHLD` in
+[`kernel/fork.c`](https://github.com/torvalds/linux/blob/v6.12/kernel/fork.c#L2868-L2875).
+The already permitted, unrestricted `clone` call admits that operation. Keep this permit
+x86-64-only.
+
 Follow-up full-Box checks found that Python `os.rmdir`, Python `shutil.rmtree`, and `git clean -fd`
 could not remove their empty directories on x86: `rmdir` returned `EPERM`. All three outside
 controls and matched ARM64 checks completed cleanup; ARM64 used `unlinkat` with `AT_REMOVEDIR`. Linux v6.12 routes both calls through `do_rmdir`
@@ -965,6 +996,26 @@ native filesystem broker, `AT_FDCWD` resolves through `/proc/<pid>/cwd` with the
 an explicit descriptor (`RequestPath::new` in `crates/box/src/run/linux_enforcement/broker.rs`).
 `a_workload_returns_to_its_saved_folder_with_fchdir`
 saves a folder, enters a subfolder, and returns with `fchdir` under the real trampoline.
+
+### Creating a name without replacing one
+
+On GitHub's Ubuntu 24.04 ARM64 runner, Box `9f5e71ea` refused `renameat2` with `EPERM`. uv 0.13.7
+failed its first command with `error: Could not acquire lock`, caused by
+`Could not persist temporary file .cache/uvx/.tmp…: Operation not permitted (os error 1)`. uv
+creates its lock through the `tempfile` crate. On Linux, tempfile 3.27's `persist_noclobber` calls
+`renameat2(…, RENAME_NOREPLACE)` and falls back to a hard link only on `ENOSYS` or `EINVAL`
+(`src/file/imp/unix.rs`), so it returned the `EPERM`.
+
+The permit admits `renameat2` only when its flags are `0` or `RENAME_NOREPLACE`. With `0` it is the
+permitted `renameat`. `RENAME_NOREPLACE` only makes the call fail with `EEXIST` when the new name
+exists. `RENAME_EXCHANGE`, which swaps two names, and `RENAME_WHITEOUT`, which creates a device
+node, still match no rule and get `EPERM`. A permitted `renameat2` meets the same mounts that keep
+each ancestor of a denied path fixed, so moving one fails with `EBUSY`, as `renameat` does
+(`renameat2_variants_remain_refused_for_denied_ancestors`). This covers the default backend only.
+The native filesystem broker mediates `renameat2` itself and answers any call with flags with
+`EACCES` (`broker.rs`), so under native filesystem policy tempfile still cannot persist a file.
+`a_name_is_created_without_replacing_one_with_renameat2_under_the_filters` checks each flag under
+the filters, and runs tempfile's `persist_noclobber`.
 
 ### W^X
 
@@ -1312,7 +1363,6 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     bit still lands outside it. Unmeasured — read from `syscall.rs` and `view.rs`, and no Linux
     target was exercised. Seccomp **can** scope this, unlike the macOS flag argument, because the
     mode is a scalar.
-
 
 ### Native policy and filesystem-information notifications
 
