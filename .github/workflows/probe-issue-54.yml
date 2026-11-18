@@ -18,4 +18,10 @@ jobs:
           save-if: false
       - run: sw_vers; rustc --version
       - run: cargo build --locked --all-features -p strands-box -p strands-box-containment
-      - run: bash .github/probe-issue-54/run.sh
+      - run: bash .github/probe-issue-54/run.sh 2>&1 | tee probe.log
+        timeout-minutes: 25
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: probe-log
+          path: probe.log

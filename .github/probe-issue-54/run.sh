@@ -33,7 +33,7 @@ python3 "$W/server.py" "$W/pki" "$W/upstream.log" &
 echo "127.0.0.1 corp-intercept.test" | sudo tee -a /etc/hosts >/dev/null
 sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder || true
 sleep 2
-curl -sS --cacert "$W/pki/ca.pem" https://corp-intercept.test:8443/ && echo " <- host curl with --cacert"
+curl -m 10 -sS --cacert "$W/pki/ca.pem" https://corp-intercept.test:8443/ && echo " <- host curl with --cacert"
 
 cat > "$W/policydir/policy.dw" <<'EOF'
 @id("corp_connect")
@@ -74,9 +74,9 @@ TOML
   local start end
   start=$(python3 -c 'import time; print(time.time())')
   if [ "$mode" = none ]; then
-    (cd "$W" && CORP_TOKEN=real-secret-123 "$W/bin/box" run --config "$C/config/box.toml" >"$C/out.txt" 2>"$C/err.txt")
+    (cd "$W" && CORP_TOKEN=real-secret-123 tmo 90 "$W/bin/box" run --config "$C/config/box.toml" >"$C/out.txt" 2>"$C/err.txt")
   else
-    (cd "$W" && BOX54_UPSTREAM_TRUST=$mode CORP_TOKEN=real-secret-123 "$W/bin/box" run --config "$C/config/box.toml" >"$C/out.txt" 2>"$C/err.txt")
+    (cd "$W" && BOX54_UPSTREAM_TRUST=$mode CORP_TOKEN=real-secret-123 tmo 90 "$W/bin/box" run --config "$C/config/box.toml" >"$C/out.txt" 2>"$C/err.txt")
   fi
   local rc=$?
   end=$(python3 -c 'import time; print(time.time())')
@@ -86,6 +86,8 @@ TOML
   sed 's/^/    upstream: /' "$W/upstream.log"
 }
 
+# Bound each box run, since a hang hides every later result.
+tmo() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 CORP=https://corp-intercept.test:8443/
 GH=https://api.github.com/zen
 echo "===== before the root is in the keychain"
@@ -98,8 +100,11 @@ case_run gh-host host "$GH"
 case_run gh-platform platform "$GH"
 
 echo "===== trust the root in the System keychain (admin trust domain, as MDM installs a TLS-inspection root)"
-sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$W/pki/ca.pem"; echo "add-trusted-cert exit=$?"
-curl -sS https://corp-intercept.test:8443/ && echo " <- host curl, no --cacert"
+# A CI runner has no one to answer the trust-settings authorization prompt; allow it for root.
+sudo security authorizationdb write com.apple.trust-settings.admin allow; echo "authorizationdb exit=$?"
+sudo perl -e 'alarm 60; exec @ARGV' security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$W/pki/ca.pem"; echo "add-trusted-cert exit=$?"
+security dump-trust-settings -d 2>&1 | grep -A3 "Corp Intercept" | head -8
+curl -m 10 -sS https://corp-intercept.test:8443/ && echo " <- host curl, no --cacert"
 case_run m0-baseline-k none "$CORP"
 case_run ma-file-k none "$CORP" "upstream-ca-file = \"$W/area/corp/ca.pem\""
 case_run mb1-host-k host "$CORP"
@@ -111,9 +116,9 @@ case_run mc2-platform-k-sslcertfile platform "$CORP"
 unset SSL_CERT_FILE
 
 echo "===== the root marked as distrusted (deny) for SSL in the admin domain"
-sudo security remove-trusted-cert -d "$W/pki/ca.pem"; echo "remove-trusted-cert exit=$?"
-sudo security add-trusted-cert -d -r deny -k /Library/Keychains/System.keychain "$W/pki/ca.pem"; echo "add deny exit=$?"
-curl -sS https://corp-intercept.test:8443/ >/dev/null 2>&1; echo "host curl after deny exit=$?"
+sudo perl -e 'alarm 60; exec @ARGV' security remove-trusted-cert -d "$W/pki/ca.pem"; echo "remove-trusted-cert exit=$?"
+sudo perl -e 'alarm 60; exec @ARGV' security add-trusted-cert -d -r deny -k /Library/Keychains/System.keychain "$W/pki/ca.pem"; echo "add deny exit=$?"
+curl -m 10 -sS https://corp-intercept.test:8443/ >/dev/null 2>&1; echo "host curl after deny exit=$?"
 case_run mb3-host-deny host "$CORP"
 case_run mc3-platform-deny platform "$CORP"
 exit 0
