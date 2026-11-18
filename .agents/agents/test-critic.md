@@ -50,9 +50,11 @@ For each test:
      code runs.
    - If something outside the diff (the area's section names what) enforces part of the claim, no
      undo can make that part fail. Report that part as `not a pin: <what> enforces it`.
-   - If the test builds its subject differently from production (for example, an in-process target
-     where the real path uses a worker under load), it does not check the production path. Report
-     it as `not a pin: built differently from production`, and name the difference.
+   - If the test builds its subject differently from production in a way that skips the code or the
+     condition the claim is about (for example, an in-process target where the real path uses a
+     worker under load), it does not check the production path. Report it as `not a pin: built
+     differently from production`, and name the difference. A fixture such as a fake home or fake
+     installs is not, on its own, a different build.
 3. **Undo only the code the test checks, in the scratch worktree.** Most tests check one branch or
    one call, not a whole file or a whole function. Edit that branch or call back to its old
    behavior (the version at the fork point, or no check at all for code that is new), and keep the

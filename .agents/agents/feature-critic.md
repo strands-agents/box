@@ -23,7 +23,9 @@ Review the working diff against the repo's contract. The contract is (in precede
    can lag the code. When the diff goes against what an entry says, write one note that names the
    anchor, and it never blocks. The pull request then fits the code to the entry, or rewrites the
    entry, and a human approves the rewrite. A pull request that changes what an entry says fixes
-   that entry.
+   that entry. For a new entry, and for a rewrite that changes an entry's answer, link where a
+   human approved it, or mark it `needs a human's approval`. An agent's own plan or pull request
+   body is not an approval.
 2. **The local spec, when the requester names one** — a `.spec.md` and `.requirements.md` under
    `.agents/drafts/spec/`. Specs are never committed, so there is one only when the requester gives
    its path. A `SHALL` the code does not honour is a **BLOCKER**.
@@ -389,8 +391,8 @@ BLOCKERS
 DESIGN
 - path/to/file.rs:45 — <deviation>; violates <spec decision / tenet / pattern at file:line>
 - goes against decisions.md#<anchor> (note, never blocks): <what>; fit the code or rewrite the entry | none
-- rewritten entries: <each anchor> : <where a human approved the rewrite | needs a human's approval> | none
-- Cargo.lock: <each version that moved> : <explained in the pull request | NOT EXPLAINED> | none
+- new or rewritten entries: <each anchor> : <link to a human's approval | needs a human's approval> | none
+- Cargo.lock: <each version that moved> : <explained in the pull request | NOT EXPLAINED>; needs a maintainer's approval before merge | none
 
 DOCS   (always present: say "none" and name the trigger-table rows you walked)
 - docs/user/<page>.md: "<the sentence the diff falsifies>"; disagrees with <symbol>
