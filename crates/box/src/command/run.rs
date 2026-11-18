@@ -75,21 +75,13 @@ fn write_credential_stores(
     Ok(())
 }
 
-#[cfg(all(
-    target_os = "linux",
-    feature = "native-filesystem-policy",
-    box_native_adapter_tests
-))]
+#[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
 pub(crate) struct NativeSetup {
     contract: Option<RunContract>,
     guard: std::io::Result<Option<Arc<crate::run::native_enforcement::EntryGuard>>>,
 }
 
-#[cfg(all(
-    target_os = "linux",
-    feature = "native-filesystem-policy",
-    box_native_adapter_tests
-))]
+#[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
 pub(super) fn prepare_native(config: &Path, has_callback: bool) -> Result<NativeSetup, BoxError> {
     let contract = if has_callback {
         None
@@ -229,18 +221,10 @@ pub(crate) async fn execute(
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
     box_id: Option<&str>,
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     native_setup: NativeSetup,
 ) -> Result<ExitCode, BoxError> {
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     let (locked, entry_guard) = {
         let NativeSetup { contract, guard } = native_setup;
         let contract = match contract {
@@ -264,11 +248,7 @@ pub(crate) async fn execute(
         };
         (prepare_contract(contract, config, argv, box_id)?, guard)
     };
-    #[cfg(not(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    )))]
+    #[cfg(not(all(target_os = "linux", feature = "native-filesystem-policy")))]
     let locked = prepare(config, argv, box_id)?;
     locked.announce_credential_stores()?;
     let collector = telemetry::open(&locked.root, &locked.record)?;
@@ -283,11 +263,7 @@ pub(crate) async fn execute(
         Arc::clone(&collector),
         terminal,
         signals,
-        #[cfg(all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        ))]
+        #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
         entry_guard,
     )
     .await;
@@ -316,12 +292,9 @@ async fn hosted(
     collector: Arc<telemetry::Collector>,
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
-    entry_guard: Option<std::sync::Arc<crate::run::native_enforcement::EntryGuard>>,
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))] entry_guard: Option<
+        std::sync::Arc<crate::run::native_enforcement::EntryGuard>,
+    >,
 ) -> Result<ExitCode, BoxError> {
     let sources: Vec<Policy> = locked.policy.into_iter().collect();
     let subject = telemetry::policy_subject(&sources);
@@ -400,11 +373,7 @@ async fn hosted(
         locked.owned,
         &locked.workspace,
         &home,
-        #[cfg(all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        ))]
+        #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
         entry_guard,
     )?;
     let site = Site {
@@ -485,11 +454,7 @@ fn read_contract(config: &Path) -> Result<RunContract, BoxError> {
     RunContract::read(config, &invocation)
 }
 
-#[cfg(not(all(
-    target_os = "linux",
-    feature = "native-filesystem-policy",
-    box_native_adapter_tests
-)))]
+#[cfg(not(all(target_os = "linux", feature = "native-filesystem-policy")))]
 fn prepare(config: &Path, argv: &[OsString], box_id: Option<&str>) -> Result<LockedRun, BoxError> {
     prepare_contract(read_contract(config)?, config, argv, box_id)
 }
@@ -504,11 +469,7 @@ fn prepare_contract(
     if contract.experimental_features().native_filesystem_policy {
         crate::run::native_enforcement::preflight()?;
     }
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     if contract.uses_native_filesystem() {
         crate::run::native_enforcement::preflight()?;
     }
