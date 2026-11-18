@@ -557,9 +557,9 @@ fn prepare_contract(
     request.verify_sources()?;
     // The one check of the declared sources: each program file, each table that lets a workload
     // go around a source, and one line for each source. Only the value that it returns reads a
-    // secret. It starts no program and reads no box state, and it comes before the record is
-    // committed, so a refusal stores nothing in a new box directory, as a refusal of the
-    // configuration does.
+    // secret, and only through its two read steps: it gives no backend to this module. It starts
+    // no program and reads no box state, and it comes before the record is committed, so a
+    // refusal stores nothing in a new box directory, as a refusal of the configuration does.
     let secrets = SecretSources::check(&request.record, &request.sources, std::io::stderr())?;
     if existed {
         root.initialize()?;

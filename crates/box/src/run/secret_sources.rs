@@ -1,5 +1,5 @@
 //! The declared secret sources of one run, as three types that fix the order of startup: the one
-//! check, the two reads, and the end of the reads.
+//! check, the two reads, and the end of the reads, and one type for a command that starts no box.
 //!
 //! | Step | Owner |
 //! |---|---|
@@ -7,6 +7,7 @@
 //! | Read the secret of each telemetry target, and state each outcome | [`SecretSources::fetch_telemetry`] |
 //! | Read each other secret, and state each outcome | [`TelemetrySecrets::fetch_routes`] |
 //! | Drop each held secret after the vaults open | [`RouteSecrets`], which the vaults consume |
+//! | Read the secret of a remote MCP server for `policy generate-schema` | [`SchemaSecrets`] |
 
 use std::collections::BTreeMap;
 
@@ -52,6 +53,11 @@ pub(crate) struct TelemetrySecrets(SecretSources);
 /// The secret sources of one run after the read of each secret, which the vaults consume.
 #[derive(Debug)]
 pub(crate) struct RouteSecrets(SecretSources);
+
+/// The checked secret sources of `policy generate-schema`, which starts no box and has no read
+/// step.
+#[derive(Debug)]
+pub(crate) struct SchemaSecrets(SecretSources);
 
 /// One configuration entry that names a secret in a declared scheme.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,7 +127,7 @@ impl SecretSources {
         tables: &ProcessTables,
         references: impl IntoIterator<Item = &'a str>,
         disclosure: impl std::io::Write,
-    ) -> Result<Self, BoxError> {
+    ) -> Result<SchemaSecrets, BoxError> {
         let read = references.into_iter().any(|reference| {
             routed_scheme(reference).is_ok_and(|scheme| entries.contains_key(&scheme))
         });
@@ -134,6 +140,7 @@ impl SecretSources {
             &[],
             disclosure,
         )
+        .map(SchemaSecrets)
     }
 
     /// The one order of the check, which each constructor follows, for the checked
@@ -249,13 +256,8 @@ impl SecretSources {
         Ok(())
     }
 
-    /// The one backend that reads each secret of this run, for a caller that holds no record.
-    pub(crate) fn backend(&self) -> &Backend {
-        &self.backend
-    }
-
     /// Whether a source of this run reads the secret that `reference` names.
-    pub(crate) fn reads(&self, reference: &str) -> bool {
+    fn reads(&self, reference: &str) -> bool {
         self.locator(reference).is_some()
     }
 
@@ -382,7 +384,7 @@ impl Drop for SecretSources {
 
 impl TelemetrySecrets {
     /// The one backend that reads each secret of this run, for the collector.
-    pub(crate) fn backend(&self) -> &Backend {
+    pub(in crate::run) fn backend(&self) -> &Backend {
         &self.0.backend
     }
 
@@ -399,6 +401,18 @@ impl TelemetrySecrets {
 
 impl RouteSecrets {
     /// The one backend that reads each secret of this run, for the vaults.
+    pub(in crate::run) fn backend(&self) -> &Backend {
+        &self.0.backend
+    }
+}
+
+impl SchemaSecrets {
+    /// Whether a declared source reads the secret that `reference` names.
+    pub(crate) fn reads(&self, reference: &str) -> bool {
+        self.0.reads(reference)
+    }
+
+    /// The one backend that reads each secret of this command.
     pub(crate) fn backend(&self) -> &Backend {
         &self.0.backend
     }

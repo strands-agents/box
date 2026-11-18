@@ -76,6 +76,11 @@ pub(crate) fn sources(text: &str) -> Result<SecretSources, BoxError> {
 }
 
 impl SecretSources {
+    /// The one backend of these sources, which only a test reads before a read step.
+    pub(crate) fn backend(&self) -> &Backend {
+        &self.backend
+    }
+
     /// The sources of `entries` on a protected operating system, with the feature on, with each
     /// program file checked and no table judged.
     pub(crate) fn for_tests(
@@ -1091,26 +1096,36 @@ fn the_sources_read_no_secret_after_the_vaults_take_them() {
     assert_eq!(program.runs(), 1);
 }
 
-/// Each `pub(crate)` function of the text `source`, with the type that holds it.
+/// Each function of the text `source` that another module can call, with the type that holds
+/// it, and with `(run)` after one that only a module of `crate::run` can call.
 fn doors(source: &str) -> Vec<String> {
     let mut holder = "";
     let mut doors = Vec::new();
     for line in source.lines() {
         if let Some(name) = line.strip_prefix("impl ") {
             holder = name.trim_end_matches(" {");
-        } else if let Some(function) = line.trim_start().strip_prefix("pub(crate) fn ") {
+        } else {
+            let line = line.trim_start();
+            let (function, reach) = match line.strip_prefix("pub(crate) fn ") {
+                Some(function) => (function, ""),
+                None => match line.strip_prefix("pub(in crate::run) fn ") {
+                    Some(function) => (function, " (run)"),
+                    None => continue,
+                },
+            };
             let name = function
                 .split(|character: char| !character.is_alphanumeric() && character != '_')
                 .next()
                 .unwrap_or_default();
-            doors.push(format!("{holder}::{name}"));
+            doors.push(format!("{holder}::{name}{reach}"));
         }
     }
     doors
 }
 
 /// **Only the check builds the sources, and only the sources read**: the module gives no other
-/// door, and no field, so a caller cannot read a secret before the check or after the vaults.
+/// door, and no field, so a caller cannot read a secret before the check or after the vaults,
+/// and `command::run` gets no backend from the sources of a run.
 #[test]
 fn only_the_check_builds_the_sources_and_only_they_read() {
     let source = include_str!("../secret_sources.rs");
@@ -1121,13 +1136,15 @@ fn only_the_check_builds_the_sources_and_only_they_read() {
             // The two doors in: each one runs the whole check.
             "SecretSources::check",
             "SecretSources::check_for_references",
-            "SecretSources::backend",
-            "SecretSources::reads",
             // The two reads: each one takes the value of the step before it.
             "SecretSources::fetch_telemetry",
-            "TelemetrySecrets::backend",
+            // The backend of a run, for the collector and the vaults in `crate::run` alone.
+            "TelemetrySecrets::backend (run)",
             "TelemetrySecrets::fetch_routes",
-            "RouteSecrets::backend",
+            "RouteSecrets::backend (run)",
+            // `policy generate-schema`, whose type has no read step and reaches no vault.
+            "SchemaSecrets::reads",
+            "SchemaSecrets::backend",
         ]
     );
     let test_only = source.matches("cfg(test)").count();
@@ -1147,10 +1164,10 @@ fn only_the_check_builds_the_sources_and_only_they_read() {
             "a field or an item that a caller can build with: {line}"
         );
     }
-    // Each visible item is a door above, one of the four types, or the test module, so no
-    // field of a tuple and no `pub(in ...)` item is a door.
+    // Each visible item is a door above, one of the five types, or the test module, so no
+    // field of a tuple and no other `pub(in ...)` item is a door.
     let visible = source.matches("pub(").count() + source.matches("pub ").count();
-    assert_eq!(visible, doors(source).len() + 4 + 1, "a visible item");
+    assert_eq!(visible, doors(source).len() + 5 + 1, "a visible item");
     // No trait builds, copies, or opens a state.
     let implementations: Vec<&str> = source
         .lines()
@@ -1164,6 +1181,7 @@ fn only_the_check_builds_the_sources_and_only_they_read() {
             "impl Drop for SecretSources {",
             "impl TelemetrySecrets {",
             "impl RouteSecrets {",
+            "impl SchemaSecrets {",
         ]
     );
     // No other file of the module holds a door.
@@ -1173,7 +1191,12 @@ fn only_the_check_builds_the_sources_and_only_they_read() {
         .collect();
     assert_eq!(modules, ["pub(crate) mod tests;"]);
     // No state of the sources is copied or built from nothing.
-    for state in ["SecretSources", "TelemetrySecrets", "RouteSecrets"] {
+    for state in [
+        "SecretSources",
+        "TelemetrySecrets",
+        "RouteSecrets",
+        "SchemaSecrets",
+    ] {
         let declared = source
             .split_once(&format!("\npub(crate) struct {state}"))
             .expect("the module declares the state")
@@ -1181,6 +1204,49 @@ fn only_the_check_builds_the_sources_and_only_they_read() {
         let attribute = declared.rsplit('\n').next().unwrap_or_default();
         assert_eq!(attribute, "#[derive(Debug)]", "for {state}");
     }
+}
+
+/// Each file under `src` whose text holds one of `names`.
+fn files_that_name(names: &[&str]) -> Vec<String> {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    let mut folders = vec![source.clone()];
+    while let Some(folder) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).expect("the source folder lists") {
+            let path = entry.expect("an entry of the source folder").path();
+            if path.is_dir() {
+                folders.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                let text = std::fs::read_to_string(&path).expect("the source file reads");
+                if names.iter().any(|name| text.contains(name)) {
+                    let file = path.strip_prefix(&source).expect("a file under `src`");
+                    files.push(file.display().to_string());
+                }
+            }
+        }
+    }
+    files.sort();
+    files
+}
+
+/// **One file builds a declared backend, and one command gets the sources that have no read
+/// step**: no other file of the crate names either door, so a run reads a declared secret
+/// through its own checked sources alone.
+#[test]
+fn only_generate_schema_reads_a_declared_secret_with_no_read_step() {
+    // This file is in each list, because it names both doors here.
+    assert_eq!(
+        files_that_name(&["Backend::declared"]),
+        ["run/secret_sources.rs", "run/secret_sources/tests.rs"]
+    );
+    assert_eq!(
+        files_that_name(&["check_for_references", "SchemaSecrets"]),
+        [
+            "command/policy.rs",
+            "run/secret_sources.rs",
+            "run/secret_sources/tests.rs",
+        ]
+    );
 }
 
 #[test]

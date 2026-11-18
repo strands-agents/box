@@ -341,14 +341,30 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     `run::secret_sources` owns the path, and its three types hold the order of startup. Keep
     each part:
     - **The order is `SecretSources::check`, `SecretSources::fetch_telemetry`,
-      `TelemetrySecrets::fetch_routes`, then the vaults, which consume `RouteSecrets`.** Each
-      step takes the value of the step before it, and only that step returns it. So no caller
-      reads a secret before the check, opens the collector before the first read, or opens a
-      vault before the second. The module has no other function that builds or reads, no
-      visible field, and no test-only item: each test door is in its `tests` module. Do not add
-      a constructor, a `Clone`, or a `Default` to one of the three types, and do not make
-      `open`, `refuse_exposure`, `disclose`, or `fetch` visible outside the module. A
-      wrong order is then a compile error, which no test can show, so
+      `TelemetrySecrets::fetch_routes`, then the vaults, which consume `RouteSecrets`.** Each step
+      takes the value of the step before it, and only that step returns it. So no caller gets the
+      sources of a run without the check, gives `telemetry::open` a value from before the first
+      read, or gives `credential::project` a value from before the second. `SecretSources` gives
+      no backend, and `TelemetrySecrets::backend` and `RouteSecrets::backend` are
+      `pub(in crate::run)`, for the collector and the vaults. So `command::run` gets no backend
+      from the sources of a run, and reads through them by the two read steps alone.
+      `policy generate-schema` has no record and no read step, so
+      `SecretSources::check_for_references` returns `SchemaSecrets`, which gives `reads` and the
+      backend, and which no read step and no vault of a run takes. What the types do not hold, in
+      three places. First, a function of `crate::run` that gets `&TelemetrySecrets` can read a
+      route's secret through that backend before the second read. Only `run::telemetry::open` gets
+      one, so give it to no other function. Second, `check_for_references` and
+      `SchemaSecrets::backend` are `pub(crate)`, because `command::policy` is not in `crate::run`.
+      So each module of the crate can build a second set of checked sources and read through it,
+      with no read step and no record. Only `command::policy` calls it. Third,
+      `credentials::Backend::declared` is public, so a second call in this crate builds sources
+      with no check. `SecretSources::open` holds the one call.
+      `only_generate_schema_reads_a_declared_secret_with_no_read_step` pins the second and the
+      third. The module has no other function that builds or reads, no visible field, and no
+      test-only item: each test door is in its `tests` module. Do not add a constructor, a
+      `Clone`, or a `Default` to one of the four types, do not give `SecretSources` a backend
+      accessor, and do not make `open`, `refuse_exposure`, `disclose`, or `fetch` visible outside
+      the module. A wrong order is then a compile error, which no test can show, so
       `only_the_check_builds_the_sources_and_only_they_read` pins the list of doors.
     - `SecretSources::check` first loads each program through `ConfiguredCommand::load`, the
       check of a configured tool command, and gives the opened file to
@@ -418,7 +434,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
       `policy generate-schema` checks the programs and reads each declared secret before it starts
       a stdio MCP server, which is a workload-named program. It has no record, so it calls
       `SecretSources::check_for_references`, which checks no table when no remote MCP server
-      names a secret in a declared scheme.
+      names a secret in a declared scheme, and it reads through `SchemaSecrets::backend`.
     - `SecretSources::fetch`, which the two read steps call, is the only place that reads a
       declared secret for a run. It writes the error of `credentials` to stderr and returns
       `ConfigError::SecretFetch`, which holds no text of that error. The `box_stopped` record
