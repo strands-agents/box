@@ -198,7 +198,7 @@
       "source": "docs/user/native-filesystem-policy.md",
       "slug": "security/native-filesystem-policy",
       "title": "Experimental native filesystem policy",
-      "description": "Enable and configure the experimental macOS native filesystem policy.",
+      "description": "Enable and configure experimental native filesystem policy on macOS and Linux ARM64.",
       "nav": {
         "group": "Security",
         "order": 2

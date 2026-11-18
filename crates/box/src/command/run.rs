@@ -33,6 +33,8 @@ struct LockedRun {
     trailing: Vec<String>,
     policy: Option<Policy>,
     grammars: ToolGrammars,
+    /// The program each grammar in `grammars` decides, including a left-out tool's.
+    grammar_programs: std::collections::BTreeSet<String>,
     sources: Vec<AuthoritySource>,
     owned: Lock,
 }
@@ -76,21 +78,13 @@ fn write_credential_stores(
     Ok(())
 }
 
-#[cfg(all(
-    target_os = "linux",
-    feature = "native-filesystem-policy",
-    box_native_adapter_tests
-))]
+#[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
 pub(crate) struct NativeSetup {
     contract: Option<RunContract>,
     guard: std::io::Result<Option<Arc<crate::run::native_enforcement::EntryGuard>>>,
 }
 
-#[cfg(all(
-    target_os = "linux",
-    feature = "native-filesystem-policy",
-    box_native_adapter_tests
-))]
+#[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
 pub(super) fn prepare_native(config: &Path, has_callback: bool) -> Result<NativeSetup, BoxError> {
     let contract = if has_callback {
         None
@@ -111,19 +105,25 @@ pub(super) fn prepare_native(config: &Path, has_callback: bool) -> Result<Native
     Ok(NativeSetup { contract, guard })
 }
 
-/// One line for each `[tool]` and stdio `[mcp]` whose program a tool grammar decides in place of
-/// `shell:spawn`.
-fn write_grammar_disclosures(
-    record: &Record,
-    mut output: impl std::io::Write,
-) -> std::io::Result<()> {
-    use crate::record::config::grammar::{bound_name, called_name};
-    let programs: std::collections::BTreeSet<&str> = record
+/// The program that each `[tool]` grammar in `record` decides.
+fn grammar_programs(record: &Record) -> std::collections::BTreeSet<String> {
+    record
         .tool
         .values()
         .filter(|spec| spec.grammar.is_some())
-        .filter_map(bound_name)
-        .collect();
+        .filter_map(crate::record::config::grammar::bound_name)
+        .map(str::to_string)
+        .collect()
+}
+
+/// One line for each `[tool]` and stdio `[mcp]` whose program a tool grammar of `programs` decides
+/// in place of `shell:spawn`.
+fn write_grammar_disclosures(
+    record: &Record,
+    programs: &std::collections::BTreeSet<String>,
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    use crate::record::config::grammar::{bound_name, called_name};
     let tables =
         record
             .tool
@@ -186,6 +186,26 @@ fn write_monty_disclosures(
     Ok(())
 }
 
+/// One line for each `[tool]` this run leaves out because its program is not installed.
+fn write_left_out_tools(
+    left_out: &[crate::run::commands::LeftOut],
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    for tool in left_out {
+        let program: String = tool
+            .program
+            .chars()
+            .flat_map(char::escape_default)
+            .collect();
+        writeln!(
+            output,
+            "strands-box: {} left out: {program} not found",
+            tool.table
+        )?;
+    }
+    Ok(())
+}
+
 /// One line for each bare name a `[tool]` answers to in the hosted Shell, and the file it runs.
 fn write_bare_name_disclosures(
     names: &crate::run::commands::BareNames,
@@ -230,18 +250,10 @@ pub(crate) async fn execute(
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
     box_id: Option<&str>,
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     native_setup: NativeSetup,
 ) -> Result<ExitCode, BoxError> {
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     let (locked, entry_guard) = {
         let NativeSetup { contract, guard } = native_setup;
         let contract = match contract {
@@ -265,11 +277,7 @@ pub(crate) async fn execute(
         };
         (prepare_contract(contract, config, argv, box_id)?, guard)
     };
-    #[cfg(not(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    )))]
+    #[cfg(not(all(target_os = "linux", feature = "native-filesystem-policy")))]
     let locked = prepare(config, argv, box_id)?;
     locked.announce_credential_stores()?;
     let collector = telemetry::open(&locked.root, &locked.record)?;
@@ -284,11 +292,7 @@ pub(crate) async fn execute(
         Arc::clone(&collector),
         terminal,
         signals,
-        #[cfg(all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        ))]
+        #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
         entry_guard,
     )
     .await;
@@ -317,12 +321,9 @@ async fn hosted(
     collector: Arc<telemetry::Collector>,
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
-    entry_guard: Option<std::sync::Arc<crate::run::native_enforcement::EntryGuard>>,
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))] entry_guard: Option<
+        std::sync::Arc<crate::run::native_enforcement::EntryGuard>,
+    >,
 ) -> Result<ExitCode, BoxError> {
     let sources: Vec<Policy> = locked.policy.into_iter().collect();
     let subject = telemetry::policy_subject(&sources);
@@ -377,8 +378,12 @@ async fn hosted(
         &commands,
         &crate::run::contain::executable::host_search_path(),
     )?);
-    write_grammar_disclosures(&locked.record, std::io::stderr().lock())
-        .map_err(|source| ConfigError::Disclosure { source })?;
+    write_grammar_disclosures(
+        &locked.record,
+        &locked.grammar_programs,
+        std::io::stderr().lock(),
+    )
+    .map_err(|source| ConfigError::Disclosure { source })?;
     let search_path = crate::run::contain::executable::host_search_path();
     let names = commands.bare_names(&locked.record, &search_path);
     write_bare_name_disclosures(&names, std::io::stderr().lock())
@@ -401,11 +406,7 @@ async fn hosted(
         locked.owned,
         &locked.workspace,
         &home,
-        #[cfg(all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        ))]
+        #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
         entry_guard,
     )?;
     let site = Site {
@@ -489,11 +490,7 @@ fn read_contract(config: &Path) -> Result<RunContract, BoxError> {
     RunContract::read(config, &invocation)
 }
 
-#[cfg(not(all(
-    target_os = "linux",
-    feature = "native-filesystem-policy",
-    box_native_adapter_tests
-)))]
+#[cfg(not(all(target_os = "linux", feature = "native-filesystem-policy")))]
 fn prepare(config: &Path, argv: &[OsString], box_id: Option<&str>) -> Result<LockedRun, BoxError> {
     prepare_contract(read_contract(config)?, config, argv, box_id)
 }
@@ -508,11 +505,7 @@ fn prepare_contract(
     if contract.experimental_features().native_filesystem_policy {
         crate::run::native_enforcement::preflight()?;
     }
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     if contract.uses_native_filesystem() {
         crate::run::native_enforcement::preflight()?;
     }
@@ -548,13 +541,19 @@ fn prepare_contract(
 
     request.verify_sources()?;
     drop(root_lock);
+    let mut record = request.record;
+    let grammar_programs = grammar_programs(&record);
+    let left_out = crate::run::commands::leave_out_absent(&mut record)?;
+    write_left_out_tools(&left_out, std::io::stderr().lock())
+        .map_err(|source| ConfigError::Disclosure { source })?;
     Ok(LockedRun {
         root,
-        record: request.record,
+        record,
         workspace,
         trailing: trailing_arguments(argv)?,
         policy: request.policy,
         grammars: request.grammars,
+        grammar_programs,
         sources: request.sources,
         owned,
     })
@@ -682,7 +681,8 @@ mod tests {
         );
         let mut output = Vec::new();
 
-        write_grammar_disclosures(&record, &mut output).expect("the disclosure writes");
+        write_grammar_disclosures(&record, &grammar_programs(&record), &mut output)
+            .expect("the disclosure writes");
 
         assert_eq!(
             String::from_utf8(output).expect("the disclosure is UTF-8"),
@@ -692,6 +692,35 @@ mod tests {
              `shell:spawn` rule applies to it\n\
              strands-box: [mcp.wrapped]: a spawn of `npm` is decided by its tool grammar, and no \
              `shell:spawn` rule applies to it\n"
+        );
+    }
+
+    /// **A left-out tool's grammar is still disclosed for each tool that it decides**: a spawn of
+    /// an installed `git` reads as the grammar of the `git` tool that the run leaves out.
+    #[test]
+    fn startup_discloses_a_left_out_tools_grammar_for_each_tool_it_still_decides() {
+        let optional: ProcessSpec = toml::from_str(
+            "command = [\"/nonexistent/strands-box/missing/git\"]\n[grammar]\nformat = 1\n\
+             program = \"git\"\n",
+        )
+        .expect("the tool parses");
+        let mut record = record_with(
+            None,
+            BTreeMap::from([
+                ("optional_git".to_string(), optional),
+                ("system_git".to_string(), spec("/usr/bin/git", &[], &[])),
+            ]),
+        );
+        let programs = grammar_programs(&record);
+        record.tool.remove("optional_git");
+        let mut output = Vec::new();
+
+        write_grammar_disclosures(&record, &programs, &mut output).expect("the disclosure writes");
+
+        assert_eq!(
+            String::from_utf8(output).expect("the disclosure is UTF-8"),
+            "strands-box: [tool.system_git]: a spawn of `git` is decided by its tool grammar, \
+             and no `shell:spawn` rule applies to it\n"
         );
     }
 
@@ -780,6 +809,29 @@ mod tests {
              runs the file of `[tool.git]`, whose label is that name\n\
              strands-box: [tool.brew_node], [tool.node]: these tables run different program paths, \
              so a bare `node` in the Shell runs the file that `PATH` finds\n"
+        );
+    }
+
+    #[test]
+    fn startup_names_each_tool_it_leaves_out() {
+        let left_out = [
+            crate::run::commands::LeftOut {
+                table: "[tool.tsx]".to_string(),
+                program: "tsx".to_string(),
+            },
+            crate::run::commands::LeftOut {
+                table: "[tool.node]".to_string(),
+                program: "/opt/node/bin/node\u{1b}[2J".to_string(),
+            },
+        ];
+        let mut output = Vec::new();
+
+        write_left_out_tools(&left_out, &mut output).expect("the disclosure writes");
+
+        assert_eq!(
+            String::from_utf8(output).expect("the disclosure is UTF-8"),
+            "strands-box: [tool.tsx] left out: tsx not found\n\
+             strands-box: [tool.node] left out: /opt/node/bin/node\\u{1b}[2J not found\n"
         );
     }
 

@@ -18,9 +18,14 @@ Review the working diff against the repo's contract. The contract is (in precede
    below. Check this
    **first**, before requirements or design: a diff can satisfy every spec and still be
    unshippable because it moved a surface an external party is already built against.
-1. **Decisions** — one entry in `docs/design/decisions.md`. A change that regresses an entry is a
-   **BLOCKER**, unless the diff also rewrites that entry. The page is a historical record, so where
-   an entry and the code already disagree, report the stale entry rather than blocking on it.
+1. **Decisions** — the entries in `docs/design/decisions.md`. A missing entry is never a finding.
+   An entry that the code has passed by, with no help from this diff, is never a finding: the log
+   can lag the code. When the diff goes against what an entry says, write one note that names the
+   anchor, and it never blocks. The pull request then fits the code to the entry, or rewrites the
+   entry, and a human approves the rewrite. A pull request that changes what an entry says fixes
+   that entry. For a new entry, and for a rewrite that changes an entry's answer, link where a
+   human approved it, or mark it `needs a human's approval`. An agent's own plan or pull request
+   body is not an approval.
 2. **The local spec, when the requester names one** — a `.spec.md` and `.requirements.md` under
    `.agents/drafts/spec/`. Specs are never committed, so there is one only when the requester gives
    its path. A `SHALL` the code does not honour is a **BLOCKER**.
@@ -52,9 +57,9 @@ but `docs/design/decisions.md` entries and an approved spec *are* decided; do no
     pattern" and "it's tidier this way" are not approvals for moving a frozen surface — the
     freeze is about who is downstream of the shape, not whether the shape is good. Only a
     decision record or an explicit operator call in the diff clears it.
-- **Severity:** `BLOCKER` (wrong / insecure / missing requirement / regresses a `decisions.md` entry /
-  breaks a gate) > `DESIGN` (violates a *cited* KD/spec/tenet/pattern) > `NIT` (drop most). Lead with
-  blockers.
+- **Severity:** `BLOCKER` (wrong / insecure / missing requirement / breaks a gate) > `DESIGN`
+  (violates a *cited* spec/tenet/pattern, or goes against a `decisions.md` entry, which is a note that
+  never blocks) > `NIT` (drop most). Lead with blockers.
 - **Never finish silently.** Out of room, told to stop, or a gate stalls — emit findings-so-far, the
   gates that completed, and what you did **not** reach. Measured: a review ran every gate then went
   idle **twice** with no report, losing its whole security pass.
@@ -69,9 +74,13 @@ but `docs/design/decisions.md` entries and an approved spec *are* decided; do no
 
 ## Getting the review surface
 
-The default branch is **`main`**. Get the diff with `git diff main...HEAD`
-plus any staged/unstaged changes (`git diff` and `git diff --staged`). Also note untracked new
-files (`git status --short`) — new crates/specs are part of the feature.
+The base is the ref the caller names, or `origin/main`. The fork point is
+`git merge-base <base> HEAD`. Review the diff from the fork point
+(`git diff $(git merge-base <base> HEAD)`, which includes the working tree, and
+`git status --short` for new files). New crates and specs are part of the feature. A diff from the
+base itself shows each newer commit on the base as reverted. If `git merge-base` prints nothing (a
+shallow clone), stop and report it. Do not run `git diff` with no ref. Below, `<fork>` is the fork
+point.
 
 ## Checklist — verify each, with evidence
 
@@ -137,14 +146,13 @@ files (`git status --short`) — new crates/specs are part of the feature.
    ("must not be deleted") is a BLOCKER unless the diff says why the property it pinned no
    longer exists.
 
-   **Do not run this against `main` on a long-lived branch** — it is far enough ahead that the
-   naive recipe returns hundreds of hits, almost all of them tests that moved between files,
-   and a reviewer who skims that output learns nothing. Instead check the change under
-   review (`git diff` / `git diff --staged` / `git diff origin/main...HEAD` for the branch), and
-   for each removed `fn` name confirm whether it **reappears** elsewhere in the tree:
+   **Check only the diff from the fork point.** A diff against `main` itself on a long-lived
+   branch returns hundreds of hits, almost all of them tests that moved between files, and a
+   reviewer who skims that output learns nothing. For each removed `fn` name, confirm whether it
+   **reappears** elsewhere in the tree:
 
    ```sh
-   git diff --staged -- '*tests*' | grep -oE '^-\s*(async )?fn [a-z0-9_]+' | awk '{print $NF}' \
+   git diff "$(git merge-base <base> HEAD)" -- '*tests*' | grep -oE '^-\s*(async )?fn [a-z0-9_]+' | awk '{print $NF}' \
      | while read -r t; do grep -rql "fn $t" crates/ || echo "GONE: $t"; done
    ```
 
@@ -177,9 +185,14 @@ files (`git status --short`) — new crates/specs are part of the feature.
 2. **Scope.** Nothing outside the plan changed. In this multi-crate workspace, flag: edits to crates
    *outside* the feature's crate(s); `Cargo.toml` `members`/dependency changes not required by the
    task; churn in unrelated docs; touching `.agents/pocs/` for a `crates/` task (or vice-versa).
+   Every `Cargo.lock` change needs a maintainer's approval before it merges, and the pull request
+   says which versions moved and why. Run `git diff <fork> -- '*Cargo.lock'` and list each version
+   that moved under `DESIGN`. A moved version that the pull request body does not name and explain
+   (or the caller's claims, before a pull request exists) is a finding.
 3. **Design fit — does this belong as built, or is it a foreign body?** Judge against the repo's OWN
    decisions, anchoring every finding to one of: (a) the **governing KD's chosen option**
-   (for example, "regresses `decisions.md#one-policy-engine-per-box`"); (b) a **spec** decision; (c) a **tenet**
+   (for example, "goes against `decisions.md#one-policy-engine-per-box`", a note under contract
+   item 1); (b) a **spec** decision; (c) a **tenet**
    — did it take the best-per-platform path or settle for lowest-common-denominator? did it keep
    things easy-to-get-started?; (d) an **analogous existing crate** — find the nearest existing
    thing and compare; a new construct that reinvents an existing pattern is a finding.
@@ -204,22 +217,9 @@ files (`git status --short`) — new crates/specs are part of the feature.
    - Panicking indexing (`v[i]`) where `.get()` is warranted; `as` truncation / overflow on
      lengths/ports; missing `#[must_use]` where dropping the value is a bug.
    - A `std::sync::Mutex` guard held across an `.await` (deadlock/blocking risk); blocking I/O in async.
-5b. **Does each new test FAIL without the fix? Break it and find out.** The repo's guard rule —
-    *"Introduce the defect, watch the refusal, restore"* — applies to **every test the diff adds**.
-    Per test: revert what it claims to pin, run that test by name, confirm it **FAILS**, restore, and
-    say you did. A scratch edit you revert in the same step is observation, not authorship.
-
-    Measured 2026-08-23: two new tests for a hang **both passed with the defect deliberately
-    restored**. They pinned nothing, and the fix beside them was reverted as unproven.
-
-    Suspect two shapes:
-    - **A hang cannot be pinned by an ordinary assertion** — the failure is "never returns". It needs
-      an asserted bound (`recv_timeout`, `tokio::time::timeout`). A test that would hang rather than
-      fail is not a test.
-    - **A test that builds its subject differently from production** — those two used an in-process
-      file target where the real path used a batch worker under load.
-
-    A claim with no test that fails without it **is** the finding: quote it, name the missing pin.
+5b. **Pins.** The `test-critic` agent runs at the same time as you and proves that each new or
+    rewritten test fails without its change. Do not repeat that work, and do not report pins:
+    they are test-critic's verdict, and the caller reads both reports.
 
 6. **Feature-flag matrix integrity.** Features gate optional layers here. Verify the default-off
    build still enforces the baseline, and that no security-critical code is reachable *only* with a
@@ -241,10 +241,9 @@ files (`git status --short`) — new crates/specs are part of the feature.
    **Do NOT report:**
    - A page that merely *reads* as stale, thin, or out of date. Falsified or missing, or it is not a
      finding.
-   - A `docs/design/decisions.md` entry that has aged. The page is a dated record and the code is
-     the authority where the two disagree. Contract item 1 above governs it: an entry the diff
-     *regresses* is a BLOCKER unless the diff also rewrites that entry, and an entry that already
-     disagreed with the code is a note, never a gate.
+   - A `docs/design/decisions.md` entry that has aged. The log can lag the code, and the code is
+     the authority where the two disagree. Contract item 1 above governs an entry the diff goes
+     against: one note, never a gate.
    - A **missing** decision entry. An entry enters only through `/kd`, and only after the user
      decides. A code change owes none, so never ask a diff to add one.
    - A `file.rs:LINE` citation or a test name that moved. Docs already ban both, so a moved one is
@@ -390,7 +389,10 @@ BLOCKERS
 - path/to/file.rs:123 — <defect>; <why it's wrong>
 
 DESIGN
-- path/to/file.rs:45 — <deviation>; violates <decisions.md#anchor / spec decision / tenet / pattern at file:line>
+- path/to/file.rs:45 — <deviation>; violates <spec decision / tenet / pattern at file:line>
+- goes against decisions.md#<anchor> (note, never blocks): <what>; fit the code or rewrite the entry | none
+- new or rewritten entries: <each anchor> : <link to a human's approval | needs a human's approval> | none
+- Cargo.lock: <each version that moved> : <explained in the pull request | NOT EXPLAINED>; needs a maintainer's approval before merge | none
 
 DOCS   (always present: say "none" and name the trigger-table rows you walked)
 - docs/user/<page>.md: "<the sentence the diff falsifies>"; disagrees with <symbol>
@@ -404,14 +406,9 @@ PLATFORMS   (always present — silence here has already shipped a broken build)
 - other targets: <cargo check --target … result> | NOT COMPILED
 - dry-run build: <build URL + pass/fail> | not submitted, so cfg(linux) is UNVERIFIED
 
-PINS   (always present when the diff adds or rewrites a test)
-- <test name> — reverted <what> → test FAILED as required, fix restored
-- <test name> — passed WITH the defect restored → pins nothing, and the claim beside it is unproven
-- claims with no failing test: <quote the claim> (or: none)
-
 VERDICT: ship | fix-then-ship | rework
-(any UNAPPROVED interface or premise change, a removed security test, an uncompiled platform, or a
- new test that passes with its defect restored forces `rework` — it is not the author's call to
+(any UNAPPROVED interface or premise change, a removed security test, or an uncompiled platform
+ forces `rework` — it is not the author's call to
  absorb, and not yours either. A `DOCS` finding forces at least `fix-then-ship`, because the page
  and the code must agree in the same commit; operator-facing description the change makes wrong is
  a BLOCKER under check 0(a).)

@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use containment::{Operation, Scope};
+use containment::{ContainmentConfig, Operation, PreparedFilesystemPath, Scope};
 
 use crate::GrantRefusal;
 use crate::error::{BoxError, ConfigError};
@@ -74,6 +74,39 @@ impl DirectGrant {
         } else {
             vec![self.resolved.as_path()]
         }
+    }
+
+    /// **Look the grant up once, as the identity the run approved.** A link entry is looked up by
+    /// its own name, so the box shows the file there too. The containment grant is
+    /// built from this one lookup, so a link hop swapped after the spawn check cannot move it to
+    /// another file: the swap either lands before this lookup, which refuses it, or after, which
+    /// the live-identity check at apply refuses.
+    pub(crate) fn prepare(&self, table: &str) -> Result<PreparedFilesystemPath, ConfigError> {
+        let changed = |reason: String| ConfigError::Filesystem {
+            table: table.to_string(),
+            entry: self.authored.clone(),
+            reason: format!(
+                "{reason} since the run judged it. A spawn acts on the identity the run approved, \
+                 so it is refused"
+            ),
+        };
+        let name = if self.is_link() {
+            &self.lexical
+        } else {
+            &self.resolved
+        };
+        let prepared = ContainmentConfig::prepare_filesystem_path(name).map_err(|source| {
+            changed(format!("{} cannot be resolved ({source})", name.display()))
+        })?;
+        if prepared.resolved_path() != self.resolved {
+            return Err(changed(format!(
+                "{} resolves to {}, not {},",
+                name.display(),
+                prepared.resolved_path().display(),
+                self.resolved.display()
+            )));
+        }
+        Ok(prepared)
     }
 }
 
@@ -1516,6 +1549,43 @@ mod tests {
         fixture.reach(
             &context,
             &format!("read = [{:?}]", text(&home.join("scratch"))),
+        );
+    }
+
+    /// **A link hop swapped after the spawn check is refused, not granted.** The check and the
+    /// grant each look the chain up, so the grant compares its own lookup with the approved file.
+    #[test]
+    fn a_link_hop_swapped_after_the_spawn_check_is_refused() {
+        let fixture = Fixture::new();
+        let home = fixture.home.clone();
+        let context = fixture.context();
+        std::fs::write(home.join("notes/approved.txt"), "approved").expect("approved");
+        std::fs::write(home.join("notes/other.txt"), "other").expect("other");
+        let selector = home.join("scratch/selector");
+        std::os::unix::fs::symlink(home.join("notes/approved.txt"), &selector).expect("a hop");
+        let helper = home.join("tools/helper");
+        std::os::unix::fs::symlink(&selector, &helper).expect("the link");
+        let reach = fixture.reach(&context, &format!("read_file = [{:?}]", text(&helper)));
+        let grant = &reach.grants[0];
+        assert_eq!(grant.resolved, home.join("notes/approved.txt"));
+
+        // Unchanged, the lookup is the approved file.
+        require_judged_identities(&reach, "[tool.t]").expect("the identity is unchanged");
+        let prepared = grant.prepare("[tool.t]").expect("the approved file");
+        assert_eq!(prepared.resolved_path(), grant.resolved);
+        drop(prepared);
+
+        // A process that can write `scratch` swaps the hop after the spawn check.
+        let swap = home.join("scratch/selector.new");
+        std::os::unix::fs::symlink(home.join("notes/other.txt"), &swap).expect("a new hop");
+        std::fs::rename(&swap, &selector).expect("the swap");
+        let refusal = grant
+            .prepare("[tool.t]")
+            .expect_err("a swapped hop is refused")
+            .to_string();
+        assert!(
+            refusal.contains("other.txt") && refusal.contains("since the run judged it"),
+            "{refusal}"
         );
     }
 }

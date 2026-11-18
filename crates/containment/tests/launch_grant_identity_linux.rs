@@ -1,7 +1,8 @@
-//! Filesystem grant identity across the production Linux launch handoff.
+//! Filesystem grant identity across the production Linux configuration handoff.
 #![cfg(all(target_os = "linux", target_arch = "aarch64"))]
 
 use std::io::{Read, Write};
+use std::net::Shutdown;
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::net::UnixStream;
@@ -101,7 +102,7 @@ int main(int argc, char **argv) {{
 
 struct Launch {
     child: Child,
-    gate: UnixStream,
+    config_input: Option<UnixStream>,
     setup_status: UnixStream,
     config_file: tempfile::NamedTempFile,
     config_bytes: Vec<u8>,
@@ -127,16 +128,18 @@ impl Launch {
         let config_file =
             tempfile::NamedTempFile::new_in(&fixture.root).expect("create the launch config");
         std::fs::write(config_file.path(), &config_bytes).expect("write the launch config once");
-        let (gate, gate_child) = UnixStream::pair().expect("create production launch gate");
+        let (config_input, config_child) =
+            UnixStream::pair().expect("create production config input");
         let (setup_status, status_child) = UnixStream::pair().expect("create setup status channel");
-        for stream in [&gate, &setup_status] {
+        for stream in [&config_child, &setup_status] {
             stream
                 .set_read_timeout(Some(Duration::from_secs(10)))
                 .expect("bound channel reads");
         }
-        gate.set_write_timeout(Some(Duration::from_secs(10)))
-            .expect("bound launch acknowledgement");
-        let gate_fd = gate_child.as_raw_fd();
+        config_input
+            .set_write_timeout(Some(Duration::from_secs(10)))
+            .expect("bound config release");
+        let config_fd = config_child.as_raw_fd();
         let status_fd = status_child.as_raw_fd();
         let mut command = Command::new(env!("CARGO_BIN_EXE_strands-box-contain-trampoline"));
         command
@@ -145,8 +148,8 @@ impl Launch {
             .arg("--config")
             .arg(config_file.path())
             .args(["--config-sha256", &config_digest, "--target-env-json", "{}"])
-            .arg("--launch-gate-fd")
-            .arg(gate_fd.to_string())
+            .arg("--config-fd")
+            .arg(config_fd.to_string())
             .arg("--setup-status-fd")
             .arg(status_fd.to_string())
             .arg("--")
@@ -158,16 +161,16 @@ impl Launch {
         // SAFETY: the child only changes descriptor flags before the production trampoline exec.
         unsafe {
             command.pre_exec(move || {
-                inherit(gate_fd)?;
+                inherit(config_fd)?;
                 inherit(status_fd)
             });
         }
         let child = command.spawn().expect("start the production trampoline");
-        drop(gate_child);
+        drop(config_child);
         drop(status_child);
         Self {
             child,
-            gate,
+            config_input: Some(config_input),
             setup_status,
             config_file,
             config_bytes,
@@ -176,16 +179,28 @@ impl Launch {
         }
     }
 
-    fn ready(&mut self) -> [u8; 1] {
-        let mut ready = [0];
-        self.gate
-            .read_exact(&mut ready)
-            .expect("receive launch gate readiness");
-        ready
+    fn assert_config_withheld(&mut self) {
+        assert!(self.config_input.is_some(), "config was already released");
+        assert!(
+            self.child
+                .try_wait()
+                .expect("inspect waiting trampoline")
+                .is_none(),
+            "trampoline exited before config release"
+        );
     }
 
     fn finish(&mut self) -> Outcome {
-        self.gate.write_all(b"G").expect("acknowledge the launch");
+        // Validation waits for the approved bytes and EOF. Using the launch gate here would also
+        // request native filesystem registration from feature-enabled Linux builds.
+        let mut input = self.config_input.take().expect("release config only once");
+        input
+            .write_all(&self.config_bytes)
+            .expect("send the exact approved config bytes");
+        input
+            .shutdown(Shutdown::Write)
+            .expect("finish config input");
+        drop(input);
         let mut setup_status = Vec::new();
         self.setup_status
             .read_to_end(&mut setup_status)
@@ -256,7 +271,7 @@ fn an_unchanged_approved_directory_runs_contained() {
     let fixture = Fixture::new();
     let approved = identity(&fixture.approved);
     let mut launch = Launch::start(&fixture, fixture.approve());
-    assert_eq!(launch.ready(), *b"R");
+    launch.assert_config_withheld();
     assert_eq!(identity(&fixture.approved), approved);
     let bytes = std::fs::read(launch.config_file.path()).expect("read unchanged config");
     assert_eq!(bytes, launch.config_bytes);
@@ -286,7 +301,7 @@ fn a_directory_replaced_after_approval_is_refused_before_execution() {
     let replacement = identity(&fixture.replacement);
     assert_ne!(approved, replacement);
     let mut launch = Launch::start(&fixture, fixture.approve());
-    assert_eq!(launch.ready(), *b"R");
+    launch.assert_config_withheld();
     fixture.replace_directory();
     assert_eq!(identity(&fixture.original), approved);
     assert_eq!(identity(&fixture.approved), replacement);
@@ -324,7 +339,7 @@ fn a_replacement_approved_for_a_new_launch_runs_contained() {
     assert_eq!(identity(&fixture.original), approved);
     assert_eq!(identity(&fixture.approved), replacement);
     let mut launch = Launch::start(&fixture, fixture.approve());
-    assert_eq!(launch.ready(), *b"R");
+    launch.assert_config_withheld();
     let bytes = std::fs::read(launch.config_file.path()).expect("read unchanged config");
     assert_eq!(bytes, launch.config_bytes);
     assert_eq!(sha256_hex(&bytes), launch.config_digest);
