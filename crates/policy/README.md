@@ -491,8 +491,12 @@ Rules written against history:
 ## Dogwood 1.1.2 history
 
 The runtime pins both `dogwood-language` and `dogwood-local-engine` to `1.1.2`.
-`PolicyEngine::open` records this version when it creates a history. It refuses previously used
-history without a supported version record before recovery or policy reconciliation.
+`PolicyEngine::open` marks a new history with Box-owned compatibility generation `1` under
+`box.dogwood.history-generation`. This generation identifies compatible saved policies and activity;
+it is independent of the Dogwood package version. Change it only when recovery or policy/state
+identity changes make saved history incompatible. Compatible package upgrades retain the generation.
+The adapter refuses previously used history without a supported generation before recovery or
+policy reconciliation.
 
 To adopt this build, deliberately select a new history file. Box operators select a new box
 directory through `box_dir`; see [the upgrade procedure](../../docs/user/policy.md#start-with-fresh-history-after-a-dogwood-upgrade).

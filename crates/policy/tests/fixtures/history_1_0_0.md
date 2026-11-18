@@ -1,7 +1,7 @@
 # Dogwood 1.0.0 history fixture
 
-`history_1_0_0.redb` contains saved history created with Dogwood 1.0.0. The history-version
-regression test uses it to verify that the 1.1.2 adapter refuses old history without changing
+`history_1_0_0.redb` contains saved history created with Dogwood 1.0.0. A regression
+test uses it to verify that the 1.1.2 adapter refuses old history without changing
 its policy or event records. It is test input, not a supported conversion format.
 
 The file is copied without changes from

@@ -145,7 +145,7 @@ fn recover_history(
     config: DurableConfig,
     interval: u64,
 ) -> Result<DurableTemporalEngine, DurableError> {
-    check_history_version(&log)?;
+    check_history_generation(&log)?;
     let summarized = log
         .get_snapshot()
         .map_err(|error| DurableError::Log(error.to_string()))?
@@ -158,18 +158,20 @@ fn recover_history(
     Ok(engine)
 }
 
-/// The Dogwood version that initialized this history.
-const HISTORY_VERSION_KEY: &str = "box.dogwood.history-version";
-const HISTORY_VERSION: &[u8] = b"1.1.2";
+/// Box-owned compatibility generation for saved policy and event history.
+/// Bump only when recovery or policy/state identity changes make existing history
+/// incompatible. A compatible Dogwood package upgrade does not change this value.
+const HISTORY_GENERATION_KEY: &str = "box.dogwood.history-generation";
+const HISTORY_GENERATION: &[u8] = b"1";
 const SERVICE_SCHEMA_KEY: &str = "dogwood_server_service_schema";
 
 /// Accept current history or mark a store that has no saved policy or activity.
-fn check_history_version(log: &DurableLog) -> Result<(), DurableError> {
+fn check_history_generation(log: &DurableLog) -> Result<(), DurableError> {
     let log_error = |error: dogwood_local_engine::LogError| DurableError::Log(error.to_string());
-    match log.get_meta(HISTORY_VERSION_KEY).map_err(log_error)? {
-        Some(version) if version == HISTORY_VERSION => Ok(()),
+    match log.get_meta(HISTORY_GENERATION_KEY).map_err(log_error)? {
+        Some(generation) if generation == HISTORY_GENERATION => Ok(()),
         Some(_) => Err(DurableError::Log(
-            "unsupported Dogwood history version; stop Box and start with a new Box directory; earlier activity will not carry over".to_owned(),
+            "unsupported Box history format; stop Box and start with a new Box directory; earlier activity will not carry over".to_owned(),
         )),
         None => {
             if log.next_offset() != 0
@@ -178,12 +180,12 @@ fn check_history_version(log: &DurableLog) -> Result<(), DurableError> {
                 || log.get_meta(SERVICE_SCHEMA_KEY).map_err(log_error)?.is_some()
             {
                 return Err(DurableError::Log(
-                    "existing history has no supported Dogwood version; stop Box and start with a new Box directory; earlier activity will not carry over".to_owned(),
+                    "existing history has no supported Box history format; stop Box and start with a new Box directory; earlier activity will not carry over".to_owned(),
                 ));
             }
             log.commit(&[Write::Meta {
-                key: HISTORY_VERSION_KEY,
-                value: HISTORY_VERSION,
+                key: HISTORY_GENERATION_KEY,
+                value: HISTORY_GENERATION,
             }])
             .map_err(log_error)?;
             Ok(())
@@ -2505,7 +2507,7 @@ when temporal {
     }
 
     #[test]
-    fn fresh_history_keeps_its_version_and_activity_after_restart() {
+    fn fresh_history_keeps_its_generation_and_activity_after_restart() {
         let history = tempfile::tempdir().expect("history directory");
         let path = history.path().join("dogwood.redb");
         let engine = DogwoodEngine::open(BUDGET, &path).expect("fresh history opens");
@@ -2522,8 +2524,8 @@ when temporal {
         for _ in 0..2 {
             let log = DurableLog::open(&path).expect("history log opens");
             assert_eq!(
-                log.get_meta(HISTORY_VERSION_KEY).unwrap(),
-                Some(HISTORY_VERSION.to_vec())
+                log.get_meta(HISTORY_GENERATION_KEY).unwrap(),
+                Some(HISTORY_GENERATION.to_vec())
             );
             drop(log);
             let engine = DogwoodEngine::open(BUDGET, &path).expect("current history reopens");
@@ -2581,12 +2583,12 @@ when temporal {
             assert!(
                 error
                     .to_string()
-                    .contains("existing history has no supported Dogwood version"),
+                    .contains("existing history has no supported Box history format"),
                 "{error}"
             );
             assert_eq!(saved(), before, "refusal changed old history");
             let log = DurableLog::open(&path).unwrap();
-            assert_eq!(log.get_meta(HISTORY_VERSION_KEY).unwrap(), None);
+            assert_eq!(log.get_meta(HISTORY_GENERATION_KEY).unwrap(), None);
         }
     }
 
@@ -2620,31 +2622,28 @@ when temporal {
                 }
                 _ => unreachable!(),
             }
-            let error = check_history_version(&log).expect_err("existing state is refused");
+            let error = check_history_generation(&log).expect_err("existing state is refused");
             assert!(
                 error.to_string().contains("start with a new Box directory"),
                 "{case}: {error}"
             );
-            assert_eq!(log.get_meta(HISTORY_VERSION_KEY).unwrap(), None, "{case}");
+            assert_eq!(
+                log.get_meta(HISTORY_GENERATION_KEY).unwrap(),
+                None,
+                "{case}"
+            );
         }
     }
 
     #[test]
-    fn unsupported_history_versions_are_refused_without_overwriting_them() {
-        for version in [
-            b"".as_slice(),
-            b"1.0.0",
-            b"1.1.1",
-            b"2.0.0",
-            b"1.1.2\0",
-            b"\xff",
-        ] {
+    fn unsupported_history_generations_are_refused_without_overwriting_them() {
+        for generation in [b"".as_slice(), b"0", b"2", b"1.1.2", b"1\0", b"\xff"] {
             let history = tempfile::tempdir().expect("history directory");
             let path = history.path().join("dogwood.redb");
             let log = DurableLog::open(&path).unwrap();
             log.commit(&[Write::Meta {
-                key: HISTORY_VERSION_KEY,
-                value: version,
+                key: HISTORY_GENERATION_KEY,
+                value: generation,
             }])
             .unwrap();
             drop(log);
@@ -2653,15 +2652,13 @@ when temporal {
                 Err(error) => error,
             };
             assert!(
-                error
-                    .to_string()
-                    .contains("unsupported Dogwood history version"),
+                error.to_string().contains("unsupported Box history format"),
                 "{error}"
             );
             let log = DurableLog::open(&path).unwrap();
             assert_eq!(
-                log.get_meta(HISTORY_VERSION_KEY).unwrap().as_deref(),
-                Some(version)
+                log.get_meta(HISTORY_GENERATION_KEY).unwrap().as_deref(),
+                Some(generation)
             );
         }
     }
@@ -2671,7 +2668,7 @@ when temporal {
         let history = tempfile::tempdir().expect("history directory");
         let path = history.path().join("dogwood.redb");
         let log = DurableLog::open(&path).expect("empty history opens");
-        check_history_version(&log).expect("current version recorded");
+        check_history_generation(&log).expect("current history generation recorded");
         drop(log);
         {
             let mut durable =

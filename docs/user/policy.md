@@ -424,9 +424,9 @@ binding sends the request with a placeholder in place of the secret, which the p
 
 ## Start with fresh history after a Dogwood upgrade
 
-Box using Dogwood 1.1.2 refuses older history without a supported version record. No workload
-starts. The error directs you to start with a new box directory; Box does not erase or convert
-the old history.
+This upgrade to Dogwood 1.1.2 requires a new box directory. If the configured directory contains
+unsupported history, Box refuses to start the workload. The error directs you to start with a new
+box directory; Box does not erase or convert the old history. Later restarts reuse the new history.
 
 A new directory starts with no recorded activity. Counts and usage budgets start over. An earlier
 read no longer satisfies a rule that requires that read before a write. If those resets are not
@@ -439,7 +439,11 @@ To use the new build with fresh history:
    and the complete old box directory intact.
 3. In the copy, set `box_dir` to a new absolute path outside the workload workspace. Its parent
    directory must exist. Keep the policy, tool grammar, credential references, and workload settings.
-4. Run the new Box executable with the copied configuration:
+4. Check each `[telemetry.<label>]` table in the copy. For a target with `kind = "file"` whose
+   `destination` points inside the old box directory, change `destination` to an absolute path under
+   the new directory's `private/` directory. Keep the target's other settings. Otherwise, the new
+   build continues to write telemetry records to the old directory.
+5. Run the new Box executable with the copied configuration:
 
    ```sh
    ./box-core/box run --config /absolute/path/to/box-1.1.2.toml

@@ -282,9 +282,12 @@ the history omits that outcome and a `::response` count is too low.
 
 ### Dogwood upgrades
 
-Box pins the Dogwood language and local engine packages to 1.1.2. Histories created by this
-adapter carry a version record. The adapter refuses previously used history without a supported
-version record before recovery or policy reconciliation. The workload does not start.
+Box pins the Dogwood language and local engine packages to 1.1.2. The adapter marks new history
+with Box-owned compatibility generation `1` under `box.dogwood.history-generation`. The generation
+identifies compatible saved policies and activity, independently of the package versions. Change it
+only when recovery or policy/state identity changes make existing history incompatible. Compatible
+package upgrades retain the generation. The adapter refuses previously used history without a
+supported generation before recovery or policy reconciliation. The workload does not start.
 
 The operator can keep the old box directory and select a new directory for the new build. The
 new directory has no earlier activity, so counts reset and history-based prerequisites must be

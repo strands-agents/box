@@ -504,8 +504,8 @@ fn captured_legacy_events_reopen_without_erasing_facts_or_inventing_identifiers(
     let history = tempfile::tempdir().expect("history directory");
     let path = history.path().join("dogwood.redb");
     // The engine is 1.1.2; only the captured event fields or action vocabulary are old.
-    // Initialize its version on an empty store before installing that historical fixture.
-    drop(PolicyEngine::open(Vec::new(), &path).expect("current engine version recorded"));
+    // Initialize its history generation on an empty store before installing that historical fixture.
+    drop(PolicyEngine::open(Vec::new(), &path).expect("current history generation recorded"));
 
     let actions = compose_action_schema(&[]).expect("fixed schema composes");
     let mut old = DurableTemporalEngine::open(&path, 10_000).expect("legacy store opens");
