@@ -1,14 +1,6 @@
-//! Production-path proof that `close_inherited_descriptors` and its fallbacks close every
-//! descriptor above stderr, on Linux.
-//!
-//! Each phase runs in `box-close-range-probe`, a freshly spawned process: the function under
-//! test wipes the caller's own descriptor table above stderr, which would tear this test
-//! binary's own pipes out from under it if run in-process, and would be unsound to run in a
-//! forked `cargo test` worker (fork in a multithreaded process only guarantees async-signal-safe
-//! work in the child, and the probe's setup allocates). A real `exec` boundary has neither
-//! problem.
+//! Production-path proof that descriptor closing preserves stdio and closes higher descriptors.
 
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 use std::process::Command;
 
@@ -38,6 +30,7 @@ fn assert_pass(phase: &str) {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn the_close_range_fast_path_closes_above_stdio_and_keeps_stdio() {
     // The probe asserts close_range specifically ran (not merely that some mechanism closed the
@@ -68,8 +61,8 @@ fn the_close_range_fast_path_closes_above_stdio_and_keeps_stdio() {
 }
 
 #[test]
-fn the_proc_self_fd_fallback_closes_above_stdio_and_keeps_stdio() {
-    assert_pass("proc-fallback");
+fn the_platform_descriptor_list_closes_above_stdio_and_keeps_stdio() {
+    assert_pass("descriptor-list");
 }
 
 /// The last-resort bounded loop, exercised directly rather than only as a fallback the fast two

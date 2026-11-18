@@ -1,6 +1,4 @@
-//! Closing every descriptor the alias inherited, before it does anything else. Shared with the
-//! test probe via `#[path]`, so it depends only on `libc` and `std`. The alias treats any `Err`
-//! here as fatal and exits before connecting to the broker.
+//! Descriptor cleanup shared by the socket alias and its test probe.
 
 use std::io;
 
@@ -8,20 +6,19 @@ use std::io;
 #[cfg(unix)]
 pub(crate) const FIRST_INHERITED_DESCRIPTOR: libc::c_int = libc::STDERR_FILENO + 1;
 
-/// Which mechanism closed the descriptors. Read only by the test probe, so a blocked close_range
-/// can't pass the fast-path test through the fallback.
+/// Which mechanism closed the descriptors, reported to the test probe.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ClosePath {
     CloseRange,
-    /// Enumerated the descriptor directory (`/proc/self/fd` or `/dev/fd`).
     Proc,
+    ProcessInfo,
+    Directory,
     Bounded,
 }
 
-/// Close every descriptor above stdio before doing anything else. One `close_range` syscall does
-/// it in constant time, so the cost no longer scales with `RLIMIT_NOFILE` (the old loop to
-/// `getdtablesize()` cost minutes at a ~1e9 limit). Called by syscall number; see the commit message.
+/// Close every descriptor above stdio without work proportional to `RLIMIT_NOFILE`. Linux first
+/// asks the kernel to close the range in one syscall.
 #[cfg(target_os = "linux")]
 pub(crate) fn close_inherited_descriptors() -> io::Result<()> {
     close_inherited_descriptors_reporting().map(|_path| ())
@@ -49,30 +46,79 @@ pub(crate) fn close_inherited_descriptors_reporting() -> io::Result<ClosePath> {
     close_inherited_descriptors_fallback_reporting()
 }
 
-/// The directory naming this process's open descriptors: `/proc/self/fd` on Linux, `/dev/fd` on
-/// macOS and the other unix targets (the same choice `contain_trampoline` makes).
+/// Close open descriptors by enumerating `/proc/self/fd`, or use the bounded fallback when the
+/// directory cannot be opened.
 #[cfg(target_os = "linux")]
-const DESCRIPTOR_DIRECTORY: &str = "/proc/self/fd";
-#[cfg(all(unix, not(target_os = "linux")))]
-const DESCRIPTOR_DIRECTORY: &str = "/dev/fd";
-
-/// Close every open descriptor above stdio by enumerating the descriptor directory, falling back
-/// to the bounded loop if it cannot be read. Costs one `close()` per open descriptor, so it keeps
-/// independence from `RLIMIT_NOFILE` when `close_range` is unavailable (and on macOS, where there
-/// is no `close_range`).
-#[cfg(unix)]
 pub(crate) fn close_inherited_descriptors_fallback_reporting() -> io::Result<ClosePath> {
-    let directory = match std::fs::read_dir(DESCRIPTOR_DIRECTORY) {
+    close_from_directory("/proc/self/fd", ClosePath::Proc)
+}
+
+/// Close descriptors reported by macOS for this process, or use the bounded fallback when the
+/// kernel does not provide a complete list.
+#[cfg(target_os = "macos")]
+pub(crate) fn close_inherited_descriptors_process_info_reporting() -> io::Result<ClosePath> {
+    let Some(descriptors) = macos_descriptors() else {
+        return close_inherited_descriptors_bounded_reporting();
+    };
+    close_descriptors(descriptors)?;
+    Ok(ClosePath::ProcessInfo)
+}
+
+/// List this process's descriptors through the macOS process-information API.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_descriptors() -> Option<Vec<libc::c_int>> {
+    let pid = libc::c_int::try_from(std::process::id()).ok()?;
+    // SAFETY: a null buffer of size zero asks how many bytes the list needs.
+    let needed =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDLISTFDS, 0, std::ptr::null_mut(), 0) };
+    if needed <= 0 {
+        return None;
+    }
+    let capacity = usize::try_from(needed / libc::PROC_PIDLISTFD_SIZE)
+        .ok()?
+        .checked_add(16)?;
+    let mut buffer = vec![
+        libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0,
+        };
+        capacity
+    ];
+    let size =
+        libc::c_int::try_from(capacity.checked_mul(std::mem::size_of::<libc::proc_fdinfo>())?)
+            .ok()?;
+    // SAFETY: `buffer` owns `size` writable bytes for the duration of the call.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            pid,
+            libc::PROC_PIDLISTFDS,
+            0,
+            buffer.as_mut_ptr().cast::<libc::c_void>(),
+            size,
+        )
+    };
+    if written <= 0 || written >= size {
+        return None;
+    }
+    let reported = usize::try_from(written / libc::PROC_PIDLISTFD_SIZE).ok()?;
+    Some(
+        buffer[..reported.min(capacity)]
+            .iter()
+            .map(|entry| entry.proc_fd)
+            .collect(),
+    )
+}
+
+/// Close open descriptors by enumerating a descriptor directory, or use the bounded fallback when
+/// the directory cannot be opened.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn close_from_directory(directory: &str, path: ClosePath) -> io::Result<ClosePath> {
+    let directory = match std::fs::read_dir(directory) {
         Ok(directory) => directory,
-        // Fall back only here, not on a per-entry error below: a failed open means `/proc` is
-        // absent (use another mechanism); a mid-scan error means it is present but unreadable.
         Err(_) => return close_inherited_descriptors_bounded_reporting(),
     };
-    // Collect numbers first, then close: closing mid-iteration would race the read. The directory
-    // handle drops when the loop ends, before the close loop, so its own number reads as closed.
     let mut descriptors = Vec::new();
     for entry in directory {
-        // A mid-scan error returns before everything is closed, which the caller treats as fatal.
         let entry = entry?;
         let name = entry.file_name();
         let Some(number) = name
@@ -81,14 +127,21 @@ pub(crate) fn close_inherited_descriptors_fallback_reporting() -> io::Result<Clo
         else {
             continue;
         };
-        if number > libc::STDERR_FILENO {
-            descriptors.push(number);
+        descriptors.push(number);
+    }
+    close_descriptors(descriptors)?;
+    Ok(path)
+}
+
+/// Close descriptor numbers above the standard streams.
+#[cfg(unix)]
+fn close_descriptors(descriptors: impl IntoIterator<Item = libc::c_int>) -> io::Result<()> {
+    for descriptor in descriptors {
+        if descriptor > libc::STDERR_FILENO {
+            close_one(descriptor)?;
         }
     }
-    for descriptor in descriptors {
-        close_one(descriptor)?;
-    }
-    Ok(ClosePath::Proc)
+    Ok(())
 }
 
 /// Close every descriptor above stdio up to `getdtablesize()` with a bounded loop: the historical
@@ -121,12 +174,16 @@ fn close_one(descriptor: libc::c_int) -> io::Result<()> {
     Ok(())
 }
 
-/// Close every descriptor above stdio before doing anything else. Non-Linux unix targets have no
-/// `close_range` call here, so they enumerate `/dev/fd` and keep the bounded loop only as the
-/// fallback when that directory cannot be read.
-#[cfg(all(unix, not(target_os = "linux")))]
+/// Close every descriptor above stdio. macOS uses `proc_pidinfo` because the alias's sandbox does
+/// not grant read access to `/dev/fd`; other non-Linux unix targets enumerate `/dev/fd`.
+#[cfg(target_os = "macos")]
 pub(crate) fn close_inherited_descriptors() -> io::Result<()> {
-    close_inherited_descriptors_fallback_reporting().map(|_path| ())
+    close_inherited_descriptors_process_info_reporting().map(|_path| ())
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
+pub(crate) fn close_inherited_descriptors() -> io::Result<()> {
+    close_from_directory("/dev/fd", ClosePath::Directory).map(|_path| ())
 }
 
 #[cfg(not(unix))]

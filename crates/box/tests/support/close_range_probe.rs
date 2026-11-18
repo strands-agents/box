@@ -1,24 +1,15 @@
-//! Test-only workload that exercises `close_inherited_descriptors` and its fallbacks directly.
-//!
-//! A real process boundary (this binary, spawned fresh by `std::process::Command`) is required
-//! because the function under test wipes the caller's descriptor table above stderr: running it
-//! in-process inside `cargo test` would tear out the harness's own pipes, and forking a
-//! multithreaded test process would make the child's own setup (which allocates) unsound before
-//! `_exit`. A freshly exec'd process has neither problem, and this probe needs no fork.
+//! Process-isolated probe for descriptor cleanup paths.
 
 #[path = "../../src/bin/strands-box-sock-alias/close_descriptors.rs"]
 #[allow(dead_code)]
 mod close_descriptors;
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn main() {
-    // This probe drives the Linux-specific close paths; on every other target it is a no-op.
-    // `box_close_range.rs`, which spawns it, is itself `#![cfg(target_os = "linux")]`, so this
-    // branch is never reached from the test suite and exists only so the binary still builds.
-    println!("skipping: box-close-range-probe is Linux-only");
+    println!("skipping: box-close-range-probe supports Linux and macOS");
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn main() -> std::process::ExitCode {
     use close_descriptors::ClosePath;
     use std::process::ExitCode;
@@ -26,14 +17,12 @@ fn main() -> std::process::ExitCode {
     let phase = std::env::args().nth(1);
     let Some(phase) = phase else {
         eprintln!(
-            "usage: box-close-range-probe <fast-path|proc-fallback|bounded|soft-limit|lower-boundary>"
+            "usage: box-close-range-probe <fast-path|descriptor-list|bounded|soft-limit|lower-boundary>"
         );
         return ExitCode::from(2);
     };
     let result = match phase.as_str() {
-        // The fast-path phase requires close_range specifically to have closed the descriptors
-        // (see ClosePath's doc). If it is genuinely unavailable here (old kernel or a seccomp
-        // block), report an explicit skip rather than failing or passing through the fallback.
+        #[cfg(target_os = "linux")]
         "fast-path" => match close_range_available() {
             Ok(true) => run_phase(close_descriptors::close_inherited_descriptors_reporting)
                 .and_then(|path| expect_path(path, ClosePath::CloseRange)),
@@ -43,9 +32,15 @@ fn main() -> std::process::ExitCode {
             }
             Err(reason) => Err(reason),
         },
-        "proc-fallback" => {
+        #[cfg(target_os = "linux")]
+        "descriptor-list" => {
             run_phase(close_descriptors::close_inherited_descriptors_fallback_reporting)
                 .and_then(|path| expect_path(path, ClosePath::Proc))
+        }
+        #[cfg(target_os = "macos")]
+        "descriptor-list" => {
+            run_phase(close_descriptors::close_inherited_descriptors_process_info_reporting)
+                .and_then(|path| expect_path(path, ClosePath::ProcessInfo))
         }
         // Exercises the last-resort bounded loop directly, independent of whether close_range or
         // /proc are available on this host (the production code only reaches it when both of
@@ -79,7 +74,7 @@ fn main() -> std::process::ExitCode {
 /// Lower the soft `RLIMIT_NOFILE` to at most `cap`, leaving the hard limit untouched, and return
 /// the new soft limit. Capping keeps the `bounded` and `soft-limit` phases fast and identical on
 /// every host; the probe is its own process, so capping affects nothing else.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn cap_soft_limit(cap: libc::rlim_t) -> Result<libc::rlim_t, String> {
     let mut limit = libc::rlimit {
         rlim_cur: 0,
@@ -134,7 +129,7 @@ fn close_range_available() -> Result<bool, String> {
 
 /// Confirm `close_fn` reported it used `expected`, after `run_phase` has already confirmed the
 /// descriptor invariant held.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn expect_path(
     actual: close_descriptors::ClosePath,
     expected: close_descriptors::ClosePath,
@@ -148,7 +143,7 @@ fn expect_path(
 /// Plant a descriptor above stderr (via `F_DUPFD`, never a fixed number), call `close_fn`, then
 /// assert the planted descriptor is gone and the three standard streams survive. Returns the
 /// `ClosePath` `close_fn` reports, for the caller to check against the phase.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_phase(
     close_fn: fn() -> std::io::Result<close_descriptors::ClosePath>,
 ) -> Result<close_descriptors::ClosePath, String> {
@@ -180,7 +175,7 @@ fn run_phase(
 /// Plant a descriptor one below the current soft `RLIMIT_NOFILE`, run the full
 /// `close_inherited_descriptors`, and confirm it is gone. Proves closure is not limited to the
 /// bottom of the range; the asymptotic timing is measured separately, not here.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn soft_limit() -> Result<(), String> {
     // Cap the soft limit at 4096 first (see cap_soft_limit) so this phase plants near a bounded,
     // host-independent limit rather than near a limit that may be ~1e9 on some hosts.
@@ -214,7 +209,7 @@ fn soft_limit() -> Result<(), String> {
 /// The exact lower boundary: fd 3 (`STDERR_FILENO + 1`) itself must be closed, and nothing above
 /// stderr may remain. Plants fd 3 explicitly first, so the "before" census contains it and the
 /// test cannot pass vacuously on a process that started with a clean table above stderr.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn lower_boundary() -> Result<(), String> {
     // Take fd 3 specifically: open `/dev/null`, then `dup2` it onto `STDERR_FILENO + 1`, which
     // closes anything already there and makes fd 3 definitively open and ours.
@@ -295,10 +290,19 @@ fn open_descriptors_above_stderr() -> Result<Vec<libc::c_int>, String> {
         .collect())
 }
 
+#[cfg(target_os = "macos")]
+fn open_descriptors_above_stderr() -> Result<Vec<libc::c_int>, String> {
+    let descriptors = close_descriptors::macos_descriptors()
+        .ok_or_else(|| "proc_pidinfo did not return a complete descriptor list".to_owned())?;
+    Ok(descriptors
+        .into_iter()
+        .filter(|descriptor| *descriptor > libc::STDERR_FILENO && is_open(*descriptor))
+        .collect())
+}
+
 /// Duplicate an open descriptor onto the lowest number at or above `minimum` that is not already
-/// taken, so the test never collides with whatever the harness already has open and never assumes
-/// a fixed descriptor number is available on every host.
-#[cfg(target_os = "linux")]
+/// taken.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn plant_descriptor(minimum: libc::c_int) -> Result<libc::c_int, String> {
     // SAFETY: opening a real file for reading only.
     let source = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
@@ -325,7 +329,7 @@ fn plant_descriptor(minimum: libc::c_int) -> Result<libc::c_int, String> {
 }
 
 /// Whether one descriptor number is open.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn is_open(descriptor: libc::c_int) -> bool {
     // SAFETY: `F_GETFD` only inspects a descriptor number.
     unsafe { libc::fcntl(descriptor, libc::F_GETFD) != -1 }
