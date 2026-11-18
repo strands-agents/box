@@ -784,6 +784,63 @@ fn a_box_reaches_the_runtime_minimum() {
     );
 }
 
+/// **The `/tmp` link resolves in a box on macOS, and a path through it keeps `/private/tmp`'s
+/// grants.** A program with no `TMPDIR` falls back to `/tmp`, and the link node needs its own
+/// metadata rule, which only a minimum cell spelled `/tmp` renders.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_tmp_link_resolves_and_a_path_through_it_keeps_its_grants() {
+    if !fixture::namespace_launcher_is_usable() {
+        println!("skipping: this platform has no usable containment backend");
+        return;
+    }
+    let granted = tempfile::tempdir_in("/private/tmp").expect("a granted directory");
+    let ungranted = tempfile::tempdir_in("/private/tmp").expect("an ungranted directory");
+    std::fs::write(ungranted.path().join("planted.txt"), "PLANTED\n").expect("a planted file");
+    let box_ = Request::with_policy("tmp-link", PERMIT_EVERY_EFFECT)
+        .agent_read(&[granted.path()])
+        .agent_write(&[granted.path()])
+        .expect();
+    let through_link = |directory: &Path| {
+        Path::new("/tmp").join(
+            directory
+                .strip_prefix("/private/tmp")
+                .expect("a directory under /private/tmp"),
+        )
+    };
+    let script = format!(
+        "[[ -L /tmp ]] && printf 'TMP_LINK '; \
+         [[ -d /tmp/ ]] && printf 'TMP_DIRECTORY '; \
+         printf 'linked\\n' > {granted}/written 2>/dev/null \
+           && read -r value < {granted}/written && printf 'GRANTED=%s ' \"$value\"; \
+         set -- {granted}/*; [[ -e $1 ]] && printf 'GRANTED_LISTED '; \
+         read -r leaked < {ungranted}/planted.txt 2>/dev/null && printf 'LEAKED=%s ' \"$leaked\"; \
+         printf x > {ungranted}/written 2>/dev/null && printf 'WRITE_LEAKED '; \
+         set -- {ungranted}/*; [[ -e $1 ]] && printf 'LIST_LEAKED '; \
+         printf DONE",
+        granted = shell_quote(&through_link(granted.path())),
+        ungranted = shell_quote(&through_link(ungranted.path())),
+    );
+
+    let output = probe(&box_, &script);
+    assert_ran(&output);
+    assert_eq!(
+        stdout(&output),
+        "TMP_LINK TMP_DIRECTORY GRANTED=linked GRANTED_LISTED DONE",
+        "the /tmp link must resolve, and a path through it must read, write and list only what \
+         /private/tmp grants: {output:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(granted.path().join("written")).expect("the write landed"),
+        "linked\n",
+        "the write through /tmp reached the granted directory on the host"
+    );
+    assert!(
+        !ungranted.path().join("written").exists(),
+        "a write through /tmp must not land in an ungranted directory"
+    );
+}
+
 /// **The workspace is enterable, and unreadable until a list names it.**
 ///
 /// The working directory *is* the workspace, so the positive half proves nothing on its own, and
