@@ -914,6 +914,165 @@ permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], r
     assert!(!printed("vault_write_rc=0"), "{output:?}");
 }
 
+/// The stderr of the first run of a new box directory, which must stop, each entry that the
+/// run left in that directory, and the next run in it after `fix` removes the cause.
+#[cfg(target_os = "macos")]
+fn first_run_then_fixed(
+    name: &str,
+    body: &str,
+    request: impl FnOnce(Request) -> Request,
+    fix: impl FnOnce(),
+) -> (String, Vec<String>, Output) {
+    let (box_, output) = request(Request::with_config(
+        name,
+        &permit_egress_to("api.example.test", 443),
+        body,
+    ))
+    .attempt();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    assert!(
+        !output.status.success(),
+        "{name}: the first run must stop: {stderr}"
+    );
+    let mut stored: Vec<String> = std::fs::read_dir(box_.root())
+        .expect("the box directory lists")
+        .map(|entry| {
+            entry
+                .expect("an entry of the box directory")
+                .file_name()
+                .to_string_lossy()
+                .to_string()
+        })
+        .collect();
+    stored.sort();
+    fix();
+    let next = box_.run(&["/bin/bash", "-c", "printf 'READY\\n'"]);
+    (stderr, stored, next)
+}
+
+/// **A run that the check of the secret sources refuses stores nothing in a new box
+/// directory**: the operator removes the cause, and the next run starts in the same directory.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_new_box_directory_starts_after_the_cause_of_a_secret_source_refusal_is_gone() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let route = declared_route("api.example.test", "op://Personal/GitHub/token");
+
+    // The program file is absent, and then the operator installs it.
+    let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+    let installed = std::path::PathBuf::from(program.path());
+    let later = installed.with_extension("later");
+    std::fs::rename(&installed, &later).expect("the program is not installed yet");
+    let (stderr, stored, next) = first_run_then_fixed(
+        "first-run-absent",
+        &declared_source(true, &program.path(), &route),
+        |request| request,
+        || std::fs::rename(&later, &installed).expect("the operator installs the program"),
+    );
+    assert!(stderr.contains("its program cannot run"), "{stderr}");
+    assert_eq!(
+        stored,
+        Vec::<String>::new(),
+        "the refused run stores nothing"
+    );
+    assert_ran(&next);
+
+    // A write grant covers the file that the program path resolves to, and then the operator
+    // points the path at a copy outside the grant.
+    let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+    let outside = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+    let links = fixture::short_temporary_home();
+    let link = links.path().join("op");
+    std::os::unix::fs::symlink(program.path(), &link).expect("the program path is a link");
+    let folder = program
+        .directory
+        .path()
+        .canonicalize()
+        .expect("the program folder resolves");
+    let (stderr, stored, next) = first_run_then_fixed(
+        "first-run-writable",
+        &declared_source(true, &link.display().to_string(), &route),
+        |request| request.agent_read(&[&folder]).agent_write(&[&folder]),
+        || {
+            std::fs::remove_file(&link).expect("the link is removed");
+            std::os::unix::fs::symlink(outside.path(), &link).expect("the link names the copy");
+        },
+    );
+    assert!(
+        stderr.contains("this write grant can change [secret-source.op] command"),
+        "{stderr}"
+    );
+    assert_eq!(
+        stored,
+        Vec::<String>::new(),
+        "the refused run stores nothing"
+    );
+    assert_ran(&next);
+    assert_eq!(program.runs(), Vec::<String>::new());
+
+    // The control: a route secret that the source does not return, and then returns.
+    let program = StandInProgram::new(&format!(
+        "test -e \"$(dirname \"$0\")/signed-in\" || {{ echo 'not signed in' >&2; exit 3; }}\n\
+         printf '%s\\n' {DECLARED_SECRET}"
+    ));
+    let marker = program.directory.path().join("signed-in");
+    let (stderr, stored, next) = first_run_then_fixed(
+        "first-run-route",
+        &declared_source(true, &program.path(), &route),
+        |request| request,
+        || std::fs::write(&marker, "").expect("the operator signs in"),
+    );
+    assert!(
+        stderr.contains("did not return, so the box does not start"),
+        "{stderr}"
+    );
+    assert!(stored.contains(&"private".to_string()), "{stored:?}");
+    assert_ran(&next);
+}
+
+/// **The limit: a telemetry secret that the program does not return on the first run of a new
+/// box directory leaves a record with no history**, so the next run stops until the operator
+/// empties the directory, because the read runs a program and so comes after Box stores the
+/// record.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_telemetry_secret_that_is_not_returned_on_a_first_run_still_strands_the_box_directory() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let program = StandInProgram::new(&format!(
+        "test -e \"$(dirname \"$0\")/signed-in\" || {{ echo 'not signed in' >&2; exit 3; }}\n\
+         printf '{{\"TELEMETRY\":\"%s\"}}\\n' {DECLARED_SECRET}"
+    ));
+    let marker = program.directory.path().join("signed-in");
+    let (stderr, stored, next) = first_run_then_fixed(
+        "first-run-otlp",
+        &declared_source(
+            true,
+            &program.path(),
+            "[telemetry.vendor]\nkind = \"otlp\"\ndestination = \"http://127.0.0.1:9\"\n\
+             secret.ref = \"op://box/keys#TELEMETRY\"\n",
+        ),
+        |request| request,
+        || std::fs::write(&marker, "").expect("the operator signs in"),
+    );
+    assert!(
+        stderr.contains("`[telemetry.vendor] secret.ref` names a secret that the secret source"),
+        "{stderr}"
+    );
+    assert!(stored.contains(&"private".to_string()), "{stored:?}");
+    let refusal = String::from_utf8_lossy(&next.stderr);
+    assert!(!next.status.success(), "{refusal}");
+    assert!(
+        refusal.contains("the box record is committed, but the history")
+            && refusal.contains("is absent. Wipe the box directory to start again."),
+        "{refusal}"
+    );
+    assert_eq!(program.runs().len(), 1, "the next run stops before a read");
+}
+
 /// **A telemetry target and a route that name one secret run the program once**, the target
 /// receives its field of that secret, and both reads are recorded after the collector opens.
 #[cfg(target_os = "macos")]

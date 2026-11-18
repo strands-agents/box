@@ -70,10 +70,85 @@ impl StandIn {
 }
 
 /// The sources of the `[secret-source.<scheme>]` tables in `text`, on a protected operating
-/// system with the feature on.
+/// system with the feature on, with each program file checked and no table judged.
 pub(crate) fn sources(text: &str) -> Result<SecretSources, BoxError> {
     SecretSources::for_tests(&crate::record::config::secret_source::tests::entries(text))
 }
+
+impl SecretSources {
+    /// The sources of `entries` on a protected operating system, with the feature on, with each
+    /// program file checked and no table judged.
+    pub(crate) fn for_tests(
+        entries: &BTreeMap<String, SecretSourceEntry>,
+    ) -> Result<Self, BoxError> {
+        Self::open(entries, || Ok(DeclaredSources::for_tests(entries)))
+    }
+
+    /// [`check`](Self::check) of `record` on a protected operating system, with the feature on.
+    pub(crate) fn check_for_tests(
+        record: &Record,
+        disclosure: impl std::io::Write,
+    ) -> Result<Self, BoxError> {
+        let entries = &record.secret_source;
+        let declared = || Ok(DeclaredSources::for_tests(entries));
+        Self::checked_for_record(record, declared, &[], disclosure)
+    }
+}
+
+impl RouteSecrets {
+    /// The secrets of a record that declares no source, after its two reads.
+    pub(crate) fn none() -> Self {
+        let (_, telemetry) = SecretSources::check(&record(""), &[], std::io::sink())
+            .expect("no declaration, no refusal")
+            .fetch_telemetry(std::io::sink());
+        let (_, routes) = telemetry
+            .expect("no secret, no failed read")
+            .fetch_routes(std::io::sink());
+        routes.expect("no secret, no failed read")
+    }
+}
+
+/// The process tables of a configuration that declares no process.
+fn no_tables() -> ProcessTables {
+    ProcessTables {
+        tables: Vec::new(),
+        policy: None,
+        declares_stdio_mcp: false,
+        source_paths: Vec::new(),
+    }
+}
+
+/// What [`SecretSources::checked`] makes of the tables in `text` beside `tables`: the sources or
+/// the refusal, and each line that it wrote.
+fn checked(text: &str, tables: &ProcessTables) -> (Result<SecretSources, String>, String) {
+    let entries = crate::record::config::secret_source::tests::entries(text);
+    let mut lines = Vec::new();
+    let sources = SecretSources::checked(
+        &entries,
+        || Ok(DeclaredSources::for_tests(&entries)),
+        tables,
+        &[],
+        &mut lines,
+    )
+    .map_err(|refusal| refusal.to_string());
+    (
+        sources,
+        String::from_utf8(lines).expect("the lines are UTF-8"),
+    )
+}
+
+/// The secret that `backend` reads for `reference`, or its refusal.
+fn read(backend: &Backend, reference: &str) -> Result<String, String> {
+    backend
+        .resolve(&Locator::parse_uri(reference).expect("the reference parses"))
+        .map(|secret| secret.to_string())
+        .map_err(|refusal| refusal.to_string())
+}
+
+/// Why a closed source refuses a read of `op://item`.
+const CLOSED: &str = "credential error: the secret source \"op\" (\"/bin/sh\") for \
+                      op://[REDACTED] is closed: the box reads each secret once, before the \
+                      workload starts";
 
 /// The sources that read `op://` and `aws-secretsmanager://` through `program`.
 pub(crate) fn printer_sources(program: &StandIn) -> SecretSources {
@@ -88,7 +163,7 @@ pub(crate) fn printer_sources(program: &StandIn) -> SecretSources {
 fn secret_use(entry: &str, reference: &str) -> SecretUse {
     SecretUse {
         entry: entry.to_string(),
-        reference: reference.to_string(),
+        locator: Locator::parse_uri(reference).expect("the reference parses"),
     }
 }
 
@@ -150,34 +225,43 @@ fn record(text: &str) -> Record {
 
 #[test]
 fn a_configuration_with_no_declaration_reads_through_the_local_sources() {
-    let sources = SecretSources::none();
+    let mut lines = Vec::new();
+    let sources =
+        SecretSources::check(&record(""), &[], &mut lines).expect("no declaration, no refusal");
     assert_eq!(
         format!("{:?}", sources.backend()),
         format!("{:?}", Backend::local())
     );
-    let mut lines = Vec::new();
-    sources.disclose(&mut lines).expect("the lines write");
     assert_eq!(lines, b"");
     assert!(!sources.reads("op://Personal/GitHub/token"));
-    assert_eq!(fetch(&sources, &[]), (Vec::new(), String::new(), None));
+    // Each read step reads nothing, and gives the next one.
+    let (fetched, telemetry) = sources.fetch_telemetry(&mut lines);
+    assert_eq!(fetched, []);
+    let (fetched, routes) = telemetry
+        .expect("no secret, no failed read")
+        .fetch_routes(&mut lines);
+    assert_eq!(fetched, []);
+    assert!(routes.is_ok());
+    assert_eq!(lines, b"");
 }
 
 #[test]
-fn startup_names_each_declared_source_and_its_program() {
+fn the_check_names_each_declared_source_and_its_program() {
     let program = StandIn::new(PRINTER);
     // A path can hold a control character, and a line shows none.
     let odd = program.path().join("to\u{1b}ol");
     std::os::unix::fs::symlink(SHELL, &odd).expect("the link is made");
-    let sources = sources(&format!(
-        "{}{}",
-        program.table("op", Path::new(SHELL)),
-        program.table("vault", &odd)
-    ))
-    .expect("the stand-in programs are checked");
-    let mut lines = Vec::new();
-    sources.disclose(&mut lines).expect("the lines write");
+    let (sources, lines) = checked(
+        &format!(
+            "{}{}",
+            program.table("op", Path::new(SHELL)),
+            program.table("vault", &odd)
+        ),
+        &no_tables(),
+    );
+    sources.expect("the stand-in programs are checked");
     assert_eq!(
-        String::from_utf8(lines).expect("the lines are UTF-8"),
+        lines,
         format!(
             "strands-box: [secret-source.op]: reads each op:// secret with /bin/sh, which runs \
              outside every sandbox\n\
@@ -192,7 +276,6 @@ fn startup_names_each_declared_source_and_its_program() {
 #[test]
 fn each_entry_whose_secret_a_declared_source_reads_is_a_use() {
     let program = StandIn::new(PRINTER);
-    let sources = printer_sources(&program);
     let record = record(
         r#"
         [egress.github]
@@ -242,15 +325,17 @@ fn each_entry_whose_secret_a_declared_source_reads_is_a_use() {
         secret.header = "x-api-key"
         "#,
     );
+    // The check of a record holds each use, for the two reads.
+    let sources = printer_sources(&program).reading(&record);
     assert_eq!(
-        sources.telemetry_uses(&record),
+        sources.telemetry,
         [secret_use(
             "[telemetry.vendor] secret.ref",
             "aws-secretsmanager://box/telemetry#KEY"
         )]
     );
     assert_eq!(
-        sources.route_uses(&record),
+        sources.routes,
         [
             secret_use("[egress.github] secret.ref", "op://Personal/GitHub/token"),
             secret_use(
@@ -261,6 +346,102 @@ fn each_entry_whose_secret_a_declared_source_reads_is_a_use() {
         ]
     );
     assert_eq!(program.runs(), 0, "a list of uses starts no program");
+}
+
+#[test]
+fn the_check_of_a_record_gives_the_sources_that_read_each_of_its_secrets() {
+    let program = StandIn::new(PRINTER);
+    let mut record = record(
+        r#"
+        [egress.github]
+        destinations = ["api.github.com"]
+        secret.ref = "op://Personal/GitHub/token"
+        secret.env = "GH_TOKEN"
+
+        [telemetry.vendor]
+        kind = "otlp"
+        destination = "https://api.vendor.example.com/otel"
+        secret.ref = "op://Personal/Vendor/key"
+        "#,
+    );
+    record.secret_source = crate::record::config::secret_source::tests::entries(
+        &program.table("op", Path::new(SHELL)),
+    );
+    let mut lines = Vec::new();
+    let sources =
+        SecretSources::check_for_tests(&record, &mut lines).expect("the program is checked");
+    assert_eq!(
+        String::from_utf8(lines).expect("the lines are UTF-8"),
+        "strands-box: [secret-source.op]: reads each op:// secret with /bin/sh, which runs \
+         outside every sandbox\n"
+    );
+    assert_eq!(program.runs(), 0, "the check starts no program");
+
+    let mut said = Vec::new();
+    let (first, telemetry) = sources.fetch_telemetry(&mut said);
+    assert_eq!(
+        first,
+        [fetched("[telemetry.vendor] secret.ref", "op", true)]
+    );
+    assert_eq!(program.runs(), 1);
+    let (second, routes) = telemetry
+        .expect("the program returns the secret")
+        .fetch_routes(&mut said);
+    assert_eq!(second, [fetched("[egress.github] secret.ref", "op", true)]);
+    assert_eq!(program.runs(), 2);
+    assert_eq!(
+        read(
+            routes.expect("the program returns the secret").backend(),
+            "op://Personal/GitHub/token"
+        ),
+        Ok("tok-Personal/GitHub/token".to_string())
+    );
+    assert_eq!(program.runs(), 2);
+    assert_eq!(said, b"");
+}
+
+#[test]
+fn the_sources_read_a_reference_by_the_scheme_that_credentials_routes() {
+    let program = StandIn::new(PRINTER);
+    let sources = printer_sources(&program);
+    for (reference, read) in [
+        ("op://Personal/GitHub/token", true),
+        ("op://item#FIELD", true),
+        ("op://a://b", true),
+        ("aws-secretsmanager://box/telemetry#KEY", true),
+        // No source of this run reads the scheme.
+        ("vault://kv/key", false),
+        ("env://NAME", false),
+        ("aws://", false),
+        // `credentials` refuses the text as a reference, so no source reads it.
+        ("op://", false),
+        ("://orphan", false),
+        ("op:/item", false),
+        ("op", false),
+        ("", false),
+        // The scheme is the text before `://` as written: no trim, and no change of case.
+        (" op://item", false),
+        ("op ://item", false),
+        ("OP://item", false),
+    ] {
+        assert_eq!(sources.reads(reference), read, "for {reference:?}");
+        // The answer is for the scheme that the backend routes the reference by.
+        let routed = Locator::parse_uri(reference).ok();
+        assert_eq!(
+            read,
+            routed
+                .as_ref()
+                .is_some_and(|locator| ["op", "aws-secretsmanager"].contains(&locator.scheme())),
+            "for {reference:?}"
+        );
+        // A use holds the reference as the backend gets it.
+        assert_eq!(
+            sources.locator(reference),
+            routed.filter(|_| read),
+            "for {reference:?}"
+        );
+    }
+    assert_eq!(program.runs(), 0, "the answer starts no program");
 }
 
 #[test]
@@ -317,11 +498,13 @@ fn a_telemetry_target_and_a_route_with_one_secret_run_the_program_once() {
         "#,
     );
     // The two steps of a run: the telemetry targets, then the routes.
-    let (first, _, refusal) = fetch(&sources, &sources.telemetry_uses(&record));
-    assert_eq!(refusal, None);
+    let sources = sources.reading(&record);
+    let mut said = Vec::new();
+    let (first, telemetry) = sources.fetch_telemetry(&mut said);
+    let telemetry = telemetry.expect("the program returns the secret");
     assert_eq!(program.runs(), 1);
-    let (second, _, refusal) = fetch(&sources, &sources.route_uses(&record));
-    assert_eq!(refusal, None);
+    let (second, routes) = telemetry.fetch_routes(&mut said);
+    let routes = routes.expect("the backend holds the secret");
     assert_eq!(program.runs(), 1, "the second step reuses the held secret");
     assert_eq!(
         [first, second].concat(),
@@ -330,6 +513,77 @@ fn a_telemetry_target_and_a_route_with_one_secret_run_the_program_once() {
             fetched("[egress.vendor] secret.ref", "aws-secretsmanager", true),
         ]
     );
+    // Each vault then takes its secret from the one backend, and starts no program.
+    assert_eq!(
+        read(routes.backend(), "aws-secretsmanager://object#B"),
+        Ok("b-value".to_string())
+    );
+    assert_eq!(program.runs(), 1);
+    assert_eq!(said, b"");
+}
+
+#[test]
+fn a_read_that_fails_gives_no_value_to_the_next_step() {
+    let program = StandIn::new(PRINTER);
+    let failed = |tables: &str| {
+        let sources = printer_sources(&program).reading(&record(tables));
+        let backend = sources.backend().clone();
+        let mut said = Vec::new();
+        let (fetched, telemetry) = sources.fetch_telemetry(&mut said);
+        let refusal = match telemetry {
+            Ok(telemetry) => {
+                let (later, routes) = telemetry.fetch_routes(&mut said);
+                assert_eq!(
+                    later.len(),
+                    1,
+                    "the route is read after the telemetry target"
+                );
+                routes.expect_err("the route names an absent secret")
+            }
+            Err(refusal) => {
+                assert_eq!(fetched.len(), 1, "the telemetry target is read first");
+                refusal
+            }
+        };
+        // The step that failed took the sources with it, so they are closed.
+        assert_eq!(read(&backend, "op://item"), Err(CLOSED.to_string()));
+        refusal.to_string()
+    };
+    assert_eq!(
+        failed(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com"]
+            secret.ref = "op://item"
+            secret.env = "GH_TOKEN"
+
+            [telemetry.vendor]
+            kind = "otlp"
+            destination = "https://api.vendor.example.com/otel"
+            secret.ref = "op://absent"
+            "#
+        ),
+        "`[telemetry.vendor] secret.ref` names a secret that the secret source `op` (/bin/sh) \
+         did not return, so the box does not start"
+    );
+    assert_eq!(
+        program.runs(),
+        1,
+        "no route is read after the target that failed"
+    );
+    assert_eq!(
+        failed(
+            r#"
+            [egress.github]
+            destinations = ["api.github.com"]
+            secret.ref = "op://absent"
+            secret.env = "GH_TOKEN"
+            "#
+        ),
+        "`[egress.github] secret.ref` names a secret that the secret source `op` (/bin/sh) did \
+         not return, so the box does not start"
+    );
+    assert_eq!(program.runs(), 2);
 }
 
 #[test]
@@ -367,24 +621,26 @@ fn a_failed_fetch_names_its_entry_and_stops_the_later_reads() {
 fn a_reference_that_the_runner_refuses_names_its_entry() {
     let program = StandIn::new(PRINTER);
     let sources = printer_sources(&program);
-    for (reference, reason) in [
+    for (reference, scheme, reason) in [
         (
             "op://-n/item",
+            "op",
             "the reference op://[REDACTED] is malformed: the text after `://` starts with `-`, \
              which a program can read as a flag",
         ),
         (
             "aws-secretsmanager://box/telemetry#",
+            "aws-secretsmanager",
             "the reference aws-secretsmanager://[REDACTED] is malformed: it names no field \
              after `#`",
         ),
         (
             "op://plain#FIELD",
+            "op",
             "the secret source \"op\" (\"/bin/sh\") for op://[REDACTED] returned a secret that \
              is not a JSON object, so it has no `#FIELD`",
         ),
     ] {
-        let scheme = reference.split_once("://").expect("a URI").0;
         assert_eq!(
             fetch(
                 &sources,
@@ -515,37 +771,45 @@ fn a_write_grant_over_a_source_program_is_refused_and_starts_no_program() {
     }
     let link = bin.join("op");
     std::os::unix::fs::symlink(SHELL, &link).expect("the link is made");
-    let sources = sources(&program.table("op", &link)).expect("the program is checked");
+    let table = program.table("op", &link);
+    let line = format!(
+        "strands-box: [secret-source.op]: reads each op:// secret with {}, which runs outside \
+         every sandbox\n",
+        link.display()
+    );
 
-    let refusal = sources
-        .refuse_exposure(&agent_writes(&bin), &[])
-        .expect_err("the agent can replace the link to the program")
-        .to_string();
+    // The check gives no sources to read with, and names no source, for a refused table.
+    let (refused, lines) = checked(&table, &agent_writes(&bin));
     assert_eq!(
-        refusal,
-        format!(
-            "`[agent]` filesystem entry {:?} is refused: this write grant can change \
-             [secret-source.op] command {} or its path. Keep the program of each secret source \
-             outside every process's write grants",
-            bin.display().to_string(),
-            Path::new(SHELL)
-                .canonicalize()
-                .expect("the shell resolves")
-                .display()
+        (refused.err(), lines),
+        (
+            Some(format!(
+                "`[agent]` filesystem entry {:?} is refused: this write grant can change \
+                 [secret-source.op] command {} or its path. Keep the program of each secret \
+                 source outside every process's write grants",
+                bin.display().to_string(),
+                Path::new(SHELL)
+                    .canonicalize()
+                    .expect("the shell resolves")
+                    .display()
+            )),
+            String::new()
         )
     );
-    sources
-        .refuse_exposure(&agent_writes(&output), &[])
-        .expect("a grant beside the program is not refused");
+    let (sources, lines) = checked(&table, &agent_writes(&output));
+    sources.expect("a grant beside the program is not refused");
+    assert_eq!(lines, line);
     // A configuration that declares no source judges no list here, also a list that the
     // judgement refuses, so its checks keep their order.
+    let (refused, lines) = checked(&table, &agent_writes(&link));
     assert!(
-        sources.refuse_exposure(&agent_writes(&link), &[]).is_err(),
+        refused.is_err(),
         "the judgement refuses a list entry that is a symbolic link"
     );
-    SecretSources::none()
-        .refuse_exposure(&agent_writes(&link), &[])
-        .expect("no source, no judgement");
+    assert_eq!(lines, "");
+    let (sources, lines) = checked("", &agent_writes(&link));
+    sources.expect("no source, no judgement");
+    assert_eq!(lines, "");
     assert_eq!(program.runs(), 0, "the check starts no program");
 }
 
@@ -730,7 +994,8 @@ fn the_sources_read_each_credential_of_a_vault_when_they_judge_a_table() {
         ]
     );
     // A configuration that declares no source copies no variable of the operator.
-    SecretSources::none()
+    SecretSources::for_tests(&BTreeMap::new())
+        .expect("no declaration, no refusal")
         .refuse_exposure_in(&tables, &[], || -> Vec<_> {
             panic!("no source, no read of the environment")
         })
@@ -739,28 +1004,183 @@ fn the_sources_read_each_credential_of_a_vault_when_they_judge_a_table() {
 }
 
 #[test]
-fn the_sources_read_no_secret_after_they_close() {
+fn a_check_for_references_checks_no_table_that_no_reference_reads() {
     let program = StandIn::new(PRINTER);
-    let sources = printer_sources(&program);
-    let uses = [secret_use("[egress.github] secret.ref", "op://item")];
-    assert_eq!(fetch(&sources, &uses).2, None);
-    sources.close();
-    assert_eq!(
-        fetch(&sources, &uses),
-        (
-            vec![fetched("[egress.github] secret.ref", "op", false)],
-            "strands-box: [egress.github] secret.ref: credential error: the secret source \
-             \"op\" (\"/bin/sh\") for op://[REDACTED] is closed: the box reads each secret once, \
-             before the workload starts\n"
-                .to_string(),
-            Some(
-                "`[egress.github] secret.ref` names a secret that the secret source `op` \
-                 (/bin/sh) did not return, so the box does not start"
-                    .to_string()
-            )
-        )
+    // The program of this table does not exist, and the feature is off.
+    let entries = crate::record::config::secret_source::tests::entries(
+        &program.table("op", &program.path().join("absent")),
     );
+    let check = |references: &[&str]| {
+        let mut lines = Vec::new();
+        let sources = SecretSources::check_for_references(
+            &entries,
+            false,
+            &no_tables(),
+            references.iter().copied(),
+            &mut lines,
+        );
+        assert_eq!(
+            lines, b"",
+            "a table that is not checked or is refused has no line"
+        );
+        sources.map_err(|refusal| refusal.to_string())
+    };
+
+    for references in [
+        &[][..],
+        // `credentials` routes none of these to the declared scheme.
+        &[
+            "env://GH_TOKEN",
+            "vault://kv/key",
+            "op",
+            "op://",
+            " op://item",
+            "OP://item",
+        ],
+    ] {
+        let sources = check(references).expect("no reference reads the table");
+        assert_eq!(
+            format!("{:?}", sources.backend()),
+            format!("{:?}", Backend::local())
+        );
+        assert!(!sources.reads("op://Personal/GitHub/token"));
+    }
+    // A reference in the declared scheme makes the check of a run, which refuses this table.
+    let refusal =
+        check(&["env://GH_TOKEN", "op://Personal/GitHub/token"]).expect_err("the table is checked");
+    assert!(
+        refusal.starts_with("invalid `[secret-source.op]` table: "),
+        "{refusal}"
+    );
+    assert_eq!(program.runs(), 0);
+}
+
+#[test]
+fn the_sources_read_no_secret_after_the_vaults_take_them() {
+    let program = StandIn::new(PRINTER);
+    let record = record(
+        r#"
+        [egress.github]
+        destinations = ["api.github.com"]
+        secret.ref = "op://item"
+        secret.env = "GH_TOKEN"
+        "#,
+    );
+    let sources = printer_sources(&program).reading(&record);
+    // A clone that a later step kept shares the one set of sources.
+    let kept = sources.backend().clone();
+    let (_, telemetry) = sources.fetch_telemetry(std::io::sink());
+    let (_, routes) = telemetry
+        .expect("no telemetry secret")
+        .fetch_routes(std::io::sink());
+    let routes = routes.expect("the program returns the secret");
+    assert_eq!(read(&kept, "op://item"), Ok("tok-item".to_string()));
     assert_eq!(program.runs(), 1);
+
+    // The vaults consume the value, and its end closes each declared source.
+    drop(routes);
+    assert_eq!(read(&kept, "op://item"), Err(CLOSED.to_string()));
+    assert_eq!(read(&kept, "op://other"), Err(CLOSED.to_string()));
+    assert_eq!(program.runs(), 1);
+
+    // The sources of a run that stops before a read close as well.
+    let unread = printer_sources(&program);
+    let kept = unread.backend().clone();
+    drop(unread);
+    assert_eq!(read(&kept, "op://item"), Err(CLOSED.to_string()));
+    assert_eq!(program.runs(), 1);
+}
+
+/// Each `pub(crate)` function of the text `source`, with the type that holds it.
+fn doors(source: &str) -> Vec<String> {
+    let mut holder = "";
+    let mut doors = Vec::new();
+    for line in source.lines() {
+        if let Some(name) = line.strip_prefix("impl ") {
+            holder = name.trim_end_matches(" {");
+        } else if let Some(function) = line.trim_start().strip_prefix("pub(crate) fn ") {
+            let name = function
+                .split(|character: char| !character.is_alphanumeric() && character != '_')
+                .next()
+                .unwrap_or_default();
+            doors.push(format!("{holder}::{name}"));
+        }
+    }
+    doors
+}
+
+/// **Only the check builds the sources, and only the sources read**: the module gives no other
+/// door, and no field, so a caller cannot read a secret before the check or after the vaults.
+#[test]
+fn only_the_check_builds_the_sources_and_only_they_read() {
+    let source = include_str!("../secret_sources.rs");
+    assert_eq!(
+        doors(source),
+        [
+            "Fetched::record",
+            // The two doors in: each one runs the whole check.
+            "SecretSources::check",
+            "SecretSources::check_for_references",
+            "SecretSources::backend",
+            "SecretSources::reads",
+            // The two reads: each one takes the value of the step before it.
+            "SecretSources::fetch_telemetry",
+            "TelemetrySecrets::backend",
+            "TelemetrySecrets::fetch_routes",
+            "RouteSecrets::backend",
+        ]
+    );
+    let test_only = source.matches("cfg(test)").count();
+    assert_eq!(test_only, 1, "the one test item is the test module");
+    for line in source.lines() {
+        let line = line.trim_start();
+        assert!(
+            !line.starts_with("pub ") && !line.starts_with("pub(super)"),
+            "an item that another crate or module sees: {line}"
+        );
+        let field = line.starts_with("pub(crate) ")
+            && !line.starts_with("pub(crate) fn ")
+            && !line.starts_with("pub(crate) struct ")
+            && !line.starts_with("pub(crate) mod tests;");
+        assert!(
+            !field,
+            "a field or an item that a caller can build with: {line}"
+        );
+    }
+    // Each visible item is a door above, one of the four types, or the test module, so no
+    // field of a tuple and no `pub(in ...)` item is a door.
+    let visible = source.matches("pub(").count() + source.matches("pub ").count();
+    assert_eq!(visible, doors(source).len() + 4 + 1, "a visible item");
+    // No trait builds, copies, or opens a state.
+    let implementations: Vec<&str> = source
+        .lines()
+        .filter(|line| line.starts_with("impl"))
+        .collect();
+    assert_eq!(
+        implementations,
+        [
+            "impl Fetched {",
+            "impl SecretSources {",
+            "impl Drop for SecretSources {",
+            "impl TelemetrySecrets {",
+            "impl RouteSecrets {",
+        ]
+    );
+    // No other file of the module holds a door.
+    let modules: Vec<&str> = source
+        .lines()
+        .filter(|line| line.contains("mod "))
+        .collect();
+    assert_eq!(modules, ["pub(crate) mod tests;"]);
+    // No state of the sources is copied or built from nothing.
+    for state in ["SecretSources", "TelemetrySecrets", "RouteSecrets"] {
+        let declared = source
+            .split_once(&format!("\npub(crate) struct {state}"))
+            .expect("the module declares the state")
+            .0;
+        let attribute = declared.rsplit('\n').next().unwrap_or_default();
+        assert_eq!(attribute, "#[derive(Debug)]", "for {state}");
+    }
 }
 
 #[test]

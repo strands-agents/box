@@ -20,7 +20,7 @@ use crate::run::contain::boundary::{
 use crate::run::contain::supervise::Contained;
 use crate::run::hosted::HostedBox;
 use crate::run::lock::Lock;
-use crate::run::secret_sources::{Fetched, SecretSources, SecretUse};
+use crate::run::secret_sources::{SecretSources, TelemetrySecrets};
 use crate::run::telemetry;
 
 /// One locked box, before this run holds any authority over it.
@@ -242,7 +242,7 @@ pub(crate) async fn execute(
         feature = "native-filesystem-policy",
         box_native_adapter_tests
     ))]
-    let (locked, entry_guard) = {
+    let ((locked, secrets), entry_guard) = {
         let NativeSetup { contract, guard } = native_setup;
         let contract = match contract {
             Some(contract) => contract,
@@ -270,18 +270,12 @@ pub(crate) async fn execute(
         feature = "native-filesystem-policy",
         box_native_adapter_tests
     )))]
-    let locked = prepare(config, argv, box_id)?;
-    // Each program file is checked before a secret is read through it.
-    let secrets = Arc::new(SecretSources::of(&locked.record)?);
-    // No program starts in a box whose grants or values let a workload go around a source.
-    secrets.refuse_exposure(&locked.record.process_tables(), &locked.sources)?;
-    secrets
-        .disclose(std::io::stderr().lock())
-        .map_err(|source| ConfigError::Disclosure { source })?;
+    let (locked, secrets) = prepare(config, argv, box_id)?;
     locked.announce_credential_stores()?;
     // No collector exists yet, so a read that fails here is stated on stderr alone.
-    let (fetched, read) = read_secrets(&secrets, secrets.telemetry_uses(&locked.record)).await;
-    read?;
+    let (fetched, secrets) =
+        off_the_worker(move || secrets.fetch_telemetry(std::io::stderr())).await;
+    let secrets = secrets?;
     let collector = telemetry::open(&locked.root, &locked.record, &secrets)?;
     let name = locked.root.name().to_string();
     collector.control(telemetry::ControlRecord::completed(
@@ -325,14 +319,12 @@ pub(crate) async fn execute(
     outcome
 }
 
-/// Read the secret of each entry in `uses` off the async worker, because a program can take its
+/// Run one read of the declared secrets off the async worker, because a program can take its
 /// whole timeout.
-async fn read_secrets(
-    secrets: &Arc<SecretSources>,
-    uses: Vec<SecretUse>,
-) -> (Vec<Fetched>, Result<(), BoxError>) {
-    let reading = Arc::clone(secrets);
-    tokio::task::spawn_blocking(move || reading.fetch(&uses, std::io::stderr()))
+async fn off_the_worker<Read: Send + 'static>(
+    read: impl FnOnce() -> Read + Send + 'static,
+) -> Read {
+    tokio::task::spawn_blocking(read)
         .await
         .expect("the secret source task panicked")
 }
@@ -340,7 +332,7 @@ async fn read_secrets(
 /// Open this box's authority, translate every declared process, and supervise the agent.
 async fn hosted(
     locked: LockedRun,
-    secrets: Arc<SecretSources>,
+    secrets: TelemetrySecrets,
     collector: Arc<telemetry::Collector>,
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
@@ -420,11 +412,11 @@ async fn hosted(
     // Read each other secret that a declared source holds, after the checks above, which need
     // none, so no vault program runs for a box that one of them stops. The checks of
     // `HostedBox::open` come after this read.
-    let (fetched, read) = read_secrets(&secrets, secrets.route_uses(&locked.record)).await;
+    let (fetched, secrets) = off_the_worker(move || secrets.fetch_routes(std::io::stderr())).await;
     for read in &fetched {
         collector.control(read.record());
     }
-    read?;
+    let secrets = secrets?;
 
     eprintln!("strands-box: starting workload");
     let hosted = HostedBox::open(
@@ -433,7 +425,7 @@ async fn hosted(
         policy,
         commands,
         collector,
-        &secrets,
+        secrets,
         &locked.sources,
         locked.owned,
         &locked.workspace,
@@ -528,16 +520,21 @@ fn read_contract(config: &Path) -> Result<RunContract, BoxError> {
     feature = "native-filesystem-policy",
     box_native_adapter_tests
 )))]
-fn prepare(config: &Path, argv: &[OsString], box_id: Option<&str>) -> Result<LockedRun, BoxError> {
+fn prepare(
+    config: &Path,
+    argv: &[OsString],
+    box_id: Option<&str>,
+) -> Result<(LockedRun, SecretSources), BoxError> {
     prepare_contract(read_contract(config)?, config, argv, box_id)
 }
 
+/// Lock the box directory of `contract`, check its secret sources, and commit its record.
 fn prepare_contract(
     contract: RunContract,
     config: &Path,
     argv: &[OsString],
     box_id: Option<&str>,
-) -> Result<LockedRun, BoxError> {
+) -> Result<(LockedRun, SecretSources), BoxError> {
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     if contract.experimental_features().native_filesystem_policy {
         crate::run::native_enforcement::preflight()?;
@@ -558,6 +555,12 @@ fn prepare_contract(
     let request = contract.into_request(&root)?;
     let existed = root.is_configured();
     request.verify_sources()?;
+    // The one check of the declared sources: each program file, each table that lets a workload
+    // go around a source, and one line for each source. Only the value that it returns reads a
+    // secret. It starts no program and reads no box state, and it comes before the record is
+    // committed, so a refusal stores nothing in a new box directory, as a refusal of the
+    // configuration does.
+    let secrets = SecretSources::check(&request.record, &request.sources, std::io::stderr())?;
     if existed {
         root.initialize()?;
     } else {
@@ -582,7 +585,7 @@ fn prepare_contract(
 
     request.verify_sources()?;
     drop(root_lock);
-    Ok(LockedRun {
+    let locked = LockedRun {
         root,
         record: request.record,
         workspace,
@@ -591,7 +594,8 @@ fn prepare_contract(
         grammars: request.grammars,
         sources: request.sources,
         owned,
-    })
+    };
+    Ok((locked, secrets))
 }
 
 fn acquire_run_lock(root: &BoxRoot) -> Result<Lock, BoxError> {

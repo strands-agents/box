@@ -344,7 +344,7 @@ message does: Box prefixes every line it prints with `strands-box:`.
 | `` `<key>` does not apply to a `<kind>` target `` | A key belongs to another kind. |
 | ``a `cloudwatch_logs` target needs `log_group` and `log_stream` `` | A CloudWatch Logs target names no group or stream. |
 | ``needs `region`, an AWS region such as `us-west-2` `` | A CloudWatch target names no region, or an invalid one. |
-| `` `secret.ref` names no scheme this box reads `` | The reference is a literal value, or its scheme is not `env://`, `secret://`, `aws://`, `credsd://`, or a [declared scheme](config.md#secret-sourcescheme). |
+| `` `secret.ref` names no scheme this box reads `` | The reference is a literal value, or its scheme is not `env://`, `secret://`, `aws://`, `credsd://`, or a [declared scheme](config.md#secret-sourcescheme). A declared scheme with nothing after `://` is refused in the same way. |
 | `its destination is neither https nor loopback` | A credential would cross the network in the clear. |
 | `` the `aws://` credential cannot sign `` | The profile is missing, or holds no static keys. The run stops before the workload starts. |
 | `` `[telemetry.<name>] secret.ref` names a secret that the secret source `<scheme>` (<program>) did not return `` | The program of a declared secret source returned no secret for this target. The line before it on stderr holds the reason. No record holds this failure, because Box reads the secret before it opens its records. See [how a run reads the secrets](config.md#how-a-run-reads-the-secrets). |

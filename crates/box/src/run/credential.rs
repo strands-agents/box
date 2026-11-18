@@ -12,7 +12,7 @@ use crate::record::config::egress::{
     EgressEntry, EgressRoute, SIGNING_PLACEHOLDER_VARIABLES, credsd_environments,
 };
 use crate::record::config::telemetry::TelemetryEntry;
-use crate::run::secret_sources::SecretSources;
+use crate::run::secret_sources::RouteSecrets;
 
 /// Validate every declared `credsd` credential before the workload starts.
 ///
@@ -114,7 +114,7 @@ fn open_vault<'a>(
 /// are attached at the gateway and placed in no workload environment. An absent credential is hard
 /// here. A backend entry keeps its routes in ONE vault, so this groups per entry rather than by
 /// provisioned variable the way [`workspace`] does.
-pub(crate) fn backend_capabilities(
+fn backend_capabilities(
     groups: &[(credentials::DestinationPattern, Vec<EgressRoute>)],
     backend: &Backend,
 ) -> Result<Projection, BoxError> {
@@ -166,23 +166,19 @@ pub(crate) fn merge_workload_environment(
     merged
 }
 
-/// Open each vault of `record` through the one backend of `secrets`, then close the declared
-/// sources.
+/// Open each vault of `record` through the one backend of `secrets`, which this call consumes,
+/// so the declared sources close when it returns.
 pub(crate) fn project(
     record: &Record,
-    secrets: &SecretSources,
+    secrets: RouteSecrets,
 ) -> Result<(Projection, Projection), BoxError> {
     let ordinary = workspace(&record.egress_routes()?, secrets.backend())?;
     let backends = backend_capabilities(&record.backend_credentials()?, secrets.backend())?;
-    secrets.close();
     Ok((ordinary, backends))
 }
 
 /// Resolve every declared binding through `backend`, minting one phantom per provisioned variable.
-pub(crate) fn workspace(
-    bindings: &[EgressRoute],
-    backend: &Backend,
-) -> Result<Projection, BoxError> {
+fn workspace(bindings: &[EgressRoute], backend: &Backend) -> Result<Projection, BoxError> {
     let mut capabilities = Vec::with_capacity(bindings.len());
     let mut workload_environment: Vec<ProvisionedVariable> = Vec::new();
     for group in credential_groups(bindings) {
@@ -677,13 +673,31 @@ mod tests {
         assert!(attachment.is_some(), "the vault attaches the secret");
     }
 
-    /// **Each vault of a record opens through the sources of the run, and then the sources
-    /// close**: a route and a backend token share one run of the program, and no later read
-    /// starts it.
+    /// **Only `project` opens a route vault for another module**: no other visible function
+    /// takes a backend.
+    #[test]
+    fn only_project_opens_a_route_vault_for_another_module() {
+        let visible: Vec<&str> = include_str!("credential.rs")
+            .lines()
+            .filter(|line| line.starts_with("pub(crate) fn "))
+            .collect();
+        assert_eq!(
+            visible,
+            [
+                "pub(crate) fn preflight_credsd(",
+                "pub(crate) fn merge_workload_environment(",
+                "pub(crate) fn project(",
+            ]
+        );
+    }
+
+    /// **Each vault of a record opens through the secrets that the run read, and takes them**:
+    /// a route and a backend token share one run of the program, and no later read starts it.
     #[cfg(target_os = "macos")]
     #[test]
-    fn each_vault_opens_through_the_sources_of_the_run_and_then_they_close() {
+    fn each_vault_opens_through_the_secrets_of_the_run_and_then_they_close() {
         use crate::record::config::secret_source::tests::entries;
+        use crate::run::secret_sources::SecretSources;
         use crate::run::secret_sources::tests::{PRINTER, StandIn};
         let program = StandIn::new(PRINTER);
         let route = |name: &str, toml: &str| (name.to_string(), target(toml));
@@ -728,21 +742,30 @@ mod tests {
             telemetry: BTreeMap::new(),
             secret_source: entries(&program.table("op", std::path::Path::new("/bin/sh"))),
         };
-        let secrets = SecretSources::of(&record).expect("the program is checked");
+        let checked = SecretSources::check_for_tests(&record, std::io::sink())
+            .expect("the program is checked");
+        // A clone that a later step kept shares the one set of sources.
+        let kept = checked.backend().clone();
+        let (_, telemetry) = checked.fetch_telemetry(std::io::sink());
+        let (read, secrets) = telemetry
+            .expect("no telemetry secret")
+            .fetch_routes(std::io::sink());
+        assert_eq!(read.len(), 2, "the route and the backend token");
+        assert_eq!(program.runs(), 1, "the two entries share one run");
 
-        let (ordinary, backends) = project(&record, &secrets).expect("each vault opens");
+        let (ordinary, backends) =
+            project(&record, secrets.expect("the program returns the secret"))
+                .expect("each vault opens");
 
         assert_eq!(ordinary.capabilities.len(), 1);
         assert_eq!(backends.capabilities.len(), 1);
-        assert_eq!(program.runs(), 1, "the two vaults share one run");
-        let mut said = Vec::new();
-        let (read, refused) = secrets.fetch(&secrets.route_uses(&record), &mut said);
-        assert_eq!(read.len(), 1, "the first read after the close is refused");
-        assert!(refused.is_err());
-        assert!(
-            String::from_utf8_lossy(&said).contains("is closed"),
-            "{said:?}"
-        );
+        assert_eq!(program.runs(), 1, "each vault takes the held secret");
+        let locator = credentials::Locator::parse_uri("op://object#A").expect("the reference");
+        let refusal = kept
+            .resolve(&locator)
+            .expect_err("the first read after the vaults open is refused")
+            .to_string();
+        assert!(refusal.contains("is closed"), "{refusal}");
         assert_eq!(program.runs(), 1);
     }
 }
