@@ -207,7 +207,8 @@ Enabling [`file-watching`](config.md#file-watching) for any process requires rec
 A [telemetry target](config.md#telemetrylabel) that uses `accepts`, `headers`, `secret.prefix`,
 `secret.placement`, a vendor kind, or an `aws://` or `credsd://` secret requires record version 36.
 Setting [`monty`](config.md#monty) to `false` requires record version 37.
-Setting `executable-memory` for any process requires record version 38.
+A box whose agent, tool, or local MCP server declares a [`deny_write`](config.md#agentfilesystem-and-toolnamefilesystem) list requires record version 38.
+Setting `executable-memory` for any process requires record version 39.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 

@@ -697,6 +697,10 @@ impl Boundary {
             };
         }
 
+        for tree in &reach.write_protections {
+            containment = containment.protect_write_tree(tree)?;
+        }
+
         if let Some(command) = reach.command.as_ref() {
             command.verify()?;
             if command.path() != program_identity {
@@ -749,6 +753,13 @@ impl Boundary {
         // Every exec identity inside a writable grant is disclosed, the command and each interpreter
         // hop alike.
         let writable_grant = |identity: &Path| {
+            if reach
+                .write_protections
+                .iter()
+                .any(|tree| identity.starts_with(tree))
+            {
+                return None;
+            }
             reach.grants.iter().find_map(|grant| {
                 (grant.operation == Operation::Write
                     && match grant.scope {
@@ -768,6 +779,7 @@ impl Boundary {
         let disclosure = disclosure(&DisclosureInputs {
             table,
             grants: &reach.grants,
+            write_protections: &reach.write_protections,
             minimum: &minimum,
             interpreters: &interpreters,
             interpreter_aliases: &interpreter_aliases,
@@ -930,6 +942,7 @@ impl Boundary {
 struct DisclosureInputs<'a> {
     table: &'a str,
     grants: &'a [DirectGrant],
+    write_protections: &'a [PathBuf],
     minimum: &'a [MinimumCell],
     interpreters: &'a [PathBuf],
     interpreter_aliases: &'a [(PathBuf, PathBuf)],
@@ -986,6 +999,12 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
         lines.push("  (no filesystem entry)".to_string());
     }
     lines.extend(inputs.grants.iter().map(DirectGrant::disclosure));
+    lines.extend(
+        inputs
+            .write_protections
+            .iter()
+            .map(|tree| format!("  deny_write  {}  (read-only)", tree.display())),
+    );
     if !inputs.command_listed {
         lines.push(format!(
             "  exec        {}  (command, implicit)",
@@ -2634,6 +2653,79 @@ mod tests {
             .expect("a replaced deny path refuses the spawn")
             .to_string();
         assert!(refused.contains("was replaced"), "{refused}");
+    }
+
+    /// **A spawn refuses a reach whose `deny_write` directory was replaced** after the judgement,
+    /// or reached through a folder that became a link, so a tool protects the directory the run
+    /// approved.
+    #[test]
+    fn a_spawn_refuses_a_reach_whose_write_protected_directory_was_replaced() {
+        for case in ["replaced", "linked ancestor"] {
+            let fixture = Fixture::new();
+            let venv = fixture.path("scratch/deps/venv");
+            std::fs::create_dir_all(&venv).expect("a protected directory");
+            let mut spec = fixture.spec();
+            spec.filesystem = Filesystem {
+                read: vec![fixture.path("scratch")],
+                write: vec![fixture.path("scratch")],
+                deny_write: vec![venv.clone()],
+                ..Filesystem::default()
+            };
+            let record = Record {
+                tool: BTreeMap::from([("t".to_string(), spec.clone())]),
+                ..fixture.record.clone()
+            };
+            let approved = crate::test_support::with_operator_home(fixture.operator.path(), || {
+                ApprovedReach::judge(&record, &[])
+            })
+            .expect("every table is judged");
+            let fallback = fixture.path("project");
+            let translate = || {
+                crate::test_support::with_operator_home(fixture.operator.path(), || {
+                    Boundary::translate(
+                        &spec,
+                        Launch {
+                            table: "[tool.t]",
+                            trailing: &[],
+                            fallback_workspace: &fallback,
+                            shebang_interpreters: ShebangInterpreters::Granted,
+                            runtime_reach: RuntimeReach::Leaf,
+                            argument_zero: None,
+                            egress: EgressMode::Gateway,
+                            approved: approved.table("[tool.t]"),
+                        },
+                        &Site {
+                            attachment: &fixture.attachment,
+                            layout: &fixture.root,
+                            stored: &record,
+                            protected_sources: &[],
+                        },
+                    )
+                })
+            };
+            translate().expect("the judged reach is acted on");
+            if case == "replaced" {
+                std::fs::rename(&venv, fixture.path("scratch/deps/moved")).expect("move it");
+                std::fs::create_dir(&venv).expect("recreate the protected path");
+            } else {
+                std::fs::create_dir_all(fixture.path("scratch/real/venv")).expect("a target");
+                std::fs::rename(fixture.path("scratch/deps"), fixture.path("scratch/old"))
+                    .expect("move the parent");
+                std::os::unix::fs::symlink(
+                    fixture.path("scratch/real"),
+                    fixture.path("scratch/deps"),
+                )
+                .expect("a linked parent");
+            }
+            let refused = translate()
+                .err()
+                .unwrap_or_else(|| panic!("{case}: the spawn is refused"))
+                .to_string();
+            assert!(
+                refused.contains("since the run judged it"),
+                "{case}: {refused}"
+            );
+        }
     }
 
     #[test]

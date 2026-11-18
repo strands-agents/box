@@ -495,7 +495,7 @@ This includes stdio MCP servers that remain unstarted; Box repeats their disclos
 strands-box: [tool.npm] executable memory: may run code it writes into memory, as a JIT runtime does; a runtime that calls native code, such as Python through ctypes, may run any bytes this way
 ```
 
-A record with any selected process requires version 38.
+A record with any selected process requires version 39.
 For rollback, remove the key from every process table, then follow the
 [rollback steps](native-filesystem-policy.md#stored-configuration-and-rollback).
 Older builds do not recognize the key, even when its value is `false`.
@@ -620,8 +620,8 @@ one line until a caller is served again.
 
 ## `[agent.filesystem]` and `[tool.<name>.filesystem]`
 
-Each list, and what one entry in it grants. `[agent.filesystem]` takes all eight;
-`[tool.<name>.filesystem]` takes six, and a `metadata` or `exec` list there is refused by name at
+Each list, and what one entry in it grants. `[agent.filesystem]` takes all nine;
+`[tool.<name>.filesystem]` takes seven. A `metadata` or `exec` list there is refused by name at
 load. [A tool's sandbox](../design/containment.md#a-tools-leaf-box) states what a tool reaches in
 their place.
 
@@ -639,6 +639,29 @@ mounted aliases, and enclosing directories.
 | `metadata` | Inspect file properties below a directory without content access on macOS. Linux omits this grant without an error. **`[agent.filesystem]` only.** |
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
+| `deny_write` | Refuse every write below an existing directory inside a `write` directory. Reads and `exec` grants there still apply. The box stores its record at version 38. The agent, a tool, and a local MCP server take it. |
+
+Use `deny_write` for a directory that the agent runs code from, such as a Python virtual
+environment in a writable project. Create and fill the directory before the box starts. The agent
+can then run its programs but cannot change them:
+
+```toml
+[agent.filesystem]
+read = ["/work/project"]
+write = ["/work/project"]
+exec = ["/work/project/.venv"]
+deny_write = ["/work/project/.venv"]
+```
+
+The agent cannot create, change, rename, link, or remove anything below the directory. Like the other lists, `deny_write` governs the agent's own processes. A Shell or Python request through Box is decided by policy, so pair the entry with `forbid` rules on `fs:write`, `fs:delete`, and `fs:move` for the directory. A file below it that also has a hard link in a writable directory can still be changed through that link. Install with copies, such as `UV_LINK_MODE=copy`, or keep the installer's cache outside every write grant. The box does not
+warn that a program below a `deny_write` directory is writable. The startup disclosure lists each
+entry as `deny_write  <path>  (read-only)`. A `[tool.<name>] command` below a `deny_write`
+directory is still refused, as every tool command inside a write grant is.
+
+A tool or a local MCP server that writes the directory's parent can still change the directory
+unless its own `[tool.<name>.filesystem]` or `[mcp.<name>.filesystem]` also lists it in
+`deny_write`. A tool's leaf box keeps the protection with broad exec: it can run programs from the
+directory but cannot change them.
 
 On macOS, opting into [file watching](#file-watching) permits an event stream that can
 disclose denied names and activity despite these direct-access restrictions.
@@ -1292,9 +1315,10 @@ A `box_dir` whose parent does not exist is refused before anything is created. E
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload
 starts: a `workspace` that does not exist, an `env.HOME` inside or enclosing `box_dir`, a telemetry
 file destination inside the box directory and outside `private/`, a `filesystem` entry whose path
-does not exist or is a symbolic link, an `[[agent.ingress]] listen` address that cannot be bound,
-and on macOS a `workload_port` that another process already listens on. A `[tool.<name>]` whose
-program is not installed is [left out](#a-tool-whose-program-is-not-installed) rather than refused. The
+does not exist or is a symbolic link, a `deny_write` entry that is not a directory inside a `write`
+directory, an `[[agent.ingress]] listen` address that cannot be bound, and on macOS a
+`workload_port` that another process already listens on. A `[tool.<name>]` whose program is not
+installed is [left out](#a-tool-whose-program-is-not-installed) rather than refused. The
 box directory stays behind. It is empty when the refusal came before the record was written, and it
 holds the record when the refusal came after. The next `run` against it judges the file again and
 reports the same refusal until the file is fixed.
