@@ -156,10 +156,7 @@ pub(crate) struct TargetExporter {
 
 impl TargetExporter {
     /// Open the exporter `target` names, refusing what cannot work.
-    pub(crate) fn open(
-        target: &Target,
-        dropped: std::sync::Arc<AtomicU64>,
-    ) -> Result<Self> {
+    pub(crate) fn open(target: &Target, dropped: std::sync::Arc<AtomicU64>) -> Result<Self> {
         Self::open_with(target, dropped, reqwest::Client::builder())
     }
 
