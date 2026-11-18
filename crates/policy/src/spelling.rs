@@ -108,6 +108,160 @@ impl std::fmt::Display for PolicyWarning {
     }
 }
 
+/// A path a `permit` names: a `when` clause compares `context.input.path` with this literal or
+/// `like` pattern, outside every negation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathPermit {
+    rule: String,
+    actions: Vec<String>,
+    elements: Vec<PatternElement>,
+}
+
+impl PathPermit {
+    /// The rule as a load message names it: by `@id` when it has one.
+    #[must_use]
+    pub fn rule(&self) -> &str {
+        &self.rule
+    }
+
+    /// The filesystem actions the rule permits, such as `fs:read`.
+    #[must_use]
+    pub fn actions(&self) -> &[String] {
+        &self.actions
+    }
+
+    /// The literal or pattern as the rule spells it, with `*` for each wildcard.
+    #[must_use]
+    pub fn spelling(&self) -> String {
+        self.elements
+            .iter()
+            .map(|element| match element {
+                PatternElement::Wildcard => "*".to_string(),
+                PatternElement::Literal(text) => text.replace('*', "\\*"),
+            })
+            .collect()
+    }
+
+    /// The text before the first wildcard, which every path the rule names starts with.
+    #[must_use]
+    pub fn fixed_text(&self) -> &str {
+        match self.elements.first() {
+            Some(PatternElement::Literal(text)) => text,
+            _ => "",
+        }
+    }
+
+    /// Whether `path`, in the spelling a rule reads, is a path this literal or pattern names.
+    #[must_use]
+    pub fn matches(&self, path: &str) -> bool {
+        matches_pattern(&self.elements, path)
+    }
+}
+
+/// Whether `text` matches `elements` as Cedar's `like` reads them: a wildcard matches any text.
+///
+/// Each literal between two wildcards takes its leftmost match, which is enough for `*` alone and
+/// keeps the work linear in the text for each literal, because the text comes from the workload.
+fn matches_pattern(elements: &[PatternElement], text: &str) -> bool {
+    let literals: Vec<&str> = elements
+        .iter()
+        .filter_map(|element| match element {
+            PatternElement::Literal(literal) => Some(literal.as_str()),
+            PatternElement::Wildcard => None,
+        })
+        .collect();
+    if literals.len() == elements.len() {
+        return literals.concat() == text;
+    }
+    let mut middle = literals.as_slice();
+    let mut rest = text;
+    if let Some(PatternElement::Literal(first)) = elements.first() {
+        let Some(after) = rest.strip_prefix(first.as_str()) else {
+            return false;
+        };
+        rest = after;
+        middle = &middle[1..];
+    }
+    let last = match elements.last() {
+        Some(PatternElement::Literal(last)) => {
+            middle = &middle[..middle.len() - 1];
+            Some(last.as_str())
+        }
+        _ => None,
+    };
+    for literal in middle {
+        let Some(found) = rest.find(literal) else {
+            return false;
+        };
+        rest = &rest[found + literal.len()..];
+    }
+    last.is_none_or(|last| rest.ends_with(last))
+}
+
+/// Every path a `permit` on filesystem actions names, in the policies' order.
+pub(crate) fn path_permits(policies: &PolicySet) -> Vec<PathPermit> {
+    let mut permits = Vec::new();
+    for policy in policies.policies() {
+        if policy.effect() != cedar_policy::Effect::Permit
+            || Scope::of(policy) != Some(Scope::Filesystem)
+        {
+            continue;
+        }
+        let actions: Vec<String> = match policy.action_constraint() {
+            ActionConstraint::Eq(uid) => vec![uid.id().escaped().to_string()],
+            ActionConstraint::In(uids) => uids
+                .iter()
+                .map(|uid| uid.id().escaped().to_string())
+                .collect(),
+            ActionConstraint::Any => continue,
+        };
+        let Ok(est) = policy.to_json() else {
+            continue;
+        };
+        let mut comparisons = Vec::new();
+        if let Some(Value::Array(conditions)) = est.get("conditions") {
+            for condition in conditions {
+                if condition.get("kind").and_then(Value::as_str) == Some("when")
+                    && let Some(body) = condition.get("body")
+                {
+                    collect_positive(body, &mut comparisons);
+                }
+            }
+        }
+        let rule = rule_name(policy);
+        for (attribute, comparison) in comparisons {
+            if attribute != PATH {
+                continue;
+            }
+            let elements = match comparison {
+                Comparison::Equals(literal) => vec![PatternElement::Literal(literal)],
+                Comparison::Like(elements) => elements,
+            };
+            permits.push(PathPermit {
+                rule: rule.clone(),
+                actions: actions.clone(),
+                elements,
+            });
+        }
+    }
+    permits
+}
+
+/// The comparisons `node` holds outside every negation: through `&&` and `||`, and nothing else.
+fn collect_positive(node: &Value, out: &mut Vec<(String, Comparison)>) {
+    let Value::Object(fields) = node else {
+        return;
+    };
+    for operator in ["&&", "||"] {
+        if let Some(operands) = fields.get(operator) {
+            collect_positive(&operands["left"], out);
+            collect_positive(&operands["right"], out);
+            return;
+        }
+    }
+    compare_here(fields, out);
+}
+
 /// One literal a rule compares an input attribute with.
 #[derive(Debug)]
 enum Comparison {
@@ -912,32 +1066,37 @@ fn collect(node: &Value, out: &mut Vec<(String, Comparison)>) {
     match node {
         Value::Array(items) => items.iter().for_each(|item| collect(item, out)),
         Value::Object(fields) => {
-            if let Some(operands) = fields.get("==") {
-                for (side, other) in [("left", "right"), ("right", "left")] {
-                    if let Some(attribute) = input_attribute(&operands[side])
-                        && let Some(literal) = string_value(&operands[other])
-                    {
-                        out.push((attribute, Comparison::Equals(literal)));
-                    }
-                }
-            }
-            if let Some(operands) = fields.get("like")
-                && let Some(attribute) = input_attribute(&operands["left"])
-                && let Some(elements) = pattern_elements(&operands["pattern"])
-            {
-                out.push((attribute, Comparison::Like(elements)));
-            }
-            if let Some(operands) = fields.get("contains")
-                && let Some(attribute) = input_attribute(&operands["right"])
-                && let Some(Value::Array(members)) = operands["left"].get("Set")
-            {
-                for literal in members.iter().filter_map(string_value) {
-                    out.push((attribute.clone(), Comparison::Equals(literal)));
-                }
-            }
+            compare_here(fields, out);
             fields.values().for_each(|value| collect(value, out));
         }
         _ => {}
+    }
+}
+
+/// The comparison `fields` itself states, without reading its operands' own comparisons.
+fn compare_here(fields: &serde_json::Map<String, Value>, out: &mut Vec<(String, Comparison)>) {
+    if let Some(operands) = fields.get("==") {
+        for (side, other) in [("left", "right"), ("right", "left")] {
+            if let Some(attribute) = input_attribute(&operands[side])
+                && let Some(literal) = string_value(&operands[other])
+            {
+                out.push((attribute, Comparison::Equals(literal)));
+            }
+        }
+    }
+    if let Some(operands) = fields.get("like")
+        && let Some(attribute) = input_attribute(&operands["left"])
+        && let Some(elements) = pattern_elements(&operands["pattern"])
+    {
+        out.push((attribute, Comparison::Like(elements)));
+    }
+    if let Some(operands) = fields.get("contains")
+        && let Some(attribute) = input_attribute(&operands["right"])
+        && let Some(Value::Array(members)) = operands["left"].get("Set")
+    {
+        for literal in members.iter().filter_map(string_value) {
+            out.push((attribute.clone(), Comparison::Equals(literal)));
+        }
     }
 }
 

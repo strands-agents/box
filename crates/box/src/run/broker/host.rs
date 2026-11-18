@@ -130,6 +130,12 @@ pub(crate) struct BrokerHost {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Disclose on stderr each `permit` that opens a credential store to the interpreters.
+fn disclose_store_permits(reach: &Reach) {
+    // A failed write to stderr leaves the operator nowhere to read the line, so it decides nothing.
+    let _ = reach.disclose_new(&reach.store_permits(), &mut std::io::stderr().lock());
+}
+
 impl BrokerHost {
     /// Bind through the trusted helper without accepting or processing any request.
     pub(crate) fn bind(layout: &BoxRoot) -> Result<std::os::unix::net::UnixListener, BoxError> {
@@ -189,8 +195,10 @@ impl BrokerHost {
             )
             .map_err(|source| ShellError::Serve { source })?
             .with_commands(commands)
-            .with_installation(installation),
+            .with_installation(installation)
+            .with_policy(Arc::clone(&policy)),
         );
+        disclose_store_permits(&reach);
         // The declared MCP servers, from the same record.
         let declared_mcp = Arc::new(record.mcp.clone());
         let spawn_credentials = record.tool_credential_paths();

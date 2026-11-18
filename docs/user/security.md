@@ -50,10 +50,10 @@ Two things pass with no decision from either tier:
 
 ## What Box always enforces
 
-One rule holds whatever a policy permits. No request reaches the box directory. No request reads
+Two rules hold whatever a policy permits. No request reaches the box directory. No request reads
 or changes the `box.toml` and `policy.dw` this run loaded, or changes the directory that holds them.
-A `permit` on these paths has no effect. When this rule refuses a request, the shell command or the
-Python call fails with the path and a reason, and the decision log entry carries
+A `permit` on these paths has no effect. When one of these rules refuses a request, the shell
+command or the Python call fails with the path and a reason, and the decision log entry carries
 `strands.box.policy.cause` set to `enforcement` and `strands.box.policy.rule` set to
 `enforcement:reach-floor`. For the box directory and the files this run loaded, the reasons are:
 
@@ -63,6 +63,52 @@ resolves into trusted Box state, which no policy may open
 
 ```text
 resolves to an authority source that this run loaded, which no policy may open or change
+```
+
+The second rule protects credential stores, such as `~/.ssh`, `~/.aws`, a keychain, or a browser
+profile, under the operator's home: the stores the agent's own grants can never enclose. Strands Shell
+and Monty refuse to read or change a path in one, and refuse to change a directory that holds one,
+even when a policy permits every path under the home. To let the interpreters use a store, write a
+`permit` whose `context.input.path` literal or `like` pattern sits inside the store, such as
+`context.input.path == "~/.aws/config"` or `context.input.path like "~/.aws/*"`. The refusal lifts
+only for the paths that literal or pattern matches, and policy still decides each request. A pattern
+with a wildcard above the store, such as `"~/*"` or `"~/.aw*"`, lifts nothing. Only a comparison in
+a `when` clause counts, never one under `!` or in an `unless` clause. An `unless` clause does not
+narrow what the rule lifts: `when { context.input.path like "~/.aws/*" } unless { context.input.path
+== "~/.aws/credentials" }` lifts the refusal for `~/.aws/credentials` too, so another permit can then
+reach it. Write a `forbid` for a file that must stay closed. An `fs:read` permit lifts the
+refusal for reads, and an `fs:write` permit lifts it for changes. A rule that permits only
+`fs:delete` or `fs:move` lifts nothing. A change still can't move the store's content outside the
+store, or onto a path an `fs:read` permit opens when no `fs:read` permit opens it where it is now.
+A directory inside a store doesn't move while any `fs:read` permit opens a path in that store.
+Renaming a directory that holds an existing store is refused too, and the refusal tells you to
+move the directory's other contents instead. To change the store directory itself, the rule must name
+it, as in `context.input.path == "~/.aws"`. `box run` prints each such rule at startup. Your
+`[agent.filesystem]` lists don't lift this refusal: they decide what the agent's own system calls
+reach, and Strands Shell and Monty stay refused unless a `permit` names the path. Box refuses a
+store under every spelling the file system treats as the same name, including one created after the
+box starts, so a rule must spell the path exactly as the store is named. A script that lists the
+home and inspects each entry, such as `Path.iterdir()` with `is_dir()`, gets a refusal on each store.
+The reasons are:
+
+```text
+resolves into a credential store, which no policy may open unless a `permit` names this path inside the store, with no wildcard above it
+```
+
+```text
+contains a credential store, so no policy may change this directory
+```
+
+```text
+would move credential-store content outside the store that a `permit` opened it in
+```
+
+```text
+would move credential-store content to a path that an `fs:read` permit opens, which no `fs:read` permit opens where it is now
+```
+
+```text
+holds a credential store, so no policy may move this directory; move its other contents instead
 ```
 
 These protections cover the current box's files.

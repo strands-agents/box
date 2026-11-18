@@ -726,6 +726,25 @@ fn perform_rename(
             ));
         }
     };
+    if let Err(refused) =
+        reach.refuse_store_relocation(&approved_src, Some(&approved_dst), dst_spelled)
+    {
+        interceptor
+            .recorder
+            .record(EffectiveDecision::enforcement_deny(
+                r#"Box::Action::"fs:move""#,
+                interceptor
+                    .policy
+                    .reported(destination.to_string_lossy().as_ref()),
+                "reach-floor",
+                refused.to_string(),
+            ));
+        record(permit, FsResult::Failed);
+        return Err(MontyException::new(
+            ExcType::PermissionError,
+            Some(refused.to_string()),
+        ));
+    }
 
     let (result, resume_with) =
         match rename_approved(&approved_src, &approved_dst, judged_destination) {

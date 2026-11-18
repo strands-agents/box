@@ -561,6 +561,13 @@ impl PolicyEngine {
         self.authority.warnings()
     }
 
+    /// Each path that an installed `permit` on filesystem actions names in a `when` clause,
+    /// outside every negation, as the policy now stands.
+    #[must_use]
+    pub fn path_permits(&self) -> Vec<crate::PathPermit> {
+        self.authority.path_permits()
+    }
+
     /// The per-tool refinement for one `tools/call`, and the `::response` an allowed call owes.
     ///
     /// Returns `Allow` when the composed schema declares no per-tool action for the tool (it rides

@@ -159,9 +159,11 @@ identity at all. A directory swapped in that window can show file names and meta
 the grant. It can't show file contents and can't write. A swap of two real directories, with no
 symbolic link, isn't refused either, but the operation stays inside the bound directory.
 
-The reachable paths check doesn't protect credentials. The Shell can name anything under the
-operator's home, so an `fs:read` permit with no path condition reads `~/.ssh` and `~/.aws`. Scope
-every `fs:read` permit to a path. See [where policy sits](./policy.md#where-policy-sits).
+The reachable paths check refuses every credential store the sandbox refuses, such as `~/.ssh` and
+`~/.aws`, unless a `permit` names the path inside that store. It doesn't
+protect anything else under the operator's home, so an `fs:read` permit with no path condition reads
+the operator's source and documents. Scope every `fs:read` permit to a path. See [where policy
+sits](./policy.md#where-policy-sits).
 
 ### Programs outside the Shell
 

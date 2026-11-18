@@ -65,4 +65,4 @@ pub use policy::{
 };
 pub use request::{FsAccess, FsOperation, Principal, Request, RequestId};
 pub use schema::GovernedBox;
-pub use spelling::{Operator, PolicyWarning};
+pub use spelling::{Operator, PathPermit, PolicyWarning};

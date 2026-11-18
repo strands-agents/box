@@ -249,10 +249,11 @@ outside the operator's home, the agent's home, and the workspace. It also reject
 box directory and the configuration and policy files loaded for this run. A policy permit cannot
 override these restrictions.
 
-That check does not protect credentials elsewhere in the operator's home. An `fs:read` permit with
-no path condition can expose files under `~/.ssh`, because
-[no credential check sits beneath the interpreters](decisions.md#no-credential-floor-sits-beneath-the-interpreters).
-File access rules therefore need path conditions. [How Box runs shell commands](shell.md) explains
+The check also refuses every credential store the sandbox refuses, such as `~/.ssh` and `~/.aws`,
+unless a `permit` names the path inside that store. See
+[the interpreters meet the sandbox's credential floor](decisions.md#no-credential-floor-sits-beneath-the-interpreters).
+Other files under the operator's home are protected by policy alone, so file access rules still
+need path conditions. [How Box runs shell commands](shell.md) explains
 the reachable paths check.
 
 For this command, the trusted process opens and writes the file. The alias sends the request over
@@ -284,8 +285,9 @@ interpreters are part of the code the operator must trust.
    A grant it cannot check stops startup.
 6. It builds and discloses the sandbox grants for each tool, then for the agent.
    Box [prints every direct filesystem grant to stderr](decisions.md#direct-filesystem-reach-is-declared-and-disclosed)
-   because those accesses do not produce `fs:*` decisions. If Box cannot build a tool's sandbox
-   grants, startup fails before the agent starts. On macOS, `file-attributes` adds a line for each
+   because those accesses do not produce `fs:*` decisions. It also prints each policy rule that
+   opens a path in a credential store to Strands Shell and Monty, because that rule lifts a floor.
+   If Box cannot build a tool's sandbox grants, startup fails before the agent starts. On macOS, `file-attributes` adds a line for each
    sandbox that states which attributes its write grants can set.
    A process that selects `file-watching` gets a line that FSEvents can expose denied names,
    event metadata, the host-wide event count, and each volume's history identifier, and that a

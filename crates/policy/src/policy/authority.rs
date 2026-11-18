@@ -230,6 +230,14 @@ impl Authority {
         &self.warnings
     }
 
+    /// The paths the installed permits name, or none while the live lock is poisoned.
+    pub(super) fn path_permits(&self) -> Vec<crate::spelling::PathPermit> {
+        self.live
+            .lock()
+            .map(|live| live.engine.path_permits().to_vec())
+            .unwrap_or_default()
+    }
+
     /// Re-install an authored policy set over the live engine, keeping this box's decision
     /// history and the MCP schemas this run already discovered.
     ///

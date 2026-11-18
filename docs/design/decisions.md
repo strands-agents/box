@@ -456,7 +456,9 @@ unrelated sibling operations still work. On Linux, this protection does not cove
 move executed outside the workload's mount namespace.
 
 A path these lists name does not join the Shell's reachable set, so `read = ["~/vendor/sdk"]` makes
-the agent's own read work while `cat` through the Shell stays refused.
+the agent's own read work while `cat` through the Shell stays refused. A credential store is no
+exception: only a `permit` that names a path inside it opens that path to the interpreters. See [the
+interpreters meet the sandbox's credential floor](#no-credential-floor-sits-beneath-the-interpreters).
 
 <a id="a-read-entry-may-name-a-link-to-a-file"></a>
 ### A read entry may name a link to a file
@@ -498,10 +500,9 @@ device, which `os_paths.rs::a_set_has_no_list_for_an_exec_grant_a_denial_or_a_wr
 Box refuses a list entry that encloses a credential store, such as `~/.aws`, `~/.ssh`, a keychain, or
 a browser profile, and the box does not start. A read or write entry that names the store itself or
 a path inside it grants access with a disclosure. The named path states deliberate access, while an
-enclosing tree can include the store by accident. **That floor covers the process's own syscalls and
-nothing else.** A read through an interpreter is a policy decision, and no credential floor sits
-beneath it. See [no credential floor
-sits beneath the interpreters](#no-credential-floor-sits-beneath-the-interpreters).
+enclosing tree can include the store by accident. The interpreters apply the same store list
+beneath policy. See [the interpreters meet the sandbox's credential
+floor](#no-credential-floor-sits-beneath-the-interpreters).
 
 <a id="the-agent-gets-one-exec-rule-per-grant"></a>
 ### The agent gets one exec rule per grant, and Box follows a script's interpreter chain
@@ -723,22 +724,35 @@ reachable set is policy's to decide, which
 `forbid`. Adding a narrower permit can only widen access, never remove it.
 
 <a id="no-credential-floor-sits-beneath-the-interpreters"></a>
-### No credential floor sits beneath the interpreters, so one broad rule reaches the operator's secrets
+### The interpreters meet the sandbox's credential floor, and only a rule that names a store path lifts it
 
-The interpreters see the whole operator home, and the authored policy is the only thing that decides
-each access. The deny floor beneath them refuses the box's own product directories and the policy
-and configuration this run loaded, and nothing else. It does not name `~/.aws`, `~/.ssh`, a
-keychain, or a browser profile. The credential floor that does name those paths belongs to the
-sandbox, and it governs the syscalls a process makes itself. A mediated read goes through the box's
-trusted process instead, so it never meets that floor. One `permit fs:read` with no path condition
-therefore lets the workload read the operator's cloud credentials, SSH keys, and source through the
-Shell or through Python.
+Strands Shell and Monty refuse a path in a credential store, such as `~/.aws`, `~/.ssh`, a keychain,
+or a browser profile, whatever the policy permits. The two routes read one store list, which
+`containment::credential_store_anchors` returns. A `permit` lifts this floor for the paths its own
+`context.input.path` literal or `like` pattern matches, when that literal or pattern's text before
+its first wildcard sits inside the store, and policy still decides each access. Only a comparison in
+a `when` clause counts, outside every negation. An `fs:read` permit lifts reads, and an `fs:write`
+permit lifts changes, because the floor sees a change and not which kind. The box discloses each
+such rule on stderr at startup, reads the rules again after a reload, and discloses a reloaded rule
+before it first lifts the floor. The policy crate exposes the rules through one new name,
+`PathPermit`, from `PolicyEngine::path_permits`.
 
-This is the widest exposure in the product, and it has no compensating control today. Treat a
-path-unconditional `fs:read` or `fs:write` permit as a grant of everything the operator can read.
-Write every filesystem rule with a path condition, and prefer a `forbid` on the credential paths in
-any policy you author. Closing this needs a deny-only floor beneath policy that carries the
-credential list that the sandbox uses, which is not built.
+The `[agent.filesystem]` lists lift nothing here. An earlier version let a `read` or `write` entry
+that named a store lift the interpreters' floor too, to match the sandbox. That coupled two
+authorities: to let the interpreters read a store under policy, the operator had to give the agent's
+own system calls the same store, with no decision in the path. A new interpreter-only `box.toml` key
+lost because it adds a frozen configuration surface beside the policy. An authored `forbid` on the
+store paths lost because a policy without it left the interpreters weaker than the sandbox. A startup
+warning lost because it leaves the read possible.
+
+The cost: this floor is the one a `permit` lifts, so it no longer sits entirely beneath policy. A
+second permit can reach a lifted path without the naming rule's other conditions, such as a
+temporal budget. The floor covers only the listed stores, so a broad permit still reaches
+everything else the operator can read, such as source trees, `.env` files, and tokens in directories
+the list does not name. A script that inspects each entry of the home gets a refusal on each store.
+`box_credential_store_floor.rs::a_home_wide_permit_reaches_no_credential_store_through_either_interpreter`
+pins the refusal, and
+`::an_agent_entry_naming_a_store_opens_it_to_neither_interpreter` pins the separation.
 
 <a id="every-decision-is-local-and-in-process"></a>
 ### Every decision is local and in-process

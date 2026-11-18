@@ -77,6 +77,8 @@ pub(crate) struct DogwoodEngine {
     request_schema: cedar_policy::Schema,
     tool_actions: std::collections::HashSet<cedar_policy::EntityUid>,
     tool_inputs: crate::mcp_input::ToolInputs,
+    /// The paths the installed permits name.
+    path_permits: Vec<crate::spelling::PathPermit>,
     /// Outcome events the history refused, recorded before the next decision.
     pending_outcomes: Mutex<Vec<EventBuilder>>,
     #[cfg(test)]
@@ -271,6 +273,7 @@ impl DogwoodEngine {
                 request_schema: effective_schema.cedar,
                 tool_actions: effective_schema.tool_actions,
                 tool_inputs: effective_schema.tool_inputs,
+                path_permits: effective_schema.path_permits,
                 pending_outcomes: Mutex::new(Vec::new()),
                 #[cfg(test)]
                 fixed_clock: None,
@@ -346,6 +349,7 @@ impl DogwoodEngine {
             request_schema,
             tool_actions,
             tool_inputs,
+            path_permits: Vec::new(),
             pending_outcomes: Mutex::new(Vec::new()),
             #[cfg(test)]
             fixed_clock: None,
@@ -441,7 +445,13 @@ impl DogwoodEngine {
         self.request_schema = request_schema.cedar;
         self.tool_actions = request_schema.tool_actions;
         self.tool_inputs = request_schema.tool_inputs;
+        self.path_permits = request_schema.path_permits;
         Ok(())
+    }
+
+    /// The paths the installed permits name.
+    pub(crate) fn path_permits(&self) -> &[crate::spelling::PathPermit] {
+        &self.path_permits
     }
 
     /// The canonical statement of each stored rule.
@@ -493,6 +503,7 @@ impl DogwoodEngine {
             request_schema: effective_schema.cedar,
             tool_actions: effective_schema.tool_actions,
             tool_inputs: effective_schema.tool_inputs,
+            path_permits: effective_schema.path_permits,
             pending_outcomes: Mutex::new(Vec::new()),
             fixed_clock: None,
         })
@@ -537,6 +548,7 @@ impl DogwoodEngine {
             request_schema: effective_schema.cedar,
             tool_actions: effective_schema.tool_actions,
             tool_inputs: effective_schema.tool_inputs,
+            path_permits: effective_schema.path_permits,
             pending_outcomes: Mutex::new(Vec::new()),
             fixed_clock: Some(now),
         })
@@ -1282,6 +1294,8 @@ pub(crate) fn check_against(
         return Err(Refused::new(error, findings));
     }
 
+    let mut effective_schema = effective_schema;
+    effective_schema.path_permits = crate::spelling::path_permits(lowered.as_cedar());
     let warnings =
         crate::spelling::judge_naming(lowered.as_cedar(), operator, &|cedar_policy_id| {
             rule_ref(&lowered, cedar_policy_id, positions)
