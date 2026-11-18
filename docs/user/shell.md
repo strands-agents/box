@@ -227,7 +227,7 @@ a `shell:spawn` permit, the program runs under the first of these that covers it
 3. Neither: the program is refused with status `126`.
 
 `limits.shell.max_input` bounds submitted command text, and `limits.shell.max_output` bounds
-output buffers and script files loaded with `source`. Set either size to `0` to disable that Shell
+output buffers, script files loaded with `source`, and each `curl` response body. Set either size to `0` to disable that Shell
 limit. The [limits reference](config.md#limits)
 gives their defaults, byte units, and the separate limits on transport and positional script invocation.
 
@@ -353,6 +353,11 @@ action permit when a tool grammar binds the file, and `program` is still the nam
 `curl` sends each request through the egress gateway, which decides `net:connect` and
 `http:request` ([how Box controls outbound traffic](../design/egress.md)). A request the gateway
 refuses makes `curl` exit non-zero.
+
+A response body is at most [`limits.shell.max_output`](config.md#limits) bytes, 1 MiB by default.
+Past it, `curl` exits with status `6`, writes none of the body, and prints
+`curl: (6) response body too large` unless `-s` hides errors. The request was already sent, so
+its effect at the server stays.
 
 ## Exit statuses
 
