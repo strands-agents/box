@@ -3949,6 +3949,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let view = MountView {
             entries: Vec::new(),
+            root_links: Vec::new(),
             protected_parents: BTreeSet::new(),
             grant_identities: BTreeMap::new(),
             grant_pins: Vec::new(),
@@ -3978,6 +3979,7 @@ mod tests {
         std::fs::write(&source, b"protected").unwrap();
         let view = MountView {
             entries: Vec::new(),
+            root_links: Vec::new(),
             protected_parents: BTreeSet::new(),
             grant_identities: BTreeMap::new(),
             grant_pins: Vec::new(),
@@ -4019,6 +4021,7 @@ mod tests {
         };
         let view = MountView {
             entries: vec![parent],
+            root_links: Vec::new(),
             protected_parents: BTreeSet::new(),
             grant_identities: BTreeMap::new(),
             grant_pins: Vec::new(),
@@ -4080,6 +4083,7 @@ mod tests {
             let identity = ObjectIdentity::from_metadata(&source.metadata().unwrap());
             let view = MountView {
                 entries: Vec::new(),
+                root_links: Vec::new(),
                 protected_parents: BTreeSet::new(),
                 grant_identities: BTreeMap::from([(source.clone(), identity)]),
                 grant_pins: Vec::new(),
@@ -4325,6 +4329,7 @@ mod tests {
             std::fs::write(old.join("unexpected"), b"marker").unwrap();
             let view = MountView {
                 entries: Vec::new(),
+                root_links: Vec::new(),
                 protected_parents: BTreeSet::new(),
                 grant_identities: BTreeMap::new(),
                 grant_pins: Vec::new(),
@@ -4405,6 +4410,7 @@ mod tests {
             };
             let view = MountView {
                 entries: Vec::new(),
+                root_links: Vec::new(),
                 protected_parents: BTreeSet::new(),
                 grant_identities,
                 grant_pins: Vec::new(),
@@ -4521,6 +4527,7 @@ mod tests {
         };
         let view = MountView {
             entries: Vec::new(),
+            root_links: Vec::new(),
             protected_parents: BTreeSet::new(),
             grant_identities,
             grant_pins: Vec::new(),
