@@ -954,13 +954,17 @@ fn duplicate_tool_names_are_refused_before_schema_install() {
         install_duplicate_tool_server(&bin, "fake-duplicate-mcp", across_pages);
         std::fs::write(
             config.join("box.toml"),
-            r#"
+            format!(
+                r#"
             name = "schema"
         box_dir = "/nonexistent/schema-generation"
             [mcp.duplicate]
             type = "stdio"
-            command = ["fake-duplicate-mcp"]
+            command = ["/usr/bin/env", "/bin/sh", {}]
             "#,
+                serde_json::to_string(&bin.join("fake-duplicate-mcp"))
+                    .expect("quote the fake server path"),
+            ),
         )
         .expect("write box.toml");
 
