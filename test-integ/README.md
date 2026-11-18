@@ -31,15 +31,16 @@ fixtures the MCP and egress cases run beside the box — `box-mcp-fetch-server`,
 `copy the fetch server onto the operator PATH: … No such file or directory`, which reads as a
 containment regression and is a missing binary.
 
-In CI this is `.github/workflows/containment-deterministic.yml`, called from
-`ci.yml` so it reports under the single `CI Gate` status. It runs on
-`ubuntu-24.04-arm`, `ubuntu-24.04` (x86-64), and `macos-latest` on the plain `pull_request` trigger: the
-suite needs no secrets, so a fork PR runs it with a read-only token and no
-approval gate is required for safety.
+In CI this runs on `ubuntu-24.04-arm`, `ubuntu-24.04` (x86-64), and `macos-latest` on the plain
+`pull_request` trigger: the suite needs no secrets, so a fork PR runs it with a read-only token and
+no approval gate is required for safety. `ci.yml` calls both workflows, so the result reports under
+the single `CI Gate` status. The two Linux runners are in
+`.github/workflows/containment-deterministic.yml`. The macOS run is in the macOS unit-test job of
+`.github/workflows/rust-test-lint.yml`, on the same runner, so a push waits for one macOS runner.
 
 ### All three runners block
 
-The Ubuntu ARM64, Ubuntu x86-64, and macOS jobs each affect `CI Gate`.
+The Ubuntu ARM64 and Ubuntu x86-64 jobs and the macOS unit-test job each affect `CI Gate`.
 The repository requires that status before merging.
 Both Linux jobs enable unprivileged user namespaces before the suite starts.
 The x86-64 job sets `EXPERIMENTAL_X86_SUPPORT=TRUE` for all Box processes.

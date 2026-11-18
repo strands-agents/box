@@ -100,12 +100,18 @@ jobs:
     needs: detect-changes
     # On push and workflow_dispatch, detect-changes still runs but its filter
     # outputs are unset — run rust unconditionally in those cases.
-    if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.rust == 'true' }}
+    # The macOS containment suite shares the macOS unit-test runner, so this job also runs when
+    # only the containment paths changed. Then it runs the macOS leg alone, without lint.
+    if: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.rust == 'true' || (github.event.pull_request.draft == false && needs.detect-changes.outputs.containment == 'true') }}
     uses: ./.github/workflows/rust-test-lint.yml
     permissions:
       contents: read
     with:
       ref: ${{ github.sha }}
+      os: ${{ (github.event_name != 'pull_request' || needs.detect-changes.outputs.rust == 'true') && '["ubuntu-24.04-arm", "ubuntu-24.04", "macos-latest"]' || '["macos-latest"]' }}
+      run_lint: ${{ github.event_name != 'pull_request' || needs.detect-changes.outputs.rust == 'true' }}
+      # Same condition as the `containment` job below, which runs the Linux runners.
+      containment: ${{ github.event_name != 'pull_request' || (github.event.pull_request.draft == false && needs.detect-changes.outputs.containment == 'true') }}
 
   site-manifest:
     name: Site manifest

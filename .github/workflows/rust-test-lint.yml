@@ -28,6 +28,11 @@ on:
         required: false
         type: string
         default: '["ubuntu-24.04-arm", "ubuntu-24.04", "macos-latest"]'
+      containment:
+        description: "Also run the deterministic containment suite on the macOS runner, after the unit tests. The Linux runners run it in containment-deterministic.yml. Default false; ci.yml sets it."
+        required: false
+        type: boolean
+        default: false
       run_lint:
         description: "Run the lint job. Default true (normal CI); a scoped dispatch sets it false to skip fmt/clippy and save minutes."
         required: false
@@ -53,8 +58,10 @@ jobs:
       contents: read
     runs-on: ${{ matrix.os }}
     # Allow a cold build and the complete workspace suite on slower runners.
-    # The x86 runner can still be making progress after 30 minutes.
-    timeout-minutes: 45
+    # The x86 runner can still be making progress after 30 minutes. The macOS runner
+    # also runs the containment suite when `containment` is set: a second cold release
+    # build (~7 min) and the suite (~1 min) follow the unit tests.
+    timeout-minutes: 75
     strategy:
       # Report every OS's outcome even if one fails. A single Linux failure
       # is not a reason to hide the macOS one.
@@ -98,6 +105,16 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      # The containment suite's standalone crate has its own lockfile and target directory.
+      # A distinct shared-key keeps its cache apart from the workspace cache above.
+      - name: Cache cargo for the containment suite (macOS only)
+        if: ${{ matrix.os == 'macos-latest' && inputs.containment }}
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: containment-deterministic
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          workspaces: test-integ
 
       - name: Fetch locked dependencies for offline metadata
         run: cargo fetch --locked
@@ -231,6 +248,56 @@ jobs:
         run: |
           echo "Native adapter, configuration, and startup tests passed. The full signed native enforcement suite did not run." >> "$GITHUB_STEP_SUMMARY"
           echo "Signed receipt freshness: ${RECEIPT_OUTCOME} (informational only)." >> "$GITHUB_STEP_SUMMARY"
+
+      # The deterministic containment suite (test-integ/), on the unit-test runner. Each step
+      # runs after a failure above, so one run reports every outcome, as the separate job did.
+      # See containment-deterministic.yml for the Linux runners.
+      # Only the two binaries the suite drives, not the whole workspace. `test-support` adds the
+      # fixtures the MCP cases run beside `strands-box`: `box-mcp-fetch-server`,
+      # `box-mcp-call-probe`, and `box-egress-probe`.
+      - name: Build strands-box and the containment trampoline (macOS only)
+        id: containment-build
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.containment }}
+        run: cargo build -p strands-box -p strands-box-containment --release --locked --features test-support
+
+      - name: Check downloader behavior (macOS only)
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.containment }}
+        run: python3 -m unittest discover -s scripts -p 'test_download.py' -v
+
+      - name: Test filesystem modes on a supported backend (macOS only)
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.containment && steps.containment-build.outcome == 'success' }}
+        run: cargo test -p strands-box --release --locked --all-features --test filesystem_modes -- --nocapture
+
+      # The harness resolves `strands-box` from PATH first (test-integ/src/lib.rs).
+      # The trampoline must sit beside it, which the shared target dir gives us.
+      - name: Run the deterministic suite (macOS only)
+        id: containment-suite
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && inputs.containment && steps.containment-build.outcome == 'success' }}
+        env:
+          DET_RESULTS_DIR: ${{ github.workspace }}/det-results
+          PLATFORM: macos
+        run: |
+          echo "$GITHUB_WORKSPACE/target/release" >> "$GITHUB_PATH"
+          export PATH="$GITHUB_WORKSPACE/target/release:$PATH"
+          command -v strands-box
+          bash test-integ/run.sh
+
+      # Always: a RED verdict is the case this reporting exists for.
+      - name: Summarize the verdict (macOS only)
+        if: ${{ always() && matrix.os == 'macos-latest' && inputs.containment }}
+        run: python3 test-integ/tools/summarize-verdict.py "$GITHUB_WORKSPACE/det-results/verdict.json"
+
+      - name: Upload verdict and logs (macOS only)
+        if: ${{ always() && matrix.os == 'macos-latest' && inputs.containment }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: deterministic-${{ matrix.os }}
+          path: |
+            det-results/verdict.json
+            det-results/cargo-test.log
+            det-results/*.jsonl
+          if-no-files-found: warn
+          retention-days: 14
 
   lint:
     name: Lint
