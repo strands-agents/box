@@ -86,11 +86,32 @@ The signed tests cover detached-child cleanup and durable history across mode ch
 They do not establish enforcement after the trusted Box process crashes or validate every shutdown failure.
 Production use still requires further review and tests for those failures.
 
+## Filesystem operation meanings
+
+Native rename checks `fs:move` on both the source and destination, plus `fs:read` on the source.
+The source read check uses `context.input.operation == Box::FsReadOperation::"read_content"` for both files and directories on Linux and macOS.
+For example, denying `read_content` blocks a directory rename even when directory listing through `enumerate` is permitted.
+Linux outcome records use the same path spelling as their policy requests, including `~/` for paths under the workload home.
+A successful Linux rename records one completed `fs:move` on the destination, matching Shell.
+The source move check remains in history without a completion record; every permission check still runs.
+When Linux policy denies a required check, earlier checks remain without outcome records.
+Actual filesystem failures retain their error records.
+Replacing an existing destination also requires `fs:delete` and `fs:write` on that destination.
+Moving to a new name does not require destination `fs:write`.
+Filesystem grants still restrict every operation independently of these policy checks.
+
+A readable directory open uses `fs:read` with `context.input.operation == Box::FsReadOperation::"enumerate"`.
+A regular-file read uses the same action with `context.input.operation == Box::FsReadOperation::"read_content"`.
+The directory-open check authorizes subsequent listing; it does not confirm that listing occurred.
+Policies that select directory opens by operation must use `enumerate` on both Linux and macOS.
+
 ## Stored configuration and rollback
 
 When `[limits]` has no explicit settings, `file-attributes` is `false`, MCP argument wildcards
 are disabled, MCP executable names are bare, the agent declares no `[[agent.ingress]]`,
-and no egress destination has a backend,
+no egress destination has a backend, `[gateway] upgrade_http` is empty, the box ID is `box-` and 16 hexadecimal digits,
+every process leaves `file-watching` disabled, and each telemetry target uses only the settings
+an earlier build reads,
 configurations without process overrides retain version 21 when disabled and version 22 when enabled.
 An explicit process override requires record version 23.
 Two stdio MCP servers that share a program require record version 24.
@@ -102,13 +123,20 @@ A box whose agent declares `[[agent.ingress]]` requires record version 29.
 A box whose egress re-routes a destination to a [backend](egress.md) requires record version 30.
 An explicit `limits.shell.max_input` or `limits.shell.max_output` requires record version 31,
 including values equal to the defaults.
+A non-empty [`[gateway] upgrade_http`](config.md#gateway) requires record version 32.
+A box ID that a library caller supplied, other than `box-` and 16 hexadecimal digits, requires record
+version 34.
+Enabling [`file-watching`](config.md#file-watching) for any process requires record version 35.
+A [telemetry target](config.md#telemetrylabel) that uses `accepts`, `headers`, `secret.prefix`,
+`secret.placement`, a vendor kind, or an `aws://` or `credsd://` secret requires record version 36.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 
 To disable the experiment, change the global setting to `false`.
 Remove all process overrides and `[limits]` settings, give each stdio MCP server its own
-program, and set `file-attributes` to `false` before returning to a binary that supports only
-version 21.
+program, set `file-attributes` to `false`, remove `file-watching` from every process, remove
+`[gateway] upgrade_http`, and give each telemetry target only `env://` or `secret://` bearer
+settings before returning to a binary that supports only version 21.
 If MCP argument wildcards are enabled, replace the stars with concrete arguments and disable
 `argument_wildcards` on each server too.
 Replace each absolute MCP executable path with a bare program name that the server's `PATH`
@@ -180,7 +208,7 @@ Tests cover normal detached-child cleanup, but not every shutdown failure or enf
 
 ### Can I immediately return to an older binary?
 
-No, if the box has a version 22, 23, 24, 25, 26, 27, or 28 record that the older binary does not support.
+No, if the box has a record of version 22 or later that the older binary does not support.
 Follow [Stored configuration and rollback](#stored-configuration-and-rollback) before starting an older binary.
 Changing TOML alone does not rewrite the stored record.
 

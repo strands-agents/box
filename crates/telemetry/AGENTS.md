@@ -27,7 +27,7 @@ Decisions live in the
 | the HTTP server for the agent's port | `axum`, behind a one-permit decode bound |
 | the OTLP mapping | `opentelemetry-proto`'s `group_logs_by_resource_and_scope` |
 | encoding a payload | this crate, one mapping for both file and endpoint |
-| the HTTP client | `reqwest`, at the same version the vendored shell declares |
+| the HTTP client | `reqwest`, at the same version Strands Shell declares |
 | the receiver | this crate; the OpenTelemetry SDK emits and does not receive |
 | the file format | this crate; `opentelemetry-stdout` writes a debug format, not the Collector's |
 
@@ -36,7 +36,7 @@ that filters by signal and wraps `BatchLogProcessor`, which carries the queue, t
 bounded flush. Do not rebuild any of those here.
 
 **`opentelemetry-otlp` is NOT adopted, and that is the one line to keep.** It requires
-`reqwest 0.13.1` and the vendored `shell` declares `0.12`, so taking it puts two TLS stacks in the
+`reqwest 0.13.1` and Strands Shell declares `0.12`, so taking it puts two TLS stacks in the
 process that holds the CA private key. The SDK itself needs no new package: `opentelemetry`,
 `opentelemetry_sdk` and `tokio-stream` were already in `Cargo.lock`.
 
@@ -86,10 +86,12 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   **The deletion costs no audit data.** Measured on a real box: for
   `zsh -c 'cat $PWD/allowed.txt'`, `process.command_args` now holds `<redacted>` while the same
   command's own `fs:read` decision still carries the full path under `file.path`. The path was
-  recorded twice and is now recorded once, by the decision that authorized it. A LITERAL path is
-  unaffected and still reported whole, which is why
-  `box_telemetry.rs::a_shell_decision_states_its_arguments_and_its_directory` passes unchanged — the
-  outer bash expands `$BOX_HOME` there, so the Shell receives a literal word.
+  recorded twice and is now recorded once, by the decision that authorized it.
+- **The hosted Shell now marks no argument as literal**, because upstream Shell does not say which
+  words the script stated. So every Shell argument meets `reportable`, and a literal path is
+  `<redacted>` too; its `fs:read` decision still names it.
+  `box_telemetry.rs::a_shell_decision_states_its_arguments_and_its_directory` pins the redaction.
+  The mask and its pins stay, for a caller that can supply one.
 
   **`plain_flag` takes one letter after a single `-`, and a `--` name is lowercase and bounded.** The
   first version required only an alphanumeric first character and put no cap on the tail, so four
@@ -207,6 +209,12 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   `below_trace_an_agent_span_is_answered_and_discarded`, and
   `a_narrowed_target_still_receives_the_agents_own_logs_and_metrics`, which asserts in one test that
   the two relayed signals arrive and a span does not.
+  **`accepts` is the one narrowing, and it is by payload, not by signal.** An `Otlp` target that
+  names `accepts` is sent no batch of a payload the list leaves out (the `accepts` field of
+  `TargetExporter`), because Langfuse and LangSmith answer `404` on `/v1/logs` and `/v1/metrics`,
+  and a target that sent one would count a dropped batch every second. So a `langfuse` target
+  receives no agent log record, whatever the union above puts in its lane.
+  `a_traces_only_target_is_sent_no_other_payload` is the pin.
 - **`Target` has TWO constructors and the default signal set must be in both.** `Target::new` and
   `Target::opened_file` each state their own set, and the box's *default* target — the one a box with
   no `[telemetry]` table gets — is built by `opened_file`, because `config_for` hands it an already
@@ -248,6 +256,39 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   in this workspace**, so a full-queue drop is not counted, not printed and not observable. That is
   why the counter is not on the facade. See
   [delivery is best effort](../../docs/design/decisions.md#delivery-is-best-effort).
+  **`drained` prints one stderr line when `dropped` is not zero or the drain did not finish.** Before
+  that, a failed batch and a failed exit flush were both silent, so a workload that filled the disk
+  under the file target, or made an OTLP target hang, removed its own last records with no signal,
+  and the run still exited 0. The line is at the drain and not in `deliver`, so a workload that makes
+  every batch fail cannot fill stderr. It names its cause: failed exports, an unfinished final
+  export, or both. An unfinished drain no longer increments `dropped`, because no export failed.
+  **A failed final export is not a timeout.** The SDK answers `shutdown` with the final export's
+  own error, so a closed port or a full disk returns at once with an `Err`. `shut_down_bounded` now
+  returns a `Shutdown` (`Completed`, `Failed`, `Unanswered`), and `drain_finished` calls the drain
+  unfinished only when no answer came, or when a lane reported that its shutdown did not finish. Each
+  `TargetLane` sets a shared `cut` flag itself, because the provider joins every lane's error into
+  one `InternalFailure`. A lane sets it on `OTelSdkError::Timeout`, and on any other error unless its
+  own `SharedTarget` recorded a failed export that started inside this shutdown. The shutdown count
+  in `LaneFailures` keeps an export that began earlier, and failed late, from answering for it. A refused shutdown message (the SDK's
+  `try_send` finds the queue full, or the worker gone) exports nothing and is counted nowhere, so a
+  flag for `Timeout` alone let it pass as finished. The first version reported every fast failure as "did not
+  finish in time". The second compared `dropped` before and after the drain, which a fast-failing
+  lane or a failing relay could raise while another lane was cut, so the cut went unreported.
+  `a_counted_export_failure_is_not_reported_as_a_timeout`, `a_fast_failing_final_export_is_not_a_timeout`,
+  `a_cut_lane_is_reported_beside_a_failing_lane` (an OTLP target on a closed port beside a file
+  target on a full FIFO), and `a_shutdown_the_worker_never_receives_is_not_finished` (a burst of
+  4000 records behind a listener that never accepts) are the pins.
+  **The receiver has its own counter.** It used to share `dropped`, so a refused agent payload (the
+  one-permit `RELAY_CAPACITY`, or the fan-out bound) counted as a lost record: the workload could
+  raise the loss line at will, and a healthy agent that exports concurrently could raise it on a run
+  whose box audit was complete. `dropped` now counts only batches an exporter failed to deliver.
+  The receiver's count is read only by tests: `a_refused_agent_payload_is_not_a_lost_record` pins
+  that a refused payload raises it while `dropped` stays at 0.
+  `drain_warning` owns the text. `a_lossy_drain_reports_the_loss_once`,
+  `a_complete_drain_reports_no_loss` and `an_unfinished_drain_alone_is_a_loss` pin the text, and
+  `box_telemetry.rs::an_unreachable_target_reports_the_lost_records_once` pins the print: it fails
+  when the `eprintln!` is removed. The exit code does not change: a failed audit sink that the
+  workload can break must not also let the workload fail the run.
 - **`BODY_LIMIT` is the library's cap now, and the hand-rolled reader is why it needs to be.** That
   reader sized its buffer from the declared `Content-Length` before a byte arrived, so 64 connections
   could pin 256 MiB in the box's trusted process. `a_body_over_the_cap_is_refused` is the pin.
@@ -363,10 +404,10 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
 
 ## Public surface
 
-Sixteen names: `Collector`, `Target`, `TargetKind`, `TargetSecret`, `TelemetryConfig`, `Result`,
+Seventeen names: `Collector`, `Target`, `TargetKind`, `TargetSecret`, `TelemetryConfig`, `Result`,
 `TelemetryError`, `DecisionRecord`, `DecisionCause`, `DeterminingPolicy`, `Subject`, `Correlation`,
-`ControlRecord`, `ControlOperation`, `Signal`, and `McpUnmatched`, reached through `telemetry::open`,
-then:
+`ControlRecord`, `ControlOperation`, `Signal`, `McpUnmatched`, and `Payload`, reached through
+`telemetry::open`, then:
 
 **Three of those carry one decision's context, and each exists because a caller holds the value and
 this crate must not re-derive it.** `Correlation` is the request's W3C parent, the transport request

@@ -22,8 +22,9 @@ Four parts of the box ask policy, each about its own boundary:
   `fs:*`.
 - **Monty**, the Python interpreter the box runs for the agent's scripts. It asks once per file
   operation, as `fs:*`.
-- **The egress gateway.** It asks once per connection, as `net:connect`, once per HTTP request, as
-  `http:request`, and once per MCP request over HTTP, as `mcp:call`.
+- **The egress gateway.** It asks once per connection, as `net:connect`, and once per HTTP request,
+  as `http:request`. It asks `mcp:call` for MCP requests whose host matches a declared server,
+  except the protocol methods listed in the [action reference](policy/actions.md#mcp).
 - **The MCP broker.** It asks once per request to a local MCP server, as `mcp:call`. On a
   `tools/call` it asks a second time, as the tool's own generated action. At startup it asks once
   for each declared server, as `shell:spawn`.
@@ -127,9 +128,11 @@ actions. [The action vocabulary](policy/actions.md) lists the fields of each one
   shell resolves its first word to a program. `shell:exec` for a program the shell implements, such
   as `cat` or `grep`, and `shell:spawn` for a program of the surrounding OS, such as `git`, and for
   the start of each stdio MCP server `box.toml` declares.
-- **[MCP](policy/actions.md#mcp)**: a request to an MCP server. `mcp:call` for each request, on
-  every method, and one generated `<server>::Action::"<tool>"` for each discovered tool, decided
-  on a `tools/call` after `mcp:call` permitted it.
+- **[MCP](policy/actions.md#mcp)**: a request through a declared MCP server, with
+  [host-based matching](mcp.md#remote-destination-matching) for remote servers.
+  `mcp:call` decides each request except the protocol methods listed in the action reference.
+  One generated `<server>::Action::"<tool>"` per discovered tool decides a `tools/call` after
+  `mcp:call` permitted it.
 
 ## Common rules
 
@@ -166,6 +169,11 @@ strands-shell: tee: policy denied this operation on '~/project/notes.md' [policy
 - The rule counts `fs:write::response` events with result `completed`, which the box records when a
   content write finishes. A refused write does not count, and a write still in flight does not count
   yet, so a burst of writes started together can exceed the budget by the size of the burst.
+- In the Shell, a redirect, `tee`, or `cp` records `descriptor_issued` when it opens the file, not
+  `completed`, so this rule doesn't count it. Only a time change from `touch` records `completed`.
+- A `touch` changes a file's times as a `write_content` write, so it counts toward the budget. Only
+  a plain `touch` that creates a file doesn't count; with `-d`, `-t`, or `-r` it then sets the new
+  file's times, and that counts.
 - The `when` clause limits the `forbid` to content writes. A `mkdir` is `fs:write` with operation
   `create_dir`, so the budget leaves it alone. A rename is `fs:move`, and a delete is `fs:delete`;
   each needs its own rule.
@@ -183,14 +191,14 @@ happens at load when a budget is written as a `permit`.
 
 ### A rate limit on one host
 
-At most sixty completed requests to one host in ten minutes. The sixty-first is refused until the
-oldest counted request is more than ten minutes old. Write it beside a `permit` for `api.github.com`
-on `http:request`, such as the `github_request` rule in
+This rule refuses new requests to `api.github.com` when Box has recorded at least sixty response
+outcomes for that host in the last ten minutes. Pending exchanges do not count yet. Write it
+beside a `permit` for `api.github.com` on `http:request`, such as the `github_request` rule in
 [the `[egress.<name>]` table](egress.md#example).
 
 ```text
 @id("github_rate_limit")
-@description("At most 60 requests to api.github.com completed in 10 minutes.")
+@description("Refuse requests when at least 60 response outcomes for api.github.com were recorded in the last 10 minutes.")
 forbid (principal, action == Box::Action::"http:request", resource)
 when { context.input.host == "api.github.com" }
 when temporal {
@@ -204,8 +212,11 @@ when temporal {
 };
 ```
 
-- The rule counts `http:request::response` events for the host, which the box records when the
-  reply arrives. A refused request does not count, and one still in flight does not count yet.
+- The rule counts `http:request::response` events for the host, using their recording times for
+  the ten-minute window. The gateway records the outcome when the exchange ends, including failure
+  or timeout. A refused request or a request that definitely failed to reach upstream does not
+  count. Pending exchanges do not count yet, so several requests can pass before earlier exchanges
+  end. Those requests can make the total exceed the limit.
 - The `when` clause scopes the `forbid` to the one host, so a request to any other host is
   unaffected. The same shape on `net:connect` limits connections rather than requests.
 - The agent receives a `403` whose body names the rule, as `[policy: github_rate_limit]`, and its
@@ -612,7 +623,10 @@ own `has` guard, so a rule that covers both families gives each one its own clau
 @id("metadata_addresses")
 forbid (principal, action == Box::Action::"net:connect", resource)
 when {
-  (context.input has ip4 && context.input.ip4 like "169.254.*") ||
+  (context.input has ip4 && (
+    context.input.ip4 like "169.254.*" ||
+    context.input.ip4 == "168.63.129.16" ||
+    context.input.ip4 == "100.100.100.200")) ||
   (context.input has ip6 && (
     context.input.ip6 == "fd00:ec2::254" ||
     context.input.ip6 like "fe8*" || context.input.ip6 like "fe9*" ||
@@ -778,6 +792,32 @@ Actions are in the same family when their names start the same way before the `:
 `fs:read`, `fs:write`, and `fs:delete` can share one rule, and `net:connect` and `http:request`
 can't. Each MCP tool action is a family of its own.
 
+### A rule that lists a built-in action beside an MCP tool's action
+
+An action list can't name a built-in action, such as `fs:read`, beside an MCP tool's action, or
+the actions of two servers. Box can't check the list until the server reports its tools, and it
+never checks a list of mixed kinds at all. So the rule would never take effect, and the built-in
+action would go unenforced. This rule refuses to load:
+
+```text
+@id("both_doors")
+forbid (principal, action in [Box::Action::"fs:read", filesrv::Action::"read_file"], resource);
+```
+
+```text
+policy lists actions of more than one namespace: rule @id("both_doors") lists [Box::Action::"fs:read"] beside [filesrv::Action::"read_file"], and an action list of more than one namespace never takes effect; write one rule for each namespace
+```
+
+To fix it, write one rule for each:
+
+```text
+@id("both_doors_file")
+forbid (principal, action == Box::Action::"fs:read", resource);
+
+@id("both_doors_tool")
+forbid (principal, action == filesrv::Action::"read_file", resource);
+```
+
 A rule that checks `context.input` and names no action gets the same error. Name the action the
 rule is for in its scope, as `action == Box::Action::"fs:read"`. A test such as
 `action == Box::Action::"fs:read"` inside `when` doesn't count, so this rule still gets the error:
@@ -881,6 +921,25 @@ The text varies: the record `is committed` or `is not committed`, and the histor
 file, with `policy staging failed: ` and the engine's own reason, and the file is left as found.
 Remove the box directory to start again, as [getting started](getting-started.md#clean-up)
 describes.
+
+The run also refuses history stamped more than five minutes ahead of the system clock. This
+happens when the clock moved back after the box last ran, or when someone edited the history file:
+
+```text
+strands-box: error: policy staging failed: policy staging history failure: durable timestamp <t> is <n> ns ahead of the current clock <now>, exceeding the maximum allowed future skew of 300000000000 ns; refusing the operation rather than issuing future-dated timestamps
+```
+
+If the clock moves back more than five minutes during a run, the box denies each request and prints
+`policy: warn: durable timestamp ...; denying` on stderr. Requests are decided again once the clock
+is within five minutes of the newest history timestamp. If an action finished while the clock was
+that far back, the box keeps its record and prints
+`policy: warn: an earlier outcome is not recorded yet: ...; denying` for each request until the
+record is saved. Once the clock is within five minutes again, the box saves it at the next request,
+or when the run shuts down, and then requests are decided normally. If the run ends while the clock
+is still more than five minutes behind, or the process is killed, that action doesn't count toward
+any limit after a restart. A time-zone change does not move this clock.
+Correct the system clock, or remove the box directory to start again, as
+[getting started](getting-started.md#clean-up) describes.
 
 ## See also
 

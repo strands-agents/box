@@ -45,10 +45,10 @@ path, or resolved command. See [the policy attribute names are this product's
 own](decisions.md#the-policy-attribute-names-are-this-products-own). Box omits the full URL and full
 command line because both can contain credentials.
 
-A shell record includes literal arguments and redacts expanded arguments unless they are plain
-flags. The shell receives arguments after expansion, so recording `echo $(cat secret.txt)` without
-this check would expose the file's contents. See [a shell record names only a literal
-argument](decisions.md#a-shell-record-names-only-a-literal-argument).
+A shell record redacts every argument that is not a plain flag. The shell receives arguments after
+expansion, so recording `echo $(cat secret.txt)` without this check would expose the file's
+contents. See [a shell record names an argument only when it is a plain
+flag](decisions.md#a-shell-record-names-only-a-literal-argument).
 
 A decision also carries the caller's trace context, which connects it to the agent's work. The
 workload supplies that context. Box bounds and validates it but never treats it as evidence of
@@ -116,7 +116,7 @@ A target can select Box denials, Box permits, relayed workload spans, and MCP ro
 [a target names a set](decisions.md#a-target-names-a-set-of-signals). The `trace` selector also
 includes control-plane records. Omitting it loses Box's record of authority changes. The `logs`
 selector includes unmatched MCP routes. Relayed workload log records and metrics arrive regardless
-of this selection.
+of this selection, unless the target's `accepts` leaves that payload out.
 
 ## What the workload cannot do
 
@@ -147,12 +147,20 @@ two-byte JSON body. A dropped payload still gets `200`.
 
 ## Limits
 
-- Delivery is best effort. A failed target write loses the record without a retry, a report of the
-  loss, or a disk copy for later delivery. See [a record can be
+- Delivery is best effort. A failed target write loses the record without a retry or a disk copy for
+  later delivery. The drain prints one stderr line when the run ends if an export to a configured
+  target failed or the final export did not finish in time. With `STRANDS_BOX_TELEMETRY_DEBUG` set,
+  Box also prints each failed export as it happens, with its cause. A record the SDK queue refuses,
+  an agent payload the receiver refuses, a batch the SDK cuts at its export deadline before
+  shutdown, and a relay in flight at shutdown are not counted, so the absence of
+  that line does not prove that nothing was lost. See [a record can be
   lost](decisions.md#delivery-is-best-effort). The shutdown drain runs on every exit path, even when
   startup fails before the workload starts, so Box still records that it stopped. Relayed payloads
   do not join that drain and can be lost in flight. A decision cannot be lost through that shutdown
   race.
+- A send to an endpoint takes no policy decision. Box sends each batch itself, not through the
+  egress gateway, so policy cannot refuse one. The agent's relayed spans and log records reach every
+  endpoint the operator declares, and the operator's `box.toml` is the only gate.
 - Every process running as the operator can reach the loopback port. The listener cannot identify
   which process connected. Such a process cannot forge a Box record, but it can inject noise
   attributed to the agent.

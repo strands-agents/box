@@ -1,4 +1,4 @@
-use std::io;
+use std::io::{self, Read as _};
 use std::mem::{size_of, zeroed};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
@@ -144,7 +144,7 @@ pub(super) fn validate_registration(
     handles: &[OwnedFd],
     closed: u8,
 ) -> io::Result<()> {
-    if header != b"BOXFS\0\x01\0" || handles.len() != 2 || closed != 1 {
+    if header != b"BOXFS\0\x02\0" || handles.len() != 3 || closed != 1 {
         return Err(io::Error::other("invalid native filesystem registration"));
     }
     // A notification listener accepts ID_VALID; another descriptor kind does not.
@@ -168,7 +168,113 @@ pub(super) fn validate_registration(
             "native registration has no path-only root directory",
         ));
     }
+    let mut kind = 0;
+    let mut length = size_of::<i32>() as libc::socklen_t;
+    // SAFETY: both output pointers cover the option and its length; the handle count was validated.
+    checked(unsafe {
+        libc::getsockopt(
+            handles[2].as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_TYPE,
+            (&mut kind as *mut i32).cast(),
+            &mut length,
+        )
+    })?;
+    // SAFETY: zero initializes the socket address before getpeername fills it.
+    let mut address: libc::sockaddr_un = unsafe { zeroed() };
+    let mut address_length = size_of::<libc::sockaddr_un>() as libc::socklen_t;
+    // SAFETY: getpeername writes into initialized storage of the declared length.
+    checked(unsafe {
+        libc::getpeername(
+            handles[2].as_raw_fd(),
+            (&mut address as *mut libc::sockaddr_un).cast(),
+            &mut address_length,
+        )
+    })?;
+    if kind != libc::SOCK_STREAM || address.sun_family != libc::AF_UNIX as libc::sa_family_t {
+        return Err(io::Error::other(
+            "native registration has no local forwarding stream",
+        ));
+    }
     Ok(())
+}
+
+/// Read one version-two request forwarded by the sole kernel-notification receiver.
+pub(super) fn receive_forwarded(socket: &mut UnixStream) -> io::Result<Request> {
+    let mut poll = libc::pollfd {
+        fd: socket.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        // SAFETY: poll receives one initialized writable descriptor record.
+        let ready = unsafe { libc::poll(&mut poll, 1, 50) };
+        if ready == -1 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "forwarded notification wait",
+            ));
+        }
+        break;
+    }
+    let mut bytes = [0_u8; 80];
+    // Read the first byte separately so a clean shutdown cannot hide a truncated request.
+    match socket.read(&mut bytes[..1]) {
+        Ok(0) => {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "notification supervisor exited",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) => return Err(error),
+    }
+    socket.read_exact(&mut bytes[1..]).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("incomplete forwarded notification: {error}"),
+        )
+    })?;
+    let mut request = Request {
+        id: u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+        pid: u32::from_le_bytes(bytes[8..12].try_into().unwrap()),
+        flags: u32::from_le_bytes(bytes[12..16].try_into().unwrap()),
+        data: Data {
+            number: i32::from_le_bytes(bytes[16..20].try_into().unwrap()),
+            arch: u32::from_le_bytes(bytes[20..24].try_into().unwrap()),
+            instruction: u64::from_le_bytes(bytes[24..32].try_into().unwrap()),
+            args: [0; 6],
+        },
+    };
+    for (index, argument) in request.data.args.iter_mut().enumerate() {
+        *argument = u64::from_le_bytes(bytes[32 + index * 8..40 + index * 8].try_into().unwrap());
+    }
+    if request.pid == 0
+        || request.flags != 0
+        || ![
+            libc::SYS_openat,
+            libc::SYS_unlinkat,
+            libc::SYS_renameat,
+            libc::SYS_renameat2,
+            libc::SYS_mkdirat,
+            libc::SYS_symlinkat,
+            libc::SYS_truncate,
+        ]
+        .contains(&(request.data.number as libc::c_long))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid forwarded native operation",
+        ));
+    }
+    Ok(request)
 }
 
 pub(super) fn receive(listener: RawFd) -> io::Result<Request> {
@@ -418,65 +524,145 @@ mod tests {
     #[test]
     fn registration_accepts_a_kernel_listener_and_path_only_directory() {
         let listener = listener();
-        let handles = [listener.descriptor.try_clone().unwrap(), root_directory()];
-        validate_registration(b"BOXFS\0\x01\0", &handles, 1).unwrap();
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let handles = [
+            listener.descriptor.try_clone().unwrap(),
+            root_directory(),
+            socket.into(),
+        ];
+        validate_registration(b"BOXFS\0\x02\0", &handles, 1).unwrap();
     }
     #[test]
     fn registration_refuses_a_wrong_protocol_or_retained_listener() {
         let listener = listener();
-        let handles = [listener.descriptor.try_clone().unwrap(), root_directory()];
-        assert!(validate_registration(b"BOXFS\0\x02\0", &handles, 1).is_err());
-        assert!(validate_registration(b"BOXFS\0\x01\0", &handles, 0).is_err());
-        assert!(validate_registration(b"BOXFS\0\x01\0", &handles[..1], 1).is_err());
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let handles = [
+            listener.descriptor.try_clone().unwrap(),
+            root_directory(),
+            socket.into(),
+        ];
+        assert!(validate_registration(b"BOXFS\0\x01\0", &handles, 1).is_err());
+        assert!(validate_registration(b"BOXFS\0\x02\0", &handles, 0).is_err());
+        assert!(validate_registration(b"BOXFS\0\x02\0", &handles[..2], 1).is_err());
     }
     #[test]
     fn registration_refuses_swapped_duplicate_and_wrong_descriptor_kinds() {
         let listener = listener();
         let root = root_directory();
-        let header = b"BOXFS\0\x01\0";
+        let (socket, _peer) = UnixStream::pair().unwrap();
+        let header = b"BOXFS\0\x02\0";
+        let cases = [
+            [
+                root.try_clone().unwrap(),
+                listener.descriptor.try_clone().unwrap(),
+            ],
+            [
+                listener.descriptor.try_clone().unwrap(),
+                listener.descriptor.try_clone().unwrap(),
+            ],
+            [root.try_clone().unwrap(), root.try_clone().unwrap()],
+            [
+                socket.try_clone().unwrap().into(),
+                root.try_clone().unwrap(),
+            ],
+            [
+                listener.descriptor.try_clone().unwrap(),
+                std::fs::File::open("/").unwrap().into(),
+            ],
+        ];
+        for [first, second] in cases {
+            assert!(
+                validate_registration(
+                    header,
+                    &[first, second, socket.try_clone().unwrap().into()],
+                    1
+                )
+                .is_err()
+            );
+        }
         assert!(
             validate_registration(
                 header,
                 &[
+                    listener.descriptor.try_clone().unwrap(),
                     root.try_clone().unwrap(),
-                    listener.descriptor.try_clone().unwrap()
+                    root
                 ],
                 1
             )
             .is_err()
         );
+        let (datagram, _peer) = std::os::unix::net::UnixDatagram::pair().unwrap();
         assert!(
             validate_registration(
                 header,
                 &[
                     listener.descriptor.try_clone().unwrap(),
-                    listener.descriptor.try_clone().unwrap()
+                    root_directory(),
+                    datagram.into()
                 ],
                 1
             )
             .is_err()
         );
-        assert!(
-            validate_registration(
-                header,
-                &[root.try_clone().unwrap(), root.try_clone().unwrap()],
-                1
-            )
-            .is_err()
+    }
+
+    #[test]
+    fn forwarding_decodes_ordered_requests_and_refuses_truncation() {
+        use std::io::Write as _;
+        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        let mut frame = [0_u8; 80];
+        frame[8..12].copy_from_slice(&42_u32.to_le_bytes());
+        frame[16..20].copy_from_slice(&(libc::SYS_openat as i32).to_le_bytes());
+        for id in [7_u64, 8] {
+            frame[..8].copy_from_slice(&id.to_le_bytes());
+            frame[32..40].copy_from_slice(&123_u64.to_le_bytes());
+            sender.write_all(&frame).unwrap();
+        }
+        for id in [7, 8] {
+            let request = receive_forwarded(&mut receiver).unwrap();
+            assert_eq!(request.id, id);
+            assert_eq!(request.pid, 42);
+            assert_eq!(request.data.args[0], 123);
+        }
+        assert_eq!(
+            receive_forwarded(&mut receiver).err().unwrap().kind(),
+            io::ErrorKind::TimedOut
         );
-        let (socket, _) = UnixStream::pair().unwrap();
-        assert!(validate_registration(header, &[socket.into(), root], 1).is_err());
-        let content_directory = std::fs::File::open("/").unwrap();
-        assert!(
-            validate_registration(
-                header,
-                &[
-                    listener.descriptor.try_clone().unwrap(),
-                    content_directory.into()
-                ],
-                1
-            )
-            .is_err()
+        sender.write_all(&frame[..40]).unwrap();
+        drop(sender);
+        assert_eq!(
+            receive_forwarded(&mut receiver).err().unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert_eq!(
+            receive_forwarded(&mut receiver).err().unwrap().kind(),
+            io::ErrorKind::BrokenPipe
+        );
+    }
+
+    #[test]
+    fn forwarding_refuses_non_native_requests_and_partial_frames() {
+        use std::io::Write as _;
+        let (mut sender, mut receiver) = UnixStream::pair().unwrap();
+        receiver
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        let mut frame = [0_u8; 80];
+        frame[8..12].copy_from_slice(&42_u32.to_le_bytes());
+        frame[16..20].copy_from_slice(&(libc::SYS_statfs as i32).to_le_bytes());
+        sender.write_all(&frame).unwrap();
+        assert_eq!(
+            receive_forwarded(&mut receiver).err().unwrap().kind(),
+            io::ErrorKind::InvalidData
+        );
+        sender.write_all(&frame[..1]).unwrap();
+        assert_eq!(
+            receive_forwarded(&mut receiver).err().unwrap().kind(),
+            io::ErrorKind::InvalidData
         );
     }
 }

@@ -9,6 +9,7 @@
 //! caller.
 
 pub(crate) mod cli;
+mod platform;
 pub(crate) mod policy;
 pub(crate) mod run;
 
@@ -19,6 +20,11 @@ use crate::error::BoxError;
 use crate::run::hardening::Hardening;
 
 pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
+    if let Err(error) = platform::preflight() {
+        eprintln!("strands-box: refusing to run: {error}");
+        return ExitCode::FAILURE;
+    }
+
     // Disable core dumps and restrict process-memory inspection before Box starts its runtime or loads credentials.
     if matches!(cli.command, Command::Run { .. })
         && let Err(error) = Hardening::apply()
@@ -26,6 +32,24 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
         eprintln!("strands-box: refusing to run: {error}");
         return ExitCode::FAILURE;
     }
+
+    #[cfg(all(
+        target_os = "linux",
+        feature = "native-filesystem-policy",
+        box_native_adapter_tests
+    ))]
+    let native_setup = match &cli.command {
+        Command::Run { config, .. } => {
+            match run::prepare_native(config, options.on_ready.is_some()) {
+                Ok(setup) => Some(setup),
+                Err(error) => {
+                    eprintln!("strands-box: refusing to run: {error}");
+                    return ExitCode::FAILURE;
+                }
+            }
+        }
+        _ => None,
+    };
 
     let runtime = match tokio::runtime::Runtime::new() {
         Ok(runtime) => runtime,
@@ -48,7 +72,19 @@ pub(crate) fn execute(cli: Cli, options: crate::RunOptions<'_>) -> ExitCode {
                 reason: format!("on_ready callback failed: {source}"),
             })?;
         }
-        dispatch(cli, options.terminal, signals).await
+        dispatch(
+            cli,
+            options.terminal,
+            signals,
+            options.box_id.as_deref(),
+            #[cfg(all(
+                target_os = "linux",
+                feature = "native-filesystem-policy",
+                box_native_adapter_tests
+            ))]
+            native_setup,
+        )
+        .await
     }) {
         Ok(code) => code,
         Err(error) => {
@@ -63,10 +99,30 @@ async fn dispatch(
     cli: Cli,
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
+    box_id: Option<&str>,
+    #[cfg(all(
+        target_os = "linux",
+        feature = "native-filesystem-policy",
+        box_native_adapter_tests
+    ))]
+    native_setup: Option<run::NativeSetup>,
 ) -> Result<ExitCode, BoxError> {
     match &cli.command {
         Command::Run { config, workload } => {
-            run::execute(config, workload, terminal, signals).await
+            run::execute(
+                config,
+                workload,
+                terminal,
+                signals,
+                box_id,
+                #[cfg(all(
+                    target_os = "linux",
+                    feature = "native-filesystem-policy",
+                    box_native_adapter_tests
+                ))]
+                native_setup.expect("native capabilities prepared before runtime startup"),
+            )
+            .await
         }
         Command::Policy {
             command: PolicyCommand::GenerateSchema { config, output_dir },

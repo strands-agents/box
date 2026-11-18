@@ -47,6 +47,9 @@ actions and elapsed time to decide what is allowed next. For example, a file rea
 through Shell or Python can cause the gateway to deny a later outbound HTTP request.
 
 **Preview:** Box supports local execution on Linux ARM64 and macOS with Apple silicon.
+Linux x86-64 is experimental and requires `EXPERIMENTAL_X86_SUPPORT=TRUE` in the
+environment of the box's trusted process. See the [Linux download instructions](docs/user/getting-started.md#linux)
+for release selection and the x86-64 startup opt-in.
 We welcome feedback through [GitHub issues](https://github.com/strands-agents/box/issues).
 Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change.
 
@@ -87,8 +90,14 @@ By default, it uses the process's terminal and returns its exit
 code. The second argument appends arguments to `[agent] command`.
 Use `RunOptions::terminal` to supply the workload's terminal and `RunOptions::on_ready`
 to start host threads after hardening and signal registration, before workload setup.
+Use `RunOptions::box_id` to give a new box your own ID, such as
+`my-app-3f9a1c0e7b2d4a6f`: a prefix of 1 to 15 letters, digits, `.`, `_`, or `-`, then `-` and 16
+lowercase hexadecimal digits. Box stores it, prints it, and labels telemetry with it. A box that
+already has an ID refuses a different one. Without `box_id`, Box generates `box-` and 16
+hexadecimal digits.
 Call it before starting application threads or loading secrets, and use one Box workload
-per host process. Later `run` calls fail, even if the first call failed.
+per host process. Later `run` calls fail, even if the first call failed, unless `run` refused a
+malformed `box_id`.
 Ship the matching Box helper binaries beside the host application.
 
 To replace the running box's policy from a host thread:
@@ -169,7 +178,7 @@ For each part, where it runs, what it decides, and how one request moves through
 
 ## Getting started
 
-Follow the [getting-started guide](docs/user/getting-started.md) to download Box for macOS or Linux ARM64.
+Follow the [getting-started guide](docs/user/getting-started.md) to download Box for macOS, Linux ARM64, or experimental Linux x86-64.
 The Strands CLI walkthrough uses macOS.
 For that walkthrough, you need macOS 15 or later on Apple silicon and Node.js 22.21 or later from Homebrew.
 You also need access to Claude Opus 5 on Amazon Bedrock in `us-west-2`.
@@ -182,10 +191,11 @@ curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh
 ./box-core/box --version
 ```
 
-The downloader selects macOS Apple silicon or Linux ARM64 archives. For Linux, select a release
-that includes `box-<version>-linux-arm64.tar.gz` and its `SHA256SUMS.txt` entry.
+The downloader selects the archive for your operating system and CPU architecture. For Linux, select a release
+that includes `box-<tag>-linux-arm64.tar.gz` or `box-<tag>-linux-x86_64.tar.gz` for your CPU, with its `SHA256SUMS.txt` entry.
 Set `BOX_VERSION` to that release tag when running the script. Set `BOX_DOWNLOAD_DIR` to change
-the destination. A release can contain macOS assets only; check its assets if a Linux download fails.
+the destination. A release can omit Linux or x86-64 assets. If the x86-64 archive or its checksum is missing,
+the download stops; the script does not substitute an ARM64 archive.
 
 The script verifies the checksum and extracts into temporary storage before changing destination files.
 Linux packages must contain executable `box`, `strands-box-sock-alias`, and `strands-box-contain-trampoline` files.
@@ -234,17 +244,22 @@ cargo build --release -p strands-box -p strands-box-containment
 Run the compiled binary as `./target/release/strands-box`. Keep its helper
 binaries in the same directory.
 
-The [release guide](docs/dev/releases.md) covers version selection and publication for macOS and Linux ARM64.
+The [release guide](docs/dev/releases.md) covers version selection and publication for macOS, Linux ARM64, and experimental Linux x86-64.
 
-Linux workspace tests run on Ubuntu ARM64 with user, mount, and process namespaces enabled.
+Linux workspace tests run on Ubuntu ARM64 and x86-64 with user, mount, and process namespaces enabled.
+The x86-64 jobs set `EXPERIMENTAL_X86_SUPPORT=TRUE` to test the experimental runtime.
 Unexpected prerequisite skips fail the job. The accepted alias-read limitation and missing
-credential-daemon fixture remain explicit in the report. Deterministic integration failures on either platform fail `CI Gate`.
+credential-daemon fixture remain explicit in the report. Workspace and deterministic integration
+failures on either Linux architecture or macOS fail `CI Gate`.
 
 The [macOS release guide](docs/dev/macos-release.md) covers the native-feature build,
 automated signing, notarization, package verification, and release gates.
 
 The [fuzzing guide](docs/dev/fuzzing.md) covers the long libFuzzer run of the tool grammar shell
 parser.
+
+Before testing, [prepare the dependency cache](CONTRIBUTING.md#before-you-open-a-pull-request)
+for the offline dependency guards.
 
 Common tasks run through [`just`](https://github.com/casey/just):
 
@@ -255,9 +270,11 @@ just check         # pre-push gate: fmt-check + clippy + test
 just test-all      # workspace tests and box example checks
 ```
 
-`cargo test --workspace --all-features` runs the full suite. Include
+`cargo test --workspace --all-features` runs the workspace suite. Include
 `--all-features` to run the `box_shell` and `box_credentials` suites, which require
-the `test-support` feature.
+the `test-support` feature. Linux CI also runs the three native filesystem forwarding tests
+with a private build switch. See the [Linux native test guide](docs/dev/linux-native-tests.md#forwarding-buffer-tests)
+for that command and the other native test prerequisites.
 
 Continuous integration also runs `box_killed_run` with default features in separate
 Linux ARM64 and macOS jobs. The test kills a running Box process and checks that
@@ -281,6 +298,7 @@ is removed.
 Run `python3 -m unittest discover -s scripts -p 'test_*.py' -v` to test release packaging and the downloader.
 Continuous integration runs the downloader tests on Linux and macOS. These tests use local fixture archives
 and simulated HTTP clients; they do not qualify a published binary or its containment behavior.
+The [release guide](docs/dev/releases.md#rehearse) describes the architecture and system-library checks for Linux ARM64 and x86-64 packages.
 On Linux, the mount test requires util-linux and permission to create a user and mount namespace.
 It creates a `noexec` temporary mount only inside the test process's private namespace.
 

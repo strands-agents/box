@@ -50,11 +50,30 @@ impl DirectGrant {
         } else {
             format!("  ({})", self.access)
         };
+        let link = if self.is_link() {
+            format!("{} -> ", self.lexical.display())
+        } else {
+            String::new()
+        };
         format!(
-            "  {:<10}  {}{store}{access}",
+            "  {:<10}  {link}{}{store}{access}",
             self.kind.key(),
             self.resolved.display()
         )
+    }
+
+    /// Whether the entry names a link to the file it grants.
+    pub(crate) fn is_link(&self) -> bool {
+        self.lexical != self.resolved
+    }
+
+    /// Each path the box shows this grant at: its file, and a link's own name.
+    fn names(&self) -> Vec<&Path> {
+        if self.is_link() {
+            vec![self.resolved.as_path(), self.lexical.as_path()]
+        } else {
+            vec![self.resolved.as_path()]
+        }
     }
 }
 
@@ -286,6 +305,18 @@ pub(crate) fn require_judged_identities(
         if now != grant.resolved {
             return Err(changed(&format!("resolves to {}", now.display())));
         }
+        if grant.is_link() {
+            let named = grant
+                .lexical
+                .canonicalize()
+                .map_err(|source| changed(&format!("lost its link ({source})")))?;
+            if named != grant.resolved {
+                return Err(changed(&format!(
+                    "is no longer what {} points at",
+                    grant.lexical.display()
+                )));
+            }
+        }
     }
     for (refusal, judged) in reach
         .refusals
@@ -389,6 +420,22 @@ fn entry_grant(
         ),
         _ => other(&format!("cannot read {}: {source}", lexical.display())),
     })?;
+    // **A read-only entry may name a link to a file**, such as `/usr/bin/cc`, because a program
+    // runs a helper by the name `PATH` finds. The grant is the file the link resolves to, and the
+    // box shows that file under the link's own name as well. The link must sit in its real folder,
+    // so the name is the one the program opens.
+    let link = metadata.is_symlink()
+        && matches!(kind, Grant::Read | Grant::ReadFile)
+        && lexical
+            .parent()
+            .is_some_and(|folder| folder.canonicalize().is_ok_and(|real| real == folder))
+        && lexical.canonicalize().is_ok_and(|target| target.is_file());
+    let metadata = if link {
+        std::fs::metadata(&lexical)
+            .map_err(|source| other(&format!("cannot read {}: {source}", lexical.display())))?
+    } else {
+        metadata
+    };
     if metadata.is_symlink() {
         // Name the target so the operator can paste it into the grant. A missing target and a
         // resolve failure (permission, link loop) are different problems; say which one it is.
@@ -416,7 +463,7 @@ fn entry_grant(
     let resolved = lexical
         .canonicalize()
         .map_err(|source| other(&format!("cannot resolve {}: {source}", lexical.display())))?;
-    if resolved != lexical {
+    if resolved != lexical && !link {
         // Not necessarily a link: `canonicalize` also folds `.` and `..`, so the message names
         // what is actually wrong, which is that the authored spelling is not the identity the kernel
         // checks.
@@ -521,6 +568,19 @@ fn entry_grant(
                 (kind, refused)
             },
         )?;
+    // **A link inside a credential store stays refused.** The store exception re-resolves the
+    // entry at each spawn, so a link there could be pointed at another file of the store during a
+    // run, such as `~/.ssh/config` at `~/.ssh/id_ed25519`.
+    if link && credential_store {
+        return Err(refused(
+            GrantRefusal::Link,
+            &format!(
+                "{} is a symbolic link in a credential store. A store entry must name the file                  itself, so name {} instead",
+                lexical.display(),
+                resolved.display()
+            ),
+        ));
+    }
 
     Ok(DirectGrant {
         kind,
@@ -645,7 +705,12 @@ fn require_no_overlap(
             if grant.operation != other.operation {
                 continue;
             }
-            if grant.resolved == other.resolved {
+            // A link adds its own name, so two names for one file are two grants. A grant whose
+            // every name the other already has adds nothing, such as a link listed beside its file.
+            let adds = |one: &DirectGrant, two: &DirectGrant| {
+                one.names().iter().any(|name| !two.names().contains(name))
+            };
+            if grant.resolved == other.resolved && !(adds(grant, other) && adds(other, grant)) {
                 return Err(refuse(
                     context,
                     &other.authored,
@@ -666,6 +731,11 @@ fn require_no_overlap(
                 continue;
             };
             if outer.scope != Scope::Root {
+                continue;
+            }
+            // A link whose own name lies outside the tree reaches the file at a name the tree
+            // does not, such as `/usr/bin/java` beside the JDK folder it points into.
+            if inner.is_link() && !inner.lexical.starts_with(&outer.resolved) {
                 continue;
             }
             return Err(refuse(
@@ -1029,6 +1099,125 @@ mod tests {
                 && refusal.contains("instead"),
             "{refusal}"
         );
+
+        // A read-only entry may name a link to a file. It grants the file, and keeps the link's
+        // own name so the box shows the file there too.
+        let file_link = home.join("api-link.md");
+        let file = home.join("notes/api.md");
+        std::os::unix::fs::symlink(&file, &file_link).expect("a link to a file");
+        for (list, kind) in [("read", Grant::Read), ("read_file", Grant::ReadFile)] {
+            let reach = fixture.reach(&context, &format!("{list} = [{:?}]", text(&file_link)));
+            let grant = &reach.grants[0];
+            assert_eq!(
+                grant,
+                &DirectGrant {
+                    kind,
+                    authored: text(&file_link),
+                    lexical: file_link.clone(),
+                    resolved: file.clone(),
+                    operation: Operation::Read,
+                    scope: Scope::File,
+                    credential_store: false,
+                    access: "read-only",
+                },
+                "{list}"
+            );
+            assert!(grant.is_link(), "{list}");
+            assert!(
+                grant
+                    .disclosure()
+                    .contains(&format!("{} -> {}", text(&file_link), text(&file))),
+                "{}",
+                grant.disclosure()
+            );
+        }
+
+        // Two links to one file are two names, and a link beside the tree its file is in reaches a
+        // name the tree does not: both are granted.
+        let second_link = home.join("api-other.md");
+        std::os::unix::fs::symlink(&file, &second_link).expect("a second link");
+        let reach = fixture.reach(
+            &context,
+            &format!(
+                "read_file = [{:?}, {:?}]",
+                text(&file_link),
+                text(&second_link)
+            ),
+        );
+        assert_eq!(reach.grants.len(), 2);
+        let reach = fixture.reach(
+            &context,
+            &format!("read = ['~/notes']\nread_file = [{:?}]", text(&file_link)),
+        );
+        assert_eq!(reach.grants.len(), 2);
+        // A link inside the tree it points into adds no name the tree lacks.
+        let inner_link = home.join("notes/api-alias.md");
+        std::os::unix::fs::symlink(&file, &inner_link).expect("a link inside the tree");
+        let refusal = fixture.refusal(
+            &context,
+            &format!("read = ['~/notes']\nread_file = [{:?}]", text(&inner_link)),
+        );
+        assert!(refusal.contains("lies inside"), "{refusal}");
+
+        // Only a read: a write, an exec or a metadata entry naming a link stays refused.
+        for list in ["write_file", "metadata"] {
+            let refusal = fixture.refusal(
+                &context,
+                &format!("read = ['~/notes']\n{list} = [{:?}]", text(&file_link)),
+            );
+            assert!(refusal.contains("symbolic link"), "{list}: {refusal}");
+        }
+        let run_link = home.join("run-link");
+        std::os::unix::fs::symlink(home.join("tools/run"), &run_link).expect("a link to a script");
+        let refusal = fixture.refusal(&context, &format!("exec = [{:?}]", text(&run_link)));
+        assert!(refusal.contains("symbolic link"), "{refusal}");
+
+        // A link reached through a linked folder is refused: the name must be the one opened.
+        let linked_folder = home.join("notes-link");
+        std::os::unix::fs::symlink(home.join("notes"), &linked_folder).expect("a linked folder");
+        let through = linked_folder.join("api.md");
+        let refusal = fixture.refusal(&context, &format!("read = [{:?}]", text(&through)));
+        assert!(
+            refusal.contains("not the path the kernel checks"),
+            "{refusal}"
+        );
+        let inner_link = home.join("notes/api-link.md");
+        std::os::unix::fs::symlink(&file, &inner_link).expect("a link beside its file");
+        let refusal = fixture.refusal(
+            &context,
+            &format!("read = [{:?}]", text(&linked_folder.join("api-link.md"))),
+        );
+        assert!(refusal.contains("symbolic link"), "{refusal}");
+
+        // A link inside a credential store is refused: the store exception would follow it again
+        // at each spawn.
+        std::fs::create_dir_all(home.join(".ssh")).expect("an SSH directory");
+        std::fs::write(home.join(".ssh/config.real"), "").expect("a real config");
+        std::os::unix::fs::symlink(home.join(".ssh/config.real"), home.join(".ssh/config"))
+            .expect("a link in the store");
+        let refusal = fixture.refusal(&context, "read_file = ['~/.ssh/config']");
+        assert!(
+            refusal.contains("symbolic link in a credential store"),
+            "{refusal}"
+        );
+        let refused = entry_grant(Grant::ReadFile, Path::new("~/.ssh/config"), &context)
+            .expect_err("a store link");
+        assert_eq!(refused.0, GrantRefusal::Link);
+
+        // A link into a credential store is judged by the store it reaches.
+        std::fs::create_dir_all(home.join(".ssh")).expect("an SSH directory");
+        std::fs::write(home.join(".ssh/id_ed25519"), "").expect("a key");
+        let key_link = home.join("key-link");
+        std::os::unix::fs::symlink(home.join(".ssh/id_ed25519"), &key_link).expect("a key link");
+        let refusal = fixture.refusal(&context, &format!("read = [{:?}]", text(&key_link)));
+        assert!(refusal.contains("refused"), "{refusal}");
+
+        // A link and its file in one list grant one file twice.
+        let refusal = fixture.refusal(
+            &context,
+            &format!("read_file = [{:?}, {:?}]", text(&file_link), text(&file)),
+        );
+        assert!(refusal.contains("twice"), "{refusal}");
 
         // A broken symlink has no canonical target; the refusal must still name the link.
         let broken = home.join("broken-link");

@@ -1607,3 +1607,266 @@ fn a_path_scoped_secret_never_rides_plain_http() {
     assert!(reasons.contains("a secret must ride TLS"), "{reasons}");
     assert!(reasons.contains("not RFC 3986"), "{reasons}");
 }
+
+// ============================================================================================
+// upgrade_http: a listed host's plain `http://` request is decided and sent as https on 443
+// ============================================================================================
+
+/// The destination of each decision a test policy saw: the attempt kind, host, and port, and for a
+/// `Connect` the port of the address it would dial.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Seen {
+    Resolve(String, u16),
+    Connect(String, u16, u16),
+    HttpRequest(String, u16, bool),
+}
+
+/// Records each attempt it decides, and refuses every `Connect` when `refuse_connect` is set, so a
+/// test reads where the gateway would dial without dialing it.
+struct RecordingPolicy {
+    refuse_connect: bool,
+    seen: std::sync::Mutex<Vec<Seen>>,
+}
+
+impl RecordingPolicy {
+    fn new(refuse_connect: bool) -> Arc<Self> {
+        Arc::new(Self {
+            refuse_connect,
+            seen: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn seen(&self) -> Vec<Seen> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl EffectInterceptor for RecordingPolicy {
+    fn intercept(&self, attempt: &EffectAttempt<'_>) -> io::Result<Box<dyn EffectPermit>> {
+        let seen = match attempt {
+            EffectAttempt::Resolve { host, port } => Some(Seen::Resolve(host.to_string(), *port)),
+            EffectAttempt::Connect {
+                host,
+                port,
+                address,
+                ..
+            } => Some(Seen::Connect(host.to_string(), *port, address.port())),
+            EffectAttempt::HttpRequest {
+                host,
+                port,
+                intercepted,
+                ..
+            } => Some(Seen::HttpRequest(host.to_string(), *port, *intercepted)),
+            _ => None,
+        };
+        let refused = self.refuse_connect && matches!(seen, Some(Seen::Connect(..)));
+        if let Some(seen) = seen {
+            self.seen.lock().unwrap().push(seen);
+        }
+        if refused {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "connect refused by test policy",
+            ));
+        }
+        Ok(Box::new(NoopPermit))
+    }
+}
+
+/// Start a gateway that upgrades `listed`, with each host in `loopback` resolved to `127.0.0.1`.
+fn start_upgrading_gateway(
+    listed: &[&str],
+    loopback: &[&str],
+    upstream_ca_pems: Vec<String>,
+    backends: Vec<(DestinationPattern, BackendDial)>,
+    controls: CapabilitySet,
+    policy: Arc<dyn EffectInterceptor>,
+) -> egress_gateway::MitmHandle {
+    let config = MitmConfig {
+        upstream_ca_pems,
+        dns_overrides: loopback
+            .iter()
+            .map(|host| (host.to_string(), "127.0.0.1".parse().unwrap()))
+            .collect(),
+        backends,
+        upgrade_http: listed.iter().map(|host| host.to_string()).collect(),
+        ..MitmConfig::default()
+    };
+    let emitter = Box::new(RECORDS.with(Clone::clone));
+    MitmInterceptor::start_with(config, controls, policy, emitter, None).unwrap()
+}
+
+/// A listed host on port 80 is decided, resolved, and dialed on 443; an unlisted host, and another
+/// port of a listed host, keep their own port.
+#[test]
+fn a_listed_plain_request_is_decided_and_dialed_on_443() {
+    let listed = "static.rust-lang.test";
+    let unlisted = "example.test";
+    let policy = RecordingPolicy::new(true);
+    let handle = start_upgrading_gateway(
+        &[listed],
+        &[listed, unlisted],
+        Vec::new(),
+        Vec::new(),
+        CapabilitySet::default(),
+        Arc::clone(&policy) as Arc<dyn EffectInterceptor>,
+    );
+
+    let send = |authority: &str| {
+        plain_exchange(
+            proxy_port(&handle),
+            &format!(
+                "GET http://{authority}/dist/channel-rust-stable.toml HTTP/1.1\r\n\
+                 Host: {authority}\r\nConnection: close\r\n\r\n"
+            ),
+        )
+    };
+    for authority in [listed, &format!("{listed}:80")] {
+        let reply = send(authority);
+        assert!(reply.starts_with("HTTP/1.1 403"), "{authority}: {reply:?}");
+    }
+    assert_eq!(
+        policy.seen(),
+        vec![
+            Seen::Resolve(listed.to_string(), 443),
+            Seen::Connect(listed.to_string(), 443, 443),
+            Seen::Resolve(listed.to_string(), 443),
+            Seen::Connect(listed.to_string(), 443, 443),
+        ],
+        "both spellings of port 80 are decided as 443 and would dial 443"
+    );
+    assert!(
+        records()
+            .iter()
+            .all(|record| record.host == listed && record.port == 443),
+        "the decision records name port 443: {:?}",
+        records()
+    );
+
+    let policy = RecordingPolicy::new(true);
+    let handle = start_upgrading_gateway(
+        &[listed],
+        &[listed, unlisted],
+        Vec::new(),
+        Vec::new(),
+        CapabilitySet::default(),
+        Arc::clone(&policy) as Arc<dyn EffectInterceptor>,
+    );
+    for authority in [unlisted.to_string(), format!("{listed}:8080")] {
+        let _ = plain_exchange(
+            proxy_port(&handle),
+            &format!(
+                "GET http://{authority}/ HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\n\r\n"
+            ),
+        );
+    }
+    assert_eq!(
+        policy.seen(),
+        vec![
+            Seen::Resolve(unlisted.to_string(), 80),
+            Seen::Connect(unlisted.to_string(), 80, 80),
+            Seen::Resolve(listed.to_string(), 8080),
+            Seen::Connect(listed.to_string(), 8080, 8080),
+        ],
+        "an unlisted host and another port of a listed host keep their own port"
+    );
+}
+
+/// An upgraded request reaches a TLS upstream, judged as `host:443`, and its request leg reports the
+/// workload's plain transport. A re-route of `host:443` moves the dial to the fixture's port, because
+/// a test cannot listen on 443.
+#[test]
+fn a_listed_plain_request_reaches_a_tls_upstream_judged_on_443() {
+    let listed = "static.rust-lang.test";
+    let upstream = TlsUpstream::start(listed);
+    let policy = RecordingPolicy::new(false);
+    let handle = start_upgrading_gateway(
+        &[listed],
+        &[listed],
+        vec![upstream.ca_pem()],
+        vec![(
+            pat(listed, 443),
+            BackendDial {
+                host: listed.to_string(),
+                port: upstream.port(),
+                tls: true,
+                path_prefix: String::new(),
+            },
+        )],
+        CapabilitySet::default(),
+        Arc::clone(&policy) as Arc<dyn EffectInterceptor>,
+    );
+
+    let reply = plain_exchange(
+        proxy_port(&handle),
+        &format!(
+            "GET http://{listed}/dist/channel-rust-stable.toml HTTP/1.1\r\nHost: {listed}\r\n\
+             Connection: close\r\n\r\n"
+        ),
+    );
+    assert!(reply.starts_with("HTTP/1.1 200"), "{reply:?}");
+    assert!(reply.ends_with("ok"), "the TLS upstream's body: {reply:?}");
+    let seen = upstream.last_request();
+    assert!(
+        seen.raw
+            .starts_with("GET /dist/channel-rust-stable.toml HTTP/1.1\r\n"),
+        "the TLS upstream received the origin-form request: {:?}",
+        seen.raw
+    );
+    let decided = policy.seen();
+    assert_eq!(
+        decided.first(),
+        Some(&Seen::Resolve(listed.to_string(), 443)),
+        "{decided:?}"
+    );
+    assert!(
+        decided.contains(&Seen::HttpRequest(listed.to_string(), 443, false)),
+        "the request leg is decided on 443, and the workload's leg was plain: {decided:?}"
+    );
+    assert!(
+        records()
+            .iter()
+            .all(|record| record.host == listed && record.port == 443),
+        "the decision records name port 443: {:?}",
+        records()
+    );
+}
+
+/// A credential still rides only TLS: a request to an upgraded host that a route matches is refused
+/// before any byte reaches the upstream, because the workload's own leg is plain.
+#[test]
+fn a_credential_on_an_upgraded_plain_request_is_refused() {
+    let listed = "api.upgraded.test";
+    let upstream = TlsUpstream::start(listed);
+    let (store, phantom) = opaque_store(listed, 443, "sk_live_REALSECRET");
+    let controls = CapabilitySet::new(vec![CredentialCapability::new(pat(listed, 443), store)]);
+    let handle = start_upgrading_gateway(
+        &[listed],
+        &[listed],
+        vec![upstream.ca_pem()],
+        vec![(
+            pat(listed, 443),
+            BackendDial {
+                host: listed.to_string(),
+                port: upstream.port(),
+                tls: true,
+                path_prefix: String::new(),
+            },
+        )],
+        controls,
+        FixedPolicy::allowing(&[listed]),
+    );
+
+    let reply = plain_exchange(
+        proxy_port(&handle),
+        &format!(
+            "GET http://{listed}/v1/charges HTTP/1.1\r\nHost: {listed}\r\n\
+             Authorization: Bearer {phantom}\r\nConnection: close\r\n\r\n"
+        ),
+    );
+    assert!(reply.starts_with("HTTP/1.1 403"), "{reply:?}");
+    assert_eq!(upstream.request_count(), 0, "nothing reached the upstream");
+    let reasons = format!("{:?}", records());
+    assert!(reasons.contains("a secret must ride TLS"), "{reasons}");
+    assert!(!reasons.contains("sk_live_REALSECRET"), "{reasons}");
+}

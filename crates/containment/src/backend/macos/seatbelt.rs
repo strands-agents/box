@@ -78,6 +78,9 @@ const LEAF_OVERLAY: &str = "{{LEAF_OVERLAY}}";
 /// The `mDNSResponder` socket that `getaddrinfo` connects to.
 const SYSTEM_RESOLVER: &str = "/private/var/run/mDNSResponder";
 
+/// The services Apple's certificate trust evaluation asks, granted to native egress alone.
+const TRUST_SERVICES: [&str; 2] = ["com.apple.trustd.agent", "com.apple.SecurityServer"];
+
 /// The `file-write*` leaves a write root grants, and the set every overriding deny must also name.
 pub(crate) const WRITE_ROOT_LEAVES: [&str; 6] = [
     "file-write-data",
@@ -139,6 +142,9 @@ fn inside_operator_home(path: &std::path::Path, homes: &[std::path::PathBuf]) ->
 /// Group grants by resolved path, so a duplicate operation and a scope disagreement are structural.
 fn group_by_path(config: &ContainmentConfig) -> Result<Vec<(&PathGrant, BTreeSet<Operation>)>> {
     let mut groups: Vec<(&PathGrant, BTreeSet<Operation>)> = Vec::new();
+    // Each spelling granted per operation. Two links to one file are two spellings of one grant:
+    // the renderer walks each grant, so each spelling gets its own traversal rules.
+    let mut spellings: BTreeSet<(&std::path::Path, Operation)> = BTreeSet::new();
     for granted in config.authorizations() {
         // Breadth first, and independent of the cell: the widest possible grant is also a
         // well-formed one, so recognizing the cell would accept it.
@@ -160,7 +166,8 @@ fn group_by_path(config: &ContainmentConfig) -> Result<Vec<(&PathGrant, BTreeSet
                         granted.scope,
                     )));
                 }
-                if !operations.insert(granted.operation) {
+                operations.insert(granted.operation);
+                if !spellings.insert((granted.original.as_path(), granted.operation)) {
                     return Err(unsupported(format!(
                         "{} is granted {:?} twice",
                         granted.resolved.display(),
@@ -168,7 +175,10 @@ fn group_by_path(config: &ContainmentConfig) -> Result<Vec<(&PathGrant, BTreeSet
                     )));
                 }
             }
-            None => groups.push((granted, BTreeSet::from([granted.operation]))),
+            None => {
+                spellings.insert((granted.original.as_path(), granted.operation));
+                groups.push((granted, BTreeSet::from([granted.operation])));
+            }
         }
     }
     Ok(groups)
@@ -277,21 +287,6 @@ fn other_spelling_metadata(granted: &PathGrant) -> Result<String> {
         rules.push_str(&format!(
             "(allow file-read-metadata (literal \"{route}\"))\n"
         ));
-    }
-    Ok(rules)
-}
-
-/// One `file-read-metadata` rule per symbolic link among the directories a requested spelling
-/// traverses, which a load through a linked directory needs beside the file's own spellings.
-fn linked_directory_metadata(requested: &std::path::Path) -> Result<String> {
-    let mut rules = String::new();
-    for ancestor in requested.ancestors().skip(1) {
-        if std::fs::symlink_metadata(ancestor).is_ok_and(|metadata| metadata.is_symlink()) {
-            let route = escaped(ancestor)?;
-            rules.push_str(&format!(
-                "(allow file-read-metadata (literal \"{route}\"))\n"
-            ));
-        }
     }
     Ok(rules)
 }
@@ -482,15 +477,16 @@ pub(crate) fn render_profile_with_streams(
                 // The images the program loads from outside the shared cache are read-file cells:
                 // `file-read*` on each identity, and metadata on the spelling the load requests.
                 for loaded in super::macho::collect_dylibs(&granted.resolved, config, &mut missing)? {
-                    let image = &loaded.original;
+                    // The grant's traversal walk holds the linked folders on the spelling the load
+                    // requests, so `other_spelling_metadata` renders each one once, judged like the
+                    // other nodes.
                     if !loaded_images.insert(loaded.resolved.clone()) {
                         continue;
                     }
                     cells.entry(READ_FILE).or_default().push_str(&format!(
-                        "(allow file-read* (literal \"{}\"))\n{}{}",
+                        "(allow file-read* (literal \"{}\"))\n{}",
                         escaped(&loaded.resolved)?,
-                        other_spelling_metadata(&loaded)?,
-                        linked_directory_metadata(image)?
+                        other_spelling_metadata(&loaded)?
                     ));
                 }
             }
@@ -828,6 +824,15 @@ pub(crate) fn render_profile_with_streams(
         ));
     }
 
+    // Opt-in: FSEvents serves directory watchers. The stream can name denied paths and past
+    // events, so only a process that selects `file-watching` gets the lookup.
+    if config.file_watching() {
+        cells
+            .entry(RUNTIME_SERVICES)
+            .or_default()
+            .push_str("(allow mach-lookup (global-name \"com.apple.FSEvents\"))\n");
+    }
+
     // Leaf-only: a bundled JS/Node runtime calls `getifaddrs` at startup. It reads the `net.*`
     // sysctls and opens a routing socket. This is host information, never egress: the `(deny
     // network*)` that follows still stands, and AF_INET/AF_UNIX are unaffected. Scope the socket
@@ -866,6 +871,16 @@ pub(crate) fn render_profile_with_streams(
                 "(allow network-outbound\n    (remote ip \"*:*\"))\n\
                  (allow network-outbound\n    (literal \"{SYSTEM_RESOLVER}\"))\n"
             ));
+            // The system's certificate check, which a direct connection meets the real server
+            // with. Through the gateway these add nothing: the gateway's CA is not in the keychain.
+            for service in TRUST_SERVICES {
+                cells
+                    .entry(RUNTIME_SERVICES)
+                    .or_default()
+                    .push_str(&format!(
+                        "(allow mach-lookup (global-name \"{service}\"))\n"
+                    ));
+            }
         }
         Network::Blocked => {}
     }
@@ -1130,6 +1145,43 @@ mod tests {
             .expect("read tree again");
         assert!(matches!(
             group_by_path(&twice),
+            Err(ContainmentError::UnsupportedCapability { .. })
+        ));
+
+        // Two links to one file are two spellings, so both render; one link twice is refused.
+        let file = root.join("gcc");
+        std::fs::write(&file, "").expect("a file");
+        for name in ["cc", "c99"] {
+            std::os::unix::fs::symlink(&file, root.join(name)).expect("a link");
+        }
+        let two_names = ContainmentConfig::new()
+            .allow(root.join("cc"), Operation::Read, Scope::File)
+            .expect("cc")
+            .allow(root.join("c99"), Operation::Read, Scope::File)
+            .expect("c99");
+        let groups = group_by_path(&two_names).expect("two names for one file");
+        assert_eq!(groups.len(), 1);
+        let program = root.join("agent");
+        std::fs::write(&program, "agent").expect("program fixture");
+        let rendered = two_names
+            .set_network(Network::localhost().connect(33085))
+            .expect("localhost")
+            .allow(&program, Operation::Exec, Scope::File)
+            .expect("exec");
+        let profile = render_profile(&rendered).expect("a profile");
+        for name in ["cc", "c99"] {
+            assert!(
+                profile.contains(&format!("{}\")", root.join(name).display())),
+                "{name} must have its own rule: {profile}"
+            );
+        }
+        let one_name_twice = ContainmentConfig::new()
+            .allow(root.join("cc"), Operation::Read, Scope::File)
+            .expect("cc")
+            .allow(root.join("cc"), Operation::Read, Scope::File)
+            .expect("cc again");
+        assert!(matches!(
+            group_by_path(&one_name_twice),
             Err(ContainmentError::UnsupportedCapability { .. })
         ));
     }
@@ -1549,6 +1601,130 @@ mod tests {
         );
     }
 
+    /// **A file read spelled the way Homebrew names a library renders every link on the way**:
+    /// `opt/<formula>` is a link to the keg, and `lib/libmpdec.4.dylib` in the keg is a link to the
+    /// versioned file. The read gets `file-read*` on the file, and metadata on the linked folder and
+    /// on the keg's file link, the same rules a program's own library gets.
+    #[test]
+    fn a_file_read_spelled_through_homebrew_links_renders_metadata_on_each_link() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical");
+        let keg = root.join("Cellar/mpdecimal/4.0.1/lib");
+        std::fs::create_dir_all(&keg).expect("keg");
+        std::fs::create_dir_all(root.join("opt")).expect("opt");
+        let file = keg.join("libmpdec.4.0.1.dylib");
+        std::fs::write(&file, b"image").expect("library");
+        std::os::unix::fs::symlink("libmpdec.4.0.1.dylib", keg.join("libmpdec.4.dylib"))
+            .expect("the file link");
+        std::os::unix::fs::symlink("../Cellar/mpdecimal/4.0.1", root.join("opt/mpdecimal"))
+            .expect("the folder link");
+        let requested = root.join("opt/mpdecimal/lib/libmpdec.4.dylib");
+        let program = root.join("agent");
+        std::fs::write(&program, "agent").expect("program fixture");
+        let config = ContainmentConfig::new()
+            .set_network(Network::Localhost {
+                connect: vec![41080],
+                listen: Vec::new(),
+            })
+            .expect("localhost")
+            .allow(&program, Operation::Exec, Scope::File)
+            .expect("exec grant")
+            .allow(&requested, Operation::Read, Scope::File)
+            .expect("a read under the requested name");
+
+        let profile = render_profile(&config).expect("the profile renders");
+
+        for rule in [
+            format!("(allow file-read* (literal \"{}\"))", file.display()),
+            format!(
+                "(allow file-read-metadata (literal \"{}\"))",
+                keg.join("libmpdec.4.dylib").display()
+            ),
+            format!(
+                "(allow file-read-metadata (literal \"{}\"))",
+                root.join("opt/mpdecimal").display()
+            ),
+        ] {
+            assert!(profile.contains(&rule), "{rule} is missing: {profile}");
+        }
+        assert!(
+            !profile.contains(&format!(
+                "(allow file-read* (literal \"{}\"))",
+                root.join("opt/mpdecimal").display()
+            )),
+            "the linked folder gets metadata, never its contents: {profile}"
+        );
+    }
+
+    /// **An exec chain whose link target passes through a linked folder renders that link.** A
+    /// Homebrew venv's chain: `venv/bin/python3 -> python3.14 -> <prefix>/opt/py/bin/python3.14`,
+    /// with `opt/py` a link to the keg and the keg's `bin/python3.14` a link to the framework's
+    /// file. The lookup reads the `opt/py` folder link, which none of the chain's own file nodes
+    /// names, so the exec cell renders metadata on it.
+    #[test]
+    fn an_exec_chain_through_a_linked_folder_renders_metadata_on_the_folder_link() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical");
+        let framework = root.join("Cellar/py/1.0/Frameworks/bin");
+        std::fs::create_dir_all(&framework).expect("framework");
+        std::fs::create_dir_all(root.join("Cellar/py/1.0/bin")).expect("keg bin");
+        std::fs::create_dir_all(root.join("opt")).expect("opt");
+        std::fs::create_dir_all(root.join("venv/bin")).expect("venv bin");
+        let program = framework.join("python3.14");
+        std::fs::write(&program, "python").expect("the program");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("executable");
+        std::os::unix::fs::symlink(
+            "../Frameworks/bin/python3.14",
+            root.join("Cellar/py/1.0/bin/python3.14"),
+        )
+        .expect("the keg's link");
+        std::os::unix::fs::symlink("../Cellar/py/1.0", root.join("opt/py")).expect("folder link");
+        std::os::unix::fs::symlink(
+            root.join("opt/py/bin/python3.14"),
+            root.join("venv/bin/python3.14"),
+        )
+        .expect("the venv's link into opt");
+        std::os::unix::fs::symlink("python3.14", root.join("venv/bin/python3"))
+            .expect("the venv's python3");
+        let config = ContainmentConfig::new()
+            .set_network(Network::Localhost {
+                connect: vec![41080],
+                listen: Vec::new(),
+            })
+            .expect("localhost")
+            .allow(root.join("venv/bin/python3"), Operation::Exec, Scope::File)
+            .expect("exec grant through the chain");
+
+        let profile = render_profile(&config).expect("the profile renders");
+
+        for rule in [
+            format!("(allow process-exec (literal \"{}\"))", program.display()),
+            format!(
+                "(allow file-read-metadata (literal \"{}\"))",
+                root.join("venv/bin/python3.14").display()
+            ),
+            format!(
+                "(allow file-read-metadata (literal \"{}\"))",
+                root.join("Cellar/py/1.0/bin/python3.14").display()
+            ),
+            format!(
+                "(allow file-read-metadata (literal \"{}\"))",
+                root.join("opt/py").display()
+            ),
+        ] {
+            assert!(profile.contains(&rule), "{rule} is missing: {profile}");
+        }
+        assert!(
+            !profile.contains(&format!(
+                "(allow file-read* (literal \"{}\"))",
+                root.join("opt/py").display()
+            )),
+            "the linked folder gets metadata, never its contents: {profile}"
+        );
+    }
+
     /// **The agent (non-broad) profile carries no `process-exec*`, enumerates one `process-exec` rule
     /// per exec grant, and keeps write-xor-execute.** A leaf may render broad exec
     /// (docs/design/decisions.md#a-leaf-runs-its-whole-toolchain-and-loads-what-it-builds); this
@@ -1658,6 +1834,48 @@ mod tests {
             leaf.contains(&literal),
             "the leaf keeps the enumerated literal (broad exec is additive): {leaf}"
         );
+    }
+
+    /// **Native egress, and only native egress, reaches the system's certificate check.** The same
+    /// leaf renders `com.apple.trustd.agent` and `com.apple.SecurityServer` with `AllowAll` and
+    /// neither through the gateway's localhost port.
+    #[test]
+    fn the_trust_services_render_only_with_native_egress() {
+        let home = tempfile::tempdir().expect("an operator home");
+        let home_path = home.path().canonicalize().expect("the home resolves");
+        let program = home_path.join("tool");
+        std::fs::write(&program, "tool").expect("an executable fixture");
+        let leaf = |network: Network| {
+            let config = ContainmentConfig::new()
+                .set_network(network)
+                .expect("the network")
+                .anchored_at(&home_path)
+                .allow(&program, Operation::Exec, Scope::File)
+                .expect("an executable")
+                .allow_runtime_services()
+                .allow_broad_exec();
+            render_profile(&config).expect("the leaf profile renders")
+        };
+        let rules: Vec<String> = TRUST_SERVICES
+            .iter()
+            .map(|service| format!("(allow mach-lookup (global-name \"{service}\"))"))
+            .collect();
+
+        let native = leaf(Network::AllowAll);
+        for rule in &rules {
+            assert_eq!(
+                native.matches(rule.as_str()).count(),
+                1,
+                "native egress renders {rule} once: {native}"
+            );
+        }
+        let gateway = leaf(Network::localhost().connect(33085));
+        for rule in &rules {
+            assert!(
+                !gateway.contains(rule.as_str()),
+                "gateway egress renders no {rule}: {gateway}"
+            );
+        }
     }
 
     /// **The map-exec allow is additive and wins by last-match.** The write cell's

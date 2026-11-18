@@ -659,7 +659,21 @@ impl PolicyEngine {
         response: crate::PendingToolResponse,
         reply: crate::McpReply,
     ) -> Result<(), PolicyError> {
-        self.authority.record_tool_response(response, reply)
+        self.authority.record_tool_response(response, reply, None)
+    }
+
+    /// Record the `::response` of one per-tool `tools/call`, with `output.reply` and
+    /// `output.structured`, from the server's JSON-RPC reply.
+    pub fn record_tool_reply(
+        &self,
+        response: crate::PendingToolResponse,
+        reply: &serde_json::Value,
+    ) -> Result<(), PolicyError> {
+        self.authority.record_tool_response(
+            response,
+            crate::McpReply::of_reply(reply),
+            reply.pointer("/result/structuredContent"),
+        )
     }
 }
 
@@ -1715,7 +1729,8 @@ forbid(principal, action == issues_mcp::Action::"read", resource);
             &Operator::unanchored(),
             source(
                 r#"permit(principal, action, resource);
-                   forbid(principal, action in [alpha::Action::"read", beta::Action::"read"], resource);"#,
+                   forbid(principal, action == alpha::Action::"read", resource)
+                   when { context.input.never_declared == "x" };"#,
             ),
             &history.path().join("dogwood.redb"),
         )

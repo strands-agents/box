@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use strands_shell::{
+use box_shell::{
     EffectAttempt, EffectInterceptor, EffectOutcome, EffectPermit, EffectResult,
     FsOperation as KernelFsOperation, FsPairOperation,
 };
@@ -193,6 +193,9 @@ fn fs_operation(operation: KernelFsOperation) -> FsOperation {
         KernelFsOperation::RemoveDir => FsOperation::RemoveDir,
         KernelFsOperation::CreateDir => FsOperation::CreateDir,
         KernelFsOperation::SetPermissions { .. } => FsOperation::SetPermissions,
+        // A time change is decided as a write, so a rule that permits writing a file permits
+        // touching it, and the authored vocabulary has no separate operation for it.
+        KernelFsOperation::SetTimes => FsOperation::WriteContent,
         KernelFsOperation::ChangeDir => FsOperation::ChangeDir,
         KernelFsOperation::ReadLink => FsOperation::ReadLink,
         _ => FsOperation::Other,

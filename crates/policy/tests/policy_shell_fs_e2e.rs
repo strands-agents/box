@@ -9,40 +9,12 @@
 mod support;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use policy::{GovernedBox, Policy, Principal, ShellPolicyInterceptor};
 use strands_shell::Shell;
 
-/// Build a Shell whose kernel consults `source` for every effect.
-fn shell_governed_by(source: &str) -> Shell {
-    let policy = support::open_policy(vec![Policy {
-        origin: PathBuf::from("shell-fs-e2e.cedar"),
-        text: source.to_string(),
-    }])
-    .expect("policy opens");
-    let interceptor = ShellPolicyInterceptor::into_handle(
-        Arc::new(policy),
-        Principal::agent(),
-        GovernedBox::assigned("test-box"),
-    );
-    Shell::builder()
-        .effect_interceptor(interceptor)
-        .build()
-        .expect("shell builds")
-}
-
-fn run<F, T>(body: F) -> T
-where
-    F: std::future::Future<Output = T>,
-{
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("runtime builds");
-    let local = tokio::task::LocalSet::new();
-    runtime.block_on(local.run_until(body))
-}
+use support::shell::{
+    adapter, backend, fixture_on, governed_by as shell_governed_by, policy, run, shell_on,
+};
 
 /// Permit everything the shell needs, so a test can then subtract one rule.
 const PERMIT_ALL: &str = r#"
@@ -163,73 +135,27 @@ fn a_multi_file_denial_names_only_the_denied_file() {
     );
 }
 
-/// An ungoverned Shell and a governed one over the **same** kernel.
+/// An ungoverned Shell and a governed one over the **same** filesystem.
 ///
 /// A test that guards a path cannot also create the fixture under it — the rule denies
 /// its own precondition, and loosening the rule to permit setup leaves a hole the
-/// payload slips through too. Sharing one kernel shares one VFS, so the fixture shell
-/// builds the protected file and the governed shell then attacks it.
+/// payload slips through too.
 fn fixture_and_governed(source: &str) -> (Shell, Shell) {
     fixture_and_governed_reporting(source, None)
 }
 
 /// The same pair, with every path under `home` reported to policy as `~/<relative>`.
 fn fixture_and_governed_reporting(source: &str, home: Option<&str>) -> (Shell, Shell) {
-    let policy = Arc::new(
-        support::open_policy(vec![Policy {
-            origin: PathBuf::from("shell-fs-e2e-shared.cedar"),
-            text: source.to_string(),
-        }])
-        .expect("policy opens"),
-    );
-    let (principal, governed) = (Principal::agent(), GovernedBox::assigned("test-box"));
-    let interceptor = match home {
-        Some(home) => {
-            ShellPolicyInterceptor::into_handle_reporting_under(policy, principal, governed, home)
-        }
-        None => ShellPolicyInterceptor::into_handle(policy, principal, governed),
-    };
-    let vfs = strands_shell::vfs_config::build_vfs(&Default::default()).expect("standard vfs");
-    let kernel: Arc<dyn strands_shell::os::Kernel> =
-        Arc::new(strands_shell::vfs_kernel::VfsKernel::new(vfs));
-
-    let fixture = Shell::builder()
-        .kernel(Arc::clone(&kernel))
-        .build()
-        .expect("fixture shell builds");
-    let governed = Shell::builder()
-        .effect_interceptor(interceptor)
-        .kernel(kernel)
-        .build()
-        .expect("governed shell builds");
-    (fixture, governed)
+    let shared = backend(&[]);
+    (
+        fixture_on(&shared),
+        shell_on(&shared, adapter(policy(source), home)),
+    )
 }
 
-/// Build a Shell governed by `source`, over a caller-supplied kernel.
-///
-/// The kernel is a bare `VfsKernel` handed in through `ShellBuilder::kernel`, which is
-/// the shape an embedder uses for an S3- or database-backed backend. Admission lives
-/// above the `Kernel` trait, so this must be governed exactly as the bundled kernel is;
-/// before the seam moved, every filesystem effect here went unmediated.
+/// Build a Shell governed by `source` over a filesystem it was handed.
 fn supplied_kernel_governed_by(source: &str) -> Shell {
-    let policy = support::open_policy(vec![Policy {
-        origin: PathBuf::from("shell-fs-e2e-supplied.cedar"),
-        text: source.to_string(),
-    }])
-    .expect("policy opens");
-    let interceptor = ShellPolicyInterceptor::into_handle(
-        Arc::new(policy),
-        Principal::agent(),
-        GovernedBox::assigned("test-box"),
-    );
-    let vfs = strands_shell::vfs_config::build_vfs(&Default::default()).expect("standard vfs");
-    let kernel: Arc<dyn strands_shell::os::Kernel> =
-        Arc::new(strands_shell::vfs_kernel::VfsKernel::new(vfs));
-    Shell::builder()
-        .effect_interceptor(interceptor)
-        .kernel(kernel)
-        .build()
-        .expect("shell builds")
+    shell_on(&backend(&[]), adapter(policy(source), None))
 }
 
 /// The baseline: with `fs:*` permitted, ordinary work succeeds.
@@ -911,5 +837,81 @@ fn plain_mkdir_is_unchanged_by_the_parents_walk() {
             .contains("policy denied this operation on '/home/lash/e' [default-deny]"),
         "{}",
         rendered(&above)
+    );
+}
+
+/// A refused probe before a plain `mkdir` leaves that `mkdir` decided, and shows nothing about
+/// whether the path exists.
+#[test]
+fn a_plain_mkdir_after_a_refused_probe_is_still_decided() {
+    let (mut fixture, mut shell) = project_fixture_and_governed();
+    let (existing, absent) = run(async {
+        let made = fixture.run("mkdir -p /home/lash/other").await;
+        assert_eq!(made.status, 0, "setup: {}", rendered(&made));
+        let existing = shell
+            .run("test -d /home/lash/other; mkdir /home/lash/other")
+            .await;
+        let absent = shell
+            .run("test -d /home/lash/absent; mkdir /home/lash/absent")
+            .await;
+        (existing, absent)
+    });
+    for out in [&existing, &absent] {
+        assert_ne!(out.status, 0, "{}", rendered(out));
+        assert!(
+            out.stderr.contains("[default-deny]"),
+            "the mkdir is decided and refused: {}",
+            rendered(out)
+        );
+    }
+}
+
+/// A content-write budget of one completed write in an hour.
+const BUDGET_OF_ONE: &str = r#"permit(principal, action, resource);
+@id("write_budget")
+forbid (principal, action == Box::Action::"fs:write", resource)
+when { context.input.operation == Box::FsWriteOperation::"write_content" }
+when temporal {
+  exists (total: Long). (
+    (count for (t: Timepoint). where (
+      formerly within 1h (
+        Box::Action::"fs:write"::response{ input.path: _, input.operation: Box::FsWriteOperation::"write_content", output.result: Box::FsResponseResult::"completed" } && tp(t)
+      )
+    )) == total && total >= 1
+  )
+};"#;
+
+/// A time change is recorded as a completed `write_content`, so a content-write budget counts
+/// each `touch` of an existing file and each `touch -d` that creates one.
+#[test]
+fn a_touch_counts_toward_a_content_write_budget() {
+    let mut shell = shell_governed_by(BUDGET_OF_ONE);
+    let (created, touched, refused) = run(async {
+        let created = shell.run("touch /tmp/a.txt").await;
+        let touched = shell.run("touch /tmp/a.txt").await;
+        let refused = shell.run("touch /tmp/a.txt").await;
+        (created, touched, refused)
+    });
+    let mut dated = shell_governed_by(BUDGET_OF_ONE);
+    let (dated_new, after) = run(async {
+        let dated_new = dated.run("touch -d @0 /tmp/b.txt").await;
+        let after = dated.run("touch /tmp/b.txt").await;
+        (dated_new, after)
+    });
+    // Creating a file at a date completes the time change, so it uses the budget.
+    assert_eq!(dated_new.status, 0, "{}", dated_new.stderr);
+    assert!(
+        after.stderr.contains("[policy: write_budget]"),
+        "{}",
+        after.stderr
+    );
+    // Creating the file issues a descriptor and completes no write, so it uses none of the budget.
+    assert_eq!(created.status, 0, "{}", created.stderr);
+    assert_eq!(touched.status, 0, "{}", touched.stderr);
+    assert_ne!(refused.status, 0, "the time change used the budget");
+    assert!(
+        refused.stderr.contains("[policy: write_budget]"),
+        "{}",
+        refused.stderr
     );
 }

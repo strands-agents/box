@@ -617,12 +617,14 @@ impl Authority {
         &self,
         response: PendingToolResponse,
         reply: crate::McpReply,
+        structured: Option<&serde_json::Value>,
     ) -> Result<(), PolicyError> {
         let live = self
             .live
             .lock()
             .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?;
-        live.engine.observe_tool_response(response, reply)
+        live.engine
+            .observe_tool_response(response, reply, structured)
     }
 
     #[cfg(test)]
@@ -1294,6 +1296,7 @@ fn is_inert(error: &PolicyError) -> bool {
         error,
         PolicyError::Spelling(_)
             | PolicyError::InputAcrossFamilies(_)
+            | PolicyError::MixedActionNamespaces(_)
             | PolicyError::SharedRuleId(_)
             | PolicyError::ReservedAction(_)
             | PolicyError::InertTemporalPermit(_)

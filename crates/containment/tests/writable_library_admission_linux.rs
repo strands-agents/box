@@ -299,10 +299,12 @@ fn compile(command: &mut Command) {
 }
 
 fn supported_architecture() -> bool {
-    if cfg!(target_arch = "aarch64") {
+    if cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
         true
     } else {
-        println!("skipping: Linux containment supports ARM64 (aarch64), not this architecture");
+        println!(
+            "skipping: Linux containment supports ARM64 (aarch64) or x86-64 (x86_64), not this architecture"
+        );
         false
     }
 }

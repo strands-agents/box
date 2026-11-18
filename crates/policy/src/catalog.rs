@@ -283,10 +283,16 @@ impl PartialList {
         let identity_tools: Vec<Value> = by_name
             .into_iter()
             .map(|tool| {
-                serde_json::json!({
+                let mut identity = serde_json::json!({
                     "name": tool.get("name"),
                     "inputSchema": tool.get("inputSchema"),
-                })
+                });
+                // A server that changes only a tool's outputs restages. Added only when present,
+                // so a catalog with no output schemas keeps the identity it had before.
+                if let Some(output) = tool.get("outputSchema") {
+                    identity["outputSchema"] = output.clone();
+                }
+                identity
             })
             .collect();
         let identity = serde_json::json!({
@@ -1035,6 +1041,40 @@ mod tests {
         assert_eq!(
             fixture.catalogs.stage(third).expect("staging runs"),
             CatalogStage::Accepted { tools: 1 }
+        );
+    }
+
+    #[test]
+    fn a_list_that_changes_only_an_output_schema_restages() {
+        let fixture = fixture(McpServerKind::Stdio);
+        let first = complete(&fixture.catalogs, "a", &page(&["read"], None));
+        fixture
+            .catalogs
+            .stage(first)
+            .expect("the first list stages");
+        let mut with_output = page(&["read"], None);
+        with_output["result"]["tools"][0]["outputSchema"] = json!({
+            "type": "object",
+            "properties": {"verified": {"type": "boolean"}},
+            "required": ["verified"]
+        });
+        let second = complete(&fixture.catalogs, "b", &with_output);
+        assert_eq!(
+            fixture.catalogs.stage(second).expect("staging runs"),
+            CatalogStage::Accepted { tools: 1 }
+        );
+        let mut retyped = with_output.clone();
+        retyped["result"]["tools"][0]["outputSchema"]["properties"]["verified"]["type"] =
+            json!("string");
+        let third = complete(&fixture.catalogs, "c", &retyped);
+        assert_eq!(
+            fixture.catalogs.stage(third).expect("staging runs"),
+            CatalogStage::Accepted { tools: 1 }
+        );
+        let fourth = complete(&fixture.catalogs, "d", &retyped);
+        assert_eq!(
+            fixture.catalogs.stage(fourth).expect("staging runs"),
+            CatalogStage::Unchanged
         );
     }
 

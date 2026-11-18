@@ -109,6 +109,14 @@ is what closes the window between authorization and apply.
 
 ## macOS Profile
 
+`ContainmentConfig::allow_file_watching` permits lookup of `com.apple.FSEvents`.
+It defaults to off and is independent of `allow_runtime_services`.
+FSEvents can disclose denied names and event metadata, including outside the granted paths and
+from past events, as well as the host-wide event count and each volume's history identifier.
+A root process can also delete any volume's event history. The caller must disclose that cost
+when selecting it. Apart from that deletion, filesystem and other service rules do not change.
+Linux ignores this setting.
+
 The macOS backend always applies
 [`src/backend/macos/seatbelt-agent.sb`](src/backend/macos/seatbelt-agent.sb). The file is
 the complete readable policy; Rust replaces one placeholder per cell, plus the
@@ -305,6 +313,15 @@ through helper read/unlink, not for the workload lifetime. Only after apply
 succeeds does the trampoline install the target environment and execute the
 command in the same process.
 
+On Linux, serialized authorizing grants carry their recorded device, inode, and object type.
+An inode identifies one filesystem object on a device. Denials omit the identity field.
+Loading reopens each path and refuses an identity mismatch before applying the sandbox.
+Keep the originating `ContainmentConfig` alive through loading so its open references prevent reuse of the recorded object identifiers.
+Box retains this configuration for the launched process's lifetime.
+
+Older configurations can omit this identity field and bind the object when loaded.
+Older trampolines reject the added field. Use the library and trampoline from the same build.
+
 The caller finds `strands-box-contain-trampoline` beside its own executable and
 nowhere else; no configuration key names another path. The caller assumes its
 package or update channel installed the intended image, and this launch path does
@@ -339,9 +356,13 @@ The production facade selects on the platform and, on Linux, on the architecture
 | host | selection |
 |------|-----------|
 | macOS | Seatbelt, and the one checked-in profile above. |
-| Linux, ARM64 (`aarch64`) | The namespace launcher under `src/backend/linux/namespace/`. |
+| Linux, ARM64 (`aarch64`) or x86-64 (`x86_64`) | The namespace launcher under `src/backend/linux/namespace/`. |
 | Linux, any other architecture | `ContainmentError::PlatformUnsupported`, carrying the reason. |
 | Windows and other targets | `ContainmentError::PlatformUnsupported`. |
+
+This table describes the standalone containment library. The Box application separately
+requires `EXPERIMENTAL_X86_SUPPORT=TRUE` before executing a command on Linux x86-64.
+See the [Box interface](../box/README.md#the-interface) for the startup opt-in.
 
 Landlock was considered as the Linux mechanism and rejected: it restricts the calling process in
 place and expresses no right that denies all network, which is the default mode, so a contained

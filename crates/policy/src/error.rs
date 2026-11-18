@@ -25,6 +25,10 @@ pub enum PolicyError {
     #[error("policy reads the input without one action family: {0}")]
     InputAcrossFamilies(String),
 
+    /// A rule's action list names `Box::Action` beside an action of another namespace.
+    #[error("policy lists actions of more than one namespace: {0}")]
+    MixedActionNamespaces(String),
+
     /// Two rules carry one non-blank `@id`.
     #[error("policy gives one @id to more than one rule: {0}")]
     SharedRuleId(String),
@@ -45,6 +49,10 @@ pub enum PolicyError {
     /// submit an event, or flush history.
     #[error("policy history failure: {0}")]
     Evaluation(String),
+
+    /// The history refused an outcome event for now, and the policy keeps it to append first.
+    #[error("policy outcome kept until the history accepts it: {0}")]
+    OutcomeKept(String),
 }
 
 /// One policy that remained unresolved after MCP discovery.

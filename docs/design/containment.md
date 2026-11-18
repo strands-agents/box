@@ -12,6 +12,14 @@ mechanism.
 > Platform scope. Unless a section explicitly states Linux behavior, this page describes operating
 > system enforcement and guarantees on macOS.
 
+Before reading configuration, the Box command and the Rust library functions `run`
+and `generate_policy_schema` require `EXPERIMENTAL_X86_SUPPORT=TRUE` in the
+operator environment on Linux x86-64.
+Without that exact value, Box refuses command execution before starting a workload
+or schema-discovery server. Help and version output remain available. ARM64 startup
+and the standalone containment library do not require this opt-in. Once enabled,
+x86-64 uses the Linux namespace launcher and its existing restrictions.
+
 ## Two kinds of enforcement
 
 Box restricts the agent in two ways, and they cover different paths to a resource:
@@ -140,11 +148,25 @@ the same four plus `network`. One translator turns each of them into a set of sa
   both families, so `LD_BIND_NOW` gets `LoadsCode` even though that variable need not load code. `NotAbsolute` identifies a relative `HOME` or `TMPDIR`. Callers can use these kinds to drop
   Box-supplied names and reject names that load code without copying Box's lists. This check does
   not cover a credential's `env://` name, for which Box also refuses `HOME` and `PATH`.
+  `reserved_env(name)` returns the kind of a name Box reserves, as a `ReservedEnv`, or `None` for a
+  name it leaves to the operator. `GatewayProxy` is a proxy name and `GatewayCaFile` a CA file name.
+  Box sets both only in a process whose egress goes through the gateway, so a table with
+  `contain_egress = false` may set them, and it needs a `read_file` entry for a CA file. `SetByBox`
+  is `PWD`, `USER`, or an OTLP exporter name, which Box sets in every process. `LoadsCode` is a name
+  that loads code before a program's first line, which a credential cannot take.
 
 - `filesystem` lists name paths and their access modes. The agent takes eight: `read`, `write`,
   `read_file`, `write_file`, `list`, `metadata`, `exec`, and `deny`. A tool and a local MCP server
   take the same lists without `metadata` and `exec`. A directory entry covers its tree, and a file
   entry is exact. `write` doesn't imply `read`.
+
+On Linux, the trusted process prepares filesystem grants for each new sandbox launch.
+It keeps open references to the objects it approved and sends their recorded identities to the launcher.
+The launcher reopens each grant's path and refuses a different object before applying the sandbox.
+
+This check covers the handoff for one launch. It compares object identity, not file contents.
+A replacement directory can be selected when grants are prepared for a later launch.
+Configured tool commands and denied paths retain their separate identity checks.
 
 ### Script interpreter grants on Linux
 
@@ -219,7 +241,8 @@ The credential store and system tree paths are listed in
 list for every platform. The other floors depend on the run.
 
 A library caller can check a path with `check_read_grant`. It uses the same function that checks a
-`read` entry in `box.toml`. It refuses an absent path, a symbolic link, a noncanonical spelling, or
+`read` entry in `box.toml`. It refuses an absent path, a symbolic link to a directory or through a
+linked folder, a noncanonical spelling, or
 a path rejected by a deny-only check. It reports that a credential-store path needs an explicit
 grant. The caller receives the decision without the underlying list, whose rows contain a class and
 an `exact` or `overlap` rule.
@@ -256,6 +279,25 @@ decision](decisions.md#a-write-root-sets-file-attributes-only-when-selected) rec
 the switch.
 
 Linux renders nothing for this switch.
+
+### File watching on macOS
+
+FSEvents is unavailable unless the operator selects `file-watching` for that process.
+The selection adds one Mach lookup grant for `com.apple.FSEvents`.
+It changes no direct filesystem grant and adds no other service lookup.
+The agent, each tool, and each local MCP server select it independently.
+Descendants running within that sandbox receive the same service access.
+Linux ignores this selection.
+
+We make this access [an explicit process choice](decisions.md#file-watching-requires-explicit-acceptance-of-metadata-disclosure)
+because permitting the service does not constrain its subscriptions to declared filesystem grants.
+FSEvents can disclose denied names and event metadata for removed or renamed paths and some historical paths.
+An ancestor subscription can extend that disclosure outside the workspace.
+FSEvents also discloses the host-wide event count and each volume's history identifier.
+The event stream bypasses `fs:*` policy decisions, including experimental native filesystem mediation.
+Direct content and write checks still apply, except that a root process can delete any volume's event history.
+They do not provide filename or activity confidentiality through this service.
+The [configuration reference](../user/config.md#file-watching) gives the option and its startup disclosure.
 
 ### Linux root sandbox launches
 
@@ -331,7 +373,10 @@ it does not prevent them from being stored on that file.
 
 The syscall restriction filter rejects either bit in `fchmod`, `fchmodat`, and `fchmodat2`. It also
 rejects either bit in `mkdirat` and in the creation mode of `openat` when `O_CREAT` or `O_TMPFILE`
-is present. It checks the low 32 bits that the kernel uses. An `openat` call without creation flags
+is present. On x86-64, the same restrictions apply to `chmod` and `mkdir`. Their mode is the
+second argument; the `*at` calls take it in the third argument. The same creation checks apply to
+x86-64 `open`, whose flags and mode precede their `openat` positions by one argument. The filter
+checks the low 32 bits that the kernel uses. An `open` or `openat` call without creation flags
 ignores the mode argument, so that unused argument does not cause a refusal. The permit filter
 continues to exclude ownership-changing calls, `openat2`, and `mknodat`. Ordinary writes and
 permitted compiler output remain available. Executable-bit changes require a requested mode without
@@ -699,7 +744,8 @@ permits to the paths the task needs.
 
 A remote MCP server runs on another machine, so no box contains it. Naming a server in `box.toml`
 doesn't authorize a connection to it. The egress gateway decides the connection and each request,
-and policy decides each tool call. See [an MCP tool call passes two
+and policy decides each tool call to a [matching configured host](../user/mcp.md#remote-destination-matching).
+See [an MCP tool call passes two
 gates](decisions.md#mcp-authorization-is-two-gates). Three protocol methods pass without an MCP
 decision: `server/discover`, `ping`, and `subscriptions/listen`. See [the protocol floor is
 narrow](decisions.md#four-mcp-methods-are-never-gated). What the server does after an allowed call

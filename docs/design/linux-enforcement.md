@@ -53,6 +53,17 @@ Direct Linux file operations use filesystem grants rather than individual policy
 Linux refuses `[experimental-features] native-filesystem-policy = true` during configuration validation.
 See the [platform comparison](platform-differences.md#behavior-and-configuration) for the macOS build requirement and mediated alternatives.
 
+## Native request forwarding
+
+When native filesystem policy is active, the containment supervisor receives kernel notifications and forwards native file requests to Box's policy worker through a private socket.
+The supervisor handles filesystem-information queries itself.
+
+If the socket buffer is full, the supervisor retains one request and waits for space before receiving another kernel notification.
+Further notifications remain queued in the kernel. Filesystem-information queries can also wait behind the pending native request.
+Each socket wait uses a 50-millisecond poll timeout, and the supervisor checks the namespace reaper's exit status before waiting again.
+A closed socket, invalid descriptor, or incomplete request write still stops supervision.
+Waiting for buffer space does not authorize the file operation; the policy worker must still decide the request.
+
 ## Capabilities inside nested namespaces
 
 A Linux [capability](#terms) is a privilege for an operation such as namespace administration.
@@ -178,6 +189,10 @@ Seccomp checks system call numbers and selected arguments.
 It does not resolve pathnames or replace filesystem grants.
 The filters refuse operations outside their permit set.
 
+The permit set includes `copy_file_range` and `sendfile`, which Node uses to copy files.
+Both calls move data from a file that the workload already has open, to a file, pipe, or connected socket that it already has open.
+So they reach only what the filesystem grants and the network restrictions already allow.
+
 The filter rejects simultaneous writable and executable memory mappings.
 The `mprotect` and `pkey_mprotect` system calls change memory access permissions.
 The filter refuses `mprotect` requests whose permissions include executable access, including requests that retain that access.
@@ -225,7 +240,7 @@ The sandbox cannot connect directly to the surrounding OS's loopback listeners, 
 `localhost`, or [abstract Unix sockets](#terms).
 A client can reach a surrounding-OS HTTP service through the gateway when it explicitly sends the request there and policy permits.
 Box sets `NO_PROXY=127.0.0.1,localhost`, so clients that honor it attempt direct connections to those destinations inside the private namespace.
-Strands Shell `curl` and Monty `fetch()` refuse URLs naming `localhost` or a literal loopback, private, or link-local address.
+Strands Shell `curl` and Monty `fetch()` refuse URLs naming `localhost` or a literal loopback, private, link-local, `0.0.0.0/8`, or one of two cloud metadata addresses outside `169.254.0.0/16`, or an IPv4-mapped, IPv4-compatible, IPv4-translated, 6to4, Teredo, or `64:ff9b::/96` NAT64 address that carries one of these, or any `64:ff9b:1::/48` address.
 See [how traffic reaches the gateway](egress.md#how-traffic-reaches-the-gateway).
 
 `contain_egress = false` selects the surrounding OS network namespace.

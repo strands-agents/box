@@ -17,7 +17,7 @@ state, and one selects the workload:
 |---|---|---|---|
 | Policy | authority | `policy` in the config file | Which effects this box may cause, decided per request. Scoped to this box |
 | Credentials | authority | `[egress.<name>]` in the config file | Which secret is attached once a request is permitted |
-| Identity and state | state | `name` in the config file | Which box this is, and where it keeps its persistent state |
+| Identity and state | state | `name` in the config file, and `RunOptions::box_id` for a library caller | Which box this is, and where it keeps its persistent state |
 | Workload | selection | `[agent] command` in the config file, and `run`'s trailing argv | Which process runs |
 
 The caller always passes one configuration path. `[agent] command` is the complete command the box
@@ -37,6 +37,13 @@ state and starts the workload.
 strands-box run    --config <file> [-- <args>...]
 strands-box policy generate-schema --config <file> --output-dir <dir>
 ```
+
+On Linux x86-64, both verbs require the operator environment variable
+`EXPERIMENTAL_X86_SUPPORT=TRUE`. If the variable is unset or has any other value,
+Box refuses execution before reading the configuration or starting a workload. `--help` and `--version`
+remain available. The same check applies to the Rust library functions `run` and
+`generate_policy_schema`; set the variable before starting the host application.
+ARM64 does not require the flag. This startup opt-in does not change sandbox permissions.
 
 There are two verbs. The caller that created `box_dir` owns its lifecycle: it holds the path, so it
 stops a box by ending the `run` process and deletes one by removing the directory.
@@ -73,9 +80,9 @@ every harness's stored credentials, through an interpreter that runs outside con
 refusal tells the operator to make a directory for the workspace and to work there, and
 `the_operator_home_is_not_a_project` pins it.
 
-The config file's complete key set is **eleven**: `name`, `box_dir`, `policy`, `[agent]`,
+The config file's complete key set is **twelve**: `name`, `box_dir`, `policy`, `[agent]`,
 `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
-`[experimental-features]`, `file-attributes`, and `[limits]`. `name` and `box_dir`
+`[experimental-features]`, `file-attributes`, `[limits]`, and `[gateway]`. `name` and `box_dir`
 are required. The file rejects an unknown key rather than ignoring it, so a typo is a load error, and
 every removed spelling is refused by its own name with its replacement.
 `four_inputs.rs::the_config_record_carries_only_the_four_inputs` pins the set, and
@@ -91,8 +98,16 @@ The nested table `[limits.shell]` accepts the same values under `timeout`.
 `shell.max_input` and `shell.max_output` accept nonnegative integer byte counts, with defaults
 of 262144 and 65536. Shell applies the output limit to both output buffers and source-file reads.
 Set either size to `0` to disable that Shell limit, or omit it to keep its default.
+`shell.max_stdin` is a positive byte count, 65536 by default, of the standard input one command
+receives through a Shell alias; it cannot be disabled.
 Invalid or unrepresentable durations and sizes are load errors. Python retains its existing limits.
 See [execution limits](../../docs/user/config.md#limits).
+
+`[gateway]` accepts `upgrade_http`, a list of host names whose plain `http://` request to port 80
+the egress gateway decides and sends as `https://` on port 443. Policy still decides each such
+request, on port 443, so the key grants no reach a permit does not. An entry with a scheme, a port, a
+path, a wildcard, or an IP address is a load error. See
+[upgrade plain HTTP to HTTPS](../../docs/user/egress.md#upgrade-plain-http-to-https).
 
 **`[agent]` and each `[tool.<label>]` hold the same four fields.** `[agent]` is the process the
 operator starts. A `[tool.<label>]` is a process the Shell runs for a request the policy already
@@ -111,6 +126,12 @@ Both tables hold the same four fields, and a `[tool.<label>]` also holds `gramma
 
 `tool_grammars.rs` pins the `tool-grammars` switch, the startup refusals, and the grammar action
 that decides a spawn of a bound program.
+
+`[agent]`, each `[tool.<label>]`, and each stdio `[mcp.<name>]` also take `file-watching`,
+`false` by default, which permits macOS FSEvents for that process alone. It can disclose denied names,
+event metadata, the host-wide event count, and each volume's history identifier. A root process can
+also delete any volume's event history. Box prints these limitations at startup. See
+[file watching](../../docs/user/config.md#file-watching).
 
 `filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
 `exec`, and `deny`. They give this process's own filesystem calls direct reach, because an
@@ -371,17 +392,17 @@ An `aws://` credential is a **signed route**. The box resolves the identity on t
 signs each request, so the workload holds no credential at all. It receives placeholder AWS
 credentials, and the signed leg strips whatever it signed with before signing again.
 
-**`aws://PROFILE` must carry static keys.** For a named profile, `credential_process` is **refused**,
-and the refusal names the command it would have run; a profile that assumes a role or uses SSO is
-refused too, because resolving one needs an STS call. Export `AWS_BEARER_TOKEN_BEDROCK` and bind
-that instead.
+**Both `aws://` forms resolve through the AWS SDK.** `aws://PROFILE` resolves only the named
+profile: its static keys, `credential_process`, assume-role, or web identity. It never reads the
+ambient `AWS_*` keys or instance metadata, and a missing profile is refused rather than signing as
+the ambient identity. A bare `aws://` resolves the default chain under the host's ambient identity,
+and the box warns on every signed request. AWS SSO and `aws login` profiles are refused (the `sso` provider is
+compiled out), and the refusal names the missing provider.
 
-**A bare `aws://` (no profile) resolves the AWS SDK default credential provider chain** — the host's
-ambient identity — and the box warns on every signed request. Because that chain reads
-`credential_process`, which the trusted process runs outside containment, a bare `aws://` is a
-remote-code-execution path when the workload can write `~/.aws`; the shipped box has no setting that
-refuses the bare form. See
-[the egress guide](../../docs/user/egress.md#credential-sources) for the chain, the warning, and the
+Because either form reads `credential_process`, which the trusted process runs outside containment,
+an `aws://` route is a remote-code-execution path when the workload can write `~/.aws`; the shipped
+box has no setting that refuses the bare form. See
+[the egress guide](../../docs/user/egress.md#credential-sources) for both forms, the warning, and the
 `~/.aws` rule.
 
 **Only `env://` and `aws://` are accepted**, and the config load refuses the rest by
@@ -443,8 +464,9 @@ destination reachable.
 creates that one directory with mode `0700`, owned by the current operating-system user, when its
 parent exists, and creates no directory above it. An existing symbolic link at that path, or at any
 child the box creates, is refused rather than followed. Box validates and opens the root, then uses
-the opened directory identity for persistent and generated state. It generates an immutable `box_id`
-and creates the children. The root persists across runs, so an agent's logins, caches, and history
+the opened directory identity for persistent and generated state. It stores an immutable `box_id`,
+the one a library caller supplies through `RunOptions::box_id` or one it generates, and creates the
+children. The root persists across runs, so an agent's logins, caches, and history
 persist with it. Everything below is relative to `box_dir`:
 
 ```text
@@ -480,8 +502,12 @@ default.
 `private/` is the tree no profile placeholder names, which is what puts the record,
 the policy copy, and the containment configs out of the workload's reach.
 
-Distinct directories are distinct boxes and share no state. The generated `box_id` labels a box
-but does not locate it.
+Distinct directories are distinct boxes and share no state. The `box_id` labels a box but does not
+locate it. A generated one is `box-` and 16 lowercase hexadecimal digits. A supplied one is a prefix
+of 1 to 15 letters, digits, `.`, `_`, or `-`, then `-` and 16 lowercase hexadecimal digits. A box
+that already has an ID refuses a different supplied one, so a box first run without a supplied ID
+keeps the ID it generated. `run` checks a supplied ID's format before it starts, so a malformed ID
+does not use up the process's one `run` attempt.
 
 ## Workload
 
@@ -561,13 +587,13 @@ Three facts about the hosted Shell are worth knowing.
   CA key and the resolved secrets. What holds is *mediation*, not a process boundary: the
   Shell asks policy before every operation, and the deny-only floors above protect the
   run process's own state whatever a rule permits.
-- **Every `Shell` is `!Send`** (one `Rc` field in the vendored crate), and a command future
+- **Every `Shell` is `!Send`** (one `Rc` field in Strands Shell), and a command future
   is not `Send` either. So each connection gets its **own thread** and its own
   current-thread runtime. `ShellSpec` is `Send`, which is what crosses that boundary; the
   Shell is built on the thread that serves it. A non-yielding command — the embedded Lua
   interpreter — pins its own thread and nothing else. The broker serves 64 connections at
   once and reaps one before it accepts the next.
-- **The vendored Shell embeds a Lua 5.4 C interpreter**, non-optionally. Its `io.popen` and
+- **Strands Shell embeds a Lua 5.4 C interpreter**, non-optionally. Its `io.popen` and
   `os.execute` bypassed `shell:exec` admission until 2026-08-08
   ([one admission point](../../docs/design/decisions.md#one-admission-point-after-resolution)). That is
   **closed**: admission moved into the one function every command-text route funnels
@@ -591,6 +617,9 @@ credential phantom can never displace proxy routing or CA trust:
 | `SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`, `CODEX_CA_CERTIFICATE`, `AWS_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, `GIT_SSL_CAINFO` | The proxy's ephemeral CA |
 | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL` | This box's loopback collector, and `http/protobuf`. Always set |
 | one per `env://` binding | The minted phantom |
+
+A `contain_egress = false` process gets none of the proxy and CA rows above. Its table's `env` may
+set them instead.
 
 `PATH` is composed rather than owned. The box prepends its alias directory and keeps the rest, so
 an alias wins a bare-name search while the operator's own tools stay resolvable. A profile still

@@ -23,6 +23,9 @@ pub(crate) async fn generate_schema(
     let config = working.join(config);
     let grammars = read_tool_grammars(&config)?;
     let servers = read_mcp_servers(&config)?;
+    // Read the remote servers first: a re-routed one is refused here, so the whole run fails before
+    // the stdio loop below spawns any server, rather than spawning them and discarding the result.
+    let remote_servers = read_remote_mcp_servers(&config)?;
     let home = operator_home_directory()?;
 
     let mut generated = Vec::with_capacity(servers.len());
@@ -41,7 +44,7 @@ pub(crate) async fn generate_schema(
     // Remote MCP servers (`[egress.<name>]` speaking `mcp`) are discovered over HTTP by a direct
     // client, not spawned. There is no gateway before `run`, so the credential is resolved and
     // attached here rather than injected as a phantom.
-    for server in read_remote_mcp_servers(&config)? {
+    for server in remote_servers {
         let auth = match &server.secret {
             Some(secret) => Some(resolve_auth(&server.name, secret)?),
             None => None,
