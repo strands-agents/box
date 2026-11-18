@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use box_shell::ShellKernel;
 
-use super::{PermitAll, backend, run as on_shell_runtime};
+use super::{PermitAll, backend, limited, run as on_shell_runtime};
 use crate::run::broker::kernel::GatewayNetwork;
 use crate::run::broker::shell::EgressRouting;
 
@@ -300,6 +300,46 @@ fn a_curl_reaches_the_gateway_in_absolute_form() {
         "{}",
         seen.request_line
     );
+}
+
+/// Count the bytes `curl` writes for a response of `body`, on a Shell with `max_output`.
+fn limited_curl(body: &str, max_output: Option<usize>) -> (String, String) {
+    let (routing, _requests) = answering("200 OK", body);
+    let kernel = ShellKernel::over(backend(&[]), Arc::new(PermitAll)).network(Arc::new(
+        GatewayNetwork::new(routing, telemetry::Correlation::from_headers(None, None)),
+    ));
+    on_shell_runtime(async {
+        let mut shell = limited(kernel);
+        if let Some(max_output) = max_output {
+            crate::run::broker::shell::apply_limits(
+                &mut shell.proc,
+                crate::record::config::limits::DEFAULT_SHELL_MAX_INPUT,
+                max_output,
+            );
+        }
+        let output = shell
+            .run(r#"{ curl -sS http://a.example/; echo "status=$?" >&2; } | wc -c"#)
+            .await;
+        (output.stdout.trim().to_string(), output.stderr)
+    })
+}
+
+#[test]
+fn a_response_body_is_bounded_by_the_output_limit() {
+    let default = crate::record::config::limits::DEFAULT_SHELL_MAX_OUTPUT;
+    for (limit, configured) in [(default, None), (256, Some(256))] {
+        let (written, stderr) = limited_curl(&"x".repeat(limit), configured);
+        assert_eq!(written, limit.to_string(), "{stderr}");
+        assert!(stderr.contains("status=0"), "{stderr}");
+
+        let (written, stderr) = limited_curl(&"x".repeat(limit + 1), configured);
+        assert_eq!(written, "0", "{stderr}");
+        assert!(
+            stderr.contains("curl: (6) response body too large"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("status=6"), "{stderr}");
+    }
 }
 
 #[test]

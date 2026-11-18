@@ -111,6 +111,9 @@ A box makes five guarantees:
 - Every descendant of a contained process inherits its sandbox restrictions. Replacing the program
   with another one preserves those restrictions. Nothing widens a box after it applies. See
   [children inherit the boundary](decisions.md#children-inherit-the-boundary).
+  On Linux x86-64, Box permits both `fork` and `clone` for child-process creation.
+  A child created with `fork` inherits the parent's syscall filters and namespaces,
+  which define its isolated view of the system.
 - The sandbox protects the operator's files, credentials, and network from what runs inside. It
   doesn't make the box's own contents confidential, and it doesn't govern code the agent writes and
   gets run somewhere else. See [the sandbox protects the surrounding

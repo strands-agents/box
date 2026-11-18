@@ -77,11 +77,12 @@ configuration. The cost is that the variable no longer prevents accidental Linux
 requirements, process hardening, filesystem grants, and containment checks still apply. A missing or
 invalid configuration still fails before a workload starts.
 
-Stable releases can include Linux ARM64, and `publish_linux=false` retains a macOS-only stable
-release without a workflow revert. Keeping Linux in preview only would prevent an accepted Linux
-build from using the stable channel. The release owner must establish Linux readiness before
-publishing its archive. Linux previews always include ARM64 Linux and leave the latest stable
-release unchanged. Removing the startup flag does not authorize a release or establish security
+Every release, stable or Linux preview, includes macOS and Linux ARM64. The release workflow has no
+input that omits Linux ARM64, and only Linux x86-64 is opt-in, through `publish_linux_x86`. An input
+that omits ARM64 would let a release drop a supported platform by accident.
+`test_stable_and_preview_publish_arm64_with_x86_off_by_default` pins the release contents. The
+release owner must establish Linux readiness before each release. Linux previews leave the latest
+stable release unchanged. Removing the startup flag does not authorize a release or establish security
 acceptance. The native filesystem policy experiment retains its separate configuration and Cargo
 feature controls.
 
