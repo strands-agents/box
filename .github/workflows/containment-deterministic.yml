@@ -34,7 +34,7 @@ jobs:
     # than running to the 6-hour default -- CN-* cases spawn real subprocesses
     # under a cage, and a wedged one would otherwise burn the whole budget.
     timeout-minutes: 45
-    # Every runner affects CI Gate, including experimental Linux x86-64. The
+    # Every runner affects CI Gate, including Linux x86-64. The
     # macOS leg runs inside the unit-test job of rust-test-lint.yml.
     strategy:
       # Report every OS's outcome even if one fails.

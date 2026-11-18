@@ -177,7 +177,7 @@ For each part, where it runs, what it decides, and how one request moves through
 
 ## Getting started
 
-Follow the [getting-started guide](docs/user/getting-started.md) to download Box for macOS, Linux ARM64, or experimental Linux x86-64.
+Follow the [getting-started guide](docs/user/getting-started.md) to download Box for macOS, Linux ARM64, or Linux x86-64.
 The Strands CLI walkthrough uses macOS.
 For that walkthrough, you need macOS 15 or later on Apple silicon and Node.js 22.21 or later from Homebrew.
 You also need access to Claude Opus 5 on Amazon Bedrock in `us-west-2`.
