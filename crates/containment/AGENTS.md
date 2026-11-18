@@ -966,6 +966,24 @@ an explicit descriptor (`RequestPath::new` in `crates/box/src/run/linux_enforcem
 `a_workload_returns_to_its_saved_folder_with_fchdir`
 saves a folder, enters a subfolder, and returns with `fchdir` under the real trampoline.
 
+### Creating a name without replacing one
+
+On GitHub's Ubuntu 24.04 ARM64 runner, Box `9f5e71ea` refused `renameat2` with `EPERM`. uv 0.13.7
+failed its first command with `error: Could not acquire lock`, caused by
+`Could not persist temporary file .cache/uvx/.tmp…: Operation not permitted (os error 1)`. uv
+creates its lock through the `tempfile` crate. On Linux, tempfile 3.27's `persist_noclobber` calls
+`renameat2(…, RENAME_NOREPLACE)` and falls back to a hard link only on `ENOSYS` or `EINVAL`
+(`src/file/imp/unix.rs`), so it returned the `EPERM`.
+
+The permit admits `renameat2` only when its flags are `0` or `RENAME_NOREPLACE`. With `0` it is the
+permitted `renameat`. `RENAME_NOREPLACE` only makes the call fail with `EEXIST` when the new name
+exists. `RENAME_EXCHANGE`, which swaps two names, and `RENAME_WHITEOUT`, which creates a device
+node, still match no rule and get `EPERM`. This covers the default backend only. The native
+filesystem broker mediates `renameat2` itself and answers any call with flags with `EACCES`
+(`broker.rs`), so under native filesystem policy tempfile still cannot persist a file.
+`a_name_is_created_without_replacing_one_with_renameat2_under_the_filters` checks each flag under
+the filters, and runs tempfile's `persist_noclobber`.
+
 ### W^X
 
 W^X closes three routes. Every writable mount, including `/tmp`, uses `MS_NOEXEC`. The permit filter
