@@ -13,7 +13,7 @@ enough.
 ## Areas
 
 Each area of the repository keeps its own decision artifacts, and an area file in
-`.agents/agents/decision-critic/` names them. Each area file opens with the artifacts it covers.
+`.agents/references/decision-critic/` names them. Each area file opens with the artifacts it covers.
 Read the area file for each artifact under review, and apply this file and that area file to it.
 The area file also names its decision skill (the skill that writes the artifact), the rules that a
 decision must not contradict, where else to read, its own axes, and what each verdict adds.

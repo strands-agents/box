@@ -2,7 +2,7 @@
 
 Paths: every path in this repository.
 
-Read [`feature-critic.md`](../feature-critic.md) first. This file adds the checks for Box Core.
+Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds the checks for Box Core.
 
 ## What this area names
 

@@ -7,7 +7,7 @@ Artifacts:
 - **Specs:** a local `.spec.md` under `.agents/drafts/spec/`.
 - **Requirements:** a local `*.requirements.md` beside it (EARS acceptance criteria).
 
-Read [`decision-critic.md`](../decision-critic.md) first. This file adds the axes for a Box Core
+Read [`decision-critic.md`](../../agents/decision-critic.md) first. This file adds the axes for a Box Core
 decision or spec.
 
 ## What this area names
@@ -49,9 +49,9 @@ that cannot support a defensible choice. `WEAKNESS` also covers miscalibrated de
 - **Decision density.** Is this **over-decided**: a two-way-door, uncontested, in-workspace
   triviality promoted to a full `/kd` (it should be a decision inside a spec)? Or
   **under-decided**: a genuinely contested, foundational, hard-to-reverse fork buried as a one-line
-  spec decision that deserves a KD and group alignment? Use the repo's own bar: a KD earns its
-  weight when it binds an external contract or is a *contested* fork worth the group's alignment
-  time; hard-to-reverse alone is not enough.
+  spec decision that deserves a KD and group alignment? Use the repo's own bar: the `kd` skill's
+  [What earns an entry](../../skills/kd/SKILL.md#what-earns-an-entry) test, "Which change to
+  another part of Box does this entry refuse or redirect?" Hard-to-reverse alone is not enough.
 - **KD traceability (the doc graph, not the code).** Does a spec's `KD-N` decision that makes a
   non-obvious mechanism choice **cite the governing `decisions.md` entry**? Is there a decision
   made "by fiat" that should trace to an entry but does not? Conversely, does an entry a spec cites

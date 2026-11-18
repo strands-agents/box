@@ -25,7 +25,7 @@ the claims are what the diff states in its docs, its commit message, and its pul
 ## Areas
 
 The checks that only one part of the repository needs are in an area file in
-`.agents/agents/feature-critic/`. Each area file opens with the paths that it covers. Before you
+`.agents/references/feature-critic/`. Each area file opens with the paths that it covers. Before you
 review, list the paths that the diff changes, and read each area file that covers one of them. Apply
 this file to every path, and an area file to the paths it covers. A path that no area file covers
 gets the checks in this file only. Each area file also names, for its paths:
