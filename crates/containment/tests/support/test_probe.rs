@@ -773,6 +773,8 @@ fn linux_main() -> ExitCode {
         Some("--shell-child") => shell_child(&args[2..]),
         Some("--verify-no-inherited-handles") => verify_no_inherited_handles(&args),
         Some("--return-to-saved-folder") => return_to_saved_folder(&args[2..]),
+        Some("--return-to-locked-folder") => return_to_locked_folder(&args[2..]),
+        Some("--enter-inherited-folder") => enter_inherited_folder(&args[2..]),
         Some("--attempt-executable-memory-write") => proc_mem_probe::run(),
         Some("--attempt-supervisor-memory-write") => {
             match args.get(2).and_then(|uid| uid.parse::<libc::uid_t>().ok()) {
@@ -787,7 +789,8 @@ fn linux_main() -> ExitCode {
             eprintln!(
                 "usage: containment-test-probe \
                  (--unix-ipc | --shell-child | --verify-no-inherited-handles | \
-                 --return-to-saved-folder | \
+                 --return-to-saved-folder | --return-to-locked-folder | \
+                 --enter-inherited-folder | \
                  --attempt-supervisor-memory-write | --attempt-executable-memory-write) ..."
             );
             ExitCode::from(2)
@@ -839,6 +842,105 @@ fn return_to_saved_folder(args: &[String]) -> ExitCode {
         return ExitCode::from(1);
     }
     println!("RETURNED_TO_SAVED_FOLDER");
+    ExitCode::SUCCESS
+}
+
+/// `--return-to-locked-folder <dir>`: save `<dir>/locked` as an `O_PATH` descriptor, remove its
+/// search permission, and go back with `fchdir`. Prints `LOCKED_FOLDER_REFUSED_ENTRY` when that
+/// `fchdir` fails with `EACCES` and succeeds again once the permission returns.
+#[cfg(target_os = "linux")]
+fn return_to_locked_folder(args: &[String]) -> ExitCode {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let Some(folder) = args.first() else {
+        eprintln!("probe: --return-to-locked-folder requires a folder");
+        return ExitCode::from(2);
+    };
+    let locked = std::path::Path::new(folder).join("locked");
+    let set_mode = |mode| std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(mode));
+    if let Err(error) = std::fs::create_dir(&locked).and_then(|()| set_mode(0o700)) {
+        eprintln!("probe FAILED: create {}: {error}", locked.display());
+        return ExitCode::from(1);
+    }
+    let Ok(path) = std::ffi::CString::new(locked.as_os_str().as_bytes()) else {
+        eprintln!("probe: the folder path holds a NUL byte");
+        return ExitCode::from(2);
+    };
+    // SAFETY: `path` is a NUL-terminated string that outlives the call.
+    let raw = unsafe { libc::open(path.as_ptr(), libc::O_PATH | libc::O_DIRECTORY) };
+    if raw < 0 {
+        eprintln!(
+            "probe FAILED: open {}: {}",
+            locked.display(),
+            std::io::Error::last_os_error()
+        );
+        return ExitCode::from(1);
+    }
+    // SAFETY: `open` returned a new descriptor that this value now owns.
+    let saved = unsafe { OwnedFd::from_raw_fd(raw) };
+    let return_to_saved = || {
+        // SAFETY: `saved` is an open descriptor this process owns.
+        if unsafe { libc::fchdir(saved.as_raw_fd()) } == 0 {
+            Ok(())
+        } else {
+            Err(std::io::Error::last_os_error())
+        }
+    };
+
+    if let Err(error) = set_mode(0o600) {
+        eprintln!("probe FAILED: lock {}: {error}", locked.display());
+        return ExitCode::from(1);
+    }
+    match return_to_saved() {
+        Err(error) if error.raw_os_error() == Some(libc::EACCES) => {}
+        Err(error) => {
+            eprintln!("probe FAILED: fchdir into the locked folder: {error}, not EACCES");
+            return ExitCode::from(1);
+        }
+        Ok(()) => {
+            eprintln!("probe FAILED: fchdir entered a folder without search permission");
+            return ExitCode::from(1);
+        }
+    }
+    if let Err(error) = set_mode(0o700) {
+        eprintln!("probe FAILED: unlock {}: {error}", locked.display());
+        return ExitCode::from(1);
+    }
+    if let Err(error) = return_to_saved() {
+        eprintln!("probe FAILED: fchdir into the unlocked folder: {error}");
+        return ExitCode::from(1);
+    }
+    println!("LOCKED_FOLDER_REFUSED_ENTRY");
+    ExitCode::SUCCESS
+}
+
+/// `--enter-inherited-folder <fd> <canary>`: enter the folder open at `<fd>` with `fchdir`, then
+/// read `<canary>` by absolute path. Prints `fchdir: <outcome>` and `canary: <outcome>`, where an
+/// outcome is `ok` or the raw error number.
+#[cfg(target_os = "linux")]
+fn enter_inherited_folder(args: &[String]) -> ExitCode {
+    let (Some(Ok(descriptor)), Some(canary)) =
+        (args.first().map(|value| value.parse::<i32>()), args.get(1))
+    else {
+        eprintln!("usage: containment-test-probe --enter-inherited-folder <fd> <canary>");
+        return ExitCode::from(2);
+    };
+    let outcome = |result: std::io::Result<()>| match result {
+        Ok(()) => "ok".to_owned(),
+        Err(error) => error
+            .raw_os_error()
+            .map_or_else(|| error.to_string(), |number| number.to_string()),
+    };
+    // SAFETY: `fchdir` only reads `descriptor`; an unopened number fails with `EBADF`.
+    let entered = if unsafe { libc::fchdir(descriptor) } == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    };
+    println!("fchdir: {}", outcome(entered));
+    println!("canary: {}", outcome(std::fs::read(canary).map(drop)));
     ExitCode::SUCCESS
 }
 
