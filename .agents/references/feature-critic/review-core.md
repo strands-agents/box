@@ -61,6 +61,12 @@ Read [`feature-critic.md`](../../agents/feature-critic.md) first. This file adds
 
 ## Checks
 
+- **Requirements coverage.** When the requester names a local spec, each EARS "WHEN … THE … SHALL
+  …" criterion in its `*.requirements.md` is satisfied and ideally test-covered. Name any criterion
+  with no code or test. A "SHALL" that the code does not enforce is a BLOCKER. With no spec, each
+  behaviour that the diff claims, in its commit message or its docs, is pinned by a named test that
+  exists.
+
 0. **Interface freeze: run this check FIRST, and report it even when the answer is "no
    change".** While the freeze in `AGENTS.md` holds, any diff touching `crates/**` gets this pass
    before anything else. Two questions, both BLOCKER-tier:

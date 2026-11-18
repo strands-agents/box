@@ -47,7 +47,7 @@ the row you used, because the report shows which rows you walked.
 
 For each surface, open the page that owns it and give it one status:
 
-- **wrong**: the page states something that the diff makes false, or something other than the code.
+- **wrong**: the page states something that the diff makes false, or what the area file adds.
   Quote the sentence, and name the symbol that it disagrees with.
 - **missing**: no page states the surface.
 - **ok**: the page and the code agree.

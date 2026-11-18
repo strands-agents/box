@@ -41,8 +41,8 @@ gets the checks in this file only. Each area file also names, for its paths:
 ## Rules
 
 - Report only what changes what the code does, makes it wrong or unsafe, breaks a requirement,
-  contradicts a decision or a rule, breaks from an existing pattern, or leaves a doc wrong, and what
-  each area file adds to this list. Drop style and taste.
+  contradicts a decision or a rule, or leaves a doc wrong, and what each area file adds to this
+  list. Drop style and taste.
 - Name the file and the place of each finding, in the form that the area file gives, and say why in
   one line.
 - Default to finding the flaw. Say "no findings" only after you say what you checked: which gates,
@@ -65,9 +65,8 @@ gets the checks in this file only. Each area file also names, for its paths:
 
 Check each item with evidence, then each item in each area file you read.
 
-1. **Requirements.** Each requirement in the plan or the spec is in the diff and has a test. Name a
-   requirement with no code or no test for it. With no plan or spec, each claim that the diff makes
-   has a test that exists and that you can name.
+1. **Requirements.** Each requirement in the plan or the spec is in the diff. Name a requirement
+   with no code for it. The area file says which requirements and claims need a test.
 2. **Counts.** A vocabulary change rewrites counts with no error. When the diff splits one construct
    into two, or changes a key, a table, or a field, an assertion on a number of grants or rules
    still compiles and passes while it counts something else. Find each changed integer literal and
@@ -80,8 +79,7 @@ Check each item with evidence, then each item in each area file you read.
    task does not need. Every `Cargo.lock` change needs a maintainer's approval before it merges,
    and the pull request says which versions moved and why. Run `git diff <fork> -- '*Cargo.lock'`
    and list each version that moved under `DESIGN`. A moved version that the pull request body does
-   not name and explain (or the plan or the caller's claims, before a pull request exists) is a
-   finding.
+   not name and explain (or the plan, before a pull request exists) is a finding.
 5. **Rust correctness.** These change what the code does, so they are not style:
    - an `unwrap`, an `expect`, or a `panic!` on a path that the area file's untrusted input
      reaches;

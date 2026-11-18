@@ -17,6 +17,7 @@ decision or spec.
   options and state the recommendation's cost. You are not re-running that authoring step. Same
   subject, opposite stance (auditor vs. author), separate invocation, no shared context.
 - **Rules a decision must not contradict:** the tenets in `docs/design/tenets.md`.
+- **Names to grep for:** each symbol, flag, file and test that the text names.
 - **Where to grep for a name:** `crates/`. The seam holds: `feature-critic` asks "does the code
   honour this decision?", you ask "does the thing this decision talks about still exist?" Never go
   further than existence.

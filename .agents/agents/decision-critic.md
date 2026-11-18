@@ -46,7 +46,6 @@ available, report that check as `not verified`, and go on.
 - **An entry in a decision log:** the user decided it. Do not argue it again on taste. Report it
   only when it:
   - contradicts another entry, or a rule that the area file names;
-  - is inconsistent with a new artifact in the review set;
   - states a name that does not exist, in text that the change under review adds or rewrites;
   - fails the entry shape in the area's decision skill (the Liveness and shape axis); or
   - meets a condition that the area file adds.
@@ -109,8 +108,8 @@ Check each axis with the quoted text, then each axis in the area file.
 9. **Liveness and shape.** Apply these checks to a draft and to a new or rewritten entry. In an
    entry that the change does not add or rewrite, a stale name is not a finding. The text that the
    change writes must be true, not only dated:
-   - Grep for each symbol, flag, file, path, key, variable, and test that it names. A name that
-     does not exist is a BLOCKER.
+   - Grep for each name that it states, of the kinds that the area file lists. A name that does
+     not exist is a BLOCKER.
    - The anchor exists, and each link to it still resolves:
      `grep -rn '<anchor-id>' --include='*.md' --include='*.rs' .` The anchor is permanent, so it
      survives a retitle. An anchor that no longer matches its title after a rewrite is expected,
