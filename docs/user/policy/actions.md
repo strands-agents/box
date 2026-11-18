@@ -221,7 +221,8 @@ when { context.input.server == "demo" && context.input has tool && context.input
 **A generated per-tool action**, `<server>::Action::"<tool>"`, carries the tool's arguments as
 `context.input.<argument>`, with the types the server's `tools/list` declares. An argument whose
 name isn't a plain name, such as `zone-id`, keeps it, and a rule reads it as
-`context.input["zone-id"]`. Run the
+`context.input["zone-id"]`. A `temporal` clause can't name such an argument; it reads only
+arguments with plain names. Run the
 `policy generate-schema` verb to see the exact names:
 
 ```sh

@@ -145,6 +145,9 @@ forbid (principal, action == dns::Action::"list_records", resource)
 when { context.input has "zone-id" && context.input["zone-id"] == "private-zone" };
 ```
 
+A `when temporal` or `unless temporal` clause can't name an argument like this: it reads only
+arguments with plain names.
+
 `policy generate-schema` starts each declared server, reads its `tools/list`, and writes the
 per-tool actions and their argument types:
 

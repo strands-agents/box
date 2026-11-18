@@ -702,15 +702,6 @@ fn identify_arguments(tools_list: &str) -> (String, BTreeMap<String, String>) {
     (value.to_string(), names.exact)
 }
 
-/// The Cedar identifier of an argument name: [`cedar_identifier`] without the reserved `__cedar`.
-fn argument_identifier(name: &str) -> String {
-    let mut identifier = cedar_identifier(name);
-    while let Some(start) = identifier.find("__cedar") {
-        identifier.replace_range(start..start + 2, "_");
-    }
-    identifier
-}
-
 /// Each property name in a schema value, at every depth.
 fn collect_property_names(value: &serde_json::Value, names: &mut BTreeSet<String>) {
     match value {
@@ -743,6 +734,8 @@ struct ArgumentNames {
     identifiers: BTreeMap<String, String>,
     /// The exact name of each identifier given.
     exact: BTreeMap<String, String>,
+    /// The next suffix to try for each base identifier.
+    next_suffix: BTreeMap<String, u32>,
 }
 
 impl ArgumentNames {
@@ -834,7 +827,7 @@ impl ArgumentNames {
     ) -> BTreeMap<String, String> {
         let renamed = properties
             .keys()
-            .filter(|name| argument_identifier(name) != **name)
+            .filter(|name| cedar_identifier(name) != **name)
             .cloned()
             .collect::<Vec<_>>();
         let mut renames = BTreeMap::new();
@@ -853,13 +846,19 @@ impl ArgumentNames {
         if let Some(identifier) = self.identifiers.get(name) {
             return identifier.clone();
         }
-        let base = argument_identifier(name);
-        let identifier = std::iter::once(base.clone())
-            .chain((2_u32..).map(|suffix| format!("{base}_{suffix}")))
-            .find(|candidate| {
-                !self.taken.contains(candidate) && !self.exact.contains_key(candidate)
-            })
-            .unwrap_or(base);
+        let base = cedar_identifier(name);
+        let next = self.next_suffix.entry(base.clone()).or_insert(1);
+        let identifier = loop {
+            let candidate = if *next == 1 {
+                base.clone()
+            } else {
+                format!("{base}_{next}")
+            };
+            *next += 1;
+            if !self.taken.contains(&candidate) && !self.exact.contains_key(&candidate) {
+                break candidate;
+            }
+        };
         self.identifiers
             .insert(name.to_string(), identifier.clone());
         self.exact.insert(identifier.clone(), name.to_string());
@@ -1589,6 +1588,76 @@ mod tests {
         );
         assert_eq!(attributes(&generated, "cf", "Shared"), ["a.b"]);
         assert_eq!(attributes(&generated, "cf", "get_zoneInput"), ["q"]);
+    }
+
+    #[test]
+    fn an_argument_name_below_each_schema_keyword_keeps_its_exact_name() {
+        let tools = serde_json::json!({"result": {"tools": [{
+            "name": "send",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "headers": {
+                        "type": "array",
+                        "items": {"type": "object", "properties": {"x-name": {"type": "string"}}}
+                    },
+                    "target": {
+                        "anyOf": [
+                            {"type": "object", "properties": {"zone-id": {"type": "string"}}},
+                            {"type": "string"}
+                        ]
+                    },
+                    "pair": {
+                        "type": "array",
+                        "prefixItems": [
+                            {"type": "object", "properties": {"first-key": {"type": "string"}}}
+                        ],
+                        "items": false
+                    },
+                    "labels": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "object",
+                            "properties": {"label-value": {"type": "string"}}
+                        }
+                    },
+                    "x__cedar": {"type": "object", "properties": {"q": {"type": "string"}}}
+                }
+            }
+        }]}});
+        let generated =
+            generate_mcp_schema("cf", &tools.to_string()).expect("the schema generates");
+        for name in ["x-name", "zone-id", "first-key", "label-value"] {
+            assert!(
+                generated.contains(&format!("\"{name}\"?: String")),
+                "{name}\n{generated}"
+            );
+        }
+        assert!(
+            generated.contains("type send_Input_x__cedar = {"),
+            "an identifier that already parses keeps the type name it had before\n{generated}"
+        );
+    }
+
+    #[test]
+    fn many_names_on_one_base_each_keep_their_exact_name() {
+        let names = (0x4e00_u32..0x4e00 + 2_000)
+            .filter_map(char::from_u32)
+            .map(String::from)
+            .collect::<Vec<_>>();
+        let properties = names
+            .iter()
+            .map(|name| (name.clone(), serde_json::json!({"type": "string"})))
+            .collect::<serde_json::Map<_, _>>();
+        let tools = serde_json::json!({"result": {"tools": [{
+            "name": "wide",
+            "inputSchema": {"type": "object", "properties": properties}
+        }]}});
+        let generated =
+            generate_mcp_schema("cf", &tools.to_string()).expect("the schema generates");
+        let mut expected = names;
+        expected.sort();
+        assert_eq!(attributes(&generated, "cf", "wideInput"), expected);
     }
 
     #[test]
