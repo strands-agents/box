@@ -52,9 +52,9 @@ jobs:
     permissions:
       contents: read
     runs-on: ${{ matrix.os }}
-    # Cargo test on the full workspace typically finishes in a few minutes;
-    # 30 min caps a hung step instead of running to the 6-hour default.
-    timeout-minutes: 30
+    # Allow a cold build and the complete workspace suite on slower runners.
+    # The x86 runner can still be making progress after 30 minutes.
+    timeout-minutes: 45
     strategy:
       # Report every OS's outcome even if one fails. A single Linux failure
       # is not a reason to hide the macOS one.
