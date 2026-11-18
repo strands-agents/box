@@ -933,6 +933,10 @@ impl HostedBox {
                 // The hosts whose plain HTTP on port 80 is decided and sent as HTTPS on 443.
                 upgrade_http: record.gateway.upgrade_http.clone(),
                 upstream_ca_pems: upstream_ca_pems.to_vec(),
+                // PROBE ONLY: pick the upstream trust mode from the trusted process's environment.
+                upstream_host_roots: std::env::var("BOX54_UPSTREAM_TRUST").as_deref() == Ok("host"),
+                upstream_platform_verifier: std::env::var("BOX54_UPSTREAM_TRUST").as_deref()
+                    == Ok("platform"),
                 ..MitmConfig::default()
             },
             capabilities,
@@ -944,6 +948,19 @@ impl HostedBox {
             Some(&trust_certificate),
         )
         .map_err(BoxError::from)?;
+        eprintln!(
+            "strands-box: PROBE upstream trust mode {:?}",
+            std::env::var("BOX54_UPSTREAM_TRUST").ok()
+        );
+        if let Some((added, ignored, errors)) = proxy.upstream_host_roots() {
+            eprintln!(
+                "strands-box: the egress gateway also trusts {added} root certificates from this \
+                 host's trust store for upstream servers ({ignored} ignored)"
+            );
+            for error in errors {
+                eprintln!("strands-box: warning: reading the host's trust store: {error}");
+            }
+        }
         let proxy_port = proxy
             .port()
             .ok_or_else(|| BoxError::from(DaemonError::NoProxyPort))?;

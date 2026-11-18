@@ -30,10 +30,41 @@ pub(crate) fn server_config_for_host(ca: &EphemeralCa, host: &str) -> Result<Ser
 /// system roots (via `webpki-roots`) plus any PEM certs supplied in `extra_ca_pems` (e.g. a route's
 /// custom CA). The upstream must present a cert the box legitimately trusts — a pin rejection here
 /// surfaces as a handshake error the caller treats as a hard-fail drop.
-pub(super) fn upstream_client_config(extra_ca_pems: &[String]) -> Result<ClientConfig> {
+pub(super) fn upstream_client_config(
+    extra_ca_pems: &[String],
+    host_roots: bool,
+    platform_verifier: bool,
+) -> Result<(ClientConfig, Option<HostRoots>)> {
+    if platform_verifier {
+        let mut extra = Vec::new();
+        for pem in extra_ca_pems {
+            extra.extend(parse_pem_certs(pem)?);
+        }
+        let provider = std::sync::Arc::new(rustls::crypto::ring::default_provider());
+        let verifier = rustls_platform_verifier::Verifier::new_with_extra_roots(extra, provider)
+            .map_err(|e| ProxyError::Intercept(format!("platform verifier: {e}")))?;
+        return Ok((
+            ClientConfig::builder()
+                .dangerous()
+                .with_custom_certificate_verifier(std::sync::Arc::new(verifier))
+                .with_no_client_auth(),
+            None,
+        ));
+    }
     let mut roots = RootCertStore::empty();
     // System roots — the base of the additive bundle.
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    // Additive: the host's own trusted roots, read once, in the trusted process.
+    let host = host_roots.then(|| {
+        let loaded = rustls_native_certs::load_native_certs();
+        let (added, ignored) = roots.add_parsable_certificates(loaded.certs);
+        HostRoots {
+            added,
+            ignored,
+            errors: loaded.errors.iter().map(ToString::to_string).collect(),
+        }
+    });
 
     // Additive: any extra CA PEMs (a route's custom CA bundle).
     for pem in extra_ca_pems {
@@ -44,9 +75,23 @@ pub(super) fn upstream_client_config(extra_ca_pems: &[String]) -> Result<ClientC
         }
     }
 
-    Ok(ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth())
+    Ok((
+        ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth(),
+        host,
+    ))
+}
+
+/// What the gateway took from the host's trust store.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct HostRoots {
+    /// Roots added to the upstream trust.
+    pub(crate) added: usize,
+    /// Certificates the store held that do not parse as a root.
+    pub(crate) ignored: usize,
+    /// Errors the store reported while it was read.
+    pub(crate) errors: Vec<String>,
 }
 
 /// Parse PEM-encoded certificates into DER, for the additive trust bundle.
@@ -71,7 +116,7 @@ mod tests {
 
     #[test]
     fn upstream_config_builds_with_system_roots() {
-        let config = upstream_client_config(&[]);
+        let config = upstream_client_config(&[], false, false);
         assert!(config.is_ok());
     }
 
@@ -79,7 +124,7 @@ mod tests {
     fn upstream_config_accepts_extra_ca() {
         // The ephemeral CA's own public PEM is a valid extra CA to add.
         let ca = EphemeralCa::generate(None, None).unwrap();
-        let config = upstream_client_config(&[ca.ca_cert_pem().to_string()]);
+        let config = upstream_client_config(&[ca.ca_cert_pem().to_string()], false, false);
         assert!(config.is_ok());
     }
 }

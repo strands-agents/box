@@ -20,6 +20,8 @@ tls-intercept = [
     "dep:rustls",
     "dep:rustls-pki-types",
     "dep:webpki-roots",
+    "dep:rustls-native-certs",
+    "dep:rustls-platform-verifier",
     "dep:ring",
     "dep:rcgen",
     "dep:tokio",
@@ -62,6 +64,9 @@ rustls = { version = "0.23", optional = true, default-features = false, features
 rustls-pki-types = { version = "1", optional = true }
 # System-root trust anchors for the upstream (client) side of interception.
 webpki-roots = { version = "1", optional = true }
+# The host's own trusted roots (the macOS keychain, or the Linux bundle), added to the upstream trust.
+rustls-native-certs = { version = "0.8", optional = true }
+rustls-platform-verifier = { version = "0.7", optional = true }
 # ECDSA P-256 keygen + signing for the ephemeral CA and per-host leaf minting.
 ring = { version = "0.17", optional = true }
 # X.509 cert generation for the ephemeral CA + per-host leaves (ring backend, matching rustls).
