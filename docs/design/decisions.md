@@ -988,8 +988,8 @@ excludes checkpoint, rewind, branch, tamper evidence, an audit record, atomic co
 external effect, and any history shared between boxes.
 
 The `experimental-idle-flush` Cargo feature in `crates/box/Cargo.toml` permits a persistence
-experiment without changing default builds. In this mode, hosted `run` selects Dogwood's periodic
-durability interface and starts an independent timer on the existing policy engine, so pending
+experiment. Default builds continue to persist each event. With the feature enabled, hosted `run`
+selects Dogwood's periodic durability interface and starts an independent timer on the existing policy engine, so pending
 history can be flushed even when events stop arriving. This experiment accepts the loss of recent
 requests and outcomes if the process crashes before a successful flush; after restart, a history
 rule can admit requests that those missing events would have denied. The timer's interval is a
@@ -997,12 +997,14 @@ polling cadence, not a maximum persistence delay. After successful startup, expl
 shutdown stops the workload and
 joins the broker, discovery, native monitoring, and gateway connection workers before stopping
 the timer and performing its final flush. Gateway shutdown interrupts client sockets and joins
-workers after their existing outcome handling finishes. Recorded timer failures stop the workload;
-final-flush failures make the run fail. Each flush retries completed outcomes retained after a
-recording failure and returns an error if any remain refused. An earlier run failure remains visible
-alongside a shutdown
-failure. If native monitoring cannot stop, Box reports the failure and joins the timer without an
-additional final flush. Cleanup after a startup error remains best effort: a native-monitor
+workers after their existing outcome handling finishes, including in default builds. Recorded timer
+failures stop the workload; final-flush failures make the run fail. Each flush retries completed
+outcomes retained after a recording failure, then persists events the engine has already accepted.
+Explicit and final flushes return an error if any outcome remains refused. Timer ticks keep retrying
+an outcome delayed only by a backward clock change without treating that delay as a failure.
+Other recording and storage failures remain errors. An earlier run failure remains visible alongside
+a shutdown failure. If native monitoring cannot stop, Box reports the failure and joins the timer
+without an additional final flush. Cleanup after a startup error remains best effort: a native-monitor
 stop failure can leave callbacks active while the timer destructor attempts a flush. Startup
 still returns an error; this path does not certify that all producers stopped. Destruction
 remains a fallback that reports failures to stderr.
