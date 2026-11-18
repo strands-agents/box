@@ -931,6 +931,26 @@ The raw `vfork` probe keeps the child entirely in one assembly block. It checks 
 `setuid` refusal using the child's own UID, then exits without returning into Rust or changing the
 shared userspace stack. The outside control can set its unchanged UID. The parent checks the
 child's distinct exit status and reaps it. The test supervisor bounds the whole probe.
+
+Native Amazon Linux 2023 x86-64 validation for `04cdbb86cb31fee82ac341d529d690cfccb6810b`
+found that a direct `SYS_fork` call returned `EPERM` when the permit was absent; the outside
+control created and reaped its child. With the permit present,
+`raw_fork_preserves_child_restrictions` creates and reaps the child and verifies inherited
+refusals from both syscall filters. Its `getpriority` probe checks the permit filter; its
+executable `mprotect` probe checks the restriction filter without executing the memory.
+Controls that relax either rule separately make the regression fail.
+
+Musl 1.2.5's C library also uses this syscall on x86-64: its `fork()` function calls `_Fork()`,
+whose [implementation](https://git.musl-libc.org/cgit/musl/tree/src/process/_Fork.c?h=v1.2.5)
+selects raw `SYS_fork` when defined. Musl's x86-64 syscall definitions include that entry.
+This source inspection explains the compatibility need; the measured test calls the syscall
+directly and does not qualify a complete musl-linked application.
+
+Linux v6.12 implements `fork` through `kernel_clone` with only `SIGCHLD` in
+[`kernel/fork.c`](https://github.com/torvalds/linux/blob/v6.12/kernel/fork.c#L2868-L2875).
+The already permitted, unrestricted `clone` call admits that operation. Keep this permit
+x86-64-only.
+
 Follow-up full-Box checks found that Python `os.rmdir`, Python `shutil.rmtree`, and `git clean -fd`
 could not remove their empty directories on x86: `rmdir` returned `EPERM`. All three outside
 controls and matched ARM64 checks completed cleanup; ARM64 used `unlinkat` with `AT_REMOVEDIR`. Linux v6.12 routes both calls through `do_rmdir`
@@ -966,23 +986,22 @@ an explicit descriptor (`RequestPath::new` in `crates/box/src/run/linux_enforcem
 `a_workload_returns_to_its_saved_folder_with_fchdir`
 saves a folder, enters a subfolder, and returns with `fchdir` under the real trampoline.
 
-### Creating a name without replacing one
+### The host's top-level links into /usr
 
-On GitHub's Ubuntu 24.04 ARM64 runner, Box `9f5e71ea` refused `renameat2` with `EPERM`. uv 0.13.7
-failed its first command with `error: Could not acquire lock`, caused by
-`Could not persist temporary file .cache/uvx/.tmp…: Operation not permitted (os error 1)`. uv
-creates its lock through the `tempfile` crate. On Linux, tempfile 3.27's `persist_noclobber` calls
-`renameat2(…, RENAME_NOREPLACE)` and falls back to a hard link only on `ENOSYS` or `EINVAL`
-(`src/file/imp/unix.rs`), so it returned the `EPERM`.
+On Amazon Linux 2023 and Ubuntu, `/bin` is a link to `usr/bin`. The view bound only the files its
+grants named, so with `/usr/bin/sh` granted, `/bin` was absent and `#!/bin/sh` scripts failed to exec
+with `ENOENT` (#453). pnpm's `node_modules/.bin/tsc` failed this way, and so did uvx's cached tool
+commands, which uv writes as `#!/bin/sh` scripts because the environment can move: on GitHub's
+Ubuntu 24.04 runner, `uvx mypy@1.15.0` printed `error: Failed to spawn: mypy`.
 
-The permit admits `renameat2` only when its flags are `0` or `RENAME_NOREPLACE`. With `0` it is the
-permitted `renameat`. `RENAME_NOREPLACE` only makes the call fail with `EEXIST` when the new name
-exists. `RENAME_EXCHANGE`, which swaps two names, and `RENAME_WHITEOUT`, which creates a device
-node, still match no rule and get `EPERM`. This covers the default backend only. The native
-filesystem broker mediates `renameat2` itself and answers any call with flags with `EACCES`
-(`broker.rs`), so under native filesystem policy tempfile still cannot persist a file.
-`a_name_is_created_without_replacing_one_with_renameat2_under_the_filters` checks each flag under
-the filters, and runs tempfile's `persist_noclobber`.
+`materialize` now writes each host link from `/bin`, `/sbin`, `/lib`, `/lib32`, `/lib64` or
+`/libx32` into the view root, after every mount and before the root is sealed read-only. A link is
+copied only when the host's entry is a link whose text is a relative path into `usr/`, and only when
+no planned mount sits at or under the name, so an interpreter spelling or loader bind under `/lib`
+keeps its place. A link resolves only to paths the view binds, so it adds no reach.
+`the_view_copies_the_hosts_merged_usr_links_where_no_mount_sits` pins the plan, and
+`a_bin_sh_script_runs_through_the_hosts_bin_link` runs a `#!/bin/sh` script under the real
+trampoline with only `/usr/bin/sh` granted, and checks that `/bin/cat` stays absent.
 
 ### W^X
 
@@ -1330,7 +1349,6 @@ empty name, `=` or NUL in a name, and NUL in a value. `--relay-control-fd` is Li
     bit still lands outside it. Unmeasured — read from `syscall.rs` and `view.rs`, and no Linux
     target was exercised. Seccomp **can** scope this, unlike the macOS flag argument, because the
     mode is a scalar.
-
 
 ### Native policy and filesystem-information notifications
 

@@ -515,6 +515,15 @@ Preserving a spelling adds no authority over a different file.
 On macOS, Box grants a declared command's interpreter chain automatically.
 A workload-selected program without a tool table requires its interpreter chain to have existing `exec` coverage on either platform.
 
+A script that a process writes or downloads at run time, such as a `#!/bin/sh` command in
+`node_modules/.bin`, names its interpreter by the host's spelling. On a Linux host where `/bin`,
+`/sbin`, `/lib`, `/lib32`, `/lib64` or `/libx32` is a link into `/usr`, as on Debian, Ubuntu,
+Fedora and Amazon Linux, each sandbox has the same link at its top level. With
+`read_file = ["/usr/bin/sh"]`, `/bin/sh` then resolves to the granted file, and the script starts.
+A link reaches only what the sandbox already shows, so it grants nothing. A name that the sandbox
+already uses for a granted path, such as an interpreter spelling `/bin/sh`, stays a folder and gets
+no link.
+
 ## `[[agent.ingress]]`
 
 Each entry is one listener: the box listens on `listen` and relays each caller's TCP connection to
