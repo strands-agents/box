@@ -191,7 +191,8 @@ the same authorized file inside the sandbox without adding authority over anothe
 
 A script a process creates at run time gets no discovery, and names its interpreter by the host's
 spelling, such as `#!/bin/sh`. The Linux view copies each host link from a top-level name into
-`/usr`, such as `/bin -> usr/bin`, wherever no planned mount sits at or under that name. The kernel
+`/usr`, such as `/bin -> usr/bin`, and mounts every path written through such a link at its `/usr`
+name, so a grant, loader bind, or refusal of `/bin/bash` sits at `/usr/bin/bash`. The kernel
 then finds a granted `/usr/bin/sh` under `/bin/sh`. A link resolves only to paths the view binds,
 so it adds no reach (`a_bin_sh_script_runs_through_the_hosts_bin_link`).
 

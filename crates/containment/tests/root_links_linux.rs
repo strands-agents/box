@@ -1,5 +1,5 @@
 //! Linux end-to-end proof that a `#!/bin/sh` script runs when only `/usr/bin/sh` is granted, on a
-//! host where `/bin` is a link to `usr/bin`, and that the link reaches no ungranted file.
+//! host where `/bin` is a link to `usr/bin`, and that the link reaches no ungranted or refused file.
 
 #![cfg(all(
     target_os = "linux",
@@ -30,11 +30,18 @@ fn a_bin_sh_script_runs_through_the_hosts_bin_link() {
 
     let scripts = tempfile::tempdir().expect("script directory");
     let script = scripts.path().join("run");
+    // `/usr/bin/cat` is granted and refused through the link as `/bin/cat`, so the script checks
+    // that the link reaches the empty overmount: a real `cat` would echo its input. `/bin/ls` is
+    // never granted, so the link must not reach it.
     std::fs::write(
         &script,
         "#!/bin/sh\n\
          echo ROOT_LINK_SCRIPT_RAN\n\
-         [ -e /bin/cat ] || echo UNGRANTED_ABSENT\n",
+         [ -e /bin/ls ] || echo UNGRANTED_ABSENT\n\
+         [ -s /bin/cat ] || echo REFUSED_EMPTY\n\
+         out=$(printf CAT_RAN | /bin/cat 2>/dev/null)\n\
+         [ \"$out\" = CAT_RAN ] && echo REFUSED_CAT_RAN\n\
+         exit 0\n",
     )
     .expect("write the script");
     let mut permissions = std::fs::metadata(&script)
@@ -43,7 +50,8 @@ fn a_bin_sh_script_runs_through_the_hosts_bin_link() {
     std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
     std::fs::set_permissions(&script, permissions).expect("make the script executable");
 
-    let config = ContainmentConfig::new()
+    let cat = Path::new("/usr/bin/cat");
+    let mut config = ContainmentConfig::new()
         .allow(scripts.path(), Operation::Read, Scope::Root)
         .expect("read the script directory")
         .allow(&script, Operation::Exec, Scope::File)
@@ -52,6 +60,15 @@ fn a_bin_sh_script_runs_through_the_hosts_bin_link() {
         .expect("read /usr/bin/sh")
         .allow(sh, Operation::Exec, Scope::File)
         .expect("execute /usr/bin/sh");
+    if cat.exists() {
+        config = config
+            .allow(cat, Operation::Read, Scope::File)
+            .expect("read /usr/bin/cat")
+            .allow(cat, Operation::Exec, Scope::File)
+            .expect("execute /usr/bin/cat")
+            .refuse("/bin/cat", Scope::File)
+            .expect("refuse /bin/cat");
+    }
     let config_json = config.to_json().expect("config json");
     let config_sha256 = Sha256::digest(config_json.as_bytes())
         .iter()
@@ -85,11 +102,18 @@ fn a_bin_sh_script_runs_through_the_hosts_bin_link() {
         stdout.contains("ROOT_LINK_SCRIPT_RAN"),
         "stdout:\n{stdout}\nstderr:\n{stderr}"
     );
-    if Path::new("/usr/bin/cat").exists() {
+    if Path::new("/usr/bin/ls").exists() {
         assert!(
             stdout.contains("UNGRANTED_ABSENT"),
-            "the /bin link must reach only what the view binds, and /usr/bin/cat is not granted:\n\
+            "the /bin link must reach only what the view binds, and /usr/bin/ls is not granted:\n\
              stdout:\n{stdout}\nstderr:\n{stderr}"
+        );
+    }
+    if cat.exists() {
+        assert!(
+            stdout.contains("REFUSED_EMPTY") && !stdout.contains("REFUSED_CAT_RAN"),
+            "a refusal written as /bin/cat must overmount the granted /usr/bin/cat, so the link \
+             reaches an empty file that does not run cat:\nstdout:\n{stdout}\nstderr:\n{stderr}"
         );
     }
 }
