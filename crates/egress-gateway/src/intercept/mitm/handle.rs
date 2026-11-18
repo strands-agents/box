@@ -44,12 +44,9 @@ impl MitmHandle {
         }
     }
 
-    /// The roots added from the host's trust store, the certificates ignored, and the errors the
-    /// store reported, when the gateway read it.
-    pub fn upstream_host_roots(&self) -> Option<(usize, usize, &[String])> {
-        self.host_roots
-            .as_ref()
-            .map(|roots| (roots.added, roots.ignored, roots.errors.as_slice()))
+    /// What the gateway took from the host's trust store, when it read it.
+    pub fn upstream_host_roots(&self) -> Option<&super::tls::HostRoots> {
+        self.host_roots.as_ref()
     }
 
     /// The localhost port the proxy is listening on, if it bound a `TcpListener`.

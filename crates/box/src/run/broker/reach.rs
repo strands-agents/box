@@ -58,6 +58,9 @@ pub(super) struct Reach {
     commands: std::sync::Arc<crate::run::commands::ConfiguredCommands>,
     installation: Option<std::sync::Arc<crate::run::installation::TrustedInstallation>>,
 
+    /// The host trust the egress gateway reads, which no interpreter may change.
+    upstream_trust: Vec<PathBuf>,
+
     /// The operator home both interpreters may name under policy.
     shared: Option<String>,
 
@@ -201,6 +204,7 @@ impl Reach {
             forbidden_exactly: protected_sources.to_vec(),
             commands: std::sync::Arc::default(),
             installation: None,
+            upstream_trust: Vec::new(),
             shared: shared
                 .map(|home| utf8(&home, "the operator home"))
                 .transpose()?,
@@ -222,6 +226,18 @@ impl Reach {
     ) -> Self {
         self.installation = Some(installation);
         self
+    }
+
+    pub(super) fn with_upstream_trust(mut self, upstream_trust: &[PathBuf]) -> Self {
+        self.upstream_trust = upstream_trust.to_vec();
+        self
+    }
+
+    /// Whether changing `path` would change, replace, or move the host trust the gateway reads.
+    fn changes_upstream_trust(&self, path: &Path) -> bool {
+        self.upstream_trust
+            .iter()
+            .any(|trust| lies_within(trust, path) || lies_within(path, trust))
     }
 
     /// The directory a relative path means, and what the interpreters report as `PWD`.
@@ -316,6 +332,9 @@ impl Reach {
         if mutates && let Some(refusal) = self.commands.mutation_refusal(named) {
             return Err(Refused::new(reported_as, command_mutation_reason(refusal)));
         }
+        if mutates && self.changes_upstream_trust(named) {
+            return Err(Refused::new(reported_as, UPSTREAM_TRUST));
+        }
         if !self.is_inside_the_set(named) {
             return Err(Refused::new(reported_as, OUTSIDE_THE_SET));
         }
@@ -356,6 +375,9 @@ impl Reach {
         }
         if mutates && let Some(refusal) = self.commands.mutation_refusal(approved) {
             return Err(Refused::new(reported_as, command_mutation_reason(refusal)));
+        }
+        if mutates && self.changes_upstream_trust(approved) {
+            return Err(Refused::new(reported_as, UPSTREAM_TRUST));
         }
         // The authority this run loaded is trusted Box state wherever it sits, so no operation
         // reaches it; changing its enclosing directory is refused too. It keeps its own reason, so
@@ -459,6 +481,9 @@ fn command_mutation_reason(refusal: CommandMutationRefusal) -> Cow<'static, str>
         }
     }
 }
+
+const UPSTREAM_TRUST: &str = "is or holds host trust that `SSL_CERT_FILE` or `SSL_CERT_DIR` names for \
+     the egress gateway, which no policy may change";
 
 const AUTHORITY_SOURCE: &str =
     "resolves to an authority source that this run loaded, which no policy may open or change";
@@ -1232,6 +1257,38 @@ mod linked_command_mutation_tests {
                 format!("{reported_as}: {reason}")
             );
         }
+    }
+
+    /// **Host trust the gateway reads is beneath the floor for a change, whatever policy permits.**
+    /// A write to the file, to a hard link to it, or into a named directory, and a change to the
+    /// directory that holds them are refused; reading stays reachable.
+    #[test]
+    fn host_trust_refuses_mutation_and_stays_readable() {
+        let (_temporary, reach, home) = fixture();
+        std::fs::create_dir(home.join("trust")).expect("a trust directory");
+        std::fs::create_dir(home.join("trust/certs")).expect("a certificate directory");
+        std::fs::write(home.join("trust/roots.pem"), "").expect("a trust file");
+        std::fs::hard_link(home.join("trust/roots.pem"), home.join("output/alias.pem"))
+            .expect("a hard link to it");
+        let reach =
+            reach.with_upstream_trust(&[home.join("trust/roots.pem"), home.join("trust/certs")]);
+        for (relative, reported_as) in [
+            ("trust/roots.pem", "roots.pem"),
+            ("output/alias.pem", "alias.pem"),
+            ("trust/certs/new.pem", "new.pem"),
+            ("trust", "trust"),
+        ] {
+            mutation_refused_for(&reach, &home.join(relative), reported_as, UPSTREAM_TRUST);
+        }
+        assert_eq!(
+            reach
+                .approve(&home.join("trust/roots.pem"), "roots.pem")
+                .expect("reading remains reachable"),
+            home.join("trust/roots.pem")
+        );
+        reach
+            .approve_mutation(&home.join("output/other.pem"), "other.pem")
+            .expect("an unrelated write remains reachable");
     }
 
     #[test]

@@ -27,6 +27,7 @@ use crate::error::{ProxyError, Result};
 use crate::seams::Emitter;
 
 pub use handle::MitmHandle;
+pub use tls::HostRoots;
 
 /// Size limits for captured requests and MCP catalog responses.
 #[derive(Debug, Clone)]

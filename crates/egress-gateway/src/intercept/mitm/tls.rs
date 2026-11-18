@@ -70,13 +70,14 @@ pub(super) fn upstream_client_config(
 
 /// What the gateway took from the host's trust store.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct HostRoots {
+#[non_exhaustive]
+pub struct HostRoots {
     /// Roots added to the upstream trust.
-    pub(crate) added: usize,
+    pub added: usize,
     /// Certificates the store held that do not parse as a root.
-    pub(crate) ignored: usize,
+    pub ignored: usize,
     /// Errors the store reported while it was read.
-    pub(crate) errors: Vec<String>,
+    pub errors: Vec<String>,
 }
 
 /// Parse PEM-encoded certificates into DER, for the additive trust bundle.

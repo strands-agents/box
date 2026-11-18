@@ -944,12 +944,13 @@ impl HostedBox {
             Some(&trust_certificate),
         )
         .map_err(BoxError::from)?;
-        if let Some((added, ignored, errors)) = proxy.upstream_host_roots() {
+        if let Some(roots) = proxy.upstream_host_roots() {
             eprintln!(
-                "strands-box: the egress gateway also trusts {added} root certificates from this \
-                 host's trust store for upstream servers ({ignored} ignored)"
+                "strands-box: the egress gateway also trusts {} root certificates from this \
+                 host's trust store for upstream servers ({} ignored)",
+                roots.added, roots.ignored
             );
-            for error in errors {
+            for error in &roots.errors {
                 eprintln!("strands-box: warning: reading the host's trust store: {error}");
             }
         }

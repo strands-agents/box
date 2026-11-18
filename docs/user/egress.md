@@ -261,8 +261,8 @@ The box doesn't start when a `write` or `write_file` entry, in any table, reache
 directory that `SSL_CERT_FILE` or `SSL_CERT_DIR` names. A root written there would be trusted by the
 next run. Read access is fine. A common case is `SSL_CERT_FILE` set to Python's `certifi` bundle
 inside a project's `.venv`, with the project writable: unset the variable for `box run`, or add a
-`deny` entry for the bundle. Keep `fs:write` rules in your policy off these paths too, because the
-check covers only `box.toml` grants.
+`deny` entry for the bundle. The Shell and Python also refuse to change these paths, whatever your
+policy permits.
 
 ## Upgrade plain HTTP to HTTPS
 

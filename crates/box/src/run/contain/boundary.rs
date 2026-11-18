@@ -162,10 +162,7 @@ fn judge_filesystem(
         operator_home: &canonical_home,
         policy: policy.as_deref(),
         authority_directories,
-        upstream_trust: upstream_trust_paths(
-            std::env::var_os("SSL_CERT_FILE"),
-            std::env::var_os("SSL_CERT_DIR"),
-        ),
+        upstream_trust: upstream_trust().to_vec(),
         // Only when the box declares a server at all: the search path matters because
         // `broker/mcp` execs the declared name against the operator's own `PATH`, outside
         // containment, and every declared name is bare.
@@ -176,6 +173,17 @@ fn judge_filesystem(
         },
     };
     Ok(filesystem::direct_grants(&spec.filesystem, &context)?)
+}
+
+/// The host trust the egress gateway reads this run, judged once for every table and interpreter.
+pub(crate) fn upstream_trust() -> &'static [PathBuf] {
+    static PATHS: std::sync::OnceLock<Vec<PathBuf>> = std::sync::OnceLock::new();
+    PATHS.get_or_init(|| {
+        upstream_trust_paths(
+            std::env::var_os("SSL_CERT_FILE"),
+            std::env::var_os("SSL_CERT_DIR"),
+        )
+    })
 }
 
 /// The paths `SSL_CERT_FILE` and `SSL_CERT_DIR` name, and each entry of a named directory.

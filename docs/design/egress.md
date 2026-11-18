@@ -166,9 +166,10 @@ is skipped. Startup prints how many roots were added. The roots are not the per-
 trusts, and they grant no reach: policy still decides every destination. A writable grant in any
 table that reaches a path `SSL_CERT_FILE` or `SSL_CERT_DIR` names, or an entry of a named directory
 or a link's target, stops the box at startup
-([why](./decisions.md#the-gateway-trusts-the-hosts-roots-and-no-grant-writes-them)). The check
-covers filesystem grants only: a Shell or Python write that policy permits there still lands, and a
-hard link to a root file elsewhere is not judged.
+([why](./decisions.md#the-gateway-trusts-the-hosts-roots-and-no-grant-writes-them)). The Shell and
+Python refuse, whatever policy permits, a change to those paths, to a hard link to one of their
+files, and to a directory that holds them. A `box.toml` grant over a hard link elsewhere to a root
+file is not judged.
 
 A request the gateway refuses gets a 403 with the header `x-strands-box-egress: refused`, and a body
 that says why. A `net:connect` refusal of a `CONNECT` arrives before the `200`, so the client never

@@ -15,7 +15,7 @@ operators inspecting egress decisions.
 
 ## Public Interface
 
-The crate root is the complete public API — 36 names, 31 unconditional and 5
+The crate root is the complete public API — 37 names, 31 unconditional and 6
 behind the `tls-intercept` feature:
 
 | Area | Items |
@@ -28,7 +28,7 @@ behind the `tls-intercept` feature:
 | Remote MCP | `McpTarget`, `McpTargetIdentity`, `canonicalize_mcp_frame`, `mcp_denial_response`, `refuse_duplicate_mcp_keys` |
 | Audit seam | `Emitter`, `StubEmitter` |
 | Errors | `PROXY_ORIGIN_HEADER`, `PROXY_ORIGIN_VALUE`, `ProxyError`, `Result` |
-| Default adapter | `BackendDial`, `MitmConfig`, `MitmHandle`, `MitmInterceptor`, `ResponseLimits` |
+| Default adapter | `BackendDial`, `HostRoots`, `MitmConfig`, `MitmHandle`, `MitmInterceptor`, `ResponseLimits` |
 
 `AuditDecision` is the one renamed export: the item is `audit::Decision`.
 
@@ -274,9 +274,9 @@ matches the host on 443 still re-routes it. The workload's leg stays plain, so `
 `false` and a credential-matched request is refused.
 
 `MitmHandle` exposes `port()`, `unix_socket_path()`, `intercept_ca_path()`,
-`env_vars()`, `upstream_host_roots()`, and `shutdown()`. `upstream_host_roots()` returns the roots
-added from the host, the certificates skipped, and the errors the store reported, when the gateway
-read the host's trust.
+`env_vars()`, `upstream_host_roots()`, and `shutdown()`. `upstream_host_roots()` returns a
+`#[non_exhaustive]` `HostRoots`, with the roots added from the host, the certificates skipped, and
+the errors the store reported, when the gateway read the host's trust.
 `env_vars()` returns the four `HTTP_PROXY`/`HTTPS_PROXY` spellings on the TCP
 transport and no proxy variable on AF_UNIX. It adds `SSL_CERT_FILE` on both
 transports when a CA directory is configured. `Drop` shuts the adapter down and
