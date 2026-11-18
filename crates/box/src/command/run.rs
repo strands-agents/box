@@ -556,9 +556,10 @@ fn prepare_contract(
     let existed = root.is_configured();
     request.verify_sources()?;
     // The one check of the declared sources: each program file, each write grant over one, and
-    // one line for each source. Only the value that it returns reads a secret. It starts no
-    // program and reads no box state, and it comes before the record is committed, so a refusal
-    // stores nothing in a new box directory, as a refusal of the configuration does.
+    // one line for each source. Only the value that it returns reads a secret, and only through
+    // its two read steps: it gives no backend to this module. It starts no program and reads no
+    // box state, and it comes before the record is committed, so a refusal stores nothing in a
+    // new box directory, as a refusal of the configuration does.
     let secrets = SecretSources::check(&request.record, &request.sources, std::io::stderr())?;
     if existed {
         root.initialize()?;

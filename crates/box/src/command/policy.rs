@@ -12,7 +12,7 @@ use crate::record::config::{
     read_mcp_servers, read_remote_mcp_servers, read_secret_sources, read_tool_grammars,
 };
 use crate::record::layout::operator_home_directory;
-use crate::run::secret_sources::SecretSources;
+use crate::run::secret_sources::{SchemaSecrets, SecretSources};
 
 const ACTION_SCHEMA_FILE: &str = "actions.cedarschema";
 const EVENT_SCHEMA_FILE: &str = "events.dwschema";
@@ -112,7 +112,7 @@ pub(crate) async fn generate_schema(
 fn with_secret<T>(
     server: &str,
     secret: &EgressSecret,
-    secrets: &SecretSources,
+    secrets: &SchemaSecrets,
     used: impl FnOnce(&str) -> T,
 ) -> Result<T, McpSchemaError> {
     let refused = |source: credentials::CredentialError| McpSchemaError::Credential {
@@ -143,7 +143,7 @@ fn header_placement(server: &str, secret: &EgressSecret) -> Result<(), McpSchema
 fn resolve_auth(
     server: &str,
     secret: &EgressSecret,
-    secrets: &SecretSources,
+    secrets: &SchemaSecrets,
 ) -> Result<(String, String), McpSchemaError> {
     header_placement(server, secret)?;
     let header = secret
