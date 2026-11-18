@@ -62,6 +62,8 @@ jobs:
               - 'download.sh'
               - 'scripts/test_download.py'
               - '.github/workflows/containment-deterministic.yml'
+              # The macOS leg of the suite runs as steps of the unit-test job.
+              - '.github/workflows/rust-test-lint.yml'
               - '.github/workflows/ci.yml'
             verdict:
               - 'test-common/**/!(*.md)'
