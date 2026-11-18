@@ -524,13 +524,16 @@ HistoryFlusher::stop(self) -> Result<HistoryFlushSnapshot, PolicyError>
 ```
 
 Here, `Arc` and `Duration` are the standard library's shared pointer and time-span types.
-The engine's thresholds are checked when events arrive. The separate timer calls
-`flush_history` periodically, including while events arrive and while Box is idle.
-A successful call can do no work if no history is pending. The snapshot counts calls,
-not disk synchronizations.
+The engine's thresholds are checked when events arrive. The separate timer flushes
+periodically, including while events arrive and while Box is idle. A successful call
+can do no work if no history is pending. The snapshot counts calls, not disk synchronizations.
 
-Each flush first retries completed outcomes that Box retained after a recording failure.
-If any outcome remains refused, the flush returns an error.
+Each flush first retries completed outcomes that Box retained after a recording failure,
+then persists events that the engine has already accepted. An explicit `flush_history`
+call, including the final flush during `shutdown`, returns an error if an outcome remains
+refused. On timer ticks, an outcome delayed only by a backward clock change remains
+available for retry. That delay does not count as a timer failure. Other recording and
+storage failures remain errors.
 
 Keep the guard alive while producers can submit events. Stop and join those producers
 before calling `shutdown`; shutdown wakes and joins the timer, then flushes once.
