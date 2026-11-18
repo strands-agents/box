@@ -515,6 +515,15 @@ impl Authority {
             .flush_history()
     }
 
+    #[cfg(feature = "experimental-idle-flush")]
+    pub(super) fn flush_history_for_timer(&self) -> Result<(), PolicyError> {
+        self.live
+            .lock()
+            .map_err(|_| PolicyError::Evaluation("policy authority lock poisoned".to_string()))?
+            .engine
+            .flush_history_for_timer()
+    }
+
     /// Records one outcome. The live authority always serves decisions (`Discovering` or `Ready`),
     /// so no readiness state refuses a record.
     pub(super) fn record(
@@ -648,6 +657,15 @@ impl Authority {
             }),
             warnings: Vec::new(),
         })
+    }
+
+    #[cfg(all(test, feature = "experimental-idle-flush"))]
+    pub(super) fn advance_clock(&self, seconds: i64) {
+        self.live
+            .lock()
+            .expect("test authority lock")
+            .engine
+            .advance_clock(seconds);
     }
 
     #[cfg(test)]

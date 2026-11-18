@@ -100,6 +100,11 @@ impl PolicyEngine {
         self.authority.flush_history()
     }
 
+    #[cfg(feature = "experimental-idle-flush")]
+    pub(crate) fn flush_history_for_timer(&self) -> Result<(), PolicyError> {
+        self.authority.flush_history_for_timer()
+    }
+
     /// Start one owned idle-flush worker; stop event producers before shutting down its guard.
     #[cfg(feature = "experimental-idle-flush")]
     pub fn start_history_flusher(
@@ -895,6 +900,187 @@ unless temporal {
                 .0
                 .is_allow(),
             "the recovered denied attempt must expire after one hour"
+        );
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    #[test]
+    fn final_flush_reports_a_clock_delayed_outcome_until_recovery() {
+        use std::time::Duration;
+        let history = tempfile::tempdir().expect("history directory");
+        let engine = Arc::new(policy_at(
+            "permit(principal, action, resource);",
+            &history.path().join("history.redb"),
+            1_000_000,
+        ));
+        engine
+            .set_periodic_history(u32::MAX, Duration::from_secs(3600))
+            .expect("periodic history");
+        let file = history.path().join("read-marker");
+        std::fs::write(&file, b"marker").expect("fixture file");
+        let file = file.canonicalize().expect("canonical fixture");
+        let approved = ApprovedPath::interpreter_resolved(&file);
+        let governed = GovernedBox::assigned("clock-final");
+        let principal = Principal::agent();
+        let (verdict, request) = engine.decide(
+            &governed,
+            &principal,
+            &Request::Fs {
+                path: &approved,
+                operation: crate::FsOperation::ReadContent,
+            },
+        );
+        assert!(verdict.is_allow(), "{verdict:?}");
+        assert_eq!(std::fs::read(&file).expect("permitted read"), b"marker");
+        engine.authority.advance_clock(-400);
+        assert!(matches!(
+            engine.record(
+                &governed,
+                &principal,
+                &request.expect("request token"),
+                &Outcome::Fs {
+                    path: &file,
+                    operation: crate::FsOperation::ReadContent,
+                    result: crate::FsResult::Completed,
+                }
+            ),
+            Err(PolicyError::OutcomeKept(_))
+        ));
+        let error = engine
+            .start_history_flusher(Duration::from_secs(3600))
+            .expect("timer starts")
+            .shutdown()
+            .expect_err("final flush must report the kept outcome");
+        assert!(
+            error
+                .to_string()
+                .contains("policy outcome kept until the history accepts it"),
+            "{error}"
+        );
+        engine.authority.advance_clock(410);
+        engine
+            .start_history_flusher(Duration::from_secs(3600))
+            .expect("failed final flush releases ownership")
+            .shutdown()
+            .expect("a recovered final flush can record the outcome");
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    #[test]
+    fn periodic_flush_keeps_a_clock_delayed_outcome_retryable() {
+        use std::time::{Duration, Instant};
+        const SOURCE: &str = r#"
+permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource);
+forbid(principal, action == Box::Action::"fs:write", resource)
+when temporal { formerly within 1h (Box::Action::"fs:read"::response{
+    input.operation: Box::FsReadOperation::"read_content"
+}) };
+"#;
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        let engine = Arc::new(policy_at(SOURCE, &path, 1_000_000));
+        engine
+            .set_periodic_history(u32::MAX, Duration::from_secs(3600))
+            .expect("disable automatic flush thresholds");
+        let file = history.path().join("read-marker");
+        std::fs::write(&file, b"marker").expect("fixture file");
+        let file = file.canonicalize().expect("canonical fixture");
+        let approved = ApprovedPath::interpreter_resolved(&file);
+        let governed = GovernedBox::assigned("clock-retry");
+        let principal = Principal::agent();
+        let (verdict, request) = engine.decide(
+            &governed,
+            &principal,
+            &Request::Fs {
+                path: &approved,
+                operation: crate::FsOperation::ReadContent,
+            },
+        );
+        assert!(verdict.is_allow(), "{verdict:?}");
+        assert_eq!(std::fs::read(&file).expect("permitted read"), b"marker");
+        engine.authority.advance_clock(-400);
+        assert!(matches!(
+            engine.record(
+                &governed,
+                &principal,
+                &request.expect("confirmed request"),
+                &Outcome::Fs {
+                    path: &file,
+                    operation: crate::FsOperation::ReadContent,
+                    result: crate::FsResult::Completed,
+                }
+            ),
+            Err(PolicyError::OutcomeKept(_))
+        ));
+        let flusher = engine
+            .start_history_flusher(Duration::from_millis(10))
+            .expect("timer starts");
+        let wait_for = |attempts: u64| {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while flusher.snapshot().attempts < attempts {
+                assert!(
+                    Instant::now() < deadline,
+                    "timer did not complete {attempts} attempts"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        };
+        wait_for(3);
+        let delayed = flusher.snapshot();
+        assert_eq!(
+            delayed.failures, 0,
+            "clock delay must not become a fatal timer failure: {delayed:?}"
+        );
+        assert!(delayed.last_error.is_none());
+        assert!(delayed.successes >= 3, "accepted history was flushed");
+        let blocked = engine
+            .decide(
+                &governed,
+                &principal,
+                &Request::Fs {
+                    path: &approved,
+                    operation: crate::FsOperation::WriteContent,
+                },
+            )
+            .0;
+        assert!(
+            matches!(
+                blocked,
+                Decision::Deny {
+                    reason: crate::DenyReason::InternalFault,
+                    ..
+                }
+            ),
+            "kept outcome still denies requests: {blocked:?}"
+        );
+        engine.authority.advance_clock(410);
+        wait_for(delayed.attempts + 3);
+        let stopped = flusher
+            .stop()
+            .expect("recovered timer has no latched failure");
+        assert_eq!(stopped.failures, 0);
+        let copy = history.path().join("copy.redb");
+        std::fs::copy(&path, &copy).expect("copy before original engine drop");
+        let recovered = policy_at(SOURCE, &copy, 1_000_020);
+        let verdict = recovered
+            .decide(
+                &governed,
+                &principal,
+                &Request::Fs {
+                    path: &approved,
+                    operation: crate::FsOperation::WriteContent,
+                },
+            )
+            .0;
+        assert!(
+            matches!(
+                verdict,
+                Decision::Deny {
+                    reason: crate::DenyReason::Forbidden,
+                    ..
+                }
+            ),
+            "timer must durably retry the completed read: {verdict:?}"
         );
     }
 

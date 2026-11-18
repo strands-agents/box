@@ -12,7 +12,7 @@ use crate::{PolicyEngine, PolicyError};
 pub struct HistoryFlushSnapshot {
     /// Completed calls, including failures.
     pub attempts: u64,
-    /// Calls that returned success.
+    /// Calls that persisted accepted events. A periodic success may retain a clock-delayed outcome.
     pub successes: u64,
     /// Calls that returned an error or panicked.
     pub failures: u64,
@@ -38,11 +38,16 @@ impl HistoryFlusher {
         interval: Duration,
     ) -> Result<Self, PolicyError> {
         let weak = Arc::downgrade(&engine);
-        let flush: Arc<Flush> = Arc::new(move || {
+        let flush: Arc<Flush> = Arc::new(move |final_flush| {
             let engine = weak
                 .upgrade()
                 .ok_or_else(|| "policy engine was dropped".to_string())?;
-            engine.flush_history().map_err(|error| error.to_string())
+            if final_flush {
+                engine.flush_history()
+            } else {
+                engine.flush_history_for_timer()
+            }
+            .map_err(|error| error.to_string())
         });
         Ok(Self {
             worker: Worker::start(interval, flush).map_err(PolicyError::Evaluation)?,
@@ -92,7 +97,7 @@ impl Drop for HistoryFlusher {
     }
 }
 
-type Flush = dyn Fn() -> Result<(), String> + Send + Sync + 'static;
+type Flush = dyn Fn(bool) -> Result<(), String> + Send + Sync + 'static;
 
 struct Worker {
     stop: Option<mpsc::Sender<()>>,
@@ -114,7 +119,7 @@ impl Worker {
             .name("box-history-flush".to_string())
             .spawn(move || {
                 while let Err(mpsc::RecvTimeoutError::Timeout) = receive.recv_timeout(interval) {
-                    if !perform(&worker_flush, &worker_stats) {
+                    if !perform(&worker_flush, &worker_stats, false) {
                         break;
                     }
                 }
@@ -141,7 +146,7 @@ impl Worker {
             );
         }
         if final_flush {
-            perform(&self.flush, &self.stats);
+            perform(&self.flush, &self.stats, true);
         }
     }
 }
@@ -163,9 +168,9 @@ fn snapshot(stats: &Mutex<HistoryFlushSnapshot>) -> HistoryFlushSnapshot {
     }
 }
 
-fn perform(flush: &Arc<Flush>, stats: &Mutex<HistoryFlushSnapshot>) -> bool {
+fn perform(flush: &Arc<Flush>, stats: &Mutex<HistoryFlushSnapshot>, final_flush: bool) -> bool {
     let started = Instant::now();
-    let outcome = catch_unwind(AssertUnwindSafe(|| flush()));
+    let outcome = catch_unwind(AssertUnwindSafe(|| flush(final_flush)));
     let panicked = outcome.is_err();
     let outcome = outcome.unwrap_or_else(|_| Err("history flush callback panicked".to_string()));
     record(stats, started.elapsed(), outcome);
@@ -199,7 +204,7 @@ mod tests {
     #[test]
     fn a_timer_calls_flush_without_event_submissions() {
         let (sent, received) = mpsc::channel();
-        let flush: Arc<Flush> = Arc::new(move || {
+        let flush: Arc<Flush> = Arc::new(move |_| {
             sent.send(()).expect("receiver remains alive");
             Ok(())
         });
@@ -220,7 +225,7 @@ mod tests {
         let worker_calls = Arc::clone(&calls);
         let mut worker = Worker::start(
             Duration::from_secs(3600),
-            Arc::new(move || {
+            Arc::new(move |_| {
                 worker_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }),
@@ -243,7 +248,7 @@ mod tests {
         let (sent, received) = mpsc::channel();
         let mut worker = Worker::start(
             Duration::from_millis(10),
-            Arc::new(move || {
+            Arc::new(move |_| {
                 let call = worker_calls.fetch_add(1, Ordering::SeqCst);
                 sent.send(call).expect("receiver remains alive");
                 if call == 0 {
@@ -278,7 +283,7 @@ mod tests {
         let (sent, received) = mpsc::channel();
         let mut worker = Worker::start(
             Duration::from_millis(10),
-            Arc::new(move || {
+            Arc::new(move |_| {
                 sent.send(()).expect("receiver remains alive");
                 panic!("injected flush panic");
             }),
@@ -307,7 +312,7 @@ mod tests {
         let mut flusher = engine
             .start_history_flusher(Duration::from_secs(3600))
             .expect("worker starts");
-        flusher.worker.flush = Arc::new(|| Err("injected final flush error".to_string()));
+        flusher.worker.flush = Arc::new(|_| Err("injected final flush error".to_string()));
         let error = flusher
             .shutdown()
             .expect_err("final error reaches the caller");
@@ -331,7 +336,7 @@ mod tests {
         let mut flusher = engine
             .start_history_flusher(Duration::from_secs(3600))
             .expect("worker starts");
-        flusher.worker.flush = Arc::new(move || {
+        flusher.worker.flush = Arc::new(move |_| {
             observed.fetch_add(1, Ordering::SeqCst);
             Ok(())
         });
@@ -351,6 +356,6 @@ mod tests {
 
     #[test]
     fn a_zero_timer_interval_is_rejected() {
-        assert!(Worker::start(Duration::ZERO, Arc::new(|| Ok(()))).is_err());
+        assert!(Worker::start(Duration::ZERO, Arc::new(|_| Ok(()))).is_err());
     }
 }

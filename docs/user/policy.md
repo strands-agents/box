@@ -974,6 +974,13 @@ record is saved. Once the clock is within five minutes again, the box saves it a
 or when the run shuts down, and then requests are decided normally. If the run ends while the clock
 is still more than five minutes behind, or the process is killed, that action doesn't count toward
 any limit after a restart. A time-zone change does not move this clock.
+
+With the `experimental-idle-flush` build feature, the background timer also retries the kept
+record after the clock recovers. The timer does not stop the run for this clock delay. Each timer call still
+persists events the engine already accepted while it waits to record the completed action.
+Storage failures still stop the run. Shutdown reports an error if a completed action remains
+unrecorded after its final attempt.
+
 Correct the system clock, or remove the box directory to start again, as
 [getting started](getting-started.md#clean-up) describes.
 
