@@ -1,0 +1,21 @@
+name: probe-issue-54
+# PROBE ONLY: measure upstream trust modes for issue 54 on macOS. Not for merge.
+on:
+  push:
+    branches: [probe/issue-54-upstream-trust]
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: false
+      - run: sw_vers; rustc --version
+      - run: cargo build --locked --all-features -p strands-box -p strands-box-containment
+      - run: bash .github/probe-issue-54/run.sh
