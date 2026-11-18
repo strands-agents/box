@@ -270,12 +270,16 @@ interpreters are part of the code the operator must trust.
    identity of each source file it opens.
    [Later steps use the validated identities](decisions.md#a-run-validates-once-then-acts-on-the-identity-it-approved),
    so replacing a source file cannot substitute a new configuration.
-   Before it stores anything in the box directory, it checks the program file of each declared
-   secret source and prints one line for each on stderr. Before that line, it refuses a write
-   grant that covers a program, a grant that reaches a path that a source protects, and a table
-   that holds a credential of a source's vault. A run that this check stops leaves a new box
-   directory empty. It then stores the box record, prepares the box directory, and takes the run
-   lock.
+   Before it stores anything in the box directory, it chooses each `[tool.<name>]` to leave out,
+   because its program is not installed. It then checks the program file of each declared secret
+   source and prints one line for each on stderr. Before that line, it refuses a write grant that
+   covers a program, a grant that reaches a path that a source protects, and a table that holds
+   a credential of a source's vault. The check reads no table of a left-out tool. A run that
+   this check stops leaves a new box directory empty. It then stores the box record, prepares
+   the box directory, and takes the run lock.
+   It then prints a `left out` line on stderr for each tool that it left out. No later step sees
+   a left-out tool, so it gets no grants, no file of its own, and no tool selection. Its grammar
+   stays in the policy and still decides another table with the same program name.
 3. It runs the programs of the declared secret sources to read the secrets of telemetry targets,
    and opens the collector to record the steps that follow. A read that fails here is on stderr
    alone.
@@ -307,6 +311,11 @@ interpreters are part of the code the operator must trust.
    grants authorize. These mappings add no executable or library access. The
    [configuration reference](../user/config.md#agentfilesystem-and-toolnamefilesystem) shows the output.
 7. It starts the trampoline, which becomes the agent, and waits for the workload to end.
+
+Before a selected Linux workload starts, native filesystem setup probes whether the kernel can transfer path-only file handles.
+When that optional transfer is unsupported, Box reports the limit on stderr and refuses those opens.
+Other supported native operations remain available. Unexpected probe errors stop startup.
+The [native policy guide](../user/native-filesystem-policy.md#linux-arm64) explains this distinction.
 
 During shutdown, Box stops and reaps the workload before closing the broker and gateway.
 It then removes the record that identifies the running box and releases the run lock.

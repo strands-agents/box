@@ -456,11 +456,7 @@ impl RunContract {
         &self.file.experimental_features
     }
 
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     pub(crate) fn uses_native_filesystem(&self) -> bool {
         self.file.uses_native_filesystem()
     }
@@ -599,10 +595,7 @@ impl RunContract {
                         .chain(self.file.tool.values())
                         .chain(contained_mcp.values().map(|m| &m.spec)),
                     &mcp_servers,
-                    self.file
-                        .agent
-                        .as_ref()
-                        .is_some_and(|agent| !agent.ingress.is_empty()),
+                    self.file.agent.as_ref(),
                     has_backend(&egress, &remote_mcp),
                     &self.file.gateway,
                     &telemetry,
@@ -803,9 +796,11 @@ const TELEMETRY_EXPORT_RECORD_VERSION: u32 = 36;
 /// The record version of a record with `monty = false`, so an older build refuses the box rather
 /// than resuming it with a bare `python3` running Monty again.
 const MONTY_OFF_RECORD_VERSION: u32 = 37;
+/// The record version of a record whose process declares a `filesystem.deny_write` list.
+const DENY_WRITE_RECORD_VERSION: u32 = 38;
 /// The record version of a record that holds a `[secret-source.<scheme>]` table or a `secret.env`
 /// key, so an older build refuses the box by its version.
-const SECRET_SOURCE_RECORD_VERSION: u32 = 38;
+const SECRET_SOURCE_RECORD_VERSION: u32 = 39;
 
 /// Monty is on unless the operator turns it off.
 fn monty_default() -> bool {
@@ -854,8 +849,7 @@ impl ExperimentalFeatures {
                 all(
                     target_os = "linux",
                     target_arch = "aarch64",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
+                    feature = "native-filesystem-policy"
                 )
             ))
         {
@@ -877,14 +871,20 @@ fn record_version<'a>(
     limits: &Limits,
     specs: impl Iterator<Item = &'a ProcessSpec> + Clone,
     mcp: &[crate::record::config::mcp::McpServer],
-    ingress: bool,
+    agent: Option<&ProcessSpec>,
     has_backend: bool,
     gateway: &Gateway,
     targets: &BTreeMap<String, telemetry::TelemetryEntry>,
     secret_source_keys: bool,
 ) -> u32 {
+    let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
     if secret_source_keys {
         SECRET_SOURCE_RECORD_VERSION
+    } else if specs
+        .clone()
+        .any(|spec| !spec.filesystem.deny_write.is_empty())
+    {
+        DENY_WRITE_RECORD_VERSION
     } else if !monty {
         MONTY_OFF_RECORD_VERSION
     } else if telemetry::needs_export_record(targets) {
@@ -1200,6 +1200,7 @@ impl Record {
             FILE_WATCHING_RECORD_VERSION,
             TELEMETRY_EXPORT_RECORD_VERSION,
             MONTY_OFF_RECORD_VERSION,
+            DENY_WRITE_RECORD_VERSION,
             SECRET_SOURCE_RECORD_VERSION,
         ]
         .contains(&stamped.version)
@@ -1231,10 +1232,7 @@ impl Record {
                 .chain(record.tool.values())
                 .chain(record.contained_mcp.values().map(|m| &m.spec)),
             &record.mcp,
-            record
-                .agent
-                .as_ref()
-                .is_some_and(|agent| !agent.ingress.is_empty()),
+            record.agent.as_ref(),
             has_backend(&record.egress, &record.remote_mcp),
             &record.gateway,
             &record.telemetry,
@@ -1610,11 +1608,7 @@ struct ConfigFile {
 }
 
 impl ConfigFile {
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     fn uses_native_filesystem(&self) -> bool {
         let contained = crate::record::config::mcp::contained_specs(&self.mcp);
         process::uses_native_filesystem(
@@ -1786,7 +1780,7 @@ mod tests {
                             &stored.limits,
                             std::iter::empty(),
                             &stored.mcp,
-                            false,
+                            None,
                             false,
                             &Gateway::default(),
                             &stored.telemetry,
@@ -1842,7 +1836,7 @@ mod tests {
                 &stored.limits,
                 std::iter::empty(),
                 &stored.mcp,
-                false,
+                None,
                 has_backend(&stored.egress, &stored.remote_mcp),
                 &Gateway::default(),
                 &stored.telemetry,
@@ -2020,11 +2014,7 @@ mod tests {
         }
     }
 
-    #[cfg(all(
-        target_os = "linux",
-        feature = "native-filesystem-policy",
-        box_native_adapter_tests
-    ))]
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     #[test]
     fn native_setup_includes_inherited_stdio_servers_and_respects_every_opt_out() {
         let base = r#"name = "selection"
@@ -2264,7 +2254,7 @@ native-filesystem-policy = false
                                     &limits,
                                     std::iter::once(&spec),
                                     servers,
-                                    false,
+                                    None,
                                     false,
                                     &Gateway::default(),
                                     &BTreeMap::new(),
@@ -2380,8 +2370,7 @@ native-filesystem-policy = false
             all(
                 target_os = "linux",
                 target_arch = "aarch64",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
+                feature = "native-filesystem-policy"
             )
         )) {
             assert!(
@@ -2849,6 +2838,61 @@ native-filesystem-policy = false
         assert!(
             load(&format!("[agent]\ncommand = [\"x\"]\n{INGRESS_ON}")).is_ok(),
             "the switch alone declares no listener"
+        );
+    }
+
+    /// **`filesystem.deny_write` loads on the agent, a tool, and a local MCP server**, with no
+    /// switch, and a `deny-write` key in `[experimental-features]` is refused as unknown.
+    #[test]
+    fn a_deny_write_list_loads_on_every_process() {
+        let agent = "[agent]\ncommand = [\"x\"]\n[agent.filesystem]\n\
+             write = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n";
+        let file = load(agent).expect("the agent takes the list");
+        assert_eq!(
+            file.agent.expect("the agent").filesystem.deny_write,
+            [PathBuf::from("/work/.venv")]
+        );
+        let tool = "[agent]\ncommand = [\"x\"]\n[tool.git]\ncommand = [\"/usr/bin/git\"]\n\
+             [tool.git.filesystem]\nwrite = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n";
+        let file = load(tool).expect("a tool takes the list");
+        assert_eq!(
+            file.tool["git"].filesystem.deny_write,
+            [PathBuf::from("/work/.venv")]
+        );
+        let server = "[mcp.local]\ntype = \"stdio\"\ncommand = [\"/bin/sh\"]\n\
+             [mcp.local.filesystem]\nwrite = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n";
+        load(server).expect("a local MCP server takes the list");
+        let error = toml::from_str::<ConfigFile>(&format!(
+            "name = \"codex\"\nbox_dir = {LOAD_BOX_DIR:?}\n{agent}[experimental-features]\n\
+             deny-write = true\n"
+        ))
+        .expect_err("the old switch is gone");
+        assert!(error.to_string().contains("deny-write"), "{error}");
+    }
+
+    /// A stored `deny_write` list, on the agent or a tool, takes its record version, so an older
+    /// build refuses the box.
+    #[test]
+    fn a_stored_deny_write_takes_its_record_version() {
+        let tool = record_from_config(
+            "[agent]\ncommand = [\"/bin/sh\"]\n[tool.git]\ncommand = [\"/usr/bin/git\"]\n\
+             [tool.git.filesystem]\nwrite = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n",
+        )
+        .expect("a tool deny_write loads");
+        assert_eq!(tool.version, DENY_WRITE_RECORD_VERSION);
+        let stored = record_from_config(
+            "[agent]\ncommand = [\"/bin/sh\"]\n[agent.filesystem]\n\
+             write = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n",
+        )
+        .expect("an agent deny_write loads");
+        assert_eq!(stored.version, DENY_WRITE_RECORD_VERSION);
+        assert!(
+            Record::parse(
+                &toml::to_string(&stored).expect("the record serializes"),
+                Path::new("record.toml")
+            )
+            .is_ok(),
+            "the record round-trips"
         );
     }
 
@@ -5007,7 +5051,7 @@ command = ["mcp-server-fetch"]
     fn a_declaration_is_stored_at_a_version_no_earlier_build_reads() {
         let stored = pinned_record(&format!("{SECRET_SOURCES_ON}{OP_SOURCE}{OP_USE_SITES}"));
         assert_eq!(stored.version, SECRET_SOURCE_RECORD_VERSION);
-        assert_eq!(SECRET_SOURCE_RECORD_VERSION, 38);
+        assert_eq!(SECRET_SOURCE_RECORD_VERSION, 39);
         assert!(stored.experimental_features.secret_sources);
         assert_eq!(
             toml::to_string(&stored.secret_source).expect("the declarations serialize"),
@@ -5116,6 +5160,43 @@ command = ["mcp-server-fetch"]
         ));
         assert!(!both.monty);
         assert_eq!(both.version, SECRET_SOURCE_RECORD_VERSION);
+        // The key beside a `deny_write` list takes the higher version too, and the list alone
+        // keeps its own version.
+        let denied = "[agent]\ncommand = [\"/bin/sh\"]\n[agent.filesystem]\n\
+                      write = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n";
+        let list_alone = pinned_record(&format!("{}{denied}", route("")));
+        assert_eq!(list_alone.version, DENY_WRITE_RECORD_VERSION);
+        let list_and_key = pinned_record(&format!(
+            "{SECRET_SOURCES_ON}{}{denied}",
+            route(&format!("secret.env = {variable:?}\n"))
+        ));
+        assert_eq!(
+            list_and_key
+                .agent
+                .as_ref()
+                .expect("the agent")
+                .filesystem
+                .deny_write,
+            [PathBuf::from("/work/.venv")]
+        );
+        assert_eq!(list_and_key.version, SECRET_SOURCE_RECORD_VERSION);
+        assert_eq!(
+            Record::parse(&list_and_key.to_toml().unwrap(), Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            list_and_key
+        );
+        let mut forged = list_and_key.clone();
+        forged.version = DENY_WRITE_RECORD_VERSION;
+        assert!(
+            matches!(
+                Record::parse(&forged.to_toml().unwrap(), Path::new("record.toml")),
+                Err(ConfigError::RecordVersion {
+                    expected: SECRET_SOURCE_RECORD_VERSION,
+                    ..
+                })
+            ),
+            "the key cannot hide in a record at the `deny_write` version"
+        );
         // The switch alone keeps the ordinary version, and an earlier build refuses its key.
         let switched = pinned_record(SECRET_SOURCES_ON);
         assert_eq!(switched.version, RECORD_VERSION);

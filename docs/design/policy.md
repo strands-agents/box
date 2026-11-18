@@ -282,6 +282,27 @@ History is not an audit record and has no tamper evidence. It cannot be rewound 
 The operation and its recorded outcome do not commit together. If the process stops between them,
 the history omits that outcome and a `::response` count is too low.
 
+### Dogwood upgrades
+
+Box pins the Dogwood language and local engine packages to 1.1.2. The adapter marks new history
+with Box-owned compatibility generation `1` under `box.dogwood.history-generation`. The generation
+identifies compatible saved policies and activity, independently of the package versions. Change it
+only when recovery or policy/state identity changes make existing history incompatible. Compatible
+package upgrades retain the generation. The adapter refuses previously used history without a
+supported generation before recovery or policy reconciliation. The workload does not start.
+
+The operator can keep the old box directory and select a new directory for the new build. The
+new directory has no earlier activity, so counts reset and history-based prerequisites must be
+satisfied again. Box does not erase or convert the old directory's history. See
+[start with fresh history](../user/policy.md#start-with-fresh-history-after-a-dogwood-upgrade).
+
+*Figure: the Box policy adapter uses Dogwood 1.1.2 in a new box directory. The old history stays
+with the old directory. Events still commit individually.*
+
+![Before the upgrade, the Box policy adapter uses dogwood-language and dogwood-local-engine 1.0.0. After the upgrade, it uses both packages at 1.1.2 and dogwood-language depends on dogwood-syntax 1.1.2. The new box directory starts with fresh history; the old history remains separate. Cedar and redb versions remain fixed, and each event still commits individually.](images/dogwood-upgrade.png)
+
+[Editable figure](images/dogwood-upgrade.drawio)
+
 ## What refuses to load
 
 An invalid policy stops the box. A `forbid` that never matches can appear to protect a resource
@@ -293,12 +314,16 @@ load](decisions.md#a-rule-that-cannot-fire-is-refused-at-load-and-an-uncertain-o
 refuses a rule that reads `context.input` under actions of more than one family, or under no action,
 because a field means what the action makes it mean. See [a rule that reads the input names one
 action family](decisions.md#a-rule-that-reads-the-input-names-one-action-family). It also refuses a
-temporal predicate on `mcp:call::error` or a per-tool `::error`, because an MCP call records only
+rule whose action list names actions of more than one action type, such as a `Box::Action` beside an
+MCP tool's action or the actions of two servers, whether or not it reads the input: Cedar refuses a set
+of mixed types, so the rule would stay pending until discovery finishes and then be dropped, and its
+other arms would go unenforced. It also
+refuses a temporal predicate on `mcp:call::error` or a per-tool `::error`, because an MCP call records only
 `::response`.
 
 The `run` verb validates the policy before it writes any box state. A box with no local MCP server
-validates against the complete action schema, and that check accepts and refuses exactly what the
-later load does, so a policy that passes it loads at the next run.
+validates against the complete action schema. Passing this check confirms the policy text;
+opening or recovering saved history can still prevent startup.
 
 A box with a local MCP server can finish the check only after the server reports its tools. Up
 front, `run` checks syntax, macro expansion, provider use, MCP `::error` predicates, and the action
@@ -383,7 +408,7 @@ has these limits:
 
 - Decisions serialize. Every decision waits for one disk sync and for the one lock, so requests in a
   burst wait for earlier decisions.
-- A temporal macro can lose its history. In Dogwood 1.0.0, a rule that calls a temporal macro such
+- A temporal macro can lose its history. In Dogwood 1.1.2, a rule that calls a temporal macro such
   as `count_within` loses its accumulated state when the text before the call changes, even by a
   comment. A rule written inline keeps its state. Nothing Box ships calls a macro.
 - A verdict is allow or deny. No rule can pause a request for human approval. See [there is no

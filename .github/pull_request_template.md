@@ -1,5 +1,7 @@
 ## Description
-<!-- Provide a detailed description of the changes in this PR -->
+<!-- Write plain prose, as a teammate would. Lead with the problem this change solves and why the
+change is right, then say how it works in a few sentences. Do not use stacked bold labels or a file
+list. When Cargo.lock changes, say which versions moved and why. -->
 
 ## Related Issues
 

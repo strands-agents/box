@@ -15,8 +15,8 @@ This page adds a grammar for `git`, writes rules against it, and then states wha
 governs and what it doesn't. For every key and every startup refusal, see
 [`[tool.<name>.grammar]`](config.md#toolnamegrammar) in the configuration reference.
 
-> **Status.** Tool grammars are experimental. They load only when `box.toml` sets
-> `[experimental-features] tool-grammars = true`, and the format can change before 1.0.0.
+Tool grammars are experimental. They load only when `box.toml` sets
+`[experimental-features] tool-grammars = true`.
 
 ## Before you start
 

@@ -215,7 +215,12 @@ fn select_tool_with_commands(
             trailing: args.to_vec(),
             shebang_interpreters: ShebangInterpreters::MustBeListed,
         }),
-        None => Err(no_match()),
+        None => Err(refuse(
+            "no `[tool.<name>] command` matches this program and its leading arguments. The \
+             `[tool.<name>]` tables are fixed when the box starts, so a program created during \
+             the run runs only under an `[agent.filesystem] exec` entry"
+                .to_string(),
+        )),
     }
 }
 
@@ -355,11 +360,7 @@ fn tool_spawner(
     recorder: Arc<telemetry::DecisionRecorder>,
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     registration: Option<super::native_enforcement::Registration>,
 ) -> ToolSpawner {
@@ -378,11 +379,7 @@ fn tool_spawner(
         let recorder = Arc::clone(&recorder);
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         ))]
         let registration = registration.clone();
         let selection = Arc::clone(&spawn_selection);
@@ -449,11 +446,7 @@ fn tool_spawner(
                 &layout,
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
-                    all(
-                        target_os = "linux",
-                        feature = "native-filesystem-policy",
-                        box_native_adapter_tests
-                    )
+                    all(target_os = "linux", feature = "native-filesystem-policy")
                 ))]
                 registration,
             )
@@ -480,11 +473,7 @@ fn tool_spawner(
 pub(crate) struct McpLeafLauncher {
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     registration: Option<super::native_enforcement::Registration>,
     attachment: Attachment,
@@ -508,22 +497,14 @@ impl McpLeafLauncher {
         workspace: PathBuf,
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         ))]
         registration: Option<super::native_enforcement::Registration>,
     ) -> Self {
         Self {
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             registration,
             attachment,
@@ -653,11 +634,7 @@ impl McpLeafLauncher {
             &self.layout,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             self.registration.clone(),
         )
@@ -715,11 +692,7 @@ pub(crate) struct HostedBox {
 
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     _file_monitor: Option<super::native_enforcement::FileMonitor>,
 
@@ -751,11 +724,7 @@ pub(crate) struct HostedBox {
 impl HostedBox {
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     pub(crate) fn native_registration(&self) -> Option<super::native_enforcement::Registration> {
         self._file_monitor
@@ -850,12 +819,9 @@ impl HostedBox {
         owned: Lock,
         workspace: &Path,
         home: &Path,
-        #[cfg(all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        ))]
-        entry_guard: Option<std::sync::Arc<crate::run::native_enforcement::EntryGuard>>,
+        #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))] entry_guard: Option<
+            std::sync::Arc<crate::run::native_enforcement::EntryGuard>,
+        >,
     ) -> Result<Self, BoxError> {
         // Whatever a previous owner left is stale, because the lock above just proved nothing of
         // this box is running.
@@ -1047,19 +1013,11 @@ impl HostedBox {
         let broker_listener = BrokerHost::bind(root)?;
         #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
         let monitor_required = record.experimental_features.native_filesystem_policy;
-        #[cfg(all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        ))]
+        #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
         let monitor_required = super::native_enforcement::selected(record);
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         ))]
         let file_monitor = if monitor_required {
             Some(super::native_enforcement::FileMonitor::start(
@@ -1068,11 +1026,7 @@ impl HostedBox {
                 root.name(),
                 &crate::record::layout::operator_home_directory()?,
                 coordinator_fatal_sender.clone(),
-                #[cfg(all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                ))]
+                #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
                 entry_guard,
             )?)
         } else {
@@ -1092,11 +1046,7 @@ impl HostedBox {
             Arc::clone(&recorder),
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             file_monitor.as_ref().map(|monitor| monitor.registration()),
         ));
@@ -1113,11 +1063,7 @@ impl HostedBox {
                 workspace.to_path_buf(),
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
-                    all(
-                        target_os = "linux",
-                        feature = "native-filesystem-policy",
-                        box_native_adapter_tests
-                    )
+                    all(target_os = "linux", feature = "native-filesystem-policy")
                 ))]
                 file_monitor.as_ref().map(|monitor| monitor.registration()),
             ))
@@ -1149,11 +1095,7 @@ impl HostedBox {
             broker: Some(broker),
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             _file_monitor: file_monitor,
             coordinator_fatal,
@@ -1198,11 +1140,7 @@ impl HostedBox {
     pub(crate) fn stop_native(&mut self) -> Result<(), BoxError> {
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         ))]
         if self._file_monitor.is_some() {
             if let Some(discovery) = &self.discovery {
@@ -2152,11 +2090,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             owned,
             &workspace,
             &workspace,
-            #[cfg(all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            ))]
+            #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
             None,
         )
         .expect("the box is hosted");
@@ -2233,11 +2167,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
                 owned,
                 &workspace,
                 &workspace,
-                #[cfg(all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                ))]
+                #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
                 None,
             )
         })
@@ -2246,6 +2176,45 @@ permit (principal, action == alpha::Action::"read", resource);"#
         .to_string();
         assert!(refusal.contains("[tool.u]"), "{refusal}");
         assert!(refusal.contains("is not there"), "{refusal}");
+    }
+
+    /// **A left-out tool's lists are not judged**, so the box opens with no reach for that table,
+    /// even when a list names a path that would refuse a tool that is installed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_left_out_tool_brings_no_reach() {
+        let operator = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(operator.path(), "codex");
+        let home = operator.path().canonicalize().expect("a canonical home");
+        let mut record = record(&root);
+        record.tool.insert(
+            "gone".to_string(),
+            ProcessSpec {
+                file_watching: false,
+                native_filesystem_policy: None,
+                command: vec![home.join("bin/gone").display().to_string()],
+                workspace: None,
+                env: Default::default(),
+                filesystem: crate::record::config::process::Filesystem {
+                    read: vec![home.join("absent")],
+                    write: vec![home.clone()],
+                    ..Default::default()
+                },
+                network: None,
+                grammar: None,
+                ingress: Vec::new(),
+            },
+        );
+
+        let left_out =
+            crate::run::commands::leave_out_absent(&mut record).expect("the tool is left out");
+        let hosted = crate::test_support::with_operator_home(operator.path(), || {
+            open_hosted(&operator, &root, &record)
+        });
+
+        assert_eq!(left_out.len(), 1);
+        assert!(hosted.approved().table("[agent]").is_some());
+        assert!(hosted.approved().table("[tool.gone]").is_none());
+        assert!(hosted.approved().commands().get("gone").is_none());
     }
 
     #[cfg(unix)]
@@ -3057,11 +3026,7 @@ while :; do :; done"#
                 workspace,
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
-                    all(
-                        target_os = "linux",
-                        feature = "native-filesystem-policy",
-                        box_native_adapter_tests
-                    )
+                    all(target_os = "linux", feature = "native-filesystem-policy")
                 ))]
                 None,
             );
@@ -3120,11 +3085,7 @@ while :; do :; done"#
                 telemetry::DecisionRecorder::discarding(),
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
-                    all(
-                        target_os = "linux",
-                        feature = "native-filesystem-policy",
-                        box_native_adapter_tests
-                    )
+                    all(target_os = "linux", feature = "native-filesystem-policy")
                 ))]
                 None,
             );
@@ -3537,6 +3498,68 @@ while :; do :; done"#
         assert_eq!(selected.table, "[tool.sh]");
     }
 
+    /// **A file that appears at a left-out tool's path never runs with that tool's reach**: the run
+    /// settled its tools before the file existed, so no table selects the file, and only an `exec`
+    /// entry of the caller's own runs it, in the caller's boundary.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_planted_at_a_left_out_tools_path_never_runs_with_its_reach() {
+        let root = tempfile::tempdir().expect("a directory");
+        let root = root.path().canonicalize().expect("canonical");
+        let bin = root.join("bin");
+        let planted = bin.join("late");
+        let mut record = selection_record(&[
+            ("sh", &["/bin/sh"]),
+            ("late", &[planted.to_str().expect("UTF-8")]),
+        ]);
+        let late = record.tool.get_mut("late").expect("the late tool");
+        late.filesystem.read = vec![root.join("secrets")];
+        late.filesystem.write = vec![root.clone()];
+        let left_out =
+            crate::run::commands::leave_out_absent(&mut record).expect("the tool is left out");
+        std::fs::create_dir_all(&bin).expect("a bin tree");
+        std::fs::copy(Path::new("/bin/sh").canonicalize().expect("sh"), &planted)
+            .expect("a planted file");
+        let planted = planted.canonicalize().expect("canonical");
+        let commands = crate::run::commands::ConfiguredCommands::load(&record).expect("commands");
+
+        let refusal = select_tool_with_commands(
+            &record,
+            &selection_attachment(),
+            &planted,
+            &planted,
+            &[],
+            &commands,
+        )
+        .err()
+        .expect("no table selects the planted file")
+        .to_string();
+        record.agent.as_mut().expect("an agent").filesystem.exec = vec![bin.clone()];
+        let caller = record.agent.clone().expect("an agent").filesystem;
+        let selected = select_tool_with_commands(
+            &record,
+            &selection_attachment(),
+            &planted,
+            &planted,
+            &[],
+            &commands,
+        )
+        .expect("the caller's own exec entry runs it");
+
+        assert_eq!(left_out.len(), 1);
+        assert!(commands.get("late").is_none());
+        assert!(
+            refusal.contains("no `[tool.<name>] command` matches"),
+            "{refusal}"
+        );
+        assert_eq!(selected.table, "[agent]");
+        assert_eq!(selected.spec.filesystem, caller);
+        assert_eq!(
+            selected.shebang_interpreters,
+            ShebangInterpreters::MustBeListed
+        );
+    }
+
     /// **A program under one of the caller's own `exec` entries runs in the caller's boundary** when
     /// no table names it: the caller's spec with the program as its command, the arguments trailing.
     #[cfg(unix)]
@@ -3659,6 +3682,10 @@ while :; do :; done"#
                 .contains("no `[tool.<name>] command` matches this program"),
             "{error}"
         );
+        assert!(
+            !error.to_string().contains("fixed when the box starts"),
+            "a program a table names is a tool, so its refusal is about arguments: {error}"
+        );
     }
 
     /// **A program under a caller `deny` entry is refused** even inside a caller `exec` entry.
@@ -3746,6 +3773,12 @@ while :; do :; done"#
                 .to_string()
                 .contains("no `[tool.<name>] command` matches this program"),
             "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("runs only under an `[agent.filesystem] exec` entry"),
+            "a program no table names says that tools are fixed at start: {error}"
         );
     }
 

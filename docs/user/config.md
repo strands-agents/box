@@ -95,10 +95,15 @@ telemetry. `box_dir` selects the box: one directory is one box. A `name` outside
 its limits is refused with ``box name "<name>" is invalid: <reason>; use one component of letters,
 digits, '.', '_', or '-'``.
 
-Box creates the directory `box_dir` names, with mode `0700`, and creates **no** directory above it.
-Create the parent yourself, or the run is refused with ``the box directory's parent does not exist;
-create it, because Box creates no directory above the one `box_dir` names``. Everything Box writes
-for a box is under `box_dir`, or under a path the file names. The example's
+If the directory named by `box_dir` does not exist, Box creates it with mode `0700` (owner-only
+access). Its parent must already exist and be writable. Box creates **no** directory above
+`box_dir`; a missing parent causes the run to fail with ``the box directory's parent does not exist;
+create it, because Box creates no directory above the one `box_dir` names``.
+
+If `box_dir` already exists, it must be owned by the user running Box and have mode `0700`.
+Box refuses to use an existing directory with a different owner or permissions. These requirements
+apply on both Linux and macOS. Everything Box writes for a box is under `box_dir` or another path
+specified in `box.toml`. The example's
 `box_dir` is `my-box/state`, under the `my-box` directory the operator made for the two files.
 
 `box_dir` may not be the agent's workspace or lie below it, and neither `box.toml` nor `policy.dw`
@@ -188,8 +193,8 @@ group, the owner, and access control lists on files in its writable grants`. Lin
 |---|---|---|---|
 | `shell.timeout` | positive integer or `false` | `30` | Seconds allowed for one submitted Strands Shell call, including its commands and pipelines. `false` disables the Shell and broker execution deadlines. |
 | `shell.max_input` | nonnegative integer | `262144` | Bytes of command text submitted to Strands Shell. `0` disables this limit. |
-| `shell.max_output` | nonnegative integer | `65536` | Bytes in each Shell output buffer, including command substitution. Shell also applies this limit when loading script files with `source`. `0` disables this limit. |
-| `shell.max_stdin` | positive integer | `65536` | Bytes of standard input that one command run through the `zsh`, `bash`, or `sh` alias receives from outside the Shell. Past it, the rest is discarded and the command gets no end of input, so a command that reads past it fails at the Shell timeout; a command that acts as its input arrives has acted on the first part by then. `0` is a load error. |
+| `shell.max_output` | nonnegative integer | `1048576` | Bytes in each Shell output buffer, including command substitution. Shell also applies it to each input that a command reads whole, such as a script loaded with `source`, a `python3` or `lua` script, the standard input of `xargs`, the standard input or each file that `jq` reads, each file that `sed -i` edits, and the file of `curl --json @file`. `jq` applies the limit to each file separately, so it can hold more than `max_output` in total. Box applies it to each `curl` response body. `0` disables this limit. |
+| `shell.max_stdin` | positive integer | `1048576` | Bytes of standard input that one command run through the `zsh`, `bash`, or `sh` alias receives from outside the Shell. Past it, the rest is discarded and the command gets no end of input, so a command that reads past it fails at the Shell timeout; a command that acts as its input arrives has acted on the first part by then. `0` is a load error. |
 
 To allow ten minutes, add `[limits]` with `shell.timeout = 600`. The equivalent nested table is
 `[limits.shell]` with `timeout = 600`. Output leaves the original deadline unchanged.
@@ -203,7 +208,7 @@ are load errors.
 Size limits accept a positive integer byte count or `0` to disable that limit. Negative numbers,
 booleans (including `false`), strings, fractions, and values the platform cannot represent are load
 errors. Omission preserves each default independently.
-For a larger source file, set `[limits.shell] max_output = 262144` to allow up to 256 KiB.
+For a larger source file, set `[limits.shell] max_output = 4194304` to allow up to 4 MiB.
 This also enlarges Shell's output buffers. A larger `max_input` alone does not enlarge source-file reads.
 Stdout and stderr captures have separate buffers; `max_output` is not a combined output or
 total memory budget. Oversized command text is refused with `input too large`, but the current
@@ -319,6 +324,11 @@ The default is `false`. Unknown feature names are errors.
 Signed macOS releases include the adapter, but leave it disabled until you select it.
 An unsupported build refuses `true` before the workload starts.
 See [native filesystem policy](native-filesystem-policy.md) for build requirements, coverage, and recovery behavior.
+
+On Linux, startup can report `this kernel cannot transfer O_PATH handles; path-only opens are refused`.
+`O_PATH` handles identify a file or directory without granting content access.
+This warning disables path-only opens. Other supported native operations remain available.
+See [Linux coverage and limits](native-filesystem-policy.md#linux-arm64) for the probe and its failure behavior.
 
 `tool-grammars = true` turns on [tool grammars](#toolnamegrammar), which are experimental and off
 by default.
@@ -580,8 +590,8 @@ one line until a caller is served again.
 
 ## `[agent.filesystem]` and `[tool.<name>.filesystem]`
 
-Each list, and what one entry in it grants. `[agent.filesystem]` takes all eight;
-`[tool.<name>.filesystem]` takes six, and a `metadata` or `exec` list there is refused by name at
+Each list, and what one entry in it grants. `[agent.filesystem]` takes all nine;
+`[tool.<name>.filesystem]` takes seven. A `metadata` or `exec` list there is refused by name at
 load. [A tool's sandbox](../design/containment.md#a-tools-leaf-box) states what a tool reaches in
 their place.
 
@@ -599,6 +609,29 @@ mounted aliases, and enclosing directories.
 | `metadata` | Inspect file properties below a directory without content access on macOS. Linux omits this grant without an error. **`[agent.filesystem]` only.** |
 | `exec` | Run the path. A file entry names an executable; a directory entry covers the binaries below it. **`[agent.filesystem]` only.** |
 | `deny` | Refuse the path, even when another list grants it. Linux requires the target to exist. |
+| `deny_write` | Refuse every write below an existing directory inside a `write` directory. Reads and `exec` grants there still apply. The box stores its record at version 38. The agent, a tool, and a local MCP server take it. |
+
+Use `deny_write` for a directory that the agent runs code from, such as a Python virtual
+environment in a writable project. Create and fill the directory before the box starts. The agent
+can then run its programs but cannot change them:
+
+```toml
+[agent.filesystem]
+read = ["/work/project"]
+write = ["/work/project"]
+exec = ["/work/project/.venv"]
+deny_write = ["/work/project/.venv"]
+```
+
+The agent cannot create, change, rename, link, or remove anything below the directory. Like the other lists, `deny_write` governs the agent's own processes. A Shell or Python request through Box is decided by policy, so pair the entry with `forbid` rules on `fs:write`, `fs:delete`, and `fs:move` for the directory. A file below it that also has a hard link in a writable directory can still be changed through that link. Install with copies, such as `UV_LINK_MODE=copy`, or keep the installer's cache outside every write grant. The box does not
+warn that a program below a `deny_write` directory is writable. The startup disclosure lists each
+entry as `deny_write  <path>  (read-only)`. A `[tool.<name>] command` below a `deny_write`
+directory is still refused, as every tool command inside a write grant is.
+
+A tool or a local MCP server that writes the directory's parent can still change the directory
+unless its own `[tool.<name>.filesystem]` or `[mcp.<name>.filesystem]` also lists it in
+`deny_write`. A tool's leaf box keeps the protection with broad exec: it can run programs from the
+directory but cannot change them.
 
 On macOS, opting into [file watching](#file-watching) permits an event stream that can
 disclose denied names and activity despite these direct-access restrictions.
@@ -737,11 +770,15 @@ happen after the box directory is created and before the workload starts.
 | A system directory or a credential store the box always refuses | `<path> is refused beneath every grant: <reason>` |
 | A path that a [`[secret-source.<scheme>]`](#what-box-protects) table lists in `reads` or `deny`, a path inside it, or a folder that holds it | ``this grant reaches <path>, which the secret source `<scheme>` keeps from each workload (its `reads` entry "<entry>"). Keep each grant outside the paths that a secret source names in `reads` and `deny` `` |
 
-Create the path first, or name the existing directory above it. The same rule holds for a
-`[tool.<name>] command` that names a file the workload has not built yet, which is refused with
-`containment config failed: path does not exist: <path>`. In the example, the CLI install,
+Create the path first, or name the existing directory above it. A `[tool.<name>] command` that names
+a file the workload has not built yet is not refused: Box
+[leaves that tool out](#a-tool-whose-program-is-not-installed) for the whole run, so build the file
+before `run`. In the example, the CLI install,
 `strands-home`, the preload file, and the project all exist before the first `run`, because the
 tutorial's earlier steps made them.
+
+On Linux, `filesystem grant object changed while loading config` means a granted path selected a different object during that launch's preparation.
+Let the filesystem update finish, then retry the launch.
 
 **A `write` grant alone is not runnable.** The agent's sandbox refuses to map code from a writable
 grant. When the agent's `command` or one of its interpreters lies inside a writable grant, the
@@ -769,7 +806,46 @@ Their filesystem tables reject `exec`; only `[agent.filesystem]` accepts that li
 A tool table applies when a program the agent's shell starts begins with the tool's `command`: the
 same program, then the same fixed arguments. Box resolves each configured tool program before the
 workload starts and keeps that file identity for the run. The longest matching prefix wins.
-Every declared tool is selectable, and a program under one of the agent's own `exec` entries needs no table of its own.
+Every declared tool is selectable, unless Box leaves it out, and a program under one of the agent's
+own `exec` entries needs no table of its own.
+
+### A tool whose program is not installed
+
+When a tool's program is not installed, Box leaves that tool out and the box still starts. The
+program is not installed when:
+
+- nothing with a bare name's spelling exists in any directory on the tool's search path, or
+- nothing exists at an absolute path.
+
+A search-path entry that is a file, or that Box cannot search, holds nothing.
+
+A symbolic link to a file that doesn't exist counts as nothing. A symbolic link that loops does not
+count as nothing, so Box refuses to start.
+
+`run` prints one line for each tool it leaves out, before the workload starts:
+
+```text
+strands-box: [tool.tsx] left out: tsx not found
+```
+
+A left-out tool gets no filesystem grants, and Box does not check its lists. It runs nothing for
+the agent. Its grammar stays, so a policy that names its actions still loads. A grammar decides
+spawns by program name, so it still decides another `[tool]` or stdio `[mcp.<name>]` with the same
+program name. The startup line for that table says so:
+
+```text
+strands-box: [tool.system_git]: a spawn of `git` is decided by its tool grammar, and no `shell:spawn` rule applies to it
+```
+
+The set of tools is fixed when the run starts. A program installed
+during the run, or a file that appears later at the tool's path, does not run with the tool's
+grants.
+
+Box still refuses to start when the program exists and fails a check: it is not executable, it is
+not a regular file, or a write grant reaches it. A bare name counts as existing when any directory
+on the search path holds something with that name. Box also refuses a program that holds `${`,
+because a program is never expanded, and a `command` argument that names no value Box can expand in
+`${NAME}`. So a typo in a `command` path does not stop the box; check the `left out` lines.
 
 The example box declares no tool, so a program its shell names is a `shell:spawn` decision with no
 table behind it, and the example policy permits none. A git tool for the CLI's shell, with git from
@@ -797,15 +873,15 @@ tool's `env` for non-secret literals.
 
 ### Configured command integrity
 
-Each configured tool program must exist before the run starts. Box checks grants in `[agent]`,
-every `[tool.<name>]`, and every local `[mcp.<name>]` table against those programs. The program of
-each [`[secret-source.<scheme>]`](#secret-sourcescheme) table gets the same checks. The
-write-grant refusal names that table. The hard-link refusals and the refusals through Strands
-Shell and Monty say `configured tool command` for it too.
+Box checks grants in `[agent]`, every `[tool.<name>]` it does not
+[leave out](#a-tool-whose-program-is-not-installed), and every local `[mcp.<name>]` table against
+those programs. The program of each [`[secret-source.<scheme>]`](#secret-sourcescheme) table gets
+the same checks. The write-grant refusal names that table. The hard-link refusals and the
+refusals through Strands Shell and Monty say `configured tool command` for it too.
 
 | Condition | Refusal text | Next action |
 |---|---|---|
-| A command file is absent, or a bare command name has no executable match on its search path. | `path does not exist` or `cannot resolve bare executable` | Install the command before startup, or correct its path or `env.PATH`. |
+| A command path exists but is not an executable regular file. | `executable is not an executable regular file` | Correct the file's mode or the command's path. |
 | A writable grant can overwrite the command or replace its path, including a symbolic-link route or enclosing directory. | `this write grant can change` the command `or its path` | Keep configured tools outside every process's write grants. |
 | A writable directory contains another name for an operator-writable configured command. | `this write grant contains a hard link to a configured tool command` | Narrow the writable directory to exclude the command's hard-link names. |
 | Box cannot finish scanning a writable directory for configured-command hard links. | `cannot be inspected for configured command hard links` | Restore access to the directory, or narrow the writable grant. |
@@ -1086,7 +1162,7 @@ Each of these is refused when the configuration loads:
   environment, even when a `pass-secret-env` list names the AWS keys. So a request that policy
   permits to that route's destinations is signed as the identity that reads the vault.
 
-A box that declares a source stores its record at version 38, and so does a box with a
+A box that declares a source stores its record at version 39, and so does a box with a
 `secret.env` key. An older build refuses that record.
 
 ### How a run reads the secrets
@@ -1175,9 +1251,11 @@ Each of these stops the box before the workload starts:
 ### What Box protects
 
 A workload must not go around Box to the vault. So Box protects four things that the table names,
-in `[agent]`, each `[tool.<name>]` table, and each local `[mcp.<name>]` table. It checks all four
-before it starts a program for the first time, in `box run` and in `policy generate-schema`, so a
-box that fails a check never runs the program.
+in `[agent]`, each `[tool.<name>]` table that the run does not
+[leave out](#a-tool-whose-program-is-not-installed), and each local `[mcp.<name>]` table. It
+checks all four before it starts a program for the first time, in `box run` and in
+`policy generate-schema`, so a box that fails a check never runs the program.
+`policy generate-schema` leaves no tool out, so it checks each `[tool.<name>]` table.
 
 **The program file.** Box keeps the program file away from the workload as it does for a
 [configured tool program](#configured-command-integrity). The program file is element 0 of
@@ -1194,9 +1272,11 @@ path inside a longer argument such as `--config=/etc/vault.hcl`. Keep those outs
 grant yourself, or list the folder in `reads`.
 
 **The `reads` and `deny` paths.** No grant can reach one of these paths. Box refuses a
-filesystem entry in any list except `deny` that names the path, a path inside it, or a folder
-that holds it. That includes a credential store that a grant can otherwise name exactly: with
-`reads = ["~/.aws"]`, a tool can't take `read = ["~/.aws"]`. Each sandbox also denies these
+filesystem entry in any list except `deny` and `deny_write` that names the path, a path inside
+it, or a folder that holds it. That includes a credential store that a grant can otherwise name
+exactly: with `reads = ["~/.aws"]`, a tool can't take `read = ["~/.aws"]`. A `deny_write` entry
+at such a path grants nothing, and Box refuses the `write` entry that it needs around it. Each
+sandbox also denies these
 paths, as it denies an entry of its own `deny` list. So a path that is absent when the box starts
 stays closed if it appears later. An entry that is a symbolic link protects the link and the path
 that it names, also when nothing is there yet, such as a socket that an app makes when it starts.
@@ -1451,9 +1531,10 @@ A `box_dir` whose parent does not exist is refused before anything is created. E
 that needs the surrounding OS happens after `run` has created `box_dir`, and before the workload
 starts: a `workspace` that does not exist, an `env.HOME` inside or enclosing `box_dir`, a telemetry
 file destination inside the box directory and outside `private/`, a `filesystem` entry whose path
-does not exist or is a symbolic link, a `[tool.<name>] command` that names a missing file, an
-`[[agent.ingress]] listen` address that cannot be bound, and on macOS a `workload_port` that another
-process already listens on. The
+does not exist or is a symbolic link, a `deny_write` entry that is not a directory inside a `write`
+directory, an `[[agent.ingress]] listen` address that cannot be bound, and on macOS a
+`workload_port` that another process already listens on. A `[tool.<name>]` whose program is not
+installed is [left out](#a-tool-whose-program-is-not-installed) rather than refused. The
 box directory stays behind. It is empty when the refusal came before the record was written, and it
 holds the record when the refusal came after. The next `run` against it judges the file again and
 reports the same refusal until the file is fixed.

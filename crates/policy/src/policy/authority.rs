@@ -1274,6 +1274,7 @@ fn is_inert(error: &PolicyError) -> bool {
         error,
         PolicyError::Spelling(_)
             | PolicyError::InputAcrossFamilies(_)
+            | PolicyError::MixedActionNamespaces(_)
             | PolicyError::SharedRuleId(_)
             | PolicyError::ReservedAction(_)
             | PolicyError::InertTemporalPermit(_)

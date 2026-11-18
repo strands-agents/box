@@ -2,7 +2,7 @@
 
 pub(crate) mod authority;
 mod filesystem_queries;
-#[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+#[cfg(feature = "native-filesystem-policy")]
 mod native_filesystem;
 pub(crate) mod netns;
 pub(crate) mod probe;
@@ -164,9 +164,9 @@ impl ContainmentBackend for NamespaceBackend {
         // Build the plan and compile both filters before anything irreversible.
         let view = view::MountView::plan(config)?;
         let policy = syscall::SyscallPolicy::for_config(config.network());
-        #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+        #[cfg(feature = "native-filesystem-policy")]
         let policy = policy.with_native_filesystem(native_filesystem_handoff.is_some());
-        #[cfg(not(all(feature = "native-filesystem-policy", box_native_adapter_tests)))]
+        #[cfg(not(feature = "native-filesystem-policy"))]
         if native_filesystem_handoff.is_some() {
             return Err(unenforceable(
                 "native filesystem interception is absent from this build",
@@ -246,7 +246,7 @@ impl ContainmentBackend for NamespaceBackend {
         // Only the workload process reaches here, in the pivoted view.
         authority::drop_all_capabilities()?;
         authority::set_no_new_privileges()?;
-        #[cfg(all(feature = "native-filesystem-policy", box_native_adapter_tests))]
+        #[cfg(feature = "native-filesystem-policy")]
         if let Some(handoff) = native_filesystem_handoff {
             native_filesystem::handoff(&filters.filesystem_queries, &filesystem_handoff, handoff)
                 .map_err(|error| {
@@ -1594,6 +1594,95 @@ mod tests {
              13 = fork failed, 14/16/17 = waitid failed with another errno or a wrong record, \
              15 = pidfd_open failed, 40 = installing the filters failed"
         );
+    }
+
+    #[test]
+    fn a_name_is_created_without_replacing_one_with_renameat2_under_the_filters() {
+        let directory = tempfile::tempdir().expect("create the rename fixture");
+        let name = |leaf: &str| {
+            std::ffi::CString::new(directory.path().join(leaf).as_os_str().as_encoded_bytes())
+                .unwrap()
+        };
+        let (first, second, taken, third) =
+            (name("first"), name("second"), name("taken"), name("third"));
+        let (fourth, fifth) = (name("fourth"), name("fifth"));
+        for leaf in ["first", "taken"] {
+            std::fs::write(directory.path().join(leaf), leaf).expect("write a rename fixture");
+        }
+        let kept = directory.path().join("kept");
+        let filters = syscall::SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("the filters compile");
+        let outcome = in_filtered_child(&filters, || {
+            let renameat2 = |old: &std::ffi::CString, new: &std::ffi::CString, flags: u64| {
+                // SAFETY: both C strings stay live and name this test's own fixture folder.
+                let result = unsafe {
+                    libc::syscall(
+                        libc::SYS_renameat2,
+                        libc::AT_FDCWD,
+                        old.as_ptr(),
+                        libc::AT_FDCWD,
+                        new.as_ptr(),
+                        flags,
+                    )
+                };
+                if result == 0 {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::last_os_error().raw_os_error())
+                }
+            };
+            let noreplace = u64::from(libc::RENAME_NOREPLACE);
+            let exchange = u64::from(libc::RENAME_EXCHANGE);
+            let whiteout = u64::from(libc::RENAME_WHITEOUT);
+            if renameat2(&first, &second, 0).is_err() {
+                return 10;
+            }
+            // The kernel, not the filter, answers a taken name: EEXIST, never EPERM.
+            if renameat2(&second, &taken, noreplace) != Err(Some(libc::EEXIST)) {
+                return 11;
+            }
+            if renameat2(&second, &third, noreplace).is_err() {
+                return 12;
+            }
+            if renameat2(&third, &taken, exchange) != Err(Some(libc::EPERM)) {
+                return 13;
+            }
+            if renameat2(&third, &second, whiteout) != Err(Some(libc::EPERM)) {
+                return 14;
+            }
+            // The kernel reads the flags as an unsigned int, so the filter matches their low 32
+            // bits: a high bit neither refuses NOREPLACE nor hides EXCHANGE or WHITEOUT.
+            let high = 1_u64 << 32;
+            if renameat2(&third, &fourth, high | noreplace).is_err() {
+                return 16;
+            }
+            if renameat2(&fourth, &taken, high | exchange) != Err(Some(libc::EPERM)) {
+                return 17;
+            }
+            if renameat2(&fourth, &fifth, high | whiteout) != Err(Some(libc::EPERM)) {
+                return 18;
+            }
+            // tempfile's persist_noclobber is the call uv's cache lock makes.
+            let persisted = tempfile::NamedTempFile::new_in(directory.path())
+                .map_err(|_| ())
+                .and_then(|file| file.persist_noclobber(&kept).map_err(|_| ()));
+            if persisted.is_err() {
+                return 15;
+            }
+            0
+        });
+        assert_eq!(
+            outcome, 0,
+            "10 = renameat2 with no flags failed, 11 = RENAME_NOREPLACE onto a taken name did not \
+             fail with EEXIST (EPERM means the filter refused it, so tempfile cannot persist a \
+             file and uv cannot take its cache lock), 12 = RENAME_NOREPLACE onto a free name \
+             failed, 13/14 = RENAME_EXCHANGE or RENAME_WHITEOUT was not refused with EPERM, \
+             15 = tempfile's persist_noclobber failed, 16 = a high flag bit refused \
+             RENAME_NOREPLACE, 17/18 = a high flag bit let RENAME_EXCHANGE or RENAME_WHITEOUT \
+             through, 40 = installing the filters failed"
+        );
+        assert!(kept.is_file(), "persist_noclobber must create its new name");
     }
 
     #[test]

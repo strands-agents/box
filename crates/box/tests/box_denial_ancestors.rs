@@ -163,7 +163,11 @@ fn denial_matrix(directory: bool, variants: &[(&str, bool)]) {
                 "permitted operations did not complete",
             );
             let errno = report["rename_errno"].as_i64();
-            let expected_refusal = if variant.starts_with("renameat2") {
+            // The workload filter refuses `renameat2` with `RENAME_EXCHANGE`, so that variant
+            // fails with `EPERM`. `renameat`, and `renameat2` with no flags or `RENAME_NOREPLACE`,
+            // reach the kernel, which refuses to move an ancestor that the view keeps fixed with a
+            // mount, with `EBUSY`.
+            let expected_refusal = if *variant == "renameat2-exchange" {
                 errno == Some(i64::from(libc::EPERM))
             } else {
                 errno == Some(i64::from(libc::EBUSY))

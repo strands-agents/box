@@ -68,9 +68,11 @@ Its waiting processes then close their copies.
 The macOS backend leaves this descriptor to the trampoline.
 The trampoline owns the completion protocol described below.
 
-The fourth argument, `native_filesystem_handoff`, reserves an optional Unix stream
-for native filesystem registration. This preparation does not implement that registration.
-Pass `None`. A supplied handoff returns `UnsupportedCapability` before backend selection.
+The fourth argument, `native_filesystem_handoff`, is an optional Unix stream to the
+trusted native filesystem monitor. On Linux, it transfers the notification listener
+and filesystem root, then waits for registration before the workload runs.
+Pass `None` when native filesystem checks are disabled.
+Builds without Linux native filesystem support refuse a supplied handoff.
 
 A successful `apply` returns `()`. Kernel enforcement remains active until the
 process exits and is inherited by child processes and across `exec`. There is no
@@ -312,6 +314,15 @@ calls `Containment::apply`. The supervisor retains the temporary directory only
 through helper read/unlink, not for the workload lifetime. Only after apply
 succeeds does the trampoline install the target environment and execute the
 command in the same process.
+
+On Linux, serialized authorizing grants carry their recorded device, inode, and object type.
+An inode identifies one filesystem object on a device. Denials omit the identity field.
+Loading reopens each path and refuses an identity mismatch before applying the sandbox.
+Keep the originating `ContainmentConfig` alive through loading so its open references prevent reuse of the recorded object identifiers.
+Box retains this configuration for the launched process's lifetime.
+
+Older configurations can omit this identity field and bind the object when loaded.
+Older trampolines reject the added field. Use the library and trampoline from the same build.
 
 The caller finds `strands-box-contain-trampoline` beside its own executable and
 nowhere else; no configuration key names another path. The caller assumes its

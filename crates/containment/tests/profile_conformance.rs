@@ -484,8 +484,8 @@ fn an_execute_grant_reached_through_a_link_chain_renders_metadata_on_every_node(
     let root = directory.path().canonicalize().expect("canonical tempdir");
     let target = root.join("real-agent");
     std::fs::write(&target, "agent").expect("the real program");
-    // Every link target is spelled canonically. A target reached through a link of its own adds an
-    // unrendered node and moves what this test measures.
+    // Every link target is spelled canonically. A target reached through a linked folder adds that
+    // folder's link as a node of its own and moves what this test measures.
     let first = root.join("hop-1");
     let second = root.join("hop-2");
     let route = root.join("hop-3");

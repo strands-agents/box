@@ -548,7 +548,7 @@ fn a_declared_secret_is_read_at_startup_and_the_workload_holds_a_placeholder() {
     let record = std::fs::read_to_string(box_.root().join("private/box.toml"))
         .expect("the box started, so the record is stored");
     let record: toml::Value = toml::from_str(&record).expect("the record is TOML");
-    assert_eq!(record["version"].as_integer(), Some(38));
+    assert_eq!(record["version"].as_integer(), Some(39));
     assert_eq!(
         record["experimental-features"]["secret-sources"].as_bool(),
         Some(true)
@@ -912,6 +912,73 @@ permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], r
         "{output:?}"
     );
     assert!(!printed("vault_write_rc=0"), "{output:?}");
+}
+
+/// **A tool that the run leaves out brings no table to the check of the secret sources**: its
+/// write grant over the program of a source stops no box, and the same table stops the box when
+/// its program is installed.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_left_out_tool_with_a_write_grant_over_a_secret_source_program_stops_no_box() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let attempt = |name: &str, tool_program: &dyn Fn(&std::path::Path) -> String| {
+        let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+        let folder = program
+            .directory
+            .path()
+            .canonicalize()
+            .expect("the program folder resolves");
+        let tool_program = tool_program(&folder);
+        let grant = folder.display().to_string();
+        let tool = format!(
+            "[tool.spare]\ncommand = [{tool_program:?}]\n[tool.spare.filesystem]\n\
+             read = [{grant:?}]\nwrite = [{grant:?}]\n"
+        );
+        let (box_, output) = Request::with_config(
+            name,
+            &permit_egress_to("api.example.test", 443),
+            &declared_source(
+                true,
+                &program.path(),
+                &format!(
+                    "{}{tool}",
+                    declared_route("api.example.test", "op://Personal/GitHub/token")
+                ),
+            ),
+        )
+        .attempt();
+        (program, folder, tool_program, box_, output)
+    };
+
+    let (program, folder, _, box_, output) =
+        attempt("declared-tool-kept", &|_| "/usr/bin/true".to_string());
+    assert_refused(
+        &box_,
+        &output,
+        &[
+            "`[tool.spare]` filesystem entry",
+            &format!(
+                "this write grant can change [secret-source.op] command {} or its path",
+                folder.join("vault-stand-in").display()
+            ),
+        ],
+    );
+    assert_eq!(program.runs(), Vec::<String>::new());
+
+    let (program, _, absent, _box, output) = attempt("declared-tool-left-out", &|folder| {
+        folder.join("absent-tool").display().to_string()
+    });
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "the box must start: {stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "strands-box: [tool.spare] left out: {absent} not found\n"
+        )),
+        "{stderr}"
+    );
+    assert_eq!(program.runs(), ["read op://Personal/GitHub/token"]);
 }
 
 /// The stderr of the first run of a new box directory, which must stop, each entry that the
