@@ -986,6 +986,23 @@ an explicit descriptor (`RequestPath::new` in `crates/box/src/run/linux_enforcem
 `a_workload_returns_to_its_saved_folder_with_fchdir`
 saves a folder, enters a subfolder, and returns with `fchdir` under the real trampoline.
 
+### The host's top-level links into /usr
+
+On Amazon Linux 2023 and Ubuntu, `/bin` is a link to `usr/bin`. The view bound only the files its
+grants named, so with `/usr/bin/sh` granted, `/bin` was absent and `#!/bin/sh` scripts failed to exec
+with `ENOENT` (#453). pnpm's `node_modules/.bin/tsc` failed this way, and so did uvx's cached tool
+commands, which uv writes as `#!/bin/sh` scripts because the environment can move: on GitHub's
+Ubuntu 24.04 runner, `uvx mypy@1.15.0` printed `error: Failed to spawn: mypy`.
+
+`materialize` now writes each host link from `/bin`, `/sbin`, `/lib`, `/lib32`, `/lib64` or
+`/libx32` into the view root, after every mount and before the root is sealed read-only. A link is
+copied only when the host's entry is a link whose text is a relative path into `usr/`, and only when
+no planned mount sits at or under the name, so an interpreter spelling or loader bind under `/lib`
+keeps its place. A link resolves only to paths the view binds, so it adds no reach.
+`the_view_copies_the_hosts_merged_usr_links_where_no_mount_sits` pins the plan, and
+`a_bin_sh_script_runs_through_the_hosts_bin_link` runs a `#!/bin/sh` script under the real
+trampoline with only `/usr/bin/sh` granted, and checks that `/bin/cat` stays absent.
+
 ### W^X
 
 W^X closes three routes. Every writable mount, including `/tmp`, uses `MS_NOEXEC`. The permit filter

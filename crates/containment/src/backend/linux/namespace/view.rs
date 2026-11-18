@@ -72,6 +72,9 @@ pub(crate) struct MountEntry {
 #[derive(Debug)]
 pub(crate) struct MountView {
     entries: Vec<MountEntry>,
+    /// Each link at the top of the view, as `(name, link text)`: the host's own `/bin -> usr/bin`
+    /// and its kin, which reach only what the entries bind.
+    root_links: Vec<(PathBuf, PathBuf)>,
     protected_parents: BTreeSet<PathBuf>,
     grant_identities: BTreeMap<PathBuf, ObjectIdentity>,
     grant_pins: Vec<ObjectPin>,
@@ -517,8 +520,10 @@ impl MountView {
                 })
         });
 
+        let root_links = root_links(&entries);
         Ok(Self {
             entries,
+            root_links,
             protected_parents,
             grant_identities,
             grant_pins: config
@@ -535,6 +540,12 @@ impl MountView {
     #[cfg(test)]
     pub(crate) fn entries(&self) -> &[MountEntry] {
         &self.entries
+    }
+
+    /// The planned links at the top of the view, as `(name, link text)`.
+    #[cfg(test)]
+    pub(crate) fn planned_root_links(&self) -> &[(PathBuf, PathBuf)] {
+        &self.root_links
     }
 
     /// Execute the plan and `pivot_root` into it.
@@ -580,6 +591,18 @@ impl MountView {
         let old_root = root.join(OLD_ROOT_NAME);
         std::fs::create_dir_all(&old_root)
             .map_err(|e| refusal(format!("creating the pivot target: {e}")))?;
+
+        // The host's merged-/usr links, written after every mount so no mount target is reached
+        // through one. `symlink` refuses an existing entry rather than replacing it.
+        for (name, link) in &self.root_links {
+            std::os::unix::fs::symlink(link, root.join(name)).map_err(|e| {
+                refusal(format!(
+                    "creating the view's '/{}' -> '{}' link: {e}",
+                    name.display(),
+                    link.display()
+                ))
+            })?;
+        }
 
         // Remount the root read-only now that every bind is in place.
         mount_syscall(
@@ -1278,6 +1301,33 @@ const OLD_ROOT_NAME: &str = ".old-root";
 
 /// The empty file every refused file is a bind of, in the view's own root.
 const EMPTY_FILE_NAME: &str = ".strands-box-empty";
+
+/// The top-level names a merged-/usr host makes links into `/usr`, as Debian, Ubuntu, Fedora and
+/// Amazon Linux do: `/bin -> usr/bin`, `/lib64 -> usr/lib64`.
+const MERGED_USR_NAMES: &[&str] = &["bin", "sbin", "lib", "lib32", "lib64", "libx32"];
+
+/// The host's merged-/usr links that the view copies, as `(name, link text)`.
+///
+/// A script names its interpreter by the host's spelling, such as `#!/bin/sh`, and without `/bin`
+/// in the view the kernel answers its exec with `ENOENT` even when the view binds `/usr/bin/sh`.
+/// A link reaches only what the view already binds, so copying it grants nothing. Each link is
+/// copied only when the host's entry is a link whose text is a relative path into `usr/`, and only
+/// when no planned mount sits at or under the name, which keeps every existing bind where it is.
+fn root_links(entries: &[MountEntry]) -> Vec<(PathBuf, PathBuf)> {
+    MERGED_USR_NAMES
+        .iter()
+        .filter_map(|name| {
+            let top = Path::new("/").join(name);
+            let link = std::fs::read_link(&top).ok()?;
+            let into_usr = link.starts_with("usr")
+                && link
+                    .components()
+                    .all(|component| matches!(component, std::path::Component::Normal(_)));
+            let planned = entries.iter().any(|entry| entry.target.starts_with(&top));
+            (into_usr && !planned).then(|| (PathBuf::from(name), link))
+        })
+        .collect()
+}
 
 /// `mount(2)`, with `Option`s for the arguments the kernel accepts as NULL.
 fn mount_syscall(
@@ -3327,6 +3377,65 @@ mod tests {
              42=THE SUBMOUNT WAS WRITABLE under a read-only grant, \
              43=a mount step errored)"
         );
+    }
+
+    /// **The view copies the host's merged-/usr links, and only where no mount sits.** A link
+    /// reaches only what the view binds, so it grants nothing. A mount at or under the name keeps
+    /// its place, and the name gets no link.
+    #[test]
+    fn the_view_copies_the_hosts_merged_usr_links_where_no_mount_sits() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let file = directory.path().join("granted");
+        std::fs::write(&file, b"contents").expect("write a granted file");
+        let config = ContainmentConfig::new()
+            .allow(&file, Operation::Read, Scope::File)
+            .expect("grant a file outside /bin");
+        let view = MountView::plan(&config).expect("plan must succeed");
+        for name in MERGED_USR_NAMES {
+            let top = Path::new("/").join(name);
+            let host = std::fs::read_link(&top).ok();
+            let copied = view
+                .planned_root_links()
+                .iter()
+                .find(|(planned, _)| planned == Path::new(name))
+                .map(|(_, link)| link.clone());
+            let mounted = view
+                .entries()
+                .iter()
+                .any(|entry| entry.target.starts_with(&top));
+            match host {
+                Some(link) if link.starts_with("usr") && !mounted => {
+                    assert_eq!(copied, Some(link), "/{name} is the host's link into /usr")
+                }
+                _ => assert_eq!(copied, None, "/{name} is no merged-/usr link of the host"),
+            }
+        }
+
+        let bin = Path::new("/bin");
+        let merged = std::fs::read_link(bin).is_ok_and(|link| link == Path::new("usr/bin"));
+        let sh = Path::new("/bin/sh");
+        if merged && sh.exists() {
+            // A grant spelled through `/bin` plans a mount under it, so `/bin` gets no link.
+            let config = ContainmentConfig::new()
+                .allow(sh, Operation::Read, Scope::File)
+                .expect("grant /bin/sh");
+            let view = MountView::plan(&config).expect("plan must succeed");
+            assert!(
+                view.entries()
+                    .iter()
+                    .any(|entry| entry.target.starts_with(bin)),
+                "the /bin/sh spelling is planned: {:?}",
+                view.entries()
+            );
+            assert!(
+                !view
+                    .planned_root_links()
+                    .iter()
+                    .any(|(name, _)| name == Path::new("bin")),
+                "a mount under /bin keeps /bin a directory: {:?}",
+                view.planned_root_links()
+            );
+        }
     }
 
     /// A grant through a symlink is reachable under BOTH names.
