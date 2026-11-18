@@ -134,7 +134,9 @@ also delete any volume's event history. Box prints these limitations at startup.
 [file watching](../../docs/user/config.md#file-watching).
 
 `filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
-`exec`, and `deny`. They give this process's own filesystem calls direct reach, because an
+`exec`, and `deny` — and also takes `deny_write`, which keeps an existing directory inside a
+`write` directory read-only. A tool and a local MCP server take `deny_write` too.
+They give this process's own filesystem calls direct reach, because an
 unmodified coding agent's `Read`, `Write` and `Edit` issue those calls and containment refuses every
 one. A directory entry is recursive, and a file entry is exact. `write` does not imply `read`. Linux
 is the residual: a writable bind reads there, and the startup disclosure says so on that entry's
