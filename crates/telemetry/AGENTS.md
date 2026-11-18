@@ -191,17 +191,19 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   to `agent_logs` and `mcp_unmatched`. The eight spellings here are this crate's own.
   `box.toml` takes six words: `deny`, `permit`, `trace`, `logs`, `metrics`, and `tool_calls`. Box
   expands them.
-- **A tool-call value reaches a target only when the target names its field, and the exporter is
-  where that holds.** A `ToolCall` carries every flattened argument and output value, because one
-  record reaches every target. `TargetExporter::export_logs` runs `ToolFieldAllowlist::redact` on the
-  encoded request before either copy leaves, keyed by the record's own `strands.box.tool.server` and
-  `.name`, so a field revealed for one tool stays redacted on another. A target with no list,
-  including the box's default file, receives every path and no value. Do not move the redaction
-  into `ToolCall` or into the box: a record that left already redacted could not serve a target that
-  asked for the value, and one that left unredacted from the box would reach every target.
-  `each_target_receives_only_the_tool_fields_it_names` is the two-target pin, and it fails when the
-  `redact` call is removed. A key that is not a plain name becomes `*`, because a key is never
-  redacted and a tool can use data, such as an email address, as one.
+- **A tool call carries its values in clear text, so it reaches only a target that names
+  `tool_calls`.** `Signal::default_signals` is every signal except `ToolCalls`, and both `Target::new`
+  and `Target::opened_file` start from it, so neither a target with no `include` nor the box's
+  default file receives one. `only_a_target_naming_tool_calls_receives_them_in_clear_text` (two
+  unnamed targets beside a named one, one of them opened) and
+  `the_default_set_is_every_signal_but_tool_calls` are the pins; both fail when the filter in
+  `default_signals` is removed. Two designs came before this one and were withdrawn. A per-tool,
+  per-field `tool_fields` list redacted every other value in the exporter; operators rarely wrote the
+  MCP servers they run, so they could not choose the fields, and each list went stale. Its first
+  version kept every field name visible, and a token-shaped key such as `ghp_…` reached every target
+  as a name. **Do not reintroduce redaction by key shape**, for the reason the shell entry above
+  gives: no syntactic rule separates a secret from a plain name. A non-plain key still becomes `*`,
+  so a key holding `.` cannot fake a nested path.
 - **`agent_logs` and `agent_metrics` are UNCONDITIONAL, and no list narrows them away.**
   `Collector::start` unions `Signal::always_received()` into every target's lane, by the maintainers'
   direction on 2026-09-29, so `include = ["deny"]` holds the refusals **and** the agent's own log
@@ -417,10 +419,10 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
 
 ## Public surface
 
-Twenty names: `Collector`, `Target`, `TargetKind`, `TargetSecret`, `TelemetryConfig`, `Result`,
+Eighteen names: `Collector`, `Target`, `TargetKind`, `TargetSecret`, `TelemetryConfig`, `Result`,
 `TelemetryError`, `DecisionRecord`, `DecisionCause`, `DeterminingPolicy`, `Subject`, `Correlation`,
-`ControlRecord`, `ControlOperation`, `Signal`, `McpUnmatched`, `Payload`, `ToolCall`, `ToolFieldList`,
-and `is_field_path`, reached through `telemetry::open`, then:
+`ControlRecord`, `ControlOperation`, `Signal`, `McpUnmatched`, `Payload`, and `ToolCall`, reached
+through `telemetry::open`, then:
 
 **Three of those carry one decision's context, and each exists because a caller holds the value and
 this crate must not re-derive it.** `Correlation` is the request's W3C parent, the transport request

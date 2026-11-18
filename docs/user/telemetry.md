@@ -16,7 +16,7 @@ A box with no `[telemetry]` table writes one file inside its own box directory:
 <box_dir>/private/telemetry/records.jsonl
 ```
 
-That target receives every record: each effective denial, each effective permit, the box's own
+That target receives every record except tool calls: each effective denial, each effective permit, the box's own
 control-plane records and MCP routing diagnostics, and the workload's relayed spans, log records, and
 metrics. The workload cannot reach the file.
 
@@ -45,8 +45,7 @@ A `file` table takes three keys. An unknown key is refused.
 |---|---|---|---|
 | `kind` | string | none, required | `file`. [Endpoints](#endpoints) lists the other kinds. |
 | `destination` | string | none, required | The file the records go to, as stated below. |
-| `include` | array of strings | every record | Which records reach this target: `deny`, `permit`, `trace`, `logs`, `metrics`, or `tool_calls`. |
-| `tool_fields` | table | none | Which tool-call fields this target receives in clear text. See [a tool call](#a-tool-call). |
+| `include` | array of strings | every record except tool calls | Which records reach this target: `deny`, `permit`, `trace`, `logs`, `metrics`, or `tool_calls`. |
 
 ## `kind = "file"`
 
@@ -71,8 +70,8 @@ Declare one target per file. Two boxes that append to one file can tear a line.
 
 ## `include`
 
-Omit `include` and the target receives every record. Write `include` and the target receives only the
-records the words in the list name:
+Omit `include` and the target receives every record except tool calls. Write `include` and the target
+receives only the records the words in the list name:
 
 | Word | The target then receives |
 |---|---|
@@ -81,7 +80,7 @@ records the words in the list name:
 | `trace` | The workload's own spans, and this box's control-plane records. |
 | `logs` | Box's unmatched MCP routing diagnostics and the workload's log records. |
 | `metrics` | The workload's metrics. |
-| `tool_calls` | Each MCP tool call's argument and output fields, and how it ended. A value appears only where `tool_fields` names its field. |
+| `tool_calls` | Each MCP tool call's arguments and output in clear text, and how it ended. A target receives these only when it names `tool_calls`. |
 
 So `include = ["deny"]` writes a file of refusals, and leaves out the permits, control-plane records,
 and MCP routing diagnostics.
@@ -268,51 +267,42 @@ Both records carry `jsonrpc.request.id`, which joins them to each other and to t
 `context.input.` or `output.structured.`: an object's member is `parent.member`, and an array's
 element is `parent.N`. So `{"profile": {"email": "a@b"}}` becomes the field `profile.email`.
 
-**Every value is `<redacted>` unless the target names its field.** The paths always arrive, so a reader
-sees which fields each tool's calls had and can choose which to reveal. Name fields per server and tool:
+**Tool-call values are in clear text, so a target receives them only when it names `tool_calls`.** A
+target with no `include`, and the box's own default file, receives none. An argument or an output can
+hold anything a tool takes or returns, including a password, a token, or a customer's data, and Box
+can't tell which field does. So name `tool_calls` only on a target whose readers may see all of it,
+such as a file on your own machine, and not on a vendor's endpoint you wouldn't trust with those
+values:
 
 ```toml
 [telemetry.local]
 kind        = "file"
 destination = "~/boxes/helpdesk/records.jsonl"
-
-[telemetry.local.tool_fields."desk/verify_identity"]
-arguments = ["user_name"]
-output    = ["verified"]
+include     = ["deny", "permit", "trace", "logs", "tool_calls"]
 ```
 
-This target receives `user_name` and `verified` from `desk`'s `verify_identity` tool in clear text, and
-every other value, including a `user_name` on another tool, as `<redacted>`. A target with no
-`tool_fields`, including the box's own default file, receives no value at all.
+A declared target replaces the default file, and a written `include` names everything the target
+receives, so list the other signals you still want beside `tool_calls`. At startup, Box prints one line
+on stderr for each target that receives tool calls.
 
-An argument or an output can hold a secret, and Box can't tell which one does, so name only the fields
-your rules and your review need. A key that isn't a plain name of letters, digits, `_`, `-`, and `$`,
-at most 64 characters, is written as `*`, and its value stays redacted, so data a tool uses as a key,
-such as an email address, stays out of the record. At most 64 fields are reported per record, each
-value at most 4 KiB; when a call has more, the record also carries `strands.box.tool.arguments_omitted`
-or `strands.box.tool.output_omitted` with the count left out.
+A key that isn't a plain name of letters, digits, `_`, `-`, and `$`, at most 64 characters, is written
+as `*`, so a key holding `.` can't pass for a nested path. At most 64 fields are reported per record,
+each value at most 4 KiB; when a call has more, the record also carries
+`strands.box.tool.arguments_omitted` or `strands.box.tool.output_omitted` with the count left out.
 
 A value keeps its JSON type: a string, `true` or `false`, or a number, so `true` and `"true"` stay
 apart. An integer too large for 64 bits arrives as its digits in a string, and a JSON `null` arrives
-as an empty array, which no flattened value can otherwise be. A redacted value is `<redacted>`
-whatever its type.
+as an empty array, which no flattened value can otherwise be.
 
-**Field names reach every target, values only where named.** A target with no `tool_fields`, an OTLP
-vendor's included, still learns which fields each tool's calls had, though never their values. A
-call refused before it reaches the server, by the coarse `mcp:call` check or because the tool isn't
-listed, is recorded too, because its fields show what the agent tried. Leave `tool_calls` out of a
-target's `include` to send it no tool-call record at all.
-
-A `tool_fields` key that isn't `"<server>/<tool>"`, a table that names no field, a path that isn't a
-dotted path of plain names, and a repeated path are each refused.
+A call refused before it reaches the server, by the coarse `mcp:call` check or because the tool isn't
+listed, is recorded too, because it shows what the agent tried.
 
 A tool-call record produces no span.
 
-**Over http, Box reads a reply only when it must.** Reading a reply copies it through the gateway's
-budget, which every reply being read at once shares (64 MiB). So Box reads a tool's reply only when
-the policy reads it anyway, which it does for every tool in the server's tool list once Box has read
-that list, or when a target names one of that tool's output fields. A call to a tool Box has not seen
-listed still gets its call record, and no completion.
+**Over http, a target that takes tool calls makes Box read every tool reply.** Reading a reply copies
+it through the gateway's budget, which every reply being read at once shares (64 MiB). The policy
+already reads the reply of every tool in the server's tool list once Box has read that list, so the
+extra copies are for replies the policy doesn't read.
 
 ### A control-plane record
 

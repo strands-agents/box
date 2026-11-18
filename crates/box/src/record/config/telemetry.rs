@@ -248,29 +248,16 @@ pub(crate) struct TelemetryEntry {
     /// The AWS region a CloudWatch target sends to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) region: Option<String>,
-
-    /// The tool-call fields this target receives in clear text, keyed by `"<server>/<tool>"`.
-    /// Every other value reaches it as `<redacted>`.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) tool_fields: BTreeMap<String, ToolFieldsEntry>,
 }
 
-/// One tool's fields a target receives in clear text.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct ToolFieldsEntry {
-    /// Argument paths, as `context.input.` spells them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) arguments: Vec<String>,
-    /// Output paths, as `output.structured.` spells them.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) output: Vec<String>,
-}
-
-/// The server and tool a `tool_fields` key names, or `None` when it is not `"<server>/<tool>"`.
-fn server_and_tool(key: &str) -> Option<(&str, &str)> {
-    let (server, tool) = key.split_once('/')?;
-    (!server.is_empty() && !tool.is_empty() && !tool.contains('/')).then_some((server, tool))
+impl TelemetryEntry {
+    /// Whether this target names `tool_calls`, the only way it receives a tool call's values.
+    pub(crate) fn takes_tool_calls(&self) -> bool {
+        self.include
+            .iter()
+            .flatten()
+            .any(|group| *group == SignalGroup::ToolCalls)
+    }
 }
 
 /// Which secret a telemetry target attaches, and under which header.
@@ -447,19 +434,6 @@ fn target_for(
     }
     for (name, value) in entry.headers.iter().flatten() {
         target = target.with_header(name, value);
-    }
-    for (key, fields) in &entry.tool_fields {
-        // `checked` refused every other key shape before the box was stored.
-        if let Some((server, tool)) = server_and_tool(key) {
-            target = target.revealing_tool_fields(
-                server,
-                tool,
-                telemetry::ToolFieldList {
-                    arguments: fields.arguments.iter().cloned().collect(),
-                    output: fields.output.iter().cloned().collect(),
-                },
-            );
-        }
     }
     if let Some(secret) = secret {
         target = target.with_secret(secret);
@@ -1007,56 +981,6 @@ pub(crate) fn checked(
                 refuse_a_credential_header(headers, placement.as_ref())
                     .map_err(|reason| refuse(name, reason))?;
             }
-            if !entry.tool_fields.is_empty()
-                && entry
-                    .include
-                    .as_ref()
-                    .is_some_and(|include| !include.contains(&SignalGroup::ToolCalls))
-            {
-                return Err(refuse(
-                    name,
-                    "tool_fields reveals tool-call values, but include leaves out tool_calls, so no \
-                     tool-call record reaches this target; add tool_calls to include"
-                        .to_string(),
-                ));
-            }
-            for (key, fields) in &entry.tool_fields {
-                if server_and_tool(key).is_none() {
-                    return Err(refuse(
-                        name,
-                        format!(
-                            "tool_fields names {key:?}; write each tool as \"<server>/<tool>\""
-                        ),
-                    ));
-                }
-                if fields.arguments.is_empty() && fields.output.is_empty() {
-                    return Err(refuse(
-                        name,
-                        format!("tool_fields {key:?} names no field, so nothing would be revealed"),
-                    ));
-                }
-                for (group, paths) in [("arguments", &fields.arguments), ("output", &fields.output)]
-                {
-                    for (index, path) in paths.iter().enumerate() {
-                        if !telemetry::is_field_path(path) {
-                            return Err(refuse(
-                                name,
-                                format!(
-                                    "tool_fields {key:?} {group} names {path:?}, which is not a \
-                                     dotted path of plain names such as `user_name` or `profile.email`"
-                                ),
-                            ));
-                        }
-                        if paths[..index].contains(path) {
-                            return Err(refuse(
-                                name,
-                                format!("tool_fields {key:?} {group} names {path:?} twice"),
-                            ));
-                        }
-                    }
-                }
-            }
-
             // **Every remaining rule belongs to the collector, so ask it rather than restate it.**
             // Two copies disagreed on `HTTPS://`, so `configure` refused what `run` accepted. The
             let probe = target_for(
@@ -1079,20 +1003,12 @@ pub(crate) fn checked(
     Ok(accepted)
 }
 
-/// Whether an authored `[telemetry]` table names `tool_calls` or reveals a tool field, which an
-/// older build cannot honour.
+/// Whether an authored `[telemetry]` table names `tool_calls`, which an older build cannot honour.
 ///
 /// Called before the targets are checked, so it reads the tables as authored; a table `checked`
 /// refuses fails the whole file there.
 pub(crate) fn names_tool_calls(telemetry: &BTreeMap<String, TelemetryEntry>) -> bool {
-    telemetry.values().any(|entry| {
-        !entry.tool_fields.is_empty()
-            || entry
-                .include
-                .iter()
-                .flatten()
-                .any(|group| *group == SignalGroup::ToolCalls)
-    })
+    telemetry.values().any(TelemetryEntry::takes_tool_calls)
 }
 
 #[cfg(test)]
@@ -1431,7 +1347,6 @@ mod tests {
             log_stream: None,
             project: None,
             region: None,
-            tool_fields: BTreeMap::new(),
         };
         let entries = BTreeMap::from([("decisions".to_string(), entry)]);
         let refusal = checked(
@@ -1450,8 +1365,8 @@ mod tests {
     ///
     /// `logs` and `metrics` are separate words rather than part of `trace`, because a harness log
     /// is not a span and an operator narrowing to spans must not silently also take metrics.
-    /// `tool_calls` is its own word, so a target can narrow to tool-call records or leave them
-    /// out; their values stay redacted unless `tool_fields` names them.
+    /// `tool_calls` is its own word, and the only way a target receives tool-call records, because
+    /// their values are in clear text.
     #[test]
     fn the_six_words_expand_through_the_production_path() {
         assert_eq!(
@@ -1493,7 +1408,6 @@ mod tests {
             destination: "/tmp/records.jsonl".to_string(),
             include,
             secret: None,
-            tool_fields: BTreeMap::new(),
         };
         let naming = target_for(
             &entry(Some(vec![SignalGroup::ToolCalls])),
@@ -1524,7 +1438,6 @@ mod tests {
                 destination: "/tmp/records.jsonl".to_string(),
                 include: Some(vec![SignalGroup::ToolCalls]),
                 secret: None,
-                tool_fields: BTreeMap::new(),
             },
         )]);
         assert!(names_tool_calls(&telemetry));
@@ -1535,20 +1448,19 @@ mod tests {
                 destination: "/tmp/records.jsonl".to_string(),
                 include: Some(vec![SignalGroup::Deny]),
                 secret: None,
-                tool_fields: BTreeMap::new(),
             },
         )]);
         assert!(!names_tool_calls(&other));
     }
 
     /// **An absent `include` takes every signal**, so an operator who names nothing still receives
-    /// the harness's own logs and metrics, and every tool call with its values redacted.
+    /// the harness's own logs and metrics, and never a tool call, whose values are in clear text.
     ///
     /// Read through `target_for`, which is the one path a run takes, rather than through
     /// `Signal::default_signals` — the box could otherwise call `receiving` with a narrower set and
     /// this assertion would still pass.
     #[test]
-    fn an_absent_include_takes_every_signal() {
+    fn an_absent_include_takes_every_signal_but_tool_calls() {
         let entry = TelemetryEntry {
             kind: TelemetryKind::File,
             destination: "/tmp/records.jsonl".to_string(),
@@ -1560,22 +1472,24 @@ mod tests {
             log_stream: None,
             project: None,
             region: None,
-            tool_fields: BTreeMap::new(),
         };
         let target = target_for(&entry, None, Path::new("/var/lib/boxes/codex"), None)
             .expect("the entry is well formed");
         assert_eq!(
             target.signals().len(),
-            Signal::every().len(),
-            "an absent include must reach every signal: {:?}",
+            Signal::every().len() - 1,
+            "an absent include must reach every signal but tool_calls: {:?}",
             target.signals()
+        );
+        assert!(
+            !target.signals().contains(&Signal::ToolCalls),
+            "a tool call reaches only a target that names tool_calls"
         );
         for expected in [
             Signal::AgentLogs,
             Signal::AgentMetrics,
             Signal::AgentTrace,
             Signal::McpUnmatched,
-            Signal::ToolCalls,
         ] {
             assert!(
                 target.signals().contains(&expected),
@@ -1583,98 +1497,6 @@ mod tests {
                 expected.as_str()
             );
         }
-    }
-
-    /// A `tool_fields` table names one server's tool, and at least one dotted path of plain names;
-    /// anything else is refused before the box exists.
-    #[test]
-    fn a_tool_fields_table_is_refused_unless_it_names_a_tool_and_a_field() {
-        let entry = |key: &str, arguments: Vec<&str>, output: Vec<&str>| TelemetryEntry {
-            kind: TargetKind::File,
-            destination: "/tmp/records.jsonl".to_string(),
-            include: None,
-            secret: None,
-            tool_fields: BTreeMap::from([(
-                key.to_string(),
-                ToolFieldsEntry {
-                    arguments: arguments.into_iter().map(str::to_string).collect(),
-                    output: output.into_iter().map(str::to_string).collect(),
-                },
-            )]),
-        };
-        let check = |entry: TelemetryEntry| {
-            checked(
-                &BTreeMap::from([("local".to_string(), entry)]),
-                Path::new("/var/lib/boxes/codex"),
-            )
-        };
-        assert!(check(entry("desk/verify", vec!["user_name"], vec!["verified"])).is_ok());
-        // A table on a target whose include leaves out tool_calls could reveal nothing.
-        let mut narrowed = entry("desk/verify", vec!["user_name"], vec![]);
-        narrowed.include = Some(vec![SignalGroup::Deny]);
-        let refusal = check(narrowed).expect_err("an unreachable table is refused");
-        assert!(
-            refusal.to_string().contains("add tool_calls to include"),
-            "{refusal}"
-        );
-        let mut included = entry("desk/verify", vec!["user_name"], vec![]);
-        included.include = Some(vec![SignalGroup::Deny, SignalGroup::ToolCalls]);
-        assert!(check(included).is_ok());
-        for (key, arguments, output, says) in [
-            ("desk", vec!["user_name"], vec![], "<server>/<tool>"),
-            ("/verify", vec!["user_name"], vec![], "<server>/<tool>"),
-            (
-                "desk/verify/extra",
-                vec!["user_name"],
-                vec![],
-                "<server>/<tool>",
-            ),
-            ("desk/verify", vec![], vec![], "names no field"),
-            (
-                "desk/verify",
-                vec!["members.*"],
-                vec![],
-                "not a dotted path",
-            ),
-            ("desk/verify", vec!["a b"], vec![], "not a dotted path"),
-            ("desk/verify", vec![], vec!["ok", "ok"], "twice"),
-        ] {
-            let refusal = check(entry(key, arguments.clone(), output.clone()))
-                .expect_err("the table is refused");
-            assert!(
-                refusal.to_string().contains(says),
-                "{key} {arguments:?} {output:?}: {refusal}"
-            );
-        }
-    }
-
-    /// A named field reaches the target through the production path, so it is revealed there.
-    #[test]
-    fn a_tool_fields_table_reaches_the_target() {
-        let entry = TelemetryEntry {
-            kind: TargetKind::File,
-            destination: "/tmp/records.jsonl".to_string(),
-            include: None,
-            secret: None,
-            tool_fields: BTreeMap::from([(
-                "desk/verify".to_string(),
-                ToolFieldsEntry {
-                    arguments: vec!["user_name".to_string()],
-                    output: vec!["verified".to_string()],
-                },
-            )]),
-        };
-        let target = target_for(&entry, None, Path::new("/var/lib/boxes/codex"), None)
-            .expect("the entry is well formed");
-        let text = format!("{target:?}");
-        assert!(
-            text.contains("user_name") && text.contains("verified"),
-            "{text}"
-        );
-        assert!(names_tool_calls(&BTreeMap::from([(
-            "local".to_string(),
-            entry
-        )])));
     }
 
     /// **An empty `include` and a repeated word are both refused in the operator's own vocabulary**,
@@ -1692,7 +1514,6 @@ mod tests {
             log_stream: None,
             project: None,
             region: None,
-            tool_fields: BTreeMap::new(),
         };
 
         let empty = checked(

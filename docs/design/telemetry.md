@@ -43,10 +43,9 @@ A box writes four kinds of record. Each has a scope that readers can select:
 
 A decision never carries a tool call's arguments or answer. Those values are what the agent and the
 server chose, so either can hold a secret. They go on a tool-call record instead, as maps of
-flattened fields. Each target's exporter replaces every value whose server, tool, and field the
-target does not name with `<redacted>`, so one record reaches a target that asked for a field with its
-value and every other target, including the box's own default file, with the paths alone. See
-[tool-call values are revealed per field](decisions.md#tool-call-values-are-revealed-per-field). The tool-call
+flattened fields in clear text. That record reaches only a target that names `tool_calls`; a target
+with no `include`, including the box's own default file, receives none. See
+[tool-call values reach only a target that asks for them](decisions.md#tool-call-values-reach-only-a-target-that-asks-for-them). The tool-call
 records name the call's JSON-RPC identifier, which joins them to the decision.
 
 A decision names the action, resource, verdict, cause, and every policy that determined it. Standard
@@ -138,9 +137,10 @@ in a directory the workload can write, the workload can truncate it.
 A target can select Box denials, Box permits, relayed workload spans, and MCP routing diagnostics. See
 [a target names a set](decisions.md#a-target-names-a-set-of-signals). The `trace` selector also
 includes control-plane records. Omitting it loses Box's record of authority changes. The `logs`
-selector includes unmatched MCP routes. The `tool_calls` selector names the tool-call records, whose
-values stay redacted unless the target's `tool_fields` names them. Relayed workload log records and metrics arrive regardless
-of this selection, unless the target's `accepts` leaves that payload out.
+selector includes unmatched MCP routes. The `tool_calls` selector names the tool-call records, and no
+absent selection includes them, because their values are in clear text. Relayed workload log records
+and metrics arrive regardless of this selection, unless the target's `accepts` leaves that payload
+out.
 
 ## What the workload cannot do
 

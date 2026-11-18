@@ -140,7 +140,6 @@ pub struct Target {
     accepts: Option<Vec<Payload>>,
     headers: Vec<(String, String)>,
     vault: Option<std::sync::Arc<credentials::Vault>>,
-    tool_fields: crate::tool::ToolFieldAllowlist,
 }
 
 impl Target {
@@ -156,7 +155,6 @@ impl Target {
             accepts: None,
             headers: Vec::new(),
             vault: None,
-            tool_fields: crate::tool::ToolFieldAllowlist::default(),
         }
     }
 
@@ -172,27 +170,7 @@ impl Target {
             accepts: None,
             headers: Vec::new(),
             vault: None,
-            tool_fields: crate::tool::ToolFieldAllowlist::default(),
         }
-    }
-
-    /// Reveal the named fields of `server`'s `tool` to this target; every other value it receives
-    /// as `<redacted>`.
-    #[must_use]
-    pub fn revealing_tool_fields(
-        mut self,
-        server: impl Into<String>,
-        tool: impl Into<String>,
-        fields: crate::tool::ToolFieldList,
-    ) -> Self {
-        self.tool_fields
-            .tools
-            .insert((server.into(), tool.into()), fields);
-        self
-    }
-
-    pub(crate) fn tool_fields(&self) -> &crate::tool::ToolFieldAllowlist {
-        &self.tool_fields
     }
 
     /// State exactly what this target receives. An empty or repeated set is refused by `validate`.

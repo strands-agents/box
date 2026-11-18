@@ -1,18 +1,11 @@
-//! An MCP tool call's flattened argument and output fields, and the per-target list that reveals them.
-//!
-//! A tool-call record carries every field's path and value. Each target's exporter then replaces
-//! every value whose server, tool, and path its list does not name with [`REDACTED`], so one record
-//! reaches a target that asked for a field with its value and every other target without it. The
-//! paths always remain, so a reader sees which fields a call had and can choose which to reveal.
+//! An MCP tool call's flattened argument and output fields, in clear text, bounded in count and size.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
 
 use opentelemetry::Key;
 use opentelemetry::logs::AnyValue;
-use opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest;
-use opentelemetry_proto::tonic::common::v1::any_value::Value as ProtoValue;
 
-use crate::record::{REDACTED, bounded};
+use crate::record::bounded;
 
 /// The attribute that carries a call's flattened arguments.
 pub(crate) const ARGUMENTS: &str = "strands.box.tool.arguments";
@@ -151,9 +144,8 @@ impl ToolFields {
 
 /// One object key as a path segment: the key itself when it is a plain name, else [`UNNAMED`].
 ///
-/// A tool can use data as a key, such as an email address, and a key is never redacted, so only a
-/// name of letters, digits, `_`, `-`, and `$` is copied. No list can name `*`, so a value under an
-/// unnamed key is always redacted.
+/// Only a name of letters, digits, `_`, `-`, and `$` is copied, so a key holding `.` cannot fake a
+/// nested path.
 fn segment(name: &str) -> &str {
     let plain = !name.is_empty()
         && name.chars().count() <= MAXIMUM_KEY_CHARS
@@ -161,85 +153,6 @@ fn segment(name: &str) -> &str {
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || "_-$".contains(character));
     if plain { name } else { UNNAMED }
-}
-
-/// Whether `path` is one a target may name: dotted plain names and array indexes.
-pub fn is_field_path(path: &str) -> bool {
-    !path.is_empty()
-        && path
-            .split('.')
-            .all(|part| !part.is_empty() && part != UNNAMED && segment(part) == part)
-}
-
-/// The fields of one server's tool that a target receives in clear text.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ToolFieldList {
-    /// Argument paths, as `context.input.` spells them.
-    pub arguments: BTreeSet<String>,
-    /// Output paths, as `output.structured.` spells them.
-    pub output: BTreeSet<String>,
-}
-
-/// Which fields of which tools one target receives in clear text, keyed by `(server, tool)`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct ToolFieldAllowlist {
-    pub(crate) tools: BTreeMap<(String, String), ToolFieldList>,
-}
-
-impl ToolFieldAllowlist {
-    /// Replace every value this list does not name with [`REDACTED`], in place.
-    ///
-    /// It runs on the encoded request, before the request is written or sent.
-    pub(crate) fn redact(&self, request: &mut ExportLogsServiceRequest) {
-        for resource in &mut request.resource_logs {
-            for scope in &mut resource.scope_logs {
-                for record in &mut scope.log_records {
-                    let text = |key: &str| {
-                        record
-                            .attributes
-                            .iter()
-                            .find(|attribute| attribute.key == key)
-                            .and_then(|attribute| attribute.value.as_ref())
-                            .and_then(|value| match &value.value {
-                                Some(ProtoValue::StringValue(text)) => Some(text.clone()),
-                                _ => None,
-                            })
-                    };
-                    // A record that does not name its tool reveals nothing, rather than everything.
-                    let list = match (text(SERVER), text(NAME)) {
-                        (Some(server), Some(tool)) => self.tools.get(&(server, tool)),
-                        _ => None,
-                    };
-                    for attribute in &mut record.attributes {
-                        let allowed = match attribute.key.as_str() {
-                            ARGUMENTS => list.map(|list| &list.arguments),
-                            OUTPUT => list.map(|list| &list.output),
-                            _ => continue,
-                        };
-                        let Some(ProtoValue::KvlistValue(fields)) = attribute
-                            .value
-                            .as_mut()
-                            .and_then(|value| value.value.as_mut())
-                        else {
-                            continue;
-                        };
-                        for field in &mut fields.values {
-                            if allowed.is_some_and(|allowed| allowed.contains(&field.key)) {
-                                continue;
-                            }
-                            if let Some(value) = field.value.as_mut() {
-                                value.value = Some(ProtoValue::StringValue(REDACTED.to_string()));
-                            }
-                        }
-                        // A map emits in no fixed order; sort so two runs read the same.
-                        fields
-                            .values
-                            .sort_by(|left, right| left.key.cmp(&right.key));
-                    }
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -303,61 +216,5 @@ mod tests {
         let fields = ToolFields::of(&serde_json::Value::Object(many));
         assert_eq!(fields.paths().len(), MAXIMUM_FIELDS);
         assert_eq!(fields.omitted, 6);
-    }
-
-    /// A record that does not name its server and tool reveals nothing, whatever the list says.
-    #[test]
-    fn a_record_without_its_tool_reveals_nothing() {
-        use opentelemetry_proto::tonic::common::v1::{AnyValue as Proto, KeyValue, KeyValueList};
-        use opentelemetry_proto::tonic::logs::v1::{LogRecord, ResourceLogs, ScopeLogs};
-        let field = |key: &str, value: &str| KeyValue {
-            key: key.to_string(),
-            value: Some(Proto {
-                value: Some(ProtoValue::StringValue(value.to_string())),
-            }),
-            ..KeyValue::default()
-        };
-        let mut request = ExportLogsServiceRequest {
-            resource_logs: vec![ResourceLogs {
-                scope_logs: vec![ScopeLogs {
-                    log_records: vec![LogRecord {
-                        attributes: vec![KeyValue {
-                            key: ARGUMENTS.to_string(),
-                            value: Some(Proto {
-                                value: Some(ProtoValue::KvlistValue(KeyValueList {
-                                    values: vec![field("user_name", "ada")],
-                                })),
-                            }),
-                            ..KeyValue::default()
-                        }],
-                        ..LogRecord::default()
-                    }],
-                    ..ScopeLogs::default()
-                }],
-                ..ResourceLogs::default()
-            }],
-        };
-        let mut list = ToolFieldAllowlist::default();
-        list.tools.insert(
-            ("desk".to_string(), "lookup".to_string()),
-            ToolFieldList {
-                arguments: ["user_name".to_string()].into(),
-                output: BTreeSet::new(),
-            },
-        );
-        list.redact(&mut request);
-        let text = format!("{request:?}");
-        assert!(!text.contains("ada"), "{text}");
-        assert!(text.contains(REDACTED), "{text}");
-    }
-
-    #[test]
-    fn only_a_dotted_plain_path_may_be_named() {
-        for good in ["user_name", "profile.email", "items.0", "a-b.$c"] {
-            assert!(is_field_path(good), "{good}");
-        }
-        for bad in ["", ".", "a..b", "*", "members.*", "a b", "a@b", "x/y"] {
-            assert!(!is_field_path(bad), "{bad}");
-        }
     }
 }

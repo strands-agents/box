@@ -224,6 +224,29 @@ impl RuntimeMcpBox {
         self.tools.push((label.to_string(), table.to_string()));
     }
 
+    /// Keep the default records file and add a target that takes tool calls, at
+    /// [`Self::tool_calls_path`].
+    pub fn record_tool_calls(&mut self) {
+        let root = self.root();
+        let records = root.join("private/telemetry/records.jsonl");
+        let tools = self.tool_calls_path();
+        self.tools.push((
+            "telemetry".to_string(),
+            format!(
+                "[telemetry.records]\nkind = \"file\"\ndestination = {:?}\n\n\
+                 [telemetry.tools]\nkind = \"file\"\ndestination = {:?}\n\
+                 include = [\"tool_calls\"]\n",
+                records.display().to_string(),
+                tools.display().to_string()
+            ),
+        ));
+    }
+
+    /// Where [`Self::record_tool_calls`] writes tool-call records.
+    pub fn tool_calls_path(&self) -> PathBuf {
+        self.root().join("private/telemetry/tools.jsonl")
+    }
+
     pub fn install_server(&self, server: &Server<'_>) {
         if server.behavior.uses_release_fifo() {
             make_fifo(&self.release_path(server.executable));

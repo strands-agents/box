@@ -49,8 +49,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `ReplyReader` is exported for the box, which reads every remote `tools/call` reply for its
   tool-call log record with the same incremental reader the per-tool response uses, and
   `McpReply::as_str` spells the end on that record. The box reads a reply the policy does not
-  already read only when a telemetry target names one of that tool's output fields, because each
-  copy counts against the gateway's shared budget.
+  already read only when a telemetry target takes tool calls, because each copy counts against the
+  gateway's shared budget.
 - `check` and `validate` share one composition (`check_and_expand`), and the staged check repeats
   the steps of `open_staged_with_engine` with no engine. A finding keeps a span only when the span
   is an offset into the authored text: a Dogwood parse error and a Cedar validation error over

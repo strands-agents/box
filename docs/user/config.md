@@ -1369,8 +1369,7 @@ started reads with `jq`.
 |---|---|---|
 | `kind` | string | `file`, `otlp`, or a vendor: `langfuse`, `langsmith`, `cloudwatch_logs`, or `cloudwatch_traces`. Required. |
 | `destination` | string | For `file`, an absolute or `~/`-relative path. Inside this box's `box_dir` it must lie under `private/`; outside the box any path is accepted. For `otlp`, the collector endpoint. For `langfuse` and `langsmith`, the base address, which defaults to the vendor's cloud. A CloudWatch kind takes `region` instead, and refuses `destination`. |
-| `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, `metrics`, or `tool_calls`. `trace` names the agent's own spans and the box's control-plane records. `logs` includes unmatched MCP routing diagnostics. **Absent means every signal**, so write `include` only to narrow the target. An empty list is refused, and so is a repeated word. |
-| `tool_fields."<server>/<tool>"` | table | `arguments` and `output`, each a list of field paths such as `user_name` or `profile.email`, that this target receives in clear text for that one tool. Every other value reaches it as `<redacted>`. See [a tool call](telemetry.md#a-tool-call). |
+| `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, `metrics`, or `tool_calls`. `trace` names the agent's own spans and the box's control-plane records. `logs` includes unmatched MCP routing diagnostics. `tool_calls` names each MCP tool call's arguments and output in clear text, and how it ended. **Absent means every signal except `tool_calls`**, which a target receives only when it names it. An empty list is refused, and so is a repeated word. |
 | `accepts` | string array | For `otlp`: which OTLP payloads the endpoint takes, from `traces`, `logs`, and `metrics`. Absent means all three. The box sends no batch of a payload the list leaves out. |
 | `headers` | table | For `otlp`: fixed headers sent on every request. A header that carries a credential or a signature is refused here. |
 | `secret.ref` | string | `env://NAME`, `secret://NAME`, `aws://PROFILE`, `credsd://ENVIRONMENT`, or a reference in a [declared scheme](#secret-sourcescheme). `aws://` and `credsd://` sign each request with SigV4. A literal value is refused. The box attaches this secret itself, so the target takes no `secret.env`. |
@@ -1443,8 +1442,7 @@ empty `include` is refused with `the target names no signal, so nothing would re
 more of: deny, permit, trace, logs, metrics, tool_calls`, and a repeated word with `the target names
 deny twice`.
 
-A box with no `[telemetry]` table writes its default file with every signal. Its tool-call records name
-each field and reveal no value, because a default file has no `tool_fields`. See
+A box with no `[telemetry]` table writes its default file with every signal except `tool_calls`. See
 [a tool call](telemetry.md#a-tool-call).
 
 <a id="logs-and-metrics-are-unconditional"></a>

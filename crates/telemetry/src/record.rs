@@ -26,7 +26,7 @@ pub enum Signal {
     ControlPlane,
     /// One MCP invocation that matches no declared command.
     McpUnmatched,
-    /// One MCP tool call's own arguments, and how it ended.
+    /// One MCP tool call's own arguments and output, in clear text, and how it ended.
     ToolCalls,
 }
 
@@ -58,10 +58,14 @@ impl Signal {
         vec![Self::PolicyDenied, Self::PolicyPermitted]
     }
 
-    /// Every signal, which is what a target receives when it names none.
+    /// What a target receives when it names none: every signal except [`Self::ToolCalls`].
     #[must_use]
     pub fn default_signals() -> Vec<Self> {
-        Self::EVERY.to_vec()
+        // A tool call carries its values in clear text, so it reaches only a target that names it.
+        Self::EVERY
+            .into_iter()
+            .filter(|signal| *signal != Self::ToolCalls)
+            .collect()
     }
 
     /// The signals every target receives, whatever it names.
@@ -390,9 +394,6 @@ impl ToolCallPhase {
 
 impl ToolCall {
     /// Record one decided call's `server`, `tool`, and `arguments`, flattened into fields.
-    ///
-    /// Each value reaches a target only when that target names the field; every other target
-    /// receives the field's path with the value redacted.
     #[must_use]
     pub fn called(server: &str, tool: &str, arguments: &serde_json::Value) -> Self {
         Self {
@@ -408,7 +409,7 @@ impl ToolCall {
     }
 
     /// Record how one call ended, with `reply` naming the end and `output` the tool's
-    /// `structuredContent`, flattened into fields that are redacted like arguments.
+    /// `structuredContent`, flattened into fields like arguments.
     #[must_use]
     pub fn completed(
         server: &str,
@@ -1204,24 +1205,25 @@ mod tests {
         }
     }
 
-    /// **The default set is EVERY signal**, so a target that names no `include` also receives the
-    /// harness's own spans, logs and metrics, and every tool call with its values redacted.
+    /// **The default set is EVERY signal but `tool_calls`**, so a target that names no `include`
+    /// also receives the harness's own spans, logs and metrics, and never a tool call's values.
     ///
     /// Named signal by signal rather than by length, because a count passes on a set that holds the
     /// wrong members.
     #[test]
-    fn the_default_set_is_every_signal() {
+    fn the_default_set_is_every_signal_but_tool_calls() {
         let default = Signal::default_signals();
         for signal in Signal::EVERY {
-            assert!(
+            assert_eq!(
                 default.contains(&signal),
-                "{} must reach a target that names no include",
+                signal != Signal::ToolCalls,
+                "{} must reach a target that names no include unless it is tool_calls",
                 signal.as_str()
             );
         }
         assert_eq!(
             default.len(),
-            Signal::EVERY.len(),
+            Signal::EVERY.len() - 1,
             "the default set names no signal twice"
         );
 

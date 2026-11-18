@@ -483,11 +483,8 @@ impl EgressEffectPermit for ObservingPermit {
         request_id: Option<&str>,
     ) -> Option<Box<dyn egress_gateway::ReplyObserver>> {
         let inner = self.inner.reply_observer(request_id);
-        // The copy counts against the gateway's shared budget. When the policy reads the reply
-        // anyway it costs nothing more; otherwise read it only for an output a target asked for.
-        if inner.is_none() && !self.recorder.reveals_output_of(&self.server, &self.tool) {
-            return None;
-        }
+        // A permit is wrapped only when a target takes tool calls, so every reply is read. The copy
+        // counts against the gateway's shared budget unless the policy reads the reply anyway.
         Some(Box::new(ObservedToolReply {
             inner,
             reader: policy::ReplyReader::for_request(request_id),
@@ -866,13 +863,6 @@ impl DecisionRecorder {
         self.collector
             .as_ref()
             .is_some_and(|collector| collector.accepts(telemetry::Signal::ToolCalls))
-    }
-
-    /// Whether some target reveals an output field of `server`'s `tool`.
-    pub(crate) fn reveals_output_of(&self, server: &str, tool: &str) -> bool {
-        self.collector
-            .as_ref()
-            .is_some_and(|collector| collector.reveals_output_of(server, tool))
     }
 
     /// Submit one decided MCP tool call, with the arguments policy judged, as the call's JSON text.
@@ -1704,30 +1694,20 @@ mod tests {
         assert_eq!(empty, rule);
     }
 
-    /// A recorder over a real collector writing tool-call records to `path`, revealing the `demo`
-    /// server's `add` output field `sum` when `reveal` holds; or a target taking no tool calls.
+    /// A recorder over a real collector writing tool-call records to `path`, or over a target
+    /// taking no tool calls.
     fn tool_call_recorder(
         path: Option<&std::path::Path>,
-        reveal: bool,
     ) -> (Arc<Collector>, Arc<DecisionRecorder>) {
         let mut config = telemetry::TelemetryConfig::for_box("demo");
         if let Some(path) = path {
-            let mut target = telemetry::Target::new(
-                telemetry::TargetKind::File,
-                path.to_string_lossy().to_string(),
-            )
-            .receiving(vec![telemetry::Signal::ToolCalls]);
-            if reveal {
-                target = target.revealing_tool_fields(
-                    "demo",
-                    "add",
-                    telemetry::ToolFieldList {
-                        arguments: std::collections::BTreeSet::new(),
-                        output: ["sum".to_string()].into(),
-                    },
-                );
-            }
-            config = config.with_target(target);
+            config = config.with_target(
+                telemetry::Target::new(
+                    telemetry::TargetKind::File,
+                    path.to_string_lossy().to_string(),
+                )
+                .receiving(vec![telemetry::Signal::ToolCalls]),
+            );
         } else {
             config = config.with_target(
                 telemetry::Target::new(telemetry::TargetKind::File, "/dev/null".to_string())
@@ -1799,7 +1779,7 @@ mod tests {
                 .expect("the call is admitted");
             OBSERVING_PERMITS.with(std::cell::Cell::get) - before
         };
-        let (_none, nobody) = tool_call_recorder(None, false);
+        let (_none, nobody) = tool_call_recorder(None);
         assert_eq!(
             wrapped(nobody),
             0,
@@ -1808,7 +1788,7 @@ mod tests {
 
         // The paired positive, so the count above cannot pass on a wrap nothing counts.
         let directory = tempfile::tempdir().expect("tempdir");
-        let (_some, somebody) = tool_call_recorder(Some(&directory.path().join("t.jsonl")), false);
+        let (_some, somebody) = tool_call_recorder(Some(&directory.path().join("t.jsonl")));
         assert_eq!(
             wrapped(somebody),
             1,
@@ -1816,17 +1796,17 @@ mod tests {
         );
     }
 
-    /// A target that takes tool calls but reveals none of this tool's output fields gets no copy
-    /// of a reply the policy does not read, since no value from it could reach that target.
+    /// A target that takes tool calls gets each reply read, even one the policy does not read,
+    /// because the record carries the tool's output.
     #[tokio::test]
-    async fn no_reply_is_copied_when_no_target_reveals_the_tools_output() {
+    async fn a_reply_is_read_when_a_target_takes_tool_calls() {
         let directory = tempfile::tempdir().expect("tempdir");
         let (_collector, recorder) =
-            tool_call_recorder(Some(&directory.path().join("tools.jsonl")), false);
+            tool_call_recorder(Some(&directory.path().join("tools.jsonl")));
         let mut permit = capture_probe(recorder)
             .intercept(&remote_tool_attempt(r#"{"a":1}"#))
             .expect("the call is admitted");
-        assert!(permit.reply_observer(Some("1")).is_none());
+        assert!(permit.reply_observer(Some("1")).is_some());
     }
 
     /// With no policy observer, the box's own observer finishes at the reply, so a stream the
@@ -1835,7 +1815,7 @@ mod tests {
     async fn the_box_observer_finishes_at_the_reply_on_a_held_open_stream() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("tools.jsonl");
-        let (collector, recorder) = tool_call_recorder(Some(&path), true);
+        let (collector, recorder) = tool_call_recorder(Some(&path));
         let mut permit = capture_probe(recorder)
             .intercept(&remote_tool_attempt(r#"{"a":1}"#))
             .expect("the call is admitted");
@@ -1862,7 +1842,7 @@ mod tests {
     async fn an_observer_dropped_before_its_reply_records_one_indeterminate_completion() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("tools.jsonl");
-        let (collector, recorder) = tool_call_recorder(Some(&path), true);
+        let (collector, recorder) = tool_call_recorder(Some(&path));
         let mut permit = capture_probe(recorder)
             .intercept(&remote_tool_attempt(r#"{"a":1}"#))
             .expect("the call is admitted");

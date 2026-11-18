@@ -21,7 +21,6 @@ pub use record::{
     ControlOperation, ControlRecord, DecisionCause, DecisionRecord, DeterminingPolicy,
     McpUnmatched, Signal, Subject, ToolCall,
 };
-pub use tool::{ToolFieldList, is_field_path};
 
 /// Open the lane `config` describes.
 ///

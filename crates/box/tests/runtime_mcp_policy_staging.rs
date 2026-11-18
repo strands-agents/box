@@ -346,16 +346,15 @@ fn observed_linked_policy_spans(box_: &RuntimeMcpBox) -> Vec<Value> {
         .expect("the stored box has an identity");
     let text = std::fs::read_to_string(box_.root().join("private/telemetry/records.jsonl"))
         .expect("read the drained policy telemetry");
-    // The default file reveals no tool-call value: the tool-call record names the argument's
-    // path and redacts its value, and no decision or span carries either. Metadata and a forged
-    // name reach no record at all.
+    // The default file takes no tool call, and no decision or span carries an argument either.
+    // Metadata and a forged name reach no record.
     assert!(!text.contains("fixture-private-argument"));
     assert!(!text.contains("fixture-private-metadata"));
     assert!(!text.contains("forged-tool"));
     let (tool_scope, _) = split_tool_scope(&text);
     assert!(
-        tool_scope.contains(r#""key":"value""#) && tool_scope.contains("<redacted>"),
-        "the tool-call record names the argument with its value redacted: {tool_scope}"
+        tool_scope.is_empty(),
+        "the default file holds no tool-call record: {tool_scope}"
     );
     let mut logs = Vec::new();
     let mut spans = Vec::new();
@@ -774,7 +773,8 @@ fn an_absent_catalog_tool_reaches_neither_policy_observer_nor_server() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let box_ = RuntimeMcpBox::new("mcp-absent-tool");
+    let mut box_ = RuntimeMcpBox::new("mcp-absent-tool");
+    box_.record_tool_calls();
     let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready);
     box_.install_server(&alpha);
     box_.write_workspace(&policy_for("alpha", "read"), &[alpha], BLOCKING_WORKLOAD);
@@ -841,7 +841,7 @@ fn an_absent_catalog_tool_reaches_neither_policy_observer_nor_server() {
         "the absent tool must record the catalog denial instead of the policy candidate"
     );
     // The refused call still states what it asked for, and only the call that ran has an end.
-    let tools = tool_records(&box_.root().join("private/telemetry/records.jsonl"));
+    let tools = tool_records(&box_.tool_calls_path());
     let called: Vec<_> = tools
         .iter()
         .filter(|record| record.event == "strands.box.tool.call")
@@ -1200,7 +1200,8 @@ fn concurrent_local_mcp_policy_spans_keep_each_messages_parent() {
         eprintln!("skipping: concurrent local MCP correlation requires a usable box launcher");
         return;
     }
-    let box_ = RuntimeMcpBox::new("mcp-trace-concurrent");
+    let mut box_ = RuntimeMcpBox::new("mcp-trace-concurrent");
+    box_.record_tool_calls();
     let alpha = Server::new("alpha", "alpha-mcp", "read", DiscoveryBehavior::Ready);
     box_.install_server(&alpha);
     let policy = r#"
@@ -1300,22 +1301,20 @@ fn concurrent_local_mcp_policy_spans_keep_each_messages_parent() {
     assert!(output.status.success(), "{output:?}");
     // Each call states its arguments, refused or not, and the one that ran states how it ended.
     // Every record names the call's own JSON-RPC id, which joins it to its decision.
-    let tools = tool_records(&box_.root().join("private/telemetry/records.jsonl"));
+    let tools = tool_records(&box_.tool_calls_path());
     let called: Vec<_> = tools
         .iter()
         .filter(|record| record.event == "strands.box.tool.call")
         .collect();
     assert_eq!(called.len(), 2, "{tools:#?}");
-    // The default file names no field, so each call names its argument and redacts the value.
-    for record in &called {
-        assert_eq!(
-            record
-                .attribute("strands.box.tool.arguments.value")
-                .map(String::as_str),
-            Some("<redacted>"),
-            "{tools:#?}"
-        );
-    }
+    // The target that names tool_calls receives each call's argument in clear text.
+    let mut values: Vec<_> = called
+        .iter()
+        .filter_map(|record| record.attribute("strands.box.tool.arguments.value"))
+        .map(String::as_str)
+        .collect();
+    values.sort_unstable();
+    assert_eq!(values, ["denied", "fixture-private-argument"], "{tools:#?}");
     let completed: Vec<_> = tools
         .iter()
         .filter(|record| record.event == "strands.box.tool.completion")

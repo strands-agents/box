@@ -60,9 +60,10 @@ A target names a **set**. No signal contains another, and there is no ordering.
 | `agent_metrics` | one metric the agent's own instrumentation exported |
 | `control_plane` | one change to the authority this box holds |
 | `mcp_unmatched` | one MCP alias invocation that matches no declared command |
-| `tool_calls` | one MCP tool call's fields, or how it ended |
+| `tool_calls` | one MCP tool call's fields in clear text, or how it ended |
 
-**A target naming none receives every one of the eight.** An empty set is refused.
+**A target naming none receives seven of the eight, every one but `tool_calls`.** An empty set is
+refused.
 
 These eight are this crate's own vocabulary and the spelling a record carries. They are not what an
 operator writes: `box.toml` takes `include`, whose words are `deny`, `permit`, `trace`, `logs`,
@@ -89,12 +90,10 @@ and the output are flattened into dotted field paths, and each value is bounded 
 `correlated` attaches the call's request context, so the two records join by `jsonrpc.request.id`.
 Neither produces a span.
 
-**A target receives a tool-call value only for a field it names.**
-`Target::revealing_tool_fields(server, tool, ToolFieldList)` names one tool's argument and output
-paths, and the target's exporter writes every other value as `<redacted>`. `is_field_path` says which
-paths a list may name. `Collector::reveals_output_of(server, tool)` tells a caller whether reading
-that tool's output can reveal anything, and `Collector::accepts(signal)` whether any target receives a
-signal at all.
+**A tool-call record carries its values in clear text, so it reaches only a target that names
+`Signal::ToolCalls`.** `Signal::default_signals` leaves it out, so a target that names no signal
+receives none. `Collector::accepts(signal)` tells a caller whether any target receives a signal at
+all, so it can skip the work for one nobody takes.
 
 ## The agent's own signals
 

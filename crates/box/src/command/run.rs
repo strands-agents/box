@@ -207,6 +207,23 @@ fn write_left_out_tools(
 }
 
 /// One line for each bare name a `[tool]` answers to in the hosted Shell, and the file it runs.
+/// Disclose each telemetry target that receives MCP tool-call values in clear text.
+fn write_tool_call_disclosures(
+    record: &Record,
+    mut output: impl std::io::Write,
+) -> std::io::Result<()> {
+    for (label, entry) in &record.telemetry {
+        if entry.takes_tool_calls() {
+            writeln!(
+                output,
+                "strands-box: [telemetry.{label}] receives each MCP tool call's arguments and \
+                 output in clear text, including any secret a tool takes or returns"
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn write_bare_name_disclosures(
     names: &crate::run::commands::BareNames,
     mut output: impl std::io::Write,
@@ -426,6 +443,8 @@ async fn hosted(
     }
     let secrets = secrets?;
 
+    write_tool_call_disclosures(&locked.record, std::io::stderr().lock())
+        .map_err(|source| ConfigError::Disclosure { source })?;
     eprintln!("strands-box: starting workload");
     let hosted = HostedBox::open(
         &locked.root,
@@ -717,6 +736,36 @@ mod tests {
             String::from_utf8(output).expect("the announcement is UTF-8"),
             "strands-box: [tool.aws-suite]: exposes ~/.aws (read)\n\
              strands-box: [tool.aws-suite]: exposes ~/.aws/sso/cache (write)\n"
+        );
+    }
+
+    /// Only a target that names `tool_calls` is disclosed, because only it receives the values.
+    #[test]
+    fn startup_discloses_each_telemetry_target_that_takes_tool_calls() {
+        use crate::record::config::telemetry::{SignalGroup, TelemetryEntry};
+        let entry = |include: Option<Vec<SignalGroup>>| TelemetryEntry {
+            kind: ::telemetry::TargetKind::File,
+            destination: "/tmp/records.jsonl".to_string(),
+            include,
+            secret: None,
+        };
+        let mut record = record_with(None, BTreeMap::new());
+        record.telemetry = BTreeMap::from([
+            (
+                "local".to_string(),
+                entry(Some(vec![SignalGroup::Deny, SignalGroup::ToolCalls])),
+            ),
+            ("plain".to_string(), entry(None)),
+            ("verdicts".to_string(), entry(Some(vec![SignalGroup::Deny]))),
+        ]);
+        let mut output = Vec::new();
+
+        write_tool_call_disclosures(&record, &mut output).expect("the disclosure writes");
+
+        assert_eq!(
+            String::from_utf8(output).expect("the disclosure is UTF-8"),
+            "strands-box: [telemetry.local] receives each MCP tool call's arguments and output in \
+             clear text, including any secret a tool takes or returns\n"
         );
     }
 
