@@ -503,6 +503,10 @@ when temporal { formerly within 3600s (
 fn captured_legacy_events_reopen_without_erasing_facts_or_inventing_identifiers() {
     let history = tempfile::tempdir().expect("history directory");
     let path = history.path().join("dogwood.redb");
+    // The engine is 1.1.2; only the captured event fields or action vocabulary are old.
+    // Initialize its history generation on an empty store before installing that historical fixture.
+    drop(PolicyEngine::open(Vec::new(), &path).expect("current history generation recorded"));
+
     let actions = compose_action_schema(&[]).expect("fixed schema composes");
     let mut old = DurableTemporalEngine::open(&path, 10_000).expect("legacy store opens");
     old.install(LEGACY_GUARDS, &actions, Some(event_schema_source()), None)
@@ -540,8 +544,8 @@ fn captured_legacy_events_reopen_without_erasing_facts_or_inventing_identifiers(
             text: LEGACY_GUARDS.to_string(),
         }]
     };
-    let engine =
-        PolicyEngine::open(sources(), &path).expect("the old history opens without migration");
+    let engine = PolicyEngine::open(sources(), &path)
+        .expect("legacy event fields reopen under the recorded current engine");
     let probe = |path| Request::Http {
         host: "api.example.com",
         port: 443,

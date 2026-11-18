@@ -427,6 +427,42 @@ policy denied this operation on 'example.com:443' [default-deny]: No permit poli
 A `[egress.<name>]` table with no matching permit leaves the host unreachable. A permit with no
 binding sends the request with a placeholder in place of the secret, which the provider rejects.
 
+## Start with fresh history after a Dogwood upgrade
+
+This upgrade to Dogwood 1.1.2 requires a new box directory. If the configured directory contains
+unsupported history, Box refuses to start the workload. The error directs you to start with a new
+box directory; Box does not erase or convert the old history. Later restarts reuse the new history.
+
+A new directory starts with no recorded activity. Counts and usage budgets start over. An earlier
+read no longer satisfies a rule that requires that read before a write. If those resets are not
+acceptable, keep using the existing build and box directory.
+
+To use the new build with fresh history:
+
+1. Stop the old Box run.
+2. Copy its configuration beside the original as `box-1.1.2.toml`. Keep the original configuration
+   and the complete old box directory intact.
+3. In the copy, set `box_dir` to a new absolute path outside the workload workspace. Its parent
+   directory must exist. Keep the policy, tool grammar, credential references, and workload settings.
+4. Check each `[telemetry.<label>]` table in the copy. For a target with `kind = "file"` whose
+   `destination` points inside the old box directory, change `destination` to an absolute path under
+   the new directory's `private/` directory. Keep the target's other settings. Otherwise, the new
+   build continues to write telemetry records to the old directory.
+5. Run the new Box executable with the copied configuration:
+
+   ```sh
+   ./box-core/box run --config /absolute/path/to/box-1.1.2.toml
+   ```
+
+Replace the configuration path with your copy's absolute path. `run` creates the new box state
+and starts the configured workload. Keeping the configuration beside the original preserves
+relative policy paths. Credential references must still resolve in the operator environment.
+If `[agent] workspace` is absent, run from the same working directory as before.
+
+Do not copy generated box state or `private/dogwood.redb` into the new directory. Retaining the
+old directory keeps its history available to the old build. Activity in the new directory does
+not appear in the old one; there is no conversion between them.
+
 ## Troubleshooting load failures
 
 The box validates `policy.dw` before it starts. It refuses to start on a policy it cannot read, or
@@ -791,6 +827,32 @@ when { context.input.path like "*/secrets.env" };
 Actions are in the same family when their names start the same way before the `:`. So
 `fs:read`, `fs:write`, and `fs:delete` can share one rule, and `net:connect` and `http:request`
 can't. Each MCP tool action is a family of its own.
+
+### A rule that lists a built-in action beside an MCP tool's action
+
+An action list can't name a built-in action, such as `fs:read`, beside an MCP tool's action, or
+the actions of two servers. Box can't check the list until the server reports its tools, and it
+never checks a list of mixed kinds at all. So the rule would never take effect, and the built-in
+action would go unenforced. This rule refuses to load:
+
+```text
+@id("both_doors")
+forbid (principal, action in [Box::Action::"fs:read", filesrv::Action::"read_file"], resource);
+```
+
+```text
+policy lists actions of more than one namespace: rule @id("both_doors") lists [Box::Action::"fs:read"] beside [filesrv::Action::"read_file"], and an action list of more than one namespace never takes effect; write one rule for each namespace
+```
+
+To fix it, write one rule for each:
+
+```text
+@id("both_doors_file")
+forbid (principal, action == Box::Action::"fs:read", resource);
+
+@id("both_doors_tool")
+forbid (principal, action == filesrv::Action::"read_file", resource);
+```
 
 A rule that checks `context.input` and names no action gets the same error. Name the action the
 rule is for in its scope, as `action == Box::Action::"fs:read"`. A test such as

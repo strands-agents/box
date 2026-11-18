@@ -1,6 +1,22 @@
-//! Concurrent workload execution and output capture.
+//! Runs host controls and concurrent workloads.
 
 use super::{BoxFixture, Command, Route, RunResult, count_launch, native};
+
+/// Captures a host control's output, retrying only executable-busy starts for up to two seconds.
+pub fn host_output(command: &mut Command) -> std::io::Result<std::process::Output> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match command.output() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => return result,
+        }
+    }
+}
 
 /// Read a child's pipe to completion on its own thread, so the child never blocks on a full pipe.
 fn drain<R: std::io::Read + Send + 'static>(pipe: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {

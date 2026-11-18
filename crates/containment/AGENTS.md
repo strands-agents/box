@@ -149,6 +149,15 @@ by reading `src/` belongs in `src/` — the README describes the shape.
   - **It adds no rule to any profile a box renders today.** Box canonicalizes every path it owns
     before granting it, `/etc` is one link whose head already rendered, and no other floor path is a
     link. The growth is bounded by the links a caller's own program carries.
+  - **A linked directory on the chain is a node too.** The kernel reads a folder link as it reads a
+    file link, and the walk once recorded only file links. A Homebrew venv's command
+    (`venv/bin/python3.14 -> /opt/homebrew/opt/python@3.14/bin/python3.14`) then failed to exec
+    with `Operation not permitted` unless a read grant happened to cover `/opt/homebrew/opt`,
+    because nothing rendered the `opt/python@3.14` folder link. So the walk adds each linked
+    directory any spelling on the chain passes through, parent-canonical, and walks that link's own
+    target. Being nodes, they are judged by the floor and the refusals like the rest.
+    `an_executable_reached_through_a_linked_folder_crosses_the_boundary` pins it under a real
+    profile.
   - **A firmlink spelling still renders a dead rule, and that residual is not closed.**
     `parent_canonical` is `realpath`, which does not collapse a firmlink, so a link target spelled
     through `/System/Volumes/Data` renders a node rule the kernel never matches and the exec is
@@ -922,6 +931,26 @@ The raw `vfork` probe keeps the child entirely in one assembly block. It checks 
 `setuid` refusal using the child's own UID, then exits without returning into Rust or changing the
 shared userspace stack. The outside control can set its unchanged UID. The parent checks the
 child's distinct exit status and reaps it. The test supervisor bounds the whole probe.
+
+Native Amazon Linux 2023 x86-64 validation for `04cdbb86cb31fee82ac341d529d690cfccb6810b`
+found that a direct `SYS_fork` call returned `EPERM` when the permit was absent; the outside
+control created and reaped its child. With the permit present,
+`raw_fork_preserves_child_restrictions` creates and reaps the child and verifies inherited
+refusals from both syscall filters. Its `getpriority` probe checks the permit filter; its
+executable `mprotect` probe checks the restriction filter without executing the memory.
+Controls that relax either rule separately make the regression fail.
+
+Musl 1.2.5's C library also uses this syscall on x86-64: its `fork()` function calls `_Fork()`,
+whose [implementation](https://git.musl-libc.org/cgit/musl/tree/src/process/_Fork.c?h=v1.2.5)
+selects raw `SYS_fork` when defined. Musl's x86-64 syscall definitions include that entry.
+This source inspection explains the compatibility need; the measured test calls the syscall
+directly and does not qualify a complete musl-linked application.
+
+Linux v6.12 implements `fork` through `kernel_clone` with only `SIGCHLD` in
+[`kernel/fork.c`](https://github.com/torvalds/linux/blob/v6.12/kernel/fork.c#L2868-L2875).
+The already permitted, unrestricted `clone` call admits that operation. Keep this permit
+x86-64-only.
+
 Follow-up full-Box checks found that Python `os.rmdir`, Python `shutil.rmtree`, and `git clean -fd`
 could not remove their empty directories on x86: `rmdir` returned `EPERM`. All three outside
 controls and matched ARM64 checks completed cleanup; ARM64 used `unlinkat` with `AT_REMOVEDIR`. Linux v6.12 routes both calls through `do_rmdir`

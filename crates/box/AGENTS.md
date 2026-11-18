@@ -4,8 +4,8 @@ Follow [repository guidance](../../AGENTS.md).
 
 Read the **"`strands-box` is interface-frozen"** section of the
 [repository guidance](../../AGENTS.md) before changing anything here. A change to an
-observable surface — the CLI verbs and flags, `box.toml`'s keys, the four box inputs, the
-on-disk records (`Record` at `RECORD_VERSION` and each later record version through
+observable surface — the `strands-box` verbs and flags, `box.toml`'s keys, the four box inputs,
+the on-disk records (`Record` at `RECORD_VERSION` and each later record version through
 `TELEMETRY_EXPORT_RECORD_VERSION`, with the `box_id` grammar `valid_box_identity` accepts,
 `BoxLive` at `LIVE_VERSION`), the broker wire protocol at
 `PROTOCOL_VERSION`, the alias names and their socket derivation, the
@@ -118,28 +118,28 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   stack frame where nothing names it.
 - **Flattening `error` into one `BoxError`** with `String` variants. That is the catch-all,
   re-created.
-- **Giving the crate a library target back.** **There is no `lib.rs` and no `[lib]` target**, so
-  nothing links the box and every caller reaches it as a process. `tests/library_surface.rs` went
-  with the façade. Every module is `pub(crate)`, and what the façade held is now a property of that
-  structure. Keep every part:
-  - Nothing outside the crate can name `run`, `contain`, or `record`, so `Boundary`, `Trampoline`, and
-    `Attachment` are unreachable. That matters most for `run`, because `flock` is per file
-    descriptor, so two in-process calls both succeed, and that breaks
-    [one policy engine per box](../../docs/design/decisions.md#one-policy-engine-per-box).
-  - `Boundary::assemble` and `Trampoline::command` stay `pub(crate)`. A caller that can assemble a
-    boundary can assemble a weaker one.
-  - `BoxError` is an **opaque struct** over a `pub(crate)` enum. Exposing the enum leaks nine
-    mechanism types.
-  - **No signature names or returns a `PolicyEngine`**, a host path, a working directory, an
-    environment overlay, or a proxy port. So nothing outside the box holds an authority object.
+- **Widening the `strands-box` library.** `src/lib.rs` is the crate's library, and `src/main.rs`
+  is a thin wrapper that calls `strands_box::run` and `strands_box::generate_policy_schema`. Every
+  module stays `pub(crate)`. The library's public API is not frozen, but a pull request that adds
+  to it needs a maintainer's approval. Keep every part:
+  - **One process runs at most one box.** `run` sets `STARTED` and refuses a second call, even for
+    a different box directory. The box lock refuses only a second run of the *same* box. A second
+    box in this process would hold two boxes' secrets and policy engines in one address space, which
+    breaks [one trusted process per box](../../docs/design/decisions.md#one-trusted-process-per-box).
+    `box_library.rs::hardening_and_repeat_run` proves the refusal.
+  - Nothing outside the crate can name the `run` or `record` modules, so `Boundary`, `Trampoline`,
+    and `Attachment` are unreachable. `Boundary::translate` and `trampoline::command` stay
+    `pub(crate)`. A caller that can assemble a boundary can assemble a weaker one.
+  - `BoxError` is an **opaque struct** over a `pub(crate)` enum. A public refusal wraps it or
+    exposes only a kind enum. Exposing the enum leaks nine mechanism types.
+  - **No public signature names or returns a `PolicyEngine`**, an environment overlay, or a proxy
+    port, and none returns a host path or working directory the box resolved. So nothing outside
+    the box holds an authority object.
 
-  **Nothing outside the box depends on a box crate, and that absence is the enforcement.** A
-  caller starts `strands-box run` as a child process and reaches it only through that process's
-  stdio. So it **cannot** open a `PolicyEngine`, build a `ContainmentConfig`, hold a proxy handle, or resolve a
-  secret, because no such type is in scope: one `Policy` per box holds by construction
-  rather than by discipline, and no CA private key and no resolved secret can exist in that address
-  space. A path dependency would buy nothing either way, because cargo ignores one on a
-  `[[bin]]`-only crate and only warns.
+  **A library caller shares the box's trusted process, so the caller is trusted.** It still
+  **cannot** open a `PolicyEngine`, build a `ContainmentConfig`, hold a proxy handle, or resolve a
+  secret through this crate, because the library puts no such type in scope. The workload reaches
+  the box only through its sandbox and `run/box.sock`.
 
   The limit: any crate depending on `strands-box-policy` can call `Policy::open`, whatever this
   crate exposes. The dependency graph and the manifest guard hold the one-instance rule.
@@ -256,9 +256,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   about one box. **Do not reintroduce `--name`**; reconciling a flag against the file is the shape in
   which the file's key became silently dead once already.
 
-  **`box.toml` carries twelve top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
+  **`box.toml` carries thirteen top-level keys — `name`, `box_dir`, `policy`, `[agent]`,
   `[tool.<label>]`, `[egress.<name>]`, `[mcp.<name>]`, `[telemetry.<kind>]`,
-  `[experimental-features]`, `file-attributes`, `[limits]`, and `[gateway]`.** The experimental settings select native file
+  `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`.** The experimental settings select native file
   checks and tool grammars. They add no authority beyond the authored policy. `file-attributes` adds
   no grant: it widens what the workload's own `write` lists allow on macOS, so it is part of the
   workload input, and each process discloses it. `[gateway] upgrade_http` adds no grant either:
@@ -578,9 +578,11 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   - **A Python alias sends words, and only the trusted process quotes them.** `python3` and
     `python` send their name and arguments as a list; `command_text` single-quotes every word
     before the Shell parses it, so `$(…)`, backticks, and a newline in an argument stay literal.
-    The alias parses no option and reads no file, and the Shell's own `python3` refuses a bare
-    `python3` or `python3 -` with status 2. `a_command_as_words_keeps_every_argument_literal` pins
-    the quoting.
+    The alias parses no option and reads no file. A bare `python3` or `python3 -` exits 2: Monty
+    refuses it, and with `monty = false` the Shell refuses it before the spawn, because a program
+    the Shell starts receives no input and CPython would run an empty program and exit 0.
+    `a_command_as_words_keeps_every_argument_literal` pins the quoting, and
+    `without_a_monty_runner_python3_runs_its_declared_program` the refusal with Monty off.
   - **The hosted Shell has no network of its own — it can reach only the gateway
     ([Shell network](../../docs/design/decisions.md#shell-network-goes-through-the-egress-gateway)).**
     The Shell itself never dials an origin: its one outbound path routes through the box's egress
@@ -726,7 +728,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   Claude Code 2.1.292 gives its Bash tool such a stdin, and collecting to EOF before the Call made
   every agent command wait 10 s and fail. A command that reads such a stdin waits until the Shell
   deadline. The alias forwards every byte, and the broker applies `[limits.shell] max_stdin`
-  (`ShellLimits::max_stdin`, 64 KiB by default, never 0): it feeds exactly the first `max_stdin`
+  (`ShellLimits::max_stdin`, 1 MiB by default, never 0): it feeds exactly the first `max_stdin`
   bytes, discards the rest, sends no Denied, and ignores `InputEof`, so the writer never blocks or
   gets EPIPE, a command that does not read is unaffected, and one that reads past the cap waits for
   the Shell deadline and fails; a failed Call then gets a stderr note that its input was cut. On a

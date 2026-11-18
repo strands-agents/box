@@ -129,7 +129,7 @@ version 34.
 Enabling [`file-watching`](config.md#file-watching) for any process requires record version 35.
 A [telemetry target](config.md#telemetrylabel) that uses `accepts`, `headers`, `secret.prefix`,
 `secret.placement`, a vendor kind, or an `aws://` or `credsd://` secret requires record version 36.
-Setting `executable-memory` for any process requires record version 37.
+Setting `executable-memory` for any process requires record version 38.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 

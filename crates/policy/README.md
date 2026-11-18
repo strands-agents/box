@@ -79,7 +79,8 @@ PolicyEngine::validate(&[Policy]) -> Result<(), PolicyError>
 PolicyEngine::check(&Operator, &[Policy], complete: bool) -> PolicyCheck
 ```
 
-`validate` answers "would `open` accept this text", and returns no authority. Use it
+`validate` checks policy text and returns no authority. It does not inspect saved history or prove
+that a history file can be opened. Use it
 when you must refuse bad policy text *before* writing it, and you must not open a
 second `PolicyEngine` to find out. `open` and `validate` share one private composition,
 so a validator that accepts text the authority would refuse is not expressible. Its
@@ -486,6 +487,21 @@ Rules written against history:
   drops state outside each rule's window. After each 10,000 submitted events, the durable
   engine attempts a checkpoint. A successful checkpoint snapshots monitor state and removes
   the covered log records. A failed checkpoint increases the durable log replay depth.
+
+## Dogwood 1.1.2 history
+
+The runtime pins both `dogwood-language` and `dogwood-local-engine` to `1.1.2`.
+`PolicyEngine::open` marks a new history with Box-owned compatibility generation `1` under
+`box.dogwood.history-generation`. This generation identifies compatible saved policies and activity;
+it is independent of the Dogwood package version. Change it only when recovery or policy/state
+identity changes make saved history incompatible. Compatible package upgrades retain the generation.
+The adapter refuses previously used history without a supported generation before recovery or
+policy reconciliation.
+
+To adopt this build, deliberately select a new history file. Box operators select a new box
+directory through `box_dir`; see [the upgrade procedure](../../docs/user/policy.md#start-with-fresh-history-after-a-dogwood-upgrade).
+Earlier activity does not carry over: counts start at zero, and prior events no longer satisfy
+history-based prerequisites. The adapter does not erase or convert existing history.
 
 ## Effective Policy
 

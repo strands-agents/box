@@ -125,7 +125,11 @@ Use `src/scenarios.rs` for setup and expected results that several execution rou
 Keep commands, interpreter checks, and route-specific refusal checks in each case.
 `MoveReplacement` shows this pattern for Shell and Monty.
 
-`src/process.rs` owns concurrent workload execution and child cleanup.
+`src/process.rs` owns host control output, concurrent workload execution, and child cleanup.
+Use `host_output(&mut Command)` to start a copied executable directly on the host.
+It retries only executable-busy startup errors every 10 milliseconds for up to two seconds.
+The caller receives the original process output or error and retains its status, output, and policy checks.
+
 Cleanup first requests normal shutdown, so Box can stop its workload groups.
 After five seconds it force-stops the direct child. A timeout remains a failed result even if shutdown exits successfully.
 Its tests in `src/process/tests.rs` check helper behavior with local subprocesses.
