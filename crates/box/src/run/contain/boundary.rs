@@ -687,10 +687,13 @@ impl Boundary {
         containment = containment.refuse(guard.private, Scope::Root)?;
         for grant in &reach.grants {
             // An exec entry for the command or an interpreter is already granted by that path.
-            let already_granted = grant.operation == Operation::Exec
+            let covers_interpreter = grant.operation == Operation::Exec
                 && grant.scope == Scope::File
-                && (grant.resolved == program_identity
-                    || interpreter_exec_files.contains(&grant.resolved));
+                && interpreter_exec_files.contains(&grant.resolved);
+            let already_granted = covers_interpreter
+                || grant.operation == Operation::Exec
+                    && grant.scope == Scope::File
+                    && grant.resolved == program_identity;
             if !already_granted {
                 containment = if grant.credential_store {
                     // The guards judge the canonical identity; the grant itself keeps the
@@ -716,9 +719,10 @@ impl Boundary {
             // On a merged-/usr host `/bin` links to `usr/bin`, and a script a process writes at
             // run time names its interpreter as `#!/bin/sh`. The file this entry shows at
             // `/usr/bin/sh` is shown at `/bin/sh` too, with each operation an entry grants it:
-            // the same file, under a name the host gives it.
+            // the same file, under a name the host gives it. An exec entry an interpreter spelling
+            // already covers gets no second name, so that interpreter keeps one exec grant.
             #[cfg(target_os = "linux")]
-            if !grant.credential_store {
+            if !grant.credential_store && !covers_interpreter {
                 let path = if grant.is_link() {
                     &grant.lexical
                 } else {
