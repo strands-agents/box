@@ -44,6 +44,7 @@ Rules:
 ## Before you start
 
 Box supports macOS on Apple silicon and Linux ARM64 (64-bit Arm). Linux x86-64 is experimental.
+Check the [macOS requirements](./macos-requirements.md) for the release package, workload dependencies, and startup checks.
 Linux binaries use Amazon Linux 2023 as their build baseline. Check the [Linux requirements](./linux-requirements.md) for compatible libraries, setup permissions, and tested configurations.
 [Step 1](#step-1-download-box) installs Box on either platform.
 The Strands CLI walkthrough in steps 2–8 uses macOS. For that walkthrough, you need:
@@ -83,6 +84,7 @@ Use a fresh destination to keep a previous installation if the final extraction 
 The signed macOS package contains `Box.app`, with a `box` launcher and helper links into that bundle.
 Moving only an executable out of the bundle loses its provisioning profile.
 The package is also notarized, so macOS runs a copy that you download in a browser.
+Check the [macOS requirements](./macos-requirements.md) before running a workload; a successful `box --version` does not test sandbox startup.
 
 ### Linux
 

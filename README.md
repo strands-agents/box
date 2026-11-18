@@ -208,6 +208,7 @@ The final extraction can partially update the destination if it fails. Use a fre
 to retain a previous installation.
 
 Keep the entire download together in `./box-core`, including `Box.app` in signed macOS packages.
+The [macOS requirements](docs/user/macos-requirements.md) list the package requirements, workload dependencies, and startup checks.
 You can also [build from source](#build-from-source). Then follow the guide to
 write `box.toml` and `policy.dw`, and run the box.
 

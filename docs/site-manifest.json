@@ -271,6 +271,17 @@
       }
     },
     {
+      "id": "macos-requirements",
+      "source": "docs/user/macos-requirements.md",
+      "slug": "reference/macos-requirements",
+      "title": "macOS requirements",
+      "description": "Check the macOS release package, workload dependencies, sandbox startup, and optional native filesystem policy prerequisites.",
+      "nav": {
+        "group": "Reference",
+        "order": 7
+      }
+    },
+    {
       "id": "cloud-deployments",
       "source": "docs/user/cloud-deployments.md",
       "slug": "reference/cloud-deployments",
@@ -278,7 +289,7 @@
       "description": "Configure and check AgentCore Runtime and Lambda MicroVM deployments using the shared Linux requirements.",
       "nav": {
         "group": "Reference",
-        "order": 7
+        "order": 8
       }
     }
   ]
