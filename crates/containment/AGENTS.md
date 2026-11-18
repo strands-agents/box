@@ -978,9 +978,11 @@ creates its lock through the `tempfile` crate. On Linux, tempfile 3.27's `persis
 The permit admits `renameat2` only when its flags are `0` or `RENAME_NOREPLACE`. With `0` it is the
 permitted `renameat`. `RENAME_NOREPLACE` only makes the call fail with `EEXIST` when the new name
 exists. `RENAME_EXCHANGE`, which swaps two names, and `RENAME_WHITEOUT`, which creates a device
-node, still match no rule and get `EPERM`. This covers the default backend only. The native
-filesystem broker mediates `renameat2` itself and answers any call with flags with `EACCES`
-(`broker.rs`), so under native filesystem policy tempfile still cannot persist a file.
+node, still match no rule and get `EPERM`. A permitted `renameat2` meets the same mounts that keep
+each ancestor of a denied path fixed, so moving one fails with `EBUSY`, as `renameat` does
+(`renameat2_variants_remain_refused_for_denied_ancestors`). This covers the default backend only.
+The native filesystem broker mediates `renameat2` itself and answers any call with flags with
+`EACCES` (`broker.rs`), so under native filesystem policy tempfile still cannot persist a file.
 `a_name_is_created_without_replacing_one_with_renameat2_under_the_filters` checks each flag under
 the filters, and runs tempfile's `persist_noclobber`.
 
