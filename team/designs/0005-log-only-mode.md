@@ -10,7 +10,7 @@ AgentCore has two LOG_ONLY controls:
 - Per-policy `enforcementMode = LOG_ONLY` logs one policy while the rest enforce. Most AgentCore users trial a new rule this way, and policy-generation tools use it.
 - Engine-level `mode = LOG_ONLY` enforces nothing.
 
-This doc (v1) covers only the engine-level control. Per-rule log-only is a planned v2 with its own design, because it needs a change in Dogwood's local engine.
+This doc (v1) covers only the engine-level control. Per-rule log-only is designed in [0008](0008-per-rule-log-only.md), because it needs a change in Dogwood's local engine.
 
 ## Success criteria
 - For the same workload and policy, the actions marked would-deny in log-only mode match the actions denied in enforce mode, up to the run's first flip.
@@ -42,7 +42,7 @@ This doc (v1) covers only the engine-level control. Per-rule log-only is a plann
 | Explicit forbids and default-deny both stop blocking | `Forbidden` and `NoMatch` both flip (KD 5) |
 | Decision flips report what would have changed | `verdict = deny` with `enforced = false` (KD 3) |
 | Results go to traces and CloudWatch metrics (`LogOnlyMatches`, `LogOnlyDecisionFlips`) | Results go to the decision records, and consumers count flips |
-| Per-policy `enforcementMode = LOG_ONLY` (one rule logged, the rest enforce) | Not in v1. Per-rule log-only is planned for v2 |
+| Per-policy `enforcementMode = LOG_ONLY` (one rule logged, the rest enforce) | Not in v1. See [0008](0008-per-rule-log-only.md) |
 
 Deliberate differences:
 - Evaluation faults (`PolicyPending`, `InternalFault`) and degraded MCP tools still deny (KD 5), so a missing or broken policy doesn't fail open.
@@ -54,7 +54,7 @@ Deliberate differences:
 ### KD 1: Box-wide, not per rule
 Decision: One switch for the whole box.
 
-Rationale: It matches AgentCore's engine-level LOG_ONLY and keeps the change small. Per-rule log-only needs enforced and shadow rules evaluated side by side, which needs a Dogwood change (v2). A Dogwood annotation such as `@enforcement("log_only")` could carry the setting then.
+Rationale: It matches AgentCore's engine-level LOG_ONLY and keeps the change small. Per-rule log-only needs enforced and shadow rules evaluated side by side, which needs a Dogwood change. [0008](0008-per-rule-log-only.md) designs it, with an `@enforcement("log_only")` annotation on the rule.
 
 ### KD 2: The setting lives on the `policy` key in `box.toml`
 Decision: The `policy` key accepts today's string, or a table that also says how the policy is applied.
@@ -167,7 +167,7 @@ Decision: The mode comes from `box.toml` and stays fixed for the run. `reload()`
 - Box prints one stderr line at startup naming the exposure.
 
 ## Limitations and not in v1
-- Per-rule log-only is a planned v2 (it needs a Dogwood change and release).
+- Per-rule log-only is designed in [0008](0008-per-rule-log-only.md) (it needs a Dogwood change and release).
 - Generating policies is out of scope, since policy-generation tools already do it.
 - Decisions after the first flip are approximate (KD 4).
 - The policy doesn't protect the host during a trial (see "What log-only mode exposes").
