@@ -175,9 +175,9 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   caller wanting determinism passes an absolute program path).
 
   **`tests/four_inputs.rs` is the guard.** It asserts both halves: no withheld flag is a box
-  argument, and `ConfigFile` carries exactly **fourteen** keys: `agent`, `box_dir`, `egress`, `mcp`,
+  argument, and `ConfigFile` carries exactly **fifteen** keys: `agent`, `box_dir`, `egress`, `mcp`,
   `name`, `policy`, `secret-source`, `telemetry`, `tool`, `experimental-features`,
-  `file-attributes`, `limits`, `gateway`, and `monty`. That is the `box.toml` key set, and it is
+  `file-attributes`, `limits`, `gateway`, `monty`, and `containment`. That is the `box.toml` key set, and it is
   **not** the stored `Record`'s key set: `Record` adds `version` and `box_id`, which no operator
   authors. Read
   which one a passage means before you change a count. The withheld-flag guard is split in two —
@@ -264,13 +264,14 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   about one box. **Do not reintroduce `--name`**; reconciling a flag against the file is the shape in
   which the file's key became silently dead once already.
 
-  **`box.toml` carries fourteen top-level keys: `name`, `box_dir`, `policy`, `[agent]`,
+  **`box.toml` carries fifteen top-level keys: `name`, `box_dir`, `policy`, `[agent]`,
   `[tool.<label>]`, `[egress.<name>]`, `[secret-source.<scheme>]`, `[mcp.<name>]`,
-  `[telemetry.<kind>]`, `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, and `monty`.** The experimental settings select native file
+  `[telemetry.<kind>]`, `[experimental-features]`, `file-attributes`, `[limits]`, `[gateway]`, `monty`, and `[containment]`.** The experimental settings select native file
   checks, tool grammars, ingress, and secret sources. They add no authority beyond the authored policy. `file-attributes` adds
   no grant: it widens what the workload's own `write` lists allow on macOS, so it is part of the
   workload input, and each process discloses it. `[gateway] upgrade_http` adds no grant either:
-  policy decides each upgraded request on port 443, as it decides a `CONNECT` to that host. `[agent]` and each
+  policy decides each upgraded request on port 443, as it decides a `CONNECT` to that host. `[containment]`
+  is argued in `four_inputs.rs`: it grants no authority and only widens what the workload observes. `[agent]` and each
   `[tool.<label>]` hold one `ProcessSpec`, which is six fields — `command`, `workspace`, `env`,
   `filesystem`, `native-filesystem-policy`, and `grammar`. Only a `[tool.<label>]` takes
   `grammar`, behind `[experimental-features] tool-grammars`, and `[agent]` refuses it. `filesystem` holds the path lists: nine for `[agent]`, seven
@@ -1058,7 +1059,11 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     trampoline or the workload.
   - **Root bypasses dumpable entirely.** This defends against same-uid peers, never root.
   - **`cmdline`, `stat`, `status`, `mountinfo`, `net/*`, and `task/*/{stat,status,cmdline}` stay
-    readable.** Only the address space is protected, never the process topology.
+    readable.** Only the address space is protected, never the process topology. Under
+    `[containment] private_proc = false` they are readable by every leaf too, because the leaves
+    share the container's `/proc`. That `/proc` is read-only, so a leaf cannot write a same-uid
+    process's `oom_score_adj`, which dumpable does not guard. Accepted as a residual, pinned by
+    `shared_proc_linux.rs`.
   - **It stops the *read*, not the *copy*.** Un-wiped plaintext copies on the request path are
     fixed in `credentials` and `egress-gateway`.
   - **Applied only for the spelling that holds a secret.** The other verbs are CLI clients, and

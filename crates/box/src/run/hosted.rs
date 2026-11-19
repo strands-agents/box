@@ -430,11 +430,14 @@ fn tool_spawner(
                 ));
             }
             // Recorded before the run, so a call the agent cancels or outlasts still leaves it.
+            let label = table
+                .strip_prefix("[tool.")
+                .and_then(|rest| rest.strip_suffix(']'))
+                .unwrap_or(&table);
+            if boundary.shares_proc() {
+                recorder.record(telemetry::EffectiveDecision::shared_proc(label.to_string()));
+            }
             if selected.spec.native_egress() {
-                let label = table
-                    .strip_prefix("[tool.")
-                    .and_then(|rest| rest.strip_suffix(']'))
-                    .unwrap_or(&table);
                 recorder.record(telemetry::EffectiveDecision::enforcement_permit(
                     "egress:native",
                     label.to_string(),
@@ -724,6 +727,9 @@ pub(crate) struct HostedBox {
     /// already available.
     _record: PublishedRecord,
 
+    /// Where this run's decisions go, kept so the agent's own spawn can record against it.
+    recorder: Arc<telemetry::DecisionRecorder>,
+
     /// The box lock. Dropped LAST, so no second run starts before teardown ends.
     _owned: Lock,
 }
@@ -856,6 +862,7 @@ impl HostedBox {
 
         let telemetry_port = collector.port();
         let recorder = telemetry::DecisionRecorder::over(Arc::clone(&collector), policy_decisions);
+        let kept_recorder = Arc::clone(&recorder);
         // A backend entry opens one vault holding its strip-phantom destination secret (a phantom is
         // provisioned to the workload and stripped at the gateway) and its box-owned backend token
         // (attached at the gateway, never placed in the workload environment). One control per
@@ -1123,6 +1130,7 @@ impl HostedBox {
             attachment,
             approved,
             _record: published,
+            recorder: kept_recorder,
             _owned: owned,
         })
     }
@@ -1149,6 +1157,11 @@ impl HostedBox {
     /// What this run's boundary reads.
     pub(crate) fn attachment(&self) -> &Attachment {
         &self.attachment
+    }
+
+    /// Where this run's decisions go.
+    pub(crate) fn recorder(&self) -> &Arc<telemetry::DecisionRecorder> {
+        &self.recorder
     }
 
     /// The filesystem reach this run judged for every process table.
@@ -1393,6 +1406,7 @@ mod tests {
             contained_mcp: Default::default(),
             telemetry: Default::default(),
             secret_source: Default::default(),
+            containment: Default::default(),
         }
     }
 
@@ -3598,6 +3612,7 @@ while :; do :; done"#
             contained_mcp: Default::default(),
             telemetry: Default::default(),
             secret_source: Default::default(),
+            containment: Default::default(),
         }
     }
 

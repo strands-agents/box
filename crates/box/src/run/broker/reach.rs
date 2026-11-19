@@ -1215,6 +1215,7 @@ mod linked_command_mutation_tests {
             contained_mcp: Default::default(),
             telemetry: Default::default(),
             secret_source: Default::default(),
+            containment: Default::default(),
         };
         let commands = ConfiguredCommands::load(&record).expect("linked command is admitted");
         let reach = Reach::over(&home, None, None)

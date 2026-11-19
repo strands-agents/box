@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries fourteen keys. `name` and `box_dir` are required.
+The file carries fifteen keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -86,8 +86,9 @@ The file carries fourteen keys. `name` and `box_dir` are required.
 | `[limits]` | table | Execution limits for Strands Shell. |
 | `monty` | boolean | Whether a bare `python3` or `python` in the Shell runs Monty, Box's built-in Python subset. `true` by default. With `false`, both names resolve like any other program: a `[tool.python3]` or `[tool.python]`, else the host's `PATH`. |
 | `[gateway]` | table | Settings for every request through the egress gateway: `upgrade_http`, the hosts whose plain `http://` on port 80 the gateway sends as `https://` on port 443. See [`[gateway]`](#gateway). |
+| `[containment]` | table | How contained processes see the host. Linux only. |
 
-The example uses five of the fourteen: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the fifteen: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -1513,6 +1514,22 @@ writes a `@description` on its rules. It runs a Strands Agents SDK agent written
 a different workload from the Strands CLI on this page.
 
 The record omits `url.full` and `process.command_line`.
+
+## `[containment]`
+
+| Key | Type | Meaning |
+|---|---|---|
+| `private_proc` | boolean | Default `true`. `false` shares the container's `/proc` with every contained process. |
+
+Set `private_proc = false` only on a Linux host that masks `/proc`, such as a Kata pod or a
+non-privileged container, where `box run` otherwise refuses with "this host masks parts of /proc".
+Every contained process (the agent, each tool, and each stdio MCP server) can then list the
+container's processes and read each one's command line, `stat`, `status`, mounts, limits, and
+cgroup, and its network namespace's socket tables. The shared `/proc` is read-only. The process
+cannot signal or trace the processes it lists, or read their memory, environment, or open files. `/proc` keeps the container's process numbers, so a program
+finds itself at `/proc/self` but not at `/proc/<its pid>`. **A secret passed on any process's
+command line in that container becomes readable to the workload.** Each leaf that shares records
+`proc:shared`. macOS refuses the key.
 
 ## Errors
 

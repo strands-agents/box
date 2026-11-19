@@ -740,6 +740,7 @@ mod tests {
             mcp: Vec::new(),
             contained_mcp: BTreeMap::new(),
             telemetry: BTreeMap::new(),
+            containment: Default::default(),
             secret_source: entries(&program.table("op", std::path::Path::new("/bin/sh"))),
         };
         let checked = SecretSources::check_for_tests(&record, std::io::sink())

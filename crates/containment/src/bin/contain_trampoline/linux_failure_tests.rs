@@ -10,6 +10,7 @@ fn request() -> Args {
         config_fd: None,
         config_sha256: [0; 32],
         target_env_json: "{}".into(),
+        target_env_fd: None,
         setup_status_fd: None,
         relay_control_fd: None,
         launch_gate_fd: None,
@@ -186,7 +187,11 @@ fn execution_enters_the_explicit_working_directory_before_attempting_exec() {
         let mut args = request();
         args.target_env_json = serde_json::json!({"PWD": directory.path()}).to_string();
         assert_eq!(
-            exec_command(&args, &SetupStatus::arm(None).unwrap()),
+            exec_command(
+                &args,
+                &args.target_env_json,
+                &SetupStatus::arm(None).unwrap()
+            ),
             ExitCode::from(4)
         );
         assert_eq!(std::env::current_dir().unwrap(), directory.path());

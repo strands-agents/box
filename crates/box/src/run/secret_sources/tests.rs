@@ -223,6 +223,7 @@ fn record(text: &str) -> Record {
         mcp: Vec::new(),
         contained_mcp: BTreeMap::new(),
         telemetry: tables.telemetry,
+        containment: Default::default(),
         secret_source: Default::default(),
     }
 }

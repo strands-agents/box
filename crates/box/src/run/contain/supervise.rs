@@ -48,7 +48,7 @@ async fn spawn_registered(
             config_path: boundary.containment_config(),
             config_file: boundary.containment_config_file(),
             config_sha256: boundary.containment_digest(),
-            target_environment: boundary.target_environment(),
+            target_environment_file: boundary.target_environment_file(),
             executable: boundary.executable(),
             arguments: boundary.arguments(),
             argument_zero: boundary.argument_zero(),
@@ -756,7 +756,12 @@ impl Contained {
             terminal_result?;
             #[cfg(unix)]
             diagnostics_result?;
-            contained_exit_code(status, setup_result)
+            // The agent's stderr is the operator's terminal, so the trampoline's message already
+            // reached it and there is no detail to carry; the masked-`/proc` hint still applies.
+            let shares_proc = self._boundary.shares_proc();
+            contained_exit_code_with(status, setup_result, |stage| {
+                super::masked_proc::hint(stage, None, shares_proc)
+            })
         })();
         crate::run::hosted::with_shutdown(outcome, shutdown_result)
     }
@@ -850,7 +855,11 @@ impl LeafBox {
                         let stderr = output.map(|output| output.stderr).unwrap_or_default();
                         return Err(TrampolineError::SetupFailed {
                             stage,
-                            detail: trampoline_message(&stderr),
+                            detail: super::masked_proc::hint(
+                                stage,
+                                trampoline_message(&stderr),
+                                boundary.shares_proc(),
+                            ),
                         }
                         .into());
                     }
@@ -916,7 +925,11 @@ impl LeafBox {
         if let Some(stage) = setup_result? {
             return Err(TrampolineError::SetupFailed {
                 stage,
-                detail: trampoline_message(&output.stderr),
+                detail: super::masked_proc::hint(
+                    stage,
+                    trampoline_message(&output.stderr),
+                    boundary.shares_proc(),
+                ),
             }
             .into());
         }
@@ -990,6 +1003,7 @@ impl LeafBox {
                 }
                 None => None,
             };
+            let detail = super::masked_proc::hint(stage, detail, boundary.shares_proc());
             return Err(TrampolineError::SetupFailed { stage, detail }.into());
         }
 
@@ -1090,9 +1104,19 @@ fn trampoline_message(stderr: &[u8]) -> Option<String> {
     Some(message.chars().take(MAXIMUM_CHARACTERS).collect())
 }
 
+#[cfg(test)]
 pub(super) fn contained_exit_code(
     status: ExitStatus,
     setup: Result<Option<crate::error::SetupStage>, TrampolineError>,
+) -> Result<ExitCode, BoxError> {
+    contained_exit_code_with(status, setup, |_| None)
+}
+
+/// [`contained_exit_code`], with the detail a setup failure at a stage carries.
+fn contained_exit_code_with(
+    status: ExitStatus,
+    setup: Result<Option<crate::error::SetupStage>, TrampolineError>,
+    detail: impl FnOnce(crate::error::SetupStage) -> Option<String>,
 ) -> Result<ExitCode, BoxError> {
     match setup {
         #[cfg(unix)]
@@ -1102,7 +1126,7 @@ pub(super) fn contained_exit_code(
             if let Some(stage) = result? {
                 return Err(TrampolineError::SetupFailed {
                     stage,
-                    detail: None,
+                    detail: detail(stage),
                 }
                 .into());
             }

@@ -34,11 +34,16 @@
 //! guards, in the file whose own header calls that spelling load-bearing. It now calls
 //! `parser_source::fields_of`, which takes the last token before the colon.
 //!
-//! # The configuration holds fourteen keys, and the four inputs still stand
+//! # The configuration holds fifteen keys, and the four inputs still stand
 //!
 //! `policy` and credentials are authority, `name` and `box_dir` select state, and `[agent] command`
-//! plus the trailing argv select the workload. `[mcp]`, `[telemetry]`, `[tool]`, and `[agent.ingress]`
-//! are keys and not additional inputs: none decides which requests are governed.
+//! plus the trailing argv select the workload. `[mcp]`, `[telemetry]`, `[tool]`, `[agent.ingress]`,
+//! and `[containment]` are keys and not additional inputs: none decides which requests are governed.
+//!
+//! `[containment] private_proc = false` shows every contained process the container's process list.
+//! It grants no authority and widens no reach the policy judges: every `fs:*`, `shell:*`, and egress
+//! decision is unchanged. The processes it shows cannot be signalled, traced, or have their memory,
+//! environment, or descriptors read, and the shared `/proc` is read-only.
 //!
 //! `[secret-source.<scheme>]` is part of the credentials input. It names the host program that
 //! reads the secret of a reference in that scheme, and a reference is still attached only where an
@@ -205,6 +210,7 @@ fn the_config_record_carries_only_the_four_inputs() {
         [
             "agent",
             "box_dir",
+            "containment",
             "egress",
             "experimental_features",
             "file_attributes",
@@ -218,11 +224,14 @@ fn the_config_record_carries_only_the_four_inputs() {
             "telemetry",
             "tool"
         ],
-        "the fourteen config keys include execution limits, explicit experimental enforcement selection, \
+        "the fifteen config keys include execution limits, explicit experimental enforcement selection, \
          `file-attributes`, which widens only the workload's own write grants, `[gateway]`, \
          whose upgraded requests policy still decides, `monty`, which selects what a bare \
-         `python3` runs and grants nothing, and `[secret-source]`, which names where a \
-         credential comes from and permits no request. \
+         `python3` runs and grants nothing, `[secret-source]`, which names where a \
+         credential comes from and permits no request, and `containment`, which grants no authority and \
+         widens no reach the policy judges: `private_proc = false` shows the workload the \
+         container's process list, read-only, and every `fs:*`, `shell:*`, and egress decision \
+         is unchanged. \
          Unknown keys must remain errors; any further input requires a deliberate contract change."
     );
 }

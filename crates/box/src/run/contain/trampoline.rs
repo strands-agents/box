@@ -197,8 +197,8 @@ pub(crate) struct Launch<'a> {
     pub(crate) config_path: &'a Path,
     pub(crate) config_file: &'a File,
     pub(crate) config_sha256: &'a str,
-    /// The workload's environment, inert until containment succeeds.
-    pub(crate) target_environment: &'a str,
+    /// The workload's environment as an opened file, inert until containment succeeds.
+    pub(crate) target_environment_file: &'a File,
     /// The one executable the boundary permits, and its arguments.
     pub(crate) executable: &'a Path,
     pub(crate) arguments: &'a [String],
@@ -230,6 +230,11 @@ pub(crate) fn command(
     crate::run::descriptor_limit::restore_in_child(&mut command);
     let setup_status = SetupStatusPipe::attach(&mut command)?;
     attach_descriptor(&mut command, launch.config_file, "--config-fd")?;
+    attach_descriptor(
+        &mut command,
+        launch.target_environment_file,
+        "--target-env-fd",
+    )?;
     #[cfg(target_os = "linux")]
     if let Some(control) = launch.relay_control {
         attach_relay_control(&mut command, control)?;
@@ -274,8 +279,6 @@ fn workload_argv(launch: &Launch<'_>) -> Vec<OsString> {
         launch.config_path.into(),
         "--config-sha256".into(),
         launch.config_sha256.into(),
-        "--target-env-json".into(),
-        launch.target_environment.into(),
     ];
     if let Some(spelled) = launch.argument_zero {
         argv.push("--argv0".into());
@@ -959,7 +962,7 @@ mod tests {
             config_path: config,
             config_file: file,
             config_sha256: "0".repeat(64).leak(),
-            target_environment: "{}",
+            target_environment_file: file,
             executable: program,
             arguments,
             argument_zero,
@@ -968,6 +971,35 @@ mod tests {
             #[cfg(target_os = "linux")]
             relay_control: None,
         }
+    }
+
+    /// **No environment text on the trampoline's argv.** Linux keeps the launcher's argv readable
+    /// for the box's life, and a shared `/proc` shows it to other leaves and other boxes.
+    #[test]
+    fn the_trampoline_argv_carries_no_environment() {
+        let file = File::open("/dev/null").expect("a descriptor");
+        let argv: Vec<String> = workload_argv(&launch(
+            Path::new("/tmp/containment.json"),
+            &file,
+            Path::new("/bin/true"),
+            &[],
+            None,
+            &|_| unreachable!("argv tests never cache an image"),
+        ))
+        .into_iter()
+        .map(|argument| argument.to_string_lossy().into_owned())
+        .collect();
+
+        assert!(
+            !argv
+                .iter()
+                .any(|argument| argument.starts_with("--target-env")),
+            "the environment travels as a descriptor attached by `command`, not in argv: {argv:?}"
+        );
+        assert!(
+            !argv.iter().any(|argument| argument.contains('{')),
+            "{argv:?}"
+        );
     }
 
     /// **The spelling reaches the trampoline as `--argv0`, and only when there is one**, so the hop

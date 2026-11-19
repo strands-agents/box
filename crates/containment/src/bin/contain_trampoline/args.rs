@@ -16,6 +16,11 @@ pub(super) struct Args {
     pub(super) config_sha256: [u8; 32],
     /// Serialized target environment, kept inert until containment succeeds.
     pub(super) target_env_json: String,
+    /// Optional inherited descriptor holding the serialized target environment. When present it
+    /// replaces `target_env_json`, which is then `{}`. A caller whose process list other
+    /// processes can read uses it, because argv is readable in `/proc/<pid>/cmdline` for as long
+    /// as the process lives.
+    pub(super) target_env_fd: Option<i32>,
     /// Optional inherited descriptor for compact pre-exec failure reporting.
     pub(super) setup_status_fd: Option<i32>,
     /// Optional inherited socket for returning the workload's egress listener.
@@ -44,6 +49,7 @@ impl Args {
         let mut config_fd = None;
         let mut config_sha256 = None;
         let mut target_env_json = None;
+        let mut target_env_fd = None;
         let mut setup_status_fd = None;
         let mut relay_control_fd = None;
         let mut argv0 = None;
@@ -85,6 +91,20 @@ impl Args {
                 "--target-env-json" => {
                     let value = take_value(&mut argv, "--target-env-json")?;
                     set_once(&mut target_env_json, value, "--target-env-json")?;
+                }
+                "--target-env-fd" => {
+                    let value = take_value(&mut argv, "--target-env-fd")?;
+                    let descriptor = value.parse::<i32>().map_err(|_| {
+                        ParseError::Invalid(
+                            "--target-env-fd must be a decimal file descriptor".to_string(),
+                        )
+                    })?;
+                    if descriptor <= 2 {
+                        return Err(ParseError::Invalid(
+                            "--target-env-fd must not collide with stdin/stdout/stderr".to_string(),
+                        ));
+                    }
+                    set_once(&mut target_env_fd, descriptor, "--target-env-fd")?;
                 }
                 "--argv0" => {
                     let value = take_value(&mut argv, "--argv0")?;
@@ -149,14 +169,27 @@ impl Args {
             config.ok_or_else(|| ParseError::Invalid("--config is required".to_string()))?;
         let config_sha256 = config_sha256
             .ok_or_else(|| ParseError::Invalid("--config-sha256 is required".to_string()))?;
-        let target_env_json = target_env_json
-            .ok_or_else(|| ParseError::Invalid("--target-env-json is required".to_string()))?;
+        let target_env_json = match (target_env_json, target_env_fd) {
+            (Some(_), Some(_)) => {
+                return Err(ParseError::Invalid(
+                    "--target-env-json and --target-env-fd cannot both be given".to_string(),
+                ));
+            }
+            (Some(json), None) => json,
+            (None, Some(_)) => "{}".to_string(),
+            (None, None) => {
+                return Err(ParseError::Invalid(
+                    "--target-env-json is required (or --target-env-fd)".to_string(),
+                ));
+            }
+        };
         Ok(Args {
             launch_gate_fd,
             config,
             config_fd,
             config_sha256,
             target_env_json,
+            target_env_fd,
             setup_status_fd,
             relay_control_fd,
             command,
@@ -577,6 +610,65 @@ mod tests {
                 "{flag} needs a value"
             );
         }
+    }
+
+    /// **The environment can arrive by descriptor instead of on argv**, so it never shows in
+    /// `/proc/<pid>/cmdline`.
+    #[test]
+    fn parses_a_target_environment_descriptor() {
+        let a = parse(&[
+            "--config",
+            "c.json",
+            "--config-sha256",
+            DIGEST,
+            "--target-env-fd",
+            "9",
+            "--",
+            "true",
+        ])
+        .expect("valid");
+        assert_eq!(a.target_env_fd, Some(9));
+        assert_eq!(a.target_env_json, "{}");
+    }
+
+    #[test]
+    fn a_target_environment_descriptor_must_not_be_a_standard_stream() {
+        for value in ["-1", "0", "1", "2", "x"] {
+            assert!(
+                parse(&[
+                    "--config",
+                    "c.json",
+                    "--config-sha256",
+                    DIGEST,
+                    "--target-env-fd",
+                    value,
+                    "--",
+                    "true",
+                ])
+                .is_err(),
+                "{value} must be refused"
+            );
+        }
+    }
+
+    /// One source for the environment: a caller that names both has a bug, and guessing which one
+    /// it meant would hide it.
+    #[test]
+    fn the_inline_and_descriptor_environments_are_exclusive() {
+        let error = parse(&[
+            "--config",
+            "c.json",
+            "--config-sha256",
+            DIGEST,
+            "--target-env-json",
+            "{}",
+            "--target-env-fd",
+            "9",
+            "--",
+            "true",
+        ])
+        .unwrap_err();
+        assert!(matches!(error, ParseError::Invalid(message) if message.contains("cannot both")));
     }
 
     #[test]

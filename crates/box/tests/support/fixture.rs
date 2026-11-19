@@ -630,4 +630,62 @@ pub fn execute_without_read_is_expressible() -> bool {
     true
 }
 
+/// Whether this host masks `/proc` and refuses a fresh procfs in a user namespace while still
+/// allowing the namespaces: the Kata-pod situation `[containment] private_proc = false` exists for.
+/// Never true off Linux. Probed on aarch64 only, where the masked-host tests run.
+///
+/// A copy of `masked_proc_host` in the containment crate's `shared_proc_linux.rs`, forced by the
+/// crate boundary.
+#[cfg(target_os = "linux")]
+pub fn masked_proc_host() -> bool {
+    if !cfg!(target_arch = "aarch64") {
+        return false;
+    }
+    use std::sync::OnceLock;
+    static MASKED: OnceLock<bool> = OnceLock::new();
+    *MASKED.get_or_init(|| {
+        let table = std::fs::read_to_string("/proc/self/mounts").unwrap_or_default();
+        let masked = table
+            .lines()
+            .filter_map(|line| line.split_whitespace().nth(1))
+            .any(|point| point != "/proc" && std::path::Path::new(point).starts_with("/proc"));
+        if !masked {
+            return false;
+        }
+        // SAFETY: the child makes syscalls and `_exit`s only.
+        let child = unsafe { libc::fork() };
+        if child < 0 {
+            return false;
+        }
+        if child == 0 {
+            // SAFETY: syscall-only child.
+            unsafe {
+                let namespaces = libc::CLONE_NEWUSER | libc::CLONE_NEWNS | libc::CLONE_NEWPID;
+                if libc::unshare(namespaces) != 0 {
+                    libc::_exit(10);
+                }
+                let inner = libc::fork();
+                if inner < 0 {
+                    libc::_exit(12);
+                }
+                if inner == 0 {
+                    let fstype = c"proc".as_ptr();
+                    let target = c"/proc".as_ptr();
+                    let refused = libc::mount(fstype, target, fstype, 0, std::ptr::null()) != 0
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+                    libc::_exit(if refused { 0 } else { 11 });
+                }
+                let mut inner_status = 0;
+                libc::waitpid(inner, &mut inner_status, 0);
+                let refused = libc::WIFEXITED(inner_status) && libc::WEXITSTATUS(inner_status) == 0;
+                libc::_exit(if refused { 0 } else { 11 });
+            }
+        }
+        let mut status = 0;
+        // SAFETY: waiting on this process's own child.
+        unsafe { libc::waitpid(child, &mut status, 0) };
+        libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0
+    })
+}
+
 include!("namespace_launcher.rs");

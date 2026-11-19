@@ -1401,6 +1401,24 @@ gate based on that probe once refused every kernel Box ships on. Platform and ar
 select the mechanism. macOS uses Seatbelt, and Linux on ARM64 or x86-64 uses the namespace launcher.
 Box refuses other Linux architectures by name.
 
+<a id="a-box-may-share-its-containers-proc"></a>
+### A box may share its container's `/proc`, and says so
+
+On a host that masks parts of `/proc` (a Kata pod, any non-privileged container), the kernel refuses
+a fresh procfs in a user namespace, whatever the mount call or option. `[containment] private_proc =
+false` is the operator's opt-in for such hosts: the namespace view binds the container's `/proc`,
+masks included, instead of mounting its own. The workload then lists the container's processes and
+reads their `cmdline`, `stat`, `status`, `mountinfo`, `limits`, `cgroup`, and `net/*` socket tables.
+The shared `/proc` is read-only, as the private one is, so it cannot write a same-uid process's
+`oom_score_adj` or any other `/proc` file. `/proc` keeps the container's PID numbering, so only
+`/proc/self` names the workload; `/proc/<getpid()>` names another process or none. It cannot signal
+them, because the PID namespace still separates it, and it cannot trace them or read their memory,
+environment, descriptors, `root`, or `cwd`, because the kernel's capability check refuses
+ptrace-class access from a user namespace to any process outside it. That holds at `ptrace_scope=0`
+and for dumpable targets. Box never picks this mode on its own: without the key a masked host
+refuses the box and names the key, and every leaf that shares records `proc:shared`. Because the
+process list becomes readable, no leaf's environment travels on a command line.
+
 <a id="containment-ends-with-the-contained-process"></a>
 ### The sandbox ends with the contained process
 

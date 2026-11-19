@@ -679,6 +679,7 @@ mod tests {
             contained_mcp: Default::default(),
             telemetry: Default::default(),
             secret_source: Default::default(),
+            containment: Default::default(),
         }
     }
 
@@ -2002,6 +2003,7 @@ mod left_out_tests {
             contained_mcp: Default::default(),
             telemetry: Default::default(),
             secret_source: Default::default(),
+            containment: Default::default(),
         }
     }
 

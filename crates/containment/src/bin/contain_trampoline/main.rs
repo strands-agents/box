@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! strands-box-contain-trampoline --config <containment-config.json> [--config-fd <fd>] \
-//!   --config-sha256 <digest> --target-env-json <json> [--argv0 <spelling>] \
+//!   --config-sha256 <digest> (--target-env-json <json> | --target-env-fd <fd>) [--argv0 <spelling>] \
 //!   [--setup-status-fd <fd>] [--relay-control-fd <fd>] [--launch-gate-fd <fd>] -- <interp> [args...]
 //! ```
 
@@ -28,12 +28,12 @@ static EXECUTABLE_IDENTITY_MARKER: [u8; 72] =
 /// Usage text, shared by `--help` and parse errors.
 const USAGE: &str = "usage: strands-box-contain-trampoline --config <containment-config.json> \
      [--config-fd <fd>] \
-     --config-sha256 <64-lowercase-hex> --target-env-json <json-object> \
+     --config-sha256 <64-lowercase-hex> (--target-env-json <json-object> | --target-env-fd <fd>) \
      [--argv0 <spelling>] [--setup-status-fd <fd>] [--relay-control-fd <fd>] [--launch-gate-fd <fd>] \
      -- <command> [args...]\n\
      \n\
      Verifies and applies <containment-config.json>, then installs only the target\n\
-     environment from <json-object> and exec-replaces itself with <command>.\n\
+     environment from <json-object>, or read from <fd>, and exec-replaces itself with <command>.\n\
      Production apply supports macOS Seatbelt and, on Linux, the namespace\n\
      launcher; other platforms are refused fail-closed.\n\
      Everything after `--` is the command, verbatim.";
@@ -88,6 +88,18 @@ fn run(args: &Args) -> ExitCode {
     .into_iter()
     .flatten()
     .collect();
+    // Read the environment now, while the descriptor is still open, and let it close: the workload
+    // must not inherit it. It stays inert bytes until after apply, exactly as the argv form was.
+    let target_environment = match read_target_environment(args) {
+        Ok(text) => text,
+        Err(error) => {
+            return setup_status.fail(
+                SetupStage::TargetEnvironment,
+                4,
+                format_args!("cannot read target environment: {error}"),
+            );
+        }
+    };
     if let Err(error) = close_inherited_descriptors(&preserved) {
         return setup_status.fail(
             SetupStage::ConfigRead,
@@ -110,7 +122,7 @@ fn run(args: &Args) -> ExitCode {
     }
     // Phase 2: hand off — `exec` replaces this (now-contained) image with the
     // command, which is therefore born contained. On success this never returns.
-    exec_command(args, &setup_status)
+    exec_command(args, &target_environment, &setup_status)
 }
 
 /// The parent must acknowledge setup before any workload code can execute.
@@ -316,6 +328,24 @@ fn read_config(args: &Args) -> Result<Vec<u8>, ConfigFileError> {
     Ok(bytes)
 }
 
+/// The serialized target environment: from its inherited descriptor when one was passed, else
+/// the argv form.
+#[cfg(unix)]
+fn read_target_environment(args: &Args) -> std::io::Result<String> {
+    use std::io::{Read as _, Seek as _};
+    use std::os::fd::FromRawFd as _;
+    let Some(descriptor) = args.target_env_fd else {
+        return Ok(args.target_env_json.clone());
+    };
+    // SAFETY: the supervisor transferred ownership of this inherited descriptor.
+    let mut file = unsafe { std::fs::File::from_raw_fd(descriptor) };
+    // From the start, whatever offset the writer left.
+    file.seek(std::io::SeekFrom::Start(0))?;
+    let mut text = String::new();
+    file.read_to_string(&mut text)?;
+    Ok(text)
+}
+
 #[cfg(any(unix, test))]
 #[derive(Debug)]
 enum ConfigFileError {
@@ -326,12 +356,12 @@ enum ConfigFileError {
 
 /// `exec`-replace this (now-contained) process with the command.
 #[cfg(unix)]
-fn exec_command(args: &Args, setup_status: &SetupStatus) -> ExitCode {
+fn exec_command(args: &Args, target_environment: &str, setup_status: &SetupStatus) -> ExitCode {
     use std::os::unix::process::CommandExt as _;
 
-    // This metadata remains an inert argv string until after containment has
+    // This metadata remains inert bytes until after containment has
     // succeeded. The target receives only this explicit environment.
-    let target_env = match decode_target_environment(&args.target_env_json) {
+    let target_env = match decode_target_environment(target_environment) {
         Ok(target_env) => target_env,
         Err(error) => {
             return setup_status.fail(
@@ -609,6 +639,7 @@ mod tests {
             config_fd: None,
             config_sha256: [0; 32],
             target_env_json: "{}".into(),
+            target_env_fd: None,
             setup_status_fd: None,
             relay_control_fd: None,
             launch_gate_fd: None,
@@ -696,7 +727,7 @@ mod tests {
                 .unwrap();
             let status = super::SetupStatus::arm(Some(writer.as_raw_fd())).unwrap();
             assert_eq!(
-                super::exec_command(&args, &status),
+                super::exec_command(&args, &args.target_env_json, &status),
                 std::process::ExitCode::from(4)
             );
             let mut observed = [0];
@@ -821,6 +852,7 @@ mod tests {
             config_fd: None,
             config_sha256: [0; 32],
             target_env_json: "{}".to_string(),
+            target_env_fd: None,
             setup_status_fd: None,
             relay_control_fd: None,
             command: vec!["true".to_string()],
@@ -847,6 +879,7 @@ mod tests {
             config_fd: Some(descriptor),
             config_sha256: [0; 32],
             target_env_json: "{}".to_string(),
+            target_env_fd: None,
             setup_status_fd: None,
             relay_control_fd: None,
             command: vec!["true".to_string()],
