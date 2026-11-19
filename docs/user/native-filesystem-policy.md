@@ -270,7 +270,9 @@ Disabling a workload also excludes its native filesystem operations from policy 
 
 ### Does this change where policy history lives?
 
-No. The adapter uses the box's existing durable Dogwood history, which survives restarts.
+No. The adapter uses the box's existing Dogwood history file. Persisted history survives
+restarts, but a process crash can lose recent events; see
+[history persistence](policy.md#history-persistence-and-process-crashes).
 Disabling and re-enabling interception does not erase that history.
 This feature adds no option to keep history only in memory.
 

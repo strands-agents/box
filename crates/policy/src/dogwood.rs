@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "experimental-idle-flush")]
+use std::time::Duration;
 
 use dogwood_language::{
     Decision as DogwoodDecision, Event, EventBuilder, LoweredPolicySet, PolicySchema,
@@ -97,6 +99,65 @@ impl DurableClock for FixedClock {
     fn now_nanos(&self) -> i64 {
         self.now.load(Ordering::SeqCst)
     }
+}
+
+/// Preserve the engine's clock-refusal category until periodic flush decides whether to retry.
+#[derive(Debug)]
+enum SubmissionError {
+    ClockSkew(String),
+    Other(String),
+}
+
+impl SubmissionError {
+    fn from_durable(error: DurableError) -> Self {
+        match error {
+            DurableError::Rejected(message) if is_clock_skew_refusal(&message) => {
+                Self::ClockSkew(message)
+            }
+            error => Self::Other(error.to_string()),
+        }
+    }
+}
+
+impl std::fmt::Display for SubmissionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ClockSkew(message) | Self::Other(message) => f.write_str(message),
+        }
+    }
+}
+
+/// Dogwood 1.1.2 has no separate clock-error variant: both clock skew and exhausted timestamps
+/// are `Rejected`. Recognize only its complete clock-skew diagnostic, including numeric bounds.
+/// Other rejections and storage errors must remain observable failures.
+fn is_clock_skew_refusal(message: &str) -> bool {
+    let Some(rest) = message.strip_prefix("durable timestamp ") else {
+        return false;
+    };
+    let Some((last, rest)) = rest.split_once(" is ") else {
+        return false;
+    };
+    let Some((skew, rest)) = rest.split_once(" ns ahead of the current clock ") else {
+        return false;
+    };
+    let Some((now, rest)) = rest.split_once(", exceeding the maximum allowed future skew of ")
+    else {
+        return false;
+    };
+    let Some(allowed) = rest
+        .strip_suffix(" ns; refusing the operation rather than issuing future-dated timestamps")
+    else {
+        return false;
+    };
+    let (Ok(last), Ok(skew), Ok(now), Ok(allowed)) = (
+        last.parse::<i64>(),
+        skew.parse::<i128>(),
+        now.parse::<i64>(),
+        allowed.parse::<i128>(),
+    ) else {
+        return false;
+    };
+    allowed >= 0 && skew == i128::from(last) - i128::from(now) && skew > allowed
 }
 
 /// Records every kept outcome event before the history closes.
@@ -728,9 +789,17 @@ impl DogwoodEngine {
 
     /// Submit the refused outcome events in order, and stop at the first the history still refuses.
     fn submit_pending(&self, pending: &mut Vec<EventBuilder>) -> Result<(), String> {
+        self.submit_pending_classified(pending)
+            .map_err(|error| error.to_string())
+    }
+
+    fn submit_pending_classified(
+        &self,
+        pending: &mut Vec<EventBuilder>,
+    ) -> Result<(), SubmissionError> {
         while let Some(event) = pending.first() {
             let event = event.clone();
-            self.submit(|_| event)?;
+            self.submit_classified(|_| event)?;
             pending.remove(0);
         }
         Ok(())
@@ -746,15 +815,73 @@ impl DogwoodEngine {
         }
     }
 
+    #[cfg(feature = "experimental-idle-flush")]
+    pub(crate) fn set_periodic_history(
+        &self,
+        max_events: u32,
+        max_interval: Duration,
+    ) -> Result<(), PolicyError> {
+        self.engine
+            .lock()
+            .map_err(|_| {
+                PolicyError::Evaluation("dogwood durable engine lock poisoned".to_string())
+            })?
+            .set_durability(dogwood_local_engine::Durability::Periodic {
+                max_events,
+                max_interval,
+            })
+            .map_err(|error| PolicyError::Evaluation(error.to_string()))
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    pub(crate) fn flush_history(&self) -> Result<(), PolicyError> {
+        self.flush_history_mode(false)
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    pub(crate) fn flush_history_for_timer(&self) -> Result<(), PolicyError> {
+        self.flush_history_mode(true)
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    fn flush_history_mode(&self, retry_clock: bool) -> Result<(), PolicyError> {
+        let mut pending = self
+            .pending_outcomes
+            .lock()
+            .map_err(|_| PolicyError::Evaluation("pending outcome lock poisoned".to_string()))?;
+        let submitted = self.submit_pending_classified(&mut pending);
+        // A refused outcome must not prevent earlier accepted events from becoming durable.
+        // Resubmit before flushing so a successful final call also persists newly accepted outcomes.
+        self.engine
+            .lock()
+            .map_err(|_| {
+                PolicyError::Evaluation("dogwood durable engine lock poisoned".to_string())
+            })?
+            .flush()
+            .map_err(|error| PolicyError::Evaluation(error.to_string()))?;
+        match submitted {
+            Ok(()) => Ok(()),
+            Err(SubmissionError::ClockSkew(_)) if retry_clock => Ok(()),
+            Err(error) => Err(PolicyError::OutcomeKept(error.to_string())),
+        }
+    }
+
     /// Feed one event through the durable engine under the scope lock.
     fn submit(
         &self,
         build: impl FnOnce(u64) -> EventBuilder,
     ) -> Result<(Option<Decision>, u64), String> {
-        let mut engine = self
-            .engine
-            .lock()
-            .map_err(|_| "dogwood durable engine lock poisoned".to_string())?;
+        self.submit_classified(build)
+            .map_err(|error| error.to_string())
+    }
+
+    fn submit_classified(
+        &self,
+        build: impl FnOnce(u64) -> EventBuilder,
+    ) -> Result<(Option<Decision>, u64), SubmissionError> {
+        let mut engine = self.engine.lock().map_err(|_| {
+            SubmissionError::Other("dogwood durable engine lock poisoned".to_string())
+        })?;
         #[cfg(all(target_os = "linux", box_native_test_faults))]
         if std::thread::current().name() == Some("linux-native-policy")
             && std::env::var("BOX_NATIVE_TEST_FAULT").as_deref() == Ok("policy-lock")
@@ -765,12 +892,12 @@ impl DogwoodEngine {
             }
         }
         let offset = engine.log_offset();
-        offset
-            .checked_add(1)
-            .ok_or_else(|| "dogwood history offset exhausted".to_string())?;
+        offset.checked_add(1).ok_or_else(|| {
+            SubmissionError::Other("dogwood history offset exhausted".to_string())
+        })?;
         let submitted = engine
             .submit(build(offset))
-            .map_err(|error| error.to_string())?;
+            .map_err(SubmissionError::from_durable)?;
 
         let DurableOutcome::Decision(response) = submitted.outcome else {
             return Ok((None, offset));
@@ -3317,6 +3444,180 @@ when temporal { formerly within 1h ( desk::Action::"reset"::response{ input.user
         assert!(
             !decision.is_allow(),
             "once the clock recovers, the kept tool leg counts toward the budget"
+        );
+    }
+
+    #[test]
+    fn only_the_complete_clock_skew_rejection_is_retryable() {
+        let clock = "durable timestamp 1000000000000002 is 400000000002 ns ahead of the current clock 999600000000000, exceeding the maximum allowed future skew of 300000000000 ns; refusing the operation rather than issuing future-dated timestamps";
+        assert!(matches!(
+            SubmissionError::from_durable(DurableError::Rejected(clock.into())),
+            SubmissionError::ClockSkew(_)
+        ));
+        for error in [
+            DurableError::Log(clock.into()),
+            DurableError::Log("injected storage write failed".into()),
+            DurableError::Rejected("durable timestamp space is exhausted at i64::MAX; refusing the operation rather than reusing a timestamp".into()),
+            DurableError::Rejected("policy rejected".into()),
+            DurableError::Rejected(format!("prefix {clock}")),
+            DurableError::Rejected(format!("{clock} suffix")),
+            DurableError::Rejected(clock.replace("400000000002", "400000000001")),
+            DurableError::Rejected(clock.replace("300000000000", "-1")),
+            DurableError::Rejected(clock.replace("999600000000000", "not-a-number")),
+            DurableError::BadEvent(clock.into()),
+            DurableError::NoPolicy,
+        ] {
+            let original_message = error.to_string();
+            let classified = SubmissionError::from_durable(error);
+            assert_eq!(classified.to_string(), original_message);
+            assert!(matches!(classified, SubmissionError::Other(_)));
+        }
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    fn history_with_a_kept_outcome() -> (tempfile::TempDir, Arc<DogwoodEngine>) {
+        let history = tempfile::tempdir().expect("history directory");
+        let engine = Arc::new(
+            DogwoodEngine::open_with_test_clock(
+                BUDGET,
+                &history.path().join("dogwood.redb"),
+                1_000_000,
+            )
+            .expect("policy loads"),
+        );
+        engine
+            .set_periodic_history(u32::MAX, Duration::from_secs(3600))
+            .expect("automatic flush thresholds remain out of reach");
+        let request_id = permitted_http_request(&engine);
+        engine.flush_history().expect("the request is persisted");
+        engine.advance_clock(-400);
+        let outcome = engine.observe_outcome(
+            &governed(),
+            &Principal::agent(),
+            &request_id,
+            &delivered(101),
+        );
+        assert!(
+            matches!(outcome, Err(PolicyError::OutcomeKept(_))),
+            "{outcome:?}"
+        );
+        (history, engine)
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    #[test]
+    fn explicit_flush_persists_accepted_events_while_an_outcome_waits_for_clock() {
+        let history = tempfile::tempdir().expect("history directory");
+        let engine = DogwoodEngine::open_with_test_clock(
+            BUDGET,
+            &history.path().join("dogwood.redb"),
+            1_000_000,
+        )
+        .expect("policy opens");
+        engine
+            .set_periodic_history(u32::MAX, Duration::from_secs(3600))
+            .expect("disable automatic flush thresholds");
+        let request_id = permitted_http_request(&engine);
+        let accepted = engine.engine.lock().expect("engine lock").log_offset();
+        engine.advance_clock(-400);
+        assert!(matches!(
+            engine.observe_outcome(&governed(), &Principal::agent(), &request_id, &delivered(1)),
+            Err(PolicyError::OutcomeKept(_))
+        ));
+        let copied_offset = |name: &str| {
+            let _lock = engine
+                .engine
+                .lock()
+                .expect("copy excludes concurrent writes");
+            let copy = history.path().join(name);
+            std::fs::copy(history.path().join("dogwood.redb"), &copy).expect("copy live history");
+            DurableLog::open(copy)
+                .expect("copied log opens")
+                .next_offset()
+        };
+        assert!(
+            copied_offset("before.redb") < accepted,
+            "control: new events are unsynced"
+        );
+        let result = engine.flush_history();
+        assert!(
+            matches!(result, Err(PolicyError::OutcomeKept(_))),
+            "{result:?}"
+        );
+        assert_eq!(
+            copied_offset("after.redb"),
+            accepted,
+            "accepted events must persist even while the clock refuses the outcome"
+        );
+        assert_eq!(
+            engine.pending_outcomes.lock().expect("pending lock").len(),
+            1
+        );
+        engine.advance_clock(410);
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    #[test]
+    fn explicit_history_flush_reports_an_outcome_that_is_still_refused() {
+        let (_history, engine) = history_with_a_kept_outcome();
+        let flush = engine.flush_history();
+        assert!(
+            matches!(flush, Err(PolicyError::OutcomeKept(_))),
+            "a successful flush must not leave a refused outcome unreported: {flush:?}"
+        );
+        assert_eq!(
+            engine
+                .pending_outcomes
+                .lock()
+                .expect("pending outcomes")
+                .len(),
+            1
+        );
+        engine.advance_clock(410);
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    #[test]
+    fn explicit_history_flush_persists_a_kept_outcome_before_engine_drop() {
+        let (history, engine) = history_with_a_kept_outcome();
+        let recovered_allows = |name: &str| {
+            let copied = history.path().join(name);
+            std::fs::copy(history.path().join("dogwood.redb"), &copied)
+                .expect("copy the persisted history");
+            let recovered = DogwoodEngine::open_with_test_clock(BUDGET, &copied, 1_000_020)
+                .expect("copied history recovers");
+            recovered
+                .decide(
+                    &governed(),
+                    &Principal::agent(),
+                    ActionRequest::Request(&http()),
+                )
+                .0
+                .is_allow()
+        };
+        assert!(
+            recovered_allows("before.redb"),
+            "the control excludes the kept outcome"
+        );
+        engine.advance_clock(410);
+        engine
+            .flush_history()
+            .expect("the recovered clock permits the kept outcome");
+        assert!(
+            !recovered_allows("after.redb"),
+            "explicit flush must persist the completed outcome before engine Drop"
+        );
+        assert!(
+            engine
+                .pending_outcomes
+                .lock()
+                .expect("pending outcomes")
+                .is_empty()
+        );
+        assert_eq!(
+            Arc::strong_count(&engine),
+            1,
+            "the original engine remains alive"
         );
     }
 

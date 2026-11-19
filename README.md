@@ -277,6 +277,30 @@ the `test-support` feature. Linux CI also checks the three native filesystem for
 in a separate step. See the [Linux native test guide](docs/dev/linux-native-tests.md#forwarding-buffer-tests)
 for that command and the other native test prerequisites.
 
+Continuous integration tests both history persistence modes on Linux x86-64, Linux ARM64,
+and macOS. Default builds test batched crash recovery and verify that the idle timer saves
+history before shutdown. The separate `--no-default-features` build also checks that recovery
+retains every returned permit after the process is killed. Both modes refuse new requests
+after the kill. These jobs run independently of the all-feature build.
+
+Run the default checks locally with:
+
+```sh
+cargo build --locked -p strands-box -p strands-box-containment --bins
+cargo test --locked -p strands-box --test box_killed_run -- --show-output
+cargo test --locked -p strands-box --lib run::hosted::tests::hosted_idle_timer_flushes_pending_history_without_shutdown -- --exact --show-output
+```
+
+Run the per-event crash-recovery check with batching disabled in both commands:
+
+```sh
+cargo build --locked -p strands-box -p strands-box-containment --bins --no-default-features
+cargo test --locked -p strands-box --no-default-features --test box_killed_run -- --show-output
+```
+
+On Linux, follow the namespace and launcher-image setup in the
+[`history-persistence` workflow job](.github/workflows/rust-test-lint.yml) before running the tests.
+
 In pull-request CI, changes to `docs/site-manifest.json`,
 `docs/site-manifest-retirements.json`, or a publishable page under `docs/user/` run the focused
 site-manifest contract test instead of the full Rust test matrix. The test compares the base

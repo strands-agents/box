@@ -42,8 +42,10 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   `Outcome`, `PendingToolResponse`, `ApprovedPath`, `PathRefusal`, `PathResolver`, `ENGINE_ID`,
   `EffectivePolicy`, `Policy`, `PolicyEngine`, `SELF_DEFENDED_FILES`, `SchemaStage`, `FsAccess`,
   `FsOperation`, `Principal`, `Request`, `RequestId`, `GovernedBox`, `Operator`, `PolicyWarning`,
-  `ToolGrammar`, `ToolGrammars`, `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`. That is 60
-  names with `--all-features` and 54 by default; recompute it when you touch the façade.
+  `ToolGrammar`, `ToolGrammars`, `ToolGrammarError`, `GrammarBindings`, `BindingRefusal`,
+  `HistoryFlusher`, `HistoryFlushSnapshot`. That is 62 names with `--all-features` and 54 by
+  default; recompute it when you touch the façade. The two history-flush types require
+  `experimental-idle-flush`.
 - `check` and `validate` share one composition (`check_and_expand`), and the staged check repeats
   the steps of `open_staged_with_engine` with no engine. A finding keeps a span only when the span
   is an offset into the authored text: a Dogwood parse error and a Cedar validation error over

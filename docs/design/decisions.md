@@ -982,10 +982,10 @@ Callers must retain each token until its effect ends, and existing unlabeled eve
 `durable_http_history_preserves_one_identifier_for_each_operation` pins request/result pairing.
 
 <a id="history-is-durable-per-box-and-has-no-rewind"></a>
-### History is durable per box, and it offers no rewind and no audit record
+### Box batches history by default and accepts loss before a completed flush
 
 One box owns one engine, one policy source set, and one history file, and a restart reuses that
-file. `open` recovers a decision-equivalent history before returning an authority. If recovery
+file. `open` recovers decision-equivalent state from the saved history before returning an authority. If recovery
 fails, it returns an error. The box never falls back to empty or partial history. The engine
 timestamps each event from the trusted system wall clock. Callers cannot supply timestamps. If the
 clock steps backwards, each append advances one nanosecond until it catches up. This can keep a
@@ -1000,6 +1000,49 @@ still hold timestamps ahead for up to five minutes. A policy edit applies prospe
 identity that still matches keeps its state, and an unmatched identity starts empty. The contract
 excludes checkpoint, rewind, branch, tamper evidence, an audit record, atomic commit across an
 external effect, and any history shared between boxes.
+
+Box enables the `experimental-idle-flush` Cargo feature by default to reduce per-event
+persistence work. Hosted `run` selects Dogwood's periodic durability interface and starts an
+independent timer on the existing policy engine, so pending history can be flushed even when
+events stop arriving. It checks thresholds of 1,000 events or one second when an event arrives
+and uses a separate one-second timer. A build with `--no-default-features` retains per-event
+persistence. The default accepts the loss of recent
+requests and outcomes if the process crashes before a successful flush; after restart, a history
+rule can admit requests that those missing events would have denied. The timer's interval is a
+polling cadence, not a maximum persistence delay. After successful startup, explicit hosted
+shutdown stops the workload and
+joins the broker, discovery, native monitoring, and gateway connection workers before stopping
+the timer and performing its final flush. Gateway shutdown interrupts client sockets and joins
+workers after their existing outcome handling finishes, in both persistence modes. Recorded timer
+failures stop the workload; final-flush failures make the run fail. Each flush retries completed
+outcomes retained after a recording failure, then persists events the engine has already accepted.
+Explicit and final flushes return an error if any outcome remains refused. Timer ticks keep retrying
+an outcome delayed only by a backward clock change without treating that delay as a failure.
+Other recording and storage failures remain errors. An earlier run failure remains visible alongside
+a shutdown failure. If native monitoring cannot stop, Box reports the failure and joins the timer
+without an additional final flush. Cleanup after a startup error remains best effort: a native-monitor
+stop failure can leave callbacks active while the timer destructor attempts a flush. Startup
+still returns an error; this path does not certify that all producers stopped. Destruction
+remains a fallback that reports failures to stderr.
+
+The policy crate's matching feature exposes `PolicyEngine::set_periodic_history` to select
+persistence thresholds, `PolicyEngine::flush_history` to persist submitted history explicitly,
+and `PolicyEngine::start_history_flusher` to start one owned timer for that engine.
+`HistoryFlusher` owns the timer: `HistoryFlusher::snapshot` observes completed calls, and
+`HistoryFlusher::shutdown` joins the worker, attempts a final flush, and returns observed errors.
+`HistoryFlusher::stop` joins without that final flush when producers cannot stop.
+`HistoryFlushSnapshot` carries call counts, elapsed time, and retained errors, not a count of
+persisted events. These interfaces keep Dogwood's engine-library types private. The policy
+crate's feature alone does not change `PolicyEngine::open`: it uses per-event persistence until
+its caller selects periodic persistence. Box makes that selection in its default composition. See the
+[policy persistence interface](../../crates/policy/README.md#experimental-idle-history-flushing)
+for the caller contract.
+
+`a_timer_calls_flush_without_event_submissions` pins idle timer calls, and
+`killing_before_the_first_timer_tick_still_loses_pending_history` pins the accepted crash-loss
+boundary. `idle_timer_preserves_history_after_sigkill` checks recovery after completed timer
+flushes.
+
 
 <a id="a-temporal-rule-names-one-action"></a>
 ### A temporal rule names one action, so a budget does not span a family

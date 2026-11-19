@@ -328,6 +328,22 @@ short tail until more bytes arrive or the response completes cleanly. Requests a
 `tools/list` responses retain the default 16 MiB cap. The gateway's 300-second upstream deadline
 covers complete response receipt; expiry or a later transfer error closes an unfinished response.
 
+While the workload runs, Ctrl-C sends it an interrupt. After the workload stops,
+`strands-box run` restores the terminal before waiting for cleanup. While Box waits for
+upstream exchanges or other work that produces policy records, Ctrl-C or the termination
+signal `SIGTERM` ends `strands-box` immediately. This interruption path also applies during
+the final history flush. The hangup signal `SIGHUP` also ends it, unless Box inherited that
+signal as ignored, such as under `nohup`. Forced termination can lose pending history.
+The later telemetry drain has a separate ten-second timeout and runs after Box restores
+the signal handlers saved before these stages.
+
+Without forced termination, Box waits for active upstream exchanges and other work that
+produces policy records to finish before its final history flush. This also applies in
+default builds. An unfinished response can keep cleanup waiting until the remaining part
+of the 300-second exchange deadline expires. That deadline limits the upstream exchange,
+not the whole shutdown: policy callbacks, history writes, and other shutdown work have no
+shared completion deadline.
+
 ## See also
 
 - [How Box controls outbound traffic](../design/egress.md): routing, the connect and request

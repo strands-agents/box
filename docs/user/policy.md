@@ -174,7 +174,8 @@ strands-shell: tee: policy denied this operation on '~/project/notes.md' [policy
 - The `when` clause limits the `forbid` to content writes. A `mkdir` is `fs:write` with operation
   `create_dir`, so the budget leaves it alone. A rename is `fs:move`, and a delete is `fs:delete`;
   each needs its own rule.
-- The count persists across a restart of the box and across an edit to another rule.
+- The persisted count survives a restart of the box and an edit to another rule. A process
+  crash can lose recent events; see [history persistence](#history-persistence-and-process-crashes).
 
 For an exact count of attempts, including refused ones, replace the predicate inside
 `formerly within 1h ( … )` with:
@@ -423,6 +424,36 @@ policy denied this operation on 'example.com:443' [default-deny]: No permit poli
 
 A `[egress.<name>]` table with no matching permit leaves the host unreachable. A permit with no
 binding sends the request with a placeholder in place of the secret, which the provider rejects.
+
+## History persistence and process crashes
+
+Box batches policy-history writes by default. Accepted events affect decisions during
+the run before those events necessarily reach disk. The engine checks persistence
+thresholds of 1,000 events or one second when an event arrives. A separate one-second
+timer also persists pending history while Box is idle. This interval is a polling
+target, not a maximum persistence delay.
+
+If the box's trusted process crashes or is killed before a completed flush, recent
+requests and outcomes can be lost. After restart, a count-based limit can admit
+additional requests because those events no longer count. A normal shutdown stops
+and joins event producers before the final history flush. A recorded timer failure
+stops the workload, and a final-flush failure makes the run fail. Shutdown has no
+fixed completion deadline; an [active upstream exchange](egress.md#errors-and-exit-codes) can delay it.
+
+To use per-event persistence, build Box and its helpers from the repository root with
+the default `experimental-idle-flush` Cargo feature disabled:
+
+```sh
+cargo build --release --locked -p strands-box -p strands-box-containment --no-default-features
+```
+
+The resulting build waits for persistence when submitting each event. An operation can
+still finish before its outcome is recorded. To retain the native filesystem policy build
+feature, also pass `--features native-filesystem-policy`;
+[its runtime selection](native-filesystem-policy.md) remains separate.
+`--all-features` or `--features experimental-idle-flush` enables batching again.
+This selection happens when Box is built; there is no `box.toml` setting for it.
+See [getting started](getting-started.md#step-1-download-box) for the source checkout and helper installation.
 
 ## Start with fresh history after a Dogwood upgrade
 
@@ -970,10 +1001,19 @@ If the clock moves back more than five minutes during a run, the box denies each
 is within five minutes of the newest history timestamp. If an action finished while the clock was
 that far back, the box keeps its record and prints
 `policy: warn: an earlier outcome is not recorded yet: ...; denying` for each request until the
-record is saved. Once the clock is within five minutes again, the box saves it at the next request,
-or when the run shuts down, and then requests are decided normally. If the run ends while the clock
+record is saved. Once the clock is within five minutes again, the box retries it when another
+request or completed outcome arrives, or when the run shuts down. Requests are decided normally
+after the record is saved. If the run ends while the clock
 is still more than five minutes behind, or the process is killed, that action doesn't count toward
 any limit after a restart. A time-zone change does not move this clock.
+
+In the default build, the background history timer also retries the kept record after
+the clock recovers. With batching disabled, retry occurs on a later request, another completed
+outcome, or shutdown. The timer does not stop the run for this clock delay. Each timer call still
+persists events the engine already accepted while it waits to record the completed action.
+Storage failures still stop the run. Shutdown reports an error if a completed action remains
+unrecorded after its final attempt.
+
 Correct the system clock, or remove the box directory to start again, as
 [getting started](getting-started.md#clean-up) describes.
 

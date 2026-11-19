@@ -231,15 +231,15 @@ cargo fmt     -p <package-name> --check
 
 ### Why `--all-features`, and not "default plus `--no-default-features`"
 
-**A plain `cargo test` reports success while skipping the tests that matter.** `strands-box` declares
-`test-support`, and `box_shell` and `box_credentials` each carry
-`required-features = ["test-support"]`. Without the flag, cargo runs one integration suite instead of
-three, says nothing about the two it dropped, and exits `0`. Those two are the suites asserting the
-Shell boundary and the credential phantom.
+**A plain `cargo test` omits tests that require `test-support`.** `strands-box` declares
+this feature, and `box_shell` and `box_credentials` each carry
+`required-features = ["test-support"]`. Cargo skips those targets when the feature is absent,
+even if other tests pass. These suites assert the Shell boundary and credential handling.
 
-**"Default features and `--no-default-features`" does not reach it.** `strands-box` declares no
-`default` feature, so both spellings are the same empty set, and neither enables `test-support`. The
-older wording therefore prescribed running the same configuration twice.
+**Default and `--no-default-features` builds exercise different history modes.**
+`strands-box` enables `experimental-idle-flush` by default; `--no-default-features`
+alone retains per-event persistence. Neither selection enables `test-support`.
+The gates above still need `--all-features` to run the suites that require it.
 
 ### Clippy: `-D warnings` is scoped, and it is unpassable per binary crate
 

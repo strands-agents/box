@@ -188,6 +188,10 @@ They require no AWS or Apple credentials.
 Run an upstream signed dry run before accepting changes to signing behavior.
 
 A local run of `scripts/macos-release.py sign` signs through the signing service, the same as the workflow.
+Pass `--build-metadata PATH` with the JSON sidecar for the same unsigned archive.
+The workflow saves this file in the `macos-build-metadata` artifact.
+It records the selected source commit, build features, and unsigned archive hash.
+The signing script rejects a source commit or archive hash that does not match its inputs.
 It needs AWS credentials, `AWS_REGION`, `CD_SIGNER_ENDPOINT`, `CD_SIGNER_BUCKET`, `CD_SIGNER_BUCKET_ACCESS_ROLE`, `CD_SIGNER_TEAM_ID`, and `CD_SIGNER_PROFILE_NAME`.
 For notarization, pass `--notary-keychain-profile` instead of `--notary-secret`.
 Use a profile that `xcrun notarytool store-credentials` created.

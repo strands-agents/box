@@ -440,6 +440,41 @@ jobs:
             python3 scripts/smoke-linux-package.py \
               "dist/box-${NEW_TAG}-aarch64-unknown-linux-gnu.tar.gz"
 
+      - name: Record the macOS build features
+        if: matrix.target.triple == 'aarch64-apple-darwin'
+        env:
+          NEW_TAG: ${{ needs.scan.outputs.new_tag }}
+          SOURCE_SHA: ${{ needs.scan.outputs.release_sha }}
+        run: |
+          set -euo pipefail
+          cargo read-manifest --manifest-path crates/box/Cargo.toml > "$RUNNER_TEMP/box-manifest.json"
+          python3 - <<'PYTHON'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = json.loads((Path(os.environ["RUNNER_TEMP"]) / "box-manifest.json").read_text())
+          features = sorted(set(manifest.get("features", {}).get("default", []) + ["native-filesystem-policy"]))
+          asset = Path("dist") / f"box-{os.environ['NEW_TAG']}-aarch64-apple-darwin.tar.gz"
+          metadata = {
+              "source_sha": os.environ["SOURCE_SHA"],
+              "features": features,
+              "input_sha256": hashlib.sha256(asset.read_bytes()).hexdigest(),
+          }
+          path = asset.with_name(asset.name.removesuffix(".tar.gz") + ".build-metadata.json")
+          path.write_text(json.dumps(metadata, indent=2) + "\n")
+          PYTHON
+
+      - name: Upload the macOS build metadata
+        if: matrix.target.triple == 'aarch64-apple-darwin'
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos-build-metadata
+          path: dist/*.build-metadata.json
+          if-no-files-found: error
+          retention-days: 7
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v7
         with:
@@ -498,6 +533,11 @@ jobs:
         with:
           name: box-${{ needs.scan.outputs.new_tag }}-aarch64-apple-darwin
           path: unsigned
+      - name: Download this run's macOS build metadata
+        uses: actions/download-artifact@v8
+        with:
+          name: macos-build-metadata
+          path: unsigned
       - name: Install signing tools
         run: |
           brew install gnu-tar
@@ -518,6 +558,7 @@ jobs:
         run: |
           "$RUNNER_TEMP/signing-venv/bin/python" scripts/macos-release.py sign \
             --input "unsigned/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
+            --build-metadata "unsigned/box-${NEW_TAG}-aarch64-apple-darwin.build-metadata.json" \
             --output "signed/box-${NEW_TAG}-aarch64-apple-darwin.tar.gz" \
             --work "$RUNNER_TEMP/signing" --version "$VERSION" --source-sha "$SOURCE_SHA" \
             --notary-secret "$NOTARY_CREDENTIAL_SECRET"

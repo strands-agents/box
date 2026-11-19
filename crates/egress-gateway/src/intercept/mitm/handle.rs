@@ -3,9 +3,10 @@
 use std::os::fd::OwnedFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::thread::JoinHandle;
+
+use super::listener::Connections;
 
 /// Which transport the adapter actually bound.
 pub(super) enum BoundTransport {
@@ -19,7 +20,7 @@ pub(super) enum BoundTransport {
 pub struct MitmHandle {
     transport: BoundTransport,
     ca_path: Option<PathBuf>,
-    stop: Arc<AtomicBool>,
+    connections: Arc<Connections>,
     accept_thread: Option<JoinHandle<()>>,
     shutdown_connection: OnceLock<OwnedFd>,
 }
@@ -29,13 +30,13 @@ impl MitmHandle {
     pub(super) fn new(
         transport: BoundTransport,
         ca_path: Option<PathBuf>,
-        stop: Arc<AtomicBool>,
+        connections: Arc<Connections>,
         accept_thread: JoinHandle<()>,
     ) -> Self {
         Self {
             transport,
             ca_path,
-            stop,
+            connections,
             accept_thread: Some(accept_thread),
             shutdown_connection: OnceLock::new(),
         }
@@ -83,10 +84,9 @@ impl MitmHandle {
         vars
     }
 
-    /// Shut the adapter down: flip the stop flag and unblock the accept loop by poking the
-    /// listener. Idempotent — a second call (or `Drop`) is a no-op.
+    /// Stop admission, interrupt client sockets, and wake the listener; `Drop` joins its workers.
     pub fn shutdown(&self) {
-        if self.stop.swap(true, Ordering::SeqCst) {
+        if !self.connections.shutdown() {
             return; // already shutting down
         }
         // Keep the wakeup connection open until the accept thread exits.
@@ -103,7 +103,7 @@ impl MitmHandle {
 }
 
 impl Drop for MitmHandle {
-    /// Shut down and join the accept thread on drop.
+    /// Shut down and join the accept thread and its connection workers on drop.
     fn drop(&mut self) {
         self.shutdown();
         if let Some(handle) = self.accept_thread.take() {
@@ -117,7 +117,7 @@ mod tests {
     use std::collections::HashMap;
     use std::os::unix::net::UnixListener;
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicU32;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -140,12 +140,12 @@ mod tests {
         // A stale socket file from a crashed prior run would fail bind; clear it first (best-effort).
         let _ = std::fs::remove_file(&path);
         let listener = UnixListener::bind(&path).unwrap();
-        let stop = Arc::new(AtomicBool::new(false));
+        let connections = Arc::new(Connections::new(1));
         let accept_thread = {
-            let stop = stop.clone();
+            let connections = connections.clone();
             std::thread::spawn(move || {
                 for incoming in listener.incoming() {
-                    if stop.load(Ordering::SeqCst) {
+                    if connections.is_stopped() {
                         break;
                     }
                     drop(incoming);
@@ -155,7 +155,7 @@ mod tests {
         let handle = MitmHandle::new(
             BoundTransport::Unix(path.clone()),
             None,
-            stop,
+            connections,
             accept_thread,
         );
         (handle, path)
@@ -165,19 +165,19 @@ mod tests {
     fn tcp_handle() -> MitmHandle {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
-        let stop = Arc::new(AtomicBool::new(false));
+        let connections = Arc::new(Connections::new(1));
         let accept_thread = {
-            let stop = stop.clone();
+            let connections = connections.clone();
             std::thread::spawn(move || {
                 for incoming in listener.incoming() {
-                    if stop.load(Ordering::SeqCst) {
+                    if connections.is_stopped() {
                         break;
                     }
                     drop(incoming);
                 }
             })
         };
-        MitmHandle::new(BoundTransport::Tcp(port), None, stop, accept_thread)
+        MitmHandle::new(BoundTransport::Tcp(port), None, connections, accept_thread)
     }
 
     /// `port()`/`unix_socket_path()` each report the transport actually bound.
