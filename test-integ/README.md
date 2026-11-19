@@ -43,9 +43,8 @@ macOS job `Rust / Unit Tests (macos-latest)` of `rust-test-lint.yml`, so a push 
 The Ubuntu ARM64 and Ubuntu x86-64 jobs, and the macOS steps, each affect `CI Gate`.
 The repository requires that status before merging.
 Both Linux jobs enable unprivileged user namespaces before the suite starts.
-The x86-64 job sets `EXPERIMENTAL_X86_SUPPORT=TRUE` for all Box processes.
-Set the same environment variable when running the suite locally on x86-64.
-This opt-in does not change the default startup behavior or qualify a release package.
+Neither Linux architecture requires an environment opt-in.
+These tests do not qualify a release package.
 
 Each job writes the per-case table to its summary and uploads the verdict and logs.
 A recorded platform exclusion remains a skip, not evidence that its assertions ran.
