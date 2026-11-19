@@ -1,0 +1,26 @@
+# A tool grammar whose command words use `_`, uppercase letters, and a leading `+`.
+
+name    = "command_words"
+program = "tool"
+format  = 1
+version = 1
+
+[effects]
+send = "Sends a message"
+
+[shell.list_payment_intents]
+usage = "tool payment_intents list [options]"
+options.limit = { flag = ["--limit"], value = "required" }
+
+[shell.empty_trash]
+usage   = "tool drive files emptyTrash"
+aliases = ["drive files Empty_Trash-2"]
+
+[shell.send]
+usage = "tool gmail +send [options]"
+adds  = ["send"]
+options.to = { flag = ["--to"], value = "required" }
+
+[shell.helper]
+usage   = "tool +helper"
+aliases = ["+h"]
