@@ -249,6 +249,7 @@ pub(crate) async fn execute(
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
     box_id: Option<&str>,
+    policy_decisions: Option<crate::PolicyDecisionSender>,
     #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
     native_setup: NativeSetup,
 ) -> Result<ExitCode, BoxError> {
@@ -290,6 +291,7 @@ pub(crate) async fn execute(
     let outcome = hosted(
         locked,
         Arc::clone(&collector),
+        policy_decisions,
         terminal,
         signals,
         #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
@@ -330,6 +332,7 @@ fn refuse_declared_sources(record: &Record) -> Result<(), BoxError> {
 async fn hosted(
     locked: LockedRun,
     collector: Arc<telemetry::Collector>,
+    policy_decisions: Option<crate::PolicyDecisionSender>,
     terminal: Option<std::fs::File>,
     signals: Option<crate::run::contain::supervise::Signals>,
     #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))] entry_guard: Option<
@@ -413,6 +416,7 @@ async fn hosted(
         policy,
         commands,
         collector,
+        policy_decisions,
         &locked.sources,
         locked.owned,
         &locked.workspace,

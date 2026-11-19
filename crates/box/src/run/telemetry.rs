@@ -633,16 +633,21 @@ fn mcp_resource(frame: &McpFrame<'_>) -> String {
 /// The box-owned sink for final policy enforcement point decisions.
 pub(crate) struct DecisionRecorder {
     collector: Option<Arc<Collector>>,
+    decisions: Option<Arc<super::decisions::PolicyDecisionSender>>,
     correlation: Option<telemetry::Correlation>,
     #[cfg(test)]
     recorded: Arc<std::sync::Mutex<Vec<EffectiveDecision>>>,
 }
 
 impl DecisionRecorder {
-    /// Bind effective decision recording to this box's collector.
-    pub(crate) fn over(collector: Arc<Collector>) -> Arc<Self> {
+    /// Bind effective decision recording to this box's collector and the caller's decision channel.
+    pub(crate) fn over(
+        collector: Arc<Collector>,
+        decisions: Option<super::decisions::PolicyDecisionSender>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             collector: Some(collector),
+            decisions: decisions.map(Arc::new),
             correlation: None,
             #[cfg(test)]
             recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -652,6 +657,7 @@ impl DecisionRecorder {
     pub(crate) fn for_request(&self, correlation: telemetry::Correlation) -> Arc<Self> {
         Arc::new(Self {
             collector: self.collector.clone(),
+            decisions: self.decisions.clone(),
             correlation: Some(correlation),
             #[cfg(test)]
             recorded: Arc::clone(&self.recorded),
@@ -673,8 +679,12 @@ impl DecisionRecorder {
         if let Ok(mut recorded) = self.recorded.lock() {
             recorded.push(decision.clone());
         }
+        let record = decision.into_record();
+        if let Some(decisions) = &self.decisions {
+            decisions.send(&record);
+        }
         if let Some(collector) = &self.collector {
-            collector.record(decision.into_record());
+            collector.record(record);
         }
     }
 
@@ -690,6 +700,7 @@ impl DecisionRecorder {
     pub(crate) fn discarding() -> Arc<Self> {
         Arc::new(Self {
             collector: None,
+            decisions: None,
             correlation: None,
             recorded: Arc::new(std::sync::Mutex::new(Vec::new())),
         })

@@ -442,6 +442,10 @@ copies it unchanged.
 - `Collector::record` never blocks, never fails and never awaits. Strands Box calls it from a policy
   enforcement point before the effect or refusal. A record no target's signal set accepts is not
   built at all.
+- **`DecisionRecord`'s readers return the values its attributes state, by construction.**
+  `attributes` builds `strands.box.policy.action`, `category`, `rule`, and the rest from `action`,
+  `category`, `rule`, and the other readers, so Strands Box's in-memory `PolicyDecision` and the
+  record cannot disagree. Do not compute an attribute apart from its reader.
 - `Collector::control` is the same contract for the other plane. Strands Box calls it where the
   authority itself changes — a policy install, a schema install, discovery completing, a box starting
   or stopping. **Each operation also reaches a span**, under `strands-box.control`, named

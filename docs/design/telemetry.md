@@ -74,6 +74,17 @@ OpenTelemetry lets a caller mark a trace as not sampled to reduce performance da
 ignores that mark for its own decisions and always writes them. The workload supplies the trace
 context, so honoring the mark would let it suppress records of its own refusals.
 
+### Policy decisions for a library caller
+
+A program that runs a box through the `strands-box` library can also receive each effective
+decision in memory, through a channel it passes in `RunOptions::policy_decisions`. The enforcement
+point's recorder puts a copy of the decision's record values on that channel just before the
+collector queues the record, so the caller sees the decision without reading a target. The channel
+is bounded and Box sends without waiting. When it is full, Box drops the copy, counts it on the
+receiver, and still records the decision. A slow caller therefore cannot delay a decision or remove
+it from the records. The channel is not a target: it has no file, no drain at shutdown, and no
+place in `include`.
+
 ### Receiver
 
 The collector asks the kernel for a free loopback port. Box supplies that address through the

@@ -619,6 +619,36 @@ run. `a_declared_home_and_path_win_beneath_cores_names` pins the order.
 
 `TERM`, `TMPDIR`, `LANG`, and `TZ` are the operator's to set, in `env`.
 
+## Policy decisions for a library caller
+
+A program that runs a box through the library can receive each policy decision as the box makes it,
+without reading a records file. Make a channel with `policy_decisions(capacity)`, pass its sender in
+`RunOptions::policy_decisions`, and read the receiver from another thread while `run` runs.
+
+```rust
+let (sender, receiver) = strands_box::policy_decisions(4096);
+std::thread::spawn(move || loop {
+    let Some(decision) = receiver.recv_timeout(std::time::Duration::from_secs(1)) else {
+        continue;
+    };
+    if !decision.permitted {
+        eprintln!("denied {} {} ({})", decision.action, decision.resource, decision.rule);
+    }
+});
+strands_box::run(config, workload, strands_box::RunOptions {
+    policy_decisions: Some(sender),
+    ..Default::default()
+});
+```
+
+A `PolicyDecision` holds the values that the decision's record states in its
+`strands.box.policy.*` attributes: the time, the verdict, the action and its category, the
+resource, the rule, the cause, and the reason. The box never waits for the reader. When the channel
+holds `capacity` unread decisions, the box drops the next one from the channel, and
+`PolicyDecisionReceiver::dropped` counts it. The records file and the telemetry targets still
+receive it as their `include` lists select. After the run ends, `recv_timeout` returns `None` once
+the channel is empty.
+
 ## Running
 
 `strands-box-contain-trampoline` must sit beside the `strands-box` executable; the box resolves it
