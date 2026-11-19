@@ -811,7 +811,8 @@ fn monty_default() -> bool {
 fn is_true(value: &bool) -> bool {
     *value
 }
-/// The record version of a record whose telemetry targets name `tool_calls` or reveal a tool field.
+/// The record version of a record whose telemetry targets name `mcp_tool_calls`, so an older build
+/// refuses the box rather than resuming it with those records dropped.
 const TOOL_CALLS_RECORD_VERSION: u32 = 40;
 
 /// Experimental mechanisms require explicit operator selection.
@@ -3374,14 +3375,14 @@ env = {}
         );
     }
 
-    /// A record whose targets name `tool_calls` is stamped with its own version, so an older build
+    /// A record whose targets name `mcp_tool_calls` is stamped with its own version, so an older build
     /// refuses the box rather than resuming it without those records.
     #[test]
     fn a_target_naming_tool_calls_stamps_its_record_version() {
         let version = |tool_calls_target: bool| {
             let include = vec![telemetry::SignalGroup::Deny]
                 .into_iter()
-                .chain(tool_calls_target.then_some(telemetry::SignalGroup::ToolCalls))
+                .chain(tool_calls_target.then_some(telemetry::SignalGroup::McpToolCalls))
                 .collect();
             record_version(
                 "box-0123456789abcdef",

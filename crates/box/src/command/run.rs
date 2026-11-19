@@ -215,7 +215,7 @@ fn write_tool_call_disclosures(
         if entry.takes_tool_calls() {
             writeln!(
                 output,
-                "strands-box: [telemetry.{label}] names tool_calls, so {} receives each MCP tool \
+                "strands-box: [telemetry.{label}] names mcp_tool_calls, so {} receives each MCP tool \
                  call's arguments and output in clear text, including any secret a tool takes or \
                  returns",
                 entry.shown_destination()
@@ -741,7 +741,7 @@ mod tests {
         );
     }
 
-    /// Only a target that names `tool_calls` is disclosed, because only it receives the values.
+    /// Only a target that names `mcp_tool_calls` is disclosed, because only it receives the values.
     #[test]
     fn startup_discloses_each_telemetry_target_that_takes_tool_calls() {
         use crate::record::config::telemetry::{SignalGroup, TelemetryEntry};
@@ -751,7 +751,7 @@ mod tests {
         record.telemetry = BTreeMap::from([
             (
                 "local".to_string(),
-                entry(Some(vec![SignalGroup::Deny, SignalGroup::ToolCalls])),
+                entry(Some(vec![SignalGroup::Deny, SignalGroup::McpToolCalls])),
             ),
             ("plain".to_string(), entry(None)),
             ("verdicts".to_string(), entry(Some(vec![SignalGroup::Deny]))),
@@ -762,7 +762,7 @@ mod tests {
 
         assert_eq!(
             String::from_utf8(output).expect("the disclosure is UTF-8"),
-            "strands-box: [telemetry.local] names tool_calls, so /tmp/records.jsonl receives each \
+            "strands-box: [telemetry.local] names mcp_tool_calls, so /tmp/records.jsonl receives each \
              MCP tool call's arguments and output in clear text, including any secret a tool takes \
              or returns\n"
         );

@@ -235,7 +235,7 @@ impl RuntimeMcpBox {
             format!(
                 "[telemetry.records]\nkind = \"file\"\ndestination = {:?}\n\n\
                  [telemetry.tools]\nkind = \"file\"\ndestination = {:?}\n\
-                 include = [\"tool_calls\"]\n",
+                 include = [\"mcp_tool_calls\"]\n",
                 records.display().to_string(),
                 tools.display().to_string()
             ),

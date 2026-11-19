@@ -27,7 +27,7 @@ pub enum Signal {
     /// One MCP invocation that matches no declared command.
     McpUnmatched,
     /// One MCP tool call's own arguments and output, in clear text, and how it ended.
-    ToolCalls,
+    McpToolCalls,
 }
 
 impl Signal {
@@ -42,7 +42,7 @@ impl Signal {
             Self::AgentMetrics => "agent_metrics",
             Self::ControlPlane => "control_plane",
             Self::McpUnmatched => "mcp_unmatched",
-            Self::ToolCalls => "tool_calls",
+            Self::McpToolCalls => "mcp_tool_calls",
         }
     }
 
@@ -58,13 +58,13 @@ impl Signal {
         vec![Self::PolicyDenied, Self::PolicyPermitted]
     }
 
-    /// What a target receives when it names none: every signal except [`Self::ToolCalls`].
+    /// What a target receives when it names none: every signal except [`Self::McpToolCalls`].
     #[must_use]
     pub fn default_signals() -> Vec<Self> {
         // A tool call carries its values in clear text, so it reaches only a target that names it.
         Self::EVERY
             .into_iter()
-            .filter(|signal| *signal != Self::ToolCalls)
+            .filter(|signal| *signal != Self::McpToolCalls)
             .collect()
     }
 
@@ -96,7 +96,7 @@ impl Signal {
             Self::AgentMetrics => opentelemetry::logs::Severity::Trace3,
             Self::ControlPlane => opentelemetry::logs::Severity::Info2,
             Self::McpUnmatched => opentelemetry::logs::Severity::Info3,
-            Self::ToolCalls => opentelemetry::logs::Severity::Info4,
+            Self::McpToolCalls => opentelemetry::logs::Severity::Info4,
         }
     }
 
@@ -120,7 +120,7 @@ impl Signal {
             Self::AgentMetrics => 4,
             Self::ControlPlane => 5,
             Self::McpUnmatched => 6,
-            Self::ToolCalls => 7,
+            Self::McpToolCalls => 7,
         }
     }
 
@@ -135,7 +135,7 @@ impl Signal {
         Self::AgentMetrics,
         Self::ControlPlane,
         Self::McpUnmatched,
-        Self::ToolCalls,
+        Self::McpToolCalls,
     ];
 }
 
@@ -363,7 +363,7 @@ impl McpUnmatched {
 
 /// One MCP tool call: the arguments it was decided with, and how it ended.
 #[derive(Debug, Clone)]
-pub struct ToolCall {
+pub struct McpToolCall {
     server: String,
     tool: String,
     arguments: Option<crate::tool::ToolFields>,
@@ -386,13 +386,13 @@ pub(crate) enum ToolCallPhase {
 impl ToolCallPhase {
     pub(crate) fn event_name(self) -> &'static str {
         match self {
-            Self::Called => "strands.box.tool.call",
-            Self::Completed => "strands.box.tool.completion",
+            Self::Called => "strands.box.mcp.tool.call",
+            Self::Completed => "strands.box.mcp.tool.completion",
         }
     }
 }
 
-impl ToolCall {
+impl McpToolCall {
     /// Record one decided call's `server`, `tool`, and `arguments`, flattened into fields.
     #[must_use]
     pub fn called(server: &str, tool: &str, arguments: &serde_json::Value) -> Self {
@@ -460,7 +460,7 @@ impl ToolCall {
             }
         }
         if let Some(reply) = &self.reply {
-            pairs.push(("strands.box.tool.reply", reply.clone().into()));
+            pairs.push(("strands.box.mcp.tool.reply", reply.clone().into()));
         }
         if let Some(output) = &self.output {
             pairs.push((crate::tool::OUTPUT, output.attribute()));
@@ -1205,7 +1205,7 @@ mod tests {
         }
     }
 
-    /// **The default set is EVERY signal but `tool_calls`**, so a target that names no `include`
+    /// **The default set is EVERY signal but `mcp_tool_calls`**, so a target that names no `include`
     /// also receives the harness's own spans, logs and metrics, and never a tool call's values.
     ///
     /// Named signal by signal rather than by length, because a count passes on a set that holds the
@@ -1216,8 +1216,8 @@ mod tests {
         for signal in Signal::EVERY {
             assert_eq!(
                 default.contains(&signal),
-                signal != Signal::ToolCalls,
-                "{} must reach a target that names no include unless it is tool_calls",
+                signal != Signal::McpToolCalls,
+                "{} must reach a target that names no include unless it is mcp_tool_calls",
                 signal.as_str()
             );
         }
@@ -1236,7 +1236,7 @@ mod tests {
             Signal::PolicyDenied,
             Signal::PolicyPermitted,
             Signal::ControlPlane,
-            Signal::ToolCalls,
+            Signal::McpToolCalls,
         ] {
             assert!(!own.is_relayed(), "{} is the box's own", own.as_str());
         }
@@ -1262,8 +1262,8 @@ mod tests {
             }
         };
         for record in [
-            ToolCall::called(&long, &long, &value),
-            ToolCall::completed(&long, &long, &long, Some(&value)),
+            McpToolCall::called(&long, &long, &value),
+            McpToolCall::completed(&long, &long, &long, Some(&value)),
         ] {
             for (key, value) in record.attributes() {
                 for text in texts(&value) {

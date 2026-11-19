@@ -1,6 +1,6 @@
 //! An MCP tool call's flattened argument and output fields, as a tool-call record carries them.
 //!
-//! The values are raw. Only a target whose `include` names `tool_calls` receives a tool-call
+//! The values are raw. Only a target whose `include` names `mcp_tool_calls` receives a tool-call
 //! record, so the operator's choice of target is what decides who sees them.
 
 use std::collections::HashMap;
@@ -11,14 +11,14 @@ use opentelemetry::logs::AnyValue;
 use crate::record::bounded;
 
 /// The attribute that carries a call's flattened arguments.
-pub(crate) const ARGUMENTS: &str = "strands.box.tool.arguments";
+pub(crate) const ARGUMENTS: &str = "strands.box.mcp.tool.arguments";
 
 /// The attribute that carries a call's flattened `structuredContent`.
-pub(crate) const OUTPUT: &str = "strands.box.tool.output";
+pub(crate) const OUTPUT: &str = "strands.box.mcp.tool.output";
 
 /// The attributes that name the call's server and tool.
-pub(crate) const SERVER: &str = "strands.box.tool.server";
-pub(crate) const NAME: &str = "strands.box.tool.name";
+pub(crate) const SERVER: &str = "strands.box.mcp.tool.server";
+pub(crate) const NAME: &str = "strands.box.mcp.tool.name";
 
 /// The most flattened fields one record carries, matching the shell's argument cap.
 const MAXIMUM_FIELDS: usize = 64;
@@ -26,8 +26,8 @@ const MAXIMUM_FIELDS: usize = 64;
 /// The attributes that say how many argument or output fields were left out, beside their maps.
 ///
 /// Outside the map, because a map key is a data path, and data can spell any path.
-pub(crate) const ARGUMENTS_OMITTED: &str = "strands.box.tool.arguments_omitted";
-pub(crate) const OUTPUT_OMITTED: &str = "strands.box.tool.output_omitted";
+pub(crate) const ARGUMENTS_OMITTED: &str = "strands.box.mcp.tool.arguments_omitted";
+pub(crate) const OUTPUT_OMITTED: &str = "strands.box.mcp.tool.output_omitted";
 
 /// Scalar fields flattened out of one JSON value, as dotted paths.
 ///

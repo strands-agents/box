@@ -1369,7 +1369,7 @@ started reads with `jq`.
 |---|---|---|
 | `kind` | string | `file`, `otlp`, or a vendor: `langfuse`, `langsmith`, `cloudwatch_logs`, or `cloudwatch_traces`. Required. |
 | `destination` | string | For `file`, an absolute or `~/`-relative path. Inside this box's `box_dir` it must lie under `private/`; outside the box any path is accepted. For `otlp`, the collector endpoint. For `langfuse` and `langsmith`, the base address, which defaults to the vendor's cloud. A CloudWatch kind takes `region` instead, and refuses `destination`. |
-| `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, `metrics`, or `tool_calls`. `trace` names the agent's own spans and the box's control-plane records. `logs` includes unmatched MCP routing diagnostics. `tool_calls` names each MCP tool call's arguments and output in clear text, and how it ended. **Absent means every signal except `tool_calls`**, which a target receives only when it names it. An empty list is refused, and so is a repeated word. |
+| `include` | string array | Which records reach this target: `deny`, `permit`, `trace`, `logs`, `metrics`, or `mcp_tool_calls`. `trace` names the agent's own spans and the box's control-plane records. `logs` includes unmatched MCP routing diagnostics. `mcp_tool_calls` names each MCP tool call's arguments and output in clear text, and how it ended. **Absent means every signal except `mcp_tool_calls`**, which a target receives only when it names it. An empty list is refused, and so is a repeated word. |
 | `accepts` | string array | For `otlp`: which OTLP payloads the endpoint takes, from `traces`, `logs`, and `metrics`. Absent means all three. The box sends no batch of a payload the list leaves out. |
 | `headers` | table | For `otlp`: fixed headers sent on every request. A header that carries a credential or a signature is refused here. |
 | `secret.ref` | string | `env://NAME`, `secret://NAME`, `aws://PROFILE`, `credsd://ENVIRONMENT`, or a reference in a [declared scheme](#secret-sourcescheme). `aws://` and `credsd://` sign each request with SigV4. A literal value is refused. The box attaches this secret itself, so the target takes no `secret.env`. |
@@ -1439,11 +1439,11 @@ A file destination inside the box directory and outside `private/` is refused: `
 the box directory <path> but outside its private tree, where a process could truncate it; name a
 destination under `private/`, or outside the box, or declare no target and take the default`. An
 empty `include` is refused with `the target names no signal, so nothing would reach it; write one or
-more of: deny, permit, trace, logs, metrics, tool_calls`, and a repeated word with `the target names
-deny twice`.
+more of: deny, permit, trace, logs, metrics, mcp_tool_calls`, and a repeated word with `the target
+names deny twice`.
 
-A box with no `[telemetry]` table writes its default file with every signal except `tool_calls`. See
-[a tool call](telemetry.md#a-tool-call).
+A box with no `[telemetry]` table writes its default file with every signal except `mcp_tool_calls`.
+See [a tool call](telemetry.md#a-tool-call).
 
 <a id="logs-and-metrics-are-unconditional"></a>
 

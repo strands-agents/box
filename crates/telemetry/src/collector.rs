@@ -18,7 +18,7 @@ use crate::config::TelemetryConfig;
 use crate::error::Result;
 use crate::export::{BOX_ATTRIBUTE, SOURCE_ATTRIBUTE, SOURCE_BOX, TargetExporter};
 use crate::receive::Receiver;
-use crate::record::{ControlRecord, DecisionRecord, McpUnmatched, Signal, ToolCall};
+use crate::record::{ControlRecord, DecisionRecord, McpToolCall, McpUnmatched, Signal};
 
 /// The scope every decision record carries.
 pub(crate) const SCOPE: &str = "strands-box.policy";
@@ -26,11 +26,9 @@ pub(crate) const SCOPE: &str = "strands-box.policy";
 /// The scope every control-plane record carries, so a reader filters one plane from the other.
 pub(crate) const CONTROL_SCOPE: &str = "strands-box.control";
 
+/// The scope every MCP record carries, an unmatched route or a tool call, so a reader filters a
+/// tool call's own values from the decision that judged it.
 const MCP_SCOPE: &str = "strands-box.mcp";
-
-/// The scope every tool-call record carries, so a reader filters a tool call's own values from the
-/// decision that judged it.
-const TOOL_SCOPE: &str = "strands-box.tool";
 
 /// The service every record names.
 const SERVICE: &str = "strands-box";
@@ -217,7 +215,6 @@ pub struct Collector {
     /// The control-plane scope's own logger, so a record names which plane it came from.
     control_logger: SdkLogger,
     mcp_logger: SdkLogger,
-    tool_logger: SdkLogger,
     /// Batches a target refused, counted by the exporters and never by the receiver.
     dropped: Arc<AtomicU64>,
     /// Agent payloads the receiver refused, which is not a loss of the box's own records.
@@ -330,7 +327,6 @@ impl Collector {
         let logger = logs.logger(SCOPE);
         let control_logger = logs.logger(CONTROL_SCOPE);
         let mcp_logger = logs.logger(MCP_SCOPE);
-        let tool_logger = logs.logger(TOOL_SCOPE);
 
         // An agent's span arrives already encoded, so it relays rather than going through the SDK.
         let receiving = tokio::spawn(inbound.serve_forever(
@@ -346,7 +342,6 @@ impl Collector {
             logger,
             control_logger,
             mcp_logger,
-            tool_logger,
             dropped,
             #[cfg(test)]
             refused,
@@ -456,13 +451,13 @@ impl Collector {
     /// Queue one MCP tool call's own arguments, or how it ended.
     ///
     /// Never blocks, never awaits, and never fails, on the same terms as [`Self::record`]. Only a
-    /// target that names [`Signal::ToolCalls`] receives it, values in clear text.
-    pub fn tool_call(&self, record: ToolCall) {
-        let signal = Signal::ToolCalls;
+    /// target that names [`Signal::McpToolCalls`] receives it, values in clear text.
+    pub fn mcp_tool_call(&self, record: McpToolCall) {
+        let signal = Signal::McpToolCalls;
         if !self.accepts(signal) {
             return;
         }
-        let mut emitted = self.tool_logger.create_log_record();
+        let mut emitted = self.mcp_logger.create_log_record();
         emitted.set_event_name(record.phase().event_name());
         let parent = record.correlation().parent();
         if parent.is_valid() {
@@ -484,7 +479,7 @@ impl Collector {
         for (key, value) in record.attributes() {
             emitted.add_attribute(key, value);
         }
-        self.tool_logger.emit(emitted);
+        self.mcp_logger.emit(emitted);
     }
 
     /// Queue one control-plane operation.
@@ -1849,7 +1844,7 @@ mod tests {
         );
     }
 
-    /// A tool call reaches only a target that names `tool_calls`, and there in clear text.
+    /// A tool call reaches only a target that names `mcp_tool_calls`, and there in clear text.
     ///
     /// Two targets, because a target naming no signal must still not receive it: its values are
     /// whatever the tool was given and returned.
@@ -1860,7 +1855,7 @@ mod tests {
         let plain = directory.path().join("plain.jsonl");
         let opened = directory.path().join("opened.jsonl");
         let mut signals = Signal::default_signals();
-        signals.push(Signal::ToolCalls);
+        signals.push(Signal::McpToolCalls);
         let collector = Collector::start(
             TelemetryConfig::for_box("demo")
                 .with_target(
@@ -1877,14 +1872,14 @@ mod tests {
                 )),
         )
         .expect("open");
-        assert!(collector.accepts(Signal::ToolCalls));
+        assert!(collector.accepts(Signal::McpToolCalls));
 
-        collector.tool_call(crate::ToolCall::called(
+        collector.mcp_tool_call(crate::McpToolCall::called(
             "desk",
             "reset_password",
             &serde_json::json!({"user_name": "ada", "token": "s3cret-token"}),
         ));
-        collector.tool_call(crate::ToolCall::completed(
+        collector.mcp_tool_call(crate::McpToolCall::completed(
             "desk",
             "reset_password",
             "result",
@@ -1916,19 +1911,19 @@ mod tests {
             );
             assert!(
                 !text.contains("strands.box.tool"),
-                "a target that did not name tool_calls received one: {text}"
+                "a target that did not name mcp_tool_calls received one: {text}"
             );
         }
     }
 
-    /// With no target naming `tool_calls`, the collector accepts none, so a caller skips the work.
+    /// With no target naming `mcp_tool_calls`, the collector accepts none, so a caller skips the work.
     #[tokio::test]
     async fn no_target_takes_tool_calls_unless_one_names_them() {
         let directory = tempfile::tempdir().expect("tempdir");
         let path = directory.path().join("records.jsonl");
         let collector = Collector::start(file_config(&path)).expect("open");
-        assert!(!collector.accepts(Signal::ToolCalls));
-        assert!(!Signal::default_signals().contains(&Signal::ToolCalls));
+        assert!(!collector.accepts(Signal::McpToolCalls));
+        assert!(!Signal::default_signals().contains(&Signal::McpToolCalls));
     }
 
     /// A value keeps its JSON type, so `true` and `"true"` stay apart.
@@ -1939,11 +1934,11 @@ mod tests {
         let collector = Collector::start(
             TelemetryConfig::for_box("demo").with_target(
                 Target::new(TargetKind::File, path.to_string_lossy().to_string())
-                    .receiving(vec![Signal::ToolCalls]),
+                    .receiving(vec![Signal::McpToolCalls]),
             ),
         )
         .expect("open");
-        collector.tool_call(crate::ToolCall::called(
+        collector.mcp_tool_call(crate::McpToolCall::called(
             "desk",
             "check",
             &serde_json::json!({
@@ -1959,7 +1954,7 @@ mod tests {
             .as_array()
             .expect("attributes")
             .iter()
-            .find(|attribute| attribute["key"] == "strands.box.tool.arguments")
+            .find(|attribute| attribute["key"] == "strands.box.mcp.tool.arguments")
             .expect("the arguments")["value"]["kvlistValue"]["values"]
             .clone();
         let value = |key: &str| {
@@ -1990,14 +1985,14 @@ mod tests {
         let collector = Collector::start(
             TelemetryConfig::for_box("demo").with_target(
                 Target::new(TargetKind::File, path.to_string_lossy().to_string())
-                    .receiving(vec![Signal::ToolCalls]),
+                    .receiving(vec![Signal::McpToolCalls]),
             ),
         )
         .expect("open");
 
         // A valid parent, because a record without one exports no span whatever its scope.
-        collector.tool_call(
-            crate::ToolCall::called("desk", "lookup", &serde_json::json!({})).correlated(
+        collector.mcp_tool_call(
+            crate::McpToolCall::called("desk", "lookup", &serde_json::json!({})).correlated(
                 crate::Correlation::from_headers(
                     Some("00-11111111111111111111111111111111-aaaaaaaaaaaaaaaa-01"),
                     None,

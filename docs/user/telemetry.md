@@ -45,7 +45,7 @@ A `file` table takes three keys. An unknown key is refused.
 |---|---|---|---|
 | `kind` | string | none, required | `file`. [Endpoints](#endpoints) lists the other kinds. |
 | `destination` | string | none, required | The file the records go to, as stated below. |
-| `include` | array of strings | every record except tool calls | Which records reach this target: `deny`, `permit`, `trace`, `logs`, `metrics`, or `tool_calls`. |
+| `include` | array of strings | every record except tool calls | Which records reach this target: `deny`, `permit`, `trace`, `logs`, `metrics`, or `mcp_tool_calls`. |
 
 ## `kind = "file"`
 
@@ -80,10 +80,10 @@ target receives only the records the words in the list name:
 | `trace` | The workload's own spans, and this box's control-plane records. |
 | `logs` | Box's unmatched MCP routing diagnostics and the workload's log records. |
 | `metrics` | The workload's metrics. |
-| `tool_calls` | Each MCP tool call's arguments and output in clear text, and how it ended. A target receives these only when it names `tool_calls`. |
+| `mcp_tool_calls` | Each MCP tool call's arguments and output in clear text, and how it ended. A target receives these only when it names `mcp_tool_calls`. |
 
-A tool-call record is a log record, so Box refuses `tool_calls` at startup on a target that accepts
-no logs, such as a `langfuse`, `langsmith`, or `cloudwatch_traces` target.
+A tool-call record is a log record, so Box refuses `mcp_tool_calls` at startup on a target that
+accepts no logs, such as a `langfuse`, `langsmith`, or `cloudwatch_traces` target.
 
 So `include = ["deny"]` writes a file of refusals, and leaves out the permits, control-plane records,
 and MCP routing diagnostics.
@@ -254,15 +254,15 @@ Targets receive it when `include` is omitted or contains `logs`.
 
 ### A tool call
 
-Each MCP tool call produces up to two log records in the `strands-box.tool` scope, over a stdio or
+Each MCP tool call produces up to two log records in the `strands-box.mcp` scope, over a stdio or
 an http server alike:
 
 | Event name | Written when | Keys |
 |---|---|---|
-| `strands.box.tool.call` | the call is decided, whether it is allowed or refused | `strands.box.tool.server`, `.name`, and `.arguments` |
-| `strands.box.tool.completion` | the call ends | `strands.box.tool.server`, `.name`, `.reply`, and `.output` when the reply carried `structuredContent` |
+| `strands.box.mcp.tool.call` | the call is decided, whether it is allowed or refused | `strands.box.mcp.tool.server`, `.name`, and `.arguments` |
+| `strands.box.mcp.tool.completion` | the call ends | `strands.box.mcp.tool.server`, `.name`, `.reply`, and `.output` when the reply carried `structuredContent` |
 
-`strands.box.tool.reply` holds one of `result`, `tool_error`, `protocol_error`, `cancelled`, or
+`strands.box.mcp.tool.reply` holds one of `result`, `tool_error`, `protocol_error`, `cancelled`, or
 `indeterminate`, as [`output.reply`](policy/actions.md) defines them. A refused call has no
 completion. Both records carry `jsonrpc.request.id`, which joins them to each other and to the
 call's decision.
@@ -271,34 +271,34 @@ call's decision.
 after `context.input.` or `output.structured.`: an object's member is `parent.member`, and an
 array's element is `parent.N`. So `{"profile": {"email": "a@b"}}` becomes the field `profile.email`.
 
-**Tool-call values are in clear text, so a target receives them only when it names `tool_calls`.** A
-target with no `include`, and the box's own default file, receives none. An argument or an output
-can hold anything a tool takes or returns, including a password, a token, or a customer's data, and
-Box can't tell which field does. So name `tool_calls` only on a target whose readers may see all of
-it, such as a file on your own machine, and not on a vendor's endpoint you wouldn't trust with those
-values:
+**Tool-call values are in clear text, so a target receives them only when it names
+`mcp_tool_calls`.** A target with no `include`, and the box's own default file, receives none. An
+argument or an output can hold anything a tool takes or returns, including a password, a token, or a
+customer's data, and Box can't tell which field does. So name `mcp_tool_calls` only on a target
+whose readers may see all of it, such as a file on your own machine, and not on a vendor's endpoint
+you wouldn't trust with those values:
 
 ```toml
 [telemetry.local]
 kind        = "file"
 destination = "~/boxes/helpdesk/records.jsonl"
-include     = ["deny", "permit", "trace", "logs", "metrics", "tool_calls"]
+include     = ["deny", "permit", "trace", "logs", "metrics", "mcp_tool_calls"]
 ```
 
 A declared target replaces the default file, and a written `include` names everything the target
-receives, so list the other signals you still want beside `tool_calls`. At startup, Box prints one
-line on stderr for each target that receives tool calls, naming where they go.
+receives, so list the other signals you still want beside `mcp_tool_calls`. At startup, Box prints
+one line on stderr for each target that receives tool calls, naming where they go.
 
-A tool-call record is a log record, so a target that accepts no logs can't name `tool_calls`: Box
-refuses it with a message that says `tool-call records are logs and it accepts no logs`. That
-covers `langfuse`, `langsmith`, `cloudwatch_traces`, and an `otlp` target whose `accepts`
-leaves out `logs`.
+A tool-call record is a log record, so a target that accepts no logs can't name `mcp_tool_calls`:
+Box refuses it with a message that says `tool-call records are logs and it accepts no logs`. That
+covers `langfuse`, `langsmith`, `cloudwatch_traces`, and an `otlp` target whose `accepts` leaves out
+`logs`.
 
-Keys arrive as the tool wrote them. When two keys flatten to one path, such as `"a.b"` and
-`{"a": {"b": …}}`, the first is kept and the second is counted as left out. At most 64 fields are
-reported per record,
-each value at most 4 KiB; when a call has more, the record also carries
-`strands.box.tool.arguments_omitted` or `strands.box.tool.output_omitted` with the count left out.
+Keys arrive as the tool wrote them. When two keys flatten to one path, such as `"a.b"` and `{"a":
+{"b": …}}`, the first is kept and the second is counted as left out. At most 64 fields are reported
+per record, each value at most 4 KiB; when a call has more, the record also carries
+`strands.box.mcp.tool.arguments_omitted` or `strands.box.mcp.tool.output_omitted` with the count
+left out.
 
 A value keeps its JSON type: a string, `true` or `false`, or a number, so `true` and `"true"` stay
 apart. An integer too large for 64 bits arrives as its digits in a string, and a JSON `null` arrives

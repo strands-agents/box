@@ -18,8 +18,8 @@ pub use config::{Payload, Target, TargetKind, TargetSecret, TelemetryConfig};
 pub use correlation::Correlation;
 pub use error::{Result, TelemetryError};
 pub use record::{
-    ControlOperation, ControlRecord, DecisionCause, DecisionRecord, DeterminingPolicy,
-    McpUnmatched, Signal, Subject, ToolCall,
+    ControlOperation, ControlRecord, DecisionCause, DecisionRecord, DeterminingPolicy, McpToolCall,
+    McpUnmatched, Signal, Subject,
 };
 
 /// Open the lane `config` describes.

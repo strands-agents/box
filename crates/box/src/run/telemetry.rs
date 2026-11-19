@@ -868,7 +868,7 @@ impl DecisionRecorder {
     pub(crate) fn wants_tool_calls(&self) -> bool {
         self.collector
             .as_ref()
-            .is_some_and(|collector| collector.accepts(telemetry::Signal::ToolCalls))
+            .is_some_and(|collector| collector.accepts(telemetry::Signal::McpToolCalls))
     }
 
     /// Submit one decided MCP tool call, with the arguments policy judged, as the call's JSON text.
@@ -882,8 +882,8 @@ impl DecisionRecorder {
         TOOL_CALLS_BUILT.with(|count| count.set(count.get() + 1));
         if let Some(collector) = &self.collector {
             let arguments = serde_json::from_str(arguments).unwrap_or(serde_json::Value::Null);
-            collector.tool_call(
-                telemetry::ToolCall::called(server, tool, &arguments)
+            collector.mcp_tool_call(
+                telemetry::McpToolCall::called(server, tool, &arguments)
                     .correlated(self.request_context()),
             );
         }
@@ -903,8 +903,8 @@ impl DecisionRecorder {
         #[cfg(test)]
         TOOL_CALLS_BUILT.with(|count| count.set(count.get() + 1));
         if let Some(collector) = &self.collector {
-            collector.tool_call(
-                telemetry::ToolCall::completed(server, tool, reply, output)
+            collector.mcp_tool_call(
+                telemetry::McpToolCall::completed(server, tool, reply, output)
                     .correlated(self.request_context()),
             );
         }
@@ -1722,7 +1722,7 @@ mod tests {
                     telemetry::TargetKind::File,
                     path.to_string_lossy().to_string(),
                 )
-                .receiving(vec![telemetry::Signal::ToolCalls]),
+                .receiving(vec![telemetry::Signal::McpToolCalls]),
             );
         } else {
             config = config.with_target(
@@ -1872,7 +1872,7 @@ mod tests {
         );
         collector.drained().await;
         let text = std::fs::read_to_string(&path).expect("the tool-call records");
-        assert!(text.contains("strands.box.tool.completion"), "{text}");
+        assert!(text.contains("strands.box.mcp.tool.completion"), "{text}");
         assert!(
             text.contains("raw-sum-77"),
             "the output arrives in clear text: {text}"
@@ -1903,7 +1903,7 @@ mod tests {
         observer.finished(&replied);
         collector.drained().await;
         let text = std::fs::read_to_string(&path).expect("the tool-call records");
-        assert!(text.contains("strands.box.tool.completion"), "{text}");
+        assert!(text.contains("strands.box.mcp.tool.completion"), "{text}");
         assert!(text.contains(r#""stringValue":"result""#), "{text}");
     }
 
@@ -1920,7 +1920,7 @@ mod tests {
         collector.drained().await;
         let text = std::fs::read_to_string(&path).expect("the tool-call records");
         assert_eq!(
-            text.matches("strands.box.tool.completion").count(),
+            text.matches("strands.box.mcp.tool.completion").count(),
             1,
             "{text}"
         );

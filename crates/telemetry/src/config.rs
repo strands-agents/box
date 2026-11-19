@@ -365,11 +365,12 @@ impl TelemetryConfig {
         let refuse = |reason: String| Err(TelemetryError::Config { reason });
         // A tool-call record is a log and never a span, so a target that takes no logs would
         // receive none of the records it named.
-        if target.signals.contains(&Signal::ToolCalls) && !target.accepts().contains(&Payload::Logs)
+        if target.signals.contains(&Signal::McpToolCalls)
+            && !target.accepts().contains(&Payload::Logs)
         {
             return refuse(format!(
-                "the {} target names tool_calls, but tool-call records are logs and it accepts no \
-                 logs, so none would reach it; send tool_calls to a target that accepts logs",
+                "the {} target names mcp_tool_calls, but tool-call records are logs and it accepts no \
+                 logs, so none would reach it; send mcp_tool_calls to a target that accepts logs",
                 target.kind.as_str()
             ));
         }
@@ -656,7 +657,7 @@ mod tests {
         otlp(endpoint().accepting(vec![Payload::Traces])).expect("one payload is accepted");
     }
 
-    /// **A target that takes no logs cannot name `tool_calls`**, because a tool-call record is a log
+    /// **A target that takes no logs cannot name `mcp_tool_calls`**, because a tool-call record is a log
     /// and is never turned into a span; one that takes logs can.
     #[test]
     fn tool_calls_need_a_target_that_accepts_logs() {
@@ -664,7 +665,7 @@ mod tests {
             TelemetryConfig::for_box("b")
                 .with_target(
                     Target::new(TargetKind::Otlp, "https://vendor.example")
-                        .receiving(vec![Signal::PolicyDenied, Signal::ToolCalls])
+                        .receiving(vec![Signal::PolicyDenied, Signal::McpToolCalls])
                         .accepting(accepts),
                 )
                 .validate()

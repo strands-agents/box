@@ -243,7 +243,7 @@ fn assert_telemetry_id(value: &Value, length: usize) {
     assert!(id.bytes().any(|byte| byte != b'0'), "{id}");
 }
 
-/// One `strands-box.tool` log record: its event name and its string attributes.
+/// One `strands-box.mcp` log record: its event name and its string attributes.
 #[derive(Debug)]
 struct ToolRecord {
     event: String,
@@ -285,7 +285,7 @@ fn flattened_attribute(attribute: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Every `strands-box.tool` log record in a records file, in order.
+/// Every `strands-box.mcp` log record in a records file, in order.
 fn tool_records(path: &Path) -> Vec<ToolRecord> {
     let text = std::fs::read_to_string(path).expect("read the drained telemetry");
     let mut records = Vec::new();
@@ -294,7 +294,7 @@ fn tool_records(path: &Path) -> Vec<ToolRecord> {
             serde_json::from_str(line).expect("a telemetry line is one OTLP request");
         for resource in request["resourceLogs"].as_array().into_iter().flatten() {
             for scope in resource["scopeLogs"].as_array().into_iter().flatten() {
-                if scope["scope"]["name"] != "strands-box.tool" {
+                if scope["scope"]["name"] != "strands-box.mcp" {
                     continue;
                 }
                 for record in scope["logRecords"].as_array().into_iter().flatten() {
@@ -314,7 +314,7 @@ fn tool_records(path: &Path) -> Vec<ToolRecord> {
     records
 }
 
-/// The records file split into its `strands-box.tool` log records and everything else, as text.
+/// The records file split into its `strands-box.mcp` log records and everything else, as text.
 fn split_tool_scope(text: &str) -> (String, String) {
     let mut tool = String::new();
     let mut other = String::new();
@@ -324,11 +324,11 @@ fn split_tool_scope(text: &str) -> (String, String) {
         for resource in request["resourceLogs"].as_array_mut().into_iter().flatten() {
             if let Some(scopes) = resource["scopeLogs"].as_array_mut() {
                 for scope in scopes.iter() {
-                    if scope["scope"]["name"] == "strands-box.tool" {
+                    if scope["scope"]["name"] == "strands-box.mcp" {
                         tool.push_str(&scope.to_string());
                     }
                 }
-                scopes.retain(|scope| scope["scope"]["name"] != "strands-box.tool");
+                scopes.retain(|scope| scope["scope"]["name"] != "strands-box.mcp");
             }
         }
         other.push_str(&request.to_string());
@@ -353,7 +353,7 @@ fn observed_linked_policy_spans(box_: &RuntimeMcpBox) -> Vec<Value> {
     assert!(!text.contains("forged-tool"));
     let (tool_scope, _) = split_tool_scope(&text);
     assert!(
-        tool_scope.is_empty(),
+        !tool_scope.contains("strands.box.mcp.tool."),
         "the default file holds no tool-call record: {tool_scope}"
     );
     let mut logs = Vec::new();
@@ -844,14 +844,14 @@ fn an_absent_catalog_tool_reaches_neither_policy_observer_nor_server() {
     let tools = tool_records(&box_.tool_calls_path());
     let called: Vec<_> = tools
         .iter()
-        .filter(|record| record.event == "strands.box.tool.call")
-        .filter_map(|record| record.attribute("strands.box.tool.name").cloned())
+        .filter(|record| record.event == "strands.box.mcp.tool.call")
+        .filter_map(|record| record.attribute("strands.box.mcp.tool.name").cloned())
         .collect();
     assert_eq!(called, ["absent", "read"], "{tools:#?}");
     let ended: Vec<_> = tools
         .iter()
-        .filter(|record| record.event == "strands.box.tool.completion")
-        .filter_map(|record| record.attribute("strands.box.tool.name").cloned())
+        .filter(|record| record.event == "strands.box.mcp.tool.completion")
+        .filter_map(|record| record.attribute("strands.box.mcp.tool.name").cloned())
         .collect();
     assert_eq!(ended, ["read"], "{tools:#?}");
 }
@@ -1304,20 +1304,20 @@ fn concurrent_local_mcp_policy_spans_keep_each_messages_parent() {
     let tools = tool_records(&box_.tool_calls_path());
     let called: Vec<_> = tools
         .iter()
-        .filter(|record| record.event == "strands.box.tool.call")
+        .filter(|record| record.event == "strands.box.mcp.tool.call")
         .collect();
     assert_eq!(called.len(), 2, "{tools:#?}");
-    // The target that names tool_calls receives each call's argument in clear text.
+    // The target that names mcp_tool_calls receives each call's argument in clear text.
     let mut values: Vec<_> = called
         .iter()
-        .filter_map(|record| record.attribute("strands.box.tool.arguments.value"))
+        .filter_map(|record| record.attribute("strands.box.mcp.tool.arguments.value"))
         .map(String::as_str)
         .collect();
     values.sort_unstable();
     assert_eq!(values, ["denied", "fixture-private-argument"], "{tools:#?}");
     let completed: Vec<_> = tools
         .iter()
-        .filter(|record| record.event == "strands.box.tool.completion")
+        .filter(|record| record.event == "strands.box.mcp.tool.completion")
         .collect();
     assert_eq!(
         completed.len(),
@@ -1326,20 +1326,20 @@ fn concurrent_local_mcp_policy_spans_keep_each_messages_parent() {
     );
     assert_eq!(
         completed[0]
-            .attribute("strands.box.tool.reply")
+            .attribute("strands.box.mcp.tool.reply")
             .map(String::as_str),
         Some("result")
     );
     for record in &tools {
         assert_eq!(
             record
-                .attribute("strands.box.tool.server")
+                .attribute("strands.box.mcp.tool.server")
                 .map(String::as_str),
             Some("alpha")
         );
         assert_eq!(
             record
-                .attribute("strands.box.tool.name")
+                .attribute("strands.box.mcp.tool.name")
                 .map(String::as_str),
             Some("read")
         );

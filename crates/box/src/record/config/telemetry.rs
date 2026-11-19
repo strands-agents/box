@@ -3,7 +3,7 @@
 //! A declared target REPLACES the box's default destination, so this module owns both halves — what
 //! an operator may write, and the collector request a run builds from what was stored.
 //!
-//! An absent `include` means every signal except `tool_calls`, so a target receives the harness's own
+//! An absent `include` means every signal except `mcp_tool_calls`, so a target receives the harness's own
 //! spans, logs and metrics without naming one, and a tool call's values only when it names the word.
 //! The six words below are how an operator narrows or extends that.
 //!
@@ -116,7 +116,7 @@ pub(crate) enum SignalGroup {
     /// The agent's own metrics.
     Metrics,
     /// Each MCP tool call's own arguments, and how it ended.
-    ToolCalls,
+    McpToolCalls,
 }
 
 impl SignalGroup {
@@ -128,7 +128,7 @@ impl SignalGroup {
             Self::Trace => vec![Signal::AgentTrace, Signal::ControlPlane],
             Self::Logs => vec![Signal::AgentLogs, Signal::McpUnmatched],
             Self::Metrics => vec![Signal::AgentMetrics],
-            Self::ToolCalls => vec![Signal::ToolCalls],
+            Self::McpToolCalls => vec![Signal::McpToolCalls],
         }
     }
 
@@ -140,7 +140,7 @@ impl SignalGroup {
             Self::Trace,
             Self::Logs,
             Self::Metrics,
-            Self::ToolCalls,
+            Self::McpToolCalls,
         ]
     }
 
@@ -152,7 +152,7 @@ impl SignalGroup {
             Self::Trace => "trace",
             Self::Logs => "logs",
             Self::Metrics => "metrics",
-            Self::ToolCalls => "tool_calls",
+            Self::McpToolCalls => "mcp_tool_calls",
         }
     }
 }
@@ -280,12 +280,12 @@ impl TelemetryEntry {
         }
     }
 
-    /// Whether this target names `tool_calls`, the only way it receives a tool call's values.
+    /// Whether this target names `mcp_tool_calls`, the only way it receives a tool call's values.
     pub(crate) fn takes_tool_calls(&self) -> bool {
         self.include
             .iter()
             .flatten()
-            .any(|group| *group == SignalGroup::ToolCalls)
+            .any(|group| *group == SignalGroup::McpToolCalls)
     }
 }
 
@@ -1032,7 +1032,7 @@ pub(crate) fn checked(
     Ok(accepted)
 }
 
-/// Whether an authored `[telemetry]` table names `tool_calls`, which an older build cannot honour.
+/// Whether an authored `[telemetry]` table names `mcp_tool_calls`, which an older build cannot honour.
 ///
 /// Called before the targets are checked, so it reads the tables as authored; a table `checked`
 /// refuses fails the whole file there.
@@ -1394,7 +1394,7 @@ mod tests {
     ///
     /// `logs` and `metrics` are separate words rather than part of `trace`, because a harness log
     /// is not a span and an operator narrowing to spans must not silently also take metrics.
-    /// `tool_calls` is its own word, and the only way a target receives tool-call records, because
+    /// `mcp_tool_calls` is its own word, and the only way a target receives tool-call records, because
     /// their values are in clear text.
     #[test]
     fn the_six_words_expand_through_the_production_path() {
@@ -1419,8 +1419,8 @@ mod tests {
             vec![Signal::AgentMetrics]
         );
         assert_eq!(
-            signals_for(&[SignalGroup::ToolCalls]),
-            vec![Signal::ToolCalls]
+            signals_for(&[SignalGroup::McpToolCalls]),
+            vec![Signal::McpToolCalls]
         );
 
         // Every signal is reachable through an include word.
@@ -1428,20 +1428,20 @@ mod tests {
         assert_eq!(every.len(), Signal::every().len(), "{every:?}");
     }
 
-    /// A target whose `include` names `tool_calls` receives the signal, and one whose `include`
+    /// A target whose `include` names `mcp_tool_calls` receives the signal, and one whose `include`
     /// leaves it out does not.
     #[test]
     fn an_include_list_selects_or_leaves_out_tool_calls() {
         let entry =
             |include: Option<Vec<SignalGroup>>| TelemetryEntry::file("/tmp/records.jsonl", include);
         let naming = target_for(
-            &entry(Some(vec![SignalGroup::ToolCalls])),
+            &entry(Some(vec![SignalGroup::McpToolCalls])),
             None,
             Path::new("/var/lib/boxes/codex"),
             None,
         )
         .expect("the entry is well formed");
-        assert_eq!(naming.signals(), &[Signal::ToolCalls]);
+        assert_eq!(naming.signals(), &[Signal::McpToolCalls]);
         let other = target_for(
             &entry(Some(vec![SignalGroup::Deny])),
             None,
@@ -1449,16 +1449,16 @@ mod tests {
             None,
         )
         .expect("the entry is well formed");
-        assert!(!other.signals().contains(&Signal::ToolCalls));
+        assert!(!other.signals().contains(&Signal::McpToolCalls));
     }
 
-    /// A record that stores a target naming `tool_calls` carries `TOOL_CALLS_RECORD_VERSION`, so
+    /// A record that stores a target naming `mcp_tool_calls` carries `TOOL_CALLS_RECORD_VERSION`, so
     /// an older build refuses the box rather than resuming it with values silently dropped.
     #[test]
     fn names_tool_calls_finds_only_a_target_naming_the_word() {
         let telemetry = BTreeMap::from([(
             "decisions".to_string(),
-            TelemetryEntry::file("/tmp/records.jsonl", Some(vec![SignalGroup::ToolCalls])),
+            TelemetryEntry::file("/tmp/records.jsonl", Some(vec![SignalGroup::McpToolCalls])),
         )]);
         assert!(names_tool_calls(&telemetry));
         let other = BTreeMap::from([(
@@ -1493,12 +1493,12 @@ mod tests {
         assert_eq!(
             target.signals().len(),
             Signal::every().len() - 1,
-            "an absent include must reach every signal but tool_calls: {:?}",
+            "an absent include must reach every signal but mcp_tool_calls: {:?}",
             target.signals()
         );
         assert!(
-            !target.signals().contains(&Signal::ToolCalls),
-            "a tool call reaches only a target that names tool_calls"
+            !target.signals().contains(&Signal::McpToolCalls),
+            "a tool call reaches only a target that names mcp_tool_calls"
         );
         for expected in [
             Signal::AgentLogs,
@@ -1539,7 +1539,14 @@ mod tests {
         .expect_err("an empty include names no signal")
         .to_string();
         assert!(empty.contains("no signal"), "{empty}");
-        for word in ["deny", "permit", "trace", "logs", "metrics", "tool_calls"] {
+        for word in [
+            "deny",
+            "permit",
+            "trace",
+            "logs",
+            "metrics",
+            "mcp_tool_calls",
+        ] {
             assert!(
                 empty.contains(word),
                 "the refusal must list {word}, which an operator may write: {empty}"

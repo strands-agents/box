@@ -2636,12 +2636,12 @@ The file has no size bound or rotation.
 `[telemetry.<label>] include` takes six words: `deny` and `permit` name the two effective verdicts,
 `trace` names the agent's relayed spans and the box's own control-plane records. `logs` names the
 agent's relayed log records and the box's unmatched MCP routing diagnostics. `metrics` names the
-agent's relayed metric records. `tool_calls` names each MCP tool call and how it ended. A target
+agent's relayed metric records. `mcp_tool_calls` names each MCP tool call and how it ended. A target
 names a set, with no ordering, and no signal contains another. A target that names no `include`
-receives every signal except `tool_calls`, which
-`an_absent_include_takes_every_signal_but_tool_calls` pins; see [tool-call values reach only a
-target that asks for them](#tool-call-values-reach-only-a-target-that-asks-for-them). An empty list,
-a repeated word, and a misspelled word are each refused before the box exists. The agent's log
+receives every signal except `mcp_tool_calls`, which
+`an_absent_include_takes_every_signal_but_tool_calls` pins; see [MCP tool-call values reach only a
+target that asks for them](#mcp-tool-call-values-reach-only-a-target-that-asks-for-them). An empty
+list, a repeated word, and a misspelled word are each refused before the box exists. The agent's log
 records and metrics reach every target whatever `include` names. `accepts` on an `otlp` target is a
 second filter, by OTLP payload and not by signal: the exporter sends no `traces`, `logs`, or
 `metrics` batch that the list leaves out, which `a_traces_only_target_is_sent_no_other_payload`
@@ -2651,8 +2651,8 @@ that an operator who reads only `include` can expect a log record that an `accep
 The box relays harness signals without producing them. The harness's exporter settings determine
 whether those records exist.
 
-<a id="tool-call-values-reach-only-a-target-that-asks-for-them"></a>
-### Tool-call values reach only a target that asks for them, in clear text
+<a id="mcp-tool-call-values-reach-only-a-target-that-asks-for-them"></a>
+### MCP tool-call values reach only a target that asks for them, in clear text
 
 A policy author, or a tool that drafts policy from the decision log, learns rules from what an
 agent's tool calls carried and how they ended. So the box records each MCP tool call's arguments
@@ -2660,12 +2660,12 @@ when the call is decided, and how it ended with its `structuredContent` when it 
 http alike. These values are what the agent and the server chose, so either can hold a secret, and a
 target can be a vendor's endpoint.
 
-The values go on a `strands-box.tool` log record, never on a decision or its span, as maps of
-flattened fields in clear text. Only a target that names `tool_calls` in its `include` receives that
-record. A target with no `include`, including the box's own default file, doesn't, and at startup
-Box prints one stderr line for each target that does. Naming the word is the operator's choice of
-who may read every argument and output. The record is a log and never a span, so a target that
-accepts no logs, such as a Langfuse target, can't name the word
+The values go on a `strands-box.mcp` log record, never on a decision or its span, as maps of
+flattened fields in clear text. Only a target that names `mcp_tool_calls` in its `include` receives
+that record. A target with no `include`, including the box's own default file, doesn't, and at
+startup Box prints one stderr line for each target that does. Naming the word is the operator's
+choice of who may read every argument and output. The record is a log and never a span, so a target
+that accepts no logs, such as a Langfuse target, can't name the word
 (`tool_calls_need_a_target_that_accepts_logs`). Keys arrive as the tool wrote them.
 `only_a_target_naming_tool_calls_receives_them_in_clear_text` and
 `startup_discloses_each_telemetry_target_that_takes_tool_calls` pin both halves.
@@ -2674,8 +2674,8 @@ This follows managed MCP gateways, which log each `tools/call` request and respo
 the customer's own log store and leave access to its permissions. Box can't assume a target is the
 operator's own, so the opt-in is per target, absent by default, and disclosed.
 
-The cost is that a target naming `tool_calls` receives any secret a tool takes or returns. Over http
-it also makes Box read every tool reply, and those copies share the gateway's budget with the
+The cost is that a target naming `mcp_tool_calls` receives any secret a tool takes or returns. Over
+http it also makes Box read every tool reply, and those copies share the gateway's budget with the
 replies per-tool rules read, so under many concurrent large replies a rule's read can be abandoned
 and record `indeterminate`, which fails closed. `a_reply_is_read_when_a_target_takes_tool_calls`
 pins the read. A call refused before the per-tool check, by `mcp:call` or because the tool isn't
@@ -2770,9 +2770,9 @@ box record carries `strands.box.run.id`, generated once per `run`. The box copie
 bounds their size, and validates before it retains anything. Tool arguments, prompts, authorization
 headers, and arbitrary baggage are excluded from correlation context, and a caller-supplied
 identifier is never evidence of caller identity. A tool call's arguments are recorded only on its
-own record, and reach only a target that names `tool_calls`; see [tool-call values reach only a
-target that asks for them](#tool-call-values-reach-only-a-target-that-asks-for-them). Roughly half
-of all decisions arrive unparented and join by `strands.box.run.id` alone.
+own record, and reach only a target that names `mcp_tool_calls`; see [MCP tool-call values reach
+only a target that asks for them](#mcp-tool-call-values-reach-only-a-target-that-asks-for-them).
+Roughly half of all decisions arrive unparented and join by `strands.box.run.id` alone.
 
 <a id="the-policy-attribute-names-are-this-products-own"></a>
 ### The policy attribute names are this product's own, and the set is fixed
@@ -2784,7 +2784,7 @@ indexes on these keys. Standard keys identify the operation where one exists: `s
 `server.port`, `http.request.method`, `file.path`, `process.command`, `process.command_args`, and
 `process.working_directory`. `url.full` and `process.command_line` stay excluded, because each
 routinely carries a secret. A tool call's arguments and answer stay off the decision for the same
-reason, and go on a tool-call record under `strands.box.tool.*`.
+reason, and go on a tool-call record under `strands.box.mcp.tool.*`.
 
 `.cause` is mandatory and must agree with `.verdict`. `DecisionRecord` holds a `DecisionCause`
 rather than an option. A permit defaults to `Permitted`, a deny defaults to `Forbidden`, and

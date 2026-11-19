@@ -37,17 +37,16 @@ A box writes four kinds of record. Each has a scope that readers can select:
 
 - `strands-box.policy` contains one record for each effective decision.
 - `strands-box.control` contains records of changes to the box's authority.
-- `strands-box.mcp` contains diagnostics for alias invocations that match no declared MCP command.
-- `strands-box.tool` contains each MCP tool call's own arguments, and how the call ended with the
-  tool's answer.
+- `strands-box.mcp` contains diagnostics for alias invocations that match no declared MCP command,
+  and each MCP tool call's own arguments and how the call ended with the tool's answer.
 
 A decision never carries a tool call's arguments or answer. Those values are what the agent and the
 server chose, so either can hold a secret. They go on a tool-call record instead, as maps of
-flattened fields in clear text. That record reaches only a target that names `tool_calls`; a target
-with no `include`, including the box's own default file, receives none. See [tool-call values reach
-only a target that asks for
-them](decisions.md#tool-call-values-reach-only-a-target-that-asks-for-them). The tool-call records
-name the call's JSON-RPC identifier, which joins them to the decision.
+flattened fields in clear text. That record reaches only a target that names `mcp_tool_calls`; a
+target with no `include`, including the box's own default file, receives none. See [MCP tool-call
+values reach only a target that asks for
+them](decisions.md#mcp-tool-call-values-reach-only-a-target-that-asks-for-them). The tool-call
+records name the call's JSON-RPC identifier, which joins them to the decision.
 
 A decision names the action, resource, verdict, cause, and every policy that determined it. Standard
 OpenTelemetry keys describe the request, including the server address and port, request method, file
@@ -138,8 +137,8 @@ in a directory the workload can write, the workload can truncate it.
 A target can select Box denials, Box permits, relayed workload spans, and MCP routing diagnostics.
 See [a target names a set](decisions.md#a-target-names-a-set-of-signals). The `trace` selector also
 includes control-plane records. Omitting it loses Box's record of authority changes. The `logs`
-selector includes unmatched MCP routes. The `tool_calls` selector names the tool-call records, and
-no absent selection includes them, because their values are in clear text. Relayed workload log
+selector includes unmatched MCP routes. The `mcp_tool_calls` selector names the tool-call records,
+and no absent selection includes them, because their values are in clear text. Relayed workload log
 records and metrics arrive regardless of this selection, unless the target's `accepts` leaves that
 payload out.
 

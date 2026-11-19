@@ -268,7 +268,7 @@ Key it on `::response`, and require `output.reply` to be `result`:
   unreadable reply fails. A `forbid` that fires when an earlier output said something can be
   avoided that way.
 - Tool outputs are stored in local history in `box_dir`, next to the inputs Box already stores.
-  They reach telemetry, in clear text, only on a target that names `tool_calls`. See
+  They reach telemetry, in clear text, only on a target that names `mcp_tool_calls`. See
   [a tool call](telemetry.md#a-tool-call).
 
 Box doesn't record `::error` for an MCP call, and the load refuses a rule that reads one, or that

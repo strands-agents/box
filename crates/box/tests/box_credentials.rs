@@ -1909,7 +1909,7 @@ fn recorded_policy_spans(box_: &Configured) -> Vec<Value> {
         let mut batch: Value = serde_json::from_str(line).expect("OTLP batch");
         for resource in batch["resourceLogs"].as_array_mut().into_iter().flatten() {
             if let Some(scopes) = resource["scopeLogs"].as_array_mut() {
-                scopes.retain(|scope| scope["scope"]["name"] != "strands-box.tool");
+                scopes.retain(|scope| scope["scope"]["name"] != "strands-box.mcp");
             }
         }
         decision_text.push_str(&batch.to_string());
@@ -3092,12 +3092,12 @@ unless temporal { formerly within 1h ( demo::Action::"verify"::response{
         "the refused echo never reached origin"
     );
 
-    // No target names tool_calls, so the default file holds no tool-call record at all.
+    // No target names mcp_tool_calls, so the default file holds no tool-call record at all.
     let tools = tool_records(&box_.root().join("private/telemetry/records.jsonl"));
     assert!(tools.is_empty(), "{tools:#?}");
 }
 
-/// A target that names `tool_calls` in `box.toml` receives each call's arguments and output in
+/// A target that names `mcp_tool_calls` in `box.toml` receives each call's arguments and output in
 /// clear text over http, joined to the call by its JSON-RPC id, with how each call that ran ended.
 #[test]
 fn a_target_naming_tool_calls_receives_each_remote_call_in_clear_text() {
@@ -3115,7 +3115,7 @@ when { context.input.server == "demo" };"#,
             "[mcp.demo]\ntype = \"http\"\ndestinations = [\"{}\"]\n\n\
              [telemetry.local]\nkind = \"file\"\n\
              destination = \"{}/private/telemetry/tools.jsonl\"\n\
-             include = [\"deny\", \"permit\", \"tool_calls\"]\n",
+             include = [\"deny\", \"permit\", \"mcp_tool_calls\"]\n",
             upstream.authority,
             fixture::BOX_DIR
         ),
@@ -3179,9 +3179,9 @@ when { context.input.server == "demo" };"#,
     ] {
         assert_eq!(
             value(
-                "strands.box.tool.call",
+                "strands.box.mcp.tool.call",
                 id,
-                "strands.box.tool.arguments.text"
+                "strands.box.mcp.tool.arguments.text"
             )
             .as_deref(),
             Some(text),
@@ -3190,9 +3190,9 @@ when { context.input.server == "demo" };"#,
     }
     assert_eq!(
         value(
-            "strands.box.tool.completion",
+            "strands.box.mcp.tool.completion",
             "v1",
-            "strands.box.tool.output.verified"
+            "strands.box.mcp.tool.output.verified"
         )
         .as_deref(),
         Some("true"),
@@ -3200,18 +3200,23 @@ when { context.input.server == "demo" };"#,
     );
     for id in ["v1", "e1"] {
         assert_eq!(
-            value("strands.box.tool.completion", id, "strands.box.tool.reply").as_deref(),
+            value(
+                "strands.box.mcp.tool.completion",
+                id,
+                "strands.box.mcp.tool.reply"
+            )
+            .as_deref(),
             Some("result"),
             "call {id} states how it ended: {tools:#?}"
         );
     }
     assert!(
-        record("strands.box.tool.completion", "e2").is_none(),
+        record("strands.box.mcp.tool.completion", "e2").is_none(),
         "the refused call never ran, so it has no completion: {tools:#?}"
     );
 }
 
-/// Every `strands-box.tool` log record in a records file, as its event name and string attributes.
+/// Every `strands-box.mcp` log record in a records file, as its event name and string attributes.
 fn tool_records(path: &std::path::Path) -> Vec<(String, Vec<(String, String)>)> {
     let text = std::fs::read_to_string(path).expect("read the drained telemetry");
     let mut records = Vec::new();
@@ -3220,7 +3225,7 @@ fn tool_records(path: &std::path::Path) -> Vec<(String, Vec<(String, String)>)> 
             serde_json::from_str(line).expect("a telemetry line is one OTLP request");
         for resource in request["resourceLogs"].as_array().into_iter().flatten() {
             for scope in resource["scopeLogs"].as_array().into_iter().flatten() {
-                if scope["scope"]["name"] != "strands-box.tool" {
+                if scope["scope"]["name"] != "strands-box.mcp" {
                     continue;
                 }
                 for record in scope["logRecords"].as_array().into_iter().flatten() {
