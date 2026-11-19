@@ -406,6 +406,37 @@ fn the_profile_reads_exactly_seven_named_sysctls() {
     );
 }
 
+/// The profile reaches one POSIX shared-memory name: libomp's registration object,
+/// `__KMP_REGISTERED_LIB_<pid>`, through the four operations registration and its cleanup use.
+///
+/// libomp 15 and older abort at load when that open fails. No other object is reachable, so a
+/// shared-memory segment of another program, such as a notification center's, stays refused.
+#[test]
+fn the_profile_reaches_only_openmp_registration_shared_memory() {
+    let (_directory, config) = fixed_config();
+    let profile = generate_seatbelt_profile(&config).expect("fixed profile");
+    let rules = rules(&profile);
+
+    let mut shm: Vec<&str> = rules
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.contains("ipc-posix"))
+        .collect();
+    shm.sort_unstable();
+    let name = r##"(ipc-posix-name-regex #"^/?__KMP_REGISTERED_LIB_[0-9]+$"))"##;
+    assert_eq!(
+        shm,
+        [
+            format!("(allow ipc-posix-shm-read-data {name}"),
+            format!("(allow ipc-posix-shm-write-create {name}"),
+            format!("(allow ipc-posix-shm-write-data {name}"),
+            format!("(allow ipc-posix-shm-write-unlink {name}"),
+        ],
+        "the shared-memory rules changed. Each must name libomp's registration object and no \
+         other.\nrendered profile:\n{profile}"
+    );
+}
+
 /// An execute grant reached through a link renders a metadata read on the link too, and no second
 /// `process-exec`.
 ///
@@ -1808,6 +1839,12 @@ fn the_rendered_profile_grants_exactly_these_operations_and_no_others() {
         // One rule holds all seven names, so this stays one entry. The name set has its own
         // test, `the_profile_reads_exactly_seven_named_sysctls`.
         "sysctl-read",
+        // libomp's registration object, one rule per operation. The name has its own test,
+        // `the_profile_reaches_only_openmp_registration_shared_memory`.
+        "ipc-posix-shm-write-create",
+        "ipc-posix-shm-read-data",
+        "ipc-posix-shm-write-data",
+        "ipc-posix-shm-write-unlink",
         "network-bind",
         "network-inbound",
         "network-outbound",

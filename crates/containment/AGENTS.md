@@ -327,6 +327,12 @@ by reading `src/` belongs in `src/` — the README describes the shape.
       the release gap, and it is not architecture-dependent. **Re-run that sweep on any release the box
       has not seen**; `sandbox_init` reports one unbound name at a time, so iterating on box launches
       costs one host cycle per name.
+    - **The four `ipc-posix-shm-*` names came after that sweep and are not in it.** They are
+      `ipc-posix-shm-write-create`, `-read-data`, `-write-data` and `-write-unlink`, scoped to
+      libomp's registration object (guard:
+      `the_profile_reaches_only_openmp_registration_shared_memory`, and CN-P-03 in `test-integ`).
+      Apple's own profiles on macOS 26.7 use all four. macOS 14 and 15 are unmeasured, so re-run the
+      sweep there.
     - **The defect and the fix are measured end to end on all four hosts.** With the guard reverted,
       `strands-box run` exits 1 with
       `unbound variable: file-graft at <input string>, line 289, column 7` and

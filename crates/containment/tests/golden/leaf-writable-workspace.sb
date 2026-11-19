@@ -129,6 +129,15 @@
     (sysctl-name "kern.ostype")
     (sysctl-name "kern.version"))
 
+; OpenMP's runtime, libomp, registers itself when it loads, in a POSIX shared-memory object named
+; for the process: __KMP_REGISTERED_LIB_<pid>. libomp 15 and older abort when that open fails, so
+; torch, and any program built with OpenMP, stops before its first line. The four operations are
+; the ones registration and its cleanup use, and the name allows that object and no other.
+(allow ipc-posix-shm-write-create (ipc-posix-name-regex #"^/?__KMP_REGISTERED_LIB_[0-9]+$"))
+(allow ipc-posix-shm-read-data (ipc-posix-name-regex #"^/?__KMP_REGISTERED_LIB_[0-9]+$"))
+(allow ipc-posix-shm-write-data (ipc-posix-name-regex #"^/?__KMP_REGISTERED_LIB_[0-9]+$"))
+(allow ipc-posix-shm-write-unlink (ipc-posix-name-regex #"^/?__KMP_REGISTERED_LIB_[0-9]+$"))
+
 (allow sysctl-read (sysctl-name-prefix "net."))
 (allow system-socket (socket-domain AF_ROUTE))
 (allow mach-lookup (global-name "com.apple.system.opendirectoryd.libinfo"))
