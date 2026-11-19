@@ -664,30 +664,15 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
         reason: "execveat with AT_EMPTY_PATH execs an inherited descriptor rather than \
                  a path, so the mount view never sees the bytes that run",
     },
-    // Route 3 of W^X: writable memory becoming executable.
-    MediatedSyscall {
-        name: "mmap",
-        number: libc::SYS_mmap,
-        disposition: Disposition::ArgumentScoped,
-        reason: "a mapping that is writable and executable at once is attacker-authored \
-                 code the mount view cannot govern",
-    },
-    MediatedSyscall {
-        name: "mprotect",
-        number: libc::SYS_mprotect,
-        disposition: Disposition::ArgumentScoped,
-        reason: "adding PROT_EXEC turns a page the workload has already written into \
-                 code, which is route 3 of W^X",
-    },
-    // `pkey_mprotect` reaches the same effect with a protection key argument, so denying only
-    // `mprotect` would be the same shape of fail-open that denying only `mount` and only `unshare`
-    // each turned out to be.
+    // `pkey_mprotect` is `mprotect` with a protection key. It stays refused together with
+    // `pkey_alloc`, so protection keys are admitted or refused as one decision; a JIT runtime with
+    // no key uses the permitted `mprotect` instead.
     MediatedSyscall {
         name: "pkey_mprotect",
         number: libc::SYS_pkey_mprotect,
         disposition: Disposition::ArgumentScoped,
-        reason: "pkey_mprotect adds PROT_EXEC exactly as mprotect does, and denying only \
-                 mprotect would leave the same route open under a second spelling",
+        reason: "pkey_mprotect pairs with pkey_alloc, which is unpermitted, so protection keys \
+                 stay refused as one unit and a runtime uses mprotect instead",
     },
     // The new mount API reaches the same effect as `mount(2)` without calling it.
     MediatedSyscall {
@@ -1080,10 +1065,7 @@ impl SyscallPolicy {
         if entry.number == libc::SYS_execveat {
             return execveat_rules();
         }
-        if entry.number == libc::SYS_mmap {
-            return write_execute_mmap_rules();
-        }
-        if entry.number == libc::SYS_mprotect || entry.number == libc::SYS_pkey_mprotect {
+        if entry.number == libc::SYS_pkey_mprotect {
             return add_execute_rules();
         }
         if entry.number == libc::SYS_setpgid {
@@ -1394,24 +1376,7 @@ fn execveat_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
     ])
 }
 
-/// Deny `mmap` only when the mapping is writable **and** executable at once.
-fn write_execute_mmap_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
-    let mask = (libc::PROT_WRITE | libc::PROT_EXEC) as u64;
-    Ok(vec![
-        SeccompRule::new(vec![
-            SeccompCondition::new(
-                2,
-                SeccompCmpArgLen::Dword,
-                SeccompCmpOp::MaskedEq(mask),
-                mask,
-            )
-            .map_err(filter_error)?,
-        ])
-        .map_err(filter_error)?,
-    ])
-}
-
-/// Deny `mprotect`/`pkey_mprotect` when the new protection adds `PROT_EXEC`.
+/// Deny `pkey_mprotect` when the new protection adds `PROT_EXEC`.
 fn add_execute_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
     let mask = libc::PROT_EXEC as u64;
     Ok(vec![

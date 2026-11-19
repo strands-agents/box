@@ -470,6 +470,19 @@ For rollback, remove the key from every process table, then follow the
 [rollback steps](native-filesystem-policy.md#stored-configuration-and-rollback).
 Older builds do not recognize the key, even when its value is `false`.
 
+### Executable memory
+
+On Linux, every process in a box can write code into memory and run it. A JIT runtime such as Node,
+Java, or Bun needs this, and so does Python `ctypes` when libffi writes a callback into memory. There
+is no setting. macOS has no such restriction.
+
+**A process can run any bytes it writes into memory**, not only the programs its grants let it
+start. `memfd_create`, `pkey_mprotect`, descriptor `execveat`, and the `noexec` mounts stay refused,
+so the kernel never maps or starts a file outside the process's `exec` grants. But a runtime that
+calls native code, such as Python through `ctypes`, can copy a readable program into memory and run
+it. For such a runtime, a `read` grant on a program works like an `exec` grant. The system-call
+filter, filesystem grants, and network policy still apply to that code.
+
 ### Script commands on Linux
 
 On Linux, a script in `command[0]` requires existing filesystem grants for every program in its
