@@ -817,45 +817,71 @@ fn a_write_grant_over_a_source_program_is_refused_and_starts_no_program() {
     assert_eq!(program.runs(), 0, "the check starts no program");
 }
 
-/// **The check refuses an entry whose path is absent in a configuration with no process table**,
-/// where only a present path is protected, and it names no source and starts no program.
+/// **The check skips an entry whose path is absent, where only a present path is protected, and
+/// names it after the line of its source**, also in a configuration with no process table.
 #[test]
-fn an_absent_path_of_a_source_is_refused_with_no_process_table() {
+fn an_absent_path_of_a_source_is_skipped_and_named_with_no_process_table() {
     let program = StandIn::new(PRINTER);
-    let store = program.path().join("store");
+    let (store, socket) = (
+        program.path().join("store"),
+        program.path().join("later/sock"),
+    );
+    let quoted = |path: &Path| toml::Value::String(path.display().to_string()).to_string();
     let table = format!(
-        "{}reads = [{}]\n",
+        "{}reads = [{}]\ndeny = [{}]\n",
         program.table("op", Path::new(SHELL)),
-        toml::Value::String(store.display().to_string())
+        quoted(&store),
+        quoted(&socket)
     );
     let line = format!(
         "strands-box: [secret-source.op]: reads each op:// secret with {SHELL}, which runs \
          outside every sandbox\n"
     );
+    let skipped = |list: &str, path: &Path| {
+        format!(
+            "strands-box: [secret-source.op]: `{list}` entry {:?} names {}, which does not \
+             exist when the box starts, so no sandbox denies it in this run\n",
+            path.display().to_string(),
+            path.display()
+        )
+    };
 
     let (sources, lines) = checked(&table, &no_tables());
+    sources.expect("an absent path stops no box");
     if cfg!(target_os = "linux") {
-        assert_eq!(
-            (sources.err(), lines),
-            (
-                Some(format!(
-                    "invalid `[secret-source.op]` table: `reads` entry {:?} names {}, which \
-                     does not exist. On Linux, Box protects only a path that exists when the \
-                     box starts: name an existing folder above it, create it, or remove the entry",
-                    store.display().to_string(),
-                    store.display()
-                )),
-                String::new()
-            )
-        );
+        let (reads, deny) = (skipped("reads", &store), skipped("deny", &socket));
+        assert_eq!(lines, format!("{line}{reads}{deny}"));
     } else {
-        sources.expect("a path that is absent is protected by its name");
-        assert_eq!(lines, line);
+        assert_eq!(
+            lines, line,
+            "a path that is absent is protected by its name"
+        );
     }
     std::fs::create_dir(&store).expect("the folder is made");
     let (sources, lines) = checked(&table, &no_tables());
     sources.expect("the path is there");
-    assert_eq!(lines, line);
+    if cfg!(target_os = "linux") {
+        assert_eq!(lines, format!("{line}{}", skipped("deny", &socket)));
+    } else {
+        assert_eq!(lines, line);
+    }
+    // A link whose target holds a line break: the line spells the target escaped, as one line.
+    let link = program.path().join("link");
+    std::os::unix::fs::symlink("gone\nstrands-box: forged", &link).expect("the link is made");
+    let table = format!(
+        "{}deny = [{}]\n",
+        program.table("op", Path::new(SHELL)),
+        quoted(&link)
+    );
+    let (sources, lines) = checked(&table, &no_tables());
+    sources.expect("an absent target stops no box");
+    if cfg!(target_os = "linux") {
+        assert_eq!(lines.lines().count(), 2, "{lines}");
+        assert!(
+            lines.contains("/gone\\nstrands-box: forged, which does not exist"),
+            "{lines}"
+        );
+    }
     assert_eq!(program.runs(), 0, "the check starts no program");
 }
 

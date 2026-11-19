@@ -375,13 +375,7 @@ fn declared_source(switch: bool, program: &str, rest: &str) -> String {
 /// each folder that this suite protects.
 fn with_vault(name: &str, policy: &str, config: &str) -> Request {
     let request = Request::with_config(name, policy, config);
-    let mut folders = vec![".config/op", ".aws"];
-    // Linux refuses an entry whose path is not there, so there the home also holds the path
-    // that `protecting_sources` names as absent.
-    if cfg!(target_os = "linux") {
-        folders.push("Library/Group Containers/vault");
-    }
-    for folder in folders {
+    for folder in [".config/op", ".aws"] {
         std::fs::create_dir_all(request.operator_home().join(folder))
             .expect("create a folder of the vault");
     }
@@ -671,7 +665,7 @@ fn a_write_grant_over_a_secret_source_program_is_refused() {
 
 /// The body of a configuration whose `op://` source runs `program` for one route and protects
 /// `~/.config/op`, and whose `aws-secretsmanager://` source protects `~/.aws` and a path that is
-/// not there on macOS, with `rest` after them.
+/// not there, with `rest` after them.
 fn protecting_sources(program: &str, rest: &str) -> String {
     let route = declared_route("api.example.test", "op://Personal/GitHub/token");
     format!(
@@ -696,7 +690,7 @@ fn source_path_refusal(path: &std::path::Path, scheme: &str, list: &str, entry: 
 
 /// **A grant that reaches a path of a secret source stops the box before a program starts**:
 /// a credential store that a tool names exactly, a folder of the agent that holds the path, and
-/// a path under a stdio MCP server that is not there on macOS and is an empty folder on Linux.
+/// a path that is not there under a stdio MCP server.
 #[test]
 fn a_grant_over_a_path_of_a_secret_source_is_refused() {
     if !fixture::namespace_launcher_is_usable() {
@@ -754,6 +748,61 @@ fn a_grant_over_a_path_of_a_secret_source_is_refused() {
             "{name}: no program starts in a box that lets a workload reach the vault"
         );
     }
+}
+
+/// **A grant that reaches an absent path of a plugin's list stops the box on each operating
+/// system**: with `reads = ["~/.config/op", "~/.op"]` and only the first folder there, a tool
+/// that reads `~/.op` is refused before a program starts, and the same table with no such grant
+/// starts.
+#[test]
+fn a_grant_over_an_absent_path_of_a_plugin_list_is_refused() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let attempt = |name: &str, tool: &str| {
+        let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+        let request = Request::with_config(
+            name,
+            &permit_egress_to("api.example.test", 443),
+            &format!(
+                "[experimental-features]\nsecret-sources = true\n\
+                 [secret-source.op]\nprotocol = \"box.secret-source.v1\"\n\
+                 command = [{:?}, \"read\", \"op://{{ref}}\"]\n\
+                 reads = [\"~/.config/op\", \"~/.op\"]\n{}{tool}",
+                program.path(),
+                declared_route("api.example.test", "op://Personal/GitHub/token")
+            ),
+        );
+        let home = request
+            .operator_home()
+            .canonicalize()
+            .expect("the operator home resolves");
+        std::fs::create_dir_all(home.join(".config/op")).expect("the folder of the vault");
+        let (box_, output) = request.attempt();
+        (program, home, box_, output)
+    };
+
+    let (program, home, box_, output) = attempt(
+        "plugin-absent-grant",
+        "[tool.old]\ncommand = [\"/usr/bin/true\"]\n[tool.old.filesystem]\nread = [\"~/.op\"]\n",
+    );
+    assert_refused(
+        &box_,
+        &output,
+        &[&format!(
+            "`[tool.old]` filesystem entry \"~/.op\" {}",
+            source_path_refusal(&home.join(".op"), "op", "reads", "~/.op")
+        )],
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains("reads each op:// secret"), "{stderr}");
+    assert_eq!(program.runs(), Vec::<String>::new());
+
+    // The control: the same lists with no grant above them.
+    let (program, _, _box, output) = attempt("plugin-absent-start", "");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "the box must start: {stderr}");
+    assert_eq!(program.runs(), ["read op://Personal/GitHub/token"]);
 }
 
 /// The value of a vault credential of the operator, which must never appear inside the box.
@@ -1458,63 +1507,93 @@ fn a_placeholder_variable_key_is_refused_while_the_switch_is_off() {
     );
 }
 
-/// **On Linux, a `reads` or `deny` entry whose path does not exist stops the box before a
-/// program starts and before Box stores a record**: the refusal names the table and the entry,
-/// and the same box directory starts after the operator makes the path.
+/// **On Linux, a `reads` or `deny` entry whose path does not exist is skipped**: the box starts,
+/// one line names each skipped entry, a tool whose program is a script starts, and the entry
+/// whose path is there is protected.
 #[cfg(target_os = "linux")]
 #[test]
-fn an_entry_whose_path_is_absent_stops_the_box_before_a_program_starts() {
+fn an_entry_whose_path_is_absent_is_skipped_and_named_and_the_box_starts() {
+    use std::os::unix::fs::PermissionsExt as _;
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let route = declared_route("api.example.test", "op://Personal/GitHub/token");
-    // `~/.config/op` is there, so the `deny` entry is the one that the refusal names. The `deny`
-    // key comes first, so that it is a key of the `[secret-source.op]` table.
-    for (name, entry, made) in [
-        ("absent-folder", "~/.op", ".op"),
-        ("absent-below", "~/.cache/vault/store", ".cache/vault/store"),
-    ] {
-        let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
-        let home = std::cell::OnceCell::new();
-        let (stderr, stored, next) = first_run_then_fixed(
-            name,
-            &declared_source(
-                true,
-                &program.path(),
-                &format!("deny = [{entry:?}]\n{route}"),
-            ),
-            |request| {
-                let resolved = request.operator_home().canonicalize();
-                home.set(resolved.expect("the operator home resolves"))
-                    .expect("one request");
-                request
-            },
-            || {
-                assert_eq!(
-                    program.runs(),
-                    Vec::<String>::new(),
-                    "{name}: no program starts in a box with a path that Box cannot protect"
-                );
-                let path = home.get().expect("the request ran").join(made);
-                std::fs::create_dir_all(path).expect("the operator makes the path");
-            },
-        );
-        let expected = format!(
-            "invalid `[secret-source.op]` table: `deny` entry {entry:?} names {}, which does not \
-             exist. On Linux, Box protects only a path that exists when the box starts: name an \
-             existing folder above it, create it, or remove the entry",
-            home.get().expect("the request ran").join(made).display()
-        );
-        assert!(stderr.contains(&expected), "{name}: {stderr}");
-        assert!(!stderr.contains("reads each op:// secret"), "{stderr}");
-        assert_eq!(
-            stored,
-            Vec::<String>::new(),
-            "{name}: the refused run stores nothing"
-        );
-        assert_ran(&next);
-        assert_eq!(program.runs(), ["read op://Personal/GitHub/token"]);
-    }
+    const POLICY: &str = r#"
+permit(principal, action == Box::Action::"shell:exec", resource);
+permit(principal, action == Box::Action::"shell:spawn", resource);
+"#;
+    // The folder of an application of macOS, which a Linux host never has.
+    const APP: &str = "~/Library/Group Containers/2BUA8C4S2C.com.1password";
+    let Ok(bash) = std::fs::canonicalize("/bin/bash") else {
+        println!("skipping: /bin/bash does not resolve on this host");
+        return;
+    };
+    let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
+    let tools = fixture::short_temporary_home();
+    let script = tools.path().join("scripted");
+    std::fs::write(&script, "#!/bin/bash\nprintf 'SCRIPT_TOOL_RAN\\n'\n").expect("write the tool");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+        .expect("make the tool executable");
+    let (script, bash) = (script.display().to_string(), bash.display().to_string());
+    // The lists of a plugin that names each place that a vault can have: one folder is there.
+    let request = Request::with_config(
+        "skipped-entries",
+        POLICY,
+        &format!(
+            "[experimental-features]\nsecret-sources = true\n\
+             [secret-source.op]\nprotocol = \"box.secret-source.v1\"\n\
+             command = [{:?}, \"read\", \"op://{{ref}}\"]\n\
+             reads = [\"~/.config/op\", \"~/.op\"]\ndeny = [{APP:?}]\n{}\
+             [tool.scripted]\ncommand = [{script:?}]\n\
+             [tool.scripted.filesystem]\nread_file = [{script:?}, {bash:?}]\n",
+            program.path(),
+            declared_route("api.example.test", "op://Personal/GitHub/token")
+        ),
+    );
+    let home = request
+        .operator_home()
+        .canonicalize()
+        .expect("the operator home resolves");
+    std::fs::create_dir_all(home.join(".config/op")).expect("the folder of the vault");
+    std::fs::write(home.join(".config/op/config"), "the settings").expect("the settings");
+    let (box_, output) = request.attempt();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "the box must start: {stderr}");
+    let skipped = |list: &str, entry: &str| {
+        format!(
+            "strands-box: [secret-source.op]: `{list}` entry {entry:?} names {}, which does not \
+             exist when the box starts, so no sandbox denies it in this run\n",
+            home.join(entry.trim_start_matches("~/")).display()
+        )
+    };
+    let lines = format!(
+        "strands-box: [secret-source.op]: reads each op:// secret with {}, which runs outside \
+         every sandbox\n{}{}",
+        program.path(),
+        skipped("reads", "~/.op"),
+        skipped("deny", APP)
+    );
+    assert!(stderr.contains(&lines), "{stderr}");
+    assert_eq!(program.runs(), ["read op://Personal/GitHub/token"]);
+
+    let output = box_.bash(&format!(
+        "zsh -lc 'scripted'; echo \"script_rc=$?\"\n\
+         if [ -d '{vault}' ]; then echo vault=folder; fi\n\
+         if [ -e '{vault}/config' ]; then echo config=there; fi\n\
+         if [ -e '{home}/.op' ]; then echo skipped=there; fi\n",
+        vault = home.join(".config/op").display(),
+        home = home.display()
+    ));
+    let seen = String::from_utf8_lossy(&output.stdout).into_owned();
+    let printed = |line: &str| seen.lines().any(|printed| printed == line);
+    assert!(
+        printed("SCRIPT_TOOL_RAN") && printed("script_rc=0"),
+        "a tool whose program is a script must start beside a skipped entry: {output:?}"
+    );
+    assert!(
+        printed("vault=folder") && !printed("config=there"),
+        "the agent must find an empty folder in place of the folder that is there: {output:?}"
+    );
+    assert!(!printed("skipped=there"), "{output:?}");
 }
 
 /// **On Linux, a `reads` or `deny` entry that names a socket stops the box before a program

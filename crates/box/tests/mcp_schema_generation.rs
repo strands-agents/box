@@ -1099,12 +1099,11 @@ fn generate_schema_refuses_a_table_that_exposes_a_secret_source() {
     assert!(!runs.exists(), "the program must not start");
 }
 
-/// **On Linux, `policy generate-schema` starts no source program while a path that the source
-/// protects is absent**, in a configuration with no process table, and the same command reads
-/// the secret when the path is there.
+/// **On Linux, `policy generate-schema` skips an entry whose path is absent and names it**, in
+/// a configuration with no process table, and it reads the secret.
 #[cfg(target_os = "linux")]
 #[test]
-fn generate_schema_refuses_an_entry_whose_path_is_absent() {
+fn generate_schema_skips_and_names_an_entry_whose_path_is_absent() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let home = tempfile::tempdir().expect("an operator home");
@@ -1148,28 +1147,20 @@ fn generate_schema_refuses_an_entry_whose_path_is_absent() {
             .expect("run the schema command")
     };
 
+    let line = format!(
+        "strands-box: [secret-source.vault]: reads each vault:// secret with {}, which runs \
+         outside every sandbox\n",
+        program.display()
+    );
     let output = generate();
-    assert!(!output.status.success());
+    assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         format!(
-            "strands-box: error: invalid `[secret-source.vault]` table: `reads` entry \
-             \"~/store\" names {}, which does not exist. On Linux, Box protects only a path that \
-             exists when the box starts: name an existing folder above it, create it, or remove \
-             the entry\n",
+            "{line}strands-box: [secret-source.vault]: `reads` entry \"~/store\" names {}, which \
+             does not exist when the box starts, so no sandbox denies it in this run\n",
             home_path.join("store").display()
         )
-    );
-    assert!(!runs.exists(), "the program must not start");
-    assert!(!directory.join("actions.cedarschema").exists());
-
-    // The same configuration reads the secret when the path is there.
-    std::fs::create_dir(home_path.join("store")).expect("create the folder of the vault");
-    let output = generate();
-    assert!(
-        output.status.success(),
-        "schema generation failed: {}",
-        String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
         std::fs::read_to_string(&runs).expect("the program ran"),

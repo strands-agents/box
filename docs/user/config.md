@@ -1125,8 +1125,8 @@ secret.env   = "GH_TOKEN"
 | `output` | string | How Box reads the program's stdout: `text` (default) or `json`, where stdout is one JSON string. |
 | `pass-env` | string array | Plain settings from your environment that the program receives when they are set, such as `AWS_REGION`. An entry that ends with `*` names each variable with that prefix. |
 | `pass-secret-env` | string array | Credentials from your environment that the program receives when they are set, such as `OP_SERVICE_ACCOUNT_TOKEN`. An entry that ends with `*` names each variable with that prefix. No `env://` or `secret://` reference can read one of these variables. |
-| `reads` | string array | The paths that the program reads, such as its configuration directory. Each is absolute, is `~`, or begins with `~/`. No grant can reach them, and each sandbox denies them. On Linux, each path must be a folder or a regular file that exists when the box starts. See [what Box protects](#what-box-protects). |
-| `deny` | string array | Other paths to the vault, such as the directory of an authentication socket. Each is absolute, is `~`, or begins with `~/`. No grant can reach them, and each sandbox denies them. On Linux, each path must be a folder or a regular file that exists when the box starts. |
+| `reads` | string array | The paths that the program reads, such as its configuration directory. Each is absolute, is `~`, or begins with `~/`. No grant can reach them, and each sandbox denies them. On Linux, a sandbox denies a path only when it exists as the box starts, and Box names each other entry on stderr. See [what Box protects](#what-box-protects). |
+| `deny` | string array | Other paths to the vault, such as the directory of an authentication socket. Each is absolute, is `~`, or begins with `~/`. No grant can reach them, and each sandbox denies them. On Linux, a sandbox denies a path only when it exists as the box starts, and Box names each other entry on stderr. |
 
 The scheme is a lowercase letter, then lowercase letters, digits, `+`, `.`, or `-`. A table can
 declare `op`, and no table can declare a scheme that Box reserves: `env`, `file`, `aws`, `credsd`,
@@ -1235,7 +1235,6 @@ Each of these stops the box before the workload starts:
 - A grant reaches a `reads` or `deny` path: ``this grant reaches /Users/me/.aws, which the secret
   source `aws-secretsmanager` keeps from each workload (its `reads` entry "~/.aws"). Keep each
   grant outside the paths that a secret source names in `reads` and `deny` ``. Remove the grant.
-- On Linux, a `reads` or `deny` entry names a path that doesn't exist: ``invalid `[secret-source.op]` table: `reads` entry "~/.config/op" names /home/me/.config/op, which does not exist. On Linux, Box protects only a path that exists when the box starts: name an existing folder above it, create it, or remove the entry``. A symbolic link whose target doesn't exist is refused in the same way. Box stores nothing for that run, so name a folder above it that exists, or create the path, and start the box again. Box doesn't protect an entry that you remove. macOS takes such an entry and protects the path by its name.
 - On Linux, a `reads` or `deny` entry names a socket or another path that is not a folder or a regular file: ``invalid `[secret-source.op]` table: `deny` entry "~/.op/agent.sock" names /home/me/.op/agent.sock, which is not a folder or a regular file. On Linux, Box protects only a folder or a regular file: name the folder that holds it, or remove the entry``. Name the folder that holds the socket. Don't make a folder at the path of a socket, because the vault's app can't make its socket there.
 - A reference that the program can't take: the text after `<scheme>://` starts with `-`, names
   no secret, or ends with an empty `#FIELD`. Box starts no program for it.
@@ -1265,7 +1264,13 @@ it, or a folder that holds it. That includes a credential store that a grant can
 exactly: with `reads = ["~/.aws"]`, a tool can't take `read = ["~/.aws"]`. A `deny_write` entry
 at such a path grants nothing, and Box refuses the `write` entry that it needs around it. Each
 sandbox also denies these
-paths, as it denies an entry of its own `deny` list. An entry that is a symbolic link protects the link and the path that it names. On macOS, a path that is absent when the box starts stays closed if it appears later. That includes a path behind a link, such as a socket that an app makes when it starts. On Linux, each path must be a folder or a regular file that exists when the box starts, and a sandbox gets an empty, read-only folder or an empty file in its place.
+paths, as it denies an entry of its own `deny` list. An entry that is a symbolic link protects the link and the path that it names. On macOS, a path that is absent when the box starts stays closed if it appears later. That includes a path behind a link, such as a socket that an app makes when it starts. On Linux, a sandbox gets an empty, read-only folder or an empty file in place of each path that exists when the box starts. Box skips an entry whose path doesn't exist then, or whose symbolic link names a target that doesn't exist: the box starts, and no sandbox denies that path in this run. No grant can reach it, as on macOS. Box prints one line for the entry after the line of its source:
+
+```text
+strands-box: [secret-source.op]: `reads` entry "~/.op" names /home/me/.op, which does not exist when the box starts, so no sandbox denies it in this run
+```
+
+So one table can name each place that a vault can have, and a box starts on a machine that has only some of them. `policy generate-schema` prints the same line when a remote MCP server names a secret in that scheme. Read these lines when you write a table: on Linux a path with a typing error doesn't stop the box, and the line is how you see it.
 No write grant can reach the folder that holds a symbolic link on the way to the path, because a
 change to the link writes that folder. This protection is for the sandboxes. Strands Shell and
 Monty run outside every sandbox, and the first limit below is about them.
@@ -1293,6 +1298,7 @@ These limits remain:
 - Box doesn't compare the `env` or the `command` of a table with your values of the `pass-secret-env` variables. A workload holds one of those values only when you write the value in a table of `box.toml` or type it after `box run`. Don't do either. A workload can use the same name for a value of its own, such as the placeholder of a signed `aws://` route in `AWS_ACCESS_KEY_ID`.
 - Each check covers one box. Keep each program and each `reads` path outside every folder that
   any other box can write.
+- On Linux, no sandbox denies a `reads` or `deny` path that is made after the box starts, until the next start. No grant reaches such a path, so a sandbox can see it only inside a system folder that Box adds to each sandbox itself. One exception: Box makes the sandboxes after it reads the secrets. So each sandbox denies a path that appears during that read, such as a folder that the program of the source makes on its first run, though the line says that no sandbox denies it. A path that goes away during that read gets no line, and no sandbox denies it. Start the vault's app before the box, or name a folder that exists.
 - On Linux, keep each `reads` and `deny` path in place while the box runs. If one goes away, a tool or a stdio MCP server whose program is a script doesn't start until the path is back: ``interpreter /bin/bash cannot resolve denied path /home/me/.config/op``. Box adds a few system folders to each sandbox itself, and the startup lines list them under `runtime minimum, added by Core`. If a protected path inside one of those folders goes away and comes back, a sandbox that already runs can read the new path. The agent can also read a protected file through `/etc/localtime` when that name is a link to the file.
 
 ## `[mcp.<name>]`

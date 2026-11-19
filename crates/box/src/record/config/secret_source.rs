@@ -128,23 +128,33 @@ pub(crate) struct ProtectedPath {
     pub(crate) entry: String,
 }
 
+/// What one `reads` or `deny` entry names when Box resolves it, which no grant may reach.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Spelled {
+    /// The path as written, then as it resolves when that differs.
+    pub(crate) spellings: Vec<PathBuf>,
+    /// Each symbolic link on the way.
+    pub(crate) links: Vec<PathBuf>,
+    /// Whether each sandbox denies the path: not where a sandbox denies only a path that is
+    /// there, and this one is absent.
+    pub(crate) covered: bool,
+}
+
 impl ProtectedPath {
     /// This path as written under `operator_home` and as it resolves through each symbolic link,
     /// also a link whose target is not there yet, then each link on the way.
-    pub(crate) fn spellings(
-        &self,
-        operator_home: &Path,
-    ) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ConfigError> {
+    pub(crate) fn spellings(&self, operator_home: &Path) -> Result<Spelled, ConfigError> {
         self.spellings_on(operator_home, cfg!(target_os = "linux"))
     }
 
-    /// [`spellings`](Self::spellings) on an operating system that protects a path that is absent
-    /// by its name, or one that protects a path only when it is there (`present_only`).
+    /// [`spellings`](Self::spellings) on an operating system whose sandbox denies a path that is
+    /// absent by its name, or one whose sandbox denies a path only when it is there
+    /// (`present_only`).
     fn spellings_on(
         &self,
         operator_home: &Path,
         present_only: bool,
-    ) -> Result<(Vec<PathBuf>, Vec<PathBuf>), ConfigError> {
+    ) -> Result<Spelled, ConfigError> {
         let refuse = |reason: String| ConfigError::SecretSource {
             scheme: self.scheme.clone(),
             reason: format!("`{}` entry {:?} {reason}", self.list, self.entry),
@@ -155,6 +165,7 @@ impl ProtectedPath {
         // link must be closed too.
         let (resolved, links) = crate::record::layout::resolved_through_links(&written)
             .map_err(|error| refuse(format!("cannot be inspected: {error}")))?;
+        let mut covered = true;
         if present_only {
             // A mount covers only a folder or a regular file that is there.
             match std::fs::metadata(&resolved) {
@@ -173,12 +184,7 @@ impl ProtectedPath {
                         std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
                     ) =>
                 {
-                    return Err(refuse(format!(
-                        "names {}, which does not exist. On Linux, Box protects only a path \
-                         that exists when the box starts: name an existing folder above it, \
-                         create it, or remove the entry",
-                        resolved.display()
-                    )));
+                    covered = false;
                 }
                 Err(error) => return Err(refuse(format!("cannot be inspected: {error}"))),
             }
@@ -187,7 +193,11 @@ impl ProtectedPath {
         if !spellings.contains(&resolved) {
             spellings.push(resolved);
         }
-        Ok((spellings, links))
+        Ok(Spelled {
+            spellings,
+            links,
+            covered,
+        })
     }
 }
 
@@ -616,10 +626,11 @@ pub(crate) mod tests {
         assert_eq!(protected_paths(&BTreeMap::new()), []);
     }
 
-    /// **An entry whose path is absent or is a socket is refused by name where only a present
-    /// folder or file is protected**, and a present folder or file keeps its spellings.
+    /// **Where a sandbox denies only a present folder or file, an entry whose path is absent
+    /// keeps its spellings with no cover, and an entry that names a socket is refused**, and a
+    /// present folder or file is covered.
     #[test]
-    fn an_entry_whose_path_is_absent_is_refused_where_only_a_present_path_is_protected() {
+    fn an_absent_path_is_skipped_and_a_socket_is_refused_where_only_a_present_path_is_protected() {
         let directory = tempfile::tempdir().expect("a home");
         let home = directory.path().canonicalize().expect("the home resolves");
         std::fs::create_dir_all(home.join("vault/store")).expect("a folder of the vault");
@@ -642,25 +653,25 @@ pub(crate) mod tests {
             ("~/vault/token/below", home.join("vault/token/below")),
         ] {
             let path = protected(entry);
+            let by_name = path.spellings_on(&home, false).expect("an absent path");
+            assert!(by_name.covered, "{entry}");
+            assert_eq!(by_name.spellings.last(), Some(&named), "{entry}");
+            // No grant reaches the same spellings, and no sandbox denies them.
             assert_eq!(
-                path.spellings_on(&home, true)
-                    .expect_err("the path is not there")
-                    .to_string(),
-                format!(
-                    "invalid `[secret-source.op]` table: `deny` entry {entry:?} names {}, which \
-                     does not exist. On Linux, Box protects only a path that exists when the \
-                     box starts: name an existing folder above it, create it, or remove the entry",
-                    named.display()
-                )
+                path.spellings_on(&home, true).expect("an absent path"),
+                Spelled {
+                    covered: false,
+                    ..by_name
+                },
+                "{entry}"
             );
-            // The other rule protects the same entry by its name.
-            path.spellings_on(&home, false)
-                .expect("an absent path has a spelling");
         }
         for entry in ["~/vault/store", "~/vault/token", "~/linked", "~"] {
             let path = protected(entry);
+            let spelled = path.spellings_on(&home, true).expect("the path is there");
+            assert!(spelled.covered, "{entry}");
             assert_eq!(
-                path.spellings_on(&home, true).expect("the path is there"),
+                spelled,
                 path.spellings_on(&home, false).expect("the path is there"),
                 "{entry}"
             );
@@ -688,8 +699,8 @@ pub(crate) mod tests {
         }
     }
 
-    /// **The rule for an absent path follows the build target**: Linux refuses the entry, and
-    /// macOS protects the path by its name.
+    /// **The rule for an absent path follows the build target**: on Linux no sandbox denies it,
+    /// and macOS denies it by its name.
     #[test]
     fn the_rule_for_an_absent_path_follows_the_build_target() {
         let directory = tempfile::tempdir().expect("a home");
@@ -699,16 +710,20 @@ pub(crate) mod tests {
             list: "reads",
             entry: "~/.config/op".to_string(),
         };
+        let present = Spelled {
+            spellings: vec![home.join(".config/op")],
+            links: Vec::new(),
+            covered: true,
+        };
         assert_eq!(
-            path.spellings(&home).is_err(),
-            cfg!(target_os = "linux"),
-            "an absent path"
+            path.spellings(&home).expect("an absent path"),
+            Spelled {
+                covered: !cfg!(target_os = "linux"),
+                ..present.clone()
+            }
         );
         std::fs::create_dir_all(home.join(".config/op")).expect("the folder of the vault");
-        assert_eq!(
-            path.spellings(&home).expect("a present path"),
-            (vec![home.join(".config/op")], Vec::new())
-        );
+        assert_eq!(path.spellings(&home).expect("a present path"), present);
     }
 
     #[test]
