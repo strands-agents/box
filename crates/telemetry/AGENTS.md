@@ -364,6 +364,13 @@ keeps one copy in the graph. Check `grep -c 'name = "reqwest"' Cargo.lock` stays
   size private; `a_full_batch_is_the_size_the_sdk_configures` pins the rule. Nothing pins that `busy`
   clears when the SDK cuts an export at its deadline: that rests on the SDK dropping the export
   future, which drops the guard.
+  **The guard lives with the file lock, not with the export future.** `export_logs` takes the
+  `Exporting` guard and hands an `Arc` of it to each write, and the `Wire::File` arm of `attempt`
+  binds it before the lock so it drops after the lock. Today the future, the lock and the write end
+  together, so no test can tell the two apart. **A change that moves the file write off the future
+  (a `spawn_blocking` that owns the lock guard) must move the guard into that task with the lock**;
+  otherwise a cut export clears `busy` while the write still holds the file, and relays queue on the
+  lock the yield exists to keep free. Found by review on 2026-11-19, reading this PR against #473.
   **`a_flood_of_relayed_payloads_loses_no_decision` is the pin**, and it was the property's first one:
   200 concurrent posts land while 200 decisions are submitted, and every decision must reach the file.
   Its scope is the relay path, because the decision count stays inside the queue's own capacity — so it

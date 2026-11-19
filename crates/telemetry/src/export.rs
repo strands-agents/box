@@ -79,12 +79,14 @@ pub(crate) struct Backlog {
 }
 
 /// One batch in the exporter, which ends the lane's busy state when it drops.
-pub(crate) struct Exporting<'a> {
-    backlog: &'a Backlog,
+///
+/// A file write holds it beside the file lock, so the busy state lasts as long as the write.
+pub(crate) struct Exporting {
+    backlog: std::sync::Arc<Backlog>,
     full: bool,
 }
 
-impl Drop for Exporting<'_> {
+impl Drop for Exporting {
     fn drop(&mut self) {
         if self.full {
             self.backlog.busy.store(false, Ordering::SeqCst);
@@ -99,14 +101,14 @@ impl Backlog {
     }
 
     /// Count the records of one batch that reached the exporter, for as long as it is sent.
-    pub(crate) fn exporting(&self, records: u64) -> Exporting<'_> {
+    pub(crate) fn exporting(self: &std::sync::Arc<Self>, records: u64) -> Exporting {
         let full = records >= *FULL_BATCH;
         if full {
             self.busy.store(true, Ordering::SeqCst);
         }
         self.reached.fetch_add(records, Ordering::SeqCst);
         Exporting {
-            backlog: self,
+            backlog: std::sync::Arc::clone(self),
             full,
         }
     }
@@ -258,7 +260,14 @@ impl TargetExporter {
     }
 
     /// Encode and send one log batch, stamped with the provider's resource.
-    pub(crate) async fn export_logs(&self, batch: LogBatch<'_>) -> OTelSdkResult {
+    ///
+    /// `exporting` is the batch's busy state, held by each write of the batch until it ends.
+    pub(crate) async fn export_logs(
+        &self,
+        batch: LogBatch<'_>,
+        exporting: Exporting,
+    ) -> OTelSdkResult {
+        let exporting = std::sync::Arc::new(exporting);
         let resource = self
             .resource
             .get_or_init(ResourceAttributesWithSchema::default);
@@ -276,18 +285,22 @@ impl TargetExporter {
             }
         };
         if traces.resource_spans.is_empty() {
-            return self.deliver(Payload::Logs, &request).await;
+            return self.deliver(Payload::Logs, &request, Some(exporting)).await;
         }
         let (logs, spans) = tokio::join!(
-            self.deliver(Payload::Logs, &request),
-            self.deliver(Payload::Traces, &traces)
+            self.deliver(
+                Payload::Logs,
+                &request,
+                Some(std::sync::Arc::clone(&exporting))
+            ),
+            self.deliver(Payload::Traces, &traces, Some(exporting))
         );
         logs.and(spans)
     }
 
     /// Relay one span batch the agent already encoded.
     pub(crate) async fn relay_trace(&self, request: &ExportTraceServiceRequest) -> OTelSdkResult {
-        self.deliver(Payload::Traces, request).await
+        self.deliver(Payload::Traces, request, None).await
     }
 
     /// Relay one log batch the agent already encoded.
@@ -295,7 +308,7 @@ impl TargetExporter {
     /// Separate from [`Self::export_logs`], which encodes the box's own records and derives their
     /// spans. An agent's batch is relayed unchanged, so no `box_spans` pass runs over it.
     pub(crate) async fn relay_logs(&self, request: &ExportLogsServiceRequest) -> OTelSdkResult {
-        self.deliver(Payload::Logs, request).await
+        self.deliver(Payload::Logs, request, None).await
     }
 
     /// Relay one metric batch the agent already encoded.
@@ -303,19 +316,24 @@ impl TargetExporter {
         &self,
         request: &ExportMetricsServiceRequest,
     ) -> OTelSdkResult {
-        self.deliver(Payload::Metrics, request).await
+        self.deliver(Payload::Metrics, request, None).await
     }
 
     /// Send one batch, counting it when it does not go. A payload the destination does not take is
     /// not sent and not counted.
-    async fn deliver<T>(&self, payload: Payload, request: &T) -> OTelSdkResult
+    async fn deliver<T>(
+        &self,
+        payload: Payload,
+        request: &T,
+        exporting: Option<std::sync::Arc<Exporting>>,
+    ) -> OTelSdkResult
     where
         T: serde::Serialize + prost::Message,
     {
         if !self.accepts.contains(&payload) {
             return Ok(());
         }
-        let outcome = self.attempt(payload.route(), request).await;
+        let outcome = self.attempt(payload.route(), request, exporting).await;
         if let Err(error) = &outcome {
             self.dropped.fetch_add(1, Ordering::Relaxed);
             if self.reports_failures {
@@ -326,16 +344,26 @@ impl TargetExporter {
     }
 
     /// Send one batch, or report why it did not go.
-    async fn attempt<T>(&self, route: &str, request: &T) -> OTelSdkResult
+    async fn attempt<T>(
+        &self,
+        route: &str,
+        request: &T,
+        exporting: Option<std::sync::Arc<Exporting>>,
+    ) -> OTelSdkResult
     where
         T: serde::Serialize + prost::Message,
     {
         match &self.wire {
             Wire::File(handle) => {
                 let line = one_line(request)?;
-                // Waiting for the file stays cancellable; once held, the write runs to its end.
-                let mut file = Arc::clone(handle).lock_owned().await;
-                tokio::task::spawn_blocking(move || append(&mut file, &line))
+                // Waiting for the file stays cancellable; once held, the write runs to its end. The
+                // busy state goes into the task with the lock and drops after it.
+                let file = Arc::clone(handle).lock_owned().await;
+                tokio::task::spawn_blocking(move || {
+                    let _exporting = exporting;
+                    let mut file = file;
+                    append(&mut file, &line)
+                })
                     .await
                     .map_err(|source| OTelSdkError::InternalFailure(source.to_string()))?
                     .map_err(|source| OTelSdkError::InternalFailure(source.to_string()))

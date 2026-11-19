@@ -154,8 +154,8 @@ impl opentelemetry_sdk::logs::LogExporter for SharedTarget {
         // Read at the start, so an export that began before a shutdown never answers for it.
         let started_in = self.failures.shutdown.load(Ordering::SeqCst);
         let records = u64::try_from(batch.iter().count()).unwrap_or(u64::MAX);
-        let _exporting = self.exporter.backlog().exporting(records);
-        let exported = self.exporter.export_logs(batch).await;
+        let exporting = self.exporter.backlog().exporting(records);
+        let exported = self.exporter.export_logs(batch, exporting).await;
         if exported.is_err() {
             self.failures.failed_in.store(started_in, Ordering::SeqCst);
         }
