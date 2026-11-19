@@ -323,6 +323,46 @@ impl PathResolver {
     }
 }
 
+/// Resolve an absolute directory as [`PathResolver::approve_host`] resolves a requested path, or
+/// say why it cannot be resolved.
+pub(crate) fn resolve_host_directory(directory: &Path) -> Result<PathBuf, String> {
+    let mut missing = Vec::new();
+    let mut existing = directory;
+    loop {
+        match std::fs::canonicalize(existing) {
+            Ok(canonical) => {
+                match std::fs::metadata(&canonical) {
+                    Ok(metadata) if metadata.is_dir() => {}
+                    Ok(_) => return Err(format!("{} is not a directory", existing.display())),
+                    Err(error) => return Err(format!("{}: {error}", existing.display())),
+                }
+                return Ok(missing
+                    .iter()
+                    .rev()
+                    .fold(canonical, |path, name| path.join(name)));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match existing.symlink_metadata() {
+                    Err(absent) if absent.kind() == std::io::ErrorKind::NotFound => {}
+                    Ok(_) => {
+                        return Err(format!(
+                            "{} is a symbolic link whose target does not exist",
+                            existing.display()
+                        ));
+                    }
+                    Err(error) => return Err(format!("{}: {error}", existing.display())),
+                }
+                let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
+                    return Err(format!("{}: {error}", existing.display()));
+                };
+                missing.push(name);
+                existing = parent;
+            }
+            Err(error) => return Err(format!("{}: {error}", existing.display())),
+        }
+    }
+}
+
 /// Close `.` and `..` in a virtual path, so neither can alias the identity policy judges.
 ///
 /// One implementation serves [`PathResolver::approve_virtual`] and the script adapter,

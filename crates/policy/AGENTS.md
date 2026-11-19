@@ -86,7 +86,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
 ## Internal Ownership
 
 - `policy.rs` the lifecycle. `dogwood.rs` the private engine, event mapping, scope lock, and clock.
-  `schema.rs` the `.cedarschema`, the name constants, and the request gate. `request.rs`,
+  `schema.rs` the `.cedarschema`, the base schema that declared locations generate, the name
+  constants, and the request gate. `request.rs`,
   `outcome.rs`, `decision.rs`, `error.rs`, `check.rs` their public types. `path.rs` the path types.
   `adapters/` one module per enforcement point, each behind its own feature.
 - Put a new boundary in `adapters/`, not in a new root file. Keep a method with its type.
@@ -191,6 +192,35 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   base schema declares is never read as a server, which
   `mcp_schema::tests::a_previous_build_of_the_box_actions_is_not_read_as_a_server` pins.
 - `body_bytes` is the offer on a `::request` and the delivery on a `::response`.
+- `context.input.locations` is a closed record on every `fs:*` input: the shipped schema declares
+  the empty `FsLocations`, and `schema::base_schema` gives it one required `Bool` per declared name.
+  It is always present so that `context.input.locations has <name> &&
+  context.input.locations.<name>` loads in every box; Cedar types `has` on a closed record that
+  lacks the field as false and short-circuits `&&`, with only an impossible-policy warning. A
+  record, not a set, because Dogwood refuses a set constant in a temporal predicate and compares a
+  set field as a whole, so a budget keyed on a set undercounts a path that is also in a nested
+  location; a record field is matched by one key. Adding the field changes `SCHEMA_SRC`, so a
+  history from the previous release takes one `SetActionSchema` on its next open, keeps its temporal
+  state, and opens again under the previous release
+  (`dogwood::tests::a_history_from_the_previous_release_opens_with_the_locations_record_and_back`).
+  Names are Cedar identifiers that Cedar does not reserve, so `.name` parses in a rule and a
+  temporal field path. A location is shorthand for `path == "<root>" || path like "<root>/*"`:
+  `schema::path_in_root` compares the reported text (`ApprovedPath::reported` for a request, the
+  outcome's own `~/…` text for an outcome) with each root as written, so the two legs always agree
+  and a location never matches more or less than the hand-written rule. Roots are not resolved;
+  `spelling::judge_location_root` refuses at load a root no reported path can match, with the
+  spelling to write (`PolicyError::UnmatchableLocation`), and still runs
+  `path::resolve_host_directory` to find a dangling link, a file, or a folder it cannot search
+  (`PolicyError::UnresolvableLocation`). Pinned by
+  `tests/path_locations.rs::a_location_decides_as_the_two_path_comparisons_it_stands_for`.
+  `with_locations` refuses locations for an operator with no home, because the refusals judge roots
+  against it. Box prints `Operator::locations`, the roots as written. Before `classify_naming` holds
+  a rule for an MCP schema, `dogwood::refuse_undeclared_locations`, only for a rule whose scope can
+  include an `fs:*` action, validates its Box-only condition against the base schema when the rule
+  reads `context.input.locations`, and checks each `input.locations.<name>` a filesystem temporal
+  predicate reads, because no MCP schema can declare a location. Pinned by `tests/path_locations.rs`
+  and
+  `dogwood::tests::a_location_budget_holds_in_each_window_and_counts_every_path_in_the_location`.
 - Sum an outbound budget over `http:request::response`, as `tests/policies/egress_byte_budget.dw`
   does. One exchange records one such event, at reply time, with the delivered request bytes and
   the reply's `output.status`. Pinned by
@@ -229,6 +259,8 @@ For `crates/policy/**`. Follow the repository-root `AGENTS.md` first.
   refusal of a path the caller may not reach.
 - LIVE GAP: `like` is case-sensitive and macOS is not, so `policy.DW` stays exposed. Do not widen
   the pattern to `*.dw`, which over-denies an ordinary `.dw` file.
+  Location matching is case-sensitive too, because it compares the reported text, so on macOS a
+  path spelled with other casing than its root is in no location.
 - `SELF_DEFENDED_FILES` is `["box.toml", "policy.dw"]`, and it is public so tests and
   `box/src/define/layout.rs` derive from it. Add no `*.cedar` rule and no speculative entry. A
   defended filename costs an escalation chain, as `mcp.toml` did.

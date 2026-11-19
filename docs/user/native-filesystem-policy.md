@@ -185,9 +185,9 @@ Policies that select directory opens by operation must use `enumerate` on both L
 
 When `[limits]` has no explicit settings, `monty` is `true`, `file-attributes` is `false`, MCP argument wildcards
 are disabled, MCP executable names are bare, the agent declares no `[[agent.ingress]]`,
-no egress destination has a backend, `[gateway] upgrade_http` is empty, the box ID is `box-` and 16 hexadecimal digits,
-every process leaves `file-watching` disabled, and each telemetry target uses only the settings
-an earlier build reads,
+no egress destination has a backend, `[gateway] upgrade_http` is empty, no `[locations]` is declared,
+the box ID is `box-` and 16 hexadecimal digits, every process leaves `file-watching` disabled, and
+each telemetry target uses only the settings an earlier build reads,
 configurations without process overrides retain version 21 when disabled and version 22 when enabled.
 An explicit process override requires record version 23.
 Two stdio MCP servers that share a program require record version 24.
@@ -211,6 +211,7 @@ A box whose agent, tool, or local MCP server declares a [`deny_write`](config.md
 A [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table, or a `secret.env` key on a route or a
 remote MCP server, requires record version 39.
 A [telemetry target](telemetry.md#include) that names `mcp_tool_calls` requires record version 40.
+A box that declares [`[locations]`](config.md#locations) requires record version 41.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 
@@ -218,8 +219,8 @@ To disable the experiment, change the global setting to `false`.
 Set `monty` to `true` before returning to a binary that supports only version 21.
 Remove all process overrides and `[limits]` settings, give each stdio MCP server its own
 program, set `file-attributes` to `false`, remove `file-watching` from every process, remove
-`[gateway] upgrade_http`, and give each telemetry target only `env://` or `secret://` bearer
-settings before returning to a binary that supports only version 21.
+`[gateway] upgrade_http` and `[locations]`, and give each telemetry target only `env://` or
+`secret://` bearer settings before returning to a binary that supports only version 21.
 If MCP argument wildcards are enabled, replace the stars with concrete arguments and disable
 `argument_wildcards` on each server too.
 Replace each absolute MCP executable path with a bare program name that the server's `PATH`

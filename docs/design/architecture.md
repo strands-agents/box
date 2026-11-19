@@ -305,6 +305,9 @@ interpreters are part of the code the operator must trust.
    event metadata, the host-wide event count, and each volume's history identifier, and that a
    root process can delete any volume's event history. A selected stdio MCP server gets it before
    the agent starts, and again when the server starts.
+   After the agent's grants, Box prints one line for each `[locations]` name and the directories
+   that a filesystem rule matches it on, because the policy text names a location and not its
+   directories.
 
    On Linux, `interpreter aliases for configured access` lists preserved interpreter spellings
    before the runtime-minimum section. Each line maps a spelling to a file the process's existing

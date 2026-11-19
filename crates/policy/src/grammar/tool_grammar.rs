@@ -114,11 +114,15 @@ impl ToolGrammars {
             .iter()
             .map(|(_, source)| (*source).to_string())
             .collect::<Vec<_>>();
-        crate::schema::composed_action_schema(&self.schemas(), &fragments)
-            .map(|schema| schema.source)
-            .map_err(|source| crate::McpSchemaError::Composition {
-                reason: source.to_string(),
-            })
+        crate::schema::composed_action_schema(
+            &crate::schema::NO_LOCATIONS,
+            &self.schemas(),
+            &fragments,
+        )
+        .map(|schema| schema.source)
+        .map_err(|source| crate::McpSchemaError::Composition {
+            reason: source.to_string(),
+        })
     }
 }
 

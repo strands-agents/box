@@ -26,8 +26,9 @@ use crate::error::{PolicyError, PolicyStagingError};
 use crate::outcome::Delivery;
 use crate::request::{ActionRequest, Principal, Request, RequestId};
 use crate::schema::{
-    AGENT_TYPE, ActionIdentity, ActionSchema, GovernedBox, RESOURCE_TYPE, SCHEMA_SRC,
-    UNUSED_RESOURCE_ID, action, action_schema, attr, composed_action_schema, mcp_tool_action,
+    AGENT_TYPE, ActionIdentity, ActionSchema, GovernedBox, Locations, NO_LOCATIONS, RESOURCE_TYPE,
+    UNUSED_RESOURCE_ID, action, attr, base_schema, composed_action_schema, held_locations,
+    mcp_tool_action,
 };
 use crate::spelling::{Operator, PolicyWarning};
 use crate::{Decision, DenyReason, Outcome, PolicyAttribution, RuleId};
@@ -79,6 +80,8 @@ pub(crate) struct DogwoodEngine {
     request_schema: cedar_policy::Schema,
     tool_actions: std::collections::HashSet<cedar_policy::EntityUid>,
     tool_inputs: crate::mcp_input::ToolInputs,
+    /// The locations a filesystem event reports, from the request schema.
+    locations: Locations,
     /// Outcome events the history refused, recorded before the next decision.
     pending_outcomes: Mutex<Vec<EventBuilder>>,
     #[cfg(test)]
@@ -311,7 +314,8 @@ impl DogwoodEngine {
         history: &Path,
         operator: &Operator,
     ) -> Result<(Self, Vec<PolicyWarning>), PolicyError> {
-        let effective_schema = composed_action_schema(grammar_schemas, mcp_schemas)?;
+        let effective_schema =
+            composed_action_schema(operator.locations(), grammar_schemas, mcp_schemas)?;
         let (canonical_policies, effective_schema, warnings) =
             check_against(source, effective_schema, operator, true, &[])
                 .map_err(Refused::into_error)?;
@@ -321,7 +325,7 @@ impl DogwoodEngine {
             &mut engine,
             &canonical_policies,
             &fragments,
-            &effective_schema.source,
+            &effective_schema,
         )?;
 
         Ok((
@@ -332,6 +336,7 @@ impl DogwoodEngine {
                 request_schema: effective_schema.cedar,
                 tool_actions: effective_schema.tool_actions,
                 tool_inputs: effective_schema.tool_inputs,
+                locations: effective_schema.locations,
                 pending_outcomes: Mutex::new(Vec::new()),
                 #[cfg(test)]
                 fixed_clock: None,
@@ -340,35 +345,30 @@ impl DogwoodEngine {
         ))
     }
 
-    /// Open durable history without changing its installed authority.
-    pub(crate) fn open_for_staging(history: &Path) -> Result<Self, PolicyStagingError> {
-        let effective_schema = action_schema(&[])?;
+    /// Open durable history without changing its installed authority, serving the base schema for
+    /// the operator's locations until a bundle commits.
+    pub(crate) fn open_for_staging(
+        history: &Path,
+        operator: &Operator,
+    ) -> Result<Self, PolicyStagingError> {
+        let effective_schema = composed_action_schema(operator.locations(), &[], &[])?;
         let engine = open_history(history, durable_config())
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
-        Self::from_staging_engine(
-            engine,
-            effective_schema.cedar,
-            effective_schema.tool_actions,
-            effective_schema.tool_inputs,
-        )
+        Self::from_staging_engine(engine, effective_schema)
     }
 
     pub(crate) fn open_for_staging_file(
         history: File,
         label: PathBuf,
+        operator: &Operator,
     ) -> Result<Self, PolicyStagingError> {
-        let effective_schema = action_schema(&[])?;
+        let effective_schema = composed_action_schema(operator.locations(), &[], &[])?;
         let log = DurableLog::open(opened_file_path(&history))
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
         drop(history);
         let engine = recover_history(log, label, durable_config(), SNAPSHOT_INTERVAL)
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
-        Self::from_staging_engine(
-            engine,
-            effective_schema.cedar,
-            effective_schema.tool_actions,
-            effective_schema.tool_inputs,
-        )
+        Self::from_staging_engine(engine, effective_schema)
     }
 
     #[cfg(test)]
@@ -376,23 +376,16 @@ impl DogwoodEngine {
         history: &Path,
         faults: Arc<dogwood_local_engine::fault_injection::FaultInjector>,
     ) -> Result<Self, PolicyStagingError> {
-        let effective_schema = action_schema(&[])?;
+        let effective_schema = composed_action_schema(&NO_LOCATIONS, &[], &[])?;
         let config = durable_config().with_fault_injector(faults);
         let engine = open_history(history, config)
             .map_err(|error| PolicyStagingError::Durable(error.to_string()))?;
-        Self::from_staging_engine(
-            engine,
-            effective_schema.cedar,
-            effective_schema.tool_actions,
-            effective_schema.tool_inputs,
-        )
+        Self::from_staging_engine(engine, effective_schema)
     }
 
     fn from_staging_engine(
         engine: DurableTemporalEngine,
-        request_schema: cedar_policy::Schema,
-        tool_actions: std::collections::HashSet<cedar_policy::EntityUid>,
-        tool_inputs: crate::mcp_input::ToolInputs,
+        request_schema: ActionSchema,
     ) -> Result<Self, PolicyStagingError> {
         if engine.has_policy() && engine.event_schema().as_deref() != Some(EVENTS_DWSCHEMA) {
             return Err(PolicyStagingError::Durable(
@@ -404,9 +397,10 @@ impl DogwoodEngine {
             rule_ids: rule_ids(&engine),
             engine: Mutex::new(engine),
             request_scope: Arc::new(()),
-            request_schema,
-            tool_actions,
-            tool_inputs,
+            request_schema: request_schema.cedar,
+            tool_actions: request_schema.tool_actions,
+            tool_inputs: request_schema.tool_inputs,
+            locations: request_schema.locations,
             pending_outcomes: Mutex::new(Vec::new()),
             #[cfg(test)]
             fixed_clock: None,
@@ -502,6 +496,7 @@ impl DogwoodEngine {
         self.request_schema = request_schema.cedar;
         self.tool_actions = request_schema.tool_actions;
         self.tool_inputs = request_schema.tool_inputs;
+        self.locations = request_schema.locations;
         Ok(())
     }
 
@@ -540,12 +535,7 @@ impl DogwoodEngine {
             validate_and_expand(source, &[], &Operator::unanchored())?;
         let config = durable_config().with_fault_injector(faults);
         let mut engine = open_history(history, config).map_err(durable_history_error)?;
-        reconcile_policy_set(
-            &mut engine,
-            &canonical_policies,
-            &[],
-            &effective_schema.source,
-        )?;
+        reconcile_policy_set(&mut engine, &canonical_policies, &[], &effective_schema)?;
 
         Ok(Self {
             rule_ids: rule_ids(&engine),
@@ -554,6 +544,7 @@ impl DogwoodEngine {
             request_schema: effective_schema.cedar,
             tool_actions: effective_schema.tool_actions,
             tool_inputs: effective_schema.tool_inputs,
+            locations: effective_schema.locations,
             pending_outcomes: Mutex::new(Vec::new()),
             fixed_clock: None,
         })
@@ -577,8 +568,26 @@ impl DogwoodEngine {
         history: &Path,
         start_secs: i64,
     ) -> Result<Self, PolicyError> {
+        Self::open_with_test_clock_under(
+            source,
+            mcp_schemas,
+            &Operator::unanchored(),
+            history,
+            start_secs,
+        )
+    }
+
+    /// [`Self::open_with_test_clock_and_mcp`] for `operator`.
+    #[cfg(test)]
+    pub(crate) fn open_with_test_clock_under(
+        source: &str,
+        mcp_schemas: &[String],
+        operator: &Operator,
+        history: &Path,
+        start_secs: i64,
+    ) -> Result<Self, PolicyError> {
         let (canonical_policies, effective_schema, _) =
-            validate_and_expand(source, mcp_schemas, &Operator::unanchored())?;
+            validate_and_expand(source, mcp_schemas, operator)?;
         let now = Arc::new(AtomicI64::new(start_secs.saturating_mul(NANOS_PER_SECOND)));
         let config = durable_config().with_clock(Box::new(FixedClock {
             now: Arc::clone(&now),
@@ -588,7 +597,7 @@ impl DogwoodEngine {
             &mut engine,
             &canonical_policies,
             mcp_schemas,
-            &effective_schema.source,
+            &effective_schema,
         )?;
 
         Ok(Self {
@@ -598,6 +607,7 @@ impl DogwoodEngine {
             request_schema: effective_schema.cedar,
             tool_actions: effective_schema.tool_actions,
             tool_inputs: effective_schema.tool_inputs,
+            locations: effective_schema.locations,
             pending_outcomes: Mutex::new(Vec::new()),
             fixed_clock: Some(now),
         })
@@ -674,10 +684,14 @@ impl DogwoodEngine {
         // builds each request through a schema-bound gate rather than restating the
         // principal/action pairings.
         let gate = match request {
-            ActionRequest::Request(request) => {
-                crate::schema::to_cedar_request(principal, request, &identity, &self.request_schema)
-                    .map(|_| ())
-            }
+            ActionRequest::Request(request) => crate::schema::to_cedar_request(
+                principal,
+                request,
+                &identity,
+                &self.request_schema,
+                &self.locations,
+            )
+            .map(|_| ()),
             ActionRequest::Grammar(request) => crate::schema::to_cedar_input_request(
                 principal,
                 &identity,
@@ -690,6 +704,12 @@ impl DogwoodEngine {
             eprintln!("policy: warn: {error}; denying");
             return (Decision::internal_fault(), None, None);
         }
+        let fs_locations = match request {
+            ActionRequest::Request(Request::Fs { path, .. }) => {
+                Some(location_value(&self.locations, &path.reported()))
+            }
+            _ => None,
+        };
         // A tool call's `input` is built once, so its `::request` and `::response` carry one value.
         let tool_input = match request {
             ActionRequest::Request(Request::McpCall {
@@ -704,9 +724,13 @@ impl DogwoodEngine {
                     (ActionRequest::Request(_), Some(input)) => {
                         with_input(identity.event_builder(KIND_REQUEST), input.clone())
                     }
-                    (ActionRequest::Request(request), None) => {
-                        request_event(governed, principal, request, &identity)
-                    }
+                    (ActionRequest::Request(request), None) => request_event(
+                        governed,
+                        principal,
+                        request,
+                        &identity,
+                        fs_locations.clone(),
+                    ),
                     (ActionRequest::Grammar(request), _) => with_input(
                         identity.event_builder(KIND_REQUEST),
                         entity_json_value(request.input()),
@@ -744,8 +768,14 @@ impl DogwoodEngine {
         outcome: &Outcome<'_>,
     ) -> Result<(), PolicyError> {
         self.verify_request_id(request_id)?;
+        let locations = match outcome {
+            Outcome::Fs { path, .. } => {
+                Some(location_value(&self.locations, &path.to_string_lossy()))
+            }
+            _ => None,
+        };
         self.record_outcome(with_request_id(
-            outcome_event(governed, principal, outcome),
+            outcome_event(governed, principal, outcome, locations),
             request_id,
         ))
     }
@@ -1046,7 +1076,7 @@ fn decides_only_tools(scope: &dogwood_language::PolicyScope) -> bool {
 /// needs no MCP action schema.
 pub(crate) fn validate_staged_source(source: &str) -> Result<(), PolicyError> {
     let expanded = parse_policy_source(source)?;
-    refuse_input_reads_before_discovery(&expanded).map_err(Refused::into_error)
+    refuse_input_reads_before_discovery(&expanded, &NO_LOCATIONS).map_err(Refused::into_error)
 }
 
 /// The conditions of one macro-expanded rule, as the engine's own parsed tree rather than its
@@ -1054,8 +1084,8 @@ pub(crate) fn validate_staged_source(source: &str) -> Result<(), PolicyError> {
 /// cannot lower without an MCP action schema, which is the case for a rule that names a typed
 /// action outside a history clause. An `unless` condition arrives as a negated `when`, which is
 /// how Cedar states it.
-pub(crate) fn rule_conditions(expanded: &str) -> Vec<serde_json::Value> {
-    let Ok(policy_schema) = action_schema(&[])
+pub(crate) fn rule_conditions(expanded: &str, locations: &Locations) -> Vec<serde_json::Value> {
+    let Ok(policy_schema) = composed_action_schema(locations, &[], &[])
         .and_then(|schema| {
             PolicySchema::from_cedarschema_str(&schema.source)
                 .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))
@@ -1093,9 +1123,13 @@ pub(crate) fn rule_conditions(expanded: &str) -> Vec<serde_json::Value> {
 /// for a tool schema, must not hide another rule's refusal. A rule whose own condition does not
 /// lower still has its action list judged, because the list needs only the head, and a rule whose
 /// head cannot be read is refused.
-pub(crate) fn refuse_input_reads_before_discovery(expanded: &[String]) -> Result<(), Refused> {
-    let policy_schema = PolicySchema::from_cedarschema_str(&action_schema(&[])?.source)
-        .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
+pub(crate) fn refuse_input_reads_before_discovery(
+    expanded: &[String],
+    locations: &Locations,
+) -> Result<(), Refused> {
+    let policy_schema =
+        PolicySchema::from_cedarschema_str(&composed_action_schema(locations, &[], &[])?.source)
+            .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
     let service = service_schema()?;
     let lower = |text: &str| {
         dogwood_language::ParsedPolicySet::parse(text, &service)
@@ -1188,6 +1222,11 @@ fn rule_head(rendered: &str) -> Option<String> {
 
 /// A rendered rule with each `temporal { … }` expression replaced by `true`.
 fn without_temporal(rendered: &str) -> String {
+    without_temporal_as(rendered, "true")
+}
+
+/// `rendered` with each `temporal { ... }` block replaced by the Cedar literal `literal`.
+fn without_temporal_as(rendered: &str, literal: &str) -> String {
     const KEYWORD: &str = "temporal";
     let bytes = rendered.as_bytes();
     let mut out = String::with_capacity(rendered.len());
@@ -1213,7 +1252,7 @@ fn without_temporal(rendered: &str) -> String {
             if bytes.get(open) == Some(&b'{')
                 && let Some(close) = block_end(bytes, open)
             {
-                out.push_str("true");
+                out.push_str(literal);
                 index = close;
                 continue;
             }
@@ -1338,7 +1377,8 @@ pub(crate) fn check_and_expand(
     // filesystem call ~1.5ms of schema parsing. Startup is where blocking work
     // belongs; a parse fault also becomes a load error rather than a first-request
     // deny.
-    let effective_schema = composed_action_schema(grammar_schemas, mcp_schemas)?;
+    let effective_schema =
+        composed_action_schema(operator.locations(), grammar_schemas, mcp_schemas)?;
     check_against(source, effective_schema, operator, authored, positions)
 }
 
@@ -1656,6 +1696,202 @@ fn reply_literals(condition: &dogwood_language::temporal_ast::Condition, out: &m
     }
 }
 
+/// Refuse a macro-expanded rule that reads a location `base` does not declare, judged without the
+/// MCP schemas the rule waits for.
+pub(crate) fn refuse_undeclared_locations(
+    expanded: &str,
+    base: &ActionSchema,
+    index: usize,
+) -> Result<(), Refused> {
+    let service = service_schema()?;
+    let Ok(parsed) = dogwood_language::ParsedPolicySet::parse(expanded, &service) else {
+        return Ok(());
+    };
+    let decides_files = parsed
+        .policies()
+        .any(|policy| may_decide_a_file_action(&policy.scope()));
+    let mut problems = Vec::new();
+    let cedar_part = without_temporal(expanded);
+    if decides_files
+        && cedar_part
+            .parse::<cedar_policy::PolicySet>()
+            .ok()
+            .is_some_and(|policies| {
+                policies.policies().any(|policy| {
+                    policy
+                        .to_json()
+                        .is_ok_and(|json| reads_locations_record(&json))
+                })
+            })
+    {
+        let policy_schema = PolicySchema::from_cedarschema_str(&base.source)
+            .map_err(|error| PolicyError::Schema(format!("dogwood action schema: {error}")))?;
+        // A block replaced by one constant can short-circuit the read Cedar would check, so judge
+        // the rule with the blocks as `true` and again as `false`.
+        for cedar_part in [cedar_part.clone(), without_temporal_as(expanded, "false")] {
+            let Ok(cedar_parsed) = dogwood_language::ParsedPolicySet::parse(&cedar_part, &service)
+            else {
+                continue;
+            };
+            let Ok(lowered) = cedar_parsed.lower(&policy_schema) else {
+                continue;
+            };
+            let validation = Validator::new().validate(&lowered);
+            for error in validation.validation_errors() {
+                let message = error.to_string();
+                // A pending MCP schema can declare an action or a type in its own namespace, but
+                // never in `Box`, so only a `Box::` name refuses here.
+                if mcp_could_supply(&message) {
+                    continue;
+                }
+                problems.push(match undeclared_location_name(&message) {
+                    Some(name) => (true, undeclared_location(&name)),
+                    None => (false, message),
+                });
+            }
+        }
+    }
+    for policy in parsed.policies() {
+        for condition in policy.temporal_conditions() {
+            let mut names = Vec::new();
+            temporal_location_names(condition, decides_files, &mut names);
+            problems.extend(
+                names
+                    .into_iter()
+                    .filter(|(_, name)| !base.locations.contains_key(name))
+                    .map(|(read, name)| (true, undeclared_history_location(read, &name))),
+            );
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    problems.retain(|problem| seen.insert(problem.clone()));
+    if problems.is_empty() {
+        return Ok(());
+    }
+    let id = annotated_id(expanded);
+    let prefix = if problems.iter().all(|(location, _)| *location) {
+        "reads a location that box.toml does not declare"
+    } else {
+        "fails validation against the Box action schema"
+    };
+    let message = format!(
+        "{} (rule {}) {prefix}: {}",
+        parsed_rule_name(expanded, id.as_deref()),
+        index.saturating_add(1),
+        problems
+            .into_iter()
+            .map(|(_, problem)| problem)
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    Err(Refused::new(
+        PolicyError::Schema(message.clone()),
+        vec![Finding::new(message).with_rules(vec![RuleRef::new(index, id)])],
+    ))
+}
+
+/// Whether a Cedar policy's JSON form reads `context.input.locations`.
+fn reads_locations_record(value: &serde_json::Value) -> bool {
+    let is_chain =
+        |value: &serde_json::Value, attr: &str, inner: &dyn Fn(&serde_json::Value) -> bool| {
+            value.get(".").is_some_and(|access| {
+                access.get("attr").and_then(serde_json::Value::as_str) == Some(attr)
+                    && access.get("left").is_some_and(inner)
+            })
+        };
+    let is_context = |value: &serde_json::Value| {
+        value.get("Var").and_then(serde_json::Value::as_str) == Some("context")
+    };
+    let is_input = |value: &serde_json::Value| is_chain(value, "input", &is_context);
+    if is_chain(value, attr::LOCATIONS, &is_input) {
+        return true;
+    }
+    match value {
+        serde_json::Value::Object(map) => map.values().any(reads_locations_record),
+        serde_json::Value::Array(items) => items.iter().any(reads_locations_record),
+        _ => false,
+    }
+}
+
+/// Whether a rule's action scope can include a `Box::Action::"fs:*"` action.
+fn may_decide_a_file_action(scope: &dogwood_language::PolicyScope) -> bool {
+    let is_file_action = |action: &cedar_policy::EntityUid| {
+        action.type_name().to_string() == "Box::Action"
+            && action.id().unescaped().starts_with("fs:")
+    };
+    match scope.action() {
+        dogwood_language::ActionConstraint::Any => true,
+        dogwood_language::ActionConstraint::Eq(action) => is_file_action(action),
+        dogwood_language::ActionConstraint::In(actions) => actions.iter().any(is_file_action),
+    }
+}
+
+/// Collect the name of each `input.locations.<name>` field a filesystem predicate reads, and of
+/// each `context.input.locations.<name>` term when the rule decides a file action.
+fn temporal_location_names(
+    condition: &dogwood_language::temporal_ast::Condition,
+    decides_files: bool,
+    out: &mut Vec<(&'static str, String)>,
+) {
+    use dogwood_language::temporal_ast::{AggExprKind, ConditionKind, Term};
+    fn location_name(path: &[String]) -> Option<String> {
+        match path {
+            [input, locations, name, ..] if input == "input" && locations == attr::LOCATIONS => {
+                Some(name.clone())
+            }
+            _ => None,
+        }
+    }
+    fn term_names(term: &Term, decides_files: bool, out: &mut Vec<(&'static str, String)>) {
+        match term {
+            Term::ContextField(path) if decides_files => {
+                out.extend(location_name(path).map(|name| ("context.input", name)));
+            }
+            Term::Agg(aggregate) => match &aggregate.kind {
+                AggExprKind::Sum { body, .. } | AggExprKind::Count { body, .. } => {
+                    temporal_location_names(body, decides_files, out);
+                }
+                AggExprKind::Call(_) => {}
+            },
+            Term::Array(items) => items
+                .iter()
+                .for_each(|item| term_names(item, decides_files, out)),
+            _ => {}
+        }
+    }
+    match &condition.kind {
+        ConditionKind::And { left, right }
+        | ConditionKind::Or { left, right }
+        | ConditionKind::Since { left, right, .. } => {
+            temporal_location_names(left, decides_files, out);
+            temporal_location_names(right, decides_files, out);
+        }
+        ConditionKind::Not { inner: body }
+        | ConditionKind::Formerly { body, .. }
+        | ConditionKind::Previous { body, .. }
+        | ConditionKind::Exists { body, .. }
+        | ConditionKind::Refine { base: body, .. } => {
+            temporal_location_names(body, decides_files, out)
+        }
+        ConditionKind::Predicate(predicate) => {
+            let filesystem = matches!(predicate.namespace.as_slice(), [box_namespace, kind]
+                if box_namespace == "Box" && kind == "Action")
+                && predicate.action.starts_with("fs:");
+            for argument in &predicate.args {
+                if filesystem {
+                    out.extend(location_name(&argument.field_path()).map(|name| ("input", name)));
+                }
+                term_names(&argument.value, decides_files, out);
+            }
+        }
+        ConditionKind::Comparison { left, right, .. } => {
+            term_names(left, decides_files, out);
+            term_names(right, decides_files, out);
+        }
+        ConditionKind::Tp { .. } | ConditionKind::Call(_) | ConditionKind::SigilRef { .. } => {}
+    }
+}
+
 /// Whether a predicate's action is `mcp:call` or a per-tool MCP action.
 fn is_mcp_event(namespace: &[String], action: &str) -> bool {
     match namespace {
@@ -1740,6 +1976,17 @@ fn validation_finding(
         ),
         other => (other.to_string(), None, None),
     };
+    let (message, help) = match undeclared_location_name(&message) {
+        Some(name) => {
+            let wording = undeclared_location(&name);
+            let message = match cedar_policy_id(&message) {
+                Some((id, _)) => format!("for policy `{id}`, {wording}"),
+                None => wording,
+            };
+            (message, None)
+        }
+        None => (message, help),
+    };
     let named = cedar_policy_id(&message);
     let rule = named.and_then(|(id, _)| rule_ref(lowered, id, positions));
     let own = named.map_or(message.as_str(), |(_, rest)| rest);
@@ -1751,6 +1998,46 @@ fn validation_finding(
         finding = finding.with_span(span);
     }
     (message, finding)
+}
+
+/// The location a validator message says is not an attribute of `context.input.locations`.
+fn undeclared_location_name(message: &str) -> Option<String> {
+    let (_, rest) = message.split_once("attribute `input.locations.")?;
+    let (name, after) = rest.split_once('`')?;
+    (after.starts_with(" in context for Box::Action::\"fs:")
+        && after.contains(" not found")
+        && !name.contains('.'))
+    .then(|| name.to_string())
+}
+
+/// The refusal of a rule that reads `context.input.locations.<name>` for an undeclared `name`.
+fn undeclared_location(name: &str) -> String {
+    format!(
+        "`context.input.locations.{name}` names a location that box.toml's [locations] does not \
+         declare; declare `{name}` there, or guard the read with \
+         `context.input.locations has {name}`"
+    )
+}
+
+/// Whether a Cedar validation `message` names an action or entity type outside `Box`, which a
+/// pending MCP schema could still declare.
+fn mcp_could_supply(message: &str) -> bool {
+    ["unrecognized action `", "unrecognized entity type `"]
+        .iter()
+        .any(|marker| {
+            message
+                .split_once(marker)
+                .is_some_and(|(_, name)| !name.starts_with("Box::"))
+        })
+}
+
+/// The refusal of a history clause that reads `<read>.locations.<name>` for an undeclared `name`,
+/// which `has` cannot guard.
+fn undeclared_history_location(read: &str, name: &str) -> String {
+    format!(
+        "history clause field `{read}.locations.{name}` names a location that box.toml's \
+         [locations] does not declare; declare `{name}` there"
+    )
 }
 
 /// The Cedar policy id that a validator message names, such as `policy_0`, and the rest of it.
@@ -2032,12 +2319,14 @@ fn reconcile_policy_set(
     engine: &mut DurableTemporalEngine,
     canonical_policies: &[String],
     mcp_schemas: &[String],
-    effective_schema: &str,
+    effective_schema: &ActionSchema,
 ) -> Result<(), PolicyError> {
+    let base = base_schema(&effective_schema.locations)?;
+    let effective_schema = effective_schema.source.as_str();
     let installed = !engine.has_policy();
     if installed {
         engine
-            .install(EMPTY_POLICY_SOURCE, SCHEMA_SRC, Some(EVENTS_DWSCHEMA), None)
+            .install(EMPTY_POLICY_SOURCE, &base, Some(EVENTS_DWSCHEMA), None)
             .map_err(durable_history_error)?;
     }
 
@@ -2051,7 +2340,7 @@ fn reconcile_policy_set(
     if engine.action_schema().as_deref() != Some(effective_schema) {
         if !installed {
             changes.push(Verb::SetActionSchema {
-                action_schema: SCHEMA_SRC.to_string(),
+                action_schema: base.into_owned(),
             });
         }
         changes.extend(
@@ -2147,6 +2436,7 @@ fn request_event(
     principal: &Principal,
     request: &Request<'_>,
     identity: &ActionIdentity,
+    locations: Option<Value>,
 ) -> EventBuilder {
     let builder = identity.event_builder(KIND_REQUEST);
     // A per-tool `tools/call` carries its raw JSON arguments. Type them into the `input`
@@ -2159,7 +2449,12 @@ fn request_event(
     {
         return with_input(builder, json_value(arguments));
     }
-    with_fields(builder, governed, principal, request_fields(request))
+    with_fields(
+        builder,
+        governed,
+        principal,
+        request_fields(request, locations),
+    )
 }
 
 /// Set the principal/resource and write `input` to both bags, for a request whose context is a raw
@@ -2227,10 +2522,16 @@ fn outcome_event(
     governed: &GovernedBox,
     principal: &Principal,
     outcome: &Outcome<'_>,
+    locations: Option<Value>,
 ) -> EventBuilder {
     let action = outcome_action_id(outcome);
     let builder = Event::builder_for(FIXED_ACTION_NAMESPACE, action, outcome_kind(outcome));
-    let builder = with_fields(builder, governed, principal, outcome_fields(outcome));
+    let builder = with_fields(
+        builder,
+        governed,
+        principal,
+        outcome_fields(outcome, locations),
+    );
     with_output_fields(builder, output_fields(outcome))
 }
 
@@ -2328,17 +2629,29 @@ fn fs_operation_value(operation: crate::request::FsOperation) -> Value {
     }
 }
 
+/// The `locations` record of a filesystem event, mirroring the Cedar mapping's `locations_expr`.
+fn location_value(locations: &Locations, reported: &str) -> Value {
+    Value::Object(
+        held_locations(locations, reported)
+            .into_iter()
+            .map(|(name, held)| (name.to_string(), Value::Bool(held)))
+            .collect(),
+    )
+}
+
 /// The `input` fields of a request event. Same names and types the Cedar mapping
 /// writes, since both are checked against one schema.
-fn request_fields(request: &Request<'_>) -> Vec<(&'static str, Value)> {
+fn request_fields(request: &Request<'_>, locations: Option<Value>) -> Vec<(&'static str, Value)> {
     match request {
         Request::Fs {
             path, operation, ..
         } => {
-            vec![
+            let mut fields = vec![
                 (attr::PATH, Value::String(path.reported().into_owned())),
                 (attr::OPERATION, fs_operation_value(*operation)),
-            ]
+            ];
+            fields.extend(locations.map(|locations| (attr::LOCATIONS, locations)));
+            fields
         }
         Request::Connect { host, ip, port } => {
             let mut fields = vec![
@@ -2464,7 +2777,7 @@ fn credential_read_fields(paths: &[String]) -> Vec<(&'static str, Value)> {
 }
 
 /// The `input` fields of a response or error event.
-fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
+fn outcome_fields(outcome: &Outcome<'_>, locations: Option<Value>) -> Vec<(&'static str, Value)> {
     match outcome {
         // Whether the socket opened is carried by the event KIND (`response` vs `error`).
         Outcome::Connect {
@@ -2540,13 +2853,17 @@ fn outcome_fields(outcome: &Outcome<'_>) -> Vec<(&'static str, Value)> {
         }
         Outcome::Fs {
             path, operation, ..
-        } => vec![
-            (
-                attr::PATH,
-                Value::String(path.to_string_lossy().into_owned()),
-            ),
-            (attr::OPERATION, fs_operation_value(*operation)),
-        ],
+        } => {
+            let mut fields = vec![
+                (
+                    attr::PATH,
+                    Value::String(path.to_string_lossy().into_owned()),
+                ),
+                (attr::OPERATION, fs_operation_value(*operation)),
+            ];
+            fields.extend(locations.map(|locations| (attr::LOCATIONS, locations)));
+            fields
+        }
         // The same `McpCallInput` fields the request carried (`server`/`method`, and the per-item
         // identity — `tool`/`prompt`/`uri` — when the method names one), so a temporal rule joins the
         // request and response legs on any of them, exactly as the request leg emits them.
@@ -2612,6 +2929,7 @@ mod tests {
     use dogwood_local_engine::{DurableLog, Record};
 
     use super::*;
+    use crate::schema::{SCHEMA_SRC, action_schema};
 
     const BUDGET: &str = r#"
 permit(principal == Box::Agent::"self", action == Box::Action::"http:request", resource)
@@ -2875,9 +3193,9 @@ when temporal {
                     .write(true)
                     .open(&path)
                     .unwrap();
-                DogwoodEngine::open_for_staging_file(file, path.clone())
+                DogwoodEngine::open_for_staging_file(file, path.clone(), &Operator::unanchored())
             } else {
-                DogwoodEngine::open_for_staging(&path)
+                DogwoodEngine::open_for_staging(&path, &Operator::unanchored())
             };
             let error = match result {
                 Ok(_) => panic!("old history returned an authority"),
@@ -2950,7 +3268,7 @@ when temporal {
             }])
             .unwrap();
             drop(log);
-            let error = match DogwoodEngine::open_for_staging(&path) {
+            let error = match DogwoodEngine::open_for_staging(&path, &Operator::unanchored()) {
                 Ok(_) => panic!("unsupported history returned an authority"),
                 Err(error) => error,
             };
@@ -2986,7 +3304,7 @@ when temporal {
                 .expect("history installs with the default event schema");
         }
 
-        let error = match DogwoodEngine::open_for_staging(&path) {
+        let error = match DogwoodEngine::open_for_staging(&path, &Operator::unanchored()) {
             Ok(_) => panic!("staged open must reject the incompatible history schema"),
             Err(error) => error,
         };
@@ -3201,7 +3519,8 @@ when temporal {
             permit(principal, action == Box::Action::"http:request", resource);"#;
         let forbid = r#"@id("forbid-http")
             forbid(principal, action == Box::Action::"http:request", resource);"#;
-        let mut authority = DogwoodEngine::open_for_staging(&path).expect("staging opens");
+        let mut authority =
+            DogwoodEngine::open_for_staging(&path, &Operator::unanchored()).expect("staging opens");
 
         for (source, allow) in [
             (format!("{permit}\n{forbid}"), false),
@@ -3258,7 +3577,8 @@ when temporal {
                 expected
             );
             drop(authority);
-            authority = DogwoodEngine::open_for_staging(&path).expect("history recovers");
+            authority = DogwoodEngine::open_for_staging(&path, &Operator::unanchored())
+                .expect("history recovers");
             assert_eq!(
                 authority
                     .decide(
@@ -3303,15 +3623,20 @@ when temporal {
     fn open_by_path(mode: usize, path: &Path) -> Result<DogwoodEngine, String> {
         match mode {
             0 => DogwoodEngine::open(BUDGET, path).map_err(|error| error.to_string()),
-            1 => DogwoodEngine::open_for_staging(path).map_err(|error| error.to_string()),
+            1 => DogwoodEngine::open_for_staging(path, &Operator::unanchored())
+                .map_err(|error| error.to_string()),
             2 => {
                 let file = std::fs::OpenOptions::new()
                     .read(true)
                     .write(true)
                     .open(path)
                     .expect("history file");
-                DogwoodEngine::open_for_staging_file(file, path.to_path_buf())
-                    .map_err(|error| error.to_string())
+                DogwoodEngine::open_for_staging_file(
+                    file,
+                    path.to_path_buf(),
+                    &Operator::unanchored(),
+                )
+                .map_err(|error| error.to_string())
             }
             _ => DogwoodEngine::open_for_staging_with_faults(path, Arc::new(FaultInjector::new()))
                 .map_err(|error| error.to_string()),
@@ -3890,7 +4215,8 @@ when temporal {
         std::fs::rename(&decoy, &path).expect("swap a valid history into the path");
 
         let authority =
-            DogwoodEngine::open_for_staging_file(opened, path.clone()).expect("descriptor open");
+            DogwoodEngine::open_for_staging_file(opened, path.clone(), &Operator::unanchored())
+                .expect("descriptor open");
         drop(authority);
 
         assert!(
@@ -4319,22 +4645,12 @@ when temporal {{
 
         faults.arm(FaultPoint::CheckpointBeforePrune);
         let worker = std::thread::spawn(move || {
-            let result = reconcile_policy_set(&mut engine, &policies, &[], &schema.source)
+            let result = reconcile_policy_set(&mut engine, &policies, &[], &schema)
                 .and_then(|()| {
-                    reconcile_policy_set(
-                        &mut engine,
-                        &changed_policies,
-                        &[],
-                        &changed_schema.source,
-                    )
+                    reconcile_policy_set(&mut engine, &changed_policies, &[], &changed_schema)
                 })
                 .and_then(|()| {
-                    reconcile_policy_set(
-                        &mut engine,
-                        &changed_policies,
-                        &[],
-                        &changed_schema.source,
-                    )
+                    reconcile_policy_set(&mut engine, &changed_policies, &[], &changed_schema)
                 });
             (result, engine)
         });
@@ -4519,6 +4835,258 @@ when temporal {
             "inserting an unrelated statement must not reset an unchanged budget"
         );
     }
+
+    fn located(locations: &[(&str, &str)]) -> Operator {
+        Operator::unanchored()
+            .anchored_at("/nonexistent-box-home/dev")
+            .with_locations(
+                locations
+                    .iter()
+                    .map(|(name, directory)| ((*name).to_string(), vec![PathBuf::from(directory)])),
+            )
+            .expect("the locations resolve")
+    }
+
+    fn located_write(engine: &DogwoodEngine, path: &str) -> bool {
+        let approved = crate::path::ApprovedPath::interpreter_resolved(path);
+        let (decision, request_id) = engine.decide(
+            &governed(),
+            &Principal::agent(),
+            ActionRequest::Request(&Request::Fs {
+                path: &approved,
+                operation: crate::request::FsOperation::WriteContent,
+            }),
+        );
+        if !decision.is_allow() {
+            return false;
+        }
+        engine
+            .observe_outcome(
+                &governed(),
+                &Principal::agent(),
+                &request_id.expect("an allow carries a request id"),
+                &Outcome::Fs {
+                    path: Path::new(path),
+                    operation: crate::request::FsOperation::WriteContent,
+                    result: crate::FsResult::Completed,
+                },
+            )
+            .expect("the outcome records");
+        true
+    }
+
+    #[test]
+    fn a_box_with_locations_stores_its_generated_base_schema() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        let operator = located(&[("project", "/work")]);
+        let base = base_schema(operator.locations()).expect("the base schema generates");
+
+        let (engine, _) = DogwoodEngine::open_with_mcp_schemas(BUDGET, &[], &path, &operator)
+            .expect("the policy loads");
+        assert_eq!(
+            engine
+                .engine
+                .lock()
+                .expect("engine is available")
+                .action_schema()
+                .as_deref(),
+            Some(base.as_ref())
+        );
+        assert_ne!(base.as_ref(), SCHEMA_SRC);
+    }
+
+    /// A budget per location set over many windows, so a sawtooth that only the first window
+    /// passes fails here.
+    #[test]
+    fn a_location_budget_holds_in_each_window_and_counts_every_path_in_the_location() {
+        let source = r#"
+permit (principal, action == Box::Action::"fs:write", resource)
+when temporal {
+    exists (total: Long). (
+        (count for (t: Timepoint). where (
+            formerly within 60s (
+                Box::Action::"fs:write"::response{ input.locations.project: true } && tp(t)
+            )
+        )) == total
+        && total < 2
+    )
+};
+"#;
+        let history = tempfile::tempdir().expect("history directory");
+        let engine = DogwoodEngine::open_with_test_clock_under(
+            source,
+            &[],
+            &located(&[("project", "/work"), ("docs", "/work/docs")]),
+            &history.path().join("dogwood.redb"),
+            1_000_000,
+        )
+        .expect("policy loads");
+
+        for window in 0..6 {
+            assert!(located_write(&engine, &format!("/work/src/{window}-a")));
+            assert!(located_write(&engine, &format!("/work/docs/{window}-b")));
+            for directory in ["/work/src", "/work/docs"] {
+                assert!(
+                    !located_write(&engine, &format!("{directory}/{window}-c")),
+                    "window {window}: writes in {{project}} and {{project, docs}} spend one budget"
+                );
+            }
+            engine.advance_clock(61);
+        }
+    }
+
+    /// The previous release's Box schema, which has no `locations` record.
+    const PREVIOUS_RELEASE: &str = include_str!("../tests/fixtures/actions-v0.2.2.cedarschema");
+
+    const WRITE_BUDGET: &str = r#"
+permit (principal, action == Box::Action::"fs:write", resource)
+when temporal {
+    exists (total: Long). (
+        (count for (t: Timepoint). where (
+            formerly within 1h (
+                Box::Action::"fs:write"::response{ input.path: _ } && tp(t)
+            )
+        )) == total
+        && total < 3
+    )
+};
+"#;
+
+    /// Submit a request and a completed response for one write, spelled as the previous release
+    /// records them, and return the request's verdict.
+    fn previous_release_write(engine: &mut DurableTemporalEngine, path: &str) -> Option<bool> {
+        let fields = || {
+            vec![
+                (attr::PATH, Value::String(path.to_string())),
+                (
+                    attr::OPERATION,
+                    fs_operation_value(crate::request::FsOperation::WriteContent),
+                ),
+            ]
+        };
+        let request = with_fields(
+            Event::builder_for(FIXED_ACTION_NAMESPACE, action::FS_WRITE, KIND_REQUEST),
+            &governed(),
+            &Principal::agent(),
+            fields(),
+        );
+        let verdict = match engine.submit(request).expect("the request submits").outcome {
+            DurableOutcome::Decision(response) => {
+                assert_eq!(
+                    response.diagnostics().errors().count(),
+                    0,
+                    "the decision evaluates"
+                );
+                Some(response.decision() == DogwoodDecision::Allow)
+            }
+            _ => None,
+        };
+        let response = with_output_fields(
+            with_fields(
+                Event::builder_for(FIXED_ACTION_NAMESPACE, action::FS_WRITE, KIND_RESPONSE),
+                &governed(),
+                &Principal::agent(),
+                fields(),
+            ),
+            vec![(
+                attr::RESULT,
+                Value::Entity {
+                    ty: crate::schema::FS_RESPONSE_RESULT_TYPE.to_string(),
+                    id: "completed".to_string(),
+                },
+            )],
+        );
+        engine.submit(response).expect("the response submits");
+        verdict
+    }
+
+    /// A box the previous release created opens under the always-present `locations` record with
+    /// its budget's history intact, and the previous release opens it again after.
+    #[test]
+    fn a_history_from_the_previous_release_opens_with_the_locations_record_and_back() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        let (canonical, _, _) = validate_and_expand(WRITE_BUDGET, &[], &Operator::unanchored())
+            .expect("the budget validates");
+        assert!(!PREVIOUS_RELEASE.contains("locations"));
+
+        let mut previous = open_history(&path, durable_config()).expect("history opens");
+        previous
+            .install(
+                &canonical.join("\n"),
+                PREVIOUS_RELEASE,
+                Some(EVENTS_DWSCHEMA),
+                None,
+            )
+            .expect("the previous release installs");
+        assert_eq!(previous_release_write(&mut previous, "/work/a"), Some(true));
+        drop(previous);
+
+        let current = DogwoodEngine::open(WRITE_BUDGET, &path).expect("this build opens it");
+        assert!(located_write(&current, "/work/b"));
+        assert!(located_write(&current, "/work/c"));
+        assert!(
+            !located_write(&current, "/work/d"),
+            "the previous release's write and this build's two count together"
+        );
+        drop(current);
+
+        let mut rolled_back = open_history(&path, durable_config()).expect("history opens");
+        rolled_back
+            .batch(vec![Verb::SetActionSchema {
+                action_schema: PREVIOUS_RELEASE.to_string(),
+            }])
+            .expect("the previous release restores its schema");
+        assert_eq!(
+            previous_release_write(&mut rolled_back, "/work/e"),
+            Some(false),
+            "the previous release counts the events this build recorded with `locations`"
+        );
+    }
+
+    /// An event the previous release recorded has no `locations`, so a budget on a location skips it.
+    #[test]
+    fn a_location_budget_does_not_count_an_event_the_previous_release_recorded() {
+        let history = tempfile::tempdir().expect("history directory");
+        let path = history.path().join("dogwood.redb");
+        let (canonical, _, _) = validate_and_expand(WRITE_BUDGET, &[], &Operator::unanchored())
+            .expect("the budget validates");
+        let mut previous = open_history(&path, durable_config()).expect("history opens");
+        previous
+            .install(
+                &canonical.join("\n"),
+                PREVIOUS_RELEASE,
+                Some(EVENTS_DWSCHEMA),
+                None,
+            )
+            .expect("the previous release installs");
+        assert_eq!(previous_release_write(&mut previous, "/work/a"), Some(true));
+        drop(previous);
+
+        let source = r#"
+permit (principal, action == Box::Action::"fs:write", resource)
+when temporal {
+    exists (total: Long). (
+        (count for (t: Timepoint). where (
+            formerly within 1h (
+                Box::Action::"fs:write"::response{ input.locations.project: true } && tp(t)
+            )
+        )) == total
+        && total < 2
+    )
+};
+"#;
+        let operator = located(&[("project", "/work")]);
+        let (current, _) = DogwoodEngine::open_with_mcp_schemas(source, &[], &path, &operator)
+            .expect("this build opens it");
+        assert!(located_write(&current, "/work/b"));
+        assert!(
+            located_write(&current, "/work/c"),
+            "the previous release's write is outside the budget on `project`"
+        );
+        assert!(!located_write(&current, "/work/d"));
+    }
 }
 
 #[cfg(test)]
@@ -4561,7 +5129,7 @@ mod rule_heads {
 
     #[test]
     fn a_rule_whose_head_cannot_be_read_is_refused_not_skipped() {
-        let error = refuse_input_reads_before_discovery(&["not a rule".to_string()])
+        let error = refuse_input_reads_before_discovery(&["not a rule".to_string()], &NO_LOCATIONS)
             .expect_err("a rule with no readable head must be refused");
         let message = error.into_error().to_string();
         assert!(
@@ -4573,7 +5141,7 @@ mod rule_heads {
     #[test]
     fn a_rule_whose_condition_alone_does_not_lower_keeps_its_head() {
         let rule = r#"@id("r") forbid(principal, action in [Box::Action::"fs:read", svc::Action::"x"], resource) when { context.input.x.unsupported() };"#;
-        let error = refuse_input_reads_before_discovery(&[rule.to_string()])
+        let error = refuse_input_reads_before_discovery(&[rule.to_string()], &NO_LOCATIONS)
             .expect_err("the mixed list is refused from the head");
         assert!(matches!(
             error.into_error(),

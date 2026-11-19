@@ -140,3 +140,69 @@ fn a_check_reads_the_actions_of_each_tool_grammar() {
         );
     }
 }
+
+const PERMIT_WRITE: &str =
+    "@id(\"write\") permit (principal, action == Box::Action::\"fs:write\", resource);\n";
+
+#[test]
+fn a_check_reads_the_locations_table_and_refuses_an_invalid_one() {
+    let directory = tempfile::tempdir().expect("a directory");
+    let config = configuration(
+        directory.path(),
+        "policy = \"policy.dw\"\n[locations]\nproject = [\"~/src/app\", \"/srv/data\"]\n",
+        Some(PERMIT_WRITE),
+    );
+    let check = strands_box::check_policy(config).expect("the check runs");
+    assert!(check.errors().is_empty(), "{:?}", check.errors());
+
+    let directory = tempfile::tempdir().expect("a directory");
+    let config = configuration(
+        directory.path(),
+        "policy = \"policy.dw\"\n[locations]\nproject = []\n",
+        Some(PERMIT_WRITE),
+    );
+    let failed = strands_box::check_policy(config).expect_err("an empty location");
+    assert!(
+        failed.to_string().contains("`[locations] project`"),
+        "{failed}"
+    );
+}
+
+#[test]
+fn a_check_matches_a_rule_against_the_declared_locations() {
+    let read_project = "@id(\"project\") permit (principal, action == Box::Action::\"fs:write\", resource)\nwhen { context.input.locations.project };\n";
+    let declared = "policy = \"policy.dw\"\n[locations]\nproject = [\"/srv/data\"]\n";
+
+    let directory = tempfile::tempdir().expect("a directory");
+    let config = configuration(directory.path(), declared, Some(read_project));
+    let check = strands_box::check_policy(config).expect("the check runs");
+    assert!(check.errors().is_empty(), "{:?}", check.errors());
+
+    let directory = tempfile::tempdir().expect("a directory");
+    let config = configuration(
+        directory.path(),
+        declared,
+        Some(&read_project.replace("locations.project", "locations.projcet")),
+    );
+    let check = strands_box::check_policy(config).expect("the check runs");
+    assert!(
+        check
+            .errors()
+            .iter()
+            .any(|finding| finding.message().contains("declare `projcet`")),
+        "{:?}",
+        check.errors()
+    );
+
+    let directory = tempfile::tempdir().expect("a directory");
+    let config = configuration(
+        directory.path(),
+        "policy = \"policy.dw\"\n",
+        Some(read_project),
+    );
+    let check = strands_box::check_policy(config).expect("the check runs");
+    assert!(
+        !check.errors().is_empty(),
+        "a box with no [locations] refuses a strict read"
+    );
+}

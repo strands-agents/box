@@ -10,7 +10,7 @@ use crate::dogwood::check_against;
 #[cfg(test)]
 use crate::error::PolicyError;
 #[cfg(test)]
-use crate::schema::{ActionSchema, composed_action_schema};
+use crate::schema::{ActionSchema, NO_LOCATIONS, composed_action_schema};
 #[cfg(test)]
 use crate::spelling::{Operator, PolicyWarning};
 
@@ -91,7 +91,7 @@ pub(crate) fn grammar_action_schema(
     mcp_schemas: &[String],
 ) -> Result<ActionSchema, PolicyError> {
     let fragments: Vec<String> = grammars.iter().map(Grammar::schema).collect();
-    composed_action_schema(&fragments, mcp_schemas)
+    composed_action_schema(&NO_LOCATIONS, &fragments, mcp_schemas)
 }
 
 /// Strict-validate `source` against the canonical schema, `grammars`, and `mcp_schemas`.

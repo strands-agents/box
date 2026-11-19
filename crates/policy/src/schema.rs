@@ -1,7 +1,12 @@
 //! The shipped `.cedarschema` and the `Request` -> Cedar tuple mapping
 //! (docs/design/decisions.md#the-action-vocabulary-is-closed-and-strict-validated-at-load).
 
-use std::{borrow::Cow, collections::HashSet, sync::OnceLock};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, HashSet},
+    path::{Component, Path, PathBuf},
+    sync::OnceLock,
+};
 
 use cedar_policy::{
     Context, EntityId, EntityTypeName, EntityUid, Request as CedarRequest, RestrictedExpression,
@@ -19,21 +24,163 @@ const FIXED_ACTION_TYPE: &str = "Box::Action";
 /// build time so the crate carries its own schema with no filesystem dependency.
 pub(crate) const SCHEMA_SRC: &str = include_str!("../schema/actions.cedarschema");
 
+/// The operator's named directories, by name.
+pub(crate) type Locations = BTreeMap<String, Vec<PathBuf>>;
+
+/// The declaration of a box that names no location.
+pub(crate) static NO_LOCATIONS: Locations = BTreeMap::new();
+
+/// The empty location record the shipped schema declares, which declared locations fill.
+const EMPTY_LOCATIONS: &str = "type FsLocations = {};";
+
+/// The longest location name.
+const MAXIMUM_LOCATION_NAME: usize = 64;
+
+/// The words Cedar reserves, which no location name may be.
+const RESERVED_WORDS: [&str; 10] = [
+    "true", "false", "if", "then", "else", "in", "is", "like", "has", "__cedar",
+];
+
+/// The base action schema for `locations`: [`SCHEMA_SRC`] with one `Bool` attribute for each
+/// declared location in the filesystem inputs' `locations` record.
+pub(crate) fn base_schema(locations: &Locations) -> Result<Cow<'static, str>, PolicyError> {
+    if locations.is_empty() {
+        return Ok(Cow::Borrowed(SCHEMA_SRC));
+    }
+    refuse_bad_locations(locations)?;
+    let attributes = locations
+        .keys()
+        .map(|name| format!("  \"{name}\": Bool"))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    replace_once(
+        SCHEMA_SRC,
+        EMPTY_LOCATIONS,
+        &format!("type FsLocations = {{\n{attributes}\n}};"),
+    )
+    .map(Cow::Owned)
+}
+
+/// Why `name` is not a location name, or `None` when it is one.
+pub(crate) fn invalid_location_name(name: &str) -> Option<&'static str> {
+    let mut characters = name.chars();
+    let Some(first) = characters.next() else {
+        return Some("it is empty");
+    };
+    if !first.is_ascii_alphabetic() {
+        return Some("it does not start with a letter");
+    }
+    if name.len() > MAXIMUM_LOCATION_NAME {
+        return Some("it is too long");
+    }
+    if !characters.all(|rest| rest.is_ascii_alphanumeric() || rest == '_') {
+        return Some("it holds a character other than a letter, a digit, or '_'");
+    }
+    if RESERVED_WORDS.contains(&name) {
+        return Some("it is a word Cedar reserves");
+    }
+    None
+}
+
+/// `source` with its one `anchor` replaced by `replacement`.
+fn replace_once(source: &str, anchor: &str, replacement: &str) -> Result<String, PolicyError> {
+    if source.matches(anchor).count() != 1 {
+        return Err(PolicyError::Schema(format!(
+            "the action schema does not declare `{anchor}` exactly once"
+        )));
+    }
+    Ok(source.replacen(anchor, replacement, 1))
+}
+
+/// Refuse a location whose name or directories the declaration rules do not accept.
+pub(crate) fn refuse_bad_locations(locations: &Locations) -> Result<(), PolicyError> {
+    for (name, directories) in locations {
+        if let Some(reason) = invalid_location_name(name) {
+            return Err(PolicyError::Schema(format!(
+                "location {name:?} is not a location name: {reason}; a name starts with a \
+                 letter, holds at most {MAXIMUM_LOCATION_NAME} letters, digits, or `_`, and is \
+                 not a word Cedar reserves"
+            )));
+        }
+        if directories.is_empty() {
+            return Err(PolicyError::Schema(format!(
+                "location {name:?}: a location names at least one directory"
+            )));
+        }
+        for directory in directories {
+            let text = directory.to_string_lossy();
+            let shaped = match text.strip_prefix("~/") {
+                Some(rest) => !rest.is_empty() && is_normal(Path::new(rest)),
+                None => text == "~" || (directory.is_absolute() && is_normal(directory)),
+            };
+            if !shaped {
+                return Err(PolicyError::Schema(format!(
+                    "location {name:?}: {} is not `~`, a `~/` path, or an absolute directory, \
+                     without `.` or `..`",
+                    directory.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether `path` spells no `.` or `..` component, including one that `Path::components` drops.
+pub(crate) fn is_normal(path: &Path) -> bool {
+    path.components().all(|component| {
+        matches!(
+            component,
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_)
+        )
+    }) && !path
+        .as_os_str()
+        .as_encoded_bytes()
+        .split(|byte| *byte == b'/')
+        .any(|segment| segment == b".")
+}
+
+/// Each declared location name, in order, and whether `reported` equals one of its roots or lies
+/// below one, as `path == "<root>" || path like "<root>/*"` decides with each `*` literal.
+pub(crate) fn held_locations<'a>(locations: &'a Locations, reported: &str) -> Vec<(&'a str, bool)> {
+    locations
+        .iter()
+        .map(|(name, roots)| {
+            let held = roots
+                .iter()
+                .any(|root| path_in_root(reported, &root.to_string_lossy()));
+            (name.as_str(), held)
+        })
+        .collect()
+}
+
+/// Whether `reported` is `root` or lies below it, as `path == "<root>" || path like "<root>/*"`.
+pub(crate) fn path_in_root(reported: &str, root: &str) -> bool {
+    reported == root
+        || reported
+            .strip_prefix(root)
+            .is_some_and(|rest| rest.starts_with('/') || root.ends_with('/'))
+}
+
 /// The effective action schema used for policy validation and request binding.
 pub(crate) struct ActionSchema {
     pub(crate) source: String,
     pub(crate) cedar: Schema,
     pub(crate) tool_actions: HashSet<EntityUid>,
     pub(crate) tool_inputs: crate::mcp_input::ToolInputs,
+    /// The locations the base schema declares.
+    pub(crate) locations: Locations,
 }
 
-/// Compose the canonical schema with ordered MCP schema fragments.
+/// Compose the canonical schema of a box that names no location with ordered MCP schema fragments.
+#[cfg(test)]
 pub(crate) fn action_schema(mcp_schemas: &[String]) -> Result<ActionSchema, PolicyError> {
-    composed_action_schema(&[], mcp_schemas)
+    composed_action_schema(&NO_LOCATIONS, &[], mcp_schemas)
 }
 
-/// Compose the canonical schema with generated tool grammar fragments, then ordered MCP fragments.
+/// Compose the base schema for `locations` with generated tool grammar fragments, then ordered
+/// MCP fragments.
 pub(crate) fn composed_action_schema(
+    locations: &Locations,
     grammar_schemas: &[String],
     mcp_schemas: &[String],
 ) -> Result<ActionSchema, PolicyError> {
@@ -41,7 +188,7 @@ pub(crate) fn composed_action_schema(
         crate::mcp_schema::validate_unbound_mcp_schema(fragment)
             .map_err(|error| PolicyError::Schema(error.to_string()))?;
     }
-    let mut source = SCHEMA_SRC.to_string();
+    let mut source = base_schema(locations)?.into_owned();
     for fragment in grammar_schemas.iter().chain(mcp_schemas) {
         let base = source.trim_end();
         source = format!("{base}\n{fragment}");
@@ -69,6 +216,7 @@ pub(crate) fn composed_action_schema(
         cedar,
         tool_actions,
         tool_inputs,
+        locations: locations.clone(),
     })
 }
 
@@ -272,6 +420,9 @@ pub(crate) mod attr {
     pub(crate) const PATH: &str = "path";
     /// `context.input.operation` — the exact kernel operation, on every `fs:*` action.
     pub(crate) const OPERATION: &str = "operation";
+    /// `context.input.locations` — one `Bool` per declared location, true when it holds the
+    /// path, on every `fs:*` action.
+    pub(crate) const LOCATIONS: &str = "locations";
     /// `output.result` — how an effect ended, on every filesystem response event.
     pub(crate) const RESULT: &str = "result";
     /// `context.input.host` — destination host (`net:*`).
@@ -420,6 +571,21 @@ fn fs_operation_expr(operation: FsOperation) -> Result<RestrictedExpression, Pol
     ))
 }
 
+/// The `locations` record of a filesystem input: each declared name, true when it holds `path`.
+fn locations_expr(
+    locations: &Locations,
+    reported: &str,
+) -> Result<RestrictedExpression, PolicyError> {
+    RestrictedExpression::new_record(
+        held_locations(locations, reported)
+            .into_iter()
+            .map(|(name, held)| (name.to_string(), RestrictedExpression::new_bool(held))),
+    )
+    .map_err(|error| {
+        PolicyError::Schema(format!("failed to build context.input.locations: {error}"))
+    })
+}
+
 /// The cached action UID for one fixed action-id string.
 fn fixed_action_uid(id: &str) -> Result<EntityUid, PolicyError> {
     static ACTIONS: OnceLock<Result<Vec<EntityUid>, String>> = OnceLock::new();
@@ -524,6 +690,7 @@ fn context_for(
     req: &Request<'_>,
     schema: &Schema,
     action: &EntityUid,
+    locations: &Locations,
 ) -> Result<Context, PolicyError> {
     // A per-tool `tools/call` carries its raw JSON arguments. Cedar types them against the
     // generated action input schema.
@@ -545,6 +712,10 @@ fn context_for(
                 RestrictedExpression::new_string(path.reported().into_owned()),
             )];
             fields.push((attr::OPERATION.to_string(), fs_operation_expr(*operation)?));
+            fields.push((
+                attr::LOCATIONS.to_string(),
+                locations_expr(locations, &path.reported())?,
+            ));
             fields
         }
         Request::Connect { host, ip, port } => {
@@ -703,11 +874,12 @@ pub(crate) fn to_cedar_request(
     req: &Request<'_>,
     identity: &ActionIdentity,
     schema: &Schema,
+    locations: &Locations,
 ) -> Result<CedarRequest, PolicyError> {
     let principal = principal_uid(principal)?;
     let action = identity.cedar_uid()?;
     let resource = resource_uid()?;
-    let context = context_for(req, schema, &action)?;
+    let context = context_for(req, schema, &action, locations)?;
     // The schema is bound: a non-conforming request errors here rather than silently
     // no-matching.
     CedarRequest::new(principal, action, resource, context, Some(schema))
@@ -742,6 +914,181 @@ mod tests {
     #[test]
     fn shipped_schema_parses() {
         assert!(schema().is_ok());
+    }
+
+    fn declared(names: &[&str]) -> Locations {
+        names
+            .iter()
+            .map(|name| ((*name).to_string(), vec![PathBuf::from("/work")]))
+            .collect()
+    }
+
+    #[test]
+    fn a_box_without_locations_keeps_the_shipped_schema() {
+        assert_eq!(
+            base_schema(&NO_LOCATIONS).expect("the base schema"),
+            SCHEMA_SRC
+        );
+        assert_eq!(
+            composed_action_schema(&NO_LOCATIONS, &[], &[])
+                .expect("the schema composes")
+                .source,
+            SCHEMA_SRC
+        );
+    }
+
+    /// Every filesystem input carries the `locations` record, empty for a box with none.
+    fn location_records(source: &str) -> Vec<(String, serde_json::Value)> {
+        let (fragment, _) = cedar_policy::SchemaFragment::from_cedarschema_str(source)
+            .expect("the base schema parses");
+        let json = fragment.to_json_value().expect("the fragment renders");
+        let common = json[BOX_NAMESPACE]["commonTypes"]
+            .as_object()
+            .expect("common types")
+            .clone();
+        let mut carrying: Vec<(String, serde_json::Value)> = common
+            .iter()
+            .filter_map(|(name, declaration)| {
+                let field = declaration["attributes"].get(attr::LOCATIONS)?;
+                let referenced = field["name"].as_str().expect("a named record type");
+                Some((name.clone(), common[referenced]["attributes"].clone()))
+            })
+            .collect();
+        carrying.sort_by(|left, right| left.0.cmp(&right.0));
+        carrying
+    }
+
+    #[test]
+    fn every_filesystem_input_carries_a_locations_record_with_one_bool_per_declared_name() {
+        let inputs = [
+            "FsDeleteInput",
+            "FsMoveInput",
+            "FsOtherInput",
+            "FsReadInput",
+            "FsWriteInput",
+        ];
+        let empty = location_records(SCHEMA_SRC);
+        assert_eq!(
+            empty
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            inputs
+        );
+        assert!(
+            empty
+                .iter()
+                .all(|(_, record)| record == &serde_json::json!({})),
+            "a box with no location has an empty record: {empty:?}"
+        );
+
+        let source = base_schema(&declared(&["project", "docs"])).expect("the base schema");
+        let declared_records = location_records(&source);
+        assert_eq!(
+            declared_records
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            inputs
+        );
+        for (name, record) in declared_records {
+            assert_eq!(
+                record,
+                serde_json::json!({
+                    "docs": {"type": "EntityOrCommon", "name": "Bool"},
+                    "project": {"type": "EntityOrCommon", "name": "Bool"}
+                }),
+                "{name} declares one required Bool per location"
+            );
+        }
+        assert!(
+            !source.contains("entity Location"),
+            "no location entity type is declared"
+        );
+        assert!(
+            composed_action_schema(&declared(&["project"]), &[], &[]).is_ok(),
+            "the base schema composes without a warning"
+        );
+    }
+
+    #[test]
+    fn a_location_name_is_a_cedar_identifier_that_is_not_reserved() {
+        for name in ["project", "P", "my_project_2", &"x".repeat(64)] {
+            assert_eq!(invalid_location_name(name), None, "{name}");
+        }
+        for name in [
+            "",
+            "1project",
+            "_project",
+            "my-project",
+            "pro ject",
+            "café",
+            &"x".repeat(65),
+        ] {
+            assert!(invalid_location_name(name).is_some(), "{name:?}");
+        }
+        for name in RESERVED_WORDS {
+            assert_eq!(
+                invalid_location_name(name),
+                if name == "__cedar" {
+                    Some("it does not start with a letter")
+                } else {
+                    Some("it is a word Cedar reserves")
+                },
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_path_is_in_each_location_that_holds_it_by_whole_components() {
+        let locations: Locations = [
+            ("project", vec![PathBuf::from("/work")]),
+            ("docs", vec![PathBuf::from("/work/docs")]),
+            (
+                "caches",
+                vec![PathBuf::from("/cache"), PathBuf::from("/npm")],
+            ),
+        ]
+        .into_iter()
+        .map(|(name, directories)| (name.to_string(), directories))
+        .collect();
+        let held = |path: &str| {
+            held_locations(&locations, path)
+                .into_iter()
+                .filter(|(_, held)| *held)
+                .map(|(name, _)| name)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(held("/work"), ["project"]);
+        assert_eq!(held("/work/docs/intro.md"), ["docs", "project"]);
+        assert_eq!(held("/npm/x"), ["caches"]);
+        assert!(held("/work-old/notes.md").is_empty());
+        assert!(held("/").is_empty());
+        assert_eq!(
+            held_locations(&locations, "/").len(),
+            3,
+            "every declared name is present"
+        );
+    }
+
+    #[test]
+    fn a_root_matches_as_the_two_path_comparisons_with_each_star_literal() {
+        for (reported, root, held) in [
+            ("~", "~", true),
+            ("~/x", "~", true),
+            ("~x", "~", false),
+            ("/~/x", "~", false),
+            ("/a*b", "/a*b", true),
+            ("/a*b/c", "/a*b", true),
+            ("/axb/c", "/a*b", false),
+            ("/", "/", true),
+            ("/etc", "/", true),
+            ("~/x", "/", false),
+        ] {
+            assert_eq!(path_in_root(reported, root), held, "{reported} in {root}");
+        }
     }
 
     #[test]
@@ -853,7 +1200,7 @@ mod tests {
         for r in &reqs {
             let identity = ActionIdentity::for_request(r);
             assert!(
-                to_cedar_request(&principal, r, &identity, schema).is_ok(),
+                to_cedar_request(&principal, r, &identity, schema, &NO_LOCATIONS).is_ok(),
                 "failed to map {r:?}"
             );
         }
@@ -870,16 +1217,23 @@ mod tests {
         let schema = schema().expect("shipped schema");
         let identity = ActionIdentity::for_request(&request);
 
-        let default_uid = to_cedar_request(&Principal::agent(), &request, &identity, schema)
-            .expect("default principal maps")
-            .principal()
-            .expect("principal is present")
-            .to_string();
+        let default_uid = to_cedar_request(
+            &Principal::agent(),
+            &request,
+            &identity,
+            schema,
+            &NO_LOCATIONS,
+        )
+        .expect("default principal maps")
+        .principal()
+        .expect("principal is present")
+        .to_string();
         let named_uid = to_cedar_request(
             &Principal::agent().with_id("worker-1"),
             &request,
             &identity,
             schema,
+            &NO_LOCATIONS,
         )
         .expect("named principal maps")
         .principal()

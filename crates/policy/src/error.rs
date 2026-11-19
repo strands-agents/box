@@ -11,6 +11,35 @@ pub enum PolicyError {
     #[error("policy fails schema validation: {0}")]
     Schema(String),
 
+    /// A declared location's directory cannot be resolved.
+    #[error(
+        "policy fails schema validation: location {name:?}: {} cannot be resolved: {reason}",
+        directory.display()
+    )]
+    UnresolvableLocation {
+        /// The location's name.
+        name: String,
+        /// The directory as the caller passed it.
+        directory: std::path::PathBuf,
+        /// Why it cannot be resolved.
+        reason: String,
+    },
+
+    /// A declared location's root is spelled so that no reported path can match it.
+    #[error(
+        "policy fails schema validation: location {name:?}: {} can never match a reported path: \
+         {reason}",
+        directory.display()
+    )]
+    UnmatchableLocation {
+        /// The location's name.
+        name: String,
+        /// The root as the caller passed it.
+        directory: std::path::PathBuf,
+        /// Why no reported path matches it, and the spelling to write instead.
+        reason: String,
+    },
+
     /// Strict schema validation reported an unknown action — e.g. a typo like
     /// `Box::Action::"fs:raed"`. Failing loud at load forecloses the silent
     /// no-match class a typo would otherwise reach.

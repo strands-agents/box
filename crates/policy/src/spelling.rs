@@ -1,7 +1,8 @@
 //! Load-time judgement of the path, program, host, and address literals a rule compares.
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use cedar_policy::{ActionConstraint, EntityUid, Policy, PolicySet};
 use egress_gateway::{is_bindable_host, normalize_host};
@@ -18,13 +19,17 @@ const BOX_ACTION_TYPE: &str = "Box::Action";
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Operator {
     home: Option<PathBuf>,
+    locations: BTreeMap<String, Vec<PathBuf>>,
 }
 
 impl Operator {
     /// An operator with no stated home, so no literal is judged against one.
     #[must_use]
     pub fn unanchored() -> Self {
-        Self { home: None }
+        Self {
+            home: None,
+            locations: BTreeMap::new(),
+        }
     }
 
     /// State the home a rule's path literal is spelled `~/…` under.
@@ -32,6 +37,47 @@ impl Operator {
     pub fn anchored_at(mut self, home: impl Into<PathBuf>) -> Self {
         self.home = Some(home.into());
         self
+    }
+
+    /// Name the roots a filesystem rule matches as `context.input.locations.<name>`, each spelled as
+    /// a path is reported, or refuse a root that no reported path can match.
+    pub fn with_locations(
+        mut self,
+        locations: impl IntoIterator<Item = (String, Vec<PathBuf>)>,
+    ) -> Result<Self, PolicyError> {
+        let declared: BTreeMap<String, Vec<PathBuf>> = locations.into_iter().collect();
+        if declared.is_empty() {
+            self.locations = declared;
+            return Ok(self);
+        }
+        let Some(home) = self.home.clone() else {
+            return Err(PolicyError::Schema(
+                "locations are declared for an operator with no home; a path under the home is \
+                 reported as `~/…`, so state the home with `Operator::anchored_at` first"
+                    .to_string(),
+            ));
+        };
+        crate::schema::refuse_bad_locations(&declared)?;
+        let mut written_locations = BTreeMap::new();
+        for (name, roots) in declared {
+            let lists_home = roots.iter().any(|root| root.as_os_str() == "~");
+            let mut written: Vec<PathBuf> = Vec::new();
+            for root in roots {
+                judge_location_root(&name, &root, &home, lists_home)?;
+                if !written.contains(&root) {
+                    written.push(root);
+                }
+            }
+            written_locations.insert(name, written);
+        }
+        self.locations = written_locations;
+        Ok(self)
+    }
+
+    /// The declared locations by name, each root as written, which is the text a rule matches.
+    #[must_use]
+    pub fn locations(&self) -> &BTreeMap<String, Vec<PathBuf>> {
+        &self.locations
     }
 
     /// Every spelling of the home a literal is judged against: as stated, and canonical.
@@ -845,6 +891,102 @@ fn contains_home_component(text: &str, home: &str) -> bool {
         let after = text[index + home.len()..].chars().next();
         matches!(before, None | Some('/')) && matches!(after, None | Some('/'))
     })
+}
+
+/// Refuse a location root that no reported path can match, with the spelling to write instead.
+fn judge_location_root(
+    name: &str,
+    root: &Path,
+    home: &Path,
+    lists_home: bool,
+) -> Result<(), PolicyError> {
+    let unmatchable = |reason: String| PolicyError::UnmatchableLocation {
+        name: name.to_string(),
+        directory: root.to_path_buf(),
+        reason,
+    };
+    let text = root.to_string_lossy();
+    if has_trailing_slash(&text) {
+        return Err(unmatchable(format!(
+            "a reported path has no trailing slash; write \"{}\"",
+            text.trim_end_matches('/')
+        )));
+    }
+    if text.contains("//") {
+        return Err(unmatchable(format!(
+            "a reported path has no empty component; write \"{}\"",
+            collapse_slashes(&text)
+        )));
+    }
+    let homes = home_spellings(home);
+    let on_disk = if text == "~" {
+        home.to_path_buf()
+    } else if let Some(rest) = text.strip_prefix("~/") {
+        home.join(rest)
+    } else {
+        if let Some(reported) = home_relative_spelling(root, &homes) {
+            return Err(unmatchable(format!(
+                "a path under the operator home is reported as `~/…`; write \"{reported}\""
+            )));
+        }
+        if !lists_home && homes.iter().any(|spelling| spelling.starts_with(root)) {
+            return Err(unmatchable(
+                "it holds the operator home, and a path in the home is reported as `~/…`, so \
+                 this root matches none of them; add \"~\" to the list"
+                    .to_string(),
+            ));
+        }
+        root.to_path_buf()
+    };
+    let resolved = crate::path::resolve_host_directory(&on_disk).map_err(|reason| {
+        PolicyError::UnresolvableLocation {
+            name: name.to_string(),
+            directory: root.to_path_buf(),
+            reason,
+        }
+    })?;
+    let reported = home_relative_spelling(&resolved, &homes)
+        .unwrap_or_else(|| resolved.to_string_lossy().into_owned());
+    if reported != text {
+        return Err(unmatchable(format!(
+            "it crosses a symbolic link, and a path is reported as resolved; write \"{reported}\""
+        )));
+    }
+    Ok(())
+}
+
+/// The operator home as stated and, when it differs, as canonical.
+fn home_spellings(home: &Path) -> Vec<PathBuf> {
+    let mut homes = vec![home.to_path_buf()];
+    if let Ok(canonical) = home.canonicalize()
+        && canonical != home
+    {
+        homes.push(canonical);
+    }
+    homes
+}
+
+/// `path` spelled `~` or `~/…` under one of `homes`, as a request reports it, or `None`.
+fn home_relative_spelling(path: &Path, homes: &[PathBuf]) -> Option<String> {
+    homes.iter().find_map(|home| {
+        let rest = path.strip_prefix(home).ok()?;
+        Some(if rest.as_os_str().is_empty() {
+            "~".to_string()
+        } else {
+            format!("~/{}", rest.to_string_lossy())
+        })
+    })
+}
+
+/// `text` with each run of `/` collapsed to one.
+fn collapse_slashes(text: &str) -> String {
+    let mut collapsed = String::with_capacity(text.len());
+    for character in text.chars() {
+        if !(character == '/' && collapsed.ends_with('/')) {
+            collapsed.push(character);
+        }
+    }
+    collapsed
 }
 
 /// The home `literal` names or sits under, when there is one.

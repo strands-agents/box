@@ -68,7 +68,7 @@ An unknown key at any level is a load error.
 
 ## Keys
 
-The file carries fourteen keys. `name` and `box_dir` are required.
+The file carries fifteen keys. `name` and `box_dir` are required.
 
 | Key | Type | Meaning |
 |---|---|---|
@@ -86,8 +86,9 @@ The file carries fourteen keys. `name` and `box_dir` are required.
 | `[limits]` | table | Execution limits for Strands Shell. |
 | `monty` | boolean | Whether a bare `python3` or `python` in the Shell runs Monty, Box's built-in Python subset. `true` by default. With `false`, both names resolve like any other program: a `[tool.python3]` or `[tool.python]`, else the host's `PATH`. |
 | `[gateway]` | table | Settings for every request through the egress gateway: `upgrade_http`, the hosts whose plain `http://` on port 80 the gateway sends as `https://` on port 443. See [`[gateway]`](#gateway). |
+| `[locations]` | table | Names for directories, which a filesystem rule in the policy reads as `context.input.locations`. Grants no access. See [`[locations]`](#locations). |
 
-The example uses five of the fourteen: `name`, `box_dir`, `policy`, `[agent]`, and one
+The example uses five of the fifteen: `name`, `box_dir`, `policy`, `[agent]`, and one
 `[egress.<name>]` table. It declares no tool, no MCP server, and no telemetry target.
 
 `name` and `box_dir` are the two required keys. `name` labels the box in its record and its
@@ -252,6 +253,75 @@ upgraded request on port 443, as it decides HTTPS to that host, and a credential
 it. A box that sets the list stores its record at version 32, and an older build refuses it.
 [Upgrade plain HTTP to HTTPS](egress.md#upgrade-plain-http-to-https) describes the behaviour and
 its limits.
+
+## `[locations]`
+
+Each key in `[locations]` is a location name, and its value lists one or more directories, called
+roots. A filesystem rule in the policy reads `context.input.locations.<name>`, which is true when
+that location holds the request's path, so the rule does not spell the directory:
+
+```toml
+[locations]
+project = ["~/src/app"]
+caches = ["~/.cache/my-agent", "/srv/cache"]
+```
+
+```text
+@id("project_write")
+permit (principal, action == Box::Action::"fs:write", resource)
+when { context.input.locations.project };
+```
+
+A location is shorthand for two path comparisons. With `project = ["~/src/app"]`,
+`context.input.locations.project` means exactly
+`context.input.path == "~/src/app" || context.input.path like "~/src/app/*"`, with a `*` in a root
+read as a plain character. So a path is in a location when its spelling in `context.input.path`
+is a root or lies below one by whole components: `~/src/app-old` is not in `~/src/app`. A path
+can be in more than one location, and a rule on each of them applies to it.
+[The filesystem actions](policy/actions.md#filesystem) describe the `locations` field.
+
+Write each root the way `context.input.path` spells a path: `~` for the operator's home, `~/…`
+below it, and an absolute path elsewhere. Box doesn't expand or resolve a root, so a root that
+crosses a symbolic link would match nothing. Box refuses a root no path can match, and says what
+to write instead:
+
+| Rule | Refusal |
+|---|---|
+| A name starts with an ASCII letter, holds at most 64 ASCII letters, digits, or `_`, and is not one of Cedar's reserved words (`true`, `false`, `if`, `then`, `else`, `in`, `is`, `like`, `has`). | ``` `[locations] <name>` is not a location name``` |
+| A location lists at least one directory. | ``` `[locations] <name>` lists no directory``` |
+| Each root is absolute, is `~` for the whole home, or starts with `~/`. | ``` `[locations] <name>` entry "<entry>" is refused: it is neither absolute nor `~/`-relative``` |
+| A `~/` root has no empty component after `~/`, so `~//etc` is refused. | ``` `[locations] <name>` entry "<entry>" is refused: it holds an empty component after `~/` ``` |
+| A root has no `.` or `..` component. | ``` `[locations] <name>` entry "<entry>" is refused: it holds a `.` or `..` component``` |
+| A location lists each root once. | ``` `[locations] <name>` lists "<entry>" twice``` |
+| A root under the home is written `~/…`. | ``` `[locations] <name>` entry "<entry>" can never match a reported path: a path under the operator home is reported as `~/…`; write "~/<rest>"``` |
+| A root crosses no symbolic link, such as `/tmp` on macOS, which is `/private/tmp`. | ``` … can never match a reported path: it crosses a symbolic link, and a path is reported as resolved; write "<resolved>"``` |
+| A root that holds the home, such as `/Users`, is listed with `~`, because a path in the home is spelled `~/…`. | ``` … can never match a reported path: it holds the operator home, and a path in the home is reported as `~/…`, so this root matches none of them; add "~" to the list``` |
+| A root has no trailing slash and no empty component. | ``` … can never match a reported path: a reported path has no trailing slash; write "<root>"``` |
+| A root, or the folder it would be created in, can be checked: it is not, and is not below, a broken symbolic link or a file, and no folder on its way refuses to be searched. | ``` `[locations] <name>` entry "<entry>" cannot be resolved: <reason>``` |
+
+A root that doesn't exist yet is accepted when its nearest existing folder passes the same checks,
+so `~/.cache/my-agent` matches once the agent creates it. Box checks the roots once, when it builds
+the policy for `run` or for a check. Two locations may list the same root.
+
+A location grants no access. The agent still reaches a directory only through
+[`[agent.filesystem]`](#agentfilesystem-and-toolnamefilesystem) and a policy permit. A rule that
+reads `context.input.locations.<name>` for a location this file does not declare refuses to load.
+A rule that first tests `context.input.locations has <name>` treats the location as optional: it
+loads in any box and applies only where this file declares the name. A history predicate on a
+location, such as `input.locations.<name>: true`, is always strict, so a rule with one refuses to
+load where this file doesn't declare the name, even beside `has`. [The filesystem
+actions](policy/actions.md#filesystem) show both forms.
+
+The startup disclosure prints one line for each location, after the agent's filesystem grants,
+with each root as written:
+
+```text
+strands-box: [locations] caches: ~/.cache/my-agent, /srv/cache  (a name for policy rules; grants no access)
+strands-box: [locations] project: ~/src/app  (a name for policy rules; grants no access)
+```
+
+A box that declares a location stores its record at version 41, and an older build refuses it.
+Without `[locations]`, the record is unchanged.
 
 ## `monty`
 
@@ -1526,7 +1596,8 @@ relative `workspace`, an `env` name the box owns, a relative `env.HOME` or `env.
 or relative `filesystem` path, a `filesystem` path carrying `..`, a duplicated `filesystem` path, an
 overlapping or all-hosts egress destination, a secretless egress entry, a literal egress secret,
 each [`[secret-source.<scheme>]`](#secret-sourcescheme) refusal,
-each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal, an `ingress` outside `[agent]`, an
+each [`[tool.<name>.grammar]`](#toolnamegrammar) refusal, each [`[locations]`](#locations) refusal,
+an `ingress` outside `[agent]`, an
 `[[agent.ingress]]` while `ingress` is off in `[experimental-features]`, more than
 five `[[agent.ingress]]` entries, an `[[agent.ingress]] listen` that is not an IP address and port, a
 port of 0, two entries with one `listen` port or one `workload_port`, and on macOS a `listen` port

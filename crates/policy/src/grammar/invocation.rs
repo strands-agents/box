@@ -316,8 +316,12 @@ mod tests {
         let git = valid("git");
         let history = tempfile::tempdir().expect("history directory");
         let path = history.path().join("dogwood.redb");
-        let actions = crate::schema::composed_action_schema(&[git.schema()], &[])
-            .expect("grammar schema composes");
+        let actions = crate::schema::composed_action_schema(
+            &crate::schema::NO_LOCATIONS,
+            &[git.schema()],
+            &[],
+        )
+        .expect("grammar schema composes");
         let service = crate::dogwood::service_schema().expect("event schema parses");
         let action_schema =
             PolicySchema::from_cedarschema_str(&actions.source).expect("action schema parses");
