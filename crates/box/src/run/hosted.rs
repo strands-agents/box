@@ -46,6 +46,7 @@ use crate::run::contain::boundary::{
 };
 use crate::run::credential;
 use crate::run::lock::{BoxLive, Lock};
+use crate::run::secret_sources::RouteSecrets;
 use crate::run::telemetry;
 
 type RunningPolicy = (Arc<PolicyEngine>, Arc<telemetry::Collector>);
@@ -214,7 +215,12 @@ fn select_tool_with_commands(
             trailing: args.to_vec(),
             shebang_interpreters: ShebangInterpreters::MustBeListed,
         }),
-        None => Err(no_match()),
+        None => Err(refuse(
+            "no `[tool.<name>] command` matches this program and its leading arguments. The \
+             `[tool.<name>]` tables are fixed when the box starts, so a program created during \
+             the run runs only under an `[agent.filesystem] exec` entry"
+                .to_string(),
+        )),
     }
 }
 
@@ -354,11 +360,7 @@ fn tool_spawner(
     recorder: Arc<telemetry::DecisionRecorder>,
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     registration: Option<super::native_enforcement::Registration>,
 ) -> ToolSpawner {
@@ -377,11 +379,7 @@ fn tool_spawner(
         let recorder = Arc::clone(&recorder);
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         ))]
         let registration = registration.clone();
         let selection = Arc::clone(&spawn_selection);
@@ -448,11 +446,7 @@ fn tool_spawner(
                 &layout,
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
-                    all(
-                        target_os = "linux",
-                        feature = "native-filesystem-policy",
-                        box_native_adapter_tests
-                    )
+                    all(target_os = "linux", feature = "native-filesystem-policy")
                 ))]
                 registration,
             )
@@ -479,11 +473,7 @@ fn tool_spawner(
 pub(crate) struct McpLeafLauncher {
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     registration: Option<super::native_enforcement::Registration>,
     attachment: Attachment,
@@ -507,22 +497,14 @@ impl McpLeafLauncher {
         workspace: PathBuf,
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         ))]
         registration: Option<super::native_enforcement::Registration>,
     ) -> Self {
         Self {
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             registration,
             attachment,
@@ -652,11 +634,7 @@ impl McpLeafLauncher {
             &self.layout,
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             self.registration.clone(),
         )
@@ -714,11 +692,7 @@ pub(crate) struct HostedBox {
 
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     _file_monitor: Option<super::native_enforcement::FileMonitor>,
 
@@ -726,8 +700,15 @@ pub(crate) struct HostedBox {
     /// raced against the broker and the registry in [`stopped`](Self::stopped).
     coordinator_fatal: tokio::sync::mpsc::UnboundedReceiver<BoxError>,
 
-    /// The egress gateway. Dropped after the broker, which joins its accept thread.
-    _proxy: MitmHandle,
+    /// The egress gateway. Shutdown joins its listener and connection workers after the broker.
+    _proxy: Option<MitmHandle>,
+
+    /// Own the experimental history timer until all event producers have stopped.
+    #[cfg(feature = "experimental-idle-flush")]
+    _history_flusher: Option<policy::HistoryFlusher>,
+
+    #[cfg(all(test, feature = "experimental-idle-flush"))]
+    history_test_failure: Option<(bool, &'static str)>,
 
     /// This box's collector. Dropped after the gateway, and the drain that precedes teardown is
     /// what exports; a verdict taken after it reaches no target.
@@ -750,11 +731,7 @@ pub(crate) struct HostedBox {
 impl HostedBox {
     #[cfg(any(
         all(target_os = "macos", feature = "native-filesystem-policy"),
-        all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        )
+        all(target_os = "linux", feature = "native-filesystem-policy")
     ))]
     pub(crate) fn native_registration(&self) -> Option<super::native_enforcement::Registration> {
         self._file_monitor
@@ -844,17 +821,23 @@ impl HostedBox {
         policy: Arc<PolicyEngine>,
         commands: Arc<ConfiguredCommands>,
         collector: Arc<telemetry::Collector>,
+        policy_decisions: Option<crate::PolicyDecisionSender>,
+        secrets: RouteSecrets,
         protected_sources: &[AuthoritySource],
         owned: Lock,
         workspace: &Path,
         home: &Path,
-        #[cfg(all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        ))]
-        entry_guard: Option<std::sync::Arc<crate::run::native_enforcement::EntryGuard>>,
+        #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))] entry_guard: Option<
+            std::sync::Arc<crate::run::native_enforcement::EntryGuard>,
+        >,
     ) -> Result<Self, BoxError> {
+        #[cfg(feature = "experimental-idle-flush")]
+        let history_flusher = {
+            let interval = std::time::Duration::from_secs(1);
+            policy.set_periodic_history(1_000, interval)?;
+            policy.start_history_flusher(interval)?
+        };
+
         // Whatever a previous owner left is stale, because the lock above just proved nothing of
         // this box is running.
         BoxLive::withdraw(root);
@@ -872,16 +855,18 @@ impl HostedBox {
         let trust_certificate = Arc::new(root.open_trust_certificate()?);
 
         let telemetry_port = collector.port();
-        let recorder = telemetry::DecisionRecorder::over(Arc::clone(&collector));
-        let projection = credential::workspace(&record.egress_routes()?)?;
+        let recorder = telemetry::DecisionRecorder::over(Arc::clone(&collector), policy_decisions);
         // A backend entry opens one vault holding its strip-phantom destination secret (a phantom is
         // provisioned to the workload and stripped at the gateway) and its box-owned backend token
         // (attached at the gateway, never placed in the workload environment). One control per
         // destination.
-        let credential::Projection {
-            capabilities: backend_capabilities,
-            workload_environment: backend_environment,
-        } = credential::backend_capabilities(&record.backend_credentials()?)?;
+        let (
+            projection,
+            credential::Projection {
+                capabilities: backend_capabilities,
+                workload_environment: backend_environment,
+            },
+        ) = credential::project(record, secrets)?;
         let capabilities = CapabilitySet::new(
             projection
                 .capabilities
@@ -969,7 +954,7 @@ impl HostedBox {
             },
             capabilities,
             // The box every request is judged as, taken from the root this process opened.
-            telemetry::EgressDecisionInterceptor::over(egress_policy),
+            telemetry::EgressDecisionInterceptor::over(egress_policy, Arc::clone(&recorder)),
             Box::new(telemetry::EgressDecisionRecorder::over(Arc::clone(
                 &recorder,
             ))),
@@ -1043,19 +1028,11 @@ impl HostedBox {
         let broker_listener = BrokerHost::bind(root)?;
         #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
         let monitor_required = record.experimental_features.native_filesystem_policy;
-        #[cfg(all(
-            target_os = "linux",
-            feature = "native-filesystem-policy",
-            box_native_adapter_tests
-        ))]
+        #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
         let monitor_required = super::native_enforcement::selected(record);
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         ))]
         let file_monitor = if monitor_required {
             Some(super::native_enforcement::FileMonitor::start(
@@ -1064,11 +1041,7 @@ impl HostedBox {
                 root.name(),
                 &crate::record::layout::operator_home_directory()?,
                 coordinator_fatal_sender.clone(),
-                #[cfg(all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                ))]
+                #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
                 entry_guard,
             )?)
         } else {
@@ -1088,11 +1061,7 @@ impl HostedBox {
             Arc::clone(&recorder),
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             file_monitor.as_ref().map(|monitor| monitor.registration()),
         ));
@@ -1109,11 +1078,7 @@ impl HostedBox {
                 workspace.to_path_buf(),
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
-                    all(
-                        target_os = "linux",
-                        feature = "native-filesystem-policy",
-                        box_native_adapter_tests
-                    )
+                    all(target_os = "linux", feature = "native-filesystem-policy")
                 ))]
                 file_monitor.as_ref().map(|monitor| monitor.registration()),
             ))
@@ -1145,15 +1110,15 @@ impl HostedBox {
             broker: Some(broker),
             #[cfg(any(
                 all(target_os = "macos", feature = "native-filesystem-policy"),
-                all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                )
+                all(target_os = "linux", feature = "native-filesystem-policy")
             ))]
             _file_monitor: file_monitor,
             coordinator_fatal,
-            _proxy: proxy,
+            _proxy: Some(proxy),
+            #[cfg(feature = "experimental-idle-flush")]
+            _history_flusher: Some(history_flusher),
+            #[cfg(all(test, feature = "experimental-idle-flush"))]
+            history_test_failure: None,
             _collector: collector,
             attachment,
             approved,
@@ -1191,24 +1156,48 @@ impl HostedBox {
         &self.approved
     }
 
-    pub(crate) fn stop_native(&mut self) -> Result<(), BoxError> {
+    /// Stop every event producer before the final history flush.
+    pub(crate) fn shutdown(&mut self) -> Result<(), BoxError> {
+        *RUNNING_POLICY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
+        if let Some(discovery) = &self.discovery {
+            discovery.close();
+        }
+        drop(self.broker.take());
+        drop(self.discovery.take());
+        let native = self.stop_native();
+        drop(self._proxy.take());
+        #[cfg(feature = "experimental-idle-flush")]
+        let history = match self._history_flusher.take() {
+            Some(flusher) if native.is_ok() && !std::thread::panicking() => {
+                flusher.shutdown().map(|_| ()).map_err(BoxError::from)
+            }
+            Some(flusher) => flusher.stop().map(|_| ()).map_err(BoxError::from),
+            None => Ok(()),
+        };
+        #[cfg(not(feature = "experimental-idle-flush"))]
+        let history = Ok(());
+        #[cfg(all(test, feature = "experimental-idle-flush"))]
+        let history = with_shutdown(
+            history,
+            match self.history_test_failure.take() {
+                Some((_, reason)) => {
+                    Err(policy::PolicyError::Evaluation(reason.to_string()).into())
+                }
+                None => Ok(()),
+            },
+        );
+        with_shutdown(native, history)
+    }
+
+    fn stop_native(&mut self) -> Result<(), BoxError> {
         #[cfg(any(
             all(target_os = "macos", feature = "native-filesystem-policy"),
-            all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            )
+            all(target_os = "linux", feature = "native-filesystem-policy")
         ))]
-        if self._file_monitor.is_some() {
-            if let Some(discovery) = &self.discovery {
-                discovery.close();
-            }
-            drop(self.broker.take());
-            drop(self.discovery.take());
-            if let Some(mut monitor) = self._file_monitor.take() {
-                monitor.stop()?;
-            }
+        if let Some(mut monitor) = self._file_monitor.take() {
+            monitor.stop()?;
         }
         Ok(())
     }
@@ -1223,9 +1212,29 @@ impl HostedBox {
             .broker
             .as_mut()
             .expect("the broker exists while the box is hosted");
+        #[cfg(feature = "experimental-idle-flush")]
+        let history = self
+            ._history_flusher
+            .as_ref()
+            .expect("the history worker exists while the box is hosted");
+        #[cfg(feature = "experimental-idle-flush")]
+        let history_failure = history_failed(|| {
+            #[cfg(test)]
+            if let Some((true, reason)) = self.history_test_failure {
+                return policy::HistoryFlushSnapshot {
+                    failures: 1,
+                    last_error: Some(reason.to_string()),
+                    ..Default::default()
+                };
+            }
+            history.snapshot()
+        });
+        #[cfg(not(feature = "experimental-idle-flush"))]
+        let history_failure = std::future::pending::<BoxError>();
         tokio::select! {
             failure = discovery.stopped() => failure,
             failure = broker.stopped() => failure,
+            failure = history_failure => failure,
             failure = self.coordinator_fatal.recv() =>
                 failure.unwrap_or_else(|| crate::error::McpDiscoveryError::NoOutcome.into()),
         }
@@ -1273,14 +1282,39 @@ fn program_finds_command(
 
 impl Drop for HostedBox {
     fn drop(&mut self) {
-        *RUNNING_POLICY
-            .lock()
-            .unwrap_or_else(|error| error.into_inner()) = None;
-        if let Some(discovery) = &self.discovery {
-            discovery.close();
+        if let Err(error) = self.shutdown() {
+            eprintln!("strands-box: shutdown failed: {error}");
         }
-        drop(self.broker.take());
-        drop(self.discovery.take());
+    }
+}
+
+/// Preserve the run's failure and any additional shutdown failure.
+pub(crate) fn with_shutdown<T>(
+    outcome: Result<T, BoxError>,
+    shutdown: Result<(), BoxError>,
+) -> Result<T, BoxError> {
+    match (outcome, shutdown) {
+        (result, Ok(())) => result,
+        (Ok(_), Err(error)) => Err(error),
+        (Err(outcome), Err(shutdown)) => Err(crate::error::SuperviseError::Control {
+            reason: format!("{outcome}; shutdown also failed: {shutdown}"),
+        }
+        .into()),
+    }
+}
+
+#[cfg(feature = "experimental-idle-flush")]
+async fn history_failed(snapshot: impl Fn() -> policy::HistoryFlushSnapshot) -> BoxError {
+    loop {
+        let state = snapshot();
+        if let Some(error) = state.last_error {
+            return policy::PolicyError::Evaluation(format!(
+                "history flush failed {} time(s): {error}",
+                state.failures
+            ))
+            .into();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
 }
 
@@ -1334,6 +1368,7 @@ mod tests {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             locations: Default::default(),
@@ -1358,6 +1393,7 @@ mod tests {
             mcp,
             contained_mcp: Default::default(),
             telemetry: Default::default(),
+            secret_source: Default::default(),
         }
     }
 
@@ -2116,10 +2152,10 @@ mod tests {
         root: &BoxRoot,
         record: &Record,
     ) -> (HostedBox, Arc<telemetry::Collector>) {
-        let collector = collector(operator.path());
-        let policy = HostedBox::prepare_policy(
+        let (hosted, collector, _) = open_hosted_with_sources(
+            operator,
             root,
-            &policy::Operator::unanchored(),
+            record,
             vec![policy::Policy {
                 origin: root.policy(),
                 text: r#"permit (principal, action == Box::Action::"mcp:call", resource);
@@ -2127,6 +2163,21 @@ permit (principal, action == Box::Action::"shell:spawn", resource);
 permit (principal, action == alpha::Action::"read", resource);"#
                     .to_string(),
             }],
+        );
+        (hosted, collector)
+    }
+
+    fn open_hosted_with_sources(
+        operator: &tempfile::TempDir,
+        root: &BoxRoot,
+        record: &Record,
+        sources: Vec<policy::Policy>,
+    ) -> (HostedBox, Arc<telemetry::Collector>, Arc<PolicyEngine>) {
+        let collector = collector(operator.path());
+        let policy = HostedBox::prepare_policy(
+            root,
+            &policy::Operator::unanchored(),
+            sources,
             policy::ToolGrammars::default(),
         )
         .map(Arc::new)
@@ -2139,22 +2190,339 @@ permit (principal, action == alpha::Action::"read", resource);"#
         let hosted = HostedBox::open(
             root,
             record,
-            policy,
+            Arc::clone(&policy),
             commands,
             Arc::clone(&collector),
+            None,
+            RouteSecrets::none(),
             &[],
             owned,
             &workspace,
             &workspace,
-            #[cfg(all(
-                target_os = "linux",
-                feature = "native-filesystem-policy",
-                box_native_adapter_tests
-            ))]
+            #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
             None,
         )
         .expect("the box is hosted");
-        (hosted, collector)
+        (hosted, collector, policy)
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hosted_idle_timer_flushes_pending_history_without_shutdown() {
+        const SOURCE: &str = r#"
+permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource);
+forbid(principal, action == Box::Action::"fs:write", resource)
+when temporal {
+    formerly within 1h (Box::Action::"fs:read"::response{
+        input.operation: Box::FsReadOperation::"read_content"
+    })
+};
+"#;
+        let operator = tempfile::tempdir_in(
+            std::env::temp_dir()
+                .canonicalize()
+                .expect("canonical temporary directory"),
+        )
+        .expect("operator home");
+        let root = crate::record::layout::testing::box_root(operator.path(), "codex");
+        let record = record_with_mcp(&root, Vec::new());
+        let sources = vec![policy::Policy {
+            origin: root.policy(),
+            text: SOURCE.to_string(),
+        }];
+        let file = operator.path().join("read-marker");
+        std::fs::write(&file, b"read marker").expect("fixture file");
+        let path = policy::PathResolver::over([operator.path().to_path_buf()])
+            .expect("resolver")
+            .approve_host(&file)
+            .expect("read path");
+        let governed = policy::GovernedBox::assigned("codex");
+        let principal = policy::Principal::agent();
+        let allows_write = |authority: &PolicyEngine| {
+            authority
+                .decide(
+                    &governed,
+                    &principal,
+                    &policy::Request::Fs {
+                        path: &path,
+                        operation: policy::FsOperation::WriteContent,
+                    },
+                )
+                .0
+                .is_allow()
+        };
+        let recover_copy = |name: &str| {
+            let copied = operator.path().join(name);
+            std::fs::copy(root.dogwood_database(), &copied).expect("copy the persisted database");
+            PolicyEngine::open(sources.clone(), &copied).expect("copied history recovers")
+        };
+        let (mut hosted, _collector, engine) =
+            open_hosted_with_sources(&operator, &root, &record, sources.clone());
+        assert!(
+            allows_write(&recover_copy("without-read.redb")),
+            "the control must allow writes without a recorded read"
+        );
+        let (verdict, request) = engine.decide(
+            &governed,
+            &principal,
+            &policy::Request::Fs {
+                path: &path,
+                operation: policy::FsOperation::ReadContent,
+            },
+        );
+        assert!(verdict.is_allow(), "{verdict:?}");
+        assert_eq!(
+            std::fs::read(&file).expect("permitted read"),
+            b"read marker"
+        );
+        engine
+            .record(
+                &governed,
+                &principal,
+                &request.expect("read token"),
+                &policy::Outcome::Fs {
+                    path: &file,
+                    operation: policy::FsOperation::ReadContent,
+                    result: policy::FsResult::Completed,
+                },
+            )
+            .expect("read outcome records");
+        assert!(
+            !allows_write(&engine),
+            "the live history must contain the read"
+        );
+
+        // Use the worker and persistence settings installed by HostedBox::open.
+        let flusher = hosted._history_flusher.as_ref().expect("worker exists");
+        // One completion could be in flight. Two ensure a flush started after the read.
+        let minimum_successes = flusher.snapshot().successes + 2;
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let snapshot = flusher.snapshot();
+                assert_eq!(snapshot.failures, 0, "{snapshot:?}");
+                assert!(snapshot.last_error.is_none(), "{snapshot:?}");
+                if snapshot.successes >= minimum_successes {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the hosted timer must complete a flush while submissions are idle");
+        assert!(
+            !allows_write(&recover_copy("after-idle-timer.redb")),
+            "the timer must persist the read while the host and engine remain alive"
+        );
+        assert!(
+            hosted._history_flusher.is_some(),
+            "the hosted timer is still owned"
+        );
+        assert!(
+            Arc::strong_count(&engine) > 1,
+            "the hosted engine is still shared"
+        );
+        hosted
+            .shutdown()
+            .expect("explicit hosted shutdown succeeds");
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hosted_shutdown_flushes_pending_history_without_dropping_the_engine() {
+        const SOURCE: &str = r#"
+permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource);
+forbid(principal, action == Box::Action::"fs:write", resource)
+when temporal {
+    formerly within 1h (Box::Action::"fs:read"::response{
+        input.operation: Box::FsReadOperation::"read_content"
+    })
+};
+"#;
+        let operator = tempfile::tempdir_in(
+            std::env::temp_dir()
+                .canonicalize()
+                .expect("canonical temporary directory"),
+        )
+        .expect("operator home");
+        let root = crate::record::layout::testing::box_root(operator.path(), "codex");
+        let record = record_with_mcp(&root, Vec::new());
+        let sources = vec![policy::Policy {
+            origin: root.policy(),
+            text: SOURCE.to_string(),
+        }];
+        let (mut hosted, _collector, engine) =
+            open_hosted_with_sources(&operator, &root, &record, sources.clone());
+        drop(hosted.discovery.take());
+        hosted
+            ._history_flusher
+            .take()
+            .expect("worker exists")
+            .shutdown()
+            .expect("initial flush");
+        let hour = std::time::Duration::from_secs(3600);
+        engine
+            .set_periodic_history(u32::MAX, hour)
+            .expect("submissions cannot trigger a flush");
+        hosted._history_flusher = Some(
+            engine
+                .start_history_flusher(hour)
+                .expect("idle timer starts"),
+        );
+        let file = operator.path().join("read-marker");
+        std::fs::write(&file, b"read marker").expect("fixture file");
+        let path = policy::PathResolver::over([operator.path().to_path_buf()])
+            .expect("resolver")
+            .approve_host(&file)
+            .expect("read path");
+        let governed = policy::GovernedBox::assigned("codex");
+        let principal = policy::Principal::agent();
+        let (verdict, request) = engine.decide(
+            &governed,
+            &principal,
+            &policy::Request::Fs {
+                path: &path,
+                operation: policy::FsOperation::ReadContent,
+            },
+        );
+        assert!(verdict.is_allow(), "{verdict:?}");
+        assert_eq!(
+            std::fs::read(&file).expect("permitted read"),
+            b"read marker"
+        );
+        engine
+            .record(
+                &governed,
+                &principal,
+                &request.expect("read token"),
+                &policy::Outcome::Fs {
+                    path: &file,
+                    operation: policy::FsOperation::ReadContent,
+                    result: policy::FsResult::Completed,
+                },
+            )
+            .expect("read outcome records");
+        let allows_write = |authority: &PolicyEngine| {
+            authority
+                .decide(
+                    &governed,
+                    &principal,
+                    &policy::Request::Fs {
+                        path: &path,
+                        operation: policy::FsOperation::WriteContent,
+                    },
+                )
+                .0
+                .is_allow()
+        };
+        assert!(
+            !allows_write(&engine),
+            "the live history must contain the read"
+        );
+        let recover_copy = |name: &str| {
+            let copied = operator.path().join(name);
+            std::fs::copy(root.dogwood_database(), &copied).expect("copy the persisted database");
+            PolicyEngine::open(sources.clone(), &copied).expect("copied history recovers")
+        };
+        assert!(
+            allows_write(&recover_copy("before.redb")),
+            "the control must exclude unflushed history"
+        );
+        assert_eq!(
+            hosted
+                ._history_flusher
+                .as_ref()
+                .expect("worker exists")
+                .snapshot()
+                .attempts,
+            0
+        );
+        hosted.shutdown().expect("explicit hosted shutdown flushes");
+        assert!(
+            !allows_write(&recover_copy("after.redb")),
+            "shutdown must persist the read before engine Drop"
+        );
+        assert_eq!(
+            Arc::strong_count(&engine),
+            1,
+            "shutdown must release every producer and timer reference"
+        );
+        hosted.shutdown().expect("shutdown is idempotent");
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_reported_history_failure_stops_the_supervised_workload() {
+        let workload = supervised_workload_with(HELD_GROUP, 2, |hosted| {
+            hosted.history_test_failure = Some((true, "injected periodic history failure"));
+        })
+        .await;
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            workload.contained.wait(),
+        )
+        .await
+        .expect("history failure stops the run")
+        .expect_err("the run cannot report success");
+        assert!(
+            error
+                .to_string()
+                .contains("injected periodic history failure"),
+            "{error}"
+        );
+        assert!(
+            processes_exit(&workload.pids).await,
+            "history failure must reap all workload processes"
+        );
+    }
+
+    #[cfg(feature = "experimental-idle-flush")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_final_history_failure_overrides_a_successful_workload_exit() {
+        let workload = supervised_workload_with(
+            r#"printf '%s' "$$" > "$1"; while [ ! -e "$1.finished" ]; do sleep 0.01; done; exit 0"#,
+            1,
+            |hosted| {
+                hosted.history_test_failure = Some((false, "injected final history failure"));
+            },
+        )
+        .await;
+        std::fs::write(
+            workload
+                ._operator
+                .path()
+                .join("scratch/workload.pids.finished"),
+            b"finish",
+        )
+        .expect("let the workload exit successfully");
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            workload.contained.wait(),
+        )
+        .await
+        .expect("the run shuts down")
+        .expect_err("final history failure must override exit zero");
+        assert!(
+            error.to_string().contains("injected final history failure"),
+            "{error}"
+        );
+        assert!(
+            processes_exit(&workload.pids).await,
+            "the workload must be gone"
+        );
+    }
+
+    #[test]
+    fn shutdown_keeps_the_original_failure_and_the_history_failure() {
+        let error = with_shutdown::<()>(
+            Err(policy::PolicyError::Evaluation("original failure".to_string()).into()),
+            Err(policy::PolicyError::Evaluation("final history failure".to_string()).into()),
+        )
+        .expect_err("both failures remain visible");
+        let message = error.to_string();
+        assert!(
+            message.contains("original failure") && message.contains("final history failure"),
+            "{message}"
+        );
     }
 
     /// **Opening the box judges every process table's reach once**, so a tool spawn acts on what
@@ -2222,15 +2590,13 @@ permit (principal, action == alpha::Action::"read", resource);"#
                 policy,
                 Arc::new(ConfiguredCommands::load(&record).expect("the commands load")),
                 collector,
+                None,
+                RouteSecrets::none(),
                 &[],
                 owned,
                 &workspace,
                 &workspace,
-                #[cfg(all(
-                    target_os = "linux",
-                    feature = "native-filesystem-policy",
-                    box_native_adapter_tests
-                ))]
+                #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
                 None,
             )
         })
@@ -2239,6 +2605,45 @@ permit (principal, action == alpha::Action::"read", resource);"#
         .to_string();
         assert!(refusal.contains("[tool.u]"), "{refusal}");
         assert!(refusal.contains("is not there"), "{refusal}");
+    }
+
+    /// **A left-out tool's lists are not judged**, so the box opens with no reach for that table,
+    /// even when a list names a path that would refuse a tool that is installed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_left_out_tool_brings_no_reach() {
+        let operator = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(operator.path(), "codex");
+        let home = operator.path().canonicalize().expect("a canonical home");
+        let mut record = record(&root);
+        record.tool.insert(
+            "gone".to_string(),
+            ProcessSpec {
+                file_watching: false,
+                native_filesystem_policy: None,
+                command: vec![home.join("bin/gone").display().to_string()],
+                workspace: None,
+                env: Default::default(),
+                filesystem: crate::record::config::process::Filesystem {
+                    read: vec![home.join("absent")],
+                    write: vec![home.clone()],
+                    ..Default::default()
+                },
+                network: None,
+                grammar: None,
+                ingress: Vec::new(),
+            },
+        );
+
+        let left_out =
+            crate::run::commands::leave_out_absent(&mut record).expect("the tool is left out");
+        let hosted = crate::test_support::with_operator_home(operator.path(), || {
+            open_hosted(&operator, &root, &record)
+        });
+
+        assert_eq!(left_out.len(), 1);
+        assert!(hosted.approved().table("[agent]").is_some());
+        assert!(hosted.approved().table("[tool.gone]").is_none());
+        assert!(hosted.approved().commands().get("gone").is_none());
     }
 
     #[cfg(unix)]
@@ -2719,6 +3124,15 @@ while :; do :; done"#
 
     #[cfg(unix)]
     async fn supervised_workload(script: &str, pid_count: usize) -> SupervisedWorkload {
+        supervised_workload_with(script, pid_count, |_| {}).await
+    }
+
+    #[cfg(unix)]
+    async fn supervised_workload_with(
+        script: &str,
+        pid_count: usize,
+        configure: impl FnOnce(&mut HostedBox),
+    ) -> SupervisedWorkload {
         let supervising = SIGNALS.lock().await;
         let operator = tempfile::tempdir().expect("operator home");
         let root = crate::record::layout::testing::box_root(operator.path(), "codex");
@@ -2738,7 +3152,8 @@ while :; do :; done"#
         ];
         agent.filesystem.read = vec![scratch.clone()];
         agent.filesystem.write = vec![scratch.clone()];
-        let hosted = open_hosted(&operator, &root, &record);
+        let mut hosted = open_hosted(&operator, &root, &record);
+        configure(&mut hosted);
         let boundary = crate::test_support::with_operator_home(operator.path(), || {
             Boundary::translate(
                 record.agent.as_ref().expect("the agent"),
@@ -3050,11 +3465,7 @@ while :; do :; done"#
                 workspace,
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
-                    all(
-                        target_os = "linux",
-                        feature = "native-filesystem-policy",
-                        box_native_adapter_tests
-                    )
+                    all(target_os = "linux", feature = "native-filesystem-policy")
                 ))]
                 None,
             );
@@ -3113,11 +3524,7 @@ while :; do :; done"#
                 telemetry::DecisionRecorder::discarding(),
                 #[cfg(any(
                     all(target_os = "macos", feature = "native-filesystem-policy"),
-                    all(
-                        target_os = "linux",
-                        feature = "native-filesystem-policy",
-                        box_native_adapter_tests
-                    )
+                    all(target_os = "linux", feature = "native-filesystem-policy")
                 ))]
                 None,
             );
@@ -3174,6 +3581,7 @@ while :; do :; done"#
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
             file_attributes: false,
+            monty: true,
             gateway: Default::default(),
             limits: Default::default(),
             locations: Default::default(),
@@ -3191,6 +3599,7 @@ while :; do :; done"#
             mcp: Vec::new(),
             contained_mcp: Default::default(),
             telemetry: Default::default(),
+            secret_source: Default::default(),
         }
     }
 
@@ -3529,6 +3938,68 @@ while :; do :; done"#
         assert_eq!(selected.table, "[tool.sh]");
     }
 
+    /// **A file that appears at a left-out tool's path never runs with that tool's reach**: the run
+    /// settled its tools before the file existed, so no table selects the file, and only an `exec`
+    /// entry of the caller's own runs it, in the caller's boundary.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_planted_at_a_left_out_tools_path_never_runs_with_its_reach() {
+        let root = tempfile::tempdir().expect("a directory");
+        let root = root.path().canonicalize().expect("canonical");
+        let bin = root.join("bin");
+        let planted = bin.join("late");
+        let mut record = selection_record(&[
+            ("sh", &["/bin/sh"]),
+            ("late", &[planted.to_str().expect("UTF-8")]),
+        ]);
+        let late = record.tool.get_mut("late").expect("the late tool");
+        late.filesystem.read = vec![root.join("secrets")];
+        late.filesystem.write = vec![root.clone()];
+        let left_out =
+            crate::run::commands::leave_out_absent(&mut record).expect("the tool is left out");
+        std::fs::create_dir_all(&bin).expect("a bin tree");
+        std::fs::copy(Path::new("/bin/sh").canonicalize().expect("sh"), &planted)
+            .expect("a planted file");
+        let planted = planted.canonicalize().expect("canonical");
+        let commands = crate::run::commands::ConfiguredCommands::load(&record).expect("commands");
+
+        let refusal = select_tool_with_commands(
+            &record,
+            &selection_attachment(),
+            &planted,
+            &planted,
+            &[],
+            &commands,
+        )
+        .err()
+        .expect("no table selects the planted file")
+        .to_string();
+        record.agent.as_mut().expect("an agent").filesystem.exec = vec![bin.clone()];
+        let caller = record.agent.clone().expect("an agent").filesystem;
+        let selected = select_tool_with_commands(
+            &record,
+            &selection_attachment(),
+            &planted,
+            &planted,
+            &[],
+            &commands,
+        )
+        .expect("the caller's own exec entry runs it");
+
+        assert_eq!(left_out.len(), 1);
+        assert!(commands.get("late").is_none());
+        assert!(
+            refusal.contains("no `[tool.<name>] command` matches"),
+            "{refusal}"
+        );
+        assert_eq!(selected.table, "[agent]");
+        assert_eq!(selected.spec.filesystem, caller);
+        assert_eq!(
+            selected.shebang_interpreters,
+            ShebangInterpreters::MustBeListed
+        );
+    }
+
     /// **A program under one of the caller's own `exec` entries runs in the caller's boundary** when
     /// no table names it: the caller's spec with the program as its command, the arguments trailing.
     #[cfg(unix)]
@@ -3651,6 +4122,10 @@ while :; do :; done"#
                 .contains("no `[tool.<name>] command` matches this program"),
             "{error}"
         );
+        assert!(
+            !error.to_string().contains("fixed when the box starts"),
+            "a program a table names is a tool, so its refusal is about arguments: {error}"
+        );
     }
 
     /// **A program under a caller `deny` entry is refused** even inside a caller `exec` entry.
@@ -3738,6 +4213,12 @@ while :; do :; done"#
                 .to_string()
                 .contains("no `[tool.<name>] command` matches this program"),
             "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("runs only under an `[agent.filesystem] exec` entry"),
+            "a program no table names says that tools are fixed at start: {error}"
         );
     }
 

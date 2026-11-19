@@ -23,7 +23,7 @@ use super::server::{
     MCP_BROKER_IO_TIMEOUT, MCP_DISCOVERY_RESPONSE_TIMEOUT, RunningMcpServer, read_server_frame,
     validate_initialize_result,
 };
-use crate::run::telemetry::{DecisionRecorder, EffectiveDecision};
+use crate::run::telemetry::{DecisionRecorder, EffectiveDecision, McpToolCallRecord};
 
 mod protocol_2026_07_28;
 
@@ -105,6 +105,8 @@ struct RecordedCall {
     tool: Option<String>,
     prompt: Option<String>,
     uri: Option<String>,
+    /// The call's tool-call record, which this call's reply ends.
+    tool_call: Option<McpToolCallRecord>,
 }
 
 /// A client's `tools/list` awaiting the server's reply.
@@ -789,6 +791,7 @@ enum ClientRequestAdmission {
         Box<EffectiveDecision>,
         Option<RequestId>,
         Option<PendingToolResponse>,
+        Option<Box<McpToolCallRecord>>,
     ),
     Refused,
 }
@@ -807,31 +810,51 @@ async fn admit_client_request(
         &Principal::agent(),
         exchange.running.server(),
         frame,
+        recorder,
     )? {
         McpRequestAdmission::Undecided => Ok(ClientRequestAdmission::Undecided),
-        McpRequestAdmission::Allowed(decision, request_id, tool_response) => Ok(
-            ClientRequestAdmission::Permit(Box::new(decision), Some(request_id), tool_response),
-        ),
-        McpRequestAdmission::PolicyPending(decision, _) if pending_is_bootstrap => {
+        McpRequestAdmission::Allowed(decision, request_id, tool_response, tool_call) => {
+            Ok(ClientRequestAdmission::Permit(
+                Box::new(decision),
+                Some(request_id),
+                tool_response,
+                tool_call.map(Box::new),
+            ))
+        }
+        McpRequestAdmission::PolicyPending(decision, _, tool_call) if pending_is_bootstrap => {
             Ok(ClientRequestAdmission::Permit(
                 Box::new(decision.into_enforcement_permit("policy-pending-bootstrap")),
                 None,
                 None,
+                tool_call.map(Box::new),
             ))
         }
-        McpRequestAdmission::PolicyPending(decision, refusal)
-        | McpRequestAdmission::Denied {
-            decision, refusal, ..
-        } => {
-            recorder.record(decision);
-            match policy_denial_response(frame, &refusal.to_string()) {
-                Some(response) => {
-                    emit_text(exchange.frames, exchange.program, response.as_bytes(), None).await?;
-                    Ok(ClientRequestAdmission::Refused)
-                }
-                None => Err(refusal),
+        McpRequestAdmission::PolicyPending(decision, refusal, tool_call) => {
+            if let Some(record) = tool_call {
+                record.refused();
             }
+            refuse_client_request(frame, exchange, decision, refusal).await
         }
+        McpRequestAdmission::Denied { decision, refusal } => {
+            refuse_client_request(frame, exchange, decision, refusal).await
+        }
+    }
+}
+
+/// Record a refused client request and answer it with the refusal.
+async fn refuse_client_request(
+    frame: &str,
+    exchange: &Exchange<'_>,
+    decision: EffectiveDecision,
+    refusal: io::Error,
+) -> io::Result<ClientRequestAdmission> {
+    exchange.connection.recorder.record(decision);
+    match policy_denial_response(frame, &refusal.to_string()) {
+        Some(response) => {
+            emit_text(exchange.frames, exchange.program, response.as_bytes(), None).await?;
+            Ok(ClientRequestAdmission::Refused)
+        }
+        None => Err(refusal),
     }
 }
 
@@ -1002,6 +1025,18 @@ async fn handle_request(
                 policy::CatalogRefusal::NotListed => refusal.to_string(),
                 _ => policy::CatalogRefusal::NotAccepted.to_string(),
             };
+            // A call the catalog refuses still states its arguments, as one policy refuses does,
+            // and never ran, so it records no completion.
+            if let Some(record) = target.as_ref().and_then(|target| {
+                exchange.connection.recorder.mcp_tool_called(
+                    exchange.running.server(),
+                    tool,
+                    &target.arguments,
+                    telemetry::Correlation::from_mcp(frame),
+                )
+            }) {
+                record.refused();
+            }
             exchange
                 .connection
                 .recorder
@@ -1023,21 +1058,25 @@ async fn handle_request(
             return Ok(ProgramAction::Continue);
         }
     }
-    let policy_request_id =
+    let mut policy_request_id =
         match admit_client_request(frame, exchange, policy, governed, false).await? {
             ClientRequestAdmission::Undecided => None,
-            ClientRequestAdmission::Permit(decision, request_id, tool_response) => {
+            ClientRequestAdmission::Permit(decision, request_id, tool_response, tool_call) => {
                 let request_id = request_id.ok_or_else(|| {
                     io::Error::other("permitted MCP request has no committed request token")
                 })?;
                 exchange.connection.recorder.record(*decision);
-                Some((request_id, tool_response))
+                Some((request_id, tool_response, tool_call))
             }
             ClientRequestAdmission::Refused => return Ok(ProgramAction::Continue),
         };
     if !protocol_2026_07_28::admit_input_answers(input_methods, request, exchange, policy, governed)
         .await?
     {
+        // The input answers were refused, so the call is never forwarded and never ran.
+        if let Some((_, _, Some(record))) = policy_request_id {
+            record.refused();
+        }
         return Ok(ProgramAction::Continue);
     }
     if let Some((key, _)) = request_id {
@@ -1051,15 +1090,20 @@ async fn handle_request(
                 RecordedCall {
                     request_id: policy_request_id
                         .as_ref()
-                        .map(|(id, _)| id.clone())
+                        .map(|(id, ..)| id.clone())
                         .ok_or_else(|| {
                             io::Error::other("recorded MCP call has no committed request token")
                         })?,
-                    tool_response: policy_request_id.and_then(|(_, tool_response)| tool_response),
                     method: target.method().to_string(),
                     tool: target.tool().map(str::to_string),
                     prompt: target.prompt().map(str::to_string),
                     uri: target.uri().map(str::to_string),
+                    tool_call: policy_request_id
+                        .as_mut()
+                        .and_then(|(_, _, tool_call)| tool_call.take())
+                        .map(|record| *record),
+                    tool_response: policy_request_id
+                        .and_then(|(_, tool_response, _)| tool_response),
                 },
             );
         }
@@ -1211,6 +1255,18 @@ fn record_response_leg(
         },
         _ => Ok(()),
     };
+    // Every tool call states how it ended, whether or not a rule named the tool, so a reader
+    // learns the answer the agent got and not only that the call was permitted.
+    if let Some(record) = call.tool_call {
+        let (reply, output) = match end {
+            CallEnd::Reply(frame) => (
+                McpReply::of_reply(frame),
+                frame.pointer("/result/structuredContent"),
+            ),
+            CallEnd::Ended(reply) => (reply, None),
+        };
+        record.completed(reply, output);
+    }
     coarse.and(tool).map_err(|error| {
         eprintln!("[broker] failed to record mcp:call response leg: {error}");
         io::Error::other(format!("failed to record MCP response: {error}"))

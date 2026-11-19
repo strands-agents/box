@@ -8,8 +8,7 @@ Audience: an operator writing a `policy.dw` who needs the exact action name, its
 fields, and which part of the box raises it. [Policy](../policy.md) introduces the rules, and
 [common rules](../policy.md#common-rules) shows each field in use.
 
-> **Status.** The vocabulary can change before 1.0.0. Pin the Box build you install. A rule that
-> names an action the build does not have refuses to load.
+A rule that names an action the build does not have refuses to load.
 
 ## The fixed parts
 

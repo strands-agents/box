@@ -289,6 +289,14 @@ mod tests {
     }
 
     #[test]
+    fn returns_a_json_object_whole() {
+        let object = r#"{"A":"a-value","B":"b-value","N":5}"#;
+        let src = source_with(CannedRunner(format!("{object}\n").into_bytes()));
+        let got = src.fetch(&locator("op://Private/GitHub/token")).unwrap();
+        assert_eq!(got.as_str(), object);
+    }
+
+    #[test]
     fn strips_crlf_and_then_refuses_an_interior_newline() {
         // The CRLF terminator is stripped (see `trim_trailing_newline`'s own tests); the remaining
         // `line1\nline2` is refused, because a multi-line value cannot be an HTTP header value

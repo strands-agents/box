@@ -9,7 +9,7 @@ use policy::{
 use serde_json::Value;
 
 use crate::record::config::mcp::McpServer;
-use crate::run::telemetry::{EffectiveDecision, capture_policy_action};
+use crate::run::telemetry::{EffectiveDecision, McpToolCallRecord, capture_policy_action};
 
 /// Resolve this launch to the server whose command, as Box starts it, the launch spells.
 pub(crate) fn admit_server<'a>(
@@ -108,12 +108,18 @@ pub(super) fn admit_tool_call(
     principal: &Principal,
     server: &str,
     frame: &str,
+    recorder: &crate::run::telemetry::DecisionRecorder,
 ) -> io::Result<McpRequestAdmission> {
     let correlation = telemetry::Correlation::from_mcp(frame);
     correlation.during(|| {
         let Some(target) = McpTarget::of_stdio_request(frame.as_bytes())? else {
             return Ok(McpRequestAdmission::Undecided);
         };
+        // Every decided `tools/call` states its own arguments, whichever gate refuses it, so a
+        // reader learns what was asked for and not only what was judged.
+        let tool_call = target.tool().and_then(|tool| {
+            recorder.mcp_tool_called(server, tool, &target.arguments, correlation.clone())
+        });
 
         let (decision, request_id) = policy.decide(
             governed,
@@ -141,9 +147,11 @@ pub(super) fn admit_tool_call(
                 return Ok(McpRequestAdmission::PolicyPending(
                     coarse,
                     io::Error::new(io::ErrorKind::PermissionDenied, decision.to_string()),
+                    tool_call,
                 ));
             }
             refused => {
+                end_refused(tool_call);
                 return Ok(McpRequestAdmission::Denied {
                     decision: coarse,
                     refusal: request_refusal(refused, target.method()),
@@ -174,6 +182,7 @@ pub(super) fn admit_tool_call(
             });
             match &refined {
                 Decision::Deny { .. } => {
+                    end_refused(tool_call);
                     return Ok(McpRequestAdmission::Denied {
                         decision: EffectiveDecision::from_policy(
                             refined_action
@@ -194,6 +203,7 @@ pub(super) fn admit_tool_call(
                         ),
                         request_id,
                         tool_response,
+                        tool_call,
                     ));
                 }
                 Decision::Allow { .. } => {
@@ -201,12 +211,22 @@ pub(super) fn admit_tool_call(
                         coarse,
                         request_id,
                         tool_response,
+                        tool_call,
                     ));
                 }
             }
         }
-        Ok(McpRequestAdmission::Allowed(coarse, request_id, None))
+        Ok(McpRequestAdmission::Allowed(
+            coarse, request_id, None, tool_call,
+        ))
     })
+}
+
+/// End the record of a call that never ran, which records no completion.
+fn end_refused(tool_call: Option<McpToolCallRecord>) {
+    if let Some(record) = tool_call {
+        record.refused();
+    }
 }
 
 pub(super) fn request_refusal(decision: &Decision, method: &str) -> io::Error {
@@ -229,9 +249,17 @@ pub(super) fn request_refusal(decision: &Decision, method: &str) -> io::Error {
 
 pub(super) enum McpRequestAdmission {
     Undecided,
-    /// The coarse `mcp:call` request, and the per-tool response an allowed `tools/call` owes.
-    Allowed(EffectiveDecision, RequestId, Option<PendingToolResponse>),
-    PolicyPending(EffectiveDecision, io::Error),
+    /// The coarse `mcp:call` request, the per-tool response an allowed `tools/call` owes, and
+    /// the call's record, which its reply ends.
+    Allowed(
+        EffectiveDecision,
+        RequestId,
+        Option<PendingToolResponse>,
+        Option<McpToolCallRecord>,
+    ),
+    /// A call refused while policy loads, unless the caller admits it as a bootstrap call; either
+    /// way the caller ends its record.
+    PolicyPending(EffectiveDecision, io::Error, Option<McpToolCallRecord>),
     Denied {
         decision: EffectiveDecision,
         refusal: io::Error,
@@ -677,10 +705,11 @@ mod tests {
             &Principal::agent(),
             "issues-mcp",
             frame,
+            &crate::run::telemetry::DecisionRecorder::discarding(),
         )? {
             McpRequestAdmission::Undecided => Ok(None),
             McpRequestAdmission::Allowed(..) => Ok(reported),
-            McpRequestAdmission::PolicyPending(_, refusal) => Err(refusal),
+            McpRequestAdmission::PolicyPending(_, refusal, _) => Err(refusal),
             McpRequestAdmission::Denied { refusal, .. } => Err(refusal),
         }
     }
@@ -908,12 +937,13 @@ mod tests {
 
         // Two calls under the cap: each admitted, each records a `mcp:call::response`.
         for _ in 0..2 {
-            let McpRequestAdmission::Allowed(_, request_id, _) = admit_tool_call(
+            let McpRequestAdmission::Allowed(_, request_id, ..) = admit_tool_call(
                 &engine,
                 &governed,
                 &Principal::agent(),
                 "issues-mcp",
                 SEARCH,
+                &crate::run::telemetry::DecisionRecorder::discarding(),
             )
             .expect("admit") else {
                 panic!("a call under the cap must be admitted");
@@ -929,7 +959,8 @@ mod tests {
                     &governed,
                     &Principal::agent(),
                     "issues-mcp",
-                    SEARCH
+                    SEARCH,
+                    &crate::run::telemetry::DecisionRecorder::discarding(),
                 )
                 .expect("admit"),
                 McpRequestAdmission::Denied { .. }
@@ -953,6 +984,7 @@ mod tests {
             &Principal::agent(),
             "issues-mcp",
             SEARCH,
+            &crate::run::telemetry::DecisionRecorder::discarding(),
         )
         .expect("the tool call is valid");
         let McpRequestAdmission::Allowed(decision, ..) = admission else {
@@ -1095,6 +1127,7 @@ mod tests {
             &Principal::agent(),
             "issues-mcp",
             SEARCH,
+            &crate::run::telemetry::DecisionRecorder::discarding(),
         )
         .expect("valid tool call") else {
             panic!("the tool permit admits the call");
@@ -1124,6 +1157,7 @@ mod tests {
             &Principal::agent(),
             "issues-mcp",
             SEARCH,
+            &crate::run::telemetry::DecisionRecorder::discarding(),
         )
         .expect("the tool call is valid");
         let McpRequestAdmission::Denied { decision, refusal } = admission else {

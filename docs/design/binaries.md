@@ -145,8 +145,12 @@ The alias then replaces itself with the ordinary program inside the agent's sand
 Fallback searches the agent's effective `PATH`, skipping the alias directory and links to its own
 image. An absent or empty `PATH` searches `/usr/bin:/bin`, never the working directory. It retains
 the arguments, working directory, composed environment, and standard streams.
-The alias reads no standard input before the routing response. It still closes inherited descriptors
-above standard error. Fallback adds no sandbox grants and receives no MCP server credentials.
+The alias reads no standard input before the routing response. It closes inherited descriptors above
+standard error before it creates the runtime or connects to the broker. Linux uses `close_range`,
+then `/proc/self/fd` if that syscall is unavailable. macOS asks `proc_pidinfo` for the open descriptor
+list because the sandbox does not grant read access to `/dev/fd`. Other unix targets enumerate
+`/dev/fd`. Each platform retains the bounded descriptor-table sweep only as a last fallback.
+Fallback adds no sandbox grants and receives no MCP server credentials.
 Protocol errors, ambiguous matches, and policy denials remain failures.
 
 The alias derives `run/box.sock` from its own location. The caller cannot select another socket. The

@@ -97,7 +97,8 @@ flowchart TD
 A command the Shell implements raises `shell:exec`. That covers its builtins, shell functions the
 command defines, and its own commands, such as `cat`, `grep`, `jq`, and `curl`. See [the full
 list](../user/shell.md#what-runs-where). A `python` or `python3` typed in the Shell runs in Monty,
-Box's Python interpreter. See [a workload reaches Monty two
+Box's Python interpreter, unless `box.toml` sets `monty = false`; then each is an external program
+like any other. See [a workload reaches Monty two
 ways](decisions.md#python-in-the-shell-is-monty).
 
 When a Shell command and an external program share a name, the Shell command takes precedence. For
@@ -250,9 +251,9 @@ fails the command the way the operation's own error would. The
 ## Execution limits
 
 The stored configuration supplies `max_input` and `max_output` whenever the broker constructs
-Strands Shell, including each new call. Omitted sizes retain the 256 KiB input and 64 KiB output
+Strands Shell, including each new call. Omitted sizes retain the 256 KiB input and 1 MiB output
 defaults; an explicit `0` disables the corresponding Shell size limit. The output limit also bounds
-script files that Shell loads with `source`.
+script files that Shell loads with `source`, and the broker applies it to each `curl` response body.
 The broker's framing and streamed-output budgets remain separate.
 
 **Each call uses the operator's execution limit.** The operator sets

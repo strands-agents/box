@@ -26,10 +26,16 @@ pub(crate) trait Socket {
     type Async: AsyncRead + AsyncWrite + Unpin + Send + 'static;
 
     fn into_async(self) -> io::Result<Self::Async>;
+
+    fn shutdown_handle(&self) -> io::Result<SocketShutdown>;
 }
 
 impl Socket for std::net::TcpStream {
     type Async = tokio::net::TcpStream;
+
+    fn shutdown_handle(&self) -> io::Result<SocketShutdown> {
+        self.try_clone().map(SocketShutdown::Tcp)
+    }
 
     fn into_async(self) -> io::Result<Self::Async> {
         self.set_nonblocking(true)?;
@@ -42,9 +48,28 @@ impl Socket for std::net::TcpStream {
 impl Socket for std::os::unix::net::UnixStream {
     type Async = tokio::net::UnixStream;
 
+    fn shutdown_handle(&self) -> io::Result<SocketShutdown> {
+        self.try_clone().map(SocketShutdown::Unix)
+    }
+
     fn into_async(self) -> io::Result<Self::Async> {
         self.set_nonblocking(true)?;
         tokio::net::UnixStream::from_std(self)
+    }
+}
+
+/// An owned socket reference that can interrupt its connection without reusing a descriptor.
+pub(crate) enum SocketShutdown {
+    Tcp(std::net::TcpStream),
+    Unix(std::os::unix::net::UnixStream),
+}
+
+impl SocketShutdown {
+    pub(crate) fn shutdown(&self) {
+        let _ = match self {
+            Self::Tcp(socket) => socket.shutdown(std::net::Shutdown::Both),
+            Self::Unix(socket) => socket.shutdown(std::net::Shutdown::Both),
+        };
     }
 }
 

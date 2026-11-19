@@ -3362,6 +3362,65 @@ pub(crate) fn resolved_to_its_deepest_existing_ancestor(path: &Path) -> PathBuf 
     }
 }
 
+/// The most symbolic links that one path resolution may pass through.
+const MAXIMUM_LINKS: usize = 40;
+
+/// What the absolute `path` resolves to, and each symbolic link on the way, spelled as the
+/// resolved folder that holds it and its own name; a name that is not there stays as written.
+pub(crate) fn resolved_through_links(path: &Path) -> std::io::Result<(PathBuf, Vec<PathBuf>)> {
+    use std::path::Component;
+    let mut links = Vec::new();
+    let mut resolved = PathBuf::from("/");
+    // The names still to resolve, with the next one last.
+    let mut pending: Vec<std::ffi::OsString> = Vec::new();
+    let push = |pending: &mut Vec<std::ffi::OsString>, target: &Path| {
+        for component in target.components().rev() {
+            match component {
+                Component::Normal(name) => pending.push(name.to_os_string()),
+                Component::ParentDir => pending.push("..".into()),
+                Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
+            }
+        }
+    };
+    push(&mut pending, path);
+    while let Some(name) = pending.pop() {
+        if name == ".." {
+            resolved.pop();
+            continue;
+        }
+        let candidate = resolved.join(&name);
+        let is_link = match std::fs::symlink_metadata(&candidate) {
+            Ok(metadata) => metadata.file_type().is_symlink(),
+            // A name that is not there is no link, and no name after it is one.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                false
+            }
+            Err(error) => return Err(error),
+        };
+        if !is_link {
+            resolved = candidate;
+            continue;
+        }
+        if links.len() == MAXIMUM_LINKS {
+            return Err(std::io::Error::other(
+                "the path passes through too many symbolic links",
+            ));
+        }
+        let target = std::fs::read_link(&candidate)?;
+        links.push(candidate);
+        if target.is_absolute() {
+            resolved = PathBuf::from("/");
+        }
+        push(&mut pending, &target);
+    }
+    Ok((resolved, links))
+}
+
 /// Whether `inner` is `outer` or beneath it, by spelling or by on-disk identity.
 pub(crate) fn lies_within(inner: &Path, outer: &Path) -> bool {
     respelled_under(inner, outer).is_some()

@@ -278,6 +278,43 @@ fn a_read_entry_naming_a_link_to_a_file_reads_by_both_names() {
     );
 }
 
+/// **A link whose target path crosses a linked folder reads by its own name**, and nothing beside.
+#[test]
+fn a_read_entry_naming_a_link_through_a_linked_folder_reads_by_both_names() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let request = Request::with_policy("file-link-folder", PERMIT_EVERY_EFFECT);
+    let tools = request.operator_home().join("tools");
+    let data = tools.join("data");
+    std::fs::create_dir_all(&data).expect("a data folder");
+    std::fs::write(data.join("file"), "linked contents\n").expect("a file");
+    std::fs::write(data.join("sibling"), "sibling only\n").expect("a sibling");
+    std::os::unix::fs::symlink("data", tools.join("current")).expect("a linked folder");
+    let helper = tools.join("helper");
+    std::os::unix::fs::symlink("current/file", &helper).expect("a link through it");
+    let box_ = request.agent_read(&[helper.as_path()]).expect();
+
+    let output = probe(
+        &box_,
+        &format!(
+            "read -r v < {} && printf 'LINK=%s\\n' \"$v\"; \
+             read -r v < {} && printf 'FILE=%s\\n' \"$v\"; \
+             read -r v < {} 2>/dev/null && printf 'SIBLING=%s\\n' \"$v\"; printf done",
+            shell_quote(&helper),
+            shell_quote(&data.join("file")),
+            shell_quote(&data.join("sibling"))
+        ),
+    );
+
+    assert_ran(&output);
+    let seen = stdout(&output);
+    assert!(seen.contains("LINK=linked contents"), "{output:?}");
+    assert!(seen.contains("FILE=linked contents"), "{output:?}");
+    assert!(!seen.contains("SIBLING="), "{output:?}");
+    assert!(seen.contains("done"), "{output:?}");
+}
+
 /// **`HOME` is the operator's home when `env.HOME` is unset, and the declared value when set.**
 #[test]
 fn home_is_the_operators_unless_the_agent_declares_one() {
@@ -488,6 +525,64 @@ fn the_boxs_own_private_tree_is_unwritable_from_inside() {
             .count(),
         2 * existing.len() + planted.len(),
         "the kernel refuses each attempt: {output:?}"
+    );
+}
+
+/// **A `deny_write` directory inside a write tree reads and refuses every write**, the rest of the
+/// tree stays writable, and the disclosure names it.
+#[test]
+fn a_deny_write_directory_reads_and_refuses_writes_inside_a_write_tree() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let request = Request::with_config("deny-write", PERMIT_EVERY_EFFECT, "");
+    let home = request.operator_home().join("agent-home");
+    let venv = home.join("venv");
+    std::fs::create_dir_all(&venv).expect("the protected directory");
+    std::fs::write(venv.join("module.py"), "original\n").expect("a protected file");
+    let box_ = request
+        .agent_list("deny_write", &[&venv.display().to_string()])
+        .expect();
+
+    let module = shell_quote(&venv.join("module.py"));
+    let output = probe(
+        &box_,
+        &format!(
+            "read -r v < {module} && printf 'READ=%s\\n' \"$v\"; \
+             printf tampered >| {module}; printf planted > {}; \
+             printf outside > {} && printf 'OUTSIDE\\n'; printf done",
+            shell_quote(&venv.join("planted.so")),
+            shell_quote(&home.join("outside.txt")),
+        ),
+    );
+
+    assert_ran(&output);
+    let seen = stdout(&output);
+    assert!(
+        seen.contains("READ=original"),
+        "the directory reads: {output:?}"
+    );
+    assert!(
+        seen.contains("OUTSIDE"),
+        "the rest of the tree is writable: {output:?}"
+    );
+    assert!(seen.ends_with("done"), "{output:?}");
+    assert_eq!(
+        std::fs::read_to_string(venv.join("module.py")).expect("the file reads"),
+        "original\n",
+        "a protected file is unchanged: {output:?}"
+    );
+    assert!(
+        std::fs::symlink_metadata(venv.join("planted.so")).is_err(),
+        "nothing is created in the protected directory: {output:?}"
+    );
+    assert!(
+        raw_stderr(&output).contains(&format!(
+            "deny_write  {}  (read-only)",
+            venv.canonicalize().expect("canonical").display()
+        )),
+        "the disclosure names the directory: {}",
+        raw_stderr(&output)
     );
 }
 
@@ -781,6 +876,63 @@ fn a_box_reaches_the_runtime_minimum() {
         stdout(&listed),
         expected,
         "a box must read the runtime minimum: {listed:?}"
+    );
+}
+
+/// **The `/tmp` link resolves in a box on macOS, and a path through it reaches only what
+/// `/private/tmp` grants.** A program with no `TMPDIR` falls back to `/tmp`, and the link node needs
+/// its own metadata rule, which only a minimum cell spelled `/tmp` renders.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_tmp_link_resolves_and_a_path_through_it_keeps_its_grants() {
+    if !fixture::namespace_launcher_is_usable() {
+        println!("skipping: this platform has no usable containment backend");
+        return;
+    }
+    let granted = tempfile::tempdir_in("/private/tmp").expect("a granted directory");
+    let ungranted = tempfile::tempdir_in("/private/tmp").expect("an ungranted directory");
+    std::fs::write(ungranted.path().join("planted.txt"), "PLANTED\n").expect("a planted file");
+    let box_ = Request::with_policy("tmp-link", PERMIT_EVERY_EFFECT)
+        .agent_read(&[granted.path()])
+        .agent_write(&[granted.path()])
+        .expect();
+    let through_link = |directory: &Path| {
+        Path::new("/tmp").join(
+            directory
+                .strip_prefix("/private/tmp")
+                .expect("a directory under /private/tmp"),
+        )
+    };
+    let script = format!(
+        "[[ -L /tmp ]] && printf 'TMP_LINK '; \
+         [[ -d /tmp/ ]] && printf 'TMP_DIRECTORY '; \
+         printf 'linked\\n' > {granted}/written 2>/dev/null && printf 'WROTE '; \
+         read -r value < {granted}/written 2>/dev/null && printf 'READ=%s ' \"$value\"; \
+         set -- {granted}/*; [[ -e $1 ]] && printf 'LISTED '; \
+         printf 'linked\\n' > {ungranted}/written 2>/dev/null && printf 'UNGRANTED_WROTE '; \
+         read -r value < {ungranted}/planted.txt 2>/dev/null && printf 'UNGRANTED_READ=%s ' \"$value\"; \
+         set -- {ungranted}/*; [[ -e $1 ]] && printf 'UNGRANTED_LISTED '; \
+         printf DONE",
+        granted = shell_quote(&through_link(granted.path())),
+        ungranted = shell_quote(&through_link(ungranted.path())),
+    );
+
+    let output = probe(&box_, &script);
+    assert_ran(&output);
+    assert_eq!(
+        stdout(&output),
+        "TMP_LINK TMP_DIRECTORY WROTE READ=linked LISTED DONE",
+        "the /tmp link must resolve, and a path through it must write, read and list only what \
+         /private/tmp grants: {output:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(granted.path().join("written")).expect("the write landed"),
+        "linked\n",
+        "the write through /tmp must reach the granted directory on the host"
+    );
+    assert!(
+        !ungranted.path().join("written").exists(),
+        "the write through /tmp must not reach the ungranted directory on the host"
     );
 }
 

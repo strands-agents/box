@@ -24,6 +24,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use command::cli::{Cli, Command, PolicyCommand};
 
 pub use policy::{Finding, Location, Policy, PolicyCheck, RuleRef};
+pub use run::decisions::{
+    PolicyDecision, PolicyDecisionReceiver, PolicyDecisionSender, policy_decisions,
+};
 
 static STARTED: AtomicBool = AtomicBool::new(false);
 
@@ -37,6 +40,9 @@ pub struct RunOptions<'a> {
     /// The box ID a new box takes; `None` generates one, a configured box refuses any other ID, and a
     /// malformed ID is refused before `run` uses the process's one attempt.
     pub box_id: Option<String>,
+    /// The channel that receives each policy decision of the run as it is made; a full channel
+    /// drops the decision rather than delay it.
+    pub policy_decisions: Option<PolicyDecisionSender>,
 }
 
 /// Run the existing Box command with a configuration.

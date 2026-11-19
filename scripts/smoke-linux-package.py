@@ -84,6 +84,7 @@ read_file = [{json.dumps(str(readonly))}]
     (root / "box.toml").write_text(config)
     environment = dict(os.environ)
     environment.pop("EXPERIMENTAL_LINUX_SUPPORT", None)
+    environment.pop("EXPERIMENTAL_X86_SUPPORT", None)
     version = subprocess.run(
         [str(bundle / "box"), "--version"], capture_output=True, text=True, timeout=10,
         env=environment,
