@@ -165,6 +165,9 @@ Native entry handling has these limits in addition to baseline containment:
 
 - `renameat2` is supported only with zero flags. Box refuses nonzero flags, including
   `RENAME_NOREPLACE` (refuse an existing destination), even when ordinary containment permits them.
+  GNU `mv` can request `RENAME_NOREPLACE` even for a plain move to a new name. With native
+  filesystem policy enabled, Box refuses that request with a permission error even when
+  filesystem grants and policy would permit the move.
 - A rename cannot replace an existing directory, including an empty directory. Moving a directory
   to a new name is supported.
 - File and directory creation accept only the ordinary permission bits (`0000` through `0777`).
@@ -173,6 +176,10 @@ Native entry handling has these limits in addition to baseline containment:
 
 These operations are refused before a Dogwood decision or file effect.
 The workload receives an operating-system permission error; the source and destination entries remain unchanged.
+
+For native rename cases, the [comparison suite](../dev/linux-native-tests.md#compare-shell-and-native-policy-events)
+uses a test program that calls `renameat` directly; it does not execute GNU `mv`.
+Its permitted rename cases do not establish that GNU `mv` works with native filesystem policy.
 
 An existing descriptor can carry later reads, writes, or directory listings without another Dogwood check.
 Linux permission changes remain subject to filesystem grants, without a fresh Dogwood permission-change check.
