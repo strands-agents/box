@@ -1199,7 +1199,6 @@ mod linked_command_mutation_tests {
                 "reader".to_string(),
                 ProcessSpec {
                     file_watching: false,
-                    executable_memory: false,
                     native_filesystem_policy: None,
                     command: vec![command.display().to_string()],
                     workspace: None,

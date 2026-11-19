@@ -144,9 +144,7 @@ impl ContainmentBackend for NamespaceBackend {
 
         // Same for the filter: a request whose filter will not compile must fail
         // here, not after the mount view is live.
-        syscall::SyscallPolicy::for_config(config.network())
-            .with_executable_memory(config.executable_memory())
-            .compile()?;
+        syscall::SyscallPolicy::for_config(config.network()).compile()?;
 
         Ok(())
     }
@@ -165,8 +163,7 @@ impl ContainmentBackend for NamespaceBackend {
 
         // Build the plan and compile both filters before anything irreversible.
         let view = view::MountView::plan(config)?;
-        let policy = syscall::SyscallPolicy::for_config(config.network())
-            .with_executable_memory(config.executable_memory());
+        let policy = syscall::SyscallPolicy::for_config(config.network());
         #[cfg(feature = "native-filesystem-policy")]
         let policy = policy.with_native_filesystem(native_filesystem_handoff.is_some());
         #[cfg(not(feature = "native-filesystem-policy"))]
@@ -2161,11 +2158,11 @@ mod tests {
         })
     }
 
-    /// **Route 3 of W^X is closed: writable memory cannot become executable.** A kernel-level
-    /// check, because the filter's *effect* is the claim — a rule that compiles but matches the
-    /// wrong argument would leave this open while the table still listed the entry.
+    /// **Writable memory can become executable, so a JIT runtime runs.** A kernel-level check,
+    /// because the filter's *effect* is the claim. `pkey_mprotect` stays refused: a runtime maps
+    /// executable memory through `mmap` and `mprotect` instead.
     #[test]
-    fn route_three_write_then_execute_is_refused() {
+    fn writable_memory_can_become_executable() {
         if !probe::user_namespace_is_permitted() {
             println!("skipping: this host forbids user namespaces");
             return;
@@ -2175,8 +2172,8 @@ mod tests {
             .expect("the filters compile");
 
         let outcome = in_filtered_child(&filters, || {
-            // SAFETY: both calls are plain memory-management syscalls on this child's own
-            // address space, and the child `_exit`s without touching the parent's state.
+            // SAFETY: every call is a plain memory-management syscall on this child's own address
+            // space, and the child `_exit`s without touching the parent's state.
             unsafe {
                 let one_call = libc::mmap(
                     std::ptr::null_mut(),
@@ -2186,8 +2183,8 @@ mod tests {
                     -1,
                     0,
                 );
-                if one_call != libc::MAP_FAILED {
-                    return 10; // W+X in one call succeeded
+                if one_call == libc::MAP_FAILED {
+                    return 10; // W+X in one call must now succeed
                 }
                 let writable = libc::mmap(
                     std::ptr::null_mut(),
@@ -2200,8 +2197,12 @@ mod tests {
                 if writable == libc::MAP_FAILED {
                     return 11; // a plain writable mapping must still work
                 }
-                if libc::mprotect(writable, 4096, libc::PROT_READ | libc::PROT_EXEC) == 0 {
-                    return 12; // the JIT spelling succeeded
+                if libc::mprotect(writable, 4096, libc::PROT_READ | libc::PROT_EXEC) != 0 {
+                    return 12; // the JIT spelling must now succeed
+                }
+                if libc::syscall(libc::SYS_pkey_mprotect, writable, 4096, libc::PROT_EXEC, -1) == 0
+                {
+                    return 13; // pkey_mprotect must stay refused
                 }
             }
             0
@@ -2209,12 +2210,12 @@ mod tests {
 
         assert_eq!(
             outcome, 0,
-            "route 3 must be refused: 10 = mmap(W|X) succeeded, 11 = a plain writable \
-             mapping was refused (the rule is too broad), 12 = mprotect(PROT_EXEC) succeeded"
+            "10 = mmap(W|X) refused, 11 = a plain writable mapping was refused, \
+             12 = mprotect(PROT_EXEC) refused, 13 = pkey_mprotect(PROT_EXEC) succeeded"
         );
     }
 
-    /// **A read-execute mapping with no write is still permitted.** The bound on the rule above.
+    /// **A read-execute mapping with no write is still permitted.** The loader maps libraries so.
     #[test]
     fn a_read_execute_mapping_is_still_permitted() {
         if !probe::user_namespace_is_permitted() {

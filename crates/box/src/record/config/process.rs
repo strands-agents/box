@@ -32,14 +32,6 @@ pub(crate) struct ProcessSpec {
     )]
     pub(crate) file_watching: bool,
 
-    /// Permit writable and executable memory on Linux for this process and its descendants.
-    #[serde(
-        default,
-        rename = "executable-memory",
-        skip_serializing_if = "std::ops::Not::not"
-    )]
-    pub(crate) executable_memory: bool,
-
     /// Override the box-wide native filesystem policy selection for this process tree.
     #[serde(
         default,

@@ -1285,7 +1285,6 @@ mod tests {
             policy: None,
             agent: Some(ProcessSpec {
                 file_watching: false,
-                executable_memory: false,
                 native_filesystem_policy: None,
                 command: vec!["/bin/sh".to_string()],
                 workspace: None,
@@ -2109,7 +2108,6 @@ permit (principal, action == alpha::Action::"read", resource);"#
         std::fs::create_dir(&vendor).expect("a readable tree");
         let tool = |read: PathBuf| ProcessSpec {
             file_watching: false,
-            executable_memory: false,
             native_filesystem_policy: None,
             command: vec!["/bin/sh".to_string()],
             workspace: None,
@@ -2192,7 +2190,6 @@ permit (principal, action == alpha::Action::"read", resource);"#
             "gone".to_string(),
             ProcessSpec {
                 file_watching: false,
-                executable_memory: false,
                 native_filesystem_policy: None,
                 command: vec![home.join("bin/gone").display().to_string()],
                 workspace: None,
@@ -3131,7 +3128,6 @@ while :; do :; done"#
     fn selection_record(tools: &[(&str, &[&str])]) -> Record {
         let spec = |command: &[&str]| ProcessSpec {
             file_watching: false,
-            executable_memory: false,
             native_filesystem_policy: None,
             command: command.iter().map(|part| (*part).to_string()).collect(),
             workspace: None,
@@ -3832,7 +3828,6 @@ while :; do :; done"#
         let workspace = root_path.join("workspace");
         let mut tool = ProcessSpec {
             file_watching: false,
-            executable_memory: false,
             native_filesystem_policy: None,
             command: vec!["/bin/sh".to_string()],
             workspace: None,

@@ -1043,12 +1043,13 @@ refused `/usr/bin/cat` is empty through `/bin/cat`.
 
 ### W^X
 
-W^X closes three routes. Every writable mount, including `/tmp`, uses `MS_NOEXEC`. The permit filter
-denies `memfd_create`, all `execveat`, and all `pkey_mprotect` calls. The restriction filter denies
-`mmap` with `PROT_WRITE|PROT_EXEC` and `mprotect` with `PROT_EXEC`. Scope `mmap` to both bits or the
-loader breaks (`a_read_execute_mapping_is_still_permitted`,
-`route_three_write_then_execute_is_refused`). `allow_executable_memory` drops those two rules so a
-JIT runtime runs; the other routes stay closed (`executable_memory_lifts_only_the_jit_routes`).
+W^X closes the file routes to executing code, not the memory one. Every writable mount, including
+`/tmp`, uses `MS_NOEXEC`. The permit filter denies `memfd_create`, all `execveat`, and all
+`pkey_mprotect` calls. Writable-and-executable `mmap` and `mprotect` with `PROT_EXEC` are permitted
+on Linux, so a JIT runtime runs the code it compiles
+(`a_box_runs_generated_code_that_stays_contained`); a read-execute mapping stays permitted so the
+loader works (`a_read_execute_mapping_is_still_permitted`), and `writable_memory_can_become_executable`
+pins both halves at the filter.
 
 **W^X protects the `fs:*` enforcement point, not the kernel boundary.** It does not stop the workload
 running code of its own choosing. An exec view is safe only when no reachable program is

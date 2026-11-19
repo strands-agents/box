@@ -801,9 +801,6 @@ const DENY_WRITE_RECORD_VERSION: u32 = 38;
 /// The record version of a record that holds a `[secret-source.<scheme>]` table or a `secret.env`
 /// key, so an older build refuses the box by its version.
 const SECRET_SOURCE_RECORD_VERSION: u32 = 39;
-/// The record version of a record whose process selects `executable-memory`, so an older build
-/// refuses the box rather than resuming it with its JIT runtime refused.
-const EXECUTABLE_MEMORY_RECORD_VERSION: u32 = 40;
 
 /// Monty is on unless the operator turns it off.
 fn monty_default() -> bool {
@@ -881,9 +878,7 @@ fn record_version<'a>(
     secret_source_keys: bool,
 ) -> u32 {
     let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
-    if specs.clone().any(|spec| spec.executable_memory) {
-        EXECUTABLE_MEMORY_RECORD_VERSION
-    } else if secret_source_keys {
+    if secret_source_keys {
         SECRET_SOURCE_RECORD_VERSION
     } else if specs
         .clone()
@@ -1207,7 +1202,6 @@ impl Record {
             MONTY_OFF_RECORD_VERSION,
             DENY_WRITE_RECORD_VERSION,
             SECRET_SOURCE_RECORD_VERSION,
-            EXECUTABLE_MEMORY_RECORD_VERSION,
         ]
         .contains(&stamped.version)
         {
@@ -1985,7 +1979,6 @@ mod tests {
     fn agent(command: &[&str]) -> ProcessSpec {
         ProcessSpec {
             file_watching: false,
-            executable_memory: false,
             native_filesystem_policy: None,
             command: command.iter().map(|word| (*word).to_string()).collect(),
             workspace: None,
@@ -2089,62 +2082,53 @@ native-filesystem-policy = false
         }
     }
 
-    /// **A per-process switch is selected per local process and needs its record version.** Each
+    /// **File watching is selected per local process and needs its record version.** Each
     /// table stores only its own selection, a selected record refuses an older version, and a
     /// remote MCP server refuses the key.
     #[test]
-    fn per_process_switches_are_versioned_and_selected_per_process() {
-        type Switch = (&'static str, fn(&ProcessSpec) -> bool, u32);
-        let switches: [Switch; 2] = [
-            ("file-watching", |spec| spec.file_watching, 35),
-            ("executable-memory", |spec| spec.executable_memory, 40),
-        ];
-        for (key, is_selected, version) in switches {
-            for table in ["agent", "tool.watcher", "mcp.watcher"] {
-                for enabled in [false, true] {
-                    let transport = if table.starts_with("mcp.") {
-                        "type = \"stdio\"\n"
-                    } else {
-                        ""
-                    };
-                    let body = format!(
-                        "[{table}]\n{transport}command = [\"watcher\"]\n\
-                         {key} = {enabled}\n\
-                         [tool.other]\ncommand = [\"other\"]\n"
-                    );
-                    let mut stored = pinned_record(&body);
-                    let selected = match table {
-                        "agent" => stored.agent.as_ref().unwrap(),
-                        "tool.watcher" => &stored.tool["watcher"],
-                        _ => &stored.contained_mcp["watcher"].spec,
-                    };
-                    assert_eq!(is_selected(selected), enabled, "{key} {table}");
-                    assert!(!is_selected(&stored.tool["other"]));
-                    let expected = if enabled { version } else { 21 };
-                    assert_eq!(stored.version, expected, "{body}");
-                    let text = stored.to_toml().unwrap();
-                    assert_eq!(text.contains(key), enabled);
-                    assert_eq!(
-                        Record::parse(&text, Path::new("record.toml")).unwrap(),
-                        stored
-                    );
-                    stored.version = if enabled { version - 1 } else { version };
-                    assert!(matches!(
-                        Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
-                        Err(ConfigError::RecordVersion { expected: required, .. }) if required == expected
-                    ));
-                }
+    fn file_watching_is_versioned_and_selected_per_process() {
+        for table in ["agent", "tool.watcher", "mcp.watcher"] {
+            for enabled in [false, true] {
+                let transport = if table.starts_with("mcp.") {
+                    "type = \"stdio\"\n"
+                } else {
+                    ""
+                };
+                let body = format!(
+                    "[{table}]\n{transport}command = [\"watcher\"]\n\
+                     file-watching = {enabled}\n\
+                     [tool.other]\ncommand = [\"other\"]\n"
+                );
+                let mut stored = pinned_record(&body);
+                let selected = match table {
+                    "agent" => stored.agent.as_ref().unwrap(),
+                    "tool.watcher" => &stored.tool["watcher"],
+                    _ => &stored.contained_mcp["watcher"].spec,
+                };
+                assert_eq!(selected.file_watching, enabled, "{table}");
+                assert!(!stored.tool["other"].file_watching);
+                let expected = if enabled { 35 } else { 21 };
+                assert_eq!(stored.version, expected, "{body}");
+                let text = stored.to_toml().unwrap();
+                assert_eq!(text.contains("file-watching"), enabled);
+                assert_eq!(
+                    Record::parse(&text, Path::new("record.toml")).unwrap(),
+                    stored
+                );
+                stored.version = if enabled { 34 } else { 35 };
+                assert!(matches!(
+                    Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion { expected: version, .. }) if version == expected
+                ));
             }
-            let remote = format!(
-                "name = \"watcher\"\nbox_dir = \"/var/lib/boxes/watcher\"\n\
-                 [mcp.remote]\ntype = \"http\"\ndestinations = [\"example.com\"]\n\
-                 {key} = false\n"
-            );
-            assert!(
-                toml::from_str::<ConfigFile>(&remote).is_err(),
-                "a remote MCP server refuses {key}"
-            );
         }
+        let remote = "name = \"watcher\"\nbox_dir = \"/var/lib/boxes/watcher\"\n\
+                      [mcp.remote]\ntype = \"http\"\ndestinations = [\"example.com\"]\n\
+                      file-watching = false\n";
+        assert!(
+            toml::from_str::<ConfigFile>(remote).is_err(),
+            "a remote MCP server refuses the key"
+        );
     }
 
     #[test]
@@ -3388,7 +3372,7 @@ env = {}
     /// A foreign version refuses, and the refusal names BOTH versions.
     #[test]
     fn a_record_from_another_format_is_refused() {
-        for found in [RECORD_VERSION - 1, EXECUTABLE_MEMORY_RECORD_VERSION + 1] {
+        for found in [RECORD_VERSION - 1, SECRET_SOURCE_RECORD_VERSION + 1] {
             let text = format!("version = {found}\n");
 
             let error = parsed_record(&text).expect_err("a foreign version must be refused");

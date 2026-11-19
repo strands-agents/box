@@ -22,7 +22,8 @@ const VFORK_CHILD_ALLOWED: i32 = 37;
 const VFORK_CHILD_DENIED: i32 = 38;
 const VFORK_CHILD_UNEXPECTED: i32 = 39;
 const FORK_CHILD_ALLOWED: i32 = 40;
-const FORK_CHILD_DENIED: i32 = 45;
+/// Contained: `getpriority` denied by the permit filter, executable `mprotect` permitted.
+const FORK_CHILD_CONTAINED: i32 = 41;
 const FORK_CHILD_MAPPING_FAILED: i32 = 60;
 const FORK_CHILD_UNMAP_FAILED: i32 = 61;
 const SCOPES: [&str; 3] = ["writable", "readonly", "ungranted"];
@@ -592,11 +593,11 @@ fn raw_fork_preserves_child_restrictions() {
         assert_eq!(
             libc::WEXITSTATUS(child.status),
             if contained {
-                FORK_CHILD_DENIED
+                FORK_CHILD_CONTAINED
             } else {
                 FORK_CHILD_ALLOWED
             },
-            "getpriority checks the permit filter; executable mprotect checks the restriction filter: {child:?}"
+            "getpriority checks the permit filter; executable mprotect, now permitted, checks the restriction filter: {child:?}"
         );
         assert_eq!(child.second_wait, -1, "{child:?}");
         assert_eq!(child.second_wait_error, libc::ECHILD, "{child:?}");

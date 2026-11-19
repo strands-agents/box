@@ -663,7 +663,6 @@ mod tests {
                 "reader".to_string(),
                 ProcessSpec {
                     file_watching: false,
-                    executable_memory: false,
                     native_filesystem_policy: None,
                     command: vec![path.display().to_string()],
                     workspace: None,
@@ -1645,7 +1644,6 @@ mod tests {
     fn tool(command: &Path, program: Option<&str>) -> ProcessSpec {
         ProcessSpec {
             file_watching: false,
-            executable_memory: false,
             native_filesystem_policy: None,
             command: vec![command.display().to_string()],
             workspace: None,
@@ -1968,7 +1966,6 @@ mod left_out_tests {
     fn spec(command: &[&str], path: Option<&Path>) -> ProcessSpec {
         ProcessSpec {
             file_watching: false,
-            executable_memory: false,
             native_filesystem_policy: None,
             command: command.iter().map(|part| (*part).to_string()).collect(),
             workspace: None,

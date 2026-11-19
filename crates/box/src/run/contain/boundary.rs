@@ -665,10 +665,6 @@ impl Boundary {
         if spec.file_watching {
             containment = containment.allow_file_watching();
         }
-        // docs/design/decisions.md#a-jit-runtime-maps-executable-memory-only-where-its-table-selects-it
-        if spec.executable_memory {
-            containment = containment.allow_executable_memory();
-        }
 
         // **Every refusal the grants need, applied before the grants themselves.** macOS renders
         // these after every allow and Linux overmounts them empty, so each subtracts from the grant
@@ -794,7 +790,6 @@ impl Boundary {
             broad_exec,
             file_attributes: cfg!(target_os = "macos") && stored.file_attributes,
             file_watching: cfg!(target_os = "macos") && spec.file_watching,
-            executable_memory: cfg!(target_os = "linux") && spec.executable_memory,
             native_egress: launch.egress == EgressMode::Native,
             native_filesystem_policy: spec
                 .native_filesystem_policy
@@ -957,7 +952,6 @@ struct DisclosureInputs<'a> {
     broad_exec: bool,
     file_attributes: bool,
     file_watching: bool,
-    executable_memory: bool,
     native_egress: bool,
     native_filesystem_policy: bool,
 }
@@ -971,16 +965,6 @@ pub(crate) fn file_watching_disclosure(table: &str) -> String {
          as the host-wide event count and each volume's history identifier; file-content and \
          write restrictions still apply, except that a root process can delete any volume's \
          event history"
-    )
-}
-
-/// The line a box prints for a `table` that selects executable memory, at startup and again
-/// when the process starts.
-pub(crate) fn executable_memory_disclosure(table: &str) -> String {
-    format!(
-        "strands-box: {table} executable memory: may run code it writes into memory, as a JIT \
-         runtime does; a runtime that calls native code, such as Python through ctypes, may run \
-         any bytes this way"
     )
 }
 
@@ -1055,9 +1039,6 @@ fn disclosure(inputs: &DisclosureInputs<'_>) -> String {
     }
     if inputs.file_watching {
         lines.push(file_watching_disclosure(table));
-    }
-    if inputs.executable_memory {
-        lines.push(executable_memory_disclosure(table));
     }
     if inputs.native_egress {
         let arguments = if table.starts_with("[tool.") {
@@ -2095,7 +2076,6 @@ mod tests {
         fn spec(&self) -> ProcessSpec {
             ProcessSpec {
                 file_watching: false,
-                executable_memory: false,
                 native_filesystem_policy: None,
                 command: vec!["/bin/sh".to_string(), "-c".to_string()],
                 workspace: Some(self.path("project")),
@@ -3386,60 +3366,38 @@ mod tests {
         }
     }
 
-    /// **A per-process switch reaches only the process that selects it, and is disclosed only
-    /// where it renders.** The agent selects each here, so a tool or MCP leaf that does not stays
-    /// off.
+    /// **File watching reaches only the process that selects it, and is disclosed only where
+    /// it renders.** The agent selects it here, so a tool or MCP leaf that does not stays off.
     #[test]
-    fn per_process_switches_follow_only_the_selected_process() {
-        type Switch = (
-            &'static str,
-            fn(&mut ProcessSpec, bool),
-            fn(&str) -> String,
-            bool,
-        );
-        let switches: [Switch; 2] = [
-            (
-                "file_watching",
-                |spec, enabled| spec.file_watching = enabled,
-                file_watching_disclosure,
-                cfg!(target_os = "macos"),
-            ),
-            (
-                "executable_memory",
-                |spec, enabled| spec.executable_memory = enabled,
-                executable_memory_disclosure,
-                cfg!(target_os = "linux"),
-            ),
-        ];
-        for (field, select, disclosure, renders) in switches {
-            let mut fixture = Fixture::new();
-            let mut selected = fixture.spec();
-            select(&mut selected, true);
-            fixture.record.agent = Some(selected);
-            for (table, reach) in [
-                ("[agent]", RuntimeReach::Agent),
-                ("[tool.watcher]", RuntimeReach::Leaf),
-                ("[mcp.watcher]", RuntimeReach::Leaf),
-            ] {
-                for enabled in [false, true] {
-                    let mut spec = fixture.spec();
-                    select(&mut spec, enabled);
-                    let boundary = fixture.translate_full(&spec, table, reach, EgressMode::Gateway);
-                    let config: serde_json::Value =
-                        serde_json::from_str(&boundary.containment_config_text())
-                            .expect("config JSON");
-                    assert_eq!(
-                        config[field].as_bool().unwrap_or(false),
-                        enabled,
-                        "{field} {table}"
-                    );
-                    assert_eq!(
-                        boundary.disclosure().contains(&disclosure(table)),
-                        enabled && renders,
-                        "{field} {table}: {}",
-                        boundary.disclosure()
-                    );
-                }
+    fn file_watching_follows_only_the_selected_process() {
+        let mut fixture = Fixture::new();
+        let mut selected = fixture.spec();
+        selected.file_watching = true;
+        fixture.record.agent = Some(selected);
+        for (table, reach) in [
+            ("[agent]", RuntimeReach::Agent),
+            ("[tool.watcher]", RuntimeReach::Leaf),
+            ("[mcp.watcher]", RuntimeReach::Leaf),
+        ] {
+            for enabled in [false, true] {
+                let mut spec = fixture.spec();
+                spec.file_watching = enabled;
+                let boundary = fixture.translate_full(&spec, table, reach, EgressMode::Gateway);
+                let config: serde_json::Value =
+                    serde_json::from_str(&boundary.containment_config_text()).expect("config JSON");
+                assert_eq!(
+                    config["file_watching"].as_bool().unwrap_or(false),
+                    enabled,
+                    "{table}"
+                );
+                assert_eq!(
+                    boundary
+                        .disclosure()
+                        .contains(&file_watching_disclosure(table)),
+                    enabled && cfg!(target_os = "macos"),
+                    "{table}: {}",
+                    boundary.disclosure()
+                );
             }
         }
     }

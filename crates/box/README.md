@@ -130,10 +130,6 @@ event metadata, the host-wide event count, and each volume's history identifier.
 also delete any volume's event history. Box prints these limitations at startup. See
 [file watching](../../docs/user/config.md#file-watching).
 
-`[agent]`, each `[tool.<label>]`, and each stdio `[mcp.<name>]` also take `executable-memory`,
-`false` by default, which permits writable and executable memory on Linux for that process alone, so
-a JIT runtime such as Node runs.
-
 `filesystem` holds eight lists — `read`, `write`, `read_file`, `write_file`, `list`, `metadata`,
 `exec`, and `deny` — and also takes `deny_write`, which keeps an existing directory inside a
 `write` directory read-only. A tool and a local MCP server take `deny_write` too.

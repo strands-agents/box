@@ -29,13 +29,6 @@ pub(crate) enum McpEntry {
             skip_serializing_if = "std::ops::Not::not"
         )]
         file_watching: bool,
-        /// Permit writable and executable memory on Linux for this server and its descendants.
-        #[serde(
-            default,
-            rename = "executable-memory",
-            skip_serializing_if = "std::ops::Not::not"
-        )]
-        executable_memory: bool,
         /// Override native filesystem policy for this local server and its descendants.
         #[serde(
             default,
@@ -149,7 +142,6 @@ pub(crate) fn contained_specs(
         .filter_map(|(name, entry)| match entry {
             McpEntry::Stdio {
                 file_watching,
-                executable_memory,
                 native_filesystem_policy,
                 command,
                 workspace,
@@ -162,7 +154,6 @@ pub(crate) fn contained_specs(
                 ContainedMcp {
                     spec: ProcessSpec {
                         file_watching: *file_watching,
-                        executable_memory: *executable_memory,
                         native_filesystem_policy: *native_filesystem_policy,
                         command: command.clone(),
                         workspace: workspace.clone(),
@@ -983,7 +974,6 @@ mod tests {
             McpEntry::Stdio {
                 argument_wildcards: false,
                 file_watching: false,
-                executable_memory: false,
                 native_filesystem_policy: None,
                 command: vec!["issues-mcp".to_string()],
                 workspace: None,

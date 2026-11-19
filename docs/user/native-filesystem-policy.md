@@ -209,14 +209,13 @@ Setting [`monty`](config.md#monty) to `false` requires record version 37.
 A box whose agent, tool, or local MCP server declares a [`deny_write`](config.md#agentfilesystem-and-toolnamefilesystem) list requires record version 38.
 A [`[secret-source.<scheme>]`](config.md#secret-sourcescheme) table, or a `secret.env` key on a route or a
 remote MCP server, requires record version 39.
-Setting `executable-memory` for any process requires record version 40.
 When a configuration selects more than one of these features, it uses the highest required version
 and retains every selection. Older binaries refuse unsupported versions.
 
 To disable the experiment, change the global setting to `false`.
 Set `monty` to `true` before returning to a binary that supports only version 21.
 Remove all process overrides and `[limits]` settings, give each stdio MCP server its own
-program, set `file-attributes` to `false`, remove `file-watching` and `executable-memory` from every
+program, set `file-attributes` to `false`, remove `file-watching` from every
 process, remove `[gateway] upgrade_http`, and give each telemetry target only `env://` or `secret://`
 bearer settings before returning to a binary that supports only version 21.
 If MCP argument wildcards are enabled, replace the stars with concrete arguments and disable

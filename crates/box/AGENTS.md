@@ -713,11 +713,11 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
   rule at all — its exec set is whatever the mount view leaves runnable, which is every `+x` file
   on a read-only bind. Measured with one `bash` workload and four aliases: **14 execve-able paths
   against 5 grants**, the extras being the ELF loader, seven mode-`0755` libraries, and the
-  workload bound under both spellings. None can run workload-authored bytes, because W^X's
-  `noexec` refuses the mapping, so it is a premise gap rather than a hole. A process whose table
-  selects `executable-memory` can run bytes it writes into memory, which the
-  [executable memory decision](../../docs/design/decisions.md#a-jit-runtime-maps-executable-memory-only-where-its-table-selects-it)
-  records.
+  workload bound under both spellings. None can run workload-authored bytes *as a file*, because
+  W^X's `noexec` refuses the mapping; a process does run bytes it writes into anonymous memory,
+  which the
+  [executable memory decision](../../docs/design/decisions.md#a-jit-runtime-maps-executable-memory-on-linux)
+  allows by default on Linux.
   `containment`'s `view.rs::the_view_leaves_exactly_the_intended_paths_executable` bounds it, and
   narrowing it is deferred. Do not restate this bullet as a cross-platform guarantee.
 
@@ -1284,8 +1284,7 @@ Do not treat any of these as settled by the code existing.
   reaches its own `filesystem` lists with no `fs:*` decision; on macOS it runs its whole toolchain
   through broad exec, discovers metadata across the operator home, and loses W^X over its own
   writable grants, because one `file-map-executable` allow renders after the write deny so a build
-  loads what it compiles; on Linux a writable bind also reads, and a leaf that selects
-  `executable-memory` loses W^X over anonymous memory; an
+  loads what it compiles; on Linux a writable bind also reads; an
   `[mcp.<name>.network] contain_egress = false` leaf bypasses the gateway, so its traffic has no
   network decision, and no credential injection, which the box records as an
   `egress:native` decision; and `mcp:call` bounds what the agent may ask for, not what the server

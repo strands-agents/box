@@ -3890,7 +3890,6 @@ mod tests {
         let mut updated = initial;
         updated.agent = Some(crate::record::config::process::ProcessSpec {
             file_watching: false,
-            executable_memory: false,
             native_filesystem_policy: None,
             command: vec!["/bin/sh".to_string()],
             workspace: None,

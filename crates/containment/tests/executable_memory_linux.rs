@@ -1,4 +1,4 @@
-//! Executable memory lifts only the two W^X routes a JIT runtime takes.
+//! A JIT runtime maps executable memory by default on Linux, and code it writes stays contained.
 #![cfg(target_os = "linux")]
 
 use std::io::{self, Write as _};
@@ -10,23 +10,64 @@ use sha2::{Digest, Sha256};
 const MARKER: &str = "EXECUTABLE_MEMORY_RESULT=";
 const LENGTH: usize = 4096;
 
+// A function that returns 42: the bytes a JIT would write before running them.
+#[cfg(target_arch = "aarch64")]
+const RETURN_42: &[u8] = &[0x40, 0x05, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6]; // mov w0, #42 ; ret
+#[cfg(target_arch = "x86_64")]
+const RETURN_42: &[u8] = &[0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3]; // mov eax, 42 ; ret
+
 /// The errno of a call that failed, or `None`.
 fn refusal(failed: bool) -> Option<i32> {
     failed.then(|| io::Error::last_os_error().raw_os_error().unwrap())
 }
 
-fn map(protection: libc::c_int) -> *mut libc::c_void {
+/// Map writable memory, write a function into it, make it executable, and call it.
+///
+/// This is what a JIT runtime does: the bytes come from the process, not from a file the mount
+/// view approved. Returns what the generated function returned.
+unsafe fn run_generated_code() -> i32 {
     // SAFETY: an anonymous private mapping touches no existing memory.
-    unsafe {
+    let page = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
             LENGTH,
-            protection,
+            libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
             -1,
             0,
         )
+    };
+    assert_ne!(
+        page,
+        libc::MAP_FAILED,
+        "a writable mapping is always permitted"
+    );
+    // SAFETY: the mapping is `LENGTH` bytes and `RETURN_42` is far shorter.
+    unsafe { std::ptr::copy_nonoverlapping(RETURN_42.as_ptr(), page.cast(), RETURN_42.len()) };
+    // SAFETY: the page was mapped above with this length.
+    assert_eq!(
+        unsafe { libc::mprotect(page, LENGTH, libc::PROT_READ | libc::PROT_EXEC) },
+        0,
+        "a JIT runtime must be able to make its code executable",
+    );
+    // aarch64 needs the instruction cache cleared before it runs freshly written code. The
+    // function fits in one cache line, so cleaning its first address covers it.
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: cache-maintenance instructions on a mapped, owned address; they make no syscall.
+    unsafe {
+        std::arch::asm!(
+            "dc cvau, {addr}",
+            "dsb ish",
+            "ic ivau, {addr}",
+            "dsb ish",
+            "isb",
+            addr = in(reg) page,
+            options(nostack, preserves_flags),
+        );
     }
+    // SAFETY: the page now holds a valid parameterless function returning an int.
+    let generated: extern "C" fn() -> i32 = unsafe { std::mem::transmute(page) };
+    generated()
 }
 
 #[test]
@@ -34,31 +75,37 @@ fn executable_memory_probe() {
     if std::env::var_os("BOX_EXECUTABLE_MEMORY_PROBE").is_none() {
         return;
     }
-    let page = map(libc::PROT_READ | libc::PROT_WRITE);
-    assert_ne!(page, libc::MAP_FAILED);
-    // SAFETY: each call names the page mapped above, or creates a descriptor the process owns.
+    // SAFETY: the generated function returns an int and makes no syscall; each check below is a
+    // single syscall on this process's own descriptors or an anonymous page.
     let report = unsafe {
+        let generated = run_generated_code();
+        let page = libc::mmap(
+            std::ptr::null_mut(),
+            LENGTH,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        );
         serde_json::json!({
-            "mmap": refusal(
-                map(libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC) == libc::MAP_FAILED
-            ),
-            "mprotect": refusal(libc::mprotect(page, LENGTH, libc::PROT_READ | libc::PROT_EXEC) != 0),
+            "generated_code_returned": generated,
+            // Code the process wrote still meets every other restriction:
             "pkey_mprotect": refusal(
-                libc::syscall(libc::SYS_pkey_mprotect, page, LENGTH, libc::PROT_READ, -1) != 0
+                libc::syscall(libc::SYS_pkey_mprotect, page, LENGTH, libc::PROT_EXEC, -1) != 0
             ),
             "memfd_create": refusal(libc::syscall(libc::SYS_memfd_create, c"jit".as_ptr(), 0) < 0),
-            // The same filter as `mmap` and `mprotect` refuses this, so the key lifts no other rule.
             "ipv6_socket": refusal(libc::socket(libc::AF_INET6, libc::SOCK_STREAM, 0) < 0),
+            "ungranted_open": refusal(libc::open(c"/etc/hostname".as_ptr(), libc::O_RDONLY) < 0),
         })
     };
     println!("{MARKER}{report}");
     io::stdout().flush().unwrap();
 }
 
-/// Run the probe in a real box under `config`, and return what it reports.
-fn probe(config: ContainmentConfig) -> serde_json::Value {
+/// Run the probe in a real box, and return what it reports.
+fn probe() -> serde_json::Value {
     let executable = std::env::current_exe().unwrap();
-    let json = config
+    let json = ContainmentConfig::new()
         .allow(&executable, Operation::Read, Scope::File)
         .unwrap()
         .allow(&executable, Operation::Exec, Scope::File)
@@ -101,30 +148,23 @@ fn probe(config: ContainmentConfig) -> serde_json::Value {
     serde_json::from_str(report).unwrap()
 }
 
+/// **A box runs code the process wrote, and that code stays inside every other restriction.** The
+/// generated function runs, while `pkey_mprotect`, `memfd_create`, an IPv6 socket, and an
+/// ungranted path stay refused for the same process.
 #[test]
-fn executable_memory_lifts_only_the_jit_routes() {
+fn a_box_runs_generated_code_that_stays_contained() {
     if !the_host_can_build_a_view() {
         println!("skipping: this host cannot build a namespace mount view");
         return;
     }
     assert_eq!(
-        probe(ContainmentConfig::new()),
+        probe(),
         serde_json::json!({
-            "mmap": libc::EPERM,
-            "mprotect": libc::EPERM,
+            "generated_code_returned": 42,
             "pkey_mprotect": libc::EPERM,
             "memfd_create": libc::EPERM,
             "ipv6_socket": libc::EPERM,
-        })
-    );
-    assert_eq!(
-        probe(ContainmentConfig::new().allow_executable_memory()),
-        serde_json::json!({
-            "mmap": null,
-            "mprotect": null,
-            "pkey_mprotect": libc::EPERM,
-            "memfd_create": libc::EPERM,
-            "ipv6_socket": libc::EPERM,
+            "ungranted_open": libc::ENOENT,
         })
     );
 }
