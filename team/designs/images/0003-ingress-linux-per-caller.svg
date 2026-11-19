@@ -1,0 +1,60 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="820" viewBox="0 0 1280 820" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<defs><marker id="an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1f8f4e"/></marker></defs>
+<rect x="0" y="0" width="1280" height="820" rx="18" fill="#ffffff"/>
+<text x="40" y="52" font-size="26" font-weight="700" fill="#1d2228">Linux: each caller through Ingress Relay</text>
+<text x="40" y="82" font-size="15" fill="#6b7280">All of these steps are new with ingress. They run once for every caller.</text>
+<rect x="25" y="110" width="250" height="56" rx="10" fill="#f4f5f7" stroke="#d6d9de"/>
+<text x="150" y="138" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Caller</text>
+<text x="150" y="158" text-anchor="middle" font-size="12.5" fill="#6b7280">outside the box</text>
+<line x1="150" y1="168" x2="150" y2="694" stroke="#d6d9de" stroke-width="2" stroke-dasharray="5 6"/>
+<rect x="355" y="110" width="250" height="56" rx="10" fill="#f4f5f7" stroke="#d6d9de"/>
+<text x="480" y="138" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Box's trusted process</text>
+<text x="480" y="158" text-anchor="middle" font-size="12.5" fill="#6b7280">(TCB): the ingress relay</text>
+<line x1="480" y1="168" x2="480" y2="694" stroke="#d6d9de" stroke-width="2" stroke-dasharray="5 6"/>
+<rect x="695" y="110" width="250" height="56" rx="10" fill="#f4f5f7" stroke="#d6d9de"/>
+<text x="820" y="138" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">PID 1</text>
+<text x="820" y="158" text-anchor="middle" font-size="12.5" fill="#6b7280">Box's code, in the sandbox</text>
+<line x1="820" y1="168" x2="820" y2="694" stroke="#d6d9de" stroke-width="2" stroke-dasharray="5 6"/>
+<rect x="985" y="110" width="250" height="56" rx="10" fill="#f4f5f7" stroke="#d6d9de"/>
+<text x="1110" y="138" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Agent's server</text>
+<text x="1110" y="158" text-anchor="middle" font-size="12.5" fill="#6b7280">untrusted, on workload_port</text>
+<line x1="1110" y1="168" x2="1110" y2="694" stroke="#d6d9de" stroke-width="2" stroke-dasharray="5 6"/>
+<rect x="680" y="92" width="570" height="616" rx="16" fill="none" stroke="#9aa3ae" stroke-width="1.5" stroke-dasharray="3 5"/>
+<text x="965.0" y="84" text-anchor="middle" font-size="13" font-weight="600" fill="#6b7280">inside the sandbox (own network namespace)</text>
+<circle cx="46" cy="214" r="15" fill="#1f8f4e"/>
+<text x="46" y="219" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">1</text>
+<line x1="150" y1="220" x2="472" y2="220" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="315.0" y="210" text-anchor="middle" font-size="15" font-weight="600" fill="#0f5c31">Connect to listen (e.g. 0.0.0.0:8080)</text>
+<circle cx="46" cy="276" r="15" fill="#1f8f4e"/>
+<text x="46" y="281" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">2</text>
+<path d="M480,264 h28 v18 h-24" fill="none" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="520" y="278" text-anchor="start" font-size="15" font-weight="600" fill="#0f5c31">Accept the caller (waits for a free slot at the caller cap)</text>
+<circle cx="46" cy="338" r="15" fill="#1f8f4e"/>
+<text x="46" y="343" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">3</text>
+<line x1="480" y1="344" x2="812" y2="344" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="650.0" y="334" text-anchor="middle" font-size="15" font-weight="600" fill="#0f5c31">Ask for a socket over the Unix socket channel</text>
+<circle cx="46" cy="400" r="15" fill="#1f8f4e"/>
+<text x="46" y="405" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">4</text>
+<path d="M820,388 h28 v18 h-24" fill="none" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="806" y="402" text-anchor="end" font-size="15" font-weight="600" fill="#0f5c31">Create an unconnected TCP socket in the sandbox's network</text>
+<circle cx="46" cy="462" r="15" fill="#1f8f4e"/>
+<text x="46" y="467" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">5</text>
+<line x1="820" y1="468" x2="488" y2="468" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="650.0" y="458" text-anchor="middle" font-size="15" font-weight="600" fill="#0f5c31">Send the socket to Box over the Unix socket channel</text>
+<circle cx="46" cy="524" r="15" fill="#1f8f4e"/>
+<text x="46" y="529" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">6</text>
+<line x1="480" y1="530" x2="1102" y2="530" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="795.0" y="520" text-anchor="middle" font-size="15" font-weight="600" fill="#0f5c31">Connect it to 127.0.0.1:workload_port (5 s timeout)</text>
+<circle cx="46" cy="586" r="15" fill="#1f8f4e"/>
+<text x="46" y="591" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">7</text>
+<path d="M1110,574 h28 v18 h-24" fill="none" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="1096" y="588" text-anchor="end" font-size="15" font-weight="600" fill="#0f5c31">Accept the connection (the agent's own server)</text>
+<rect x="20" y="620" width="1240" height="66" rx="10" fill="#e3f5ea"/>
+<circle cx="46" cy="648" r="15" fill="#1f8f4e"/>
+<text x="46" y="653" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">8</text>
+<line x1="158" y1="658" x2="472" y2="658" stroke="#1f8f4e" stroke-width="3" marker-start="url(#an)" marker-end="url(#an)"/>
+<line x1="488" y1="658" x2="1102" y2="658" stroke="#1f8f4e" stroke-width="3" marker-start="url(#an)" marker-end="url(#an)"/>
+<text x="795.0" y="642" text-anchor="middle" font-size="15" font-weight="700" fill="#0f5c31">Box copies bytes both ways, caller ⇄ agent, until either side closes</text>
+<text x="40" y="768" font-size="13.5" fill="#6b7280">If nothing accepts on workload_port, or a connect takes over 5 s, Box closes only this caller. PID 1 never blocks.</text>
+<text x="40" y="790" font-size="13.5" fill="#6b7280">On macOS there is no PID 1 and no channel: Box creates the socket itself (steps 3 to 5) and connects it on the Mac's loopback.</text>
+</svg>

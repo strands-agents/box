@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
-use strands_det_harness::{BoxFixture, RunResult, sh_quote};
+use strands_det_harness::{BoxFixture, Platform, RunResult, macos_git_identity, sh_quote};
 
 pub const SOURCE: &str = include_str!("probe.rs");
 pub const SIGNAL: i32 = if cfg!(target_os = "macos") { 30 } else { 10 };
@@ -18,6 +18,56 @@ pub fn q(path: &Path) -> String {
 
 pub fn compile(b: &BoxFixture) -> PathBuf {
     b.compile_probe("phase3-probe", SOURCE)
+}
+
+pub fn git_identity() -> PathBuf {
+    if Platform::current() == Platform::Macos {
+        return macos_git_identity();
+    }
+    std::env::split_paths(&std::env::var_os("PATH").expect("DET_ERROR: PATH is set"))
+        .map(|directory| directory.join("git"))
+        .find(|path| path.is_file())
+        .expect("DET_ERROR: Git is installed")
+        .canonicalize()
+        .expect("DET_ERROR: resolve Git")
+}
+
+pub fn with_git(b: &BoxFixture, text: String) -> String {
+    if Platform::current() == Platform::Macos {
+        return b.with_macos_git_tool()(text);
+    }
+    let git = git_identity();
+    let output = Command::new(&git)
+        .arg("--exec-path")
+        .env_remove("GIT_EXEC_PATH")
+        .output()
+        .expect("DET_ERROR: query Git's helper directory");
+    let helpers = PathBuf::from(self::text(output).trim())
+        .canonicalize()
+        .expect("DET_ERROR: resolve Git's helper directory");
+    let roots: std::collections::BTreeSet<_> = ["/lib", "/lib64", "/usr/lib", "/usr/lib64"]
+        .into_iter()
+        .filter_map(|path| std::fs::canonicalize(path).ok())
+        .chain([helpers, b.workspace().to_path_buf()])
+        .collect();
+    let json = |path: &Path| serde_json::to_string(&path.to_string_lossy()).unwrap();
+    let reads = roots
+        .iter()
+        .filter(|path| {
+            !roots
+                .iter()
+                .any(|other| other != *path && path.starts_with(other))
+        })
+        .map(|path| json(path))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "{text}\n[tool.git]\ncommand = [{}]\nworkspace = {ws}\n\
+         [tool.git.env]\nGIT_CONFIG_NOSYSTEM = \"1\"\nGIT_TEMPLATE_DIR = \"\"\n\
+         [tool.git.filesystem]\nread = [{reads}]\nwrite = [{ws}]\n",
+        json(&git),
+        ws = json(b.workspace()),
+    )
 }
 
 pub fn host(probe: &Path, args: &[&str]) -> String {

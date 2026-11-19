@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="760" viewBox="0 0 1280 760" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<defs>
+<marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8a9099"/></marker>
+<marker id="an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1f8f4e"/></marker>
+</defs>
+<rect x="0" y="0" width="1280" height="760" rx="18" fill="#ffffff"/>
+<text x="40" y="52" font-size="26" font-weight="700" fill="#1d2228">Where Ingress Relay sits in Box</text>
+<text x="40" y="82" font-size="15" fill="#6b7280">The green path is new: callers reach the agent through Box. Grey paths are what Box already has.</text>
+<rect x="220" y="120" width="840" height="560" rx="20" fill="none" stroke="#9aa3ae" stroke-width="1.8"/>
+<text x="240" y="146" text-anchor="start" font-size="16" font-weight="700" fill="#1d2228">Box</text>
+<rect x="250" y="165" width="360" height="490" rx="16" fill="#fafbfc" stroke="#d6d9de"/>
+<text x="270" y="192" text-anchor="start" font-size="15" font-weight="650" fill="#1d2228">Box's trusted process (TCB)</text>
+<rect x="660" y="165" width="370" height="250" rx="16" fill="none" stroke="#9aa3ae" stroke-width="1.5" stroke-dasharray="4 5"/>
+<text x="680" y="192" text-anchor="start" font-size="15" font-weight="650" fill="#1d2228">Agent sandbox</text>
+<text x="680" y="212" text-anchor="start" font-size="12" font-weight="400" fill="#6b7280">Linux: own network namespace, PID 1 · macOS: Seatbelt profile</text>
+<rect x="660" y="525" width="370" height="130" rx="16" fill="none" stroke="#c7cdd6" stroke-width="1.5" stroke-dasharray="4 5"/>
+<text x="680" y="550" text-anchor="start" font-size="15" font-weight="650" fill="#1d2228">Tool and MCP sandboxes</text>
+<text x="680" y="568" text-anchor="start" font-size="12" font-weight="400" fill="#6b7280">each in its own sandbox, started by the broker</text>
+<rect x="280" y="225" width="300" height="92" rx="12" fill="#e3f5ea" stroke="#1f8f4e" stroke-width="2.2"/>
+<text x="430.0" y="267.0" text-anchor="middle" font-size="16" font-weight="650" fill="#0f5c31">Ingress Relay</text>
+<text x="430.0" y="289.0" text-anchor="middle" font-size="12.5" fill="#6b7280">[agent.ingress] listen, e.g. 0.0.0.0:8080</text>
+<text x="430.0" y="306.0" text-anchor="middle" font-size="12.5" fill="#6b7280">accept · connect · copy</text>
+<rect x="280" y="345" width="300" height="70" rx="12" fill="#f4f5f7" stroke="#d6d9de" stroke-width="1.5"/>
+<text x="430.0" y="376.0" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Broker (box.sock)</text>
+<text x="430.0" y="398.0" text-anchor="middle" font-size="12.5" fill="#6b7280">Shell · Python · MCP · tools</text>
+<rect x="280" y="440" width="300" height="70" rx="12" fill="#f4f5f7" stroke="#d6d9de" stroke-width="1.5"/>
+<text x="430.0" y="471.0" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Egress gateway</text>
+<text x="430.0" y="493.0" text-anchor="middle" font-size="12.5" fill="#6b7280">policy on every outbound request</text>
+<rect x="280" y="560" width="300" height="70" rx="12" fill="#f4f5f7" stroke="#d6d9de" stroke-width="1.5"/>
+<text x="430.0" y="591.0" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Policy</text>
+<text x="430.0" y="613.0" text-anchor="middle" font-size="12.5" fill="#6b7280">one per box: decides agent, tool, and egress requests</text>
+<rect x="700" y="265" width="290" height="110" rx="12" fill="#ffffff" stroke="#9aa3ae" stroke-width="1.5"/>
+<text x="845.0" y="316.0" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Agent's server</text>
+<text x="845.0" y="338.0" text-anchor="middle" font-size="12.5" fill="#6b7280">listens on workload_port</text>
+<text x="845.0" y="355.0" text-anchor="middle" font-size="12.5" fill="#6b7280">e.g. app.run(port=8081)</text>
+<rect x="700" y="582" width="290" height="60" rx="12" fill="#ffffff" stroke="#c7cdd6" stroke-width="1.5"/>
+<text x="845.0" y="618.0" text-anchor="middle" font-size="15" font-weight="650" fill="#1d2228">A tool or an MCP server</text>
+<rect x="30" y="222" width="160" height="98" rx="12" fill="#ffffff" stroke="#9aa3ae" stroke-width="1.5"/>
+<text x="110.0" y="267.0" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Callers</text>
+<text x="110.0" y="289.0" text-anchor="middle" font-size="12.5" fill="#6b7280">HTTP clients,</text>
+<text x="110.0" y="306.0" text-anchor="middle" font-size="12.5" fill="#6b7280">AgentCore Runtime</text>
+<rect x="1090" y="456" width="160" height="88" rx="12" fill="#ffffff" stroke="#9aa3ae" stroke-width="1.5"/>
+<text x="1170.0" y="496.0" text-anchor="middle" font-size="15" font-weight="650" fill="#1d2228">External services</text>
+<text x="1170.0" y="518.0" text-anchor="middle" font-size="12.5" fill="#6b7280">models · APIs ·</text>
+<text x="1170.0" y="535.0" text-anchor="middle" font-size="12.5" fill="#6b7280">remote MCP</text>
+<path d="M190,271 L276,271" fill="none" stroke="#1f8f4e" stroke-width="3.2" marker-end="url(#an)"/>
+<text x="233" y="260" text-anchor="middle" font-size="13" font-weight="700" fill="#0f5c31">TCP</text>
+<path d="M580,271 L640,271 L640,300 L696,300" fill="none" stroke="#1f8f4e" stroke-width="3.2" marker-end="url(#an)"/>
+<text x="640" y="252" text-anchor="middle" font-size="13" font-weight="700" fill="#0f5c31">relayed connection</text>
+<path d="M700,345 L620,345 L620,375 L584,375" fill="none" stroke="#8a9099" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ag)"/>
+<text x="626" y="362" text-anchor="start" font-size="12" font-weight="500" fill="#3d434b">box.sock</text>
+<path d="M760,375 L760,470 L584,470" fill="none" stroke="#8a9099" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ag)"/>
+<text x="768" y="432" text-anchor="start" font-size="12" font-weight="500" fill="#3d434b">outbound, through the proxy</text>
+<path d="M580,495 L1086,495" fill="none" stroke="#8a9099" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ag)"/>
+<text x="1072" y="486" text-anchor="end" font-size="12" font-weight="500" fill="#3d434b">to the internet</text>
+<path d="M580,400 L645,400 L645,612 L696,612" fill="none" stroke="#8a9099" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ag)"/>
+<text x="652" y="600" text-anchor="start" font-size="12" font-weight="500" fill="#3d434b">starts</text>
+<path d="M430,510 L430,556" fill="none" stroke="#8a9099" stroke-width="1.6" marker-end="url(#ag)"/>
+<text x="440" y="538" text-anchor="start" font-size="12" font-weight="500" fill="#3d434b">decides</text>
+<path d="M300,415 L265,415 L265,595 L276,595" fill="none" stroke="#8a9099" stroke-width="1.6" marker-end="url(#ag)"/>
+<text x="258" y="505" text-anchor="end" font-size="12" font-weight="500" fill="#3d434b">decides</text>
+<line x1="40" y1="718" x2="78" y2="718" stroke="#1f8f4e" stroke-width="3.2" marker-end="url(#an)"/>
+<text x="88" y="723" text-anchor="start" font-size="14" font-weight="500" fill="#1d2228">new with ingress</text>
+<line x1="250" y1="718" x2="288" y2="718" stroke="#8a9099" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#ag)"/>
+<text x="298" y="723" text-anchor="start" font-size="14" font-weight="500" fill="#1d2228">Box today</text>
+<text x="1240" y="723" text-anchor="end" font-size="13" font-weight="400" fill="#6b7280">No policy decision covers a caller: the operator's listen setting decides who can call the agent.</text>
+</svg>

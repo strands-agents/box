@@ -1,10 +1,12 @@
 # `strands-box-telemetry`
 
-Where one box's decision records go.
+Where one box's decisions, control operations, and MCP routing diagnostics go.
 
 ## Known limitations
 
-- **Delivery is best-effort.** A failing target prints to stderr and the record is gone. A full
+- **Delivery is best-effort.** A failing target loses the record. The loss is counted, and the drain
+  prints the count on one stderr line when the run ends. Each failure also prints with its cause
+  when the caller sets `TelemetryConfig::reporting_failures`. A full
   queue drops records and does not count them, because the SDK reports that number only through a
   `tracing` subscriber this workspace does not install.
 - **Targets flush in sequence.** Each target has its own queue, but one slow or unreachable
@@ -57,19 +59,26 @@ A target names a **set**. No signal contains another, and there is no ordering.
 | `agent_logs` | one log record the agent's own instrumentation exported |
 | `agent_metrics` | one metric the agent's own instrumentation exported |
 | `control_plane` | one change to the authority this box holds |
+| `mcp_unmatched` | one MCP alias invocation that matches no declared command |
 
-**A target naming none receives every one of the six.** An empty set is refused.
+**A target naming none receives every one of the seven.** An empty set is refused.
 
-These six are this crate's own vocabulary and the spelling a record carries. They are not what an
+These seven are this crate's own vocabulary and the spelling a record carries. They are not what an
 operator writes: `box.toml` takes `include`, whose words are `deny`, `permit`, `trace`, `logs`, and
 `metrics`, and the box expands each word into this set. `trace` names both `agent_trace` and
-`control_plane`.
+`control_plane`. `logs` names both `agent_logs` and `mcp_unmatched`.
 
 ## What a record carries
 
 Each decision record names the principal, action, resource, policy rule or enforcement gate, and
 verdict. A refusal also carries its reason. The shape is OTLP: `resourceLogs` for the box's own
 records and `resourceSpans` for an agent trace.
+
+`Collector::mcp_unmatched` accepts `McpUnmatched::new(program, arguments)` and records it as an
+informational log in scope `strands-box.mcp`, with event name `strands.box.mcp.unmatched`.
+The constructor bounds the program and redacts expanded arguments. `correlated` attaches the
+caller's available request context. This record has no policy verdict or execution outcome and
+produces no span.
 
 ## The agent's own signals
 
@@ -95,26 +104,40 @@ Three properties are intended:
 
 **Shape no longer distinguishes a box record from an agent's.** The box writes `resourceLogs` for
 every decision, and `/v1/logs` now accepts `resourceLogs` from the agent. So a consumer must select on
-`strands.box.source`, or on the `strands-box.policy` and `strands-box.control` scopes. Severity is the
-box's own routing and is not a filter for a reader.
+`strands.box.source`, or on the `strands-box.policy`, `strands-box.control`, and `strands-box.mcp`
+scopes. Severity is the box's own routing and is not a filter for a reader.
 
 The box **relays** each of these and produces none of them, so a harness that exports no metric
 delivers no metric, whatever `include` names.
 
 ## Exporter types
 
-`type` selects the exporter. Two are built:
+`TargetKind` selects the exporter. Two are built:
 
-| Type | Built | Destination |
-|---|---|---|
-| `file` | yes | a path; one OTLP-JSON request per line |
-| `otlp` | yes | a URL; OTLP over HTTP with protobuf |
+| Kind | Destination |
+|---|---|
+| `File` | a path; one OTLP-JSON request per line |
+| `Otlp` | a URL; OTLP over HTTP with protobuf |
 
-Those are the two types. Any other table name is refused when the config loads, naming these two, so
-no box starts believing it records. A vendor exporter is reached through a collector — see below.
+The box's vendor kinds (`langfuse`, `langsmith`, `cloudwatch_logs`, `cloudwatch_traces`) are not
+exporters here. The box expands each one into the `Otlp` target it stands for, with its path, its
+headers, and its payloads, before this crate sees it.
+
+An `Otlp` target can also name:
+
+- **The payloads it accepts** (`Target::accepting`), from `Payload::Traces`, `Logs`, and `Metrics`.
+  The exporter sends no batch of a payload the list leaves out, because a vendor that takes only
+  spans answers `404` on the other routes.
+- **Fixed headers** (`Target::with_header`). A header the exporter writes itself is refused.
 
 ## The credential
 
-An `otlp` target names a `secret.ref` and a `secret.header`. The caller resolves the reference and
-hands over the value; this crate never reads the environment. A secret needs an `https://`
-destination unless the destination is loopback.
+An `Otlp` target carries its credential in one of two ways. The caller resolves a `TargetSecret`
+and hands over the header and value. Or the caller opens a `credentials::Vault` for the destination
+alone, and hands it over with `Target::with_vault`. The exporter then asks the vault to attach the
+credential to each request, as a header, as Basic auth, or as a SigV4 signature. A target takes one
+or the other, never both. A credential needs an `https://` destination unless the destination is
+loopback.
+
+This crate never reads the environment. The caller turns on the stderr line for each failed batch
+with `TelemetryConfig::reporting_failures`.

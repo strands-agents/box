@@ -25,7 +25,7 @@
 //! every other one for its full deadline (27.73s measured), because all Shells shared a thread.
 //!
 //! **MCP is deliberately not exercised.** Nothing in the box vends an MCP server today — the
-//! vendored Shell's client half needs `[[mcp]]` the box never writes, and its server half needs
+//! Shell's client half needs `[[mcp]]` the box never writes, and its server half needs
 //! `--mcp` the box never passes. What *is* asserted (`a_program_holds_a_session_across_many_calls`)
 //! is the capability MCP would need: one program, many calls, state surviving between them. If
 //! that holds, the abstraction can carry a session-oriented protocol later.
@@ -236,6 +236,56 @@ fn an_env_key_sets_is_sandbox_for_the_workload() {
         stdout(&observer).contains("IS_SANDBOX=[true] CLAUDE_CODE_TMPDIR=[]"),
         "the operator's `env` key must reach the workload, and no CLAUDE_CODE_TMPDIR may: \
          {observer:?}"
+    );
+}
+
+/// **An `[agent] env` runtime option reaches the agent and no tool.**
+#[test]
+fn an_agent_runtime_option_reaches_the_agent_and_no_tool() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let links = fixture::short_temporary_home();
+    let bash = std::path::Path::new("/bin/bash")
+        .canonicalize()
+        .expect("bash exists");
+    std::os::unix::fs::symlink(&bash, links.path().join("probe")).expect("a link to bash");
+    let directory = links.path().display();
+    let policy = format!(
+        r#"
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:spawn", resource)
+when {{ context.input.program == "{directory}/probe" }};
+permit(principal, action == Box::Action::"fs:read", resource);
+"#
+    );
+
+    let box_ = Request::with_config(
+        "prog-env-runtime-option",
+        &policy,
+        &format!(
+            "[tool.probe]\ncommand = [\"{directory}/probe\"]\n\
+             [tool.probe.filesystem]\nread = [\"{directory}\"]\n"
+        ),
+    )
+    .agent_env("NODE_OPTIONS", "--agent-only")
+    .agent_read(&[links.path()])
+    .expect();
+
+    let agent = box_.bash(r#"printf "agent=[%s]" "$NODE_OPTIONS""#);
+    assert_workload_launched(&agent, "the agent");
+    assert!(
+        stdout(&agent).contains("agent=[--agent-only]"),
+        "the agent's own `env` must reach it: {agent:?}"
+    );
+
+    let tool = box_.bash(&format!(
+        r#"zsh -c '{directory}/probe -c "printf tool=[%s] \"\$NODE_OPTIONS\""'"#
+    ));
+    assert_workload_launched(&tool, "the tool");
+    assert!(
+        stdout(&tool).contains("tool=[]"),
+        "the agent's `env` must not reach a tool: {tool:?}"
     );
 }
 
@@ -450,32 +500,33 @@ fn four_concurrent_requests_each_keep_their_own_state() {
     }
 }
 /// A stuck request does not block a healthy one.
-///
-/// The Lua interpreter never awaits, so it once pinned the runtime every request
-/// shared and a healthy sibling waited 27.73s. Each connection owns its thread now. Timed with
-/// bash's `SECONDS`, because the profile grants exec on the workload and the aliases and nothing
-/// else — there is no `date` in the cage.
 #[test]
 fn a_stuck_request_does_not_block_a_healthy_one() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    let box_ = Request::with_policy("prog-stuck", PERMISSIVE).expect();
+    let box_ =
+        Request::with_config("prog-stuck", PERMISSIVE, "[limits]\nshell.timeout = 6\n").expect();
 
     let output = box_.bash(
         r#"
-zsh -c "lua -e 'while true do end'" &
-zsh -c "sleep 3"
 SECONDS=0
+zsh -c 'lua -e "local ready = assert(io.open(\"{box_home}/spinning\", \"w\")); ready:write(\"ready\"); ready:close(); while true do end"' &
+spinner=$!
+while [[ ! -s "{box_home}/spinning" ]]; do
+    (( SECONDS < 4 )) || { printf 'LUA_NOT_READY'; exit 1; }
+done
+# Lua's file close yields once; include its settling time in the measurement.
+zsh -c "sleep 0.1"
 zsh -c 'cd {box_home} && printf healthy > ok.txt && cat ok.txt'
 printf "|elapsed=%s" "$SECONDS"
+wait "$spinner"
+printf "|spinner_status=%s" "$?"
 "#,
     );
 
     let text = stdout(&output);
-    eprintln!(
-        "STUCK-SIBLING MEASURED: {text} (was 27.73s before each connection got its own thread)"
-    );
+    eprintln!("STUCK-SIBLING MEASURED: {text}");
 
     assert_workload_launched(&output, "the healthy request");
     assert!(
@@ -490,9 +541,14 @@ printf "|elapsed=%s" "$SECONDS"
         .parse()
         .expect("elapsed seconds parse");
     assert!(
-        elapsed < 15,
+        elapsed < 4,
         "a stuck request must not block a healthy one. If this regresses, the connections went \
          back onto one shared thread. elapsed={elapsed}s, output={output:?}"
+    );
+    assert!(
+        text.contains("|spinner_status=1")
+            && String::from_utf8_lossy(&output.stderr).contains("timeout"),
+        "the competing Lua request must run until its deadline: {output:?}"
     );
 }
 
@@ -536,43 +592,49 @@ zsh -c 'cat {box_home}/shared/w1.txt {box_home}/shared/w2.txt {box_home}/shared/
 
 /// A program the box never saw behaves like a Unix program.
 ///
-/// Every other test here exercises builtins the vendored Shell implements. This one runs a script
-/// the *test* creates on the host, inside the box's mount, so the box has no knowledge of it — the
-/// closest reachable thing to "a fake command". It checks the parts an agent harness depends on: a
-/// shebang, an argument, stdout and stderr kept separate, and the tool's own exit code.
+/// Every other test here exercises builtins Strands Shell implements. This one runs a script
+/// the *test* creates on the host, inside the box's mount, as a host program in its own sandbox —
+/// the closest reachable thing to "a fake command". It checks the parts an agent harness depends
+/// on: a shebang, an argument, stdout and stderr kept separate, and the tool's own exit code.
 ///
-/// **Why this test has its own policy.** `sh` is not a program the Shell implements, so the
-/// resolved decision is `shell:spawn` and `PERMISSIVE` — which permits `shell:run` only — refuses
-/// it. Adding the spawn permit to `PERMISSIVE` instead would widen every other test in this file,
-/// including the ones whose subject is a denial, so the grant stays scoped to the one test that
-/// needs a host binary. The same reason `box_shell.rs` keeps `ONE_BINARY_POLICY` separate.
+/// The script is a declared tool called by its bare name, so it is decided as `shell:spawn` on
+/// `faketool`. `sh FILE` would run the file in the Shell instead (`sh_script_admission.rs`).
 #[test]
 fn a_program_the_box_never_saw_behaves_like_a_unix_program() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
-    /// `PERMISSIVE` plus the one host binary this test runs, and no other.
-    const PERMISSIVE_PLUS_SH: &str = r#"
+    /// `PERMISSIVE` plus a spawn of the one host program this test runs, and no other.
+    const PERMISSIVE_PLUS_FAKETOOL: &str = r#"
 permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
 permit(principal == Box::Agent::"self", action == Box::Action::"shell:spawn", resource)
-when { context.input.program == "sh" };
+when { context.input.program == "faketool" };
 permit(principal, action == Box::Action::"fs:read", resource);
 permit(principal, action == Box::Action::"fs:write", resource);
 "#;
 
-    // The host `sh` is a declared tool with the agent home read-write, so it can run a script there.
-    let box_ = Request::with_config(
+    // The script is a declared tool in the workspace, outside every write grant, and reads only
+    // its own directory and its `#!/bin/sh` interpreter. Linux grants an interpreter only through
+    // the tool's own table, so the table names the file `/bin/sh` resolves to.
+    let sh = std::path::Path::new("/bin/sh")
+        .canonicalize()
+        .expect("resolve /bin/sh");
+    let request = Request::with_config(
         "prog-fake-cmd",
-        PERMISSIVE_PLUS_SH,
-        "[tool.sh]\ncommand = [\"sh\"]\n[tool.sh.filesystem]\nread = [\"{box_home}\"]\n\
-         write = [\"{box_home}\"]\n",
-    )
-    .expect();
+        PERMISSIVE_PLUS_FAKETOOL,
+        &format!(
+            "[tool.faketool]\ncommand = [\"{{workspace}}/fake-bin/faketool\"]\n\
+             [tool.faketool.filesystem]\nread = [\"{{workspace}}/fake-bin\"]\n\
+             read_file = [\"{}\"]\n",
+            sh.display()
+        ),
+    );
 
-    // Written from the host side into the box home, which the box mounts. Writing it here rather
-    // than through a nested `zsh -c` keeps the shell quoting legible; the *use* of it below is
-    // still a full round trip through the boundary.
-    let tool = box_.box_home().join("faketool");
+    // Written from the host side before the box exists, because a declared tool's file must
+    // exist when the box is created.
+    let bin = request.workspace().join("fake-bin");
+    std::fs::create_dir_all(&bin).expect("create the fake tool's directory");
+    let tool = bin.join("faketool");
     std::fs::write(
         &tool,
         "#!/bin/sh\nprintf 'out:%s' \"$1\"\nprintf 'err:%s' \"$1\" >&2\nexit 3\n",
@@ -580,8 +642,9 @@ permit(principal, action == Box::Action::"fs:write", resource);
     .expect("write the fake tool");
     std::fs::set_permissions(&tool, std::os::unix::fs::PermissionsExt::from_mode(0o755))
         .expect("make the fake tool executable");
+    let box_ = request.expect();
 
-    let output = box_.bash(r#"zsh -c 'sh {box_home}/faketool ARG; printf "|status=%s" "$?"'"#);
+    let output = box_.bash(r#"zsh -c 'faketool ARG; printf "|status=%s" "$?"'"#);
 
     assert_workload_launched(&output, "the fake tool");
     let text = stdout(&output);
@@ -599,6 +662,59 @@ permit(principal, action == Box::Action::"fs:write", resource);
         stderr(&output).contains("err:ARG"),
         "the tool's stderr must reach the harness: {output:?}"
     );
+}
+
+/// **A program called by one of two links to one file runs under the table of that link**, so the
+/// spawn selects by the spelling the caller used and not by the resolved file.
+#[test]
+fn a_program_called_by_a_link_runs_under_the_table_of_that_link() {
+    if !fixture::namespace_launcher_is_usable() {
+        return;
+    }
+    let links = fixture::short_temporary_home();
+    let bash = std::path::Path::new("/bin/bash")
+        .canonicalize()
+        .expect("bash exists");
+    for name in ["first", "second"] {
+        std::os::unix::fs::symlink(&bash, links.path().join(name)).expect("a link to bash");
+    }
+    let directory = links.path().display();
+
+    // `PERMISSIVE` plus a spawn of the two links, and no other program.
+    let policy = format!(
+        r#"
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:exec", resource);
+permit(principal == Box::Agent::"self", action == Box::Action::"shell:spawn", resource)
+when {{ context.input.program == "{directory}/first" || context.input.program == "{directory}/second" }};
+permit(principal, action == Box::Action::"fs:read", resource);
+"#
+    );
+
+    let box_ = Request::with_config(
+        "prog-called-link",
+        &policy,
+        &format!(
+            "[tool.first]\ncommand = [\"{directory}/first\"]\nenv = {{ WHICH = \"first\" }}\n\
+             [tool.first.filesystem]\nread = [\"{directory}\"]\n\
+             [tool.second]\ncommand = [\"{directory}/second\"]\nenv = {{ WHICH = \"second\" }}\n\
+             [tool.second.filesystem]\nread = [\"{directory}\"]\n"
+        ),
+    )
+    .agent_read(&[links.path()])
+    .expect();
+
+    // Both links, so the test holds whichever table wins a tie that no name breaks.
+    for name in ["first", "second"] {
+        let output = box_.bash(&format!(
+            r#"zsh -c '{directory}/{name} -c "printf which=%s \"\$WHICH\""'"#
+        ));
+
+        assert_workload_launched(&output, "the linked tool");
+        assert!(
+            stdout(&output).contains(&format!("which={name}")),
+            "the program called as {name} must run under [tool.{name}]: {output:?}"
+        );
+    }
 }
 
 /// Redirection, appending, and reading back — the file semantics a build depends on.
@@ -676,71 +792,60 @@ permit(principal, action == Box::Action::"fs:read", resource);
     );
 }
 
-/// Eight concurrent workloads, each doing agent-shaped work, all keep their own state.
-///
-/// Twice the four-workload case, because the per-connection Program cap is 8 and a bound is worth
-/// exercising at its edge rather than comfortably inside it.
+/// Eight clients in one Box run retain their own directories and file contents.
 #[test]
-/// # Flaky on a pre-existing lost write — `#[ignore]`d 2026-08-09
-///
-/// Fails roughly 1 run in 5, always the same way: a workload's `read=` is empty after its own
-/// `printf p{i} > f.txt` in the same command. That is the defect
-/// `redirection_and_append_behave_like_a_shell` already pins — `vfs_kernel.rs:215-229` spawns a
-/// detached task that accumulates writes and flushes only when the channel closes, and nothing
-/// awaits that flush, so a read can beat it.
-///
-/// **The streaming work makes this much better, not worse**: with the vendored channel-writer
-/// inheritance stashed it fails **4 runs out of 4**; with it, 1 in 5. So this is not a regression to
-/// bisect — it is the same upstream lost write, now rare enough to look intermittent.
-///
-/// Un-`#[ignore]` when the flush is joinable. Fixing it means making the writer task awaited on
-/// close rather than detached, which is a vendored change of its own and larger than this diff.
-#[ignore = "flaky on the pre-existing detached-flush lost write; see the doc comment"]
-fn eight_concurrent_workloads_all_make_progress() {
+fn eight_concurrent_clients_all_make_progress() {
+    if !fixture::namespace_launcher_is_usable() {
+        eprintln!("skipping: concurrent clients require a usable containment backend");
+        return;
+    }
     let box_ = Request::with_policy("prog-eight", PERMISSIVE).expect();
-
+    let mut script = String::from("printf 'EIGHT_CLIENTS_STARTED\n'\npids=''\n");
+    let release = await_file("$BOX_HOME/release-clients");
+    for i in 1..=8 {
+        script.push_str(&format!(
+            r#"(
+                : > "$BOX_HOME/ready-{i}"
+                {release}
+                zsh -c '
+                    mkdir -p {{box_home}}/w{i}
+                    cd {{box_home}}/w{i}
+                    printf p{i} > f.txt
+                    printf "|w={i}|cwd=%s|read=%s" "$(pwd)" "$(cat f.txt)"
+                ' > "$BOX_HOME/result-{i}"
+            ) &
+            pids="$pids $!"
+"#
+        ));
+    }
+    for i in 1..=8 {
+        script.push_str(&await_file(&format!("$BOX_HOME/ready-{i}")));
+        script.push('\n');
+    }
+    script.push_str(
+        r#": > "$BOX_HOME/release-clients"
+           status=0
+           for p in $pids; do wait "$p" || status=$?; done
+           exit "$status"
+"#,
+    );
     let start = Instant::now();
-    let workloads: Vec<_> = (1..=8)
-        .map(|i| {
-            spawn_run(
-                &box_,
-                &format!(
-                    r#"zsh -c '
-                        mkdir -p {{box_home}}/w{i}
-                        cd {{box_home}}/w{i}
-                        printf p{i} > f.txt
-                        printf "|w={i}|cwd=%s|read=%s" "$(pwd)" "$(cat f.txt)"
-                    '"#
-                ),
-            )
-        })
-        .collect();
-
-    let outputs: Vec<Output> = workloads
-        .into_iter()
-        .map(|child| {
-            child
-                .wait_with_output()
-                .expect("a concurrent workload finishes")
-        })
-        .collect();
-    let elapsed = start.elapsed();
-    eprintln!("EIGHT-WORKLOAD MEASURED: {elapsed:?}");
-
-    // The real path, because these read the workload's output rather than feed it a script.
+    let output = run_within_deadline(&box_, &script);
+    eprintln!("EIGHT-CLIENT MEASURED: {:?}", start.elapsed());
+    assert_workload_launched(&output, "the eight clients");
+    assert!(
+        output.status.success(),
+        "all clients must succeed: {output:?}"
+    );
+    assert!(stdout(&output).contains("EIGHT_CLIENTS_STARTED"));
     let home = box_.box_home();
-    let home = home.display();
-    for (index, output) in outputs.iter().enumerate() {
-        let i = index + 1;
-        let text = stdout(output);
-        assert_workload_launched(output, &format!("workload {i}"));
-        assert!(
-            text.contains(&format!("|cwd={home}/w{i}")),
-            "workload {i} must stay in its own directory: {output:?}"
-        );
-        assert!(
-            text.contains(&format!("|read=p{i}")),
-            "workload {i} must read its own file: {output:?}"
+    for i in 1..=8 {
+        let text = std::fs::read_to_string(home.join(format!("result-{i}")))
+            .expect("each client must write its response");
+        assert_eq!(
+            text,
+            format!("|w={i}|cwd={}/w{i}|read=p{i}", home.display()),
+            "client {i} must retain its directory and read its own write"
         );
     }
 }
@@ -1111,7 +1216,8 @@ when temporal {{
 /// The text the hosted Shell reports when no rule permits a command.
 const NO_PERMIT_MATCHED: &str = "No permit policy matched";
 
-/// The marker write's journaled decision, and the commit's.
+/// The marker write's journaled decision, and the commit's: the box's only `printf`, whose
+/// argument a record redacts.
 fn marker_and_commit(journaled: &[Journaled]) -> (Option<usize>, Vec<usize>) {
     let marker = journaled.iter().position(|entry| {
         entry.action == "fs:write"
@@ -1122,7 +1228,9 @@ fn marker_and_commit(journaled: &[Journaled]) -> (Option<usize>, Vec<usize>) {
         .iter()
         .enumerate()
         .filter(|(_, entry)| {
-            entry.action == "shell:exec" && entry.command_args == ["printf", "COMMIT"]
+            entry.action == "shell:exec"
+                && entry.resource == "printf"
+                && entry.command_args == ["printf", "<redacted>"]
         })
         .map(|(index, _)| index)
         .collect();
@@ -1162,7 +1270,7 @@ fn two_racing_requests_under_a_response_keyed_rule_get_the_verdicts_the_journal_
         // hold both racers at the same gate and erase the stagger; one exec pays it before the race.
         let script = format!(
             r#"zsh -c true > /dev/null 2>&1
-( : > "{home}/ready-test"; {wait}; out=$(zsh -c "printf ok > {home}/tests-passed" 2>&1); echo "|test_status=$?|${{out//$'\n'/ }}" ) &
+( : > "{home}/ready-test"; {wait}; out=$(zsh -c "echo ok > {home}/tests-passed" 2>&1); echo "|test_status=$?|${{out//$'\n'/ }}" ) &
 ( : > "{home}/ready-commit"; {wait}; for (( i = 0; i < {stagger}; i++ )); do :; done; out=$(zsh -c "printf COMMIT" 2>&1); echo "|commit_status=$?|${{out//$'\n'/ }}" ) &
 {wait_test}
 {wait_commit}
@@ -1261,7 +1369,7 @@ fn a_commit_sequenced_after_the_test_response_is_permitted() {
     }
     let box_ = Request::with_policy("order-after", &response_keyed_policy()).expect();
     let output = box_.bash(
-        r#"zsh -c "printf ok > $BOX_HOME/tests-passed"; echo "|test_status=$?"
+        r#"zsh -c "echo ok > $BOX_HOME/tests-passed"; echo "|test_status=$?"
 out=$(zsh -c "printf COMMIT" 2>&1); echo "|commit_status=$?|$out""#,
     );
     let text = stdout(&output);
@@ -1294,7 +1402,7 @@ fn a_commit_sequenced_before_the_test_response_is_denied_until_it_lands() {
     let box_ = Request::with_policy("order-before", &response_keyed_policy()).expect();
     let output = box_.bash(
         r#"out=$(zsh -c "printf COMMIT" 2>&1); echo "|first_status=$?|${out//$'\n'/ }"
-zsh -c "printf ok > $BOX_HOME/tests-passed"; echo "|test_status=$?"
+zsh -c "echo ok > $BOX_HOME/tests-passed"; echo "|test_status=$?"
 out=$(zsh -c "printf COMMIT" 2>&1); echo "|second_status=$?|$out""#,
     );
     let text = stdout(&output);

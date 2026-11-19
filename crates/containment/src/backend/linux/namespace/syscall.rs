@@ -82,6 +82,11 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "epoll_pwait",
         number: libc::SYS_epoll_pwait,
     },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "epoll_wait",
+        number: libc::SYS_epoll_wait,
+    },
     PermittedSyscall {
         name: "dup",
         number: libc::SYS_dup,
@@ -89,6 +94,11 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
     PermittedSyscall {
         name: "dup3",
         number: libc::SYS_dup3,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "dup2",
+        number: libc::SYS_dup2,
     },
     PermittedSyscall {
         name: "fcntl",
@@ -101,6 +111,11 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
     PermittedSyscall {
         name: "pipe2",
         number: libc::SYS_pipe2,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "pipe",
+        number: libc::SYS_pipe,
     },
     PermittedSyscall {
         name: "inotify_init1",
@@ -122,17 +137,46 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "mkdirat",
         number: libc::SYS_mkdirat,
     },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "mkdir",
+        number: libc::SYS_mkdir,
+    },
     PermittedSyscall {
         name: "unlinkat",
         number: libc::SYS_unlinkat,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "unlink",
+        number: libc::SYS_unlink,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "rmdir",
+        number: libc::SYS_rmdir,
+    },
+    PermittedSyscall {
+        name: "linkat",
+        number: libc::SYS_linkat,
     },
     PermittedSyscall {
         name: "symlinkat",
         number: libc::SYS_symlinkat,
     },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "symlink",
+        number: libc::SYS_symlink,
+    },
     PermittedSyscall {
         name: "renameat",
         number: libc::SYS_renameat,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "rename",
+        number: libc::SYS_rename,
     },
     PermittedSyscall {
         name: "ftruncate",
@@ -146,13 +190,30 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "faccessat2",
         number: libc::SYS_faccessat2,
     },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "access",
+        number: libc::SYS_access,
+    },
     PermittedSyscall {
         name: "chdir",
         number: libc::SYS_chdir,
     },
+    // `fchdir` enters a folder the workload already holds open, so it reaches nothing `chdir`
+    // cannot. Go's `testing.T.Chdir` returns to the saved folder with it when a test ends, and
+    // a refusal there panics the test.
+    PermittedSyscall {
+        name: "fchdir",
+        number: libc::SYS_fchdir,
+    },
     PermittedSyscall {
         name: "fchmod",
         number: libc::SYS_fchmod,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "chmod",
+        number: libc::SYS_chmod,
     },
     PermittedSyscall {
         name: "fchmodat",
@@ -175,6 +236,11 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
     PermittedSyscall {
         name: "openat",
         number: libc::SYS_openat,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "open",
+        number: libc::SYS_open,
     },
     PermittedSyscall {
         name: "close",
@@ -208,21 +274,72 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "pwrite64",
         number: libc::SYS_pwrite64,
     },
+    // libuv copies a file with `copy_file_range`, then `sendfile`, and reads `EPERM` from either
+    // as a real failure, so Node's `fs.copyFile` and every scaffolder built on it stop. An `EINVAL`
+    // from `sendfile` would also let libuv fall back to read and write, but the permit keeps the
+    // kernel copy, which is faster for a large file across filesystems. Both calls move bytes
+    // between two descriptors the workload already holds, and the kernel requires the same read
+    // and write modes on them that `read` and `write` do.
+    PermittedSyscall {
+        name: "copy_file_range",
+        number: libc::SYS_copy_file_range,
+    },
+    PermittedSyscall {
+        name: "sendfile",
+        number: libc::SYS_sendfile,
+    },
     PermittedSyscall {
         name: "ppoll",
         number: libc::SYS_ppoll,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "poll",
+        number: libc::SYS_poll,
+    },
+    // The libcurl that cargo vendors waits on its sockets with `select()`, which glibc issues as
+    // `pselect6` (glibc 2.32 and older issue `select` on x86_64), so an `EPERM` here fails every
+    // cargo download with "Unrecoverable error in select/poll". Like `ppoll`, it only waits on
+    // descriptors the process already holds.
+    PermittedSyscall {
+        name: "pselect6",
+        number: libc::SYS_pselect6,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "select",
+        number: libc::SYS_select,
     },
     PermittedSyscall {
         name: "readlinkat",
         number: libc::SYS_readlinkat,
     },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "readlink",
+        number: libc::SYS_readlink,
+    },
     PermittedSyscall {
         name: "newfstatat",
         number: libc::SYS_newfstatat,
     },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "stat",
+        number: libc::SYS_stat,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "lstat",
+        number: libc::SYS_lstat,
+    },
     PermittedSyscall {
         name: "fstat",
         number: libc::SYS_fstat,
+    },
+    PermittedSyscall {
+        name: "statfs",
+        number: libc::SYS_statfs,
     },
     PermittedSyscall {
         name: "fsync",
@@ -319,6 +436,11 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
     PermittedSyscall {
         name: "getpgid",
         number: libc::SYS_getpgid,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "getpgrp",
+        number: libc::SYS_getpgrp,
     },
     PermittedSyscall {
         name: "uname",
@@ -432,6 +554,16 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
         name: "clone",
         number: libc::SYS_clone,
     },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "fork",
+        number: libc::SYS_fork,
+    },
+    #[cfg(target_arch = "x86_64")]
+    PermittedSyscall {
+        name: "vfork",
+        number: libc::SYS_vfork,
+    },
     PermittedSyscall {
         name: "execve",
         number: libc::SYS_execve,
@@ -451,6 +583,13 @@ pub(crate) const WORKLOAD_PERMITTED: &[PermittedSyscall] = &[
     PermittedSyscall {
         name: "wait4",
         number: libc::SYS_wait4,
+    },
+    // Go's os/exec waits for a child with `waitid` before it reaps it with `wait4`, so an `EPERM`
+    // here fails every child a Go program starts (`gh` cannot run `git`). Like `wait4`, it reaches
+    // only the caller's own children, and the pidfd it can name comes from the permitted `pidfd_open`.
+    PermittedSyscall {
+        name: "waitid",
+        number: libc::SYS_waitid,
     },
     PermittedSyscall {
         name: "prlimit64",
@@ -595,13 +734,67 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
         reason: "changes mount attributes, so a read-only bind could be made \
                  writable; absent on 5.10 but named so a newer kernel is covered",
     },
-    // KNOWN GAP: `open_tree_attr` (467, kernel >= 6.15) clones a mount and sets
-    // attributes in one call, and is not in this table — the pinned libc 0.2.189
-    // exports `SYS_open_tree_attr` for no supported arch, and a hand-written
-    // number is against this crate's rule. Two backstops hold meanwhile: every
-    // capability set is cleared and `no_new_privs` is set, so the whole mount
-    // API returns `EPERM`. Add the entry when libc carries the constant.
+    // The permit filter refuses unlisted mount calls, including `open_tree_attr`.
     // Privilege and identity surfaces the namespaces do not close.
+    MediatedSyscall {
+        name: "fchmod",
+        number: libc::SYS_fchmod,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    #[cfg(target_arch = "x86_64")]
+    MediatedSyscall {
+        name: "chmod",
+        number: libc::SYS_chmod,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    MediatedSyscall {
+        name: "fchmodat",
+        number: libc::SYS_fchmodat,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    MediatedSyscall {
+        name: "fchmodat2",
+        number: FCHMODAT2,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    MediatedSyscall {
+        name: "openat",
+        number: libc::SYS_openat,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    #[cfg(target_arch = "x86_64")]
+    MediatedSyscall {
+        name: "open",
+        number: libc::SYS_open,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    // This checks explicit directory modes, so ordinary subdirectories can still
+    // inherit the parent's group and set-group-ID bit.
+    MediatedSyscall {
+        name: "mkdirat",
+        number: libc::SYS_mkdirat,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    #[cfg(target_arch = "x86_64")]
+    MediatedSyscall {
+        name: "mkdir",
+        number: libc::SYS_mkdir,
+        disposition: Disposition::ArgumentScoped,
+        reason: "workload-requested set-user-ID and set-group-ID bits must not be stored on host files",
+    },
+    MediatedSyscall {
+        name: "ioctl",
+        number: libc::SYS_ioctl,
+        disposition: Disposition::ArgumentScoped,
+        reason: "terminal requests can change shared input, display, or console state",
+    },
     MediatedSyscall {
         name: "setuid",
         number: libc::SYS_setuid,
@@ -758,21 +951,43 @@ pub(crate) const MEDIATED: &[MediatedSyscall] = &[
 pub(crate) struct SyscallFilters {
     pub(crate) permit: BpfProgram,
     pub(crate) restrictions: BpfProgram,
+    pub(crate) filesystem_queries: BpfProgram,
 }
 
 /// The static system-call policy for one containment request.
 #[derive(Debug)]
-pub(crate) struct SyscallPolicy;
+pub(crate) struct SyscallPolicy {
+    #[cfg(feature = "native-filesystem-policy")]
+    native_filesystem: bool,
+}
 
 impl SyscallPolicy {
     /// Derive the policy from one request.
     pub(crate) fn for_config(_network: &Network) -> Self {
-        Self
+        Self {
+            #[cfg(feature = "native-filesystem-policy")]
+            native_filesystem: false,
+        }
+    }
+
+    #[cfg(feature = "native-filesystem-policy")]
+    pub(crate) fn with_native_filesystem(mut self, enabled: bool) -> Self {
+        self.native_filesystem = enabled;
+        self
     }
 
     /// Compile both filters before containment starts.
     pub(crate) fn compile(&self) -> Result<SyscallFilters, ContainmentError> {
         let permit_rules = build_permit_rules(WORKLOAD_PERMITTED, true)?;
+        #[cfg(feature = "native-filesystem-policy")]
+        let permit_rules = {
+            let mut rules = permit_rules;
+            if self.native_filesystem {
+                // The notification filter must mediate this path-based call before it can run.
+                rules.insert(libc::SYS_truncate, Vec::new());
+            }
+            rules
+        };
         let permit = compile_filter(
             permit_rules,
             SeccompAction::Errno(libc::EPERM as u32),
@@ -797,9 +1012,34 @@ impl SyscallPolicy {
             SeccompAction::Errno(libc::EPERM as u32),
         )?;
 
+        let notification_rules = BTreeMap::from([(libc::SYS_statfs, Vec::new())]);
+        #[cfg(feature = "native-filesystem-policy")]
+        let notification_rules = {
+            let mut rules = notification_rules;
+            if self.native_filesystem {
+                for number in super::native_filesystem::OPERATIONS {
+                    rules.insert(*number, Vec::new());
+                }
+            }
+            rules
+        };
+        let mut filesystem_queries = compile_filter(
+            notification_rules,
+            SeccompAction::Allow,
+            SeccompAction::Trace(0),
+        )?;
+        // seccompiler 0.5 has no notification action; retain its architecture guard and rule compiler.
+        for instruction in &mut filesystem_queries {
+            if instruction.code == (libc::BPF_RET | libc::BPF_K) as u16
+                && instruction.k == libc::SECCOMP_RET_TRACE
+            {
+                instruction.k = libc::SECCOMP_RET_USER_NOTIF;
+            }
+        }
         Ok(SyscallFilters {
             permit,
             restrictions,
+            filesystem_queries,
         })
     }
 
@@ -808,6 +1048,29 @@ impl SyscallPolicy {
         &self,
         entry: &MediatedSyscall,
     ) -> Result<Vec<SeccompRule>, ContainmentError> {
+        if entry.number == libc::SYS_fchmod {
+            return special_file_mode_rules(1, None);
+        }
+        #[cfg(target_arch = "x86_64")]
+        if entry.number == libc::SYS_chmod || entry.number == libc::SYS_mkdir {
+            return special_file_mode_rules(1, None);
+        }
+        if entry.number == libc::SYS_fchmodat || entry.number == FCHMODAT2 {
+            return special_file_mode_rules(2, None);
+        }
+        if entry.number == libc::SYS_mkdirat {
+            return special_file_mode_rules(2, None);
+        }
+        if entry.number == libc::SYS_openat {
+            return special_file_mode_rules(3, Some(2));
+        }
+        #[cfg(target_arch = "x86_64")]
+        if entry.number == libc::SYS_open {
+            return special_file_mode_rules(2, Some(1));
+        }
+        if entry.number == libc::SYS_ioctl {
+            return terminal_control_rules();
+        }
         if entry.number == libc::SYS_socket {
             return self.socket_rules();
         }
@@ -860,6 +1123,103 @@ impl SyscallPolicy {
     }
 }
 
+fn special_file_mode_rules(
+    mode_argument: u8,
+    flags_argument: Option<u8>,
+) -> Result<Vec<SeccompRule>, ContainmentError> {
+    let mut rules = Vec::new();
+    for bit in [u64::from(libc::S_ISUID), u64::from(libc::S_ISGID)] {
+        let mode = SeccompCondition::new(
+            mode_argument,
+            SeccompCmpArgLen::Dword,
+            SeccompCmpOp::MaskedEq(bit),
+            bit,
+        )
+        .map_err(filter_error)?;
+        if let Some(argument) = flags_argument {
+            for flag in [libc::O_CREAT, libc::O_TMPFILE] {
+                let flag = flag as u64;
+                let flags = SeccompCondition::new(
+                    argument,
+                    SeccompCmpArgLen::Dword,
+                    SeccompCmpOp::MaskedEq(flag),
+                    flag,
+                )
+                .map_err(filter_error)?;
+                rules.push(SeccompRule::new(vec![mode.clone(), flags]).map_err(filter_error)?);
+            }
+        } else {
+            rules.push(SeccompRule::new(vec![mode]).map_err(filter_error)?);
+        }
+    }
+    Ok(rules)
+}
+
+fn terminal_control_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
+    // Linux console request numbers from include/uapi/linux/{kd,vt}.h.
+    const KDSETMODE: u32 = 0x4b3a;
+    const KDSKBMODE: u32 = 0x4b45;
+    const KDSKBMETA: u32 = 0x4b63;
+    const KDSKBLED: u32 = 0x4b65;
+    const KDSETLED: u32 = 0x4b32;
+    const KDSKBDIACR: u32 = 0x4b4b;
+    const KDSKBDIACRUC: u32 = 0x4bfb;
+    const KDFONTOP: u32 = 0x4b72;
+    const PIO_CMAP: u32 = 0x4b71;
+    const PIO_SCRNMAP: u32 = 0x4b41;
+    const PIO_UNISCRNMAP: u32 = 0x4b6a;
+    const PIO_UNIMAPCLR: u32 = 0x4b68;
+    const PIO_UNIMAP: u32 = 0x4b67;
+    const VT_SETMODE: u32 = 0x5602;
+    const VT_ACTIVATE: u32 = 0x5606;
+    const VT_SETACTIVATE: u32 = 0x560f;
+    const VT_RELDISP: u32 = 0x5605;
+    const VT_DISALLOCATE: u32 = 0x5608;
+    const VT_RESIZE: u32 = 0x5609;
+    const VT_RESIZEX: u32 = 0x560a;
+
+    [
+        libc::TIOCSTI as u32,
+        libc::TIOCLINUX as u32,
+        libc::TIOCSETD as u32,
+        KDSETMODE,
+        KDSKBMODE,
+        KDSKBMETA,
+        KDSKBLED,
+        KDSETLED,
+        KDSKBDIACR,
+        KDSKBDIACRUC,
+        KDFONTOP,
+        PIO_CMAP,
+        PIO_SCRNMAP,
+        PIO_UNISCRNMAP,
+        PIO_UNIMAPCLR,
+        PIO_UNIMAP,
+        VT_SETMODE,
+        VT_ACTIVATE,
+        VT_SETACTIVATE,
+        VT_RELDISP,
+        VT_DISALLOCATE,
+        VT_RESIZE,
+        VT_RESIZEX,
+    ]
+    .into_iter()
+    .map(|request| {
+        SeccompRule::new(vec![
+            // Linux interprets the ioctl request as an unsigned 32-bit integer.
+            SeccompCondition::new(
+                1,
+                SeccompCmpArgLen::Dword,
+                SeccompCmpOp::Eq,
+                u64::from(request),
+            )
+            .map_err(filter_error)?,
+        ])
+        .map_err(filter_error)
+    })
+    .collect()
+}
+
 fn unix_socketpair_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
     Ok(vec![
         SeccompRule::new(vec![
@@ -900,6 +1260,19 @@ fn build_permit_rules(
         libc::SYS_setresgid,
         setresgid_rules()?,
     )?;
+    insert_permitted_scoped(
+        &mut rules,
+        "renameat2",
+        libc::SYS_renameat2,
+        renameat2_rules()?,
+    )?;
+    #[cfg(target_arch = "x86_64")]
+    insert_permitted_scoped(
+        &mut rules,
+        "arch_prctl",
+        libc::SYS_arch_prctl,
+        x86_thread_setup_rules()?,
+    )?;
     if include_installer && rules.insert(libc::SYS_seccomp, Vec::new()).is_some() {
         return Err(filter_error(
             "installer-only seccomp duplicates a workload permit",
@@ -925,6 +1298,38 @@ fn insert_permitted_scoped(
         )));
     }
     Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
+fn x86_thread_setup_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
+    // Linux x86's asm/prctl.h defines this operation for setting the calling thread's FS base.
+    const ARCH_SET_FS: u64 = 0x1002;
+    Ok(vec![
+        SeccompRule::new(vec![
+            // The kernel reads the operation as an int, so match its low 32 bits.
+            SeccompCondition::new(0, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, ARCH_SET_FS)
+                .map_err(filter_error)?,
+        ])
+        .map_err(filter_error)?,
+    ])
+}
+
+/// `renameat2` with no flags is the permitted `renameat`, and `RENAME_NOREPLACE` only adds "fail if
+/// the new name exists". The `tempfile` crate creates a name with `RENAME_NOREPLACE` and falls back
+/// to a hard link only on `ENOSYS` or `EINVAL`, so the permit table's `EPERM` failed every
+/// `tempfile` persist, such as uv's cache lock. `RENAME_EXCHANGE` and `RENAME_WHITEOUT` stay refused.
+fn renameat2_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
+    [0, u64::from(libc::RENAME_NOREPLACE)]
+        .into_iter()
+        .map(|flags| {
+            SeccompRule::new(vec![
+                // The kernel reads the flags as an unsigned int, so match their low 32 bits.
+                SeccompCondition::new(4, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, flags)
+                    .map_err(filter_error)?,
+            ])
+            .map_err(filter_error)
+        })
+        .collect()
 }
 
 fn setresuid_rules() -> Result<Vec<SeccompRule>, ContainmentError> {
@@ -1076,14 +1481,17 @@ mod tests {
     }
 
     #[test]
-    fn permit_filter_has_111_workload_entries_and_one_installer_entry() {
-        assert_eq!(WORKLOAD_PERMITTED.len(), 111);
+    fn permit_filter_has_the_expected_workload_and_installer_entries() {
+        let x86_entries = usize::from(cfg!(target_arch = "x86_64"));
+        assert_eq!(WORKLOAD_PERMITTED.len(), 118 + 19 * x86_entries);
         let rules =
             build_permit_rules(WORKLOAD_PERMITTED, true).expect("the permit table must be unique");
-        assert_eq!(rules.len(), 114);
+        assert_eq!(rules.len(), 122 + 20 * x86_entries);
         assert!(rules.contains_key(&libc::SYS_seccomp));
         assert_eq!(rules[&libc::SYS_setresuid].len(), 1);
         assert_eq!(rules[&libc::SYS_setresgid].len(), 1);
+        // No flags, or RENAME_NOREPLACE; RENAME_EXCHANGE and RENAME_WHITEOUT match neither.
+        assert_eq!(rules[&libc::SYS_renameat2].len(), 2);
         assert!(
             !WORKLOAD_PERMITTED
                 .iter()
@@ -1097,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn the_file_mode_calls_and_the_creation_mask_are_permitted() {
+    fn file_mode_calls_are_restricted_but_the_creation_mask_is_not() {
         for required in ["fchmod", "fchmodat", "fchmodat2", "umask"] {
             assert!(
                 WORKLOAD_PERMITTED
@@ -1107,7 +1515,15 @@ mod tests {
                  EPERM, and a caller that tries the newest spelling first would read that as a \
                  real failure instead of falling back"
             );
-            assert!(!MEDIATED.iter().any(|entry| entry.name == required));
+            let restriction = MEDIATED.iter().find(|entry| entry.name == required);
+            if required == "umask" {
+                assert!(restriction.is_none());
+            } else {
+                assert!(matches!(
+                    restriction.unwrap().disposition,
+                    Disposition::ArgumentScoped
+                ));
+            }
         }
     }
 
@@ -1124,6 +1540,55 @@ mod tests {
             },
         ];
         build_permit_rules(&duplicate, false).expect_err("a duplicate must fail");
+    }
+
+    #[test]
+    fn installer_syscall_cannot_also_be_a_workload_permit() {
+        let entries = [PermittedSyscall {
+            name: "seccomp",
+            number: libc::SYS_seccomp,
+        }];
+        let error = build_permit_rules(&entries, true).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("installer-only seccomp duplicates")
+        );
+        assert!(build_permit_rules(&entries, false).is_ok());
+    }
+
+    #[test]
+    fn identity_rules_cannot_override_unrestricted_workload_permits() {
+        for (name, number) in [
+            ("setresuid", libc::SYS_setresuid),
+            ("setresgid", libc::SYS_setresgid),
+        ] {
+            let entries = [PermittedSyscall { name, number }];
+            let error = build_permit_rules(&entries, false).unwrap_err();
+            assert!(error.to_string().contains("duplicate permitted syscall"));
+            assert!(error.to_string().contains(name));
+        }
+    }
+
+    #[test]
+    fn an_empty_permitted_argument_rule_is_refused_without_insertion() {
+        let mut rules = BTreeMap::new();
+        let error =
+            insert_permitted_scoped(&mut rules, "setresuid", libc::SYS_setresuid, Vec::new())
+                .unwrap_err();
+        assert!(error.to_string().contains("has no argument rule"));
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn an_empty_scoped_rule_does_not_replace_an_existing_restriction() {
+        let mut rules = BTreeMap::new();
+        insert_scoped(&mut rules, libc::SYS_setpgid, setpgid_rules().unwrap());
+        let before = format!("{rules:?}");
+        insert_scoped(&mut rules, libc::SYS_setpgid, Vec::new());
+        assert_eq!(format!("{rules:?}"), before);
+        insert_scoped(&mut rules, libc::SYS_getpid, Vec::new());
+        assert!(!rules.contains_key(&libc::SYS_getpid));
     }
 
     #[test]
@@ -1291,6 +1756,72 @@ mod tests {
     }
 
     #[test]
+    fn child_waits_are_permitted_and_unmediated() {
+        let filters = SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("filters compile");
+        for (name, number) in [("wait4", libc::SYS_wait4), ("waitid", libc::SYS_waitid)] {
+            assert!(
+                WORKLOAD_PERMITTED
+                    .iter()
+                    .any(|entry| entry.name == name && entry.number == number),
+                "'{name}' is absent from the permit table, so a Go program gets EPERM when it \
+                 waits for a child and gh cannot run git"
+            );
+            assert!(!MEDIATED.iter().any(|entry| entry.name == name));
+            let number = u32::try_from(number).expect("syscall numbers are small");
+            assert!(
+                filters
+                    .permit
+                    .iter()
+                    .any(|instruction| instruction.k == number)
+            );
+            assert!(
+                !filters
+                    .restrictions
+                    .iter()
+                    .any(|instruction| instruction.k == number)
+            );
+        }
+    }
+
+    #[test]
+    fn select_waits_are_permitted_and_unmediated() {
+        let required = [
+            ("pselect6", libc::SYS_pselect6),
+            #[cfg(target_arch = "x86_64")]
+            ("select", libc::SYS_select),
+        ];
+        let filters = SyscallPolicy::for_config(&Network::Blocked)
+            .compile()
+            .expect("filters compile");
+        for (name, number) in required {
+            assert!(
+                WORKLOAD_PERMITTED
+                    .iter()
+                    .any(|entry| entry.name == name && entry.number == number),
+                "'{name}' is absent from the permit table, so cargo's vendored libcurl gets \
+                 EPERM from select() and every download fails with 'Unrecoverable error in \
+                 select/poll'"
+            );
+            assert!(!MEDIATED.iter().any(|entry| entry.name == name));
+            let number = u32::try_from(number).expect("syscall numbers are small");
+            assert!(
+                filters
+                    .permit
+                    .iter()
+                    .any(|instruction| instruction.k == number)
+            );
+            assert!(
+                !filters
+                    .restrictions
+                    .iter()
+                    .any(|instruction| instruction.k == number)
+            );
+        }
+    }
+
+    #[test]
     fn event_loop_timers_are_permitted_and_unmediated() {
         for required in ["timerfd_create", "timerfd_settime", "timerfd_gettime"] {
             assert!(
@@ -1373,7 +1904,7 @@ mod tests {
 
     #[test]
     fn accepted_file_mutation_calls_are_permitted() {
-        for required in ["pwrite64", "fdatasync", "symlinkat"] {
+        for required in ["pwrite64", "fdatasync", "symlinkat", "linkat"] {
             assert!(
                 WORKLOAD_PERMITTED
                     .iter()

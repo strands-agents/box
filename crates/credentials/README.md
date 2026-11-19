@@ -49,9 +49,12 @@ route that names no profile then fails at signing time, per request, rather than
 than not starting: the request goes upstream bare, and the upstream's `401` reads
 like the boundary denying the call.
 
-A route is either **opaque** (`RouteSpec::opaque`) — one secret attached
-at one location, standing behind a phantom — or **signed AWS**
-(`RouteSpec::signed_aws`), SigV4-signed across several headers. A signed
+A route is one of four kinds. **Opaque** (`RouteSpec::opaque`) — one secret attached
+at one location, standing behind a phantom. **Signed AWS**
+(`RouteSpec::signed_aws`), SigV4-signed across several headers. And two for a re-route to a backend:
+**box-owned** (`RouteSpec::box_owned`) attaches the box's own credential — a backend token — at one
+location with no phantom; and **strip-phantom** (`RouteSpec::strip_phantom`) mints a placeholder the
+workload presents and strips it, attaching nothing (a re-routed destination's own secret). A signed
 route takes no inject location and mints no phantom, because nothing is placed for
 the vault to recognize. Add `harness_location(mode)` to an opaque route when the
 workload presents the phantom somewhere other than where the real secret attaches. It returns
@@ -66,6 +69,15 @@ signed route the call is accepted and changes nothing, because there is no injec
 |---|---|
 | `attach_for(&self, req: Outbound<'_>) -> Result<Option<Attachment>>` | What to edit before this request goes upstream, as an `Attachment` of header, path, and query edits. `Ok(None)` when this vault governs no credential for the destination. |
 | `redact_leaks(&self, res: Inbound<'_>) -> Option<Redactions>` | The `Redactions` a response needs because it echoed the injected secret back, or `None` when nothing leaked. It returns no `Result`: a response is already received, so there is nothing to fail closed on. |
+| `response_redactor(&self, destination: Destination<'_>) -> Option<ResponseRedactor>` | An owned scrubber for a streamed response, or `None` when no unique opaque binding matches. |
+
+`ResponseRedactor` keeps credential material private and replaces exact secret occurrences with
+`[REDACTED]`. Use `redact_header()` for each header value and `push()` for each body chunk. Each
+`push()` returns bytes ready for delivery and retains a trailing window of up to one less than the
+credential's byte length, including any possible secret prefix. At clean completion, call `finish()`
+to release the tail; on failure, drop the scrubber. Matches can cross chunk boundaries. A small event
+can wait for more bytes or clean completion. Retained state depends on the credential size, not the
+total response size.
 
 `attach_for` performs binding dispatch, phantom location, phantom **validation**,
 and SigV4 signing internally, so the phantom check is not a step a caller can skip.
@@ -84,6 +96,9 @@ Declare signed patterns that do not overlap.
 `resolve(&self, locator: &Locator) -> Result<Zeroizing<String>>`. The caller owns the
 returned secret and its lifetime.
 
+`Backend::declared(declarations)` is the local source set plus one source for each
+`SecretSourceCommand`. See [Declared secret sources](#declared-secret-sources).
+
 ## Credential references
 
 | Form | Resolves to | Absent secret |
@@ -91,13 +106,55 @@ returned secret and its lifetime.
 | `env://NAME` | A process environment variable. A nine-name denylist refuses `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_SECURITY_TOKEN`, `AWS_CREDENTIAL_EXPIRATION`, `AWS_PROFILE`, `AWS_WEB_IDENTITY_TOKEN_FILE`, `LD_PRELOAD`, and `LD_LIBRARY_PATH`, case-insensitively. | soft when the variable is unset |
 | `file:///path` | File contents, trailing newline stripped. | soft when the file is missing or unreadable |
 | `op://vault/item/field` | The authenticated 1Password CLI. | hard: `op read` returns one exit code for missing, locked, and signed-out, so there is no "absent" signal to trust |
-| `aws://profile` | Structured AWS session credentials for SigV4 signing. Not a single secret, so `Backend::resolve` rejects it. | hard |
+| `aws://profile` | Structured AWS session credentials for SigV4 signing, resolved as the named profile through the AWS SDK (static keys, credential_process, assume-role, or web identity). Not a single secret, so `Backend::resolve` rejects it. | hard |
+| `aws://` (no profile) | Structured AWS session credentials from the AWS SDK default credential provider chain (the host's ambient identity), driven on a worker thread and cached. Not a single secret, so `Backend::resolve` rejects it. | hard |
+| `SCHEME://NAME` or `SCHEME://NAME#FIELD`, for a declared `SCHEME` | The stdout of the declared program, or one string field of it. Only `Backend::declared` resolves it. | hard: a program cannot signal "absent" |
 
 A soft outcome means the vault comes up and the route appears in `skipped()`. A hard one aborts
 the open. A present value is always judged on content, so an empty, whitespace-only, non-UTF-8,
 or control-character value is hard whatever the scheme. Open the vault **before** the caller
 activates its sandbox: a `file://` path unreachable afterwards reads as an absent secret rather
 than an error.
+
+## Declared secret sources
+
+A `SecretSourceCommand` declares one host program that prints one secret on stdout. A caller
+builds one for each scheme, and `Backend::declared` registers them:
+
+```rust
+use credentials::{Backend, Locator, SecretSourceCommand};
+
+let command = ["/opt/homebrew/bin/op", "read", "op://{ref}"].map(String::from);
+let declaration = SecretSourceCommand::new("op", SecretSourceCommand::PROTOCOL, &command)?
+    .pass_env(["OP_ACCOUNT", "TMPDIR"])?
+    .pass_secret_env(["OP_SERVICE_ACCOUNT_TOKEN", "OP_SESSION_*"])?;
+let backend = Backend::declared([declaration])?;
+let secret = backend.resolve(&Locator::parse_uri("op://Private/GitHub/token")?)?;
+```
+
+The example passes `TMPDIR`, because `op` keeps the session of `op signin` in a folder under it.
+
+| Part | Rule |
+|---|---|
+| Scheme | A lowercase letter, then lowercase letters, digits, `+`, `.`, or `-`. No declaration can claim one of the nine reserved schemes: `env`, `file`, `aws`, `credsd`, `secret`, `cmd`, `oauth2`, `aws-signed`, and `strip-phantom`. The last two are the crate's own route markers. `SecretSourceCommand::check_scheme` is the check. A declared `op` takes the place of the built-in `op://` source. Two declarations of one scheme are refused. |
+| Protocol | `SecretSourceCommand::PROTOCOL`, which is `box.secret-source.v1`. Any other value is refused. |
+| Command | The program, then its arguments. The program is an absolute path. The source runs it with no shell. A command with no `{ref}` in its arguments is refused. |
+| `{ref}` | The source replaces `{ref}` inside each argument with `NAME`, the text after `SCHEME://` without `#FIELD`. A reference whose text after `SCHEME://` starts with `-` is refused, so the program cannot read it as a flag. |
+| Environment | `HOME` when the operator has one, `PATH=/usr/bin:/bin`, and each variable in `pass_env` or `pass_secret_env` that is set. An entry that ends with `*` passes each variable with that prefix. No entry replaces `HOME` or `PATH`. The entries `*`, `PATH`, and `HOME` are refused, and so is an entry with a `*` before its end. |
+| Bounds | No stdin. The working directory is `/`. A run of more than 30 seconds, or more than 1 MiB of stdout, stops the program and fails the fetch. A non-zero exit fails the fetch. |
+| `output` | `text` (the default): stdout is the secret. `json`: stdout is one JSON string, and the decoded string is the secret. Any other JSON value, such as `null`, is refused. The source strips one trailing `\n` or `\r\n` first. With each form, the `#FIELD` rule then applies to the secret. |
+| `#FIELD` | The source parses the secret as a JSON object and returns that one string field. Without `#FIELD`, a secret that is a JSON object is refused with each `output`, so that one destination never gets all the keys. The built-in `op://` source returns such a secret whole, so a declared `op` differs from it here. |
+| One fetch | The backend keeps each fetched secret until its last clone drops. Two references that differ only in `#FIELD` name one secret, so the program runs once for both. `Backend` is `Clone`, and each clone shares the fetch. A run that fails, or whose output the source cannot read, is not kept. A run whose output is read is kept, also when the `#FIELD` step or the content check then refuses the value. |
+
+A failure names the scheme, the program, and the redacted reference. After a non-zero exit it also
+carries the last bytes of the program's stderr, at most 512, as one line. The reference name and the value
+of each passed `pass_secret_env` variable are replaced with `[REDACTED]`, and the line holds no control
+character. A program that prints one part of the reference name on its own, such as one path
+segment, still shows that part. No failure carries stdout.
+
+The program runs in the caller's process context, outside every sandbox, so declare only a program
+that the operator chose. This crate does not check the program's identity and does not protect its
+files; the caller owns both.
 
 ## What this crate refuses
 
@@ -115,9 +172,9 @@ constructor cannot see, because `open` is the one seam every route passes whatev
 
 ## Secret handling
 
-No public method vends a resolved plaintext to an egress caller. A resolved secret
-lives only inside the vault, and reaches the wire as edits on an `Attachment`; the
-one plaintext exit is `Backend::resolve`. Its caller must protect the returned value.
+No public method vends a resolved plaintext to an egress caller. Credential material stays
+private to the vault and its owned response scrubber. It reaches the request wire as edits on an
+`Attachment`; the one plaintext exit is `Backend::resolve`. Its caller must protect the returned value.
 
 Secret-bearing values use `Zeroizing` storage and redact in `Debug`, including a
 `{:?}` of a whole `Vault` or `Attachment`. Redaction happens at each constructor, not at the
@@ -156,9 +213,10 @@ A reader deciding whether to trust this boundary needs four claims, each enforce
 rather than by a convention.
 
 **The workload never holds a secret.** It holds a phantom: a `strands_box_`-prefixed 64-hex
-token from the OS CSPRNG, bound to one destination. Presenting it against a different
-destination attaches nothing. A workload that exfiltrated its whole environment would be
-leaking values that authenticate nowhere.
+token from the OS CSPRNG, bound to one credential's destinations. Routes with an equal
+`Locator` and prefix share one phantom; two credentials never do. Presenting it against a
+destination outside that credential's routes attaches nothing. A workload that exfiltrated its
+whole environment would be leaking values that authenticate nowhere.
 
 **A value that cannot authenticate never becomes a credential.** Every source returns a
 crate-internal `Secret`, and its only constructor refuses an empty value, a whitespace-only
@@ -200,6 +258,26 @@ question about this crate:
 | [Identity substitution](../../docs/design/decisions.md#a-provider-refuses-an-identity-it-cannot-honour) | May a provider substitute an identity it cannot honour? |
 
 Two are worth knowing even if you are only reading: the unusable-secret decision, because the
-`Secret` type is the reason three sources cannot each be wrong about content; and the
+`Secret` type is the reason no source can be wrong about content; and the
 endpoint-breadth decision, because the guard it replaced had been bypassable by writing `*:443`
 instead of `*`.
+
+## Live daemon test
+
+The `credsd_e2e` tests use local socket fixtures. One optional test checks a running
+credsd daemon. Configure a test environment that permits the test process to list
+credentials, then run:
+
+```sh
+CREDSD_SOCKET=/path/to/credsd.sock CREDSD_TEST_ENVIRONMENT=test-environment \
+  cargo test -p strands-box-credentials --all-features --test end_to_end \
+  credsd_e2e::a_live_daemon_maps_an_unknown_environment_to_a_hard_failure -- --exact --nocapture
+```
+
+The test checks daemon health and caller access to the configured environment before
+requesting an unknown environment. It requires the specific unknown-environment error.
+A connection failure cannot satisfy that assertion. The configured environment is used
+only for the credential-list check, not for credential acquisition.
+
+An explicit socket or test environment makes setup failures fatal. Without either
+setting, the test reports a skip. A skipped test does not prove daemon compatibility.

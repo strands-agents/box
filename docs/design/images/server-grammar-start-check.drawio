@@ -1,0 +1,100 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<mxfile host="drawio" type="device">
+  <diagram id="server-grammar-start-check" name="Local server grammar check">
+    <mxGraphModel dx="0" dy="0" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="0" pageScale="1" pageWidth="1120" pageHeight="960" math="0" shadow="0" background="#ffffff">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:bold;color:#232F3E&quot;&gt;Local server starts keep their grammar check&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=24;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="40" width="1040" height="40" />
+        </mxCell>
+        <mxCell id="scope" value="&lt;div style=&quot;font-size:18px;line-height:21.6px;font-weight:normal;color:#5F6B7A&quot;&gt;When the configured program name matches an installed grammar&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=18;fontColor=#5F6B7A;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="85" width="1040" height="30" />
+        </mxCell>
+        <mxCell id="startup" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold;color:#232F3E&quot;&gt;At Box startup&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=nowrap;strokeColor=#232F3E;fillColor=none;strokeWidth=2;dashed=0;verticalAlign=top;align=left;spacing=0;spacingLeft=16;spacingTop=6;fontSize=14;fontStyle=1;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="140" width="1040" height="170" />
+        </mxCell>
+        <mxCell id="record" value="&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:normal;color:#232F3E&quot;&gt;Record available file identities + called names&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=24;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="80" y="200" width="960" height="36" />
+        </mxCell>
+        <mxCell id="lazy" value="&lt;div style=&quot;font-size:18px;line-height:21.6px;font-weight:normal;color:#5F6B7A&quot;&gt;Servers remain stopped. Missing server programs do not block Box.&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=18;fontColor=#5F6B7A;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="80" y="250" width="960" height="28" />
+        </mxCell>
+        <mxCell id="request-stage" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:bold;color:#232F3E&quot;&gt;On each server-start request&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=22;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="350" width="430" height="34" />
+        </mxCell>
+        <mxCell id="request" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:normal;color:#232F3E&quot;&gt;Resolve the&lt;/div&gt;&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:normal;color:#232F3E&quot;&gt;requested program&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=wrap;align=center;verticalAlign=middle;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;spacing=16;fontSize=22;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="440" width="220" height="110" />
+        </mxCell>
+        <mxCell id="binding" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:normal;color:#232F3E&quot;&gt;File identity +&lt;/div&gt;&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:normal;color:#232F3E&quot;&gt;called name match&lt;/div&gt;&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:normal;color:#232F3E&quot;&gt;a startup binding?&lt;/div&gt;" style="shape=rhombus;html=1;whiteSpace=wrap;align=center;verticalAlign=middle;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;rounded=0;spacing=0;fontSize=22;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="380" y="395" width="320" height="200" />
+        </mxCell>
+        <mxCell id="policy" value="&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:normal;color:#232F3E&quot;&gt;Grammar policy&lt;/div&gt;&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:normal;color:#232F3E&quot;&gt;decides&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=wrap;align=center;verticalAlign=middle;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;spacing=16;fontSize=24;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="820" y="440" width="260" height="110" />
+        </mxCell>
+        <mxCell id="refuse" value="&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:normal;color:#DD344C&quot;&gt;Refuse this start&lt;/div&gt;&lt;div style=&quot;font-size:22px;line-height:26.4px;font-weight:normal;color:#DD344C&quot;&gt;Box keeps running&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=wrap;align=center;verticalAlign=middle;strokeColor=#DD344C;fillColor=#ffffff;strokeWidth=2;spacing=16;fontSize=22;fontColor=#DD344C;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="410" y="720" width="260" height="110" />
+        </mxCell>
+        <mxCell id="start" value="&lt;div style=&quot;font-size:24px;line-height:28.8px;font-weight:normal;color:#232F3E&quot;&gt;Start server&lt;/div&gt;" style="rounded=0;html=1;whiteSpace=wrap;align=center;verticalAlign=middle;strokeColor=#232F3E;fillColor=#ffffff;strokeWidth=2;spacing=16;fontSize=24;fontColor=#232F3E;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="820" y="720" width="260" height="110" />
+        </mxCell>
+        <mxCell id="retry" value="&lt;div style=&quot;font-size:18px;line-height:21.6px;font-weight:normal;color:#5F6B7A&quot;&gt;Retry: a later path to an already-bound file can be checked again.&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=18;fontColor=#5F6B7A;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="870" width="1040" height="28" />
+        </mxCell>
+        <mxCell id="new-file" value="&lt;div style=&quot;font-size:18px;line-height:21.6px;font-weight:normal;color:#5F6B7A&quot;&gt;A new executable file does not receive approval during the run.&lt;/div&gt;" style="text;html=1;whiteSpace=nowrap;align=left;verticalAlign=top;strokeColor=none;fillColor=none;fontSize=18;fontColor=#5F6B7A;fontFamily=Arial,Helvetica,sans-serif;" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="40" y="904" width="1040" height="28" />
+        </mxCell>
+        <mxCell id="reuse" value="Reuse" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.480769230769;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=#ffffff;align=center;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="startup" target="binding">
+          <mxGeometry as="geometry" x="0" relative="1">
+            <Array as="points">
+              <mxPoint x="540" y="350" />
+            </Array>
+            <mxPoint as="offset" x="48" y="0" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="check" value="Check" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=#ffffff;align=center;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="request" target="binding">
+          <mxGeometry as="geometry" x="0" relative="1">
+            <Array as="points">
+              <mxPoint x="320" y="495" />
+            </Array>
+            <mxPoint as="offset" x="0" y="-15" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="match" value="Match" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#545B64;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=#ffffff;align=center;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="binding" target="policy">
+          <mxGeometry as="geometry" x="0" relative="1">
+            <Array as="points">
+              <mxPoint x="760" y="495" />
+            </Array>
+            <mxPoint as="offset" x="0" y="-15" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="no-match" value="No match" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#DD344C;strokeWidth=2.5;dashed=1;dashPattern=8 6;fixDash=1;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=#ffffff;align=center;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="binding" target="refuse">
+          <mxGeometry as="geometry" x="0" relative="1">
+            <Array as="points">
+              <mxPoint x="540" y="660" />
+            </Array>
+            <mxPoint as="offset" x="62" y="0" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="permit" value="Permitted" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#1D8102;strokeWidth=2.5;dashed=0;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=#ffffff;align=center;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="policy" target="start">
+          <mxGeometry as="geometry" x="0" relative="1">
+            <Array as="points">
+              <mxPoint x="1015" y="635" />
+            </Array>
+            <mxPoint as="offset" x="-65" y="0" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="deny" value="Denied" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#DD344C;strokeWidth=2.5;dashed=1;dashPattern=8 6;fixDash=1;endArrow=block;endFill=1;endSize=10;startArrow=none;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;fontSize=18;fontStyle=2;fontColor=#414D5C;labelBackgroundColor=#ffffff;align=center;fontFamily=Arial,Helvetica,sans-serif;" edge="1" parent="1" source="policy" target="refuse">
+          <mxGeometry as="geometry" x="-0.28" relative="1">
+            <Array as="points">
+              <mxPoint x="885" y="650" />
+              <mxPoint x="740" y="650" />
+              <mxPoint x="740" y="775" />
+            </Array>
+            <mxPoint as="offset" x="0" y="-15" />
+          </mxGeometry>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

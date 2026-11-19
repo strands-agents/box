@@ -6,9 +6,19 @@ mod adapters;
 mod address;
 mod cap;
 mod catalog;
+mod check;
 mod decision;
 mod dogwood;
 mod error;
+#[cfg_attr(
+    not(feature = "shell-adapter"),
+    expect(
+        dead_code,
+        reason = "only the shell adapter reads a command line with a tool grammar"
+    )
+)]
+mod grammar;
+mod mcp_input;
 mod mcp_schema;
 mod observe;
 mod outcome;
@@ -19,6 +29,13 @@ mod request;
 mod rerun;
 mod schema;
 mod spelling;
+
+#[cfg(test)]
+#[path = "../tests/support/event_schema.rs"]
+mod test_event_schema;
+#[cfg(test)]
+#[path = "../tests/support/history.rs"]
+mod test_history;
 
 #[cfg(feature = "egress-adapter")]
 pub use adapters::egress::EgressPolicyInterceptor;
@@ -32,18 +49,20 @@ pub use catalog::{
     CatalogRefusal, CatalogStage, CompleteCatalog, DiscoveryFailure, ListPage, MAXIMUM_LIST_BYTES,
     MAXIMUM_LIST_PAGES, McpServerKind, ServerDiscovery, ToolCatalogs,
 };
+pub use check::{Finding, Location, PolicyCheck, RuleRef};
 pub use decision::{Decision, DenyReason, PolicyAttribution, RuleId};
 pub use dogwood::event_schema_source;
 pub use error::{PolicyDiagnostic, PolicyError, PolicyStagingError};
+pub use grammar::{BindingRefusal, GrammarBindings, ToolGrammar, ToolGrammarError, ToolGrammars};
 pub use mcp_schema::{
     McpSchemaError, compose_action_schema, generate_mcp_schema, validate_mcp_schema_composition,
 };
 pub use observe::DecisionObserver;
-pub use outcome::{Delivery, FsResult, Outcome};
+pub use outcome::{Delivery, FsResult, McpReply, Outcome, PendingToolResponse};
 pub use path::{ApprovedPath, PathRefusal, PathResolver};
 pub use policy::{
     ENGINE_ID, EffectivePolicy, Policy, PolicyEngine, SELF_DEFENDED_FILES, SchemaStage,
 };
-pub use request::{FsAccess, FsOperation, Principal, Request};
+pub use request::{FsAccess, FsOperation, Principal, Request, RequestId};
 pub use schema::GovernedBox;
 pub use spelling::{Operator, PolicyWarning};

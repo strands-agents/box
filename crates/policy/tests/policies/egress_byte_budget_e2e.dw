@@ -1,15 +1,18 @@
-// The same outbound byte budget as `egress_byte_budget.dw`, calibrated for real wire
-// traffic.
+// The same completion-based outbound byte budget as `egress_byte_budget.dw`,
+// calibrated for real HTTP traffic.
 //
-// The budget is 400 bytes rather than 100 because the proxy reports what it actually
-// wrote to the socket — the whole serialized request, headers included — not just the
-// body. A 10-byte body therefore charges ~150 bytes. Counting the wire total is the
-// honest measure for an egress budget (headers leave the box too), so the threshold
-// moves rather than the measurement.
+// The threshold is 400 bytes rather than 100 because the gateway reports the whole
+// serialized request written to the socket, including headers. A 10-byte body
+// therefore charges about 150 bytes.
 //
-// Sums `http:request::response`, never `::request`: a resolution exists only for a
-// request that was allowed AND actually written, so a denied attempt cannot consume
-// budget.
+// Sum delivered request bytes from `http:request::response` outcomes recorded in
+// the last 60 seconds. The gateway records the outcome when the exchange ends,
+// including completion, failure, or timeout. Pending exchanges do not count yet,
+// so stalled or concurrent exchanges can exceed the threshold. The rule also
+// excludes the next request's size from the comparison, so it can overshoot.
+//
+// A denied attempt adds no delivered bytes and does not consume this budget.
+// `::request` events describe offered bytes, so this rule does not sum them.
 @id("egress_byte_budget_e2e")
 permit (
     principal,

@@ -1,11 +1,12 @@
 # Telemetry
 
-A box records every policy decision it makes, every change to its own authority, and every span, log
-record, and metric the workload exports. A `[telemetry.*]` table in `box.toml` declares the target those
-records reach, and `include` states which records that target receives.
+A box records every policy decision it makes, every change to its own authority, each unmatched MCP
+route, and every span, log record, and metric the workload exports. A `[telemetry.*]` table in `box.toml`
+declares the target those records reach, and `include` states which records that target receives.
 
-This page covers a `file` target, which appends records to a path the operator names. A box that
-declares no table writes to a default target. See [The default target](#the-default-target).
+This page covers a `file` target, which appends records to a path the operator names, and the
+endpoints a box sends to directly: an `otlp` endpoint, Langfuse, LangSmith, and CloudWatch. A box
+that declares no table writes to a default target. See [The default target](#the-default-target).
 
 ## The default target
 
@@ -16,8 +17,8 @@ A box with no `[telemetry]` table writes one file inside its own box directory:
 ```
 
 That target receives every record: each effective denial, each effective permit, the box's own
-control-plane records, and the workload's relayed spans, log records, and metrics. The workload cannot
-reach the file.
+control-plane records and MCP routing diagnostics, and the workload's relayed spans, log records, and
+metrics. The workload cannot reach the file.
 
 The file grows for as long as the box is used. Rotate or remove it as the operator's own task.
 
@@ -35,16 +36,16 @@ own writes no record to `private/telemetry/records.jsonl`.
 [telemetry.decisions]                  # every decision this box takes, recorded
 kind        = "file"
 destination = "~/boxes/codex/records.jsonl"
-include     = ["deny", "permit", "trace"]
+include     = ["deny", "permit", "trace", "logs"]
 ```
 
-Each table takes three keys. An unknown key is refused.
+A `file` table takes three keys. An unknown key is refused.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `kind` | string | none, required | `file`, which this page covers. |
+| `kind` | string | none, required | `file`. [Endpoints](#endpoints) lists the other kinds. |
 | `destination` | string | none, required | The file the records go to, as stated below. |
-| `include` | array of strings | every record | Which records reach this target: `deny`, `permit`, or `trace`. |
+| `include` | array of strings | every record | Which records reach this target: `deny`, `permit`, `trace`, `logs`, or `metrics`. |
 
 ## `kind = "file"`
 
@@ -77,27 +78,88 @@ records the words in the list name:
 | `deny` | Every effective denial. |
 | `permit` | Every effective permit. |
 | `trace` | The workload's own spans, and this box's control-plane records. |
+| `logs` | Box's unmatched MCP routing diagnostics and the workload's log records. |
+| `metrics` | The workload's metrics. |
 
-So `include = ["deny"]` writes a file of refusals, and leaves out the permits and the control-plane
-records.
+So `include = ["deny"]` writes a file of refusals, and leaves out the permits, control-plane records,
+and MCP routing diagnostics.
 
 **The workload's log records and metrics are on by default.** They reach every target, and no value of
-`include` keeps them out, so the list never needs the words `logs` and `metrics`. The file
-`include = ["deny"]` writes therefore holds the denials, plus whatever log records and metrics the
-workload itself exported.
+`include` keeps them out. The word `logs` selects Box's MCP routing diagnostics; the workload's own
+logs arrive even without it. The word `metrics` is optional. The file `include = ["deny"]` writes
+therefore holds the denials, plus whatever log records and metrics the workload itself exported.
 
 `trace` names two things at once. A target that omits `trace` receives no control-plane record, so this
 box's `box_started`, `policy_installed`, and `box_stopped` records are absent from it.
 
 An empty list is refused, and so is a repeated word.
 
+## Endpoints
+
+An endpoint target sends each batch from the box itself, over OTLP/HTTP with protobuf. The batch
+does not go through the egress gateway, and policy makes no decision for it. The workload never
+holds the target's credential.
+
+Write the vendor's kind, and Box sets the vendor's path, headers, and credential placement:
+
+```toml
+[telemetry.langfuse]
+kind        = "langfuse"
+destination = "https://us.cloud.langfuse.com"
+secret.ref  = "env://LANGFUSE_AUTH"      # public-key:secret-key
+
+[telemetry.cloudwatch_logs]
+kind       = "cloudwatch_logs"
+region     = "us-west-2"
+log_group  = "my-group"
+log_stream = "my-stream"
+secret.ref = "aws://my-profile"
+```
+
+| Kind | What it receives | What the operator writes |
+|---|---|---|
+| `otlp` | every payload, or the payloads `accepts` names | `destination`, and optionally `accepts`, `headers`, and `secret` |
+| `langfuse` | spans | `secret.ref`, and `destination` for a region or a self-hosted Langfuse |
+| `langsmith` | spans | `secret.ref`, and optionally `project` and `destination` |
+| `cloudwatch_logs` | log records | `region`, `log_group`, `log_stream`, and an `aws://` or `credsd://` `secret.ref` |
+| `cloudwatch_traces` | spans | `region`, and an `aws://` or `credsd://` `secret.ref` |
+
+A vendor that takes only spans is sent no log or metric batch. That is the one exception to the rule
+that the workload's log records and metrics reach every target.
+
+[`config.md`](./config.md#telemetrylabel) lists every key, and what each kind sets.
+
+### The credential
+
+`secret.ref` names where the box reads the key: `env://NAME` or `secret://NAME` for a variable in the
+environment of `strands-box run`, or `aws://PROFILE` or `credsd://ENVIRONMENT` for a SigV4 signature.
+The box holds the key in a vault of its own for each target, and attaches it on each request. A
+literal key is refused, and so is a `file://` or `op://` reference.
+
+A credential needs an `https://` destination, unless the destination is loopback.
+
+### Failed sends
+
+Box sends each batch once, with one four-second deadline that covers the credential lookup and the
+send. A batch that fails is counted, and the box
+does not retry it. When the run ends, Box prints one line on stderr with the count (see [Errors and
+exit codes](#errors-and-exit-codes)). To see why a send failed, set `STRANDS_BOX_TELEMETRY_DEBUG` to
+any non-empty value in the environment of `strands-box run`. Box then also prints each failure on
+stderr as it happens, with its full cause and the start of the endpoint's answer. Box redacts each
+credential it attached from that answer, so an endpoint that echoes a refused key does not put the
+key in your logs:
+
+```text
+strands-box: telemetry export failed: https://cloud.langfuse.com/api/public/otel/v1/traces answered 401 Unauthorized: ...
+```
+
 ## The workload's own signals
 
 OpenTelemetry calls each kind of telemetry a signal. Three of them apply here: traces, logs, and metrics.
 
-Box relays the workload's spans, log records, and metrics, and generates no signal of that kind itself.
-A target receives one only when the workload exports it, so two settings apply: the workload's own
-exporter setting, and a target that accepts the signal.
+Box relays the workload's spans, log records, and metrics. These records exist only when the workload
+exports them, so two settings apply: the workload's own exporter setting, and a target that accepts
+the signal.
 
 Box binds one loopback port for the workload and sets three variables in its environment:
 
@@ -130,7 +192,7 @@ Each box record names its origin on its resource:
 | Key | Value |
 |---|---|
 | `service.name` | `strands-box` |
-| `strands.box.name` | this box's generated identifier, as `box-` and 16 hexadecimal characters |
+| `strands.box.name` | this box's ID: the one the library caller supplied, or a generated `box-` and 16 hexadecimal characters |
 | `strands.box.source` | `box` for a record the box wrote, and `agent` for a relayed payload |
 | `strands.box.run.id` | one identifier per `strands-box run` invocation |
 
@@ -154,12 +216,14 @@ A record whose cause is `internal_fault` also carries the key `error.type`, with
 `strands.box.policy.evaluation_error`.
 
 The action value carries the vocabulary term alone, so a reader sees `fs:read` rather than
-`Box::Action::"fs:read"`. Every other value is reported as the enforcement point holds it.
+`Box::Action::"fs:read"`. Every other value is reported as the enforcement point holds it. A spawn
+that a tool grammar decides reports the grammar action, so `Tool::git::Action::"push"` reads as the
+action `push` in the category `Tool::git`.
 
 Two keys are excluded: `url.full` and `process.command_line`.
 
-`process.command_args` reports an argument the script stated literally. For an argument that arrived
-from an expansion, the record reports:
+`process.command_args` reports each argument after expansion, because the Shell does not say which
+words the script stated literally. For each argument, the record reports:
 
 | The expanded argument | What the record carries |
 |---|---|
@@ -170,6 +234,17 @@ from an expansion, the record reports:
 
 At most 64 arguments are reported. One attribute carries at most 4 KiB, and a longer value is cut on a
 character boundary and ends with `… (truncated)`.
+
+### An unmatched MCP route
+
+When an MCP alias invocation matches no declared command, Box writes an informational log record
+with event name `strands.box.mcp.unmatched` in the `strands-box.mcp` scope.
+`process.command` names the received program, and `process.command_args` follows the expanded-argument
+redaction rules above. The record includes request identifiers and parent trace context when available.
+
+The diagnostic carries no policy verdict, action, or rule. Box writes it before replying to the
+alias, so it does not say whether ordinary execution starts or succeeds. It produces no span.
+Targets receive it when `include` is omitted or contains `logs`.
 
 ### A control-plane record
 
@@ -186,7 +261,7 @@ A control-plane record states one change to the authority this box holds. The sc
 
 ## Reading a records file
 
-A records file holds both scopes, so a query selects one. A box records that it started before it
+A records file can hold several scopes, so a query selects one. A box records that it started before it
 decides anything, so the first record in the file is a control-plane record.
 
 Every denial, one per line:
@@ -254,11 +329,32 @@ message does: Box prefixes every line it prints with `strands-box:`.
 | ``a file destination must be absolute or begin with `~/` `` | A file destination is relative. |
 | ``carries a `..` component`` | A destination carries `..`. |
 | `is inside the box directory ... but outside its private tree` | A file destination sits where a process could truncate it. |
+| ``a `<kind>` target sets `<key>` itself, so leave it out`` | A vendor kind names a key it sets. |
+| `` `<key>` does not apply to a `<kind>` target `` | A key belongs to another kind. |
+| ``a `cloudwatch_logs` target needs `log_group` and `log_stream` `` | A CloudWatch Logs target names no group or stream. |
+| ``needs `region`, an AWS region such as `us-west-2` `` | A CloudWatch target names no region, or an invalid one. |
+| `` `secret.ref` names no scheme this box reads `` | The reference is a literal value, or a scheme other than `env://`, `secret://`, `aws://`, or `credsd://`. |
+| `its destination is neither https nor loopback` | A credential would cross the network in the clear. |
+| `` the `aws://` credential cannot sign `` | The profile is missing, or holds no static keys. The run stops before the workload starts. |
 
 Each message names the table it came from.
 
-A target that fails while the box runs loses the record. Box reports no such loss, and it does not
-retry.
+A target that fails while the box runs loses the record, and Box does not retry. When the run ends,
+Box prints one line on stderr if an export to a configured target failed, or if the final export did
+not finish in time:
+
+```text
+strands-box: warning: telemetry records were lost: 2 exports to the configured targets failed
+```
+
+The count is exports, not records: one export can carry many records. The run's exit code does not
+change. The line does not cover everything that can be lost: a record that the telemetry queue
+refuses when it is full, an agent payload that Box refuses, a batch that a slow target does not
+accept before its export deadline while the box runs, and a relayed payload still in flight at
+shutdown are not counted. So the absence of this line does not prove that nothing was lost.
+
+Set `STRANDS_BOX_TELEMETRY_DEBUG` to also print each failed export as it happens, with its cause. See
+[Failed sends](#failed-sends).
 
 ## See also
 

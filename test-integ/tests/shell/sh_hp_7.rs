@@ -1,6 +1,6 @@
 use strands_det_harness::det_case;
 
-// Control flow and variables behave per bash through the vendored parser: a `for` loop,
+// Control flow and variables behave per bash through the Shell's parser: a `for` loop,
 // `export`, `test`, and an `if [ -f ]` branch are all `shell:exec` the baseline permits,
 // with no filesystem effect (the `if` tests a file that does not exist and takes the else).
 // Measured green on macOS 2026-09-22 (cargo test --test shell): `123`, `X=42`, `TESTOK`, and

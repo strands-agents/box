@@ -14,6 +14,10 @@
 //! | [`process`] | `[agent]` and `[tool.<name>]`: one `ProcessSpec` each |
 //! | [`egress`] | `[egress.a]`: which secret attaches to which request |
 //! | [`filesystem`] | the translation of a `ProcessSpec`'s eight lists into containment cells |
+//! | [`gateway`] | `[gateway]`: the hosts whose plain HTTP the egress gateway upgrades to HTTPS |
+//! | [`grammar`] | `[tool.<name>.grammar]`: the tool grammars a box installs |
+//! | [`ingress`] | `[[agent.ingress]]`: where callers reach the agent |
+//! | [`limits`] | `[limits.shell]`: the execution timeout of one Shell submission |
 //! | `env` | which environment names a process may set, and which Core owns |
 //! | [`mcp`] | `[mcp.<name>]`: which local MCP servers exist, and how each starts |
 //! | [`telemetry`] | `[telemetry.<label>]`: where a box's decision records go |
@@ -24,7 +28,11 @@
 pub(crate) mod egress;
 pub(crate) mod env;
 pub(crate) mod filesystem;
+pub(crate) mod gateway;
+pub(crate) mod grammar;
+pub(crate) mod ingress;
 pub(crate) mod isolation;
+pub(crate) mod limits;
 pub(crate) mod mcp;
 pub(crate) mod process;
 pub(crate) mod telemetry;
@@ -35,7 +43,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use policy::{Policy, PolicyEngine};
+use policy::{Policy, PolicyEngine, ToolGrammars};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{BoxError, ConfigError};
@@ -43,14 +51,17 @@ use crate::error::{BoxError, ConfigError};
 #[cfg(test)]
 use self::egress::routes_for;
 use self::egress::{
-    EgressEntry, EgressRoute, Protocol, host_of, routes_for_and_remote, validate_egress,
-    validate_egress_and_remote,
+    BackendTarget, EgressEntry, EgressRoute, Protocol, host_of, routes_for_and_remote,
+    validate_egress, validate_egress_and_remote,
 };
 #[cfg(test)]
 use self::env::{LOADER_HOOK_PREFIXES, LOADER_HOOKS};
 #[cfg(test)]
 use self::env::{reserved_workload_environment, valid_environment_name};
+use self::gateway::Gateway;
+use self::limits::Limits;
 use self::process::{ContainedMcp, ProcessSpec};
+use credentials::DestinationPattern;
 
 /// The default credential header, and the one whose convention carries a prefix.
 pub(super) const DEFAULT_HEADER: &str = "Authorization";
@@ -84,7 +95,23 @@ pub(super) const INJECT_ALWAYS: &str = "always";
 /// Read the MCP servers declared in one workspace config.
 pub(crate) fn read_mcp_servers(path: &Path) -> Result<Vec<mcp::McpServer>, BoxError> {
     let file = ConfigFile::read(path)?;
-    mcp::from_entries(&file.mcp)
+    let servers = mcp::from_entries(&file.mcp)?;
+    if let Some(server) = servers
+        .iter()
+        .find(|server| server.has_argument_wildcards())
+    {
+        return Err(ConfigError::Mcp {
+            name: server.name.clone(),
+            reason: "offline schema generation cannot supply wildcard arguments; use a configuration with concrete arguments".into(),
+        }.into());
+    }
+    Ok(servers)
+}
+
+/// The tool grammars that one workspace config installs, checked.
+pub(crate) fn read_tool_grammars(path: &Path) -> Result<ToolGrammars, BoxError> {
+    let file = ConfigFile::read(path)?;
+    Ok(grammar::tool_grammars(&file.tool)?)
 }
 
 /// A remote MCP server: an `[egress.<name>]` entry speaking `mcp`, resolved to a discovery URL.
@@ -103,6 +130,23 @@ pub(crate) fn read_remote_mcp_servers(path: &Path) -> Result<Vec<RemoteMcpServer
     let (_, remote_mcp) = mcp::partition(&file.mcp)?;
     let mut servers = Vec::new();
     for remote in remote_mcp {
+        // A re-routed server is reachable only through the backend, and that re-route — with its
+        // SigV4/`env://` backend auth — happens at `run` time in the egress gateway. Offline
+        // `generate-schema` has no gateway, so it cannot discover a re-routed server; refuse by name
+        // rather than silently discover the ORIGINAL host (wrong tools, and it would resolve the
+        // phantom-only destination `secret` against that host).
+        if !remote.backends.is_empty() {
+            return Err(ConfigError::Mcp {
+                name: remote.name,
+                reason: "re-routes to a backend, which generate-schema cannot discover (the \
+                         re-route and its backend auth apply only at run time, in the egress \
+                         gateway). This stops the whole run; generate a schema from a box.toml \
+                         without this server for the others, then author this server's mcp:call \
+                         rules by hand"
+                    .to_string(),
+            }
+            .into());
+        }
         let Some(destination) = remote.destinations.first() else {
             continue;
         };
@@ -264,6 +308,7 @@ pub(crate) struct RunContract {
     box_directory: PathBuf,
     workspace: PathBuf,
     file: ConfigFile,
+    grammars: ToolGrammars,
 }
 
 impl RunContract {
@@ -271,6 +316,7 @@ impl RunContract {
     pub(crate) fn read(path: &Path, invocation: &Path) -> Result<Self, BoxError> {
         let (source, text) = AuthoritySource::read(path, "configuration")?;
         let file = ConfigFile::parse(&text, source.path())?;
+        let grammars = grammar::tool_grammars(&file.tool)?;
         let box_directory = file.box_dir.clone();
         if !box_directory.is_absolute() {
             return Err(ConfigError::Contract {
@@ -312,12 +358,18 @@ impl RunContract {
             box_directory,
             workspace,
             file,
+            grammars,
         })
     }
 
     #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
     pub(crate) fn experimental_features(&self) -> &ExperimentalFeatures {
         &self.file.experimental_features
+    }
+
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+    pub(crate) fn uses_native_filesystem(&self) -> bool {
+        self.file.uses_native_filesystem()
     }
 
     pub(crate) fn box_directory(&self) -> &Path {
@@ -388,11 +440,15 @@ impl RunContract {
     ) -> Result<ConfigureRequest, BoxError> {
         let policy_path = self.file.policy_path(self.source.path());
         let (mcp_servers, http_mcp) = crate::record::config::mcp::partition(&self.file.mcp)?;
+        mcp::refuse_overlapping_wildcard_commands(&mcp_servers, |server| {
+            Some(server.arguments().to_vec())
+        })?;
         let contained_mcp = crate::record::config::mcp::contained_specs(&self.file.mcp);
         let (policy, policy_source) = read_authored_policy(
             policy_path.as_deref(),
-            mcp_servers.is_empty(),
+            mcp_servers.is_empty() && http_mcp.is_empty(),
             &policy_operator()?,
+            &self.grammars,
         )?;
         if let Some(source) = &policy_source
             && crate::record::layout::lies_within(source.path(), root.root())
@@ -436,6 +492,9 @@ impl RunContract {
                         destinations: remote.destinations,
                         protocol: Protocol::Mcp,
                         secret: remote.secret,
+                        // A remote MCP server re-routes to its declared backend, exactly as an
+                        // `[egress.<name>]` entry does; an empty list means no re-route.
+                        backends: remote.backends,
                     },
                 )
             })
@@ -446,18 +505,32 @@ impl RunContract {
         if let Some(source) = policy_source {
             sources.push(source);
         }
+        let telemetry = telemetry::checked(&self.file.telemetry, root.root())?;
         Ok(ConfigureRequest {
             record: Record {
-                version: process_record_version(
+                version: record_version(
+                    root.box_id(),
+                    self.file.file_attributes,
+                    self.file.monty,
                     &self.file.experimental_features,
+                    &self.file.limits,
                     self.file
                         .agent
                         .iter()
                         .chain(self.file.tool.values())
                         .chain(contained_mcp.values().map(|m| &m.spec)),
+                    &mcp_servers,
+                    self.file.agent.as_ref(),
+                    has_backend(&egress, &remote_mcp),
+                    &self.file.gateway,
+                    &telemetry,
                     &self.file.containment,
                 ),
                 experimental_features: self.file.experimental_features.clone(),
+                file_attributes: self.file.file_attributes,
+                monty: self.file.monty,
+                gateway: self.file.gateway.clone(),
+                limits: self.file.limits.clone(),
                 box_id: root.box_id().to_string(),
                 box_dir: root.root().to_path_buf(),
                 name: self.file.name.clone(),
@@ -468,10 +541,11 @@ impl RunContract {
                 remote_mcp,
                 mcp: mcp_servers,
                 contained_mcp,
-                telemetry: telemetry::checked(&self.file.telemetry, root.root())?,
+                telemetry,
                 containment: self.file.containment,
             },
             policy,
+            grammars: self.grammars,
             sources,
         })
     }
@@ -484,6 +558,9 @@ pub(crate) struct ConfigureRequest {
 
     /// The record to store, from which every later verb rebuilds the above.
     pub(crate) record: Record,
+
+    /// The tool grammars the record's `[tool.<name>.grammar]` tables hold, checked.
+    pub(crate) grammars: ToolGrammars,
 
     /// The loaded source identities that the interpreters protect from mutation.
     pub(crate) sources: Vec<AuthoritySource>,
@@ -512,6 +589,24 @@ pub(crate) struct Record {
         skip_serializing_if = "ExperimentalFeatures::is_disabled"
     )]
     pub(crate) experimental_features: ExperimentalFeatures,
+
+    /// Whether each macOS write grant may also set file attributes.
+    #[serde(
+        default,
+        rename = "file-attributes",
+        skip_serializing_if = "std::ops::Not::not"
+    )]
+    pub(crate) file_attributes: bool,
+    /// Whether a bare `python3` or `python` in the Shell runs Monty. `false` leaves both names to
+    /// resolve like any other program the Shell starts.
+    #[serde(default = "monty_default", skip_serializing_if = "is_true")]
+    pub(crate) monty: bool,
+    /// The box-wide egress gateway settings.
+    #[serde(default, skip_serializing_if = "Gateway::is_default")]
+    pub(crate) gateway: Gateway,
+    /// The operator-selected execution limits.
+    #[serde(default, skip_serializing_if = "Limits::is_default")]
+    pub(crate) limits: Limits,
 
     /// The immutable identity that Box generated for this directory.
     pub(crate) box_id: String,
@@ -559,7 +654,8 @@ pub(crate) struct Record {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) contained_mcp: BTreeMap<String, ContainedMcp>,
 
-    /// The telemetry targets this box declares, verbatim.
+    /// The telemetry targets this box declares, each vendor kind stored as the `otlp` target it
+    /// stands for.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) telemetry: BTreeMap<String, telemetry::TelemetryEntry>,
 
@@ -572,7 +668,12 @@ pub(crate) struct Record {
     pub(crate) containment: isolation::ContainmentSpec,
 }
 
-/// The ordinary record format; native enforcement uses version 22. Version 21 adds `network` to each
+/// The ordinary record format; native enforcement uses version 22. Version 28 adds `backends` to an
+/// `[egress.<name>]` entry (a destination re-routes to one backend), so a build that predates the
+/// re-route is refused with a version mismatch rather than failing on the unknown `backends` field.
+/// Versions 25 through 27 cover `file-attributes`, whole-argument MCP wildcards, and configured
+/// execution limits, each documented on its constant below.
+/// Version 21 adds `network` to each
 /// `[tool.<name>]`, and stores a stdio MCP server's network in its spec's `network`, where version
 /// 20 kept a separate `native_egress` flag on `ContainedMcp`. Version 20 names a secret's injection mode
 /// `secret.inject`, taking `phantom` or `always`, where version 19 took `secret.phantom` with
@@ -584,12 +685,59 @@ pub(crate) struct Record {
 /// key.
 pub(crate) const RECORD_VERSION: u32 = 21;
 
-/// Version 22 prevents older builds from resuming a box without its selected enforcement.
+/// Version 22 prevents older builds from resuming a box without each experimental feature it selects.
 const EXPERIMENTAL_RECORD_VERSION: u32 = 22;
 const PROCESS_POLICY_RECORD_VERSION: u32 = 23;
-/// Version 25 carries `[containment] private_proc = false`, so a build that predates the table
-/// refuses the box rather than resuming it with a private `/proc` it no longer asked for.
-const SHARED_PROC_RECORD_VERSION: u32 = 25;
+/// The record version of a record with two stdio MCP servers on one program.
+const SHARED_PROGRAM_RECORD_VERSION: u32 = 24;
+/// The record version of a record that selects `file-attributes`, so an older build refuses the box
+/// rather than resuming it without the write grants it was configured with.
+const FILE_ATTRIBUTES_RECORD_VERSION: u32 = 25;
+const MCP_ARGUMENT_WILDCARDS_RECORD_VERSION: u32 = 26;
+/// The record version that preserves configured execution limits.
+const LIMITS_RECORD_VERSION: u32 = 27;
+const MCP_ABSOLUTE_COMMAND_RECORD_VERSION: u32 = 28;
+/// The record version of a record whose agent declares an ingress.
+const INGRESS_RECORD_VERSION: u32 = 29;
+/// The record version of a record whose egress re-routes a destination to a backend.
+const BACKEND_RECORD_VERSION: u32 = 30;
+const SHELL_SIZE_LIMITS_RECORD_VERSION: u32 = 31;
+/// The record version of a record whose `[gateway]` upgrades a host's plain HTTP, so an older build
+/// refuses the box rather than resuming it with those requests refused on port 80.
+const UPGRADE_HTTP_RECORD_VERSION: u32 = 32;
+/// The record version of a record that sets `limits.shell.max_stdin`, so an older build refuses the
+/// box rather than resuming it with the default stdin limit.
+const SHELL_STDIN_LIMIT_RECORD_VERSION: u32 = 33;
+/// The record version of a record whose box identity a caller supplied, so an older build refuses
+/// the box by its version rather than by its identity.
+pub(crate) const SUPPLIED_IDENTITY_RECORD_VERSION: u32 = 34;
+/// The record version of a record whose process selects `file-watching`, so an older build
+/// refuses the box rather than resuming it with FSEvents refused.
+const FILE_WATCHING_RECORD_VERSION: u32 = 35;
+/// The record version of a record whose telemetry target uses `accepts`, `headers`,
+/// `secret.prefix`, `secret.placement`, or a secret that is not read from the environment. A vendor
+/// kind stores these, so an earlier build refuses the record instead of sending without them.
+const TELEMETRY_EXPORT_RECORD_VERSION: u32 = 36;
+/// The record version of a record with `monty = false`, so an older build refuses the box rather
+/// than resuming it with a bare `python3` running Monty again.
+const MONTY_OFF_RECORD_VERSION: u32 = 37;
+/// The record version of a record whose process declares a `filesystem.deny_write` list.
+const DENY_WRITE_RECORD_VERSION: u32 = 38;
+
+/// The record version of a record with `[containment] private_proc = false`, so a build that
+/// predates the table refuses the box rather than resuming it with a private `/proc` it no longer
+/// asked for.
+const SHARED_PROC_RECORD_VERSION: u32 = 39;
+
+/// Monty is on unless the operator turns it off.
+fn monty_default() -> bool {
+    true
+}
+
+/// A record leaves `monty` out while it holds the default.
+fn is_true(value: &bool) -> bool {
+    *value
+}
 
 /// Experimental mechanisms require explicit operator selection.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -597,11 +745,15 @@ const SHARED_PROC_RECORD_VERSION: u32 = 25;
 pub(crate) struct ExperimentalFeatures {
     #[serde(default)]
     pub(crate) native_filesystem_policy: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) tool_grammars: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) ingress: bool,
 }
 
 impl ExperimentalFeatures {
     fn is_disabled(&self) -> bool {
-        !self.native_filesystem_policy
+        !self.native_filesystem_policy && !self.tool_grammars && !self.ingress
     }
 
     fn record_version(&self) -> u32 {
@@ -614,9 +766,13 @@ impl ExperimentalFeatures {
 
     fn validate(&self) -> Result<(), ConfigError> {
         if self.native_filesystem_policy
-            && !cfg!(all(
-                target_os = "macos",
-                feature = "native-filesystem-policy"
+            && !cfg!(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(
+                    target_os = "linux",
+                    target_arch = "aarch64",
+                    feature = "native-filesystem-policy"
+                )
             ))
         {
             return Err(ConfigError::ExperimentalFeatureUnavailable {
@@ -627,23 +783,88 @@ impl ExperimentalFeatures {
     }
 }
 
+/// The highest record version required by the features a record holds.
+#[allow(clippy::too_many_arguments)]
+fn record_version<'a>(
+    box_id: &str,
+    file_attributes: bool,
+    monty: bool,
+    features: &ExperimentalFeatures,
+    limits: &Limits,
+    specs: impl Iterator<Item = &'a ProcessSpec> + Clone,
+    mcp: &[crate::record::config::mcp::McpServer],
+    agent: Option<&ProcessSpec>,
+    has_backend: bool,
+    gateway: &Gateway,
+    targets: &BTreeMap<String, telemetry::TelemetryEntry>,
+    containment: &isolation::ContainmentSpec,
+) -> u32 {
+    let ingress = agent.is_some_and(|agent| !agent.ingress.is_empty());
+    if !containment.is_default() {
+        SHARED_PROC_RECORD_VERSION
+    } else if specs
+        .clone()
+        .any(|spec| !spec.filesystem.deny_write.is_empty())
+    {
+        DENY_WRITE_RECORD_VERSION
+    } else if !monty {
+        MONTY_OFF_RECORD_VERSION
+    } else if telemetry::needs_export_record(targets) {
+        TELEMETRY_EXPORT_RECORD_VERSION
+    } else if specs.clone().any(|spec| spec.file_watching) {
+        FILE_WATCHING_RECORD_VERSION
+    } else if !generated_box_identity(box_id) {
+        SUPPLIED_IDENTITY_RECORD_VERSION
+    } else if limits.shell.has_stdin_limit() {
+        SHELL_STDIN_LIMIT_RECORD_VERSION
+    } else if !gateway.is_default() {
+        UPGRADE_HTTP_RECORD_VERSION
+    } else if limits.shell.has_size_limits() {
+        SHELL_SIZE_LIMITS_RECORD_VERSION
+    } else if has_backend {
+        BACKEND_RECORD_VERSION
+    } else if ingress {
+        INGRESS_RECORD_VERSION
+    } else if mcp
+        .iter()
+        .any(|server| Path::new(server.executable()).is_absolute())
+    {
+        MCP_ABSOLUTE_COMMAND_RECORD_VERSION
+    } else if !limits.is_default() {
+        LIMITS_RECORD_VERSION
+    } else if mcp.iter().any(|server| server.argument_wildcards) {
+        MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
+    } else if file_attributes {
+        FILE_ATTRIBUTES_RECORD_VERSION
+    } else if crate::record::config::mcp::shares_a_program(mcp) {
+        SHARED_PROGRAM_RECORD_VERSION
+    } else {
+        process_record_version(features, specs)
+    }
+}
+
+/// Whether any egress or remote-MCP entry re-routes its destination to a backend.
+fn has_backend(
+    egress: &BTreeMap<String, EgressEntry>,
+    remote_mcp: &BTreeMap<String, EgressEntry>,
+) -> bool {
+    egress
+        .values()
+        .chain(remote_mcp.values())
+        .any(|entry| !entry.backends.is_empty())
+}
+
 fn process_record_version<'a>(
     features: &ExperimentalFeatures,
     specs: impl Iterator<Item = &'a ProcessSpec>,
-    containment: &isolation::ContainmentSpec,
 ) -> u32 {
-    let version = if specs
+    if specs
         .into_iter()
         .any(|spec| spec.native_filesystem_policy.is_some())
     {
         PROCESS_POLICY_RECORD_VERSION
     } else {
         features.record_version()
-    };
-    if containment.is_default() {
-        version
-    } else {
-        version.max(SHARED_PROC_RECORD_VERSION)
     }
 }
 
@@ -873,6 +1094,21 @@ impl Record {
             RECORD_VERSION,
             EXPERIMENTAL_RECORD_VERSION,
             PROCESS_POLICY_RECORD_VERSION,
+            SHARED_PROGRAM_RECORD_VERSION,
+            FILE_ATTRIBUTES_RECORD_VERSION,
+            MCP_ARGUMENT_WILDCARDS_RECORD_VERSION,
+            LIMITS_RECORD_VERSION,
+            MCP_ABSOLUTE_COMMAND_RECORD_VERSION,
+            INGRESS_RECORD_VERSION,
+            BACKEND_RECORD_VERSION,
+            SHELL_SIZE_LIMITS_RECORD_VERSION,
+            UPGRADE_HTTP_RECORD_VERSION,
+            SHELL_STDIN_LIMIT_RECORD_VERSION,
+            SUPPLIED_IDENTITY_RECORD_VERSION,
+            FILE_WATCHING_RECORD_VERSION,
+            TELEMETRY_EXPORT_RECORD_VERSION,
+            MONTY_OFF_RECORD_VERSION,
+            DENY_WRITE_RECORD_VERSION,
             SHARED_PROC_RECORD_VERSION,
         ]
         .contains(&stamped.version)
@@ -887,13 +1123,27 @@ impl Record {
             path: path.to_path_buf(),
             source,
         })?;
-        let expected = process_record_version(
+        if !valid_box_identity(&record.box_id) {
+            return Err(ConfigError::RecordIdentity {
+                found: record.box_id,
+            });
+        }
+        let expected = record_version(
+            &record.box_id,
+            record.file_attributes,
+            record.monty,
             &record.experimental_features,
+            &record.limits,
             record
                 .agent
                 .iter()
                 .chain(record.tool.values())
                 .chain(record.contained_mcp.values().map(|m| &m.spec)),
+            &record.mcp,
+            record.agent.as_ref(),
+            has_backend(&record.egress, &record.remote_mcp),
+            &record.gateway,
+            &record.telemetry,
             &record.containment,
         );
         if record.version != expected {
@@ -902,12 +1152,8 @@ impl Record {
                 expected,
             });
         }
-        if !valid_box_identity(&record.box_id) {
-            return Err(ConfigError::RecordIdentity {
-                found: record.box_id,
-            });
-        }
         BoxName::parse(&record.name)?;
+        record.gateway.validate()?;
         record.validate_processes()?;
         Ok(record)
     }
@@ -920,12 +1166,17 @@ impl Record {
                 "[agent]",
                 self.experimental_features.native_filesystem_policy,
             )?;
+            agent.validate_ingress_selection("[agent]", self.experimental_features.ingress)?;
         }
         for (label, tool) in &self.tool {
             tool.validate(&format!("[tool.{label}]"))?;
             tool.validate_native_policy(
                 &format!("[tool.{label}]"),
                 self.experimental_features.native_filesystem_policy,
+            )?;
+            tool.validate_grammar_selection(
+                &format!("[tool.{label}]"),
+                self.experimental_features.tool_grammars,
             )?;
         }
         for (name, contained) in &self.contained_mcp {
@@ -942,6 +1193,46 @@ impl Record {
     /// destination, so the gateway learns every plain-HTTP credential and every remote MCP host.
     pub(crate) fn egress_routes(&self) -> Result<Vec<EgressRoute>, BoxError> {
         routes_for_and_remote(&self.egress, &self.remote_mcp)
+    }
+
+    /// The credential routes for each backend entry, grouped per entry so each opens in one vault
+    /// (one credential authority on one destination): the entry's strip-phantom destination secret
+    /// and its box-owned backend token together. An entry with no credentials contributes no group.
+    pub(crate) fn backend_credentials(
+        &self,
+    ) -> Result<Vec<(DestinationPattern, Vec<EgressRoute>)>, BoxError> {
+        let mut groups = Vec::new();
+        // A remote MCP server re-routes through the same backend path as an `[egress.<name>]` entry,
+        // so both maps contribute here.
+        for entry in self.egress.values().chain(self.remote_mcp.values()) {
+            let routes = entry.backend_credential_routes()?;
+            if routes.is_empty() {
+                continue;
+            }
+            // The vault registers under the ORIGINAL destination, so the gateway finds it both for
+            // the pre-rewrite strip (keyed on the original) and the post-rewrite backend signature
+            // (whose signed route is keyed on the backend host). A backend entry has exactly one
+            // destination, so `primary_destination` is `Some`.
+            let Some(original) = entry.primary_destination()? else {
+                continue;
+            };
+            groups.push((original, routes));
+        }
+        Ok(groups)
+    }
+
+    /// The backend dial target for every re-routed destination, keyed by the original destination
+    /// pattern. The gateway dials these instead of the original destination.
+    pub(crate) fn backend_dials(
+        &self,
+    ) -> Result<Vec<(DestinationPattern, BackendTarget)>, BoxError> {
+        let mut dials = Vec::new();
+        // Both the operator's egress entries and the remote MCP servers re-route through the same
+        // backend dial path.
+        for entry in self.egress.values().chain(self.remote_mcp.values()) {
+            dials.extend(entry.backend_dials()?);
+        }
+        Ok(dials)
     }
 
     /// The remote MCP servers this box declares, as `(host, name)` pairs — one per destination of
@@ -989,13 +1280,59 @@ impl Record {
     }
 }
 
-fn valid_box_identity(identity: &str) -> bool {
-    identity.strip_prefix("box-").is_some_and(|suffix| {
-        suffix.len() == 16
-            && suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+/// The lowercase hexadecimal digits that end every box identity.
+const BOX_IDENTITY_DIGITS: usize = 16;
+
+/// The longest prefix a caller-supplied identity may carry before its digits.
+pub(crate) const MAXIMUM_BOX_IDENTITY_PREFIX: usize = MAXIMUM_BOX_NAME - 1 - BOX_IDENTITY_DIGITS;
+
+/// Whether `identity` is one Box generates or one a caller may supply.
+pub(crate) fn valid_box_identity(identity: &str) -> bool {
+    identity.rsplit_once('-').is_some_and(|(prefix, digits)| {
+        identity_digits(digits)
+            && !prefix.is_empty()
+            && prefix.len() <= MAXIMUM_BOX_IDENTITY_PREFIX
+            && !prefix.starts_with(['.', '-'])
+            && prefix.chars().all(nameable)
     })
+}
+
+/// Whether `identity` has the form Box generates: `box-` and 16 lowercase hexadecimal digits.
+fn generated_box_identity(identity: &str) -> bool {
+    identity.strip_prefix("box-").is_some_and(identity_digits)
+}
+
+fn identity_digits(digits: &str) -> bool {
+    digits.len() == BOX_IDENTITY_DIGITS
+        && digits
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+/// The policy that the configuration at `path` selects, read as `run` reads it, whether `run`
+/// validates it completely, and the tool grammars it validates against.
+pub(crate) fn read_checked_policy(
+    path: &Path,
+) -> Result<(Option<Policy>, bool, ToolGrammars), BoxError> {
+    let (source, text) = AuthoritySource::read(path, "configuration")?;
+    let file = ConfigFile::parse(&text, source.path())?;
+    let grammars = grammar::tool_grammars(&file.tool)?;
+    let (mcp_servers, http_mcp) = crate::record::config::mcp::partition(&file.mcp)?;
+    let policy = match file.policy_path(source.path()) {
+        Some(policy_path) => {
+            let (identity, text) = AuthoritySource::read(&policy_path, "policy")?;
+            Some(Policy {
+                origin: identity.path().to_path_buf(),
+                text,
+            })
+        }
+        None => None,
+    };
+    Ok((
+        policy,
+        mcp_servers.is_empty() && http_mcp.is_empty(),
+        grammars,
+    ))
 }
 
 /// The operator a policy loads for, anchored at the operator's own home.
@@ -1009,6 +1346,7 @@ fn read_authored_policy(
     path: Option<&Path>,
     validate_complete_schema: bool,
     operator: &policy::Operator,
+    grammars: &ToolGrammars,
 ) -> Result<(Option<Policy>, Option<AuthoritySource>), BoxError> {
     let Some(path) = path else {
         return Ok((None, None));
@@ -1019,7 +1357,7 @@ fn read_authored_policy(
         text,
     };
     let validation = if validate_complete_schema {
-        PolicyEngine::validate(operator, std::slice::from_ref(&source))
+        PolicyEngine::validate_with_grammars(operator, std::slice::from_ref(&source), grammars)
     } else {
         PolicyEngine::validate_staged(std::slice::from_ref(&source))
     };
@@ -1037,7 +1375,7 @@ fn read_authored_policy(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BoxName(String);
 
-/// The longest box name that leaves room for the sockets under it.
+/// The longest box name, which also bounds a caller-supplied box identity.
 pub(crate) const MAXIMUM_BOX_NAME: usize = 32;
 
 /// Whether one character may appear in a box name, an MCP server name, or an alias filename.
@@ -1101,6 +1439,20 @@ struct ConfigFile {
     /// Experimental enforcement, disabled unless the operator selects it.
     #[serde(default, rename = "experimental-features")]
     experimental_features: ExperimentalFeatures,
+    /// Whether each macOS write grant may also set file times, set-ID bits, the group, the owner,
+    /// and ACLs. Linux accepts the key and renders nothing for it.
+    #[serde(default, rename = "file-attributes")]
+    file_attributes: bool,
+    /// Whether a bare `python3` or `python` in the Shell runs Monty, Box's built-in Python subset.
+    /// `false` turns Monty off, and both names then resolve like any other program.
+    #[serde(default = "monty_default")]
+    monty: bool,
+    /// The box-wide egress gateway settings.
+    #[serde(default)]
+    gateway: Gateway,
+    /// The execution limits for hosted interpreters.
+    #[serde(default)]
+    limits: Limits,
     /// The operator's name for this box, which is one path component.
     name: String,
 
@@ -1138,6 +1490,18 @@ struct ConfigFile {
 }
 
 impl ConfigFile {
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+    fn uses_native_filesystem(&self) -> bool {
+        let contained = crate::record::config::mcp::contained_specs(&self.mcp);
+        process::uses_native_filesystem(
+            self.agent
+                .iter()
+                .chain(self.tool.values())
+                .chain(contained.values().map(|server| &server.spec)),
+            self.experimental_features.native_filesystem_policy,
+        )
+    }
+
     fn read(path: &Path) -> Result<Self, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_path_buf(),
@@ -1180,12 +1544,14 @@ impl ConfigFile {
     fn validate(&self) -> Result<(), ConfigError> {
         self.experimental_features.validate()?;
         BoxName::parse(&self.name)?;
+        self.gateway.validate()?;
         if let Some(agent) = &self.agent {
             agent.validate("[agent]")?;
             agent.validate_native_policy(
                 "[agent]",
                 self.experimental_features.native_filesystem_policy,
             )?;
+            agent.validate_ingress_selection("[agent]", self.experimental_features.ingress)?;
         }
         for (label, tool) in &self.tool {
             validate_tool_label(label)?;
@@ -1193,6 +1559,10 @@ impl ConfigFile {
             tool.validate_native_policy(
                 &format!("[tool.{label}]"),
                 self.experimental_features.native_filesystem_policy,
+            )?;
+            tool.validate_grammar_selection(
+                &format!("[tool.{label}]"),
+                self.experimental_features.tool_grammars,
             )?;
         }
         for (name, contained) in crate::record::config::mcp::contained_specs(&self.mcp) {
@@ -1207,6 +1577,18 @@ impl ConfigFile {
                 reason: "[containment] private_proc = false is Linux-only: Seatbelt cannot show \
                          the workload other processes"
                     .to_string(),
+            });
+        }
+        if self.experimental_features.tool_grammars
+            && self.mcp.contains_key(grammar::TOOL_GRAMMAR_NAMESPACE)
+        {
+            return Err(ConfigError::Mcp {
+                name: grammar::TOOL_GRAMMAR_NAMESPACE.to_string(),
+                reason: format!(
+                    "`{}` is the namespace of every tool grammar action \
+                     while `tool-grammars` is on; give the server another name",
+                    grammar::TOOL_GRAMMAR_NAMESPACE
+                ),
             });
         }
         validate_egress(&self.egress)
@@ -1244,6 +1626,196 @@ fn validate_tool_label(label: &str) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absolute_mcp_commands_require_their_own_record_version() {
+        let config = ConfigFile::parse(
+            "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+             [mcp.test]\ntype = \"stdio\"\ncommand = [\"/opt/bin/server\", \"arg\"]",
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        let mut stored = record(None, BTreeMap::new());
+        stored.mcp = mcp::from_entries(&config.mcp).unwrap();
+        stored.contained_mcp = mcp::contained_specs(&config.mcp);
+        for file_attributes in [false, true] {
+            for wildcard in [false, true] {
+                for (limits, expected_version) in [
+                    (Limits::default(), 28),
+                    (toml::from_str("[shell]\ntimeout = 600").unwrap(), 28),
+                    (toml::from_str("[shell]\nmax_input = 262144").unwrap(), 31),
+                    (
+                        toml::from_str("[shell]\nmax_output = 65536\ntimeout = false").unwrap(),
+                        31,
+                    ),
+                ] {
+                    stored.mcp[0].argument_wildcards = wildcard;
+                    stored.file_attributes = file_attributes;
+                    stored.limits = limits;
+                    assert_eq!(
+                        record_version(
+                            "box-0123456789abcdef",
+                            stored.file_attributes,
+                            true,
+                            &stored.experimental_features,
+                            &stored.limits,
+                            std::iter::empty(),
+                            &stored.mcp,
+                            None,
+                            false,
+                            &Gateway::default(),
+                            &stored.telemetry,
+                            &isolation::ContainmentSpec::default(),
+                        ),
+                        expected_version
+                    );
+                    for old in RECORD_VERSION..expected_version {
+                        stored.version = old;
+                        assert!(matches!(
+                            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                            Err(ConfigError::RecordVersion { found, expected }) if found == old && expected == expected_version
+                        ));
+                    }
+                    stored.version = expected_version;
+                    assert_eq!(
+                        Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml"))
+                            .unwrap(),
+                        stored
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mcp_wildcards_require_per_server_opt_in_and_an_enabled_record_version() {
+        let base = "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+            [mcp.test]\ntype = \"stdio\"\ncommand = [\"server\", \"*\"]\n";
+        for flag in ["", "argument_wildcards = false\n"] {
+            let config =
+                ConfigFile::parse(&format!("{base}{flag}"), Path::new("box.toml")).unwrap();
+            assert!(!mcp::from_entries(&config.mcp).unwrap()[0].argument_wildcards);
+        }
+        let config = ConfigFile::parse(
+            &format!("{base}argument_wildcards = true\n"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        let mut stored = record(None, BTreeMap::new());
+        stored.mcp = mcp::from_entries(&config.mcp).unwrap();
+        stored.contained_mcp = mcp::contained_specs(&config.mcp);
+        stored.mcp[0].argument_wildcards = false;
+        let original = toml::to_string(&stored).unwrap();
+        assert!(!original.contains("argument_wildcards"));
+        stored.mcp[0].argument_wildcards = true;
+        assert_eq!(
+            record_version(
+                "box-0123456789abcdef",
+                stored.file_attributes,
+                true,
+                &stored.experimental_features,
+                &stored.limits,
+                std::iter::empty(),
+                &stored.mcp,
+                None,
+                has_backend(&stored.egress, &stored.remote_mcp),
+                &Gateway::default(),
+                &stored.telemetry,
+                &isolation::ContainmentSpec::default(),
+            ),
+            MCP_ARGUMENT_WILDCARDS_RECORD_VERSION
+        );
+        assert!(
+            Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")).is_err()
+        );
+        stored.version = MCP_ARGUMENT_WILDCARDS_RECORD_VERSION;
+        assert_eq!(
+            Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")).unwrap(),
+            stored
+        );
+        stored.version = 25;
+        assert!(matches!(
+            Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion { found: 25, .. })
+        ));
+        stored.mcp[0].argument_wildcards = false;
+        stored.version = RECORD_VERSION;
+        assert_eq!(toml::to_string(&stored).unwrap(), original);
+    }
+
+    #[test]
+    fn argument_wildcards_are_only_a_stdio_mcp_setting() {
+        for entry in [
+            "[agent]\ncommand = [\"server\"]",
+            "[tool.server]\ncommand = [\"server\"]",
+            "[mcp.remote]\ntype = \"http\"\ndestinations = [\"example.com\"]",
+        ] {
+            let text = format!(
+                "name = \"test\"\nbox_dir = \"/var/lib/box\"\n{entry}\nargument_wildcards = true\n"
+            );
+            assert!(
+                ConfigFile::parse(&text, Path::new("box.toml")).is_err(),
+                "{entry}"
+            );
+        }
+        let old = "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+            [experimental-features]\nmcp-argument-wildcards = true\n";
+        assert!(ConfigFile::parse(old, Path::new("box.toml")).is_err());
+    }
+
+    #[test]
+    fn offline_schema_generation_refuses_enabled_wildcard_commands() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("box.toml");
+        let config = "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+            [mcp.test]\ntype = \"stdio\"\nargument_wildcards = true\n\
+            command = [\"server\", \"*\"]\n";
+        std::fs::write(&path, config).unwrap();
+        let error = read_mcp_servers(&path).unwrap_err().to_string();
+        assert!(
+            error.contains("offline schema generation cannot supply wildcard arguments"),
+            "{error}"
+        );
+        std::fs::write(&path, config.replace("true", "false")).unwrap();
+        assert_eq!(read_mcp_servers(&path).unwrap()[0].arguments(), &["*"]);
+        std::fs::write(&path, config.replace("\"*\"", "\"concrete\"")).unwrap();
+        assert_eq!(
+            read_mcp_servers(&path).unwrap()[0].arguments(),
+            &["concrete"]
+        );
+    }
+
+    /// Offline `generate-schema` cannot discover a re-routed MCP server: the re-route and its backend
+    /// auth apply only at run time, in the gateway. `read_remote_mcp_servers` refuses by name rather
+    /// than silently discover the ORIGINAL host (wrong tools, and resolving the phantom-only secret
+    /// against that host). Without a backend the same entry is read normally.
+    #[test]
+    fn offline_schema_generation_refuses_a_re_routed_remote_mcp_server() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("box.toml");
+        let with_backend = "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+            [mcp.web]\ntype = \"http\"\ndestinations = [\"api.example.com\"]\n\
+            [[mcp.web.backends]]\nurl = \"https://gw.example.com/mcp\"\n";
+        std::fs::write(&path, with_backend).unwrap();
+        let error = match read_remote_mcp_servers(&path) {
+            Ok(_) => panic!("a re-routed server must be refused, not discovered"),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            error.contains("web") && error.contains("generate-schema cannot discover"),
+            "a re-routed server is refused by name: {error}"
+        );
+        // The same entry without a backend is read normally, on its original host.
+        std::fs::write(
+            &path,
+            "name = \"test\"\nbox_dir = \"/var/lib/box\"\n\
+             [mcp.web]\ntype = \"http\"\ndestinations = [\"api.example.com\"]\n",
+        )
+        .unwrap();
+        let servers = read_remote_mcp_servers(&path).unwrap();
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].url, "https://api.example.com/mcp");
+    }
     // **The egress tests still live here.** They belong in `egress.rs` beside what they test;
     // moving them needs the `load` fixture below, which every other test also uses.
 
@@ -1287,12 +1859,15 @@ mod tests {
     /// One `[agent]` with the given command and nothing else.
     fn agent(command: &[&str]) -> ProcessSpec {
         ProcessSpec {
+            file_watching: false,
             native_filesystem_policy: None,
             command: command.iter().map(|word| (*word).to_string()).collect(),
             workspace: None,
             env: Default::default(),
             filesystem: Default::default(),
             network: None,
+            grammar: None,
+            ingress: Vec::new(),
         }
     }
 
@@ -1301,6 +1876,10 @@ mod tests {
         Record {
             version: RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
+            monty: true,
+            gateway: Default::default(),
+            limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/codex"),
             name: "codex".to_string(),
@@ -1314,6 +1893,288 @@ mod tests {
             telemetry: std::collections::BTreeMap::new(),
             containment: Default::default(),
         }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+    #[test]
+    fn native_setup_includes_inherited_stdio_servers_and_respects_every_opt_out() {
+        let base = r#"name = "selection"
+box_dir = "/var/lib/box"
+[experimental-features]
+native-filesystem-policy = true
+[agent]
+command = ["/bin/true"]
+native-filesystem-policy = false
+"#;
+        for (extra, expected) in [
+            ("", false),
+            (
+                r#"[tool.reader]
+command = ["/bin/true"]
+"#,
+                true,
+            ),
+            (
+                r#"[tool.reader]
+command = ["/bin/true"]
+native-filesystem-policy = false
+"#,
+                false,
+            ),
+            (
+                r#"[mcp.reader]
+type = "stdio"
+command = ["/bin/true"]
+"#,
+                true,
+            ),
+            (
+                r#"[mcp.reader]
+type = "stdio"
+command = ["/bin/true"]
+native-filesystem-policy = false
+"#,
+                false,
+            ),
+        ] {
+            let text = format!("{base}{extra}");
+            let parsed = ConfigFile::parse(&text, Path::new("box.toml"));
+            let file = if cfg!(target_arch = "aarch64") {
+                parsed.unwrap()
+            } else {
+                assert!(matches!(
+                    parsed,
+                    Err(ConfigError::ExperimentalFeatureUnavailable { .. })
+                ));
+                // Test selection independently of this platform's activation refusal.
+                toml::from_str::<ConfigFile>(&text).expect("decode the selection fixture")
+            };
+            assert_eq!(file.uses_native_filesystem(), expected, "{extra}");
+            let contained_mcp = crate::record::config::mcp::contained_specs(&file.mcp);
+            let mut normalized = record(file.agent, file.egress);
+            normalized.experimental_features = file.experimental_features;
+            normalized.tool = file.tool;
+            normalized.contained_mcp = contained_mcp;
+            assert_eq!(
+                crate::run::native_enforcement::selected(&normalized),
+                expected,
+                "{extra}"
+            );
+        }
+    }
+
+    /// **File watching is selected per local process and needs its record version.** Each
+    /// table stores only its own selection, a selected record refuses an older version, and a
+    /// remote MCP server refuses the key.
+    #[test]
+    fn file_watching_is_versioned_and_selected_per_process() {
+        for table in ["agent", "tool.watcher", "mcp.watcher"] {
+            for enabled in [false, true] {
+                let transport = if table.starts_with("mcp.") {
+                    "type = \"stdio\"\n"
+                } else {
+                    ""
+                };
+                let body = format!(
+                    "[{table}]\n{transport}command = [\"watcher\"]\n\
+                     file-watching = {enabled}\n\
+                     [tool.other]\ncommand = [\"other\"]\n"
+                );
+                let mut stored = pinned_record(&body);
+                let selected = match table {
+                    "agent" => stored.agent.as_ref().unwrap(),
+                    "tool.watcher" => &stored.tool["watcher"],
+                    _ => &stored.contained_mcp["watcher"].spec,
+                };
+                assert_eq!(selected.file_watching, enabled, "{table}");
+                assert!(!stored.tool["other"].file_watching);
+                let expected = if enabled { 35 } else { 21 };
+                assert_eq!(stored.version, expected, "{body}");
+                let text = stored.to_toml().unwrap();
+                assert_eq!(text.contains("file-watching"), enabled);
+                assert_eq!(
+                    Record::parse(&text, Path::new("record.toml")).unwrap(),
+                    stored
+                );
+                stored.version = if enabled { 34 } else { 35 };
+                assert!(matches!(
+                    Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion { expected: version, .. }) if version == expected
+                ));
+            }
+        }
+        let remote = "name = \"watcher\"\nbox_dir = \"/var/lib/boxes/watcher\"\n\
+                      [mcp.remote]\ntype = \"http\"\ndestinations = [\"example.com\"]\n\
+                      file-watching = false\n";
+        assert!(
+            toml::from_str::<ConfigFile>(remote).is_err(),
+            "a remote MCP server refuses the key"
+        );
+    }
+
+    #[test]
+    fn explicit_shell_sizes_require_their_record_version() {
+        for limits in [
+            "[limits]\nshell.max_input = 262144\n",
+            "[limits.shell]\nmax_output = 65536\n",
+            "[limits.shell]\nmax_input = 524288\nmax_output = 262144\ntimeout = false\n",
+            "[limits.shell]\nmax_input = 0\n",
+            "[limits.shell]\nmax_output = 0\n",
+            "[limits.shell]\nmax_input = 0\nmax_output = 0\ntimeout = false\n",
+        ] {
+            let mut stored = pinned_record(limits);
+            assert_eq!(stored.version, 31, "{limits}");
+            let text = stored.to_toml().unwrap();
+            assert_eq!(
+                Record::parse(&text, Path::new("record.toml")).unwrap(),
+                stored
+            );
+            for version in 21..=30 {
+                stored.version = version;
+                assert!(
+                    matches!(
+                        Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                        Err(ConfigError::RecordVersion { found, expected: 31 }) if found == version
+                    ),
+                    "{limits}: version {version}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shell_limits_round_trip_in_the_required_record_version() {
+        for (limits, timeout, explicit) in [
+            ("", Some(30), false),
+            ("[limits]\n", Some(30), false),
+            ("[limits.shell]\n", Some(30), false),
+            ("[limits]\nshell.timeout = 30\n", Some(30), true),
+            ("[limits.shell]\ntimeout = 30\n", Some(30), true),
+            ("[limits]\nshell.timeout = 600\n", Some(600), true),
+            ("[limits.shell]\ntimeout = 600\n", Some(600), true),
+            ("[limits]\nshell.timeout = false\n", None, true),
+            ("[limits.shell]\ntimeout = false\n", None, true),
+        ] {
+            for file_attributes in [false, true] {
+                let version = match (explicit, file_attributes) {
+                    (true, _) => 27,
+                    (false, true) => 25,
+                    (false, false) => 21,
+                };
+                let body = format!("file-attributes = {file_attributes}\n{limits}");
+                let configured = load(&body).unwrap();
+                assert_eq!(
+                    configured.limits.shell.timeout(),
+                    timeout.map(std::time::Duration::from_secs),
+                    "{body}"
+                );
+                let mut stored = pinned_record(&body);
+                assert_eq!(stored.file_attributes, file_attributes);
+                assert_eq!(stored.limits, configured.limits);
+                assert_eq!(stored.version, version, "{body}");
+                let text = stored.to_toml().unwrap();
+                assert_eq!(text.contains("[limits"), explicit, "{body}");
+                assert_eq!(
+                    Record::parse(&text, Path::new("record.toml")).unwrap(),
+                    stored,
+                    "{body}"
+                );
+                for found in 21..=27 {
+                    if found == version {
+                        continue;
+                    }
+                    stored.version = found;
+                    assert!(
+                        matches!(
+                            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                            Err(ConfigError::RecordVersion {
+                                found: refused,
+                                expected,
+                            }) if refused == found && expected == version
+                        ),
+                        "{body}: version {found}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn configured_limits_preserve_other_versioned_record_fields() {
+        let mut spec = agent(&["/bin/true"]);
+        for (timeout, argument_wildcards) in [
+            ("600", false),
+            ("600", true),
+            ("false", false),
+            ("false", true),
+        ] {
+            let shared_program = SHARED_PROGRAM.replace(
+                "type = \"stdio\"\n",
+                &format!("type = \"stdio\"\nargument_wildcards = {argument_wildcards}\n"),
+            );
+            let shared = pinned_record(&shared_program);
+            let limits: Limits =
+                toml::from_str(&format!("[shell]\ntimeout = {timeout}\n")).unwrap();
+            for file_attributes in [false, true] {
+                for native_filesystem_policy in [false, true] {
+                    let features = ExperimentalFeatures {
+                        native_filesystem_policy,
+                        tool_grammars: true,
+                        ingress: false,
+                    };
+                    for override_value in [None, Some(false)] {
+                        spec.native_filesystem_policy = override_value;
+                        for servers in [&[][..], shared.mcp.as_slice()] {
+                            assert_eq!(
+                                record_version(
+                                    "box-0123456789abcdef",
+                                    file_attributes,
+                                    true,
+                                    &features,
+                                    &limits,
+                                    std::iter::once(&spec),
+                                    servers,
+                                    None,
+                                    false,
+                                    &Gateway::default(),
+                                    &BTreeMap::new(),
+                                    &isolation::ContainmentSpec::default(),
+                                ),
+                                27
+                            );
+                        }
+                    }
+                }
+                let body = format!(
+                    "file-attributes = {file_attributes}\n\
+                     {shared_program}\n[limits.shell]\ntimeout = {timeout}\n"
+                );
+                let mut stored = pinned_record(&body);
+                stored.experimental_features.tool_grammars = true;
+                stored.tool = grammar_record().tool;
+                assert_eq!(stored.version, 27);
+                assert_eq!(stored.file_attributes, file_attributes);
+                assert_eq!(stored.mcp, shared.mcp);
+                assert_eq!(stored.contained_mcp, shared.contained_mcp);
+                assert_eq!(
+                    Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+                    stored
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_limits_are_refused_in_configuration_and_stored_records() {
+        let body = "[limits.shell]\ntimeout = true\n";
+        let config = format!("name = \"codex\"\nbox_dir = \"/var/lib/box\"\n{body}");
+        let error = ConfigFile::parse(&config, Path::new("box.toml")).unwrap_err();
+        assert!(matches!(error, ConfigError::Parse { .. }));
+        let mut stored = record(None, BTreeMap::new());
+        stored.version = LIMITS_RECORD_VERSION;
+        let text = format!("{}\n{body}", stored.to_toml().unwrap());
+        let error = Record::parse(&text, Path::new("record.toml")).unwrap_err();
+        assert!(matches!(error, ConfigError::Parse { .. }));
     }
 
     #[test]
@@ -1384,9 +2245,13 @@ native-filesystem-policy = false
             &format!("{required}[experimental-features]\nnative-filesystem-policy = true\n"),
             Path::new("box.toml"),
         );
-        if cfg!(all(
-            target_os = "macos",
-            feature = "native-filesystem-policy"
+        if cfg!(any(
+            all(target_os = "macos", feature = "native-filesystem-policy"),
+            all(
+                target_os = "linux",
+                target_arch = "aarch64",
+                feature = "native-filesystem-policy"
+            )
         )) {
             assert!(
                 enabled
@@ -1400,6 +2265,159 @@ native-filesystem-policy = false
                 Err(ConfigError::ExperimentalFeatureUnavailable { .. })
             ));
         }
+    }
+
+    #[test]
+    fn the_file_attributes_key_is_off_by_default_and_parses_on_every_operating_system() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        let absent = ConfigFile::parse(required, Path::new("box.toml")).unwrap();
+        assert!(!absent.file_attributes);
+        let enabled = ConfigFile::parse(
+            &format!("file-attributes = true\n{required}"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        assert!(enabled.file_attributes);
+        assert!(enabled.experimental_features.is_disabled());
+        let disabled = ConfigFile::parse(
+            &format!("file-attributes = false\n{required}"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        assert!(!disabled.file_attributes);
+    }
+
+    #[test]
+    fn file_attributes_is_refused_as_an_experimental_feature_and_when_misspelled() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        for text in [
+            format!("{required}[experimental-features]\nfile-attributes = true\n"),
+            format!("file-attribute = true\n{required}"),
+            format!("file_attributes = true\n{required}"),
+            format!("file-attributes = \"yes\"\n{required}"),
+        ] {
+            assert!(
+                ConfigFile::parse(&text, Path::new("box.toml")).is_err(),
+                "{text} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_file_attributes_key_cannot_hide_in_a_legacy_record() {
+        let mut stored = record(None, BTreeMap::new());
+        stored.file_attributes = true;
+        let forged = toml::to_string(&stored).unwrap();
+        assert!(forged.contains("file-attributes = true"), "{forged}");
+        for found in [
+            RECORD_VERSION,
+            EXPERIMENTAL_RECORD_VERSION,
+            PROCESS_POLICY_RECORD_VERSION,
+            SHARED_PROGRAM_RECORD_VERSION,
+        ] {
+            stored.version = found;
+            assert!(
+                matches!(
+                    Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion {
+                        found: refused,
+                        expected: FILE_ATTRIBUTES_RECORD_VERSION
+                    }) if refused == found
+                ),
+                "version {found}"
+            );
+        }
+        stored.version = FILE_ATTRIBUTES_RECORD_VERSION;
+        let encoded = toml::to_string(&stored).unwrap();
+        assert_eq!(
+            Record::parse(&encoded, Path::new("record.toml")).unwrap(),
+            stored
+        );
+        let ordinary = toml::to_string(&record(None, BTreeMap::new())).unwrap();
+        assert!(!ordinary.contains("file-attributes"), "{ordinary}");
+    }
+
+    #[test]
+    fn the_gateway_upgrade_list_parses_and_is_empty_by_default() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        let absent = ConfigFile::parse(required, Path::new("box.toml")).unwrap();
+        assert!(absent.gateway.is_default());
+        let listed = ConfigFile::parse(
+            &format!("{required}[gateway]\nupgrade_http = [\"static.rust-lang.org\"]\n"),
+            Path::new("box.toml"),
+        )
+        .unwrap();
+        assert_eq!(listed.gateway.upgrade_http, ["static.rust-lang.org"]);
+        let stored = record_from_config("[gateway]\nupgrade_http = [\"static.rust-lang.org\"]\n")
+            .expect("the configuration loads");
+        assert_eq!(stored.version, UPGRADE_HTTP_RECORD_VERSION);
+        assert_eq!(stored.gateway.upgrade_http, ["static.rust-lang.org"]);
+    }
+
+    #[test]
+    fn a_gateway_upgrade_entry_that_is_not_a_host_name_is_refused_at_load() {
+        let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
+        for (entry, reason) in [
+            ("http://static.rust-lang.org", "it names a scheme"),
+            ("static.rust-lang.org:80", "it names a port"),
+            ("*.rust-lang.org", "it is a wildcard"),
+            ("151.101.2.137", "it is an IP address"),
+        ] {
+            let text = format!("{required}[gateway]\nupgrade_http = [\"{entry}\"]\n");
+            let error = ConfigFile::parse(&text, Path::new("box.toml"))
+                .expect_err(entry)
+                .to_string();
+            assert!(error.contains(reason), "{entry}: {error}");
+        }
+        for text in [
+            format!("{required}[gateway]\nupgrade-http = [\"static.rust-lang.org\"]\n"),
+            format!("{required}[gateway]\nupgrade_http = \"static.rust-lang.org\"\n"),
+            format!("{required}[gateway]\nupgrade_https = [\"static.rust-lang.org\"]\n"),
+            format!("upgrade_http = [\"static.rust-lang.org\"]\n{required}"),
+        ] {
+            assert!(
+                ConfigFile::parse(&text, Path::new("box.toml")).is_err(),
+                "{text} must be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn the_gateway_upgrade_list_cannot_hide_in_a_legacy_record() {
+        let mut stored = record(None, BTreeMap::new());
+        stored.gateway.upgrade_http = vec!["static.rust-lang.org".to_string()];
+        let forged = toml::to_string(&stored).unwrap();
+        assert!(forged.contains("[gateway]"), "{forged}");
+        for found in [
+            RECORD_VERSION,
+            FILE_ATTRIBUTES_RECORD_VERSION,
+            BACKEND_RECORD_VERSION,
+        ] {
+            stored.version = found;
+            assert!(
+                matches!(
+                    Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion {
+                        found: refused,
+                        expected: UPGRADE_HTTP_RECORD_VERSION
+                    }) if refused == found
+                ),
+                "version {found}"
+            );
+        }
+        stored.version = UPGRADE_HTTP_RECORD_VERSION;
+        let encoded = toml::to_string(&stored).unwrap();
+        assert_eq!(
+            Record::parse(&encoded, Path::new("record.toml")).unwrap(),
+            stored
+        );
+        stored.gateway.upgrade_http = vec!["static.rust-lang.org:80".to_string()];
+        assert!(
+            Record::parse(&toml::to_string(&stored).unwrap(), Path::new("record.toml")).is_err(),
+            "a stored entry is checked again when the record is read"
+        );
+        let ordinary = toml::to_string(&record(None, BTreeMap::new())).unwrap();
+        assert!(!ordinary.contains("gateway"), "{ordinary}");
     }
 
     #[test]
@@ -1424,6 +2442,162 @@ native-filesystem-policy = false
         let encoded = toml::to_string(&ordinary).unwrap();
         let restored = Record::parse(&encoded, Path::new("record.toml"));
         assert_eq!(restored.unwrap(), ordinary);
+    }
+
+    #[test]
+    fn a_grammar_given_as_a_path_is_refused() {
+        let text = format!(
+            "name = \"codex\"\nbox_dir = {LOAD_BOX_DIR:?}\n[experimental-features]\n\
+             tool-grammars = true\n[tool.git]\ncommand = [\"/usr/bin/git\"]\n\
+             grammar = \"git.grammar.toml\"\n"
+        );
+
+        let error = ConfigFile::parse(&text, Path::new("box.toml"))
+            .expect_err("a grammar is a table in box.toml, never a file it names");
+
+        assert!(
+            error
+                .to_string()
+                .contains("invalid type: string \"git.grammar.toml\", expected a map"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_mcp_server_named_tool_is_refused_while_tool_grammars_is_on() {
+        let server = "[mcp.Tool]\ntype = \"stdio\"\ncommand = [\"fake-tool-mcp\"]\n";
+
+        let error = load(&format!(
+            "[experimental-features]\ntool-grammars = true\n{server}"
+        ))
+        .expect_err("`Tool` is the grammar namespace");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid MCP server \"Tool\": `Tool` is the namespace of every tool grammar action \
+             while `tool-grammars` is on; give the server another name"
+        );
+        load(server).expect("with the switch off, `Tool` is an ordinary server name");
+    }
+
+    const GIT_TOOL: &str = "name = \"codex\"\n[tool.git]\ncommand = [\"/usr/bin/git\"]\n\
+        [tool.git.grammar]\nformat = 1\nversion = 1\nname = \"git\"\nprogram = \"git\"\n\
+        [tool.git.grammar.shell.push]\nusage = \"git push [<remote>]\"\n";
+
+    #[test]
+    fn a_tool_grammar_needs_the_tool_grammars_switch() {
+        let error = load(GIT_TOOL).expect_err("the switch is off");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid `[tool.git]` table: `grammar` is experimental: set `tool-grammars = true` in \
+             `[experimental-features]` to load it"
+        );
+        let file = load(&format!(
+            "{GIT_TOOL}[experimental-features]\ntool-grammars = true\n"
+        ))
+        .expect("the switch is on");
+        assert!(file.tool["git"].grammar.is_some());
+    }
+
+    #[test]
+    fn a_grammar_is_refused_on_the_agent() {
+        let error = load(
+            "[experimental-features]\ntool-grammars = true\n[agent]\ncommand = [\"/bin/true\"]\n\
+             [agent.grammar]\nformat = 1\n",
+        )
+        .expect_err("only a tool takes a grammar");
+
+        assert!(
+            error
+                .to_string()
+                .starts_with("invalid `[agent]` table: `grammar` is refused on `[agent]`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_record_without_tool_grammars_writes_no_tool_grammars_key() {
+        let mut stored = record(None, BTreeMap::new());
+        stored.experimental_features.native_filesystem_policy = true;
+        stored.version = EXPERIMENTAL_RECORD_VERSION;
+
+        let encoded = toml::to_string(&stored).expect("the record writes");
+
+        assert!(
+            encoded.contains("native-filesystem-policy = true"),
+            "{encoded}"
+        );
+        assert!(!encoded.contains("tool-grammars"), "{encoded}");
+    }
+
+    #[test]
+    fn a_grammar_is_refused_on_an_mcp_server() {
+        let text = format!(
+            "name = \"codex\"\nbox_dir = {LOAD_BOX_DIR:?}\n[experimental-features]\n\
+             tool-grammars = true\n[mcp.alpha]\ntype = \"stdio\"\n\
+             command = [\"fake-alpha-mcp\"]\n[mcp.alpha.grammar]\nformat = 1\n"
+        );
+
+        let error = ConfigFile::parse(&text, Path::new("box.toml"))
+            .expect_err("an MCP server takes no grammar");
+
+        assert!(
+            error.to_string().contains("unknown field `grammar`"),
+            "{error}"
+        );
+    }
+
+    fn grammar_record() -> Record {
+        let file = load(&format!(
+            "{GIT_TOOL}[experimental-features]\ntool-grammars = true\n"
+        ))
+        .expect("the switch is on");
+        let mut stored = record(None, BTreeMap::new());
+        stored.experimental_features.tool_grammars = true;
+        stored.tool = file.tool.clone();
+        stored
+    }
+
+    #[test]
+    fn a_record_that_selects_tool_grammars_keeps_its_ordinary_version() {
+        let mut stored = grammar_record();
+        let encoded = toml::to_string(&stored).expect("the record writes");
+        assert_eq!(
+            Record::parse(&encoded, Path::new("record.toml")).expect("the record reads"),
+            stored
+        );
+
+        stored.experimental_features.tool_grammars = false;
+        let hidden = toml::to_string(&stored).expect("the record writes");
+        assert!(
+            Record::parse(&hidden, Path::new("record.toml")).is_err(),
+            "a stored grammar needs the switch"
+        );
+    }
+
+    /// A build that has no `grammar` field or `tool-grammars` key reads each one as a key it does
+    /// not know, and refuses the record.
+    #[test]
+    fn a_grammar_record_is_refused_where_its_keys_are_unknown() {
+        let encoded = toml::to_string(&grammar_record()).expect("the record writes");
+        assert!(encoded.contains("[tool.git.grammar]"), "{encoded}");
+        assert!(encoded.contains("tool-grammars = true"), "{encoded}");
+
+        for (known, unknown) in [
+            ("[tool.git.grammar]", "[tool.git.unknown]"),
+            ("tool-grammars = true", "unknown-feature = true"),
+        ] {
+            let older = encoded.replace(known, unknown);
+
+            let error = Record::parse(&older, Path::new("record.toml"))
+                .expect_err("an unknown record key is refused");
+
+            assert!(
+                error.to_string().contains("unknown field"),
+                "{unknown}: {error}"
+            );
+        }
     }
 
     // ── The four inputs ────────────────────────────────────────────────────────
@@ -1486,13 +2660,16 @@ native-filesystem-policy = false
 
     /// Unknown keys remain errors when experimental enforcement is available.
     #[test]
-    fn the_config_accepts_the_ten_keys_and_refuses_unknown_keys() {
+    fn the_config_accepts_the_nine_keys_and_refuses_unknown_keys() {
         // `name` and `box_dir` are the two required keys, so every accepted spelling carries both.
         let required = "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n";
         for known in [
             format!("{required}[agent]\ncommand = [\"codex\"]"),
             format!("{required}policy = \"policy.dw\""),
             format!("{required}[tool.git]\ncommand = [\"git\"]"),
+            format!(
+                "{required}[agent]\ncommand = [\"codex\"]\n[[agent.ingress]]\nlisten = \"0.0.0.0:8080\"\nworkload_port = 8081"
+            ),
             format!("{required}[containment]\nprivate_proc = false"),
         ] {
             assert!(
@@ -1504,6 +2681,13 @@ native-filesystem-policy = false
             format!("{required}workload = [\"codex\"]"),
             format!("{required}command = [\"codex\"]"),
             format!("{required}wat = 1"),
+            format!("{required}[ingress]\nlisten = \"0.0.0.0:8080\"\nworkload_port = 8081"),
+            format!(
+                "{required}[agent]\ncommand = [\"codex\"]\n[[agent.ingress]]\nhost = \"0.0.0.0\"\nport = 8080"
+            ),
+            format!(
+                "{required}[agent]\ncommand = [\"codex\"]\n[agent.ingress]\nlisten = \"0.0.0.0:8080\"\nworkload_port = 8081"
+            ),
             "[agent]\ncommand = [\"codex\"]".to_string(),
             "name = \"codex\"\n".to_string(),
             "box_dir = \"/var/lib/box\"\n".to_string(),
@@ -1569,6 +2753,143 @@ native-filesystem-policy = false
             ),
             "{error}"
         );
+    }
+
+    /// The switch that turns on `[[agent.ingress]]`.
+    const INGRESS_ON: &str = "[experimental-features]\ningress = true\n";
+
+    /// **`[[agent.ingress]]` needs the `ingress` switch**: it is refused while the switch is omitted
+    /// or `false`, and loads once it is `true`.
+    #[test]
+    fn an_agent_ingress_needs_the_ingress_switch() {
+        let agent = "[agent]\ncommand = [\"x\"]\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n";
+        let refusal = "invalid `[agent]` table: `ingress` is experimental: set `ingress = true` in \
+             `[experimental-features]` to load it";
+        for switch in ["", "[experimental-features]\ningress = false\n"] {
+            let error = load(&format!("{agent}{switch}")).expect_err("the switch is off");
+            assert_eq!(error.to_string(), refusal, "{switch:?}");
+        }
+        let file = load(&format!("{agent}{INGRESS_ON}")).expect("the switch is on");
+        assert_eq!(file.agent.expect("the agent").ingress.len(), 1);
+        assert!(
+            load(&format!("[agent]\ncommand = [\"x\"]\n{INGRESS_ON}")).is_ok(),
+            "the switch alone declares no listener"
+        );
+    }
+
+    /// **`filesystem.deny_write` loads on the agent, a tool, and a local MCP server**, with no
+    /// switch, and a `deny-write` key in `[experimental-features]` is refused as unknown.
+    #[test]
+    fn a_deny_write_list_loads_on_every_process() {
+        let agent = "[agent]\ncommand = [\"x\"]\n[agent.filesystem]\n\
+             write = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n";
+        let file = load(agent).expect("the agent takes the list");
+        assert_eq!(
+            file.agent.expect("the agent").filesystem.deny_write,
+            [PathBuf::from("/work/.venv")]
+        );
+        let tool = "[agent]\ncommand = [\"x\"]\n[tool.git]\ncommand = [\"/usr/bin/git\"]\n\
+             [tool.git.filesystem]\nwrite = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n";
+        let file = load(tool).expect("a tool takes the list");
+        assert_eq!(
+            file.tool["git"].filesystem.deny_write,
+            [PathBuf::from("/work/.venv")]
+        );
+        let server = "[mcp.local]\ntype = \"stdio\"\ncommand = [\"/bin/sh\"]\n\
+             [mcp.local.filesystem]\nwrite = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n";
+        load(server).expect("a local MCP server takes the list");
+        let error = toml::from_str::<ConfigFile>(&format!(
+            "name = \"codex\"\nbox_dir = {LOAD_BOX_DIR:?}\n{agent}[experimental-features]\n\
+             deny-write = true\n"
+        ))
+        .expect_err("the old switch is gone");
+        assert!(error.to_string().contains("deny-write"), "{error}");
+    }
+
+    /// A stored `deny_write` list, on the agent or a tool, takes its record version, so an older
+    /// build refuses the box.
+    #[test]
+    fn a_stored_deny_write_takes_its_record_version() {
+        let tool = record_from_config(
+            "[agent]\ncommand = [\"/bin/sh\"]\n[tool.git]\ncommand = [\"/usr/bin/git\"]\n\
+             [tool.git.filesystem]\nwrite = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n",
+        )
+        .expect("a tool deny_write loads");
+        assert_eq!(tool.version, DENY_WRITE_RECORD_VERSION);
+        let stored = record_from_config(
+            "[agent]\ncommand = [\"/bin/sh\"]\n[agent.filesystem]\n\
+             write = [\"/work\"]\ndeny_write = [\"/work/.venv\"]\n",
+        )
+        .expect("an agent deny_write loads");
+        assert_eq!(stored.version, DENY_WRITE_RECORD_VERSION);
+        assert!(
+            Record::parse(
+                &toml::to_string(&stored).expect("the record serializes"),
+                Path::new("record.toml")
+            )
+            .is_ok(),
+            "the record round-trips"
+        );
+    }
+
+    /// A stored ingress needs the stored switch, so a record cannot carry a listener the operator
+    /// did not turn on.
+    #[test]
+    fn a_stored_ingress_needs_the_stored_switch() {
+        let mut stored = record_from_config(&format!(
+            "[agent]\ncommand = [\"/bin/sh\"]\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n{INGRESS_ON}"
+        ))
+        .expect("an agent ingress loads");
+        assert!(stored.experimental_features.ingress);
+        stored.experimental_features.ingress = false;
+        assert!(
+            Record::parse(
+                &toml::to_string(&stored).expect("the record serializes"),
+                Path::new("record.toml")
+            )
+            .is_err(),
+            "a stored ingress needs the switch"
+        );
+    }
+
+    /// **`ingress` belongs to `[agent]`**: it fills the record's agent ingress in order, and a tool
+    /// or a stdio MCP server refuses one.
+    #[test]
+    fn an_ingress_is_declared_on_the_agent() {
+        let ingress = "listen = \"127.0.0.1:8080\"\nworkload_port = 8081";
+        let file = load(&format!(
+            "[agent]\ncommand = [\"x\"]\n[[agent.ingress]]\n{ingress}\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8000\"\nworkload_port = 8001\n{INGRESS_ON}"
+        ))
+        .expect("an agent ingress list is accepted");
+        let entries: Vec<_> = file
+            .agent
+            .as_ref()
+            .expect("the agent is declared")
+            .ingress
+            .iter()
+            .map(|entry| (entry.listen.as_str(), entry.workload_port))
+            .collect();
+        assert_eq!(
+            entries,
+            [("127.0.0.1:8080", 8081), ("127.0.0.1:8000", 8001)]
+        );
+
+        let tool = load(&format!(
+            "[tool.dev]\ncommand = [\"y\"]\n[[tool.dev.ingress]]\n{ingress}"
+        ))
+        .expect_err("a tool's ingress is not built yet");
+        assert!(
+            tool.to_string().contains("supported on `[agent]` only"),
+            "{tool}"
+        );
+        let mcp = toml::from_str::<ConfigFile>(&format!(
+            "name = \"codex\"\nbox_dir = \"/var/lib/box\"\n[mcp.dev]\ntype = \"stdio\"\n\
+             command = [\"y\"]\n[[mcp.dev.ingress]]\n{ingress}"
+        ));
+        assert!(mcp.is_err(), "a stdio MCP server has no `ingress` field");
     }
 
     #[test]
@@ -1772,6 +3093,7 @@ native-filesystem-policy = false
             BTreeMap::from([(
                 "a".to_string(),
                 EgressEntry {
+                    backends: Vec::new(),
                     destinations: vec!["api.stripe.com".to_string()],
                     protocol: Protocol::Http,
                     secret: Some(EgressSecret {
@@ -1782,6 +3104,7 @@ native-filesystem-policy = false
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        aws: None,
                     }),
                 },
             )]),
@@ -2005,12 +3328,64 @@ env = {}
     }
 
     #[test]
+    fn the_longest_supplied_box_identity_is_also_a_valid_box_name() {
+        let longest = format!("{}-0123456789abcdef", "a".repeat(15));
+        assert_eq!(longest.len(), MAXIMUM_BOX_NAME);
+        assert!(valid_box_identity(&longest));
+        BoxName::parse(&longest).expect("a caller can use its box ID as the name");
+        let too_long = format!("{}-0123456789abcdef", "a".repeat(16));
+        assert!(!valid_box_identity(&too_long));
+        let message = ConfigError::SuppliedIdentity { found: too_long }.to_string();
+        assert!(
+            message.contains(&format!("1 to {MAXIMUM_BOX_IDENTITY_PREFIX} letters")),
+            "the refusal names the limit that applies: {message}"
+        );
+    }
+
+    #[test]
+    fn a_supplied_box_identity_requires_its_own_record_version() {
+        let record = |version: u32, box_id: &str| {
+            format!(
+                "version = {version}\n\
+                 box_id = {box_id:?}\n\
+                 box_dir = \"/var/lib/box\"\n\
+                 name = \"codex\"\n"
+            )
+        };
+        let supplied = "claude-code-wit-0123456789abcdef";
+
+        let parsed = parsed_record(&record(SUPPLIED_IDENTITY_RECORD_VERSION, supplied))
+            .expect("a supplied identity at its version parses");
+        assert_eq!(parsed.box_id, supplied);
+        let error = parsed_record(&record(RECORD_VERSION, supplied))
+            .expect_err("a supplied identity at the base version must be refused");
+        assert!(
+            matches!(
+                error,
+                ConfigError::RecordVersion { found, expected }
+                    if found == RECORD_VERSION && expected == SUPPLIED_IDENTITY_RECORD_VERSION
+            ),
+            "{error}"
+        );
+
+        let generated = "box-0123456789abcdef";
+        parsed_record(&record(RECORD_VERSION, generated))
+            .expect("a generated identity keeps the base version");
+        assert!(
+            parsed_record(&record(SUPPLIED_IDENTITY_RECORD_VERSION, generated)).is_err(),
+            "a generated identity must not take the supplied identity's version"
+        );
+    }
+
+    #[test]
     fn a_record_with_an_invalid_box_identity_is_refused() {
         for found in [
             "",
             "box-0123456789abcde",
             "box-0123456789abcdeG",
-            "name-0123456789abcdef",
+            "name0123456789abcdef",
+            "-name-0123456789abcdef",
+            "claude-code-with-0123456789abcdef",
         ] {
             let text = format!(
                 "version = {RECORD_VERSION}\n\
@@ -2075,6 +3450,21 @@ env = {}
         let refusal = load("[agent]\ncommand = [\"claude\"]\nenv = { HTTPS_PROXY = \"x\" }\n")
             .expect_err("proxy routing is Core's");
         assert!(refusal.to_string().contains("HTTPS_PROXY"), "{refusal}");
+    }
+
+    #[test]
+    fn a_dynamic_loader_name_is_refused_as_loading_code_and_a_box_name_as_set_by_the_box() {
+        use super::env::refused_name;
+        use crate::EnvRefusal;
+        for name in ["LD_ANY", "DYLD_ANY"] {
+            assert_eq!(refused_name(name), Some(EnvRefusal::LoadsCode), "{name}");
+        }
+        for name in ["PYTHONANY", "NODE_OPTIONS", "BASH_ENV"] {
+            assert_eq!(refused_name(name), None, "{name}");
+        }
+        for name in ["HTTPS_PROXY", "OTEL_EXPORTER_OTLP_ENDPOINT", "PWD", "USER"] {
+            assert_eq!(refused_name(name), Some(EnvRefusal::SetByBox), "{name}");
+        }
     }
 
     #[test]
@@ -2196,6 +3586,7 @@ env = {}
                 (
                     "wildcard".to_string(),
                     EgressEntry {
+                        backends: Vec::new(),
                         destinations: vec!["*.stripe.com".to_string()],
                         protocol: Protocol::Http,
                         secret: Some(EgressSecret {
@@ -2206,12 +3597,14 @@ env = {}
                             param: None,
                             inject: None,
                             phantom_prefix: None,
+                            aws: None,
                         }),
                     },
                 ),
                 (
                     "exact".to_string(),
                     EgressEntry {
+                        backends: Vec::new(),
                         destinations: vec!["api.stripe.com".to_string()],
                         protocol: Protocol::Http,
                         secret: Some(EgressSecret {
@@ -2222,6 +3615,7 @@ env = {}
                             param: None,
                             inject: None,
                             phantom_prefix: None,
+                            aws: None,
                         }),
                     },
                 ),
@@ -2243,6 +3637,7 @@ env = {}
             BTreeMap::from([(
                 "a".to_string(),
                 EgressEntry {
+                    backends: Vec::new(),
                     destinations: vec!["*:443".to_string()],
                     protocol: Protocol::Http,
                     secret: Some(EgressSecret {
@@ -2253,6 +3648,7 @@ env = {}
                         param: None,
                         inject: None,
                         phantom_prefix: None,
+                        aws: None,
                     }),
                 },
             )]),
@@ -2297,6 +3693,7 @@ env = {}
         stored.egress.insert(
             "model".to_string(),
             EgressEntry {
+                backends: Vec::new(),
                 destinations: vec!["api.stripe.com".to_string()],
                 protocol: Protocol::Http,
                 secret: Some(EgressSecret {
@@ -2307,6 +3704,7 @@ env = {}
                     param: None,
                     inject: None,
                     phantom_prefix: None,
+                    aws: None,
                 }),
             },
         );
@@ -2496,12 +3894,35 @@ env = {}
             let _lock = crate::run::lock::Lock::try_acquire(&root.lock())
                 .expect("lock opens")
                 .expect("box is free");
-            root.settle_identity().expect("identity settles");
+            root.settle_identity(None).expect("identity settles");
             RunContract::read(&config_path, &workspace)
                 .expect("run contract loads")
                 .into_request(&root)
                 .expect("MCP configuration defers complete action-schema validation");
 
+            std::fs::write(
+                &policy_path,
+                r#"forbid(principal, action in [Box::Action::"fs:read", alpha::Action::"read"], resource)
+               when { context.input.path like "*/secret" };"#,
+            )
+            .expect("write cross-family policy");
+            let refusal = RunContract::read(&config_path, &workspace)
+                .expect("run contract loads")
+                .into_request(&root)
+                .map(|_| ())
+                .expect_err("MCP configuration still refuses a read of the input across families")
+                .to_string();
+            assert!(
+                refusal.contains("policy.dw")
+                    && refusal.contains("reads the input without one action family"),
+                "{refusal}"
+            );
+            std::fs::write(
+                &policy_path,
+                r#"permit(principal, action == Box::Action::"shell:exec", resource)
+               when { context.input.not_in_the_canonical_schema == "value" };"#,
+            )
+            .expect("restore policy");
             std::fs::write(
                 &config_path,
                 format!(
@@ -2516,6 +3937,69 @@ env = {}
                     .into_request(&root)
                     .is_err(),
                 "configuration without MCP servers must keep strict schema validation"
+            );
+        });
+    }
+
+    #[test]
+    fn http_only_mcp_configuration_defers_complete_schema_validation() {
+        let directory = tempfile::tempdir().expect("configuration directory");
+        crate::test_support::with_operator_home(directory.path(), || {
+            let workspace = directory.path().join("workspace");
+            let box_directory = directory.path().join("box");
+            std::fs::create_dir(&workspace).expect("workspace");
+            std::fs::create_dir(&box_directory).expect("box directory");
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(&box_directory, std::fs::Permissions::from_mode(0o700))
+                    .expect("private box directory");
+            }
+            let policy_path = directory.path().join("policy.dw");
+            let config_path = directory.path().join("box.toml");
+            std::fs::write(
+                &policy_path,
+                r#"permit(principal, action == alpha::Action::"read", resource);"#,
+            )
+            .expect("write policy");
+            std::fs::write(
+                &config_path,
+                format!(
+                    "name = \"codex\"\nbox_dir = {:?}\npolicy = \"policy.dw\"\n\
+                 [mcp.alpha]\ntype = \"http\"\ndestinations = [\"example.com\"]\n",
+                    box_directory.display().to_string()
+                ),
+            )
+            .expect("write MCP configuration");
+
+            let mut root = crate::record::layout::BoxRoot::open_directory(&box_directory)
+                .expect("box directory opens");
+            root.initialize().expect("box layout initializes");
+            let _lock = crate::run::lock::Lock::try_acquire(&root.lock())
+                .expect("lock opens")
+                .expect("box is free");
+            root.settle_identity(None).expect("identity settles");
+            RunContract::read(&config_path, &workspace)
+                .expect("run contract loads")
+                .into_request(&root)
+                .expect("MCP configuration defers complete action-schema validation");
+
+            std::fs::write(
+                &policy_path,
+                r#"forbid(principal, action in [Box::Action::"fs:read", alpha::Action::"read"], resource)
+               when { context.input.path like "*/secret" };"#,
+            )
+            .expect("write cross-family policy");
+            let refusal = RunContract::read(&config_path, &workspace)
+                .expect("run contract loads")
+                .into_request(&root)
+                .map(|_| ())
+                .expect_err("MCP configuration still refuses a read of the input across families")
+                .to_string();
+            assert!(
+                refusal.contains("policy.dw")
+                    && refusal.contains("reads the input without one action family"),
+                "{refusal}"
             );
         });
     }
@@ -2555,7 +4039,7 @@ env = {}
             let _lock = crate::run::lock::Lock::try_acquire(&root.lock())
                 .expect("lock opens")
                 .expect("box is free");
-            root.settle_identity().expect("identity settles");
+            root.settle_identity(None).expect("identity settles");
             let load = || {
                 RunContract::read(&config_path, &workspace)
                     .expect("run contract loads")
@@ -2637,12 +4121,399 @@ env = {}
             let _lock = crate::run::lock::Lock::try_acquire(&root.lock())
                 .expect("lock opens")
                 .expect("box is free");
-            root.settle_identity().expect("identity settles");
+            root.settle_identity(None).expect("identity settles");
             RunContract::read(&config_path, &workspace)
                 .expect("run contract loads")
                 .into_request(&root)
                 .map(|request| request.record)
         })
+    }
+
+    /// Two stdio servers on distinct programs, as `box.toml` tables.
+    const DISTINCT_PROGRAMS: &str = "[mcp.fetch]\ntype = \"stdio\"\ncommand = [\"mcp-server-fetch\"]\n\
+         [mcp.aws]\ntype = \"stdio\"\n\
+         command = [\"uvx\", \"mcp-proxy-for-aws@latest\", \"https://aws-mcp.us-east-1.api.aws/mcp\"]\n";
+
+    /// The stored record of `body`, with a pinned identity.
+    fn pinned_record(body: &str) -> Record {
+        let mut record = record_from_config(body).expect("the configuration loads");
+        record.box_id = "box-0123456789abcdef".to_string();
+        record.box_dir = PathBuf::from("/var/lib/boxes/codex");
+        record.policy = Some(PathBuf::from("/etc/boxes/policy.dw"));
+        record
+    }
+
+    /// **`monty` is on by default, and only `monty = false` changes the record.** An absent key and
+    /// an explicit `true` store the same record, which leaves the key out. `false` is stored, round
+    /// trips, and needs version 37, so a build that would run Monty refuses the box.
+    #[test]
+    fn monty_off_is_stored_at_its_own_record_version() {
+        let tool = "[tool.python3]\ncommand = [\"python3\"]\n";
+        let absent = pinned_record(tool);
+        assert!(absent.monty);
+        assert_eq!(absent.version, RECORD_VERSION);
+        assert_eq!(pinned_record(&format!("monty = true\n{tool}")), absent);
+        assert!(!absent.to_toml().unwrap().contains("monty"));
+
+        let mut off = pinned_record(&format!("monty = false\n{tool}"));
+        assert!(!off.monty);
+        assert_eq!(off.version, MONTY_OFF_RECORD_VERSION);
+        let text = off.to_toml().unwrap();
+        assert!(text.contains("monty = false"), "{text}");
+        assert_eq!(Record::parse(&text, Path::new("record.toml")).unwrap(), off);
+
+        off.version = TELEMETRY_EXPORT_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&off.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                expected: MONTY_OFF_RECORD_VERSION,
+                ..
+            })
+        ));
+    }
+
+    /// Servers on distinct programs store the record an earlier build stored.
+    #[test]
+    fn servers_on_distinct_programs_store_a_byte_identical_record() {
+        let stored = pinned_record(DISTINCT_PROGRAMS).to_toml().unwrap();
+        assert_eq!(
+            stored,
+            r#"version = 21
+box_id = "box-0123456789abcdef"
+box_dir = "/var/lib/boxes/codex"
+name = "codex"
+policy = "/etc/boxes/policy.dw"
+
+[[mcp]]
+name = "aws"
+command = [
+    "uvx",
+    "mcp-proxy-for-aws@latest",
+    "https://aws-mcp.us-east-1.api.aws/mcp",
+]
+
+[[mcp]]
+name = "fetch"
+command = ["mcp-server-fetch"]
+
+[contained_mcp.aws.spec]
+command = [
+    "uvx",
+    "mcp-proxy-for-aws@latest",
+    "https://aws-mcp.us-east-1.api.aws/mcp",
+]
+
+[contained_mcp.fetch.spec]
+command = ["mcp-server-fetch"]
+"#
+        );
+    }
+
+    /// Two stdio servers on one launcher, as `box.toml` tables.
+    const SHARED_PROGRAM: &str = "[mcp.playwright]\ntype = \"stdio\"\n\
+         command = [\"npx\", \"-y\", \"@playwright/mcp\"]\n\
+         [mcp.github]\ntype = \"stdio\"\n\
+         command = [\"npx\", \"-y\", \"@modelcontextprotocol/server-github\"]\n";
+
+    /// Servers that share a program store the shared-program record version.
+    #[test]
+    fn servers_sharing_a_program_store_a_version_no_earlier_build_reads() {
+        let stored = pinned_record(SHARED_PROGRAM);
+        assert_eq!(stored.version, SHARED_PROGRAM_RECORD_VERSION);
+        let text = stored.to_toml().unwrap();
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+    }
+
+    /// A record whose version differs from what it holds is refused.
+    #[test]
+    fn the_shared_program_version_states_what_the_record_holds() {
+        let mut shared = pinned_record(SHARED_PROGRAM);
+        for version in [
+            RECORD_VERSION,
+            EXPERIMENTAL_RECORD_VERSION,
+            PROCESS_POLICY_RECORD_VERSION,
+        ] {
+            shared.version = version;
+            assert!(
+                matches!(
+                    Record::parse(&shared.to_toml().unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion { found, expected: SHARED_PROGRAM_RECORD_VERSION })
+                        if found == version
+                ),
+                "a shared program may not hide under version {version}"
+            );
+        }
+        let mut distinct = pinned_record(DISTINCT_PROGRAMS);
+        distinct.version = SHARED_PROGRAM_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&distinct.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: SHARED_PROGRAM_RECORD_VERSION,
+                expected: RECORD_VERSION
+            })
+        ));
+    }
+
+    /// An agent ingress determines the version beside servers that share a program.
+    #[test]
+    fn an_agent_ingress_beside_a_shared_program_stores_the_ingress_version() {
+        let ingress = "[agent]\ncommand = [\"/bin/sh\"]\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n";
+        let stored = pinned_record(&format!("{SHARED_PROGRAM}{ingress}{INGRESS_ON}"));
+        assert_eq!(stored.version, INGRESS_RECORD_VERSION);
+        assert_eq!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+    }
+
+    /// An agent ingress determines the version beside an absolute MCP command.
+    #[test]
+    fn an_agent_ingress_beside_an_absolute_mcp_command_stores_the_ingress_version() {
+        let body = "[mcp.local]\ntype = \"stdio\"\ncommand = [\"/usr/bin/true\", \"--stdio\"]\n\
+             [agent]\ncommand = [\"/bin/sh\"]\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n";
+        let stored = pinned_record(&format!("{body}{INGRESS_ON}"));
+        assert_eq!(stored.version, INGRESS_RECORD_VERSION);
+        assert_eq!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+    }
+
+    /// A stdin limit stores its own record version, so an earlier build refuses the box.
+    #[test]
+    fn a_stdin_limit_stores_a_version_no_earlier_build_reads() {
+        let mut stored = record_from_config("[limits.shell]\nmax_stdin = 1048576\n")
+            .expect("a stdin limit loads");
+        assert_eq!(stored.version, SHELL_STDIN_LIMIT_RECORD_VERSION);
+        assert_eq!(stored.limits.shell.max_stdin(), 1048576);
+        assert_eq!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+            stored
+        );
+        stored.version = UPGRADE_HTTP_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: UPGRADE_HTTP_RECORD_VERSION,
+                expected: SHELL_STDIN_LIMIT_RECORD_VERSION
+            })
+        ));
+    }
+
+    #[test]
+    fn shell_sizes_beside_an_agent_ingress_store_the_shell_size_version() {
+        let body = "[agent]\ncommand = [\"/bin/sh\"]\n\
+             [[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n\
+             [limits.shell]\nmax_output = 262144\n";
+        let mut stored = pinned_record(&format!("{body}{INGRESS_ON}"));
+        assert_eq!(stored.version, SHELL_SIZE_LIMITS_RECORD_VERSION);
+        assert_eq!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+            stored
+        );
+        stored.version = INGRESS_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: INGRESS_RECORD_VERSION,
+                expected: SHELL_SIZE_LIMITS_RECORD_VERSION
+            })
+        ));
+    }
+
+    /// An agent ingress stores its own record version, so an earlier build refuses the box, and a
+    /// record without one keeps the version it had.
+    #[test]
+    fn an_agent_ingress_stores_a_version_no_earlier_build_reads() {
+        let agent = "[agent]\ncommand = [\"/bin/sh\"]\n";
+        let ingress = "[[agent.ingress]]\nlisten = \"127.0.0.1:8080\"\nworkload_port = 8081\n";
+        let plain = record_from_config(agent).expect("an agent without ingress loads");
+        assert_eq!(plain.version, RECORD_VERSION);
+        let reached = record_from_config(&format!("{agent}{ingress}{INGRESS_ON}"))
+            .expect("an agent ingress loads");
+        assert_eq!(reached.version, INGRESS_RECORD_VERSION);
+        let text = toml::to_string(&reached).expect("the record serializes");
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            reached
+        );
+        let mut hidden = reached;
+        hidden.version = RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(
+                &toml::to_string(&hidden).expect("the record serializes"),
+                Path::new("record.toml")
+            ),
+            Err(ConfigError::RecordVersion {
+                found: RECORD_VERSION,
+                expected: INGRESS_RECORD_VERSION
+            })
+        ));
+    }
+
+    /// A `box.toml` whose egress re-routes a destination to a backend.
+    const BACKEND_EGRESS: &str = "[egress.github]\ndestinations = [\"api.github.com\"]\n\
+         [[egress.github.backends]]\nurl = \"https://gateway-1.example.com/github\"\n";
+
+    /// A re-route stores the backend record version, which no earlier build reads.
+    #[test]
+    fn a_backend_reroute_stores_a_version_no_earlier_build_reads() {
+        let stored = pinned_record(BACKEND_EGRESS);
+        assert_eq!(stored.version, BACKEND_RECORD_VERSION);
+        let text = stored.to_toml().unwrap();
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+    }
+
+    #[test]
+    fn shell_sizes_beside_a_backend_store_the_shell_size_version() {
+        for limits in [
+            "[limits.shell]\nmax_input = 262144\n",
+            "[limits.shell]\nmax_output = 65536\n",
+            "[limits.shell]\nmax_input = 0\nmax_output = 0\n",
+        ] {
+            let mut stored = pinned_record(&format!("{BACKEND_EGRESS}{limits}"));
+            assert_eq!(stored.version, 31, "{limits}");
+            assert_eq!(
+                Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")).unwrap(),
+                stored
+            );
+            stored.version = BACKEND_RECORD_VERSION;
+            assert!(matches!(
+                Record::parse(&stored.to_toml().unwrap(), Path::new("record.toml")),
+                Err(ConfigError::RecordVersion {
+                    found: BACKEND_RECORD_VERSION,
+                    expected: SHELL_SIZE_LIMITS_RECORD_VERSION
+                })
+            ));
+        }
+    }
+
+    /// A re-routing record may not hide under an earlier version.
+    #[test]
+    fn the_backend_version_states_what_the_record_holds() {
+        let mut reroute = pinned_record(BACKEND_EGRESS);
+        for version in [
+            RECORD_VERSION,
+            EXPERIMENTAL_RECORD_VERSION,
+            PROCESS_POLICY_RECORD_VERSION,
+            SHARED_PROGRAM_RECORD_VERSION,
+        ] {
+            reroute.version = version;
+            assert!(
+                matches!(
+                    Record::parse(&reroute.to_toml().unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion { found, expected: BACKEND_RECORD_VERSION })
+                        if found == version
+                ),
+                "a re-route may not hide under version {version}"
+            );
+        }
+        let mut plain = pinned_record(DISTINCT_PROGRAMS);
+        plain.version = BACKEND_RECORD_VERSION;
+        assert!(matches!(
+            Record::parse(&plain.to_toml().unwrap(), Path::new("record.toml")),
+            Err(ConfigError::RecordVersion {
+                found: BACKEND_RECORD_VERSION,
+                expected: RECORD_VERSION
+            })
+        ));
+    }
+
+    /// A bearer telemetry target, the only shape an earlier build sends.
+    const BEARER_TELEMETRY: &str = "[telemetry.honeycomb]\nkind = \"otlp\"\n\
+         destination = \"https://api.honeycomb.io\"\nsecret.ref = \"env://HONEYCOMB_KEY\"\n";
+
+    /// A vendor target, which stores fixed headers and a payload list.
+    const VENDOR_TELEMETRY: &str = "[telemetry.langsmith]\nkind = \"langsmith\"\n\
+         project = \"box\"\nsecret.ref = \"env://LANGSMITH_API_KEY\"\n";
+
+    /// **A bearer telemetry target keeps the ordinary record version**, so an earlier build still
+    /// resumes the box. `secret://` is the `env://` alias, so it keeps the version too.
+    #[test]
+    fn a_bearer_telemetry_target_keeps_the_ordinary_version() {
+        assert_eq!(pinned_record(BEARER_TELEMETRY).version, RECORD_VERSION);
+        assert_eq!(
+            pinned_record(&BEARER_TELEMETRY.replace("env://", "secret://")).version,
+            RECORD_VERSION
+        );
+    }
+
+    /// **A record an earlier build wrote with a `secret://` telemetry secret still parses**, at the
+    /// version that build stamped.
+    #[test]
+    fn an_earlier_record_with_a_secret_alias_still_parses() {
+        let mut earlier = pinned_record(BEARER_TELEMETRY);
+        earlier
+            .telemetry
+            .get_mut("honeycomb")
+            .and_then(|entry| entry.secret.as_mut())
+            .expect("the bearer target has a secret")
+            .reference = "secret://HONEYCOMB_KEY".to_string();
+        let text = earlier.to_toml().unwrap();
+        assert!(
+            text.starts_with(&format!("version = {RECORD_VERSION}\n")),
+            "{text}"
+        );
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml")).expect("this build reads it"),
+            earlier
+        );
+    }
+
+    /// **A target that uses an export setting stores a version no earlier build reads**, so an
+    /// earlier build refuses the record instead of sending without the vendor's headers.
+    #[test]
+    fn a_vendor_telemetry_target_stores_a_version_no_earlier_build_reads() {
+        let stored = pinned_record(VENDOR_TELEMETRY);
+        assert_eq!(stored.version, TELEMETRY_EXPORT_RECORD_VERSION);
+        let text = stored.to_toml().unwrap();
+        assert_eq!(
+            Record::parse(&text, Path::new("record.toml"))
+                .expect("this build reads its own record"),
+            stored
+        );
+
+        let mut hidden = stored;
+        for version in [
+            RECORD_VERSION,
+            EXPERIMENTAL_RECORD_VERSION,
+            PROCESS_POLICY_RECORD_VERSION,
+            SHARED_PROGRAM_RECORD_VERSION,
+            FILE_ATTRIBUTES_RECORD_VERSION,
+            MCP_ARGUMENT_WILDCARDS_RECORD_VERSION,
+            LIMITS_RECORD_VERSION,
+            MCP_ABSOLUTE_COMMAND_RECORD_VERSION,
+            INGRESS_RECORD_VERSION,
+            BACKEND_RECORD_VERSION,
+            SHELL_SIZE_LIMITS_RECORD_VERSION,
+            UPGRADE_HTTP_RECORD_VERSION,
+            SHELL_STDIN_LIMIT_RECORD_VERSION,
+            SUPPLIED_IDENTITY_RECORD_VERSION,
+            FILE_WATCHING_RECORD_VERSION,
+        ] {
+            hidden.version = version;
+            assert!(
+                matches!(
+                    Record::parse(&hidden.to_toml().unwrap(), Path::new("record.toml")),
+                    Err(ConfigError::RecordVersion { found, expected: TELEMETRY_EXPORT_RECORD_VERSION })
+                        if found == version
+                ),
+                "an export setting may not hide under version {version}"
+            );
+        }
     }
 
     /// A name shared between `[egress.foo]` and `[mcp.foo] type = "http"` is not a collision: the two
@@ -2772,6 +4643,181 @@ env = {}
             routes.iter().any(|route| route.host() == host),
             "egress_routes() must include the remote MCP host: {:?}",
             routes.iter().map(EgressRoute::host).collect::<Vec<_>>()
+        );
+    }
+
+    /// A remote MCP server with a backend re-routes exactly as an egress entry does: the backend
+    /// threads into `remote_mcp`, the gateway still classifies the server on the ORIGINAL host, and
+    /// the dial targets the backend. One declaration proves the whole wiring.
+    #[test]
+    fn a_remote_mcp_backend_reroutes_through_the_egress_path() {
+        let record = record_from_config(
+            "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n\
+             [[mcp.github.backends]]\n\
+             url = \"https://abc.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp\"\n\
+             auth.ref = \"aws://bedrock\"\n\
+             auth.aws.service = \"bedrock-agentcore\"\nauth.aws.region = \"us-east-1\"\n",
+        )
+        .expect("a remote MCP server with an aws:// backend is a valid box");
+
+        // The backend threads into the stored remote_mcp entry, not an empty list.
+        let entry = record
+            .remote_mcp
+            .get("github")
+            .expect("the remote MCP server is stored");
+        assert_eq!(entry.backends.len(), 1, "the declared backend is carried");
+
+        // The gateway classifies EXACTLY the ORIGINAL host and nothing else: the re-route changes
+        // which bytes leave the box, not which `mcp:call`/`http:request` policy judges. Whole-value
+        // equality so a regression that also classified the backend host would fail here. See
+        // docs/design/decisions.md#a-re-route-is-authorized-on-the-original-destination.
+        assert_eq!(
+            record.mcp_servers(),
+            vec![("api.githubcopilot.com".to_string(), "github".to_string())],
+            "mcp_servers() names only the original host, never the backend"
+        );
+
+        // The dial targets the backend, keyed by the original destination. Whole-value equality so a
+        // wrong port or scheme is caught, not just the host.
+        assert_eq!(
+            record.backend_dials().expect("dials build"),
+            vec![(
+                DestinationPattern::parse("api.githubcopilot.com").expect("pattern"),
+                egress::BackendTarget {
+                    scheme: egress::BackendScheme::Https,
+                    host: "abc.gateway.bedrock-agentcore.us-east-1.amazonaws.com".to_string(),
+                    port: 443,
+                    path_prefix: "/mcp".to_string(),
+                },
+            )],
+            "one dial, keyed by the original destination, to the exact backend target"
+        );
+
+        // The backend's aws:// auth opens one box-owned credential vault, keyed by the original
+        // destination so the gateway finds it after the Host rewrite.
+        let credentials = record.backend_credentials().expect("credentials build");
+        assert_eq!(credentials.len(), 1, "one vault for the one re-route");
+        assert_eq!(
+            credentials[0].0,
+            DestinationPattern::parse("api.githubcopilot.com").expect("pattern")
+        );
+    }
+
+    /// A remote MCP server with no `backends` key keeps the direct behaviour: an empty backend list,
+    /// no dial, and no backend credential vault.
+    #[test]
+    fn a_remote_mcp_server_with_no_backend_does_not_reroute() {
+        let record = record_from_config(
+            "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n",
+        )
+        .expect("a remote MCP server with no backend is a valid box");
+        assert!(
+            record.remote_mcp["github"].backends.is_empty(),
+            "an absent backends key is an empty list"
+        );
+        assert!(
+            record.backend_dials().expect("dials build").is_empty(),
+            "no backend, no dial"
+        );
+        assert!(
+            record
+                .backend_credentials()
+                .expect("credentials build")
+                .is_empty(),
+            "no backend, no vault"
+        );
+        assert_eq!(
+            record.version, RECORD_VERSION,
+            "no re-route keeps the ordinary record version"
+        );
+    }
+
+    /// A remote MCP backend stores the existing `BACKEND_RECORD_VERSION`; no new version is minted.
+    #[test]
+    fn a_remote_mcp_backend_stores_the_backend_record_version() {
+        let record = record_from_config(
+            "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n\
+             [[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp\"\n",
+        )
+        .expect("a secretless remote MCP backend is complete");
+        assert_eq!(record.version, BACKEND_RECORD_VERSION);
+    }
+
+    /// The egress backend validation reaches a remote MCP entry through the fan-out, so every backend
+    /// refusal applies to `[mcp.<name>]` as it does to `[egress.<name>]`. One representative of each
+    /// class, routed through the MCP path, proves the wiring (the classes themselves are pinned in
+    /// `egress.rs`).
+    #[test]
+    fn a_remote_mcp_backend_inherits_every_egress_refusal() {
+        let backend = |body: &str| {
+            format!(
+                "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n{body}"
+            )
+        };
+        for (body, needle, why) in [
+            (
+                "[[mcp.github.backends]]\nurl = \"https://a.example.com/mcp\"\n\
+                 [[mcp.github.backends]]\nurl = \"https://b.example.com/mcp\"\n",
+                "at most one backend",
+                "more than one backend",
+            ),
+            (
+                "[[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp?x=1\"\n",
+                "query or fragment",
+                "a url with a query",
+            ),
+            (
+                "secret.ref = \"aws://profile\"\n\
+                 [[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp\"\n",
+                "must be env://",
+                "a signed entry secret beside a backend",
+            ),
+            (
+                "[[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp\"\n\
+                 auth.ref = \"credsd://prod\"\n",
+                "may not be credsd://",
+                "a credsd backend auth",
+            ),
+            (
+                "[[mcp.github.backends]]\nurl = \"http://gw.example.com/mcp\"\n\
+                 auth.ref = \"env://TOKEN\"\n",
+                "needs an https backend",
+                "a backend auth on a plaintext backend",
+            ),
+            (
+                "[[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp\"\n\
+                 auth.ref = \"aws://bedrock\"\n",
+                "aws.service",
+                "an aws:// backend auth with no explicit aws.service/region",
+            ),
+        ] {
+            let error = record_from_config(&backend(body))
+                .err()
+                .unwrap_or_else(|| panic!("{why} must be refused through the MCP path"));
+            assert!(
+                error.to_string().contains(needle),
+                "{why}: the refusal must name {needle:?}: {error}"
+            );
+        }
+    }
+
+    /// The backend-host-cover rule spans the `[egress.*]` + `[mcp.*]` union: an `[egress.<x>]`
+    /// wildcard that covers an `[mcp.<y>]` backend's re-route host is refused, exactly as an
+    /// egress-vs-egress cover is. The covering wildcard is on a NON-DEFAULT port, so the
+    /// port-sensitive overlap check lets it through and the port-blind cross-collection cover loop —
+    /// the one the re-route's host-alone match depends on — is what must catch it.
+    #[test]
+    fn an_egress_wildcard_covering_an_mcp_backend_host_is_refused() {
+        let error = record_from_config(
+            "[mcp.github]\ntype = \"http\"\ndestinations = [\"api.githubcopilot.com\"]\n\
+             [[mcp.github.backends]]\nurl = \"https://gw.example.com/mcp\"\n\
+             [egress.wild]\ndestinations = [\"*.githubcopilot.com:8443\"]\n\
+             secret.ref = \"aws://prod\"\n",
+        )
+        .expect_err("an egress wildcard covering an MCP backend's re-route host is refused");
+        assert!(
+            error.to_string().contains("re-routes to a backend"),
+            "the refusal must name the re-route host-cover rule: {error}"
         );
     }
 }

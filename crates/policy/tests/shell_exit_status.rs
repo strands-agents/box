@@ -24,7 +24,7 @@ fn args(words: &[&str]) -> Vec<String> {
 
 fn allows(policy: &PolicyEngine, request: &Request<'_>) -> bool {
     matches!(
-        policy.decide(&governed(), &Principal::agent(), request),
+        policy.decide(&governed(), &Principal::agent(), request).0,
         Decision::Allow { .. }
     )
 }
@@ -52,14 +52,20 @@ fn exec<'a>(command: &'a str, program: &'a str, words: &'a [String]) -> Request<
 /// Admit one host binary, then record that it ended with `status`.
 fn spawned(policy: &PolicyEngine, command: &str, program: &str, words: &[&str], status: i32) {
     let words = args(words);
+    let (decision, request_id) = policy.decide(
+        &governed(),
+        &Principal::agent(),
+        &spawn(command, program, &words),
+    );
     assert!(
-        allows(policy, &spawn(command, program, &words)),
+        decision.is_allow(),
         "`{command}` must be admitted before it records an outcome"
     );
     policy
         .record(
             &governed(),
             &Principal::agent(),
+            &request_id.expect("the request records"),
             &Outcome::ShellSpawn {
                 command,
                 program,
@@ -76,14 +82,20 @@ fn spawned(policy: &PolicyEngine, command: &str, program: &str, words: &[&str], 
 /// Admit one Shell-implemented command, then record that it ended with `status`.
 fn executed(policy: &PolicyEngine, command: &str, program: &str, words: &[&str], status: i32) {
     let words = args(words);
+    let (decision, request_id) = policy.decide(
+        &governed(),
+        &Principal::agent(),
+        &exec(command, program, &words),
+    );
     assert!(
-        allows(policy, &exec(command, program, &words)),
+        decision.is_allow(),
         "`{command}` must be admitted before it records an outcome"
     );
     policy
         .record(
             &governed(),
             &Principal::agent(),
+            &request_id.expect("the request records"),
             &Outcome::ShellRun {
                 command,
                 program,

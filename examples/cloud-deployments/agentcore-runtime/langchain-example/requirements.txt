@@ -1,0 +1,6 @@
+langchain==1.4.8
+langchain-aws==1.9.1
+langchain-core==1.7.4
+aws-bedrock-token-generator==1.1.0
+boto3==1.43.123
+botocore==1.43.123

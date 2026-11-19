@@ -1,16 +1,15 @@
 # Debug an OS-specific CI failure
 
-A test can pass on your machine and fail on the CI runner for the same commit. The cause is
-almost always environment identity, not the code. The runner and your machine differ in some
-value the box reads at startup: an active toolchain, a system path, a pointer file, or a library
-location. This page gives a general method to find that value, and then a worked example on
-macOS.
+A test can pass locally and fail on the continuous integration runner for the same commit.
+Investigate differences in startup conditions, such as the active toolchain, system paths, pointer
+files, and library locations. This page gives a method to isolate those differences and a macOS
+example. A difference between environments can expose a code defect.
 
-The method is generic. The containment layer denies by default on both platforms, so the same
-class of failure appears on each. macOS uses Seatbelt, and you reproduce it with `sandbox-exec`
+Operating system enforcement denies access by default on both platforms, so either can have
+this class of failure. macOS uses Seatbelt, and you reproduce it with `sandbox-exec`
 and read denials from the unified log. Linux uses the namespace launcher, and you reproduce it
 with the trampoline or a minimal namespace and read denials from `dmesg`, `journalctl`, or an
-`strace` of the seccomp refusal. Read the platform floor data for either case:
+`strace` of the seccomp refusal. Read the platform data for either case:
 `crates/containment/src/containment-data/os-paths.macos.json` and its Linux sibling.
 
 ## Method
@@ -18,14 +17,12 @@ with the trampoline or a minimal namespace and read denials from `dmesg`, `journ
 ### 1. Reproduce locally first, at the exact CI commit
 
 Check out the commit the runner tested. Run the failing test on your machine. You must establish
-that the test passes locally and fails on the runner. That divergence is the whole signal. It
-tells you the code is correct and the environment differs, so you stop reading the diff and start
-reading the environment.
+that the test passes locally and fails on the runner. The difference shows that the failure depends on conditions that differ between the local system
+and the runner. Investigate those conditions before choosing a fix.
 
 ### 2. Build a no-build probe workflow on a fork
 
-Add a small workflow that runs on one OS and builds nothing. It prints the environment identity
-of the runner. On macOS the probe prints:
+Add a small workflow that runs on one OS and builds nothing. It prints the runner settings and paths. On macOS the probe prints:
 
 - `sw_vers`
 - `xcode-select -p`
@@ -47,25 +44,26 @@ Two constraints govern the fork:
 - `workflow_dispatch` needs the workflow file on the fork's **default** branch to be dispatchable.
   Push the probe to the default branch of your fork first, then dispatch it.
 
-The probe answers one question: what does the runner's environment hold that yours does not?
+Compare the output with the same values from your local system.
 
-### 3. Build a faithful sandbox or namespace oracle
+<a id="3-build-a-faithful-sandbox-or-namespace-oracle"></a>
+### 3. Reproduce the sandbox or namespace restrictions
 
-The probe shows the difference. Now prove that difference causes the failure. Build the smallest
-containment that reconstructs the box's floor by hand.
+Use the probe results to identify a candidate cause. Build a minimal sandbox that reproduces
+Box's required system access, then test whether the difference causes the failure.
 
-On macOS, write a `sandbox-exec` profile from the platform floor data: the `agent` and `leaf`
+On macOS, write a `sandbox-exec` profile from the platform data: the `agent` and `leaf`
 cells in `os-paths.macos.json`, plus the active developer directory that the failing tool's own
-`read` list grants. Validate the oracle locally first: it must start the interpreter,
-which matches the box's local pass. Then run the same oracle on the runner. It must fail, which
+`read` list grants. Validate the test sandbox locally first. It must start the interpreter,
+which matches the box's local pass. Then run the same test sandbox on the runner. It must fail, which
 reproduces the box's runner failure. Capture the exact `dyld` or sandbox denial.
 
 On Linux, reconstruct the launcher's namespace and bind set by hand, or run the trampoline
 directly, and capture the seccomp or mount denial.
 
-A faithful oracle is the point. If your oracle passes locally and fails on the runner with the
-same denial the box gives, you hold the cause. If it passes on both, your reconstruction is not
-faithful and you go back to the floor data.
+The test sandbox must reproduce the Box result on both systems. A local pass and the same
+runner denial isolate the failure for further tests. If it passes on both, compare its restrictions
+with the platform data and correct the reconstruction.
 
 ### 4. Read the denials
 
@@ -74,19 +72,19 @@ Read the denial from the platform's own log, not from the test's timeout.
 - macOS: `sudo log show --style syslog --last 3m --predicate 'eventMessage CONTAINS "deny"'`.
 - Linux: `dmesg`, `journalctl`, or an `strace` of the process that shows the refused syscall.
 
-### 5. Falsify hypotheses one at a time
+<a id="5-falsify-hypotheses-one-at-a-time"></a>
+### 5. Test one possible cause at a time
 
-You now have a denial and an oracle. Change one grant, run the oracle on the runner, and read the
-log. Do not change two things at once. For the macOS example the sequence was: is the wrong
-directory granted; is a pointer read missing; is a standard-library read missing; does granting
-the whole bundle fix it; then, does switching the active developer directory fix it. Each step is
-one edit and one run.
+Change one grant, run the test sandbox on the runner, and read the denial log. Do not change two things at once. The macOS example checked the granted directory, pointer-file reads, and standard-library reads
+in separate runs. Later runs tested access to the whole bundle and a different active developer
+directory. Each step changed one condition.
 
-### 6. Confirm with a scoped real-box dispatch
+<a id="6-confirm-with-a-scoped-real-box-dispatch"></a>
+### 6. Confirm with a limited Box test run
 
-When the oracle tells you the fix, confirm it with the real box on CI, scoped to one OS and a
-subset of tests. `full-tests.yml` surfaces three inputs for this: `filter` (a substring of the
-cargo test name), `os` (a choice that drives the matrix), and `lint` (a toggle). So:
+After the test sandbox confirms a candidate fix, test the change with Box on one CI operating
+system and a subset of tests. `full-tests.yml` accepts `filter` for a substring of a test name,
+`os` for the operating system, and `lint` to enable or disable lint checks:
 
 ```sh
 gh workflow run full-tests.yml -f ref=<sha> -f os=macos-latest -f lint=false -f filter=<substring>
@@ -96,52 +94,46 @@ Two notes on the scope:
 
 - `filter` matches test **names**, not test-binary names.
 - Build time does not shrink with `filter`, because the build is `--all-targets` for the
-  trampoline. The saving comes from one OS instead of the matrix, no lint, and far fewer tests
-  that execute.
+  trampoline. The run saves time by selecting one OS, disabling lint checks, and running fewer tests.
 
-## Worked example: the contained MCP leaf on `macos-latest`
+<a id="worked-example-the-contained-mcp-leaf-on-macos-latest"></a>
+## Worked example: an MCP server on `macos-latest`
 
 At commit `ffb8197e`, every contained-MCP-leaf test failed on the GitHub `macos-latest` runner
 and passed on a local Mac. The test binaries were `runtime_mcp_policy_staging` and
-`native_egress_mcp`. Each starts a `#!/usr/bin/python3` tool as a leaf, waits for the tool to
-write a `.started` marker, and times out at the eight-second startup deadline
-(`native_egress_mcp.rs` `STARTUP`).
+`native_egress_mcp`. Each starts a `#!/usr/bin/python3` tool in its own sandbox, waits for the tool to
+write a `.started` marker, and reaches the eight-second startup deadline defined by `STARTUP` in `native_egress_mcp.rs`.
 
-**Root cause.** `/usr/bin/python3` on macOS is Apple's `libxcselect` shim, not an interpreter. It
-re-execs into the developer directory that `xcode-select` makes active.
+`/usr/bin/python3` on macOS is Apple's `libxcselect` shim. It starts the program in the developer
+directory that `xcode-select` selects.
 
 - On the local Mac the active directory is the Command Line Tools at
   `/Library/Developer/CommandLineTools`. Its `python3` is a self-contained `Python3.framework/3.9`.
-  The tool's own `read` grant on the developer directory covers that framework, so the leaf
-  launches, and the `leaf` cell of `os-paths.macos.json` supplies the rest.
+  The tool's own `read` grant on the developer directory covers that framework, so the tool starts, and the `leaf` cell of `os-paths.macos.json` supplies the rest.
 - On the `macos-latest` runner the active directory is a full `Xcode.app`, such as
   `/Applications/Xcode_26.6.app/Contents/Developer`. Under a full Xcode the shim delegates to
-  `xcodebuild` to resolve the toolchain. That path needs three things a deny-default leaf does not
-  give it: the frameworks in `Xcode.app/Contents/SharedFrameworks`, which is a sibling **above** the
-  granted `Contents/Developer`; a writable `xcrun_db` cache, which the leaf denies, so the shim
-  re-runs `xcodebuild` on every call; and Xcode license acceptance. The leaf provides none of them,
-  so the leaf dies before Python runs a line, never writes `.started`, and the harness times out.
+  `xcodebuild` to resolve the toolchain. That path needs access to `Xcode.app/Contents/SharedFrameworks`, a sibling of the granted
+  `Contents/Developer`. It also needs a writable `xcrun_db` cache and Xcode license acceptance.
+  The sandbox refuses the cache write, so the shim runs `xcodebuild` on every call. The sandbox
+  provides none of these requirements. The process exits before Python starts or writes `.started`,
+  and the test harness reaches its deadline.
 
-The `no_containment_reaches_the_developer_directory` test in `os_paths.rs` pins that neither
+The `no_containment_reaches_the_developer_directory` test in `os_paths.rs` checks that neither
 runtime set reaches the active developer directory, so a tool grants it in its own table. The
-`a_leaf_carries_broad_exec_and_the_main_box_does_not` test in the macOS Seatbelt backend pins the
-leaf's exec carve-out. Neither test observes the runner's full-Xcode environment, so the suite is
-green locally and the runner is not.
+`a_leaf_carries_broad_exec_and_the_main_box_does_not` test in the macOS Seatbelt backend checks the broader execution access for a tool's sandbox. Neither test observes the runner's full-Xcode environment, so the suite passes locally and fails on the runner.
 
-**The fix is CI-environment only.** One line in the macOS test job, before the build, makes
-`/usr/bin/python3` take the self-contained Command Line Tools path the box already grants:
+The fix changes the CI environment. Before the build, add this line to the macOS test job.
+It makes `/usr/bin/python3` use the self-contained Command Line Tools path Box already grants:
 
 ```sh
 sudo xcode-select -s /Library/Developer/CommandLineTools
 ```
 
-This was validated end to end through the method above: the hand-built oracle failed on the
-runner with the `Xcode.app` active directory and passed once the active directory was the Command
-Line Tools, and a scoped `full-tests.yml` dispatch then passed the real leaf tests on
+The test sandbox failed on the runner with the `Xcode.app` active directory. It passed after
+selecting the Command Line Tools. A scoped `full-tests.yml` dispatch then passed the Box tests on
 `macos-latest`.
 
-**This is not a product fix, and it does not close the product gap.** A box on a Mac with a full
-Xcode active still cannot run a `#!/usr/bin/python3` tool as a leaf. That gap is real and
-freeze-gated, and the macOS-containment owner owns it. The CI line only selects an environment the
-box already supports so the CI signal measures the code under test rather than the runner's
-toolchain layout.
+A box on a Mac with full Xcode active still cannot run a `#!/usr/bin/python3` tool in its own
+sandbox. The macOS containment owner must address this limitation under the interface freeze.
+The CI change selects an environment Box already supports, so the tests can evaluate changes
+without this toolchain failure.

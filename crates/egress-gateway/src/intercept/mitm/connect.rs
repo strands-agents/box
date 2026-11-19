@@ -2,58 +2,19 @@
 
 use std::net::IpAddr;
 
-use crate::capability::normalize_host;
+use crate::capability::{is_bindable_host, normalize_host};
 
-/// A parsed CONNECT request: the target `host` and `port`, plus any `Proxy-Authorization` value.
+/// A parsed CONNECT request: the target `host` and `port`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ConnectRequest {
+pub(crate) struct ConnectRequest {
     /// The target host from the CONNECT authority.
-    pub(super) host: String,
+    pub(crate) host: String,
     /// The target port from the CONNECT authority.
-    pub(super) port: u16,
-    /// The `Proxy-Authorization` header value, if the client supplied one (best-effort).
-    pub(super) proxy_authorization: Option<String>,
-}
-
-/// Parse a raw HTTP/1.1 CONNECT request head (the bytes up to and including the blank line).
-pub(super) fn parse_connect(head: &str) -> Option<ConnectRequest> {
-    let mut lines = head.split("\r\n");
-    let request_line = lines.next()?;
-    let mut parts = request_line.split_whitespace();
-    if !parts.next()?.eq_ignore_ascii_case("CONNECT") {
-        return None;
-    }
-    let authority = parts.next()?;
-    let version = parts.next()?;
-    if parts.next().is_some() || !version.starts_with("HTTP/") {
-        return None;
-    }
-    let (host, port) = parse_authority(authority, None)?;
-
-    Some(ConnectRequest {
-        host,
-        port,
-        proxy_authorization: proxy_authorization_from_head(head),
-    })
-}
-
-/// Extract a `Proxy-Authorization` value from a raw HTTP head (request line + headers, up to the
-/// blank line). The plain-HTTP path must read it from the RAW head, because `read_request` strips
-/// `Proxy-Authorization` as a hop-by-hop header before the parsed request is available.
-pub(super) fn proxy_authorization_from_head(head: &str) -> Option<String> {
-    head.split("\r\n")
-        .skip(1) // the request line
-        .take_while(|line| !line.is_empty())
-        .find_map(|line| {
-            let (name, value) = line.split_once(':')?;
-            name.trim()
-                .eq_ignore_ascii_case("proxy-authorization")
-                .then(|| value.trim().to_string())
-        })
+    pub(crate) port: u16,
 }
 
 /// Parse an HTTP authority into an unbracketed host and port.
-pub(super) fn parse_authority(authority: &str, default_port: Option<u16>) -> Option<(String, u16)> {
+pub(crate) fn parse_authority(authority: &str, default_port: Option<u16>) -> Option<(String, u16)> {
     let authority = authority.trim_matches(|character| matches!(character, ' ' | '\t'));
     if authority.is_empty() {
         return None;
@@ -86,11 +47,11 @@ pub(super) fn parse_authority(authority: &str, default_port: Option<u16>) -> Opt
     // record must agree on (trailing-dot trim + lowercase), THEN validate the normalized value.
     // Validating the raw form first would accept an all-dots host like `.` or `...` (non-empty,
     // ASCII, only `.`), which normalizes to the empty string — binding an empty `context.input.host`
-    // and defeating `valid_host`'s non-empty guarantee. Binding the raw form instead would let a host
-    // `forbid` miss while DNS still reaches the host. A bare IP literal is unaffected (no trailing
-    // dot; only IPv6 hex is case-folded, which is canonical).
+    // and defeating `is_bindable_host`'s non-empty guarantee. Binding the raw form instead would let
+    // a host `forbid` miss while DNS still reaches the host. A bare IP literal is unaffected (no
+    // trailing dot; only IPv6 hex is case-folded, which is canonical).
     let host = normalize_host(host);
-    if !valid_host(&host) {
+    if !is_bindable_host(&host) {
         return None;
     }
     Some((host, explicit_port.or(default_port)?))
@@ -106,7 +67,7 @@ pub(super) fn parse_authority(authority: &str, default_port: Option<u16>) -> Opt
 /// request would send it in cleartext to an origin that expects TLS — a silent downgrade. A real
 /// HTTPS client reaches the proxy with CONNECT (the TLS path) and never here, so an `https://`
 /// absolute-form request is illegitimate rather than something to forward unencrypted.
-pub(super) fn parse_absolute_target(target: &str) -> Option<(String, u16, String)> {
+pub(crate) fn parse_absolute_target(target: &str) -> Option<(String, u16, String)> {
     let default_port = 80u16;
     let rest = target.strip_prefix("http://")?;
     // A fragment is a client-only construct (RFC 3986 §3.5) and must never reach an origin server, so
@@ -122,6 +83,25 @@ pub(super) fn parse_absolute_target(target: &str) -> Option<(String, u16, String
     };
     let (host, port) = parse_authority(authority, Some(default_port))?;
     Some((host, port, origin))
+}
+
+/// The port plain HTTP names when its URL names none.
+pub(crate) const HTTP_PORT: u16 = 80;
+
+/// The port an upgraded request is decided and dialed on.
+pub(crate) const HTTPS_PORT: u16 = 443;
+
+/// The destination a plain-HTTP request is decided and sent to, and whether its upstream leg speaks
+/// TLS. A request to port 80 of a host in `upgrade_http` becomes the same host on port 443 over TLS;
+/// every other request keeps its own destination and stays plaintext.
+pub(crate) fn plain_destination(
+    upgrade_http: &[String],
+    host: String,
+    port: u16,
+) -> (ConnectRequest, bool) {
+    let upgraded = port == HTTP_PORT && upgrade_http.iter().any(|listed| same_host(listed, &host));
+    let port = if upgraded { HTTPS_PORT } else { port };
+    (ConnectRequest { host, port }, upgraded)
 }
 
 /// Compare authority hosts without making DNS names case- or trailing-dot-sensitive. The
@@ -146,17 +126,8 @@ fn parse_port(port: &str) -> Option<u16> {
     (port != 0).then_some(port)
 }
 
-fn valid_host(host: &str) -> bool {
-    !host.is_empty()
-        && (host.parse::<IpAddr>().is_ok()
-            || (host.is_ascii()
-                && host.bytes().all(|byte| {
-                    byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_')
-                })))
-}
-
 /// The best-effort session-token check.
-pub(super) fn token_ok(expected: Option<&str>, observed: Option<&str>) -> bool {
+pub(crate) fn token_ok(expected: Option<&str>, observed: Option<&str>) -> bool {
     match (expected, observed) {
         // No expected token configured → always ok.
         (None, _) => true,
@@ -170,31 +141,6 @@ pub(super) fn token_ok(expected: Option<&str>, observed: Option<&str>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_connect_authority_and_header() {
-        let head = "CONNECT api.example.com:443 HTTP/1.1\r\n\
-                    Host: api.example.com:443\r\n\
-                    Proxy-Authorization: Bearer tok123\r\n\
-                    \r\n";
-        let parsed = parse_connect(head).unwrap();
-        assert_eq!(parsed.host, "api.example.com");
-        assert_eq!(parsed.port, 443);
-        assert_eq!(parsed.proxy_authorization.as_deref(), Some("Bearer tok123"));
-    }
-
-    #[test]
-    fn rejects_non_connect() {
-        assert!(parse_connect("GET / HTTP/1.1\r\n\r\n").is_none());
-        assert!(parse_connect("CONNECT no-port HTTP/1.1\r\n\r\n").is_none());
-    }
-
-    #[test]
-    fn parses_bracketed_ipv6_without_leaking_brackets_into_host() {
-        let parsed = parse_connect("CONNECT [2001:db8::1]:8443 HTTP/1.1\r\n\r\n").unwrap();
-        assert_eq!(parsed.host, "2001:db8::1");
-        assert_eq!(parsed.port, 8443);
-    }
 
     #[test]
     fn authority_supports_default_and_explicit_ports() {
@@ -213,6 +159,12 @@ mod tests {
             Some(("2001:db8::1".to_string(), 443))
         );
         assert!(parse_authority("2001:db8::1:443", None).is_none());
+        // A CONNECT authority has no default port.
+        assert!(parse_authority("no-port", None).is_none());
+        assert_eq!(
+            parse_authority("[2001:db8::1]:8443", None),
+            Some(("2001:db8::1".to_string(), 8443))
+        );
     }
 
     /// FIX A (finding 2): a trailing-dot FQDN or mixed case must normalize to the one spelling the
@@ -239,7 +191,7 @@ mod tests {
         );
     }
 
-    /// FIX A edge: an all-dots host is non-empty and passes the raw `valid_host` check, but
+    /// FIX A edge: an all-dots host is non-empty and passes the raw `is_bindable_host` check, but
     /// normalizes to the empty string. Validating the normalized value refuses it, so no empty host
     /// is ever bound to `context.input.host` / the resolve / the audit legs.
     #[test]
@@ -300,21 +252,50 @@ mod tests {
         assert!(parse_absolute_target("/mcp?foo=bar").is_none());
     }
 
+    /// Only port 80 of a listed host is upgraded, to 443 over TLS; the list matches as `same_host`.
     #[test]
-    fn proxy_authorization_read_from_a_plain_http_head() {
-        // The plain-HTTP path reads the token from the raw head (before `read_request` strips the
-        // hop-by-hop header), so a non-CONNECT head must still yield the value.
-        let head = "GET http://api.example.com/ HTTP/1.1\r\n\
-                    Host: api.example.com\r\n\
-                    Proxy-Authorization: Bearer tok123\r\n\
-                    \r\n";
+    fn only_port_80_of_a_listed_host_is_upgraded_to_443() {
+        let listed = vec!["static.rust-lang.org".to_string()];
+        let upgraded = |host: &str, port| plain_destination(&listed, host.to_string(), port);
+        let to = |host: &str, port| ConnectRequest {
+            host: host.to_string(),
+            port,
+        };
+
         assert_eq!(
-            proxy_authorization_from_head(head).as_deref(),
-            Some("Bearer tok123")
+            upgraded("static.rust-lang.org", 80),
+            (to("static.rust-lang.org", 443), true)
         );
-        // Absent header → None.
-        let without = "GET http://api.example.com/ HTTP/1.1\r\nHost: api.example.com\r\n\r\n";
-        assert!(proxy_authorization_from_head(without).is_none());
+        assert_eq!(
+            upgraded("Static.Rust-Lang.Org.", 80),
+            (to("Static.Rust-Lang.Org.", 443), true),
+            "the list matches without regard to case or a trailing dot"
+        );
+        assert_eq!(
+            upgraded("static.rust-lang.org", 8080),
+            (to("static.rust-lang.org", 8080), false),
+            "another port of a listed host stays plain"
+        );
+        assert_eq!(
+            upgraded("static.rust-lang.org", 443),
+            (to("static.rust-lang.org", 443), false),
+            "an explicit `http://host:443` stays plain, as today"
+        );
+        assert_eq!(
+            upgraded("example.com", 80),
+            (to("example.com", 80), false),
+            "an unlisted host stays plain"
+        );
+        assert_eq!(
+            upgraded("rust-lang.org", 80),
+            (to("rust-lang.org", 80), false),
+            "a parent domain of a listed host is not listed"
+        );
+        assert_eq!(
+            plain_destination(&[], "static.rust-lang.org".to_string(), 80),
+            (to("static.rust-lang.org", 80), false),
+            "an empty list upgrades nothing"
+        );
     }
 
     #[test]

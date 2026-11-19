@@ -93,6 +93,10 @@ pub struct PreparedFilesystemPath {
     original: PathBuf,
     resolved: PathBuf,
     is_file: bool,
+    #[cfg(target_os = "linux")]
+    identity: ObjectIdentity,
+    #[cfg(target_os = "linux")]
+    pin: ObjectPin,
 }
 
 impl PreparedFilesystemPath {
@@ -100,11 +104,20 @@ impl PreparedFilesystemPath {
         let path = path.as_ref();
         let original = absolute_path(path)?;
         let resolved = canonicalize_existing(&original)?;
+        #[cfg(target_os = "linux")]
+        let pin = ObjectPin::open(&resolved)?;
+        #[cfg(target_os = "linux")]
+        let is_file = pin.0.identity.kind != libc::S_IFDIR;
+        #[cfg(not(target_os = "linux"))]
         let is_file = !resolved.is_dir();
         Ok(Self {
             original,
             resolved,
             is_file,
+            #[cfg(target_os = "linux")]
+            identity: pin.0.identity,
+            #[cfg(target_os = "linux")]
+            pin,
         })
     }
 
@@ -121,6 +134,83 @@ impl PreparedFilesystemPath {
     }
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ObjectIdentity {
+    device: u64,
+    inode: u64,
+    kind: u32,
+}
+
+#[cfg(target_os = "linux")]
+impl ObjectIdentity {
+    pub(crate) fn from_metadata(metadata: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt as _;
+
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            kind: metadata.mode() & libc::S_IFMT,
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug, Clone)]
+pub(crate) struct ObjectPin(std::sync::Arc<PinnedObject>);
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+struct PinnedObject {
+    identity: ObjectIdentity,
+    file: std::sync::Mutex<Option<File>>,
+}
+
+#[cfg(target_os = "linux")]
+impl PartialEq for ObjectPin {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.identity == other.0.identity
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Eq for ObjectPin {}
+
+#[cfg(target_os = "linux")]
+impl ObjectPin {
+    fn open(path: &Path) -> Result<Self> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let open = || -> std::io::Result<_> {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .custom_flags(libc::O_PATH | libc::O_CLOEXEC)
+                .open(path)?;
+            let identity = ObjectIdentity::from_metadata(&file.metadata()?);
+            Ok(Self(std::sync::Arc::new(PinnedObject {
+                identity,
+                file: std::sync::Mutex::new(Some(file)),
+            })))
+        };
+        open().map_err(|source| ContainmentError::PathCanonicalization {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    pub(crate) fn release(&self) -> Result<()> {
+        self.0
+            .file
+            .lock()
+            .map_err(|_| {
+                ContainmentError::ConfigValidation("grant object pin lock is poisoned".to_string())
+            })?
+            .take();
+        Ok(())
+    }
+}
+
 /// One opened regular file whose identity must remain unavailable to writes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "WriteProtectionWire")]
@@ -130,10 +220,19 @@ pub(crate) struct WriteProtection {
     device: u64,
     #[cfg(unix)]
     inode: u64,
+    #[cfg(unix)]
+    #[serde(skip_serializing_if = "is_one_link")]
+    links: u64,
 }
 
 impl WriteProtection {
     pub(crate) fn new(path: impl AsRef<Path>, opened: &File) -> Result<Self> {
+        let protected = Self::opened_now(path, opened)?;
+        protected.require_one_name()?;
+        Ok(protected)
+    }
+
+    fn opened_now(path: impl AsRef<Path>, opened: &File) -> Result<Self> {
         let path = canonicalize_existing(&absolute_path(path.as_ref())?)?;
         let opened_metadata = opened.metadata().map_err(|source| {
             ContainmentError::ConfigValidation(format!(
@@ -144,24 +243,45 @@ impl WriteProtection {
         if !opened_metadata.is_file() {
             return Err(ContainmentError::ExpectedFile(path));
         }
-        #[cfg(unix)]
-        if opened_metadata.nlink() != 1 {
-            return Err(ContainmentError::ConfigValidation(format!(
-                "write-protected file {} has {} hard links, so one pathname cannot protect the \
-                 opened object",
-                path.display(),
-                opened_metadata.nlink()
-            )));
-        }
         let protected = Self {
             path,
             #[cfg(unix)]
             device: opened_metadata.dev(),
             #[cfg(unix)]
             inode: opened_metadata.ino(),
+            #[cfg(unix)]
+            links: opened_metadata.nlink(),
         };
         protected.validate_live_identity()?;
         Ok(protected)
+    }
+
+    fn from_wire(wire: WriteProtectionWire) -> Result<Self> {
+        require_absolute("write-protected", &wire.path)?;
+        let protected = Self {
+            path: wire.path,
+            #[cfg(unix)]
+            device: wire.device,
+            #[cfg(unix)]
+            inode: wire.inode,
+            #[cfg(unix)]
+            links: wire.links,
+        };
+        protected.validate_live_identity()?;
+        Ok(protected)
+    }
+
+    fn require_one_name(&self) -> Result<()> {
+        #[cfg(unix)]
+        if self.links != 1 {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "write-protected file {} has {} hard links, so one pathname cannot protect the \
+                 opened object",
+                self.path.display(),
+                self.links
+            )));
+        }
+        Ok(())
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -197,7 +317,10 @@ impl WriteProtection {
             return Err(ContainmentError::ExpectedFile(self.path.clone()));
         }
         #[cfg(unix)]
-        if metadata.dev() != self.device || metadata.ino() != self.inode || metadata.nlink() != 1 {
+        if metadata.dev() != self.device
+            || metadata.ino() != self.inode
+            || metadata.nlink() != self.links
+        {
             return Err(ContainmentError::ConfigValidation(format!(
                 "write-protected file identity changed before apply: {}",
                 self.path.display()
@@ -215,22 +338,64 @@ struct WriteProtectionWire {
     device: u64,
     #[cfg(unix)]
     inode: u64,
+    #[cfg(unix)]
+    #[serde(default = "one_link")]
+    links: u64,
+}
+
+#[cfg(unix)]
+const fn one_link() -> u64 {
+    1
+}
+
+#[cfg(unix)]
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde passes the field by reference"
+)]
+const fn is_one_link(links: &u64) -> bool {
+    *links == 1
 }
 
 impl TryFrom<WriteProtectionWire> for WriteProtection {
     type Error = ContainmentError;
 
     fn try_from(wire: WriteProtectionWire) -> Result<Self> {
-        require_absolute("write-protected", &wire.path)?;
-        let protected = Self {
-            path: wire.path,
-            #[cfg(unix)]
-            device: wire.device,
-            #[cfg(unix)]
-            inode: wire.inode,
-        };
-        protected.validate_live_identity()?;
+        let protected = Self::from_wire(wire)?;
+        protected.require_one_name()?;
         Ok(protected)
+    }
+}
+
+/// One opened program file that keeps its path, its identity, and the link count it had when opened.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(try_from = "WriteProtectionWire")]
+pub(crate) struct CommandIdentity(WriteProtection);
+
+impl CommandIdentity {
+    pub(crate) fn new(path: impl AsRef<Path>, opened: &File) -> Result<Self> {
+        WriteProtection::opened_now(path, opened).map(Self)
+    }
+
+    pub(crate) const fn file(&self) -> &WriteProtection {
+        &self.0
+    }
+}
+
+impl Serialize for CommandIdentity {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl TryFrom<WriteProtectionWire> for CommandIdentity {
+    type Error = ContainmentError;
+
+    fn try_from(wire: WriteProtectionWire) -> Result<Self> {
+        WriteProtection::from_wire(wire).map(Self)
     }
 }
 
@@ -251,8 +416,7 @@ pub enum Network {
         /// handed out per port in this order, because one `recvmsg` carries one descriptor and
         /// that order is the wire contract. An empty list or a duplicate is refused.
         connect: Vec<u16>,
-        /// Ports the workload may bind. Empty by default. The Linux namespace backend refuses a
-        /// non-empty list: it has no lowering for an inbound bind.
+        /// Ports the workload may bind, each reachable from the box. Empty by default.
         listen: Vec<u16>,
     },
 }
@@ -366,6 +530,12 @@ pub(crate) struct PathGrant {
     /// Every node a lookup of this grant traverses, resolved once when the grant is built.
     #[serde(skip)]
     nodes: Vec<PathBuf>,
+    #[cfg(target_os = "linux")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) identity: Option<ObjectIdentity>,
+    #[cfg(target_os = "linux")]
+    #[serde(skip)]
+    pub(crate) pin: Option<ObjectPin>,
 }
 
 impl PathGrant {
@@ -412,6 +582,10 @@ impl PathGrant {
             operation: Operation::Deny,
             scope,
             nodes: Vec::new(),
+            #[cfg(target_os = "linux")]
+            identity: None,
+            #[cfg(target_os = "linux")]
+            pin: None,
         };
         granted.nodes = granted.walk_traversal_nodes();
         Ok(granted)
@@ -452,6 +626,10 @@ impl PathGrant {
             operation,
             scope,
             nodes: Vec::new(),
+            #[cfg(target_os = "linux")]
+            identity: Some(path.identity),
+            #[cfg(target_os = "linux")]
+            pin: Some(path.pin),
         };
         granted.nodes = granted.walk_traversal_nodes();
         Ok(granted)
@@ -476,8 +654,19 @@ impl PathGrant {
         self.nodes.clone()
     }
 
-    /// Walk the chain once: [`Self::reachable_paths`], the caller's spelling parent-canonical, and
-    /// each link node between the two ends.
+    /// Walk the chain once: [`Self::reachable_paths`], the caller's spelling parent-canonical, each
+    /// link node between the two ends, and each linked directory those spellings pass through.
+    ///
+    /// The kernel reads every link a lookup meets, a linked directory as much as a linked file. A
+    /// venv's `python3.14 -> /opt/homebrew/opt/python@3.14/bin/python3.14` meets the
+    /// `opt/python@3.14` folder link after the venv's own file links, and Homebrew names each
+    /// library a Python module loads through an `opt/<formula>` folder link the same way. A linked
+    /// directory's own target is walked as well, because it can pass through more links. Each node
+    /// is spelled parent-canonical, and the walk follows at most [`MAXIMUM_LINK_HOPS`] links of each
+    /// kind.
+    ///
+    /// A linked directory below the caller's own folder also adds the path asked for through it,
+    /// such as `tools/current/file`, because macOS tests that path's existence before following it.
     ///
     /// A grant whose parent is canonical and which holds no link, or one, gives back exactly
     /// [`Self::reachable_paths`].
@@ -490,21 +679,73 @@ impl PathGrant {
         };
 
         record(parent_canonical(&self.original), &mut nodes);
+        let own = self
+            .original
+            .parent()
+            .and_then(|parent| parent.canonicalize().ok())
+            .unwrap_or_else(|| PathBuf::from("/"));
 
+        let target_of = |link: &Path, target: PathBuf| match link.parent() {
+            Some(parent) if target.is_relative() => parent.join(&target),
+            _ => target,
+        };
+        let mut spellings = vec![self.original.clone()];
         let mut current = self.original.clone();
         for _ in 0..MAXIMUM_LINK_HOPS {
             let Ok(target) = std::fs::read_link(&current) else {
                 break;
             };
-            current = match current.parent() {
-                Some(parent) if target.is_relative() => parent.join(&target),
-                _ => target,
-            };
+            current = target_of(&current, target);
+            spellings.push(current.clone());
             let node = parent_canonical(&current);
             if node == self.resolved {
                 break;
             }
             record(node, &mut nodes);
+        }
+
+        let mut followed = 0;
+        while let Some(spelling) = spellings.pop() {
+            if followed == MAXIMUM_LINK_HOPS {
+                break;
+            }
+            followed += 1;
+            for ancestor in spelling.ancestors().skip(1) {
+                if !std::fs::symlink_metadata(ancestor).is_ok_and(|metadata| metadata.is_symlink())
+                {
+                    continue;
+                }
+                let node = parent_canonical(ancestor);
+                // **The path asked for through a linked directory below the caller's own folder**,
+                // such as `tools/current/file` for `helper -> current/file`: macOS tests its
+                // existence before it follows `current`, and refuses the open without it. It names
+                // the file the grant already reaches. A linked directory anywhere else, such as
+                // `/var`, adds no such path, so a floor path gains none.
+                let asked = (own != Path::new("/")
+                    && node.parent().is_some_and(|parent| parent.starts_with(&own)))
+                .then(|| spelling.strip_prefix(ancestor).ok())
+                .flatten()
+                .filter(|rest| {
+                    rest.components()
+                        .all(|part| matches!(part, std::path::Component::Normal(_)))
+                })
+                .map(|rest| node.join(rest));
+                if !nodes.contains(&node) {
+                    nodes.push(node);
+                    // The rest of the spelling rides along, so a path asked for through the
+                    // link's own target names the same file too.
+                    if let Ok(target) = std::fs::read_link(ancestor) {
+                        let reached = target_of(ancestor, target);
+                        spellings.push(match spelling.strip_prefix(ancestor) {
+                            Ok(rest) if !rest.as_os_str().is_empty() => reached.join(rest),
+                            _ => reached,
+                        });
+                    }
+                }
+                if let Some(asked) = asked {
+                    record(asked, &mut nodes);
+                }
+            }
         }
         nodes
     }
@@ -531,6 +772,13 @@ impl PathGrant {
             return Ok(());
         }
         let live = PreparedFilesystemPath::new(&self.original)?;
+        #[cfg(target_os = "linux")]
+        if self.identity != Some(live.identity) {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "filesystem grant object changed before apply: {}",
+                self.original.display(),
+            )));
+        }
         if live.resolved != self.resolved || live.is_directory() != self.is_directory() {
             return Err(ContainmentError::ConfigValidation(format!(
                 "filesystem grant changed before apply: original={}, recorded resolved={}, \
@@ -575,6 +823,9 @@ pub(crate) struct PathGrantWire {
     resolved: PathBuf,
     operation: Operation,
     scope: Scope,
+    #[cfg(target_os = "linux")]
+    #[serde(default)]
+    identity: Option<ObjectIdentity>,
 }
 
 impl TryFrom<PathGrantWire> for PathGrant {
@@ -591,6 +842,15 @@ impl TryFrom<PathGrantWire> for PathGrant {
         } else {
             Self::new(&wire.original, wire.operation, wire.scope)?
         };
+        #[cfg(target_os = "linux")]
+        if let Some(expected) = wire.identity
+            && granted.identity != Some(expected)
+        {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "filesystem grant object changed while loading config: {}",
+                granted.original.display(),
+            )));
+        }
         if granted.resolved != wire.resolved {
             return Err(ContainmentError::ConfigValidation(format!(
                 "granted path canonical path drifted while loading config: \
@@ -663,4 +923,216 @@ pub enum BackendOverride {
         /// Whether Seatbelt extension tokens are enabled.
         extensions_enabled: bool,
     },
+}
+
+#[cfg(test)]
+mod traversal_node_tests {
+    use super::*;
+
+    /// **A linked folder on a link's target path is a traversal node**, with the path the lookup
+    /// asks for through it, and so is a linked folder another linked folder points through.
+    #[test]
+    fn a_linked_folder_on_a_links_target_path_is_a_node() {
+        let directory = tempfile::tempdir().expect("a folder");
+        let root = directory.path().canonicalize().expect("canonical");
+        std::fs::create_dir_all(root.join("store/data")).expect("data");
+        std::fs::write(root.join("store/data/file"), "x").expect("file");
+        std::fs::write(root.join("store/data/sibling"), "x").expect("sibling");
+        std::os::unix::fs::symlink("store", root.join("shelf")).expect("a linked folder");
+        std::os::unix::fs::symlink("shelf/data", root.join("current")).expect("a second one");
+        std::os::unix::fs::symlink("current/file", root.join("helper")).expect("a link");
+        let granted =
+            PathGrant::new(root.join("helper"), Operation::Read, Scope::File).expect("granted");
+        assert_eq!(
+            granted.traversal_paths(),
+            vec![
+                root.join("store/data/file"),
+                root.join("helper"),
+                root.join("current"),
+                root.join("current/file"),
+                root.join("shelf"),
+                root.join("shelf/data/file"),
+            ]
+        );
+    }
+
+    /// **A grant with no link has only its own node**, and a link to a file beside it adds only
+    /// the link.
+    #[test]
+    fn a_grant_with_no_linked_folder_keeps_its_nodes() {
+        let directory = tempfile::tempdir().expect("a folder");
+        let root = directory.path().canonicalize().expect("canonical");
+        std::fs::write(root.join("gcc"), "x").expect("file");
+        std::os::unix::fs::symlink("gcc", root.join("cc")).expect("a link");
+        let plain = PathGrant::new(root.join("gcc"), Operation::Read, Scope::File).expect("plain");
+        assert_eq!(plain.traversal_paths(), vec![root.join("gcc")]);
+        let link = PathGrant::new(root.join("cc"), Operation::Read, Scope::File).expect("link");
+        assert_eq!(
+            link.traversal_paths(),
+            vec![root.join("gcc"), root.join("cc")]
+        );
+    }
+
+    /// **A linked folder outside the caller's own folder adds no path through it**, as for macOS's
+    /// `/etc/localtime` through `/var`: the link itself is a node, as on `main`, but no spelling of
+    /// the file through it is, so a floor path gains no rule.
+    #[test]
+    fn a_linked_folder_outside_the_callers_folder_adds_no_path_through_it() {
+        let directory = tempfile::tempdir().expect("a folder");
+        let root = directory.path().canonicalize().expect("canonical");
+        // `etc/localtime -> <root>/var/db/zoneinfo/Region`, with `var -> private/var` and
+        // `private/var/db/zoneinfo -> tz/2026/zoneinfo`, as on macOS.
+        std::fs::create_dir_all(root.join("etc")).expect("etc");
+        std::fs::create_dir_all(root.join("private/var/db/tz/2026/zoneinfo")).expect("tz");
+        std::fs::write(root.join("private/var/db/tz/2026/zoneinfo/Region"), "x").expect("zone");
+        std::os::unix::fs::symlink("private/var", root.join("var")).expect("var");
+        std::os::unix::fs::symlink("tz/2026/zoneinfo", root.join("private/var/db/zoneinfo"))
+            .expect("zoneinfo");
+        let localtime = root.join("etc/localtime");
+        std::os::unix::fs::symlink(root.join("var/db/zoneinfo/Region"), &localtime)
+            .expect("localtime");
+        let granted = PathGrant::new(&localtime, Operation::Read, Scope::File).expect("granted");
+        assert_eq!(
+            granted.traversal_paths(),
+            vec![
+                root.join("private/var/db/tz/2026/zoneinfo/Region"),
+                localtime.clone(),
+                root.join("private/var/db/zoneinfo"),
+                root.join("var"),
+            ]
+        );
+
+        // An absolute target through a linked folder below the caller's own folder adds the path.
+        std::fs::create_dir_all(root.join("etc/data")).expect("data");
+        std::fs::write(root.join("etc/data/file"), "x").expect("file");
+        std::os::unix::fs::symlink("data", root.join("etc/current")).expect("current");
+        let helper = root.join("etc/helper");
+        std::os::unix::fs::symlink(root.join("etc/current/file"), &helper).expect("helper");
+        let granted = PathGrant::new(&helper, Operation::Read, Scope::File).expect("granted");
+        assert_eq!(
+            granted.traversal_paths(),
+            vec![
+                root.join("etc/data/file"),
+                helper,
+                root.join("etc/current"),
+                root.join("etc/current/file")
+            ]
+        );
+    }
+
+    /// **A system folder link such as `/bin` adds no path through it** where the host has one.
+    #[test]
+    fn a_root_level_folder_link_adds_no_path_through_it() {
+        let system = Path::new("/bin");
+        if !std::fs::symlink_metadata(system).is_ok_and(|metadata| metadata.is_symlink())
+            || !system.join("sh").exists()
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().expect("a folder");
+        let root = directory.path().canonicalize().expect("canonical");
+        let helper = root.join("helper");
+        std::os::unix::fs::symlink(system.join("sh"), &helper).expect("helper");
+        let granted = PathGrant::new(&helper, Operation::Read, Scope::File).expect("granted");
+        let nodes = granted.traversal_paths();
+        assert!(!nodes.contains(&system.join("sh")), "{nodes:?}");
+        assert!(nodes.contains(&helper), "{nodes:?}");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    fn serialized_exec_directory(path: &Path) -> (PathGrant, String) {
+        let grant =
+            PathGrant::new(path, Operation::Exec, Scope::Root).expect("prepare the directory");
+        let text = serde_json::to_string(&grant).expect("serialize the grant");
+        (grant, text)
+    }
+
+    #[test]
+    fn a_serialized_exec_directory_refuses_replacement_and_accepts_restoration() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let directory = temp.path().join("tools");
+        let original = temp.path().join("original");
+        std::fs::create_dir(&directory).expect("create the tools directory");
+        let (grant, text) = serialized_exec_directory(&directory);
+        let loaded: PathGrant = serde_json::from_str(&text).expect("the unchanged directory loads");
+        assert_eq!(loaded.identity, grant.identity);
+
+        std::fs::rename(&directory, &original).expect("move the directory");
+        std::fs::create_dir(&directory).expect("replace the directory");
+        let error = serde_json::from_str::<PathGrant>(&text)
+            .expect_err("the serialized grant must reject the replacement directory");
+        assert!(error.to_string().contains("object changed"), "{error}");
+
+        std::fs::rename(&directory, temp.path().join("replacement")).expect("move the replacement");
+        std::fs::rename(&original, &directory).expect("restore the original directory");
+        let restored: PathGrant =
+            serde_json::from_str(&text).expect("the original directory loads");
+        assert_eq!(restored.identity, grant.identity);
+    }
+
+    #[test]
+    fn a_serialized_exec_directory_refuses_an_ancestor_replacement() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let project = temp.path().join("project");
+        let directory = project.join("tools");
+        std::fs::create_dir_all(&directory).expect("create the tools directory");
+        let (_grant, text) = serialized_exec_directory(&directory);
+
+        std::fs::rename(&project, temp.path().join("original")).expect("move the ancestor");
+        std::fs::create_dir_all(&directory).expect("replace the ancestor and tools directory");
+        let error = serde_json::from_str::<PathGrant>(&text)
+            .expect_err("the serialized grant must reject the substituted subtree");
+        assert!(error.to_string().contains("object changed"), "{error}");
+    }
+
+    #[test]
+    fn a_serialized_exec_directory_refuses_a_swap_after_loading() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let directory = temp.path().join("tools");
+        std::fs::create_dir(&directory).expect("create the tools directory");
+        let (_grant, text) = serialized_exec_directory(&directory);
+        let loaded: PathGrant = serde_json::from_str(&text).expect("the unchanged directory loads");
+
+        std::fs::rename(&directory, temp.path().join("original")).expect("move the directory");
+        std::fs::create_dir(&directory).expect("replace the directory");
+        let error = loaded
+            .validate_live_identity()
+            .expect_err("the loaded grant must reject a later replacement");
+        assert!(error.to_string().contains("object changed"), "{error}");
+    }
+
+    #[test]
+    fn a_legacy_grant_without_identity_binds_the_object_present_at_load() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let directory = temp.path().join("tools");
+        std::fs::create_dir(&directory).expect("create the tools directory");
+        let (grant, text) = serialized_exec_directory(&directory);
+        let mut wire: serde_json::Value =
+            serde_json::from_str(&text).expect("the serialized grant");
+        wire.as_object_mut()
+            .expect("grant object")
+            .remove("identity");
+
+        let loaded: PathGrant = serde_json::from_value(wire).expect("the legacy grant loads");
+        assert_eq!(loaded.identity, grant.identity);
+        loaded
+            .validate_live_identity()
+            .expect("the loaded identity stays valid");
+    }
+
+    #[test]
+    fn a_serialized_denial_keeps_its_existing_shape() {
+        let temp = tempfile::tempdir().expect("temporary directory");
+        let denied = temp.path().join("denied");
+        let grant = PathGrant::denial(&denied, Scope::Root).expect("prepare the absent denial");
+        let wire = serde_json::to_value(&grant).expect("serialize the denial");
+        assert!(wire.get("identity").is_none());
+        let loaded: PathGrant = serde_json::from_value(wire).expect("load the absent denial");
+        assert_eq!(loaded.operation, Operation::Deny);
+        assert_eq!(loaded.identity, None);
+    }
 }

@@ -2,7 +2,11 @@
 
 use std::path::{Path, PathBuf};
 
+use super::seatbelt::MECHANISM;
+use crate::backend::dependencies::{MissingReads, require_not_refused, workload_writable};
 use crate::error::ContainmentError;
+use crate::model::PathGrant;
+use crate::{ContainmentConfig, Operation, Scope};
 
 const MH_MAGIC_64: u32 = 0xfeed_facf;
 const FAT_MAGIC: u32 = 0xcafe_babe;
@@ -38,18 +42,34 @@ fn refusal(reason: String) -> ContainmentError {
 
 /// Every image `executable` loads from outside the shared cache, through each image's own loads,
 /// each as the spelling the load requests. Empty for a static binary or a script.
-pub(crate) fn dylib_closure(executable: &Path) -> Result<Vec<PathBuf>, ContainmentError> {
+#[cfg(test)]
+fn dylib_closure(executable: &Path) -> Result<Vec<PathBuf>, ContainmentError> {
+    let mut missing = MissingReads::default();
+    let images = collect_dylibs(executable, &ContainmentConfig::new(), &mut missing)?;
+    missing.require_complete(MECHANISM)?;
+    Ok(images.into_iter().map(|grant| grant.resolved).collect())
+}
+
+pub(super) fn collect_dylibs(
+    executable: &Path,
+    config: &ContainmentConfig,
+    missing: &mut MissingReads,
+) -> Result<Vec<PathGrant>, ContainmentError> {
     let executable_directory = executable
         .parent()
         .unwrap_or_else(|| Path::new("/"))
         .to_path_buf();
-    let executable_loads = image_loads(executable)?;
+    let executable_loads = image_loads(
+        &executable
+            .canonicalize()
+            .map_err(|error| refusal(format!("resolving {executable:?}: {error}")))?,
+    )?;
     let executable_rpaths = executable_loads.rpaths.clone();
-    let mut requested: Vec<PathBuf> = Vec::new();
-    let mut seen: Vec<PathBuf> = Vec::new();
-    let mut pending: Vec<(PathBuf, ImageLoads)> =
-        vec![(executable.to_path_buf(), executable_loads)];
-    while let Some((image, loads)) = pending.pop() {
+    let mut requested: Vec<PathGrant> = Vec::new();
+    let mut seen = std::collections::BTreeSet::new();
+    let restricted = workload_writable(config, executable, MECHANISM)?;
+    let mut pending = vec![(executable.to_path_buf(), executable_loads, restricted)];
+    while let Some((image, loads, restricted)) = pending.pop() {
         if requested.len() > MAXIMUM_IMAGES {
             return Err(refusal(format!(
                 "'{}' loads more than {MAXIMUM_IMAGES} images; refusing rather than walking on",
@@ -91,14 +111,38 @@ pub(crate) fn dylib_closure(executable: &Path) -> Result<Vec<PathBuf>, Containme
             if is_system_image(&found.to_string_lossy()) {
                 continue;
             }
-            let identity = found.canonicalize().unwrap_or_else(|_| found.clone());
-            if seen.contains(&identity) {
+            let granted = PathGrant::new(&found, Operation::Read, Scope::File)?;
+            crate::floors::require_bounded_grant(&granted, config.operator_home(), false).map_err(
+                |error| {
+                    refusal(format!(
+                        "{image:?} loads {:?}, which the floor refuses: {error}",
+                        granted.resolved
+                    ))
+                },
+            )?;
+            require_not_refused(config, &granted, MECHANISM)?;
+            let next_restricted = restricted || workload_writable(config, &found, MECHANISM)?;
+            if next_restricted
+                && !is_system_image(&granted.resolved.to_string_lossy())
+                && !config.authorizations().iter().any(|grant| {
+                    grant.operation == Operation::Read
+                        && match grant.scope {
+                            Scope::Root => granted.resolved.starts_with(&grant.resolved),
+                            Scope::File => granted.resolved == grant.resolved,
+                            Scope::Dir => false,
+                        }
+                })
+            {
+                missing.add(&granted.resolved, &image);
                 continue;
             }
-            seen.push(identity);
-            let inner = image_loads(&found)?;
-            requested.push(found.clone());
-            pending.push((found, inner));
+            if !seen.insert((granted.resolved.clone(), next_restricted)) {
+                continue;
+            }
+            let inner = image_loads(&granted.resolved)?;
+            granted.validate_live_identity()?;
+            pending.push((granted.resolved.clone(), inner, next_restricted));
+            requested.push(granted);
         }
     }
     Ok(requested)
@@ -123,23 +167,23 @@ fn resolve_install_name(
     // so each entry expands against its own owner rather than against the image being resolved.
     let expand = |spelling: &str, owner: &Path| -> Option<PathBuf> {
         if let Some(rest) = spelling.strip_prefix("@executable_path/") {
-            return Some(normalized(&executable_directory.join(rest)));
+            return Some(executable_directory.join(rest));
         }
         if let Some(rest) = spelling.strip_prefix("@loader_path/") {
-            return Some(normalized(&owner.join(rest)));
+            return Some(owner.join(rest));
         }
         if spelling == "@executable_path" {
-            return Some(normalized(executable_directory));
+            return Some(executable_directory.to_path_buf());
         }
         if spelling == "@loader_path" {
-            return Some(normalized(owner));
+            return Some(owner.to_path_buf());
         }
         if spelling.starts_with('@') {
             return None;
         }
         Path::new(spelling)
             .is_absolute()
-            .then(|| normalized(Path::new(spelling)))
+            .then(|| PathBuf::from(spelling))
     };
     if let Some(rest) = name.strip_prefix("@rpath/") {
         return image_rpaths
@@ -157,26 +201,58 @@ fn resolve_install_name(
     expand(name, loader_directory).filter(|candidate| candidate.is_file())
 }
 
-/// The path with `.` and `..` folded lexically, and every symbolic link left in place.
-fn normalized(path: &Path) -> PathBuf {
-    let mut folded = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                folded.pop();
-            }
-            other => folded.push(other.as_os_str()),
-        }
+#[cfg(unix)]
+fn open_image(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::fd::{AsRawFd as _, FromRawFd as _};
+    use std::os::unix::{ffi::OsStrExt as _, fs::MetadataExt as _};
+    let expected = std::fs::symlink_metadata(path)?;
+    if !expected.is_file() {
+        return Err(std::io::Error::other("dependency is not a regular file"));
     }
-    folded
+    let mut parent = std::fs::File::open("/")?;
+    let mut components = path.components().peekable();
+    if components.next() != Some(std::path::Component::RootDir) {
+        return Err(std::io::Error::other("dependency is not absolute"));
+    }
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(std::io::Error::other("dependency is not canonical"));
+        };
+        let name = std::ffi::CString::new(name.as_bytes())?;
+        let flags = libc::O_RDONLY
+            | libc::O_CLOEXEC
+            | libc::O_NOFOLLOW
+            | libc::O_NONBLOCK
+            | if components.peek().is_some() {
+                libc::O_DIRECTORY
+            } else {
+                0
+            };
+        // SAFETY: parent owns an open directory and name is a live C string.
+        let fd = unsafe { libc::openat(parent.as_raw_fd(), name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: openat returned a new descriptor owned by this File.
+        parent = unsafe { std::fs::File::from_raw_fd(fd) };
+    }
+    let actual = parent.metadata()?;
+    if !actual.is_file() || actual.dev() != expected.dev() || actual.ino() != expected.ino() {
+        return Err(std::io::Error::other("dependency changed before opening"));
+    }
+    Ok(parent)
+}
+
+#[cfg(not(unix))]
+fn open_image(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 /// Read what one image asks dyld for. A file that is not a 64-bit Mach-O asks for nothing.
 fn image_loads(path: &Path) -> Result<ImageLoads, ContainmentError> {
     use std::io::{Read as _, Seek as _};
 
-    let mut file = std::fs::File::open(path).map_err(|source| {
+    let mut file = open_image(path).map_err(|source| {
         refusal(format!(
             "opening '{}' to resolve the images it loads: {source}",
             path.display()
@@ -559,5 +635,261 @@ pub(crate) mod tests {
             let closure = dylib_closure(&path).unwrap_or_else(|error| panic!("{name}: {error}"));
             assert!(closure.is_empty(), "{name} must load nothing");
         }
+    }
+    fn checked(app: &Path, config: &ContainmentConfig) -> Result<Vec<PathGrant>, ContainmentError> {
+        let mut missing = MissingReads::default();
+        let result = collect_dylibs(app, config, &mut missing)?;
+        missing.require_complete(MECHANISM)?;
+        Ok(result)
+    }
+
+    #[test]
+    fn writable_chains_report_siblings_and_stop_before_unreadable_children() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let hidden = planted_image(&root, "outside/hidden", b"private marker");
+        let first = planted_image(
+            &root,
+            "outside/codec",
+            &synthetic_macho(&[(hidden.to_str().unwrap(), false)], &[]),
+        );
+        let second = planted_image(&root, "outside/storage", b"private marker");
+        let app = planted_image(
+            &root,
+            "project/app",
+            &synthetic_macho(
+                &[
+                    (first.to_str().unwrap(), false),
+                    (second.to_str().unwrap(), false),
+                    (first.to_str().unwrap(), false),
+                ],
+                &[],
+            ),
+        );
+        let config = ContainmentConfig::new()
+            .allow(root.join("project"), Operation::Write, Scope::Root)
+            .unwrap();
+        let error = checked(&app, &config).unwrap_err().to_string();
+        assert!(error.contains("2 dependencies lack read access"), "{error}");
+        assert!(
+            error.contains("codec") && error.contains("storage") && error.contains("project/app"),
+            "{error}"
+        );
+        assert!(
+            !error.contains("outside/hidden"),
+            "discovery must not inspect unreadable files: {error}"
+        );
+        let partial = config.allow(&first, Operation::Read, Scope::File).unwrap();
+        let error = checked(&app, &partial).unwrap_err().to_string();
+        assert!(
+            error.contains("outside/hidden") && error.contains("outside/storage"),
+            "{error}"
+        );
+        let complete = partial
+            .allow(root.join("outside"), Operation::Read, Scope::Root)
+            .unwrap();
+        assert_eq!(checked(&app, &complete).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn a_read_grant_on_an_intermediate_image_does_not_reset_writable_provenance() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let leaf = planted_image(&root, "outside/note", b"private bytes");
+        let middle = planted_image(
+            &root,
+            "project/middle",
+            &synthetic_macho(&[(leaf.to_str().unwrap(), false)], &[]),
+        );
+        let app = planted_image(
+            &root,
+            "installed/app",
+            &synthetic_macho(&[(middle.to_str().unwrap(), false)], &[]),
+        );
+        let config = ContainmentConfig::new()
+            .allow(root.join("project"), Operation::Write, Scope::Root)
+            .unwrap()
+            .allow(&middle, Operation::Read, Scope::File)
+            .unwrap();
+        let error = checked(&app, &config).unwrap_err().to_string();
+        assert!(error.contains("outside/note"), "{error}");
+        assert_eq!(checked(&app, &ContainmentConfig::new()).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn non_read_cells_cannot_authorize_macos_dependency_contents() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let leaf = planted_image(&root, "outside/note", b"private bytes");
+        let app = planted_image(
+            &root,
+            "project/app",
+            &synthetic_macho(&[(leaf.to_str().unwrap(), false)], &[]),
+        );
+        let base = ContainmentConfig::new()
+            .allow(root.join("project"), Operation::Write, Scope::Root)
+            .unwrap();
+        for operation in [Operation::Write, Operation::Exec] {
+            let config = base.clone().allow(&leaf, operation, Scope::File).unwrap();
+            assert!(
+                checked(&app, &config)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("lack read access")
+            );
+        }
+        for operation in [Operation::Read, Operation::Metadata] {
+            let config = base
+                .clone()
+                .allow(root.join("outside"), operation, Scope::Dir)
+                .unwrap();
+            assert!(
+                checked(&app, &config)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("lack read access")
+            );
+        }
+        let config = base
+            .allow(root.join("outside"), Operation::List, Scope::Root)
+            .unwrap();
+        assert!(
+            checked(&app, &config)
+                .unwrap_err()
+                .to_string()
+                .contains("lack read access")
+        );
+    }
+
+    #[test]
+    fn an_explicit_deny_never_produces_a_read_file_suggestion() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let leaf = planted_image(&root, "outside/note", b"private bytes");
+        let app = planted_image(
+            &root,
+            "project/app",
+            &synthetic_macho(&[(leaf.to_str().unwrap(), false)], &[]),
+        );
+        let config = ContainmentConfig::new()
+            .allow(root.join("project"), Operation::Write, Scope::Root)
+            .unwrap()
+            .refuse(&leaf, Scope::File)
+            .unwrap();
+        let error = checked(&app, &config).unwrap_err().to_string();
+        assert!(
+            error.contains("explicitly denied") && !error.contains("read_file"),
+            "{error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_link_routes_cannot_import_ungranted_contents() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let leaf = planted_image(&root, "outside/note", b"private bytes");
+        std::fs::create_dir(root.join("project")).unwrap();
+        let link = root.join("project/hop");
+        std::os::unix::fs::symlink(root.join("outside"), &link).unwrap();
+        let outer = root.join("outer");
+        std::os::unix::fs::symlink(&link, &outer).unwrap();
+        let app = planted_image(
+            &root,
+            "installed/app",
+            &synthetic_macho(&[(outer.join("note").to_str().unwrap(), false)], &[]),
+        );
+        let config = ContainmentConfig::new()
+            .allow(root.join("project"), Operation::Write, Scope::Root)
+            .unwrap();
+        assert!(
+            checked(&app, &config)
+                .unwrap_err()
+                .to_string()
+                .contains("lack read access")
+        );
+        assert!(
+            checked(
+                &app,
+                &config.allow(&leaf, Operation::Read, Scope::File).unwrap()
+            )
+            .is_ok()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_replacement_symlink_is_never_opened_as_a_canonical_image() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let leaf = planted_image(&root, "outside/note", b"private bytes");
+        let link = root.join("replaced");
+        std::os::unix::fs::symlink(&leaf, &link).unwrap();
+        assert!(open_image(&link).is_err());
+        let ancestor = root.join("ancestor");
+        std::os::unix::fs::symlink(root.join("outside"), &ancestor).unwrap();
+        assert!(open_image(&ancestor.join("note")).is_err());
+    }
+    #[test]
+    fn a_prior_unrestricted_visit_does_not_hide_a_restricted_branch() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let leaf = planted_image(&root, "outside/note", b"private bytes");
+        let shared = planted_image(
+            &root,
+            "installed/shared",
+            &synthetic_macho(&[(leaf.to_str().unwrap(), false)], &[]),
+        );
+        let writable = planted_image(
+            &root,
+            "project/middle",
+            &synthetic_macho(&[(shared.to_str().unwrap(), false)], &[]),
+        );
+        let app = planted_image(
+            &root,
+            "installed/app",
+            &synthetic_macho(
+                &[
+                    (writable.to_str().unwrap(), false),
+                    (shared.to_str().unwrap(), false),
+                ],
+                &[],
+            ),
+        );
+        let config = ContainmentConfig::new()
+            .allow(root.join("project"), Operation::Write, Scope::Root)
+            .unwrap()
+            .allow(&writable, Operation::Read, Scope::File)
+            .unwrap()
+            .allow(&shared, Operation::Read, Scope::File)
+            .unwrap();
+        let error = checked(&app, &config).unwrap_err().to_string();
+        assert!(
+            error.contains("outside/note") && error.contains("lack read access"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn missing_weak_images_are_optional_but_present_weak_images_need_read_access() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        let leaf = root.join("optional");
+        let app = planted_image(
+            &root,
+            "project/app",
+            &synthetic_macho(&[(leaf.to_str().unwrap(), true)], &[]),
+        );
+        let config = ContainmentConfig::new()
+            .allow(root.join("project"), Operation::Write, Scope::Root)
+            .unwrap();
+        assert!(checked(&app, &config).unwrap().is_empty());
+        std::fs::write(&leaf, b"private bytes").unwrap();
+        assert!(
+            checked(&app, &config)
+                .unwrap_err()
+                .to_string()
+                .contains("lack read access")
+        );
     }
 }

@@ -1,0 +1,4 @@
+strands-agents[gemini]==1.63.0
+google-genai==2.34.0
+google-auth==2.62.1
+httpx==0.28.1

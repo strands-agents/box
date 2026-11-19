@@ -23,10 +23,10 @@
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use egress_gateway::{
-    CapabilitySet, CredentialCapability, MitmConfig, MitmHandle, MitmInterceptor,
+    BackendDial, CapabilitySet, CredentialCapability, MitmConfig, MitmHandle, MitmInterceptor,
 };
 use policy::{
     EgressPolicyInterceptor, GovernedBox, McpServerKind, PolicyEngine, Principal, ToolCatalogs,
@@ -40,12 +40,38 @@ use crate::run::broker::BrokerHost;
 use crate::run::broker::complete::{DiscoveryCoordinator, DiscoveryDoor};
 use crate::run::broker::mcp::DiscoveryRegistryHost;
 use crate::run::broker::shell::EgressRouting;
+use crate::run::commands::ConfiguredCommands;
 use crate::run::contain::boundary::{
     ApprovedReach, Boundary, EgressMode, Launch, RuntimeReach, ShebangInterpreters, Site,
 };
 use crate::run::credential;
 use crate::run::lock::{BoxLive, Lock};
 use crate::run::telemetry;
+
+type RunningPolicy = (Arc<PolicyEngine>, Arc<telemetry::Collector>);
+
+static RUNNING_POLICY: Mutex<Option<RunningPolicy>> = Mutex::new(None);
+
+pub(crate) fn reload(sources: &[policy::Policy]) -> Result<(), BoxError> {
+    let running = RUNNING_POLICY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (policy, collector) = running.as_ref().ok_or(DaemonError::NotRunning)?;
+    let result = policy.reload(sources).map_err(BoxError::from);
+    let subject = telemetry::policy_subject(sources);
+    collector.control(match &result {
+        Ok(()) => telemetry::ControlRecord::completed(
+            telemetry::ControlOperation::PolicyInstalled,
+            &subject,
+        ),
+        Err(error) => telemetry::ControlRecord::refused(
+            telemetry::ControlOperation::PolicyRefused,
+            &subject,
+            &error.to_string(),
+        ),
+    });
+    result
+}
 
 /// What the workload's boundary needs from the box hosting it.
 #[derive(Debug, Clone)]
@@ -87,12 +113,28 @@ pub(crate) struct SelectedTool {
 /// A program no table names runs in the caller's own boundary when it lies under one of the
 /// caller's `exec` entries.
 ///
-/// The prefix is compared expanded, because the translator runs the expanded arguments.
-pub(crate) fn select_tool(
+/// The prefix is compared expanded, because the translator runs the expanded arguments. Among
+/// prefixes of one length, a command with the file name of `called` wins. `called` is the path the
+/// caller used, and `program` is the file it resolves to.
+#[cfg(test)]
+fn select_tool(
     record: &Record,
     attachment: &Attachment,
     program: &Path,
+    called: &Path,
     args: &[String],
+) -> Result<SelectedTool, BoxError> {
+    let commands = crate::run::commands::ConfiguredCommands::load(record)?;
+    select_tool_with_commands(record, attachment, program, called, args, &commands)
+}
+
+fn select_tool_with_commands(
+    record: &Record,
+    attachment: &Attachment,
+    program: &Path,
+    called: &Path,
+    args: &[String],
+    commands: &crate::run::commands::ConfiguredCommands,
 ) -> Result<SelectedTool, BoxError> {
     let refuse = |reason: String| {
         BoxError::from(ConfigError::ToolSelection {
@@ -114,18 +156,18 @@ pub(crate) fn select_tool(
     let invoked = program;
     // The matched prefix length travels with the winner, so `trailing` never re-derives it from an
     // unexpanded count.
-    let mut selected: Option<(&str, &ProcessSpec, usize)> = None;
+    let mut selected: Option<(&str, &ProcessSpec, usize, bool)> = None;
+    let called_name = called.file_name();
     let mut unexpandable: Vec<String> = Vec::new();
     let mut named_by_a_table = false;
     for (label, spec) in &record.tool {
-        let Ok(resolved) =
-            crate::run::contain::executable::resolve(spec.program(), &spec.search_path())
-        else {
+        let Some(command) = commands.get(label) else {
             continue;
         };
-        if resolved.granted_path() != invoked {
+        if command.path() != invoked {
             continue;
         }
+        command.verify()?;
         named_by_a_table = true;
         // A token this build cannot expand is the operator's error, so the refusal names it rather
         // than reporting a non-match. It is held until the loop ends, so a malformed table cannot
@@ -142,12 +184,16 @@ pub(crate) fn select_tool(
         if args.len() < fixed.len() || args[..fixed.len()] != fixed[..] {
             continue;
         }
-        if selected.is_none_or(|(_, current, _)| spec.command.len() > current.command.len()) {
-            selected = Some((label, spec, fixed.len()));
+        let called_by_name =
+            called_name.is_some() && Path::new(spec.program()).file_name() == called_name;
+        if selected.is_none_or(|(_, current, _, current_by_name)| {
+            (spec.command.len(), called_by_name) > (current.command.len(), current_by_name)
+        }) {
+            selected = Some((label, spec, fixed.len(), called_by_name));
         }
     }
     match selected {
-        Some((label, spec, fixed)) => Ok(SelectedTool {
+        Some((label, spec, fixed, _)) => Ok(SelectedTool {
             table: format!("[tool.{label}]"),
             spec: spec.clone(),
             trailing: args[fixed..].to_vec(),
@@ -162,12 +208,18 @@ pub(crate) fn select_tool(
             spec: ProcessSpec {
                 command: vec![invoked.display().to_string()],
                 network: None,
+                grammar: None,
                 ..caller.clone()
             },
             trailing: args.to_vec(),
             shebang_interpreters: ShebangInterpreters::MustBeListed,
         }),
-        None => Err(no_match()),
+        None => Err(refuse(
+            "no `[tool.<name>] command` matches this program and its leading arguments. The \
+             `[tool.<name>]` tables are fixed when the box starts, so a program created during \
+             the run runs only under an `[agent.filesystem] exec` entry"
+                .to_string(),
+        )),
     }
 }
 
@@ -219,49 +271,138 @@ fn caller_exec_covers(caller: &ProcessSpec, program: &Path) -> bool {
     true
 }
 
+#[derive(Clone)]
+pub(crate) struct ToolSpawner {
+    spawn: box_shell::HostSpawner,
+    selection: Arc<ToolSelection>,
+}
+
+struct ToolSelection {
+    attachment: Attachment,
+    record: Record,
+    workspace: PathBuf,
+    commands: Arc<crate::run::commands::ConfiguredCommands>,
+}
+
+impl ToolSelection {
+    fn select(
+        &self,
+        program: &Path,
+        called: &Path,
+        args: &[String],
+    ) -> Result<SelectedTool, BoxError> {
+        select_tool_with_commands(
+            &self.record,
+            &self.attachment,
+            program,
+            called,
+            args,
+            &self.commands,
+        )
+    }
+
+    fn working_directory(
+        &self,
+        program: &Path,
+        called: &Path,
+        args: &[String],
+        requested: &Path,
+    ) -> std::io::Result<PathBuf> {
+        let selected = self
+            .select(program, called, args)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        let directory = selected
+            .spec
+            .workspace
+            .clone()
+            .unwrap_or_else(|| caller_directory(requested, &selected.spec, &self.workspace));
+        let directory = directory.canonicalize()?;
+        if !directory.is_absolute() || !directory.is_dir() || directory.to_str().is_none() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "the tool working directory must be an absolute UTF-8 directory",
+            ));
+        }
+        Ok(directory)
+    }
+}
+
+impl ToolSpawner {
+    pub(crate) fn spawn(&self) -> box_shell::HostSpawner {
+        Arc::clone(&self.spawn)
+    }
+
+    pub(crate) fn working_directory(
+        &self,
+        program: &Path,
+        called: &Path,
+        args: &[String],
+        requested: &Path,
+    ) -> std::io::Result<PathBuf> {
+        self.selection
+            .working_directory(program, called, args, requested)
+    }
+}
+
 /// Build the hook that runs a host binary in its own boundary
 /// (docs/design/decisions.md#the-box-runs-a-host-binary-through-the-spawn-host-seam).
 ///
-/// The box installs this on the hosted Shell in place of the vendored crate's built-in spawn. Each
+/// The box's kernel runs every host binary the Shell does not implement through this. Each
 /// call selects the tool the invocation matches, translates that tool's `ProcessSpec` through the
 /// same translator the agent used, runs it through the trampoline, and hands the captured output
 /// back.
+#[allow(clippy::too_many_arguments)]
 fn tool_spawner(
-    attachment: Attachment,
-    layout: BoxRoot,
-    record: Record,
+    site: Site<'_>,
     approved: Arc<ApprovedReach>,
     workspace: PathBuf,
-    protected_sources: Vec<AuthoritySource>,
     recorder: Arc<telemetry::DecisionRecorder>,
-    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
-        super::macos_enforcement::Registration,
-    >,
-) -> strands_shell::os::HostSpawner {
-    Arc::new(move |spawn: strands_shell::os::HostSpawn| {
+    #[cfg(any(
+        all(target_os = "macos", feature = "native-filesystem-policy"),
+        all(target_os = "linux", feature = "native-filesystem-policy")
+    ))]
+    registration: Option<super::native_enforcement::Registration>,
+) -> ToolSpawner {
+    let attachment = site.attachment.clone();
+    let layout = site.layout.clone();
+    let record = site.stored.clone();
+    let protected_sources = site.protected_sources.to_vec();
+    let selection = Arc::new(ToolSelection {
+        attachment,
+        record,
+        workspace,
+        commands: Arc::clone(approved.commands()),
+    });
+    let spawn_selection = Arc::clone(&selection);
+    let spawn: box_shell::HostSpawner = Arc::new(move |spawn: box_shell::HostSpawn| {
         let recorder = Arc::clone(&recorder);
-        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+        #[cfg(any(
+            all(target_os = "macos", feature = "native-filesystem-policy"),
+            all(target_os = "linux", feature = "native-filesystem-policy")
+        ))]
         let registration = registration.clone();
-        let attachment = attachment.clone();
+        let selection = Arc::clone(&spawn_selection);
         let layout = layout.clone();
-        let record = record.clone();
         let approved = Arc::clone(&approved);
-        let workspace = workspace.clone();
         let protected_sources = protected_sources.clone();
         Box::pin(async move {
-            let selected = select_tool(&record, &attachment, &spawn.program, &spawn.args)
+            let mut selected = selection
+                .select(&spawn.program, &spawn.invoked, &spawn.args)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
-            let cwd = caller_directory(&spawn.cwd, &selected.spec, &workspace);
+            let cwd = caller_directory(&spawn.cwd, &selected.spec, &selection.workspace);
             let table = selected.table.clone();
             // The reach this run judged for the table; every declared table was judged, so a miss
             // is refused.
             let reach = approved.table(&table).ok_or_else(|| {
                 std::io::Error::other(format!("{table} has no reach judged for this run"))
             })?;
+            if let Some(command) = reach.command.as_ref() {
+                selected.spec.command[0] = command.invoked().display().to_string();
+            }
             let site = Site {
-                attachment: &attachment,
+                attachment: &selection.attachment,
                 layout: &layout,
-                stored: &record,
+                stored: &selection.record,
                 protected_sources: &protected_sources,
             };
             let boundary = Boundary::translate(
@@ -281,6 +422,12 @@ fn tool_spawner(
                 &site,
             )
             .map_err(|error| std::io::Error::other(error.to_string()))?;
+            if boundary.working_directory() != spawn.cwd.as_path() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "the tool working directory does not match the policy-approved directory",
+                ));
+            }
             // Recorded before the run, so a call the agent cancels or outlasts still leaves it.
             let label = table
                 .strip_prefix("[tool.")
@@ -299,18 +446,22 @@ fn tool_spawner(
             let captured = crate::run::contain::supervise::LeafBox::run(
                 boundary,
                 &layout,
-                #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+                #[cfg(any(
+                    all(target_os = "macos", feature = "native-filesystem-policy"),
+                    all(target_os = "linux", feature = "native-filesystem-policy")
+                ))]
                 registration,
             )
             .await
             .map_err(|error| std::io::Error::other(error.to_string()))?;
-            Ok(strands_shell::os::HostSpawnOutcome {
+            Ok(box_shell::HostSpawnOutcome {
                 status: captured.status,
                 stdout: captured.stdout,
                 stderr: captured.stderr,
             })
         })
-    })
+    });
+    ToolSpawner { spawn, selection }
 }
 
 /// Builds and spawns the contained leaf for a stdio MCP server. Every stdio server is contained;
@@ -322,11 +473,15 @@ fn tool_spawner(
 /// crossing the thread boundary. A contained MCP leaf reuses the parent's gateway and policy exactly
 /// as a tool leaf does; it owns no second [`HostedBox`].
 pub(crate) struct McpLeafLauncher {
-    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-    registration: Option<super::macos_enforcement::Registration>,
+    #[cfg(any(
+        all(target_os = "macos", feature = "native-filesystem-policy"),
+        all(target_os = "linux", feature = "native-filesystem-policy")
+    ))]
+    registration: Option<super::native_enforcement::Registration>,
     attachment: Attachment,
     layout: BoxRoot,
     record: Record,
+    approved: Arc<ApprovedReach>,
     protected_sources: Vec<AuthoritySource>,
     /// The agent's workspace — the contained MCP leaf's working directory. NOT the box's
     /// `private/mcp` (the non-unix/no-launcher fallback start's cwd): that is private Box state and
@@ -339,18 +494,25 @@ impl McpLeafLauncher {
         attachment: Attachment,
         layout: BoxRoot,
         record: Record,
+        approved: Arc<ApprovedReach>,
         protected_sources: Vec<AuthoritySource>,
         workspace: PathBuf,
-        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))] registration: Option<
-            super::macos_enforcement::Registration,
-        >,
+        #[cfg(any(
+            all(target_os = "macos", feature = "native-filesystem-policy"),
+            all(target_os = "linux", feature = "native-filesystem-policy")
+        ))]
+        registration: Option<super::native_enforcement::Registration>,
     ) -> Self {
         Self {
-            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            #[cfg(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(target_os = "linux", feature = "native-filesystem-policy")
+            ))]
             registration,
             attachment,
             layout,
             record,
+            approved,
             protected_sources,
             workspace,
         }
@@ -388,14 +550,33 @@ impl McpLeafLauncher {
             .unwrap_or_default()
     }
 
-    /// Translate `server`'s `[mcp.<name>]` `ProcessSpec` into the boundary its leaf will run in.
-    pub(crate) fn prepare(&self, server: &str) -> Result<Boundary, BoxError> {
-        let contained = self.record.contained_mcp.get(server).ok_or_else(|| {
+    /// `server`'s fixed arguments as its leaf starts them, or `None` when they do not expand.
+    pub(crate) fn launched_arguments(&self, server: &str) -> Option<Vec<String>> {
+        let contained = self.record.contained_mcp.get(server)?;
+        crate::run::contain::boundary::environment::expanded_arguments(
+            &contained.spec,
+            &self.attachment,
+        )
+        .ok()
+    }
+
+    /// Prepare the server boundary with its effective launch arguments.
+    pub(crate) fn prepare(
+        &self,
+        server: &crate::record::config::mcp::McpServer,
+        received: &[String],
+    ) -> Result<Boundary, BoxError> {
+        let contained = self.record.contained_mcp.get(&server.name).ok_or_else(|| {
             BoxError::from(ConfigError::Contract {
-                reason: format!("no contained MCP server named {server:?}"),
+                reason: format!("no contained MCP server named {:?}", server.name),
             })
         })?;
-        let table = format!("[mcp.{server}]");
+        let table = format!("[mcp.{}]", server.name);
+        let reach = self.approved.table(&table).ok_or_else(|| {
+            BoxError::from(ConfigError::Contract {
+                reason: format!("{table} has no reach judged for this run"),
+            })
+        })?;
         let site = Site {
             attachment: &self.attachment,
             layout: &self.layout,
@@ -403,7 +584,7 @@ impl McpLeafLauncher {
             protected_sources: &self.protected_sources,
         };
         let egress = EgressMode::for_spec(&contained.spec);
-        Boundary::translate(
+        let boundary = Boundary::translate(
             &contained.spec,
             Launch {
                 table: &table,
@@ -413,10 +594,35 @@ impl McpLeafLauncher {
                 argument_zero: None,
                 runtime_reach: RuntimeReach::Leaf,
                 egress,
-                approved: None,
+                approved: Some(reach),
             },
             &site,
-        )
+        )?;
+        if !server.argument_wildcards {
+            return Ok(boundary);
+        }
+        if received.len() != boundary.arguments().len() {
+            return Err(ConfigError::Mcp {
+                name: server.name.clone(),
+                reason: "received argument count differs from the configured command".into(),
+            }
+            .into());
+        }
+        let arguments = contained
+            .spec
+            .fixed_arguments()
+            .iter()
+            .zip(boundary.arguments())
+            .zip(received)
+            .map(|((declared, expanded), received)| {
+                if declared == "*" {
+                    received.clone()
+                } else {
+                    expanded.clone()
+                }
+            })
+            .collect();
+        Ok(boundary.with_arguments(arguments))
     }
 
     /// Spawn the contained streaming leaf `boundary` describes.
@@ -424,10 +630,14 @@ impl McpLeafLauncher {
         &self,
         boundary: Boundary,
     ) -> Result<crate::run::contain::supervise::StreamingLeaf, BoxError> {
+        eprintln!("{}", boundary.disclosure());
         crate::run::contain::supervise::LeafBox::spawn_streaming(
             boundary,
             &self.layout,
-            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            #[cfg(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(target_os = "linux", feature = "native-filesystem-policy")
+            ))]
             self.registration.clone(),
         )
         .await
@@ -482,8 +692,11 @@ pub(crate) struct HostedBox {
     /// The broker serving this box's aliases.
     broker: Option<BrokerHost>,
 
-    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-    _file_monitor: Option<super::macos_enforcement::FileMonitor>,
+    #[cfg(any(
+        all(target_os = "macos", feature = "native-filesystem-policy"),
+        all(target_os = "linux", feature = "native-filesystem-policy")
+    ))]
+    _file_monitor: Option<super::native_enforcement::FileMonitor>,
 
     /// A fatal cross-door completion verdict from the discovery coordinator,
     /// raced against the broker and the registry in [`stopped`](Self::stopped).
@@ -514,8 +727,11 @@ pub(crate) struct HostedBox {
 }
 
 impl HostedBox {
-    #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-    pub(crate) fn native_registration(&self) -> Option<super::macos_enforcement::Registration> {
+    #[cfg(any(
+        all(target_os = "macos", feature = "native-filesystem-policy"),
+        all(target_os = "linux", feature = "native-filesystem-policy")
+    ))]
+    pub(crate) fn native_registration(&self) -> Option<super::native_enforcement::Registration> {
         self._file_monitor
             .as_ref()
             .map(|monitor| monitor.registration())
@@ -525,13 +741,73 @@ impl HostedBox {
         root: &BoxRoot,
         operator: &policy::Operator,
         sources: Vec<policy::Policy>,
-    ) -> Result<Arc<PolicyEngine>, BoxError> {
+        grammars: policy::ToolGrammars,
+    ) -> Result<PolicyEngine, BoxError> {
         let database_path = root.dogwood_database();
         let database = root.open_dogwood_database()?;
-        Ok(Arc::new(
-            PolicyEngine::open_staged_file(operator, sources, database, database_path)?
-                .observed_by(Arc::new(telemetry::PolicyDecisionObserver)),
-        ))
+        Ok(PolicyEngine::open_staged_file_with_grammars(
+            operator,
+            sources,
+            grammars,
+            database,
+            database_path,
+        )?
+        .observed_by(Arc::new(telemetry::PolicyDecisionObserver)))
+    }
+
+    /// `policy`, bound to every `[tool.<name>]` in `record` at the program file `commands` opened
+    /// for it, and to the program file of each stdio `[mcp.<name>]`. A grammar's `program` that is
+    /// not the last component of its tool's `command` must find that tool's file on `search_path`
+    /// (docs/design/decisions.md#a-tool-grammar-binds-on-the-program-file-and-the-called-name).
+    pub(crate) fn bind_tool_grammars(
+        policy: PolicyEngine,
+        record: &Record,
+        commands: &ConfiguredCommands,
+        search_path: &std::ffi::OsStr,
+    ) -> Result<PolicyEngine, BoxError> {
+        let mut bindings = policy.grammar_bindings();
+        if !record.experimental_features.tool_grammars {
+            return Ok(policy);
+        }
+        for (label, spec) in &record.tool {
+            let table = format!("[tool.{label}]");
+            let command = commands.get(label).ok_or_else(|| ConfigError::Process {
+                table: table.clone(),
+                reason: "has no configured command for this run".to_string(),
+            })?;
+            let name = crate::record::config::grammar::bound_name(spec).ok_or_else(|| {
+                ConfigError::Process {
+                    table: table.clone(),
+                    reason: format!(
+                        "`{}.program` is not a string",
+                        crate::record::config::grammar::grammar_key(label)
+                    ),
+                }
+            })?;
+            if spec.grammar.is_some() && name != crate::record::config::grammar::called_name(spec) {
+                program_finds_command(label, name, command, search_path)?;
+            }
+            bindings.declare_tool(command.opened(), command.path(), command.invoked(), name)?;
+        }
+        for contained in record.contained_mcp.values() {
+            let spec = &contained.spec;
+            let Ok(program) =
+                crate::run::contain::executable::resolve(spec.program(), &spec.search_path())
+            else {
+                continue;
+            };
+            let Ok(opened) = crate::record::layout::open_without_following(program.granted_path())
+            else {
+                continue;
+            };
+            bindings.declare_server(
+                &opened,
+                program.granted_path(),
+                program.invoked(),
+                crate::record::config::grammar::called_name(spec),
+            )?;
+        }
+        Ok(policy.bound_by(bindings)?)
     }
 
     /// Open this box's trusted half, or refuse. `workspace` and `home` are the agent's effective
@@ -541,11 +817,15 @@ impl HostedBox {
         root: &BoxRoot,
         record: &Record,
         policy: Arc<PolicyEngine>,
+        commands: Arc<ConfiguredCommands>,
         collector: Arc<telemetry::Collector>,
         protected_sources: &[AuthoritySource],
         owned: Lock,
         workspace: &Path,
         home: &Path,
+        #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))] entry_guard: Option<
+            std::sync::Arc<crate::run::native_enforcement::EntryGuard>,
+        >,
     ) -> Result<Self, BoxError> {
         // Whatever a previous owner left is stale, because the lock above just proved nothing of
         // this box is running.
@@ -567,11 +847,45 @@ impl HostedBox {
         let recorder = telemetry::DecisionRecorder::over(Arc::clone(&collector));
         let kept_recorder = Arc::clone(&recorder);
         let projection = credential::workspace(&record.egress_routes()?)?;
-        let mut capabilities = CapabilitySet::builder();
-        for (destination, store) in projection.capabilities {
-            capabilities =
-                capabilities.add_credential(CredentialCapability::new(destination, store));
-        }
+        // A backend entry opens one vault holding its strip-phantom destination secret (a phantom is
+        // provisioned to the workload and stripped at the gateway) and its box-owned backend token
+        // (attached at the gateway, never placed in the workload environment). One control per
+        // destination.
+        let credential::Projection {
+            capabilities: backend_capabilities,
+            workload_environment: backend_environment,
+        } = credential::backend_capabilities(&record.backend_credentials()?)?;
+        let capabilities = CapabilitySet::new(
+            projection
+                .capabilities
+                .into_iter()
+                .chain(backend_capabilities)
+                .map(|(destination, store)| CredentialCapability::new(destination, store))
+                .collect(),
+        );
+        // Every phantom the workload receives: the destination-secret phantoms from the ordinary
+        // routes, plus the strip-phantom placeholders from the backend entries, sharing one
+        // placeholder for a variable named by both.
+        let workload_environment = credential::merge_workload_environment(
+            projection.workload_environment,
+            backend_environment,
+        );
+        // The backend dial targets the gateway re-routes to, keyed by the original destination
+        // pattern. The host decision still runs on the original; the address decision runs on the
+        // backend address.
+        let backend_dials: Vec<(credentials::DestinationPattern, BackendDial)> = record
+            .backend_dials()?
+            .into_iter()
+            .map(|(pattern, target)| {
+                let dial = BackendDial {
+                    tls: target.is_tls(),
+                    host: target.host,
+                    port: target.port,
+                    path_prefix: target.path_prefix,
+                };
+                (pattern, dial)
+            })
+            .collect();
 
         // The two-door discovery completion coordinator. It hears from the
         // stdio broker always, and from the egress gateway when the record declares a remote MCP
@@ -615,21 +929,24 @@ impl HostedBox {
                 Arc::new(move || coordinator.report_finished(DiscoveryDoor::Egress))
             },
         );
-        let proxy = MitmInterceptor::start_with_emitter_and_opened_ca(
+        let proxy = MitmInterceptor::start_with(
             MitmConfig {
                 intercept_ca_dir: Some(trust.clone()),
-                credential_env: projection.phantom_environment,
                 // The servers the gateway frames are the servers the policy door tracks.
                 mcp_servers: remote_mcp_servers,
+                // The destinations that re-route to a backend.
+                backends: backend_dials,
+                // The hosts whose plain HTTP on port 80 is decided and sent as HTTPS on 443.
+                upgrade_http: record.gateway.upgrade_http.clone(),
                 ..MitmConfig::default()
             },
-            capabilities.build(),
+            capabilities,
             // The box every request is judged as, taken from the root this process opened.
             telemetry::EgressDecisionInterceptor::over(egress_policy),
             Box::new(telemetry::EgressDecisionRecorder::over(Arc::clone(
                 &recorder,
             ))),
-            &trust_certificate,
+            Some(&trust_certificate),
         )
         .map_err(BoxError::from)?;
         let proxy_port = proxy
@@ -675,19 +992,45 @@ impl HostedBox {
             proxy_port,
             telemetry_port,
             trust_bundle,
-            phantoms: projection.workload_environment,
+            phantoms: workload_environment,
         };
+        let launched = |server: &crate::record::config::mcp::McpServer| match record
+            .contained_mcp
+            .get(&server.name)
+        {
+            Some(contained) => crate::run::contain::boundary::environment::expanded_arguments(
+                &contained.spec,
+                &attachment,
+            )
+            .ok(),
+            None => Some(server.arguments().to_vec()),
+        };
+        crate::record::config::mcp::refuse_a_shared_command(&record.mcp, launched)?;
+        crate::record::config::mcp::refuse_overlapping_wildcard_commands(&record.mcp, launched)?;
         // Every process table's lists, judged once, before any of them spawns.
-        let approved = Arc::new(ApprovedReach::judge(record, protected_sources)?);
+        let approved = Arc::new(ApprovedReach::judge_with(
+            record,
+            protected_sources,
+            commands,
+        )?);
         let broker_listener = BrokerHost::bind(root)?;
         #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
-        let file_monitor = if record.experimental_features.native_filesystem_policy {
-            Some(super::macos_enforcement::FileMonitor::start(
+        let monitor_required = record.experimental_features.native_filesystem_policy;
+        #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+        let monitor_required = super::native_enforcement::selected(record);
+        #[cfg(any(
+            all(target_os = "macos", feature = "native-filesystem-policy"),
+            all(target_os = "linux", feature = "native-filesystem-policy")
+        ))]
+        let file_monitor = if monitor_required {
+            Some(super::native_enforcement::FileMonitor::start(
                 Arc::clone(&policy),
                 Arc::clone(&recorder),
                 root.name(),
                 &crate::record::layout::operator_home_directory()?,
                 coordinator_fatal_sender.clone(),
+                #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+                entry_guard,
             )?)
         } else {
             None
@@ -695,14 +1038,19 @@ impl HostedBox {
         // The host-binary seam: a command the Shell does not implement runs in the
         // boundary of the tool the invocation selects, not as an uncontained child.
         let host_spawner = Some(tool_spawner(
-            attachment.clone(),
-            root.clone(),
-            record.clone(),
+            Site {
+                attachment: &attachment,
+                layout: root,
+                stored: record,
+                protected_sources,
+            },
             Arc::clone(&approved),
             workspace.to_path_buf(),
-            protected_sources.to_vec(),
             Arc::clone(&recorder),
-            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            #[cfg(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(target_os = "linux", feature = "native-filesystem-policy")
+            ))]
             file_monitor.as_ref().map(|monitor| monitor.registration()),
         ));
         // Every stdio MCP server is started contained, as a streaming leaf, through the same inputs.
@@ -713,9 +1061,13 @@ impl HostedBox {
                 attachment.clone(),
                 root.clone(),
                 record.clone(),
+                Arc::clone(&approved),
                 protected_sources.to_vec(),
                 workspace.to_path_buf(),
-                #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+                #[cfg(any(
+                    all(target_os = "macos", feature = "native-filesystem-policy"),
+                    all(target_os = "linux", feature = "native-filesystem-policy")
+                ))]
                 file_monitor.as_ref().map(|monitor| monitor.registration()),
             ))
         });
@@ -728,17 +1080,26 @@ impl HostedBox {
             Arc::clone(&policy),
             discovery.registry(),
             egress,
+            &attachment.phantoms,
             Arc::clone(&recorder),
             host_spawner,
             mcp_leaf_launcher,
             protected_sources,
+            std::sync::Arc::clone(approved.commands()),
+            std::sync::Arc::clone(approved.installation()),
         )?;
         BoxLive::publish(root, proxy_port)?;
         let published = PublishedRecord(root.clone());
+        *RUNNING_POLICY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = Some((policy, Arc::clone(&collector)));
         Ok(Self {
             discovery: Some(discovery),
             broker: Some(broker),
-            #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+            #[cfg(any(
+                all(target_os = "macos", feature = "native-filesystem-policy"),
+                all(target_os = "linux", feature = "native-filesystem-policy")
+            ))]
             _file_monitor: file_monitor,
             coordinator_fatal,
             _proxy: proxy,
@@ -761,7 +1122,13 @@ impl HostedBox {
                 text,
             });
         }
-        Self::prepare_policy(root, &policy::Operator::unanchored(), sources)
+        Self::prepare_policy(
+            root,
+            &policy::Operator::unanchored(),
+            sources,
+            policy::ToolGrammars::default(),
+        )
+        .map(Arc::new)
     }
 
     /// What this run's boundary reads.
@@ -780,7 +1147,10 @@ impl HostedBox {
     }
 
     pub(crate) fn stop_native(&mut self) -> Result<(), BoxError> {
-        #[cfg(all(target_os = "macos", feature = "native-filesystem-policy"))]
+        #[cfg(any(
+            all(target_os = "macos", feature = "native-filesystem-policy"),
+            all(target_os = "linux", feature = "native-filesystem-policy")
+        ))]
         if self._file_monitor.is_some() {
             if let Some(discovery) = &self.discovery {
                 discovery.close();
@@ -813,8 +1183,50 @@ impl HostedBox {
     }
 }
 
+/// Refuse the grammar on `[tool.<label>]` unless its `program`, found on `search_path`, is the file
+/// that `command` opened.
+fn program_finds_command(
+    label: &str,
+    program: &str,
+    command: &crate::run::commands::ConfiguredCommand,
+    search_path: &std::ffi::OsStr,
+) -> Result<(), ConfigError> {
+    use std::os::unix::fs::MetadataExt as _;
+    let identity = |metadata: std::fs::Metadata| (metadata.dev(), metadata.ino());
+    let found = crate::run::contain::executable::find_on(program, search_path);
+    let reached = found
+        .as_deref()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(identity);
+    if reached.is_some() && reached == command.opened().metadata().ok().map(identity) {
+        return Ok(());
+    }
+    let finds = match &found {
+        Some(path) => format!(
+            "finds {}",
+            std::fs::canonicalize(path)
+                .unwrap_or_else(|_| path.clone())
+                .display()
+        ),
+        None => "finds no program by that name".to_string(),
+    };
+    Err(ConfigError::Process {
+        table: format!("[tool.{label}]"),
+        reason: format!(
+            "`{}.program` is {program:?}, and `PATH` {finds}, but `command` runs {}; a grammar \
+             reads only the program its own tool runs, so set `program` to the name that finds \
+             that file on `PATH`, or move the grammar to the tool that runs {program:?}",
+            crate::record::config::grammar::grammar_key(label),
+            command.path().display(),
+        ),
+    })
+}
+
 impl Drop for HostedBox {
     fn drop(&mut self) {
+        *RUNNING_POLICY
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = None;
         if let Some(discovery) = &self.discovery {
             discovery.close();
         }
@@ -872,17 +1284,24 @@ mod tests {
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
+            monty: true,
+            gateway: Default::default(),
+            limits: Default::default(),
             box_id: root.name().to_string(),
             box_dir: root.root().to_path_buf(),
             name: "codex".to_string(),
             policy: None,
             agent: Some(ProcessSpec {
+                file_watching: false,
                 native_filesystem_policy: None,
                 command: vec!["/bin/sh".to_string()],
                 workspace: None,
                 env: Default::default(),
                 filesystem: Default::default(),
                 network: None,
+                grammar: None,
+                ingress: Vec::new(),
             }),
             tool: Default::default(),
             egress: Default::default(),
@@ -891,6 +1310,720 @@ mod tests {
             contained_mcp: Default::default(),
             telemetry: Default::default(),
             containment: Default::default(),
+        }
+    }
+
+    /// A record whose one `[tool.git]` runs `program` and carries a grammar with `status` and `push`.
+    fn grammar_record(root: &BoxRoot, program: &Path) -> Record {
+        let mut record = record_with_mcp(root, Vec::new());
+        record.experimental_features.tool_grammars = true;
+        let spec: ProcessSpec = toml::from_str(&format!(
+            "command = [{:?}]\n[grammar]\nformat = 1\nversion = 1\nname = \"git\"\n\
+             program = \"git\"\n[grammar.shell.status]\nusage = \"git status\"\n\
+             [grammar.shell.push]\nusage = \"git push [<remote>]\"\n",
+            program.display().to_string()
+        ))
+        .expect("the tool parses");
+        record.tool.insert("git".to_string(), spec);
+        record
+    }
+
+    /// The engine a run opens over `record` and `text`, bound as `run` binds it, with each tool's
+    /// directory on the search path.
+    fn bound_engine(
+        root: &BoxRoot,
+        record: &Record,
+        commands: &ConfiguredCommands,
+        text: &str,
+    ) -> Arc<PolicyEngine> {
+        let search_path = std::env::join_paths(
+            record
+                .tool
+                .values()
+                .filter_map(|spec| Path::new(spec.program()).parent()),
+        )
+        .expect("the search path joins");
+        Arc::new(bind_on(root, record, commands, text, &search_path).expect("the tools bind"))
+    }
+
+    /// The engine a run opens over `record` and `text`, bound against `search_path`.
+    fn bind_on(
+        root: &BoxRoot,
+        record: &Record,
+        commands: &ConfiguredCommands,
+        text: &str,
+        search_path: &std::ffi::OsStr,
+    ) -> Result<PolicyEngine, BoxError> {
+        let grammars =
+            crate::record::config::grammar::tool_grammars(&record.tool).expect("the grammar loads");
+        let engine = HostedBox::prepare_policy(
+            root,
+            &policy::Operator::unanchored(),
+            vec![policy::Policy {
+                origin: root.policy(),
+                text: text.to_string(),
+            }],
+            grammars,
+        )
+        .expect("the policy opens");
+        HostedBox::bind_tool_grammars(engine, record, commands, search_path)
+    }
+
+    /// `home/lib/npm-cli.js`, at its canonical path, with a link `home/bin/npm` to it.
+    fn linked_npm(home: &Path) -> PathBuf {
+        let library = home.join("lib");
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&library).expect("a library directory");
+        std::fs::create_dir_all(&bin).expect("a bin directory");
+        let file = library.join("npm-cli.js");
+        install_program(&file);
+        std::os::unix::fs::symlink("../lib/npm-cli.js", bin.join("npm")).expect("the npm link");
+        file.canonicalize().expect("the file resolves")
+    }
+
+    /// A record whose one `[tool.npm]` runs `program` and carries an npm grammar with `install`.
+    fn npm_record(root: &BoxRoot, program: &Path) -> Record {
+        let mut record = record_with_mcp(root, Vec::new());
+        record.experimental_features.tool_grammars = true;
+        let spec: ProcessSpec = toml::from_str(&format!(
+            "command = [{:?}]\n[grammar]\nformat = 1\nversion = 1\nname = \"npm\"\n\
+             program = \"npm\"\n[grammar.shell.install]\nusage = \"npm install\"\n",
+            program.display().to_string()
+        ))
+        .expect("the tool parses");
+        record.tool.insert("npm".to_string(), spec);
+        record
+    }
+
+    #[tokio::test]
+    async fn a_grammar_binds_under_its_program_when_the_command_names_the_linked_file() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-linked");
+        let file = linked_npm(home.path());
+        let record = npm_record(&root, &file);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+        let engine = bind_on(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+            home.path().join("bin").as_os_str(),
+        )
+        .expect("`npm` on the search path finds the tool's file");
+        let path = file.display().to_string();
+
+        let capture = telemetry::ObservationCapture::begin();
+        let refused = spawned_as(&Arc::new(engine), "npm", &path, &["install"])
+            .await
+            .expect_err("no rule permits the install, and `shell:spawn` does not decide it");
+        let decided = capture.last().expect("the engine decided the spawn");
+        assert_eq!(decided.action(), r#"Tool::npm::Action::"install""#);
+        assert!(refused.contains("[default-deny]"), "{refused}");
+    }
+
+    #[test]
+    fn a_grammar_whose_program_finds_another_file_is_refused() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-other");
+        let gh = home.path().join("gh");
+        install_program(&gh);
+        install_program(&home.path().join("git"));
+        let gh = gh.canonicalize().expect("gh resolves");
+        let mut record = grammar_record(&root, &gh);
+        let spec = record.tool.remove("git").expect("the git tool");
+        record.tool.insert("gh".to_string(), spec);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+
+        let refusal = bind_on(&root, &record, &commands, "", home.path().as_os_str())
+            .expect_err("`git` finds another file than the tool runs")
+            .to_string();
+
+        let git = home
+            .path()
+            .join("git")
+            .canonicalize()
+            .expect("git resolves");
+        assert_eq!(
+            refusal,
+            format!(
+                "invalid `[tool.gh]` table: `tool.gh.grammar.program` is \"git\", and `PATH` \
+                 finds {}, but `command` runs {}; a grammar reads only the program its own tool \
+                 runs, so set `program` to the name that finds that file on `PATH`, or move the \
+                 grammar to the tool that runs \"git\"",
+                git.display(),
+                gh.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_grammar_whose_command_calls_its_program_binds_when_another_file_is_first_on_path() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-shadowed");
+        let brew = home.path().join("brew");
+        let system = home.path().join("system");
+        std::fs::create_dir(&brew).expect("a first directory");
+        std::fs::create_dir(&system).expect("a second directory");
+        install_program(&brew.join("git"));
+        install_program(&system.join("git"));
+        let git = system.join("git").canonicalize().expect("git resolves");
+        let record = grammar_record(&root, &git);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+        let search_path = std::env::join_paths([&brew, &system]).expect("the search path joins");
+
+        bind_on(&root, &record, &commands, "", &search_path)
+            .expect("a command that calls `git` binds, whatever `PATH` finds first");
+    }
+
+    #[test]
+    fn a_grammar_whose_program_finds_nothing_is_refused() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-absent");
+        let file = linked_npm(home.path());
+        let record = npm_record(&root, &file);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+
+        let refusal = bind_on(
+            &root,
+            &record,
+            &commands,
+            "",
+            home.path().join("lib").as_os_str(),
+        )
+        .expect_err("no `npm` is on the search path")
+        .to_string();
+
+        assert!(
+            refusal.starts_with(
+                "invalid `[tool.npm]` table: `tool.npm.grammar.program` is \"npm\", and `PATH` \
+                 finds no program by that name, but `command` runs "
+            ),
+            "{refusal}"
+        );
+    }
+
+    async fn spawned(
+        engine: &Arc<PolicyEngine>,
+        program_path: &str,
+        args: &[&str],
+    ) -> Result<(), String> {
+        spawned_as(engine, "git", program_path, args).await
+    }
+
+    async fn spawned_as(
+        engine: &Arc<PolicyEngine>,
+        program: &str,
+        program_path: &str,
+        args: &[&str],
+    ) -> Result<(), String> {
+        let args: Vec<String> = args.iter().map(ToString::to_string).collect();
+        policy::ShellPolicyInterceptor::into_handle(
+            Arc::clone(engine),
+            Principal::agent(),
+            GovernedBox::assigned("codex"),
+        )
+        .intercept(&box_shell::EffectAttempt::ShellSpawn {
+            command: program,
+            program,
+            program_path,
+            args: &args,
+            literal: &[],
+            cwd: "/",
+        })
+        .await
+        .map(drop)
+        .map_err(|error| error.to_string())
+    }
+
+    #[tokio::test]
+    async fn binding_decides_a_declared_tool_as_its_grammar_action() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-binding");
+        let program = home.path().join("git");
+        install_program(&program);
+        let program = program.canonicalize().expect("the program resolves");
+        let path = program.display().to_string();
+        let record = grammar_record(&root, &program);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+        let engine = bound_engine(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Tool::git::Action::"status", resource);
+               permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        );
+
+        spawned(&engine, &path, &["status"])
+            .await
+            .expect("the grammar action permit admits the spawn");
+        let capture = telemetry::ObservationCapture::begin();
+        let refused = spawned(&engine, &path, &["push", "origin"])
+            .await
+            .expect_err("no rule permits the push, and `shell:spawn` does not decide it");
+        let decided = capture.last().expect("the engine decided the spawn");
+        assert_eq!(decided.action(), r#"Tool::git::Action::"push""#);
+        assert!(
+            refused.starts_with(&format!(
+                "policy denied this operation on '{path}' [default-deny]"
+            )),
+            "{refused}"
+        );
+    }
+
+    #[tokio::test]
+    async fn binding_uses_the_file_the_run_opened_and_not_what_its_path_holds_later() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-identity");
+        let program = home.path().join("git");
+        install_program(&program);
+        let program = program.canonicalize().expect("the program resolves");
+        let record = grammar_record(&root, &program);
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+        let kept = home.path().join("kept");
+        std::fs::create_dir(&kept).expect("a directory for the opened file");
+        std::fs::hard_link(&program, kept.join("git")).expect("the opened file keeps a name");
+        let staged = home.path().join("git.new");
+        install_program(&staged);
+        std::fs::rename(&staged, &program)
+            .expect("the program is replaced after the run opened it");
+
+        let engine = Arc::new(
+            bind_on(
+                &root,
+                &record,
+                &commands,
+                "permit (principal, action, resource);",
+                kept.as_os_str(),
+            )
+            .expect("`git` on the search path finds the opened file"),
+        );
+
+        let refused = spawned(&engine, &program.display().to_string(), &["status"])
+            .await
+            .expect_err("the file at the path is not the file the run approved");
+        assert!(refused.contains("[tool-grammar]"), "{refused}");
+    }
+
+    #[tokio::test]
+    async fn an_mcp_server_that_shares_a_bound_file_is_declared_for_its_own_start_alone() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-mcp");
+        let program = home.path().join("git");
+        install_program(&program);
+        let program = program.canonicalize().expect("the program resolves");
+        let server = home.path().join("git-mcp");
+        std::os::unix::fs::symlink(&program, &server).expect("a second name for the file");
+        let mut record = grammar_record(&root, &program);
+        record.contained_mcp.insert(
+            "git-mcp".to_string(),
+            crate::record::config::process::ContainedMcp {
+                spec: toml::from_str(&format!("command = [{:?}]\n", server.display().to_string()))
+                    .expect("the server parses"),
+            },
+        );
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+        let engine = bound_engine(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        );
+
+        let args: Vec<String> = Vec::new();
+        let started = policy::ShellPolicyInterceptor::into_server_start_handle(
+            Arc::clone(&engine),
+            Principal::agent(),
+            GovernedBox::assigned("codex"),
+            None,
+            Default::default(),
+        )
+        .intercept(&box_shell::EffectAttempt::ShellSpawn {
+            command: "git-mcp",
+            program: &server.display().to_string(),
+            program_path: &program.display().to_string(),
+            args: &args,
+            literal: &[],
+            cwd: "/",
+        })
+        .await
+        .map(drop)
+        .map_err(|error| error.to_string());
+
+        assert_eq!(
+            started,
+            Ok(()),
+            "no grammar binds the server's name, so `shell:spawn` decides the start"
+        );
+        let by_the_agent = policy::ShellPolicyInterceptor::into_handle(
+            Arc::clone(&engine),
+            Principal::agent(),
+            GovernedBox::assigned("codex"),
+        )
+        .intercept(&box_shell::EffectAttempt::ShellSpawn {
+            command: "git-mcp",
+            program: &server.display().to_string(),
+            program_path: &program.display().to_string(),
+            args: &args,
+            literal: &[],
+            cwd: "/",
+        })
+        .await
+        .map(drop)
+        .map_err(|error| error.to_string());
+        assert!(
+            by_the_agent
+                .as_ref()
+                .is_err_and(|refused| refused.contains("[tool-grammar]")),
+            "the agent cannot use the server's name to leave the grammar: {by_the_agent:?}"
+        );
+        assert!(
+            spawned(&engine, &program.display().to_string(), &["push"])
+                .await
+                .is_err_and(|refused| refused.contains("[default-deny]")),
+            "the declared name keeps its grammar, and `shell:spawn` does not decide it"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_mcp_server_that_a_grammar_binds_starts_when_its_file_has_several_names() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-mcp-names");
+        let program = home.path().join("git");
+        install_program(&program);
+        let program = program.canonicalize().expect("the program resolves");
+        let shared = home.path().join("shared");
+        std::fs::create_dir(&shared).expect("a second directory");
+        let server = shared.join("git");
+        install_program(&server);
+        let make = shared.join("make");
+        std::fs::hard_link(&server, &make).expect("a second name");
+        let mut record = grammar_record(&root, &program);
+        record.contained_mcp.insert(
+            "repo".to_string(),
+            crate::record::config::process::ContainedMcp {
+                spec: toml::from_str(&format!("command = [{:?}]\n", server.display().to_string()))
+                    .expect("the server parses"),
+            },
+        );
+        let commands = ConfiguredCommands::load(&record).expect("the commands load");
+        let engine = bound_engine(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#,
+        );
+
+        assert!(
+            spawned(&engine, &server.display().to_string(), &["push"])
+                .await
+                .is_err_and(|refused| refused.contains("[default-deny]")),
+            "the server's file keeps the grammar under the name `git`"
+        );
+        assert_eq!(
+            spawned_as(&engine, "make", &make.display().to_string(), &["all"]).await,
+            Ok(()),
+            "another name of the server's file is a `shell:spawn`"
+        );
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[tokio::test]
+    async fn hard_linked_tool_names_keep_separate_grammar_and_spawn_decisions() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-linked-tool");
+        let program = home.path().join("git");
+        install_program(&program);
+        let program = program.canonicalize().expect("the program resolves");
+        let make = home.path().join("make");
+        std::fs::hard_link(&program, &make).expect("a second name for the tool");
+        let record = grammar_record(&root, &program);
+        let commands = ConfiguredCommands::load(&record).expect("the hard-linked tool loads");
+        let engine = bound_engine(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Tool::git::Action::"status", resource);
+               permit (principal, action == Box::Action::"shell:spawn", resource)
+               when { context.input.program == "make" };"#,
+        );
+
+        spawned(&engine, &program.display().to_string(), &["status"])
+            .await
+            .expect("the grammar permits git status");
+        assert!(
+            spawned(&engine, &program.display().to_string(), &["push"])
+                .await
+                .is_err_and(|refused| refused.contains("[default-deny]")),
+            "the second name does not bypass the git grammar"
+        );
+        assert_eq!(
+            spawned_as(&engine, "make", &make.display().to_string(), &["all"]).await,
+            Ok(()),
+            "the second name uses its shell:spawn permission"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_grammar_on_apples_git_binds_git_and_leaves_its_other_names_to_shell_spawn() {
+        let home = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(home.path(), "grammar-several");
+        let record = grammar_record(&root, Path::new("/usr/bin/git"));
+        let commands = ConfiguredCommands::load(&record).expect("/usr/bin/git loads");
+        let engine = bound_engine(
+            &root,
+            &record,
+            &commands,
+            r#"permit (principal, action == Tool::git::Action::"status", resource);
+               permit (principal, action == Box::Action::"shell:spawn", resource)
+               when { context.input.program == "make" };"#,
+        );
+
+        spawned(&engine, "/usr/bin/git", &["status"])
+            .await
+            .expect("the grammar action permit admits `git status`");
+        assert!(
+            spawned(&engine, "/usr/bin/git", &["push"])
+                .await
+                .is_err_and(|refused| refused.contains("[default-deny]")),
+            "no rule permits the push"
+        );
+        assert_eq!(
+            spawned_as(&engine, "make", "/usr/bin/git", &["all"]).await,
+            Ok(()),
+            "another name of the launcher file is a `shell:spawn`"
+        );
+    }
+
+    fn install_program(path: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::write(path, "#!/bin/sh\nexit 0\n").expect("the program is written");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("the program is executable");
+    }
+
+    mod missing_server_checks {
+        use super::*;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        const PERMITS: &str = r#"
+            permit (principal, action == Box::Action::"shell:spawn", resource);
+            permit (principal, action == Tool::git::Action::"status", resource);
+        "#;
+
+        fn fixture() -> (tempfile::TempDir, BoxRoot, Record, PathBuf) {
+            let home = tempfile::tempdir().expect("operator home");
+            let root = crate::record::layout::testing::box_root(home.path(), "missing-server");
+            let trusted = home.path().join("trusted");
+            let writable = home.path().join("writable");
+            std::fs::create_dir(&trusted).expect("trusted directory");
+            std::fs::create_dir(&writable).expect("writable directory");
+            let program = trusted.join("git");
+            install_program(&program);
+            let mut record = grammar_record(&root, &program);
+            record.contained_mcp.insert(
+                "repo".to_string(),
+                crate::record::config::process::ContainedMcp {
+                    spec: toml::from_str(&format!(
+                        "command = [\"git\"]\n[env]\nPATH = {:?}\n",
+                        writable.display().to_string()
+                    ))
+                    .expect("server with a declared search directory"),
+                },
+            );
+            (home, root, record, writable.join("git"))
+        }
+
+        fn bind(root: &BoxRoot, record: &Record, text: &str) -> Arc<PolicyEngine> {
+            let commands = ConfiguredCommands::load(record).expect("tool command loads");
+            bound_engine(root, record, &commands, text)
+        }
+
+        async fn start(
+            engine: &Arc<PolicyEngine>,
+            spec: &ProcessSpec,
+            argument: &str,
+        ) -> Result<(), String> {
+            let program =
+                crate::run::contain::executable::resolve(spec.program(), &spec.search_path())
+                    .expect("the requested server resolves");
+            let args = vec![argument.to_string()];
+            policy::ShellPolicyInterceptor::into_server_start_handle(
+                Arc::clone(engine),
+                Principal::agent(),
+                GovernedBox::assigned("codex"),
+                None,
+                Default::default(),
+            )
+            .intercept(&box_shell::EffectAttempt::ShellSpawn {
+                command: spec.program(),
+                program: spec.program(),
+                program_path: &program.granted_path().display().to_string(),
+                args: &args,
+                literal: &[],
+                cwd: "/",
+            })
+            .await
+            .map(drop)
+            .map_err(|error| error.to_string())
+        }
+
+        #[test]
+        fn a_missing_matched_server_keeps_startup_lazy() {
+            let (_home, root, record, server) = fixture();
+            assert!(!server.exists(), "the server is absent at startup");
+            bind(&root, &record, PERMITS);
+        }
+
+        #[tokio::test]
+        async fn an_unreadable_server_cannot_later_claim_a_grammar_permit() {
+            let (_home, root, record, server) = fixture();
+            install_program(&server);
+            std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o111))
+                .expect("execute-only server");
+            let spec = &record.contained_mcp["repo"].spec;
+            assert!(
+                crate::run::contain::executable::resolve(spec.program(), &spec.search_path())
+                    .is_ok(),
+                "the unreadable server remains executable"
+            );
+            assert!(
+                crate::record::layout::open_without_following(&server).is_err(),
+                "this control requires a server file the test user cannot read"
+            );
+            let engine = bind(&root, &record, PERMITS);
+            std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755))
+                .expect("the server becomes readable after binding");
+
+            let refused = start(&engine, spec, "status")
+                .await
+                .expect_err("the server file was never approved");
+            assert!(
+                refused.contains("tool grammar requires an approved program file"),
+                "{refused}"
+            );
+        }
+
+        #[tokio::test]
+        async fn a_new_server_cannot_claim_spawn_or_grammar_permits() {
+            let (_home, root, record, server) = fixture();
+            assert!(!server.exists(), "the server is absent at startup");
+            let engine = bind(&root, &record, PERMITS);
+            install_program(&server);
+
+            for argument in ["push", "status"] {
+                let refused = start(&engine, &record.contained_mcp["repo"].spec, argument)
+                    .await
+                    .expect_err("a later file cannot claim either permit");
+                assert!(
+                    refused.contains("tool grammar requires an approved program file"),
+                    "{argument}: {refused}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn an_existing_server_keeps_its_grammar_denial() {
+            let (_home, root, record, server) = fixture();
+            install_program(&server);
+            let engine = bind(&root, &record, PERMITS);
+            let capture = telemetry::ObservationCapture::begin();
+
+            let refused = start(&engine, &record.contained_mcp["repo"].spec, "push")
+                .await
+                .expect_err("the general spawn permit does not admit a grammar-denied command");
+            assert!(refused.contains("[default-deny]"), "{refused}");
+            assert_eq!(
+                capture.last().expect("the start was decided").action(),
+                r#"Tool::git::Action::"push""#
+            );
+        }
+
+        #[tokio::test]
+        async fn an_existing_server_keeps_its_grammar_permit() {
+            let (_home, root, record, server) = fixture();
+            install_program(&server);
+            let engine = bind(
+                &root,
+                &record,
+                r#"permit (principal, action == Tool::git::Action::"status", resource);"#,
+            );
+            let capture = telemetry::ObservationCapture::begin();
+
+            start(&engine, &record.contained_mcp["repo"].spec, "status")
+                .await
+                .expect("the grammar permits status without a general spawn permit");
+            assert_eq!(
+                capture.last().expect("the start was decided").action(),
+                r#"Tool::git::Action::"status""#
+            );
+        }
+
+        #[tokio::test]
+        async fn a_replaced_server_cannot_claim_the_grammar_permit() {
+            let (_home, root, record, server) = fixture();
+            install_program(&server);
+            let engine = bind(&root, &record, PERMITS);
+            let replacement = server.with_extension("replacement");
+            install_program(&replacement);
+            std::fs::rename(&replacement, &server).expect("replace with a different file");
+
+            let refused = start(&engine, &record.contained_mcp["repo"].spec, "status")
+                .await
+                .expect_err("the replacement cannot claim the approved file's permit");
+            assert!(refused.contains("[tool-grammar]"), "{refused}");
+        }
+
+        #[tokio::test]
+        async fn an_unrelated_missing_server_keeps_lazy_start_and_spawn_permission() {
+            let (_home, root, mut record, server) = fixture();
+            let server = server.with_file_name("unrelated-server");
+            record.contained_mcp.get_mut("repo").unwrap().spec.command[0] =
+                "unrelated-server".to_string();
+            assert!(
+                !server.exists(),
+                "the unrelated server is absent at startup"
+            );
+            let engine = bind(&root, &record, PERMITS);
+            install_program(&server);
+            let capture = telemetry::ObservationCapture::begin();
+
+            start(&engine, &record.contained_mcp["repo"].spec, "status")
+                .await
+                .expect("the general spawn permit admits the unrelated server");
+            assert_eq!(
+                capture.last().expect("the start was decided").action(),
+                r#"Box::Action::"shell:spawn""#
+            );
+        }
+
+        #[tokio::test]
+        async fn a_refused_late_server_can_retry_with_an_already_bound_program() {
+            let (_home, root, record, server) = fixture();
+            let engine = bind(&root, &record, PERMITS);
+            install_program(&server);
+            let spec = &record.contained_mcp["repo"].spec;
+            let refused = start(&engine, spec, "status")
+                .await
+                .expect_err("the new file has no approved identity");
+            assert!(
+                refused.contains("tool grammar requires an approved program file"),
+                "{refused}"
+            );
+            let approved = Path::new(record.tool["git"].program());
+            let replacement = server.with_extension("approved");
+            std::os::unix::fs::symlink(approved, &replacement)
+                .expect("the replacement names the approved git file");
+            std::fs::rename(&replacement, &server).expect("the server now names the approved file");
+            let capture = telemetry::ObservationCapture::begin();
+
+            start(&engine, spec, "status")
+                .await
+                .expect("the same engine admits a retry with the approved file and called name");
+            assert_eq!(
+                capture.last().expect("the retry was decided").action(),
+                r#"Tool::git::Action::"status""#
+            );
         }
     }
 
@@ -905,6 +2038,7 @@ mod tests {
         record_with_mcp(
             root,
             vec![crate::record::config::mcp::McpServer {
+                argument_wildcards: false,
                 name: "alpha".to_string(),
                 command: vec!["alpha-mcp".to_string()],
             }],
@@ -945,21 +2079,27 @@ permit (principal, action == Box::Action::"shell:spawn", resource);
 permit (principal, action == alpha::Action::"read", resource);"#
                     .to_string(),
             }],
+            policy::ToolGrammars::default(),
         )
+        .map(Arc::new)
         .expect("the staged authority opens");
         let owned = Lock::try_acquire(&root.lock())
             .expect("the lock opens")
             .expect("the lock is free");
         let workspace = workspace_of(root);
+        let commands = Arc::new(ConfiguredCommands::load(record).expect("the commands load"));
         let hosted = HostedBox::open(
             root,
             record,
             policy,
+            commands,
             Arc::clone(&collector),
             &[],
             owned,
             &workspace,
             &workspace,
+            #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+            None,
         )
         .expect("the box is hosted");
         (hosted, collector)
@@ -975,6 +2115,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
         let vendor = home.join("vendor");
         std::fs::create_dir(&vendor).expect("a readable tree");
         let tool = |read: PathBuf| ProcessSpec {
+            file_watching: false,
             native_filesystem_policy: None,
             command: vec!["/bin/sh".to_string()],
             workspace: None,
@@ -984,6 +2125,8 @@ permit (principal, action == alpha::Action::"read", resource);"#
                 ..Default::default()
             },
             network: None,
+            grammar: None,
+            ingress: Vec::new(),
         };
         let mut record = record(&root);
         record.tool.insert("t".to_string(), tool(vendor.clone()));
@@ -1008,8 +2151,14 @@ permit (principal, action == alpha::Action::"read", resource);"#
             .tool
             .insert("u".to_string(), tool(home.join("absent")));
         let collector = collector(operator.path());
-        let policy = HostedBox::prepare_policy(&root, &policy::Operator::unanchored(), Vec::new())
-            .expect("an empty authority opens");
+        let policy = HostedBox::prepare_policy(
+            &root,
+            &policy::Operator::unanchored(),
+            Vec::new(),
+            policy::ToolGrammars::default(),
+        )
+        .map(Arc::new)
+        .expect("an empty authority opens");
         let owned = Lock::try_acquire(&root.lock())
             .expect("the lock opens")
             .expect("the lock is free");
@@ -1019,11 +2168,14 @@ permit (principal, action == alpha::Action::"read", resource);"#
                 &root,
                 &record,
                 policy,
+                Arc::new(ConfiguredCommands::load(&record).expect("the commands load")),
                 collector,
                 &[],
                 owned,
                 &workspace,
                 &workspace,
+                #[cfg(all(target_os = "linux", feature = "native-filesystem-policy"))]
+                None,
             )
         })
         .err()
@@ -1031,6 +2183,45 @@ permit (principal, action == alpha::Action::"read", resource);"#
         .to_string();
         assert!(refusal.contains("[tool.u]"), "{refusal}");
         assert!(refusal.contains("is not there"), "{refusal}");
+    }
+
+    /// **A left-out tool's lists are not judged**, so the box opens with no reach for that table,
+    /// even when a list names a path that would refuse a tool that is installed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_left_out_tool_brings_no_reach() {
+        let operator = tempfile::tempdir().expect("operator home");
+        let root = crate::record::layout::testing::box_root(operator.path(), "codex");
+        let home = operator.path().canonicalize().expect("a canonical home");
+        let mut record = record(&root);
+        record.tool.insert(
+            "gone".to_string(),
+            ProcessSpec {
+                file_watching: false,
+                native_filesystem_policy: None,
+                command: vec![home.join("bin/gone").display().to_string()],
+                workspace: None,
+                env: Default::default(),
+                filesystem: crate::record::config::process::Filesystem {
+                    read: vec![home.join("absent")],
+                    write: vec![home.clone()],
+                    ..Default::default()
+                },
+                network: None,
+                grammar: None,
+                ingress: Vec::new(),
+            },
+        );
+
+        let left_out =
+            crate::run::commands::leave_out_absent(&mut record).expect("the tool is left out");
+        let hosted = crate::test_support::with_operator_home(operator.path(), || {
+            open_hosted(&operator, &root, &record)
+        });
+
+        assert_eq!(left_out.len(), 1);
+        assert!(hosted.approved().table("[agent]").is_some());
+        assert!(hosted.approved().table("[tool.gone]").is_none());
+        assert!(hosted.approved().commands().get("gone").is_none());
     }
 
     #[cfg(unix)]
@@ -1095,6 +2286,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
     async fn initialized_mcp_client(
         root: &BoxRoot,
         program: &str,
+        arguments: &[String],
     ) -> (
         tokio::net::unix::OwnedReadHalf,
         tokio::net::unix::OwnedWriteHalf,
@@ -1108,10 +2300,25 @@ permit (principal, action == alpha::Action::"read", resource);"#
             crate::run::broker::protocol::Body::Open {
                 mode: crate::run::broker::protocol::Interpreter::Mcp {
                     server: program.to_string(),
+                    arguments: arguments.to_vec(),
                 },
             },
         )
         .await;
+        let ready = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::run::broker::protocol::read_frame::<crate::run::broker::protocol::Frame, _>(
+                &mut reader,
+            ),
+        )
+        .await
+        .expect("the MCP readiness response arrives")
+        .expect("the MCP readiness response reads")
+        .expect("the MCP readiness response is present");
+        assert!(matches!(
+            ready.body,
+            crate::run::broker::protocol::Body::McpReady
+        ));
         send_mcp_json(
             &mut writer,
             serde_json::json!({
@@ -1200,7 +2407,7 @@ permit (principal, action == alpha::Action::"read", resource);"#
             .expect("a resolver")
             .approve_host(&canonical.join("secret.txt"))
             .expect("inside the root");
-        let decision = authority.decide(
+        let (decision, _) = authority.decide(
             &GovernedBox::assigned(root.name()),
             &Principal::agent(),
             &Request::Fs {
@@ -1247,6 +2454,7 @@ wait"#;
             &root,
             vec![
                 crate::record::config::mcp::McpServer {
+                    argument_wildcards: false,
                     name: "alpha".to_string(),
                     command: vec![
                         "/bin/sh".to_string(),
@@ -1258,6 +2466,7 @@ wait"#;
                     ],
                 },
                 crate::record::config::mcp::McpServer {
+                    argument_wildcards: false,
                     name: "beta".to_string(),
                     command: vec!["/bin/false".to_string()],
                 },
@@ -1269,9 +2478,11 @@ wait"#;
             .as_ref()
             .expect("the discovery host exists")
             .registry();
-        let (mut leader_reader, mut leader_writer) = initialized_mcp_client(&root, "/bin/sh").await;
+        let arguments = record.mcp[0].arguments().to_vec();
+        let (mut leader_reader, mut leader_writer) =
+            initialized_mcp_client(&root, "sh", &arguments).await;
         let (mut follower_reader, mut follower_writer) =
-            initialized_mcp_client(&root, "/bin/sh").await;
+            initialized_mcp_client(&root, "sh", &arguments).await;
         let pids = wait_for_pids(&pids_path, 4)
             .await
             .expect("both MCP process groups start");
@@ -1406,6 +2617,7 @@ while :; do :; done"#
             "hosted-v47-workload".to_string(),
             workload_pid_path.to_string_lossy().into_owned(),
         ];
+        agent.filesystem.read = vec![scratch.clone()];
         agent.filesystem.write = vec![scratch.clone()];
         let hosted = open_hosted(&operator, &root, &record);
         let registry = hosted
@@ -1507,6 +2719,7 @@ while :; do :; done"#
             "supervised-workload".to_string(),
             pid_path.to_string_lossy().into_owned(),
         ];
+        agent.filesystem.read = vec![scratch.clone()];
         agent.filesystem.write = vec![scratch.clone()];
         let hosted = open_hosted(&operator, &root, &record);
         let boundary = crate::test_support::with_operator_home(operator.path(), || {
@@ -1790,19 +3003,155 @@ while :; do :; done"#
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn a_local_server_refuses_a_grant_replaced_after_startup_approval() {
+        let home = tempfile::tempdir().expect("operator home");
+        let operator = home.path().canonicalize().expect("canonical operator home");
+        let operator = operator.as_path();
+        let root = crate::record::layout::testing::box_root(operator, "codex");
+        crate::test_support::with_operator_home(operator, || {
+            let granted = operator.join("granted");
+            let workspace = operator.join("workspace");
+            std::fs::write(&granted, "seed").expect("granted file");
+            std::fs::create_dir(&workspace).expect("workspace directory");
+            let mut record = record(&root);
+            let mut spec = record.agent.clone().expect("agent spec");
+            spec.filesystem.read = vec![granted.clone()];
+            spec.filesystem.write = vec![granted.clone()];
+            record.contained_mcp.insert(
+                "alpha".to_string(),
+                crate::record::config::process::ContainedMcp { spec },
+            );
+            let approved = Arc::new(ApprovedReach::judge(&record, &[]).expect("startup approval"));
+            let launcher = McpLeafLauncher::new(
+                selection_attachment(),
+                root,
+                record,
+                approved,
+                Vec::new(),
+                workspace,
+                #[cfg(any(
+                    all(target_os = "macos", feature = "native-filesystem-policy"),
+                    all(target_os = "linux", feature = "native-filesystem-policy")
+                ))]
+                None,
+            );
+            let server = crate::record::config::mcp::McpServer {
+                name: "alpha".into(),
+                command: Vec::new(),
+                argument_wildcards: false,
+            };
+            launcher.prepare(&server, &[]).expect("unchanged grant");
+            std::fs::rename(&granted, operator.join("moved")).expect("move granted file");
+            std::fs::create_dir(&granted).expect("replace file grant with directory");
+            let refusal = launcher
+                .prepare(&server, &[])
+                .err()
+                .expect("changed grant refused");
+            let message = refusal.to_string();
+            assert!(message.contains("[mcp.alpha]"), "{message}");
+            assert!(
+                message.contains("changed between a file and a directory"),
+                "{message}"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_refuses_a_workspace_retargeted_after_directory_admission() {
+        let home = tempfile::tempdir().expect("operator home");
+        let operator = home.path().canonicalize().expect("canonical operator home");
+        let root = crate::record::layout::testing::box_root(&operator, "cwd-retarget");
+        crate::test_support::with_operator_home(&operator, || {
+            let projects = operator.join("projects");
+            let admitted = projects.join("admitted");
+            let replacement = projects.join("replacement");
+            std::fs::create_dir_all(&admitted).expect("admitted workspace");
+            std::fs::create_dir(&replacement).expect("replacement workspace");
+            let workspace_alias = projects.join("workspace");
+            std::os::unix::fs::symlink(&admitted, &workspace_alias).expect("workspace alias");
+            let mut record = record_with_mcp(&root, Vec::new());
+            let mut spec = record.agent.clone().expect("agent specification");
+            spec.workspace = Some(workspace_alias.clone());
+            spec.filesystem.read = vec![projects.clone()];
+            spec.filesystem.write = vec![projects.clone()];
+            record.tool.insert("probe".to_string(), spec);
+            let approved = Arc::new(ApprovedReach::judge(&record, &[]).expect("startup approval"));
+            let attachment = selection_attachment();
+            let spawner = tool_spawner(
+                Site {
+                    attachment: &attachment,
+                    layout: &root,
+                    stored: &record,
+                    protected_sources: &[],
+                },
+                approved,
+                admitted.clone(),
+                telemetry::DecisionRecorder::discarding(),
+                #[cfg(any(
+                    all(target_os = "macos", feature = "native-filesystem-policy"),
+                    all(target_os = "linux", feature = "native-filesystem-policy")
+                ))]
+                None,
+            );
+            let program = Path::new("/bin/sh").canonicalize().expect("host shell");
+            let args = vec![
+                "-c".to_string(),
+                "printf launched > launch-marker".to_string(),
+            ];
+            let checked = spawner
+                .working_directory(&program, Path::new("sh"), &args, &admitted)
+                .expect("the original directory passes preselection");
+            assert_eq!(checked, admitted);
+            let changed_alias = projects.join("workspace-next");
+            std::os::unix::fs::symlink(&replacement, &changed_alias)
+                .expect("changed workspace alias");
+            std::fs::rename(&changed_alias, &workspace_alias).expect("retarget workspace alias");
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("tool runtime");
+            let refusal = runtime
+                .block_on((spawner.spawn())(box_shell::HostSpawn {
+                    program,
+                    invoked: PathBuf::from("/bin/sh"),
+                    args,
+                    cwd: checked,
+                }))
+                .err()
+                .expect("the changed directory must refuse the launch");
+            assert_eq!(refusal.kind(), std::io::ErrorKind::PermissionDenied);
+            assert_eq!(
+                refusal.to_string(),
+                "the tool working directory does not match the policy-approved directory",
+            );
+            assert!(!admitted.join("launch-marker").exists());
+            assert!(!replacement.join("launch-marker").exists());
+        });
+    }
+
     fn selection_record(tools: &[(&str, &[&str])]) -> Record {
         let spec = |command: &[&str]| ProcessSpec {
+            file_watching: false,
             native_filesystem_policy: None,
             command: command.iter().map(|part| (*part).to_string()).collect(),
             workspace: None,
             env: Default::default(),
             filesystem: Default::default(),
             network: None,
+            grammar: None,
+            ingress: Vec::new(),
         };
         let agent = spec(&["/bin/sh"]);
         Record {
             version: crate::record::config::RECORD_VERSION,
             experimental_features: Default::default(),
+            file_attributes: false,
+            monty: true,
+            gateway: Default::default(),
+            limits: Default::default(),
             box_id: "box-0123456789abcdef".to_string(),
             box_dir: PathBuf::from("/var/lib/boxes/probe"),
             name: "probe".to_string(),
@@ -1821,6 +3170,147 @@ while :; do :; done"#
         }
     }
 
+    fn directory_selection(record: Record, workspace: PathBuf) -> ToolSelection {
+        ToolSelection {
+            commands: Arc::new(
+                crate::run::commands::ConfiguredCommands::load(&record)
+                    .expect("configured commands"),
+            ),
+            attachment: selection_attachment(),
+            record,
+            workspace,
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_directory_selection_uses_the_invoked_alias_and_longest_prefix() {
+        let (_root, bin, mut record) = rustup_links();
+        let mut longer = record.tool["cargo"].clone();
+        longer.command.push("-c".to_string());
+        record.tool.insert("cargo-c".to_string(), longer);
+        for (label, spec) in &mut record.tool {
+            let workspace = bin.join(format!("{label}-workspace"));
+            std::fs::create_dir(&workspace).expect("a tool workspace");
+            spec.workspace = Some(workspace);
+        }
+        let selection = directory_selection(record, bin.clone());
+        for (called, args, label) in [
+            ("cargo", Vec::new(), "cargo"),
+            ("rustc", Vec::new(), "rustc"),
+            (
+                "rustc",
+                vec!["-c".to_string(), "printf x".to_string()],
+                "cargo-c",
+            ),
+        ] {
+            assert_eq!(
+                selection
+                    .working_directory(&bin.join("rustup"), Path::new(called), &args, &bin)
+                    .expect("the matching workspace"),
+                bin.join(format!("{label}-workspace")),
+                "called as {called} with {args:?}",
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spawn_directory_selection_canonicalizes_the_declared_workspace() {
+        let (_root, bin, mut record) = rustup_links();
+        let workspace = bin.join("project");
+        std::fs::create_dir(&workspace).expect("a workspace");
+        let alias = bin.join("project-link");
+        std::os::unix::fs::symlink(&workspace, &alias).expect("a workspace alias");
+        record.tool.get_mut("cargo").expect("cargo").workspace = Some(alias);
+        let selection = directory_selection(record, bin.clone());
+        assert_eq!(
+            selection
+                .working_directory(&bin.join("rustup"), Path::new("cargo"), &[], &bin)
+                .expect("the declared workspace"),
+            workspace,
+        );
+    }
+
+    #[test]
+    fn spawn_directory_selection_applies_the_caller_workspace_rules() {
+        let root = tempfile::tempdir().expect("a directory");
+        let root = root.path().canonicalize().expect("canonical root");
+        let workspace = root.join("project");
+        let permitted = root.join("vendor");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(workspace.join("src")).expect("a caller directory");
+        std::fs::create_dir_all(permitted.join("src")).expect("a granted directory");
+        std::fs::create_dir(&outside).expect("an outside directory");
+        let mut record = selection_record(&[("sh", &["/bin/sh"])]);
+        record.tool.get_mut("sh").expect("sh").filesystem.read = vec![permitted.clone()];
+        let selection = directory_selection(record, workspace.clone());
+        let program = Path::new("/bin/sh").canonicalize().expect("sh");
+        for (requested, expected) in [
+            (workspace.join("src"), workspace.join("src")),
+            (permitted.join("src"), permitted.join("src")),
+            (outside, workspace.clone()),
+            (root.join("absent"), workspace.clone()),
+        ] {
+            assert_eq!(
+                selection
+                    .working_directory(&program, Path::new("sh"), &[], &requested)
+                    .expect("the caller workspace selection"),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn spawn_directory_selection_honors_the_agent_spec_fallback() {
+        let root = tempfile::tempdir().expect("a directory");
+        let workspace = root.path().canonicalize().expect("canonical root");
+        let requested = workspace.join("src");
+        std::fs::create_dir(&requested).expect("a caller directory");
+        let program = Path::new("/bin/sh").canonicalize().expect("sh");
+        let mut record = selection_record(&[]);
+        let agent = record.agent.as_mut().expect("agent");
+        agent.workspace = Some(workspace.clone());
+        agent.filesystem.exec = vec![program.clone()];
+        let selection = directory_selection(record, workspace.clone());
+        assert_eq!(
+            selection
+                .working_directory(&program, Path::new("sh"), &[], &requested)
+                .expect("the agent specification supplies its declared workspace"),
+            workspace,
+        );
+    }
+
+    #[test]
+    fn spawn_directory_preselection_reports_unavailable_commands_and_workspaces() {
+        let root = tempfile::tempdir().expect("a directory");
+        let workspace = root.path().canonicalize().expect("canonical root");
+        let program = Path::new("/bin/sh").canonicalize().expect("sh");
+        let mut record = selection_record(&[("sh", &["/bin/sh", "-c"])]);
+        record.tool.get_mut("sh").expect("sh").workspace = Some(workspace.join("absent"));
+        let selection = directory_selection(record, workspace.clone());
+        assert!(
+            selection
+                .working_directory(&program, Path::new("sh"), &[], &workspace)
+                .is_err()
+        );
+        assert!(
+            selection
+                .working_directory(&program, Path::new("sh"), &["-c".to_string()], &workspace)
+                .is_err()
+        );
+        assert!(
+            selection
+                .working_directory(
+                    &workspace.join("missing"),
+                    Path::new("./missing"),
+                    &[],
+                    &workspace
+                )
+                .is_err()
+        );
+    }
+
     /// **The longest `command` prefix the invocation matches selects the tool**, and the arguments
     /// after that prefix are the tool's trailing ones.
     #[test]
@@ -1833,16 +3323,101 @@ while :; do :; done"#
             &record,
             &selection_attachment(),
             &sh,
+            &sh,
             &["-c".to_string(), "printf x".to_string()],
         )
         .expect("the invocation matches two tools");
         assert_eq!(selected.table, "[tool.sh-c]");
         assert_eq!(selected.trailing, ["printf x"]);
 
-        let selected = select_tool(&record, &selection_attachment(), &sh, &["-x".to_string()])
-            .expect("the shorter prefix still matches");
+        let selected = select_tool(
+            &record,
+            &selection_attachment(),
+            &sh,
+            &sh,
+            &["-x".to_string()],
+        )
+        .expect("the shorter prefix still matches");
         assert_eq!(selected.table, "[tool.sh]");
         assert_eq!(selected.trailing, ["-x"]);
+    }
+
+    /// A directory holding one executable `rustup` and the `cargo` and `rustc` links to it.
+    #[cfg(unix)]
+    fn rustup_links() -> (tempfile::TempDir, PathBuf, Record) {
+        let root = tempfile::tempdir().expect("a directory");
+        let bin = root.path().canonicalize().expect("canonical");
+        let rustup = bin.join("rustup");
+        std::fs::copy(Path::new("/bin/sh").canonicalize().expect("sh"), &rustup)
+            .expect("an executable");
+        for name in ["cargo", "rustc"] {
+            std::os::unix::fs::symlink(&rustup, bin.join(name)).expect("a link");
+        }
+        let cargo = bin.join("cargo").display().to_string();
+        let rustc = bin.join("rustc").display().to_string();
+        let record =
+            selection_record(&[("cargo", &[cargo.as_str()]), ("rustc", &[rustc.as_str()])]);
+        (root, bin, record)
+    }
+
+    /// **The name a program was called by selects among tables that resolve to one file**, so
+    /// `rustc` runs under `[tool.rustc]` and not under the `[tool.cargo]` that shares its file.
+    #[cfg(unix)]
+    #[test]
+    fn the_called_name_selects_among_tools_that_resolve_to_one_file() {
+        let (_root, bin, record) = rustup_links();
+        let program = bin.join("rustup");
+
+        for (name, table) in [("rustc", "[tool.rustc]"), ("cargo", "[tool.cargo]")] {
+            let selected = select_tool(
+                &record,
+                &selection_attachment(),
+                &program,
+                &bin.join(name),
+                &["--version".to_string()],
+            )
+            .expect("the invocation matches both tools");
+            assert_eq!(selected.table, table, "called as {name}");
+            assert_eq!(selected.trailing, ["--version"]);
+        }
+    }
+
+    /// **A called name no table's command has leaves selection unchanged**: the first table with the
+    /// longest matching prefix, in name order, still wins.
+    #[cfg(unix)]
+    #[test]
+    fn a_called_name_no_tool_has_leaves_selection_unchanged() {
+        let (_root, bin, record) = rustup_links();
+        let program = bin.join("rustup");
+
+        let selected = select_tool(&record, &selection_attachment(), &program, &program, &[])
+            .expect("the invocation matches both tools");
+
+        assert_eq!(selected.table, "[tool.cargo]");
+    }
+
+    /// **A longer matching prefix still wins over the called name**: the name breaks a tie between
+    /// prefixes of one length and nothing more.
+    #[cfg(unix)]
+    #[test]
+    fn a_longer_prefix_still_wins_over_the_called_name() {
+        let (_root, bin, mut record) = rustup_links();
+        let mut longer = record.tool["cargo"].clone();
+        longer.command.push("-c".to_string());
+        record.tool.insert("cargo-c".to_string(), longer);
+        let program = bin.join("rustup");
+
+        let selected = select_tool(
+            &record,
+            &selection_attachment(),
+            &program,
+            &bin.join("rustc"),
+            &["-c".to_string(), "x".to_string()],
+        )
+        .expect("the invocation matches every tool");
+
+        assert_eq!(selected.table, "[tool.cargo-c]");
+        assert_eq!(selected.trailing, ["x"]);
     }
 
     /// **A `${...}` in a tool's `command` is compared expanded**, so the invocation the operator
@@ -1864,14 +3439,21 @@ while :; do :; done"#
             attachment.telemetry_port
         );
 
-        let selected = select_tool(&record, &attachment, &sh, &[expanded, "tail".to_string()])
-            .expect("the expanded argument matches the tool");
+        let selected = select_tool(
+            &record,
+            &attachment,
+            &sh,
+            &sh,
+            &[expanded, "tail".to_string()],
+        )
+        .expect("the expanded argument matches the tool");
         assert_eq!(selected.table, "[tool.probe]");
         assert_eq!(selected.trailing, ["tail"]);
 
         let literal = select_tool(
             &record,
             &attachment,
+            &sh,
             &sh,
             &["--endpoint=${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}".to_string()],
         );
@@ -1887,7 +3469,7 @@ while :; do :; done"#
         let record = selection_record(&[("probe", &["/bin/sh", "--endpoint=${NOT_A_CORE_NAME}"])]);
         let sh = Path::new("/bin/sh").canonicalize().expect("sh exists");
 
-        let error = select_tool(&record, &selection_attachment(), &sh, &[])
+        let error = select_tool(&record, &selection_attachment(), &sh, &sh, &[])
             .err()
             .expect("an unexpandable token is refused");
 
@@ -1905,7 +3487,7 @@ while :; do :; done"#
             ("probe", &["/bin/sh", "--endpoint=${NOT_A_CORE_NAME}"]),
             ("plain", &["/bin/sh"]),
         ]);
-        let selected = select_tool(&both, &selection_attachment(), &sh, &[])
+        let selected = select_tool(&both, &selection_attachment(), &sh, &sh, &[])
             .expect("the well-formed table still selects");
         assert_eq!(selected.table, "[tool.plain]");
     }
@@ -1917,10 +3499,72 @@ while :; do :; done"#
         let record = selection_record(&[("sh", &["/bin/sh"])]);
         let sh = Path::new("/bin/sh").canonicalize().expect("sh exists");
 
-        let selected = select_tool(&record, &selection_attachment(), &sh, &[])
+        let selected = select_tool(&record, &selection_attachment(), &sh, &sh, &[])
             .expect("a declared tool is selected");
 
         assert_eq!(selected.table, "[tool.sh]");
+    }
+
+    /// **A file that appears at a left-out tool's path never runs with that tool's reach**: the run
+    /// settled its tools before the file existed, so no table selects the file, and only an `exec`
+    /// entry of the caller's own runs it, in the caller's boundary.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_planted_at_a_left_out_tools_path_never_runs_with_its_reach() {
+        let root = tempfile::tempdir().expect("a directory");
+        let root = root.path().canonicalize().expect("canonical");
+        let bin = root.join("bin");
+        let planted = bin.join("late");
+        let mut record = selection_record(&[
+            ("sh", &["/bin/sh"]),
+            ("late", &[planted.to_str().expect("UTF-8")]),
+        ]);
+        let late = record.tool.get_mut("late").expect("the late tool");
+        late.filesystem.read = vec![root.join("secrets")];
+        late.filesystem.write = vec![root.clone()];
+        let left_out =
+            crate::run::commands::leave_out_absent(&mut record).expect("the tool is left out");
+        std::fs::create_dir_all(&bin).expect("a bin tree");
+        std::fs::copy(Path::new("/bin/sh").canonicalize().expect("sh"), &planted)
+            .expect("a planted file");
+        let planted = planted.canonicalize().expect("canonical");
+        let commands = crate::run::commands::ConfiguredCommands::load(&record).expect("commands");
+
+        let refusal = select_tool_with_commands(
+            &record,
+            &selection_attachment(),
+            &planted,
+            &planted,
+            &[],
+            &commands,
+        )
+        .err()
+        .expect("no table selects the planted file")
+        .to_string();
+        record.agent.as_mut().expect("an agent").filesystem.exec = vec![bin.clone()];
+        let caller = record.agent.clone().expect("an agent").filesystem;
+        let selected = select_tool_with_commands(
+            &record,
+            &selection_attachment(),
+            &planted,
+            &planted,
+            &[],
+            &commands,
+        )
+        .expect("the caller's own exec entry runs it");
+
+        assert_eq!(left_out.len(), 1);
+        assert!(commands.get("late").is_none());
+        assert!(
+            refusal.contains("no `[tool.<name>] command` matches"),
+            "{refusal}"
+        );
+        assert_eq!(selected.table, "[agent]");
+        assert_eq!(selected.spec.filesystem, caller);
+        assert_eq!(
+            selected.shebang_interpreters,
+            ShebangInterpreters::MustBeListed
+        );
     }
 
     /// **A program under one of the caller's own `exec` entries runs in the caller's boundary** when
@@ -1946,6 +3590,7 @@ while :; do :; done"#
         let selected = select_tool(
             &record,
             &selection_attachment(),
+            &demo,
             &demo,
             &["--flag".to_string()],
         )
@@ -1978,7 +3623,7 @@ while :; do :; done"#
             contain_egress: false,
         });
 
-        let selected = select_tool(&record, &selection_attachment(), &demo, &[])
+        let selected = select_tool(&record, &selection_attachment(), &demo, &demo, &[])
             .expect("the caller runs its own build output");
 
         assert_eq!(selected.table, "[agent]");
@@ -2028,15 +3673,25 @@ while :; do :; done"#
         let mut record = selection_record(&[("sh-c", &[spelled.as_str(), "-c"])]);
         record.agent.as_mut().expect("an agent").filesystem.exec = vec![tools.clone()];
 
-        let error = select_tool(&record, &selection_attachment(), &sh, &["-x".to_string()])
-            .err()
-            .expect("a prefix no table matches is refused, not run as the caller");
+        let error = select_tool(
+            &record,
+            &selection_attachment(),
+            &sh,
+            &sh,
+            &["-x".to_string()],
+        )
+        .err()
+        .expect("a prefix no table matches is refused, not run as the caller");
 
         assert!(
             error
                 .to_string()
                 .contains("no `[tool.<name>] command` matches this program"),
             "{error}"
+        );
+        assert!(
+            !error.to_string().contains("fixed when the box starts"),
+            "a program a table names is a tool, so its refusal is about arguments: {error}"
         );
     }
 
@@ -2056,7 +3711,7 @@ while :; do :; done"#
         agent.filesystem.deny = vec![root.path().join("target/debug")];
 
         assert!(
-            select_tool(&record, &selection_attachment(), &demo, &[]).is_err(),
+            select_tool(&record, &selection_attachment(), &demo, &demo, &[]).is_err(),
             "a denied program must not run"
         );
     }
@@ -2080,7 +3735,7 @@ while :; do :; done"#
         agent.filesystem.deny = vec![root.path().join("absent")];
 
         assert!(
-            select_tool(&record, &selection_attachment(), &demo, &[]).is_ok(),
+            select_tool(&record, &selection_attachment(), &demo, &demo, &[]).is_ok(),
             "a `deny` entry that names no file covers nothing"
         );
 
@@ -2093,7 +3748,7 @@ while :; do :; done"#
             .push(barrier.join("under"));
 
         assert!(
-            select_tool(&record, &selection_attachment(), &demo, &[]).is_err(),
+            select_tool(&record, &selection_attachment(), &demo, &demo, &[]).is_err(),
             "a `deny` entry this run cannot resolve must refuse the program"
         );
     }
@@ -2114,6 +3769,7 @@ while :; do :; done"#
             &record,
             &selection_attachment(),
             &elsewhere.canonicalize().expect("canonical"),
+            &elsewhere.canonicalize().expect("canonical"),
             &[],
         )
         .err()
@@ -2124,6 +3780,12 @@ while :; do :; done"#
                 .to_string()
                 .contains("no `[tool.<name>] command` matches this program"),
             "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("runs only under an `[agent.filesystem] exec` entry"),
+            "a program no table names says that tools are fixed at start: {error}"
         );
     }
 
@@ -2172,12 +3834,15 @@ while :; do :; done"#
         }
         let workspace = root_path.join("workspace");
         let mut tool = ProcessSpec {
+            file_watching: false,
             native_filesystem_policy: None,
             command: vec!["/bin/sh".to_string()],
             workspace: None,
             env: Default::default(),
             filesystem: Default::default(),
             network: None,
+            grammar: None,
+            ingress: Vec::new(),
         };
         tool.filesystem.read = vec![root_path.join("vendor")];
 
@@ -2222,7 +3887,7 @@ while :; do :; done"#
             .expect("a link to the tool");
 
         for program in [impostor.as_path(), link.as_path(), Path::new("/bin/true")] {
-            let error = select_tool(&record, &selection_attachment(), program, &[])
+            let error = select_tool(&record, &selection_attachment(), program, program, &[])
                 .err()
                 .unwrap_or_else(|| panic!("{} must not select a tool", program.display()));
             assert!(

@@ -1,11 +1,11 @@
 # Getting started with Box
 
-Box runs an agent on your Mac under a policy; the agent can only reach the files, programs, and
-network hosts you allow, and everything else is refused. You describe a box in two files:
+Box runs an agent on Linux or macOS under a policy.
+The agent can reach only the files, programs, and network destinations you allow. You describe a box in two files:
 `box.toml` says what to run and what it can reach, and `policy.dw` decides each request it makes.
 
 In this guide you'll put the [Strands CLI](https://github.com/strands-agents/harness-sdk/tree/main/strands-cli)
-in a box. You'll give it one tool, a shell, so your policy decides every command it runs and every
+in a box on macOS. You'll give it one tool, a shell, so your policy decides every command it runs and every
 file its shell reads or writes, and you'll watch the box refuse a write, then change the policy to
 allow it. The finished files are in
 [`examples/strands-cli`](../../examples/strands-cli/).
@@ -43,7 +43,11 @@ Rules:
 
 ## Before you start
 
-You need:
+Box supports macOS on Apple silicon and Linux ARM64 (64-bit Arm). Linux x86-64 is experimental.
+Check the [macOS requirements](./macos-requirements.md) for the release package, workload dependencies, and startup checks.
+Linux release executables are built on Amazon Linux 2023. Check the [Linux requirements](./linux-requirements.md) for required libraries, permissions to create the sandbox, and tested configurations.
+[Step 1](#step-1-download-box) installs Box on either platform.
+The Strands CLI walkthrough in steps 2–8 uses macOS. For that walkthrough, you need:
 
 - A Mac with Apple silicon and macOS 15 or later.
 - Node.js 22.21 or later from Homebrew: `brew install node`.
@@ -59,19 +63,57 @@ cd ~/box-tutorial
 
 ## Step 1. Download Box
 
+Download Box on macOS or Linux:
+
 ```sh
-curl -fsSL https://raw.githubusercontent.com/strands-agents/box/main/download.sh | sh
+curl -fsSL https://raw.githubusercontent.com/strands-agents/box/refs/heads/main/download.sh | sh
 ./box-core/box --version
 ```
 
-The script downloads the latest release, checks it, and unpacks it into `./box-core`. You run
-`box` by its path. Keep the other files in `./box-core` next to it, because `box` needs them
-beside it.
+The script selects the latest release and downloads the archive for your operating system and CPU architecture.
+It verifies the checksum and checks the extracted files in temporary storage.
+It then unpacks the archive into `./box-core`.
+Run `box` by its path, and keep the entire directory together.
+The version command prints `strands-box` followed by the release version.
 
-### Build from source
+Set `BOX_VERSION` to select a release tag and `BOX_DOWNLOAD_DIR` to select a destination.
+Use a fresh destination to keep a previous installation if the final extraction fails.
 
-To build Box yourself in place of the download, install [rustup](https://rustup.rs/), then build it
-and copy the binaries into `./box-core`:
+### macOS
+
+The signed macOS package contains `Box.app`, with a `box` launcher and helper links into that bundle.
+Moving only an executable out of the bundle loses its provisioning profile.
+The package is also notarized, so macOS runs a copy that you download in a browser.
+Check the [macOS requirements](./macos-requirements.md) before running a workload; a successful `box --version` does not test sandbox startup.
+
+### Linux
+
+Select a release that includes the archive for your CPU: `box-<tag>-linux-arm64.tar.gz` or `box-<tag>-linux-x86_64.tar.gz`.
+The release must also include its checksum in `SHA256SUMS.txt`. Set `BOX_VERSION` to that release tag when running the downloader.
+A release can omit Linux or x86-64 assets. If the x86-64 archive or its checksum is missing, the download stops without substituting an ARM64 archive.
+
+To run Box on x86-64, set its experimental startup opt-in in the same terminal:
+
+```sh
+export EXPERIMENTAL_X86_SUPPORT=TRUE
+```
+
+Box requires the exact value `TRUE` for `run` and `policy generate-schema`, including
+their Rust library entry points. Help and version output do not require the flag.
+ARM64 does not require the flag. It does not change the sandbox permissions.
+
+After installation, run the [native Linux example](./linux-requirements.md#run-a-native-linux-example) to check sandbox startup and file access without model credentials.
+For a cloud workload, continue with the [Amazon EKS coding example](tutorials/eks.md) or the [AgentCore Runtime shipment example](tutorials/agentcore-runtime.md).
+Steps 2–8 below follow the macOS Strands CLI example.
+
+Check the [Linux requirements](./linux-requirements.md) before running a workload; a successful `box --version` does not test sandbox startup.
+Use the [platform comparison](../design/platform-differences.md) when adapting a macOS configuration.
+
+<a id="build-from-source"></a>
+<details>
+<summary>Build from source (optional)</summary>
+
+To build Box yourself, install [rustup](https://rustup.rs/). Build it and copy the binaries into `./box-core`:
 
 ```sh
 git clone https://github.com/strands-agents/box.git box-src
@@ -80,6 +122,10 @@ mkdir box-core
 cp box-src/target/release/strands-box box-core/box
 cp box-src/target/release/strands-box-sock-alias box-src/target/release/strands-box-contain-trampoline box-core/
 ```
+
+The x86-64 startup opt-in above also applies to builds from source.
+
+</details>
 
 ## Step 2. Install the Strands CLI
 
@@ -383,6 +429,7 @@ The box writes its own errors to stderr. To keep them, add `2> my-box/box-run.lo
 | `getaddrinfo ENOTFOUND bedrock-runtime.us-west-2.amazonaws.com` | Node didn't load the preload file. Check the `--import` path in `command`. |
 | `Authentication failed: Please make sure your API Key is valid.` | Your key has expired, or you made it in another region. Make a new one in `us-west-2`. |
 | `OpenSSL configuration error` ... `openssl.cnf` | Add `openssl.cnf` to `read_file`. |
+| `EMFILE` from a directory watcher on macOS | Use the application's polling mode, or explicitly enable [file watching](config.md#file-watching) after accepting its limitations. |
 | `EPERM: process.cwd failed with error operation not permitted, uv_cwd` | Add the project to `list`. |
 | `Unexpected token 'b', "blocked by"... is not valid JSON` | The box refused a model request. Find its `deny` in the decision log, and read the reason. |
 | `unsafe box directory ...: it is not empty and contains no valid private record` | You removed part of `my-box/state`. Remove all of it; `run` recreates it. Never remove `state/private` alone. |

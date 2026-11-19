@@ -9,10 +9,6 @@ Audience: an operator who has run [getting started](../getting-started.md) and w
 policy by hand. [Policy](../policy.md) names each part of a rule and the ten actions, and
 [the action vocabulary](../policy/actions.md) lists every field a rule can read.
 
-> **Status.** The action vocabulary and the context fields can change before 1.0.0. Pin the Box
-> build you install (`./box-core/box --version`), and read [troubleshooting load
-> failures](../policy.md#troubleshooting-load-failures) after an upgrade.
-
 ## Before you start
 
 - The box from [getting started](../getting-started.md): `my-box/box.toml` and `my-box/policy.dw`
@@ -92,11 +88,17 @@ What the rules do, beyond what their comments say:
 
 The box validates the policy before it starts. When the policy loads, the box prints
 `strands-box: starting workload` and the paths the agent reaches, as in getting started. A policy
-that cannot load stops the run, with the file and the reason on stderr. For example, when the first
-rule in the file names the action `fs:raed`:
+that cannot load stops the run, with the file and the reason on stderr. For example, when the file
+holds only this rule, which names the action `fs:raed`:
 
 ```text
-strands-box: error: policy file /Users/you/box-tutorial/my-box/policy.dw will not load: policy references unknown action: for policy `policy_0`, unrecognized action `Box::Action::"fs:raed"`; for policy `policy_0`, unable to find an applicable action given the policy scope constraints
+permit (principal, action == Box::Action::"fs:raed", resource);
+```
+
+the box prints:
+
+```text
+strands-box: error: policy file /Users/you/box-tutorial/my-box/policy.dw will not load: policy references unknown action: for policy `policy_0`, unrecognized action `Box::Action::"fs:raed"` at line 1, column 30 (did you mean `Box::Action::"fs:read"`?); for policy `policy_0`, unable to find an applicable action given the policy scope constraints
 ```
 
 [Troubleshooting load failures](../policy.md#troubleshooting-load-failures) lists each refusal.

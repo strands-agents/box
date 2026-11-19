@@ -19,13 +19,15 @@ The public API describes one complete request and applies it once:
 | `PreparedFilesystemPath` | Opaque existing path identity prepared once by containment. Callers read its canonical path and its kind, then consume it in a grant. |
 | `Operation`, `Scope` | The grant vocabulary: `Exec`/`Read`/`Write`/`Connect`/`Metadata` by `File`/`Dir`/`Root`. |
 | `Network`, and the signal, process-info, IPC and backend-override enums | Typed arguments for `ContainmentConfig` builders. |
-| `Containment::apply(&config, egress_handoff)` | Detect the host backend and irreversibly contain the calling process. |
+| `Containment::apply(&config, egress_handoff, confirm_fd, native_filesystem_handoff)` | Detect the host backend and irreversibly contain the calling process. |
 | `ContainmentError`, `Platform` | Matchable failure and platform values. |
+| `ForbiddenClass`, `ContainmentError::forbidden_class` | What a floor row protects, and the class of the row that refused a grant. |
 
-The crate root exports **13 names**: `Containment`, `ContainmentConfig`,
-`ContainmentError`, `Platform`, `PreparedFilesystemPath`, `Operation`, `Scope`,
-`Network`, `BackendOverride`, `IpcMode`, `ProcessInfoMode`, `SignalMode`, and
-`home_relative_path_refusal`. The last one is the deny-only floor's own predicate,
+The crate root exports **19 names**: `Containment`, `ContainmentConfig`,
+`ContainmentError`, `ContainmentWarning`, `ForbiddenClass`, `Platform`,
+`PreparedFilesystemPath`, `Operation`, `Scope`, `Network`, `BackendOverride`,
+`IpcMode`, `ProcessInfoMode`, `SignalMode`, `os_minimum_cells`, `os_runtime_cells`,
+`validate_grant`, `validate_grants`, and `home_relative_path_refusal`. The last one is the deny-only floor's own predicate,
 which judges a `~/`-relative spelling at authoring time so a caller that holds no
 resolved path still gets the one refusal this crate owns.
 Two further items are not in that count:
@@ -34,7 +36,7 @@ test_support`, which exists only behind the non-default `test-support` feature.
 Every other module is private, so this list is the whole API rather than a
 selection from it.
 
-### `apply` takes two arguments
+### `apply` takes four arguments
 
 ```rust,ignore
 use containment::{Containment, ContainmentConfig, Network, Operation, Scope};
@@ -49,7 +51,7 @@ let config = ContainmentConfig::new()
     .allow(&home, Operation::Write, Scope::Root)?;
 
 // The second argument is `Option<&std::os::unix::net::UnixStream>`.
-Containment::apply(&config, None)?;
+Containment::apply(&config, None, None, None)?;
 ```
 
 The second argument is the egress handoff, and it is not a second entry point.
@@ -58,6 +60,19 @@ endpoint through the stream. The macOS backend passes `None`, because it pins a
 localhost port that already exists. The Linux namespace launcher **refuses**
 `Network::Localhost` when the handoff is absent, rather than binding an endpoint
 that nothing can accept on.
+
+The third argument, `confirm_fd`, is an optional setup-status pipe writer.
+The Linux launcher preserves it in the workload and reports namespace setup failures through it.
+The reaper writes byte `6` after its own setup completes.
+Its waiting processes then close their copies.
+The macOS backend leaves this descriptor to the trampoline.
+The trampoline owns the completion protocol described below.
+
+The fourth argument, `native_filesystem_handoff`, is an optional Unix stream to the
+trusted native filesystem monitor. On Linux, it transfers the notification listener
+and filesystem root, then waits for registration before the workload runs.
+Pass `None` when native filesystem checks are disabled.
+Builds without Linux native filesystem support refuse a supplied handoff.
 
 A successful `apply` returns `()`. Kernel enforcement remains active until the
 process exits and is inherited by child processes and across `exec`. There is no
@@ -96,6 +111,14 @@ is what closes the window between authorization and apply.
 
 ## macOS Profile
 
+`ContainmentConfig::allow_file_watching` permits lookup of `com.apple.FSEvents`.
+It defaults to off and is independent of `allow_runtime_services`.
+FSEvents can disclose denied names and event metadata, including outside the granted paths and
+from past events, as well as the host-wide event count and each volume's history identifier.
+A root process can also delete any volume's event history. The caller must disclose that cost
+when selecting it. Apart from that deletion, filesystem and other service rules do not change.
+Linux ignores this setting.
+
 The macOS backend always applies
 [`src/backend/macos/seatbelt-agent.sb`](src/backend/macos/seatbelt-agent.sb). The file is
 the complete readable policy; Rust replaces one placeholder per cell, plus the
@@ -119,7 +142,7 @@ shape:
 | `Metadata` + `Dir` | `file-read-metadata` on the literal and its ancestors, and no data rule at all |
 | `Metadata` + `Root` | ancestor metadata, and `file-read-metadata` over the subtree |
 | `Write` + `File` | `file-write*` on that literal |
-| `Write` + `Root` | `file-write*` over the subtree, and two denies pinning the root's own identity |
+| `Write` + `Root` | Six named write operations over the subtree (contents, create, unlink, extended attributes, mode, and times), and two denies pinning the root's own identity. With `allow_file_attributes`, also `file-write*` over the subtree, with the flags, owner, ACL, and Finder information operations denied again. Linux ignores the builder |
 | `Connect` + `File` | `network-outbound` on that socket path |
 
 **One block per cell, and every cell repeats.** The profile has a placeholder per
@@ -147,15 +170,16 @@ that file's metadata.
 ### The minimum process authority the profile grants
 
 An execute grant renders exactly two lines on one canonical literal, and the
-profile grants the unscoped fork once:
+profile grants the unscoped fork and the signal to its own children once:
 
 ```scheme
 (allow process-exec (literal "<granted executable>"))
 (allow file-read-metadata (literal "<granted executable>"))
 (allow process-fork)
+(allow signal (target children))
 ```
 
-Three properties of that block:
+Four properties of that block:
 
 - **The paired `file-read-metadata` is required, and it is not a widening.** A
   `PATH` search stats each candidate before it execs it. A program that can be
@@ -170,6 +194,12 @@ Three properties of that block:
   processes without limit, and process exhaustion is an unbounded residual.
   Closing it needs a separate resource boundary. Descendants inherit the profile,
   so the fork expands no filesystem, network, or exec authority.
+- **A contained process signals only the children it forked.** A harness stops
+  a child it started; without the grant `kill` refuses with `EPERM`, and a
+  harness that waits for the child to stop waits out its own timeout. A child
+  inherits the profile, so the signal reaches no authority the sender lacks.
+  Every other target stays refused, the box's own trusted process included.
+  `CN-I-03` proves both arms. On Linux the PID namespace already permits it.
 - **The crate recognizes an execute grant by its shape, not by the role the
   caller assigns it.** An alias is
   simply a second execute-only file, so the profile needs no `{{EXECUTABLE_PATH}}`
@@ -253,7 +283,7 @@ trampoline image:
 
 ```text
 strands-box-contain-trampoline --config <file> --config-sha256 <64-lowercase-hex> \
-  [--target-env-fd <fd>] [--setup-status-fd <fd>] [--relay-control-fd <fd>] \
+  (--target-env-json <json> | --target-env-fd <fd>) [--setup-status-fd <fd>] [--relay-control-fd <fd>] \
   -- <command> [args...]
 ```
 
@@ -262,6 +292,18 @@ The first three flags are required, and each may appear only once.
 names an inherited descriptor for compact pre-exec failure reporting, and must
 not be `0`, `1`, or `2`. `--relay-control-fd` carries the workload's egress
 listener back to the box, and is Linux-only.
+
+Byte `128` reports completed preparation.
+Failure bytes `1` through `5` report configuration read, configuration validation, apply, environment decode, or executable launch failure.
+The trampoline writes `128` after apply, environment decode, and working-directory selection, immediately before its executable launch attempt.
+A launch failure can therefore produce `128, 5`. The supervisor requires both completion markers on Linux, waits for channel closure, and lets a failure byte override completion.
+Channel closure without all required markers is a protocol failure. A successful executable launch closes the workload's descriptor through `FD_CLOEXEC`.
+
+The completion marker confirms preparation, not successful executable launch or application readiness.
+A process killed between the marker and the executable launch can also close the channel without a failure byte.
+The pipe cannot distinguish that interval from a successful executable launch.
+The reader rejects the obsolete completion byte `0` immediately, so mixed helper versions cannot retain a streaming setup wait.
+Buffered execution still reports the process outcome. Streaming users must use their application protocol to establish application readiness.
 
 The digest and target-environment carrier are supervisor-owned internal launch
 metadata, not `ContainmentConfig` fields or user policy.
@@ -272,6 +314,15 @@ calls `Containment::apply`. The supervisor retains the temporary directory only
 through helper read/unlink, not for the workload lifetime. Only after apply
 succeeds does the trampoline install the target environment and execute the
 command in the same process.
+
+On Linux, serialized authorizing grants carry their recorded device, inode, and object type.
+An inode identifies one filesystem object on a device. Denials omit the identity field.
+Loading reopens each path and refuses an identity mismatch before applying the sandbox.
+Keep the originating `ContainmentConfig` alive through loading so its open references prevent reuse of the recorded object identifiers.
+Box retains this configuration for the launched process's lifetime.
+
+Older configurations can omit this identity field and bind the object when loaded.
+Older trampolines reject the added field. Use the library and trampoline from the same build.
 
 The caller finds `strands-box-contain-trampoline` beside its own executable and
 nowhere else; no configuration key names another path. The caller assumes its
@@ -307,9 +358,13 @@ The production facade selects on the platform and, on Linux, on the architecture
 | host | selection |
 |------|-----------|
 | macOS | Seatbelt, and the one checked-in profile above. |
-| Linux, ARM64 (`aarch64`) | The namespace launcher under `src/backend/linux/namespace/`. |
+| Linux, ARM64 (`aarch64`) or x86-64 (`x86_64`) | The namespace launcher under `src/backend/linux/namespace/`. |
 | Linux, any other architecture | `ContainmentError::PlatformUnsupported`, carrying the reason. |
 | Windows and other targets | `ContainmentError::PlatformUnsupported`. |
+
+This table describes the standalone containment library. The Box application separately
+requires `EXPERIMENTAL_X86_SUPPORT=TRUE` before executing a command on Linux x86-64.
+See the [Box interface](../box/README.md#the-interface) for the startup opt-in.
 
 Landlock was considered as the Linux mechanism and rejected: it restricts the calling process in
 place and expresses no right that denies all network, which is the default mode, so a contained
@@ -317,10 +372,21 @@ child would keep unrestricted network. The launcher builds the filesystem view t
 forks into it instead.
 
 On Linux, `apply` returns in a different process than the one that called it.
-The launcher unshares a PID namespace and forks twice: the caller waits, a
+The launcher unshares a PID namespace and forks twice: the caller serves filesystem queries and waits, a
 reaper becomes namespace PID 1, and the workload is namespace PID 2, where
-`apply` returns `Ok`. No post-apply code may depend on `getpid()` being stable
-across the call. The exit status propagates outward unchanged.
+`apply` returns `Ok`. Before it forks the workload, PID 1 sets
+`PR_SET_DUMPABLE` to `0`, so the workload cannot open PID 1 memory through
+procfs. If that setup step fails, PID 1 reports an apply failure before it exits.
+No post-apply code may depend on `getpid()` being stable across the call. The
+exit status propagates outward unchanged.
+
+After the workload executes its program, the original caller handles `statfs` notifications with only
+`CAP_SYS_PTRACE` in the sandbox's private user namespace. The workload transfers its listener before
+execution. The caller returns the actual filesystem type and geometry, with capacity, inode counts,
+and identifiers set to zero. A direct `apply` caller that does not execute a program can receive a
+refusal because its inherited memory still belongs to an ancestor user namespace. See
+[Linux filesystem metadata](../../docs/design/containment.md#linux-filesystem-metadata) for path,
+process-memory, and lifecycle limits.
 
 Run the macOS enforcement proof on a macOS host:
 

@@ -21,8 +21,8 @@ det_case! {
     id:   "CN-T-07",
     desc: "Two tools hold disjoint grants: tool a (write=[a-work]) cannot read tool b's read_file or write b's directory, tool b cannot write a-work, and each reaches its own grant (host witness, file bytes)",
     run: |b| {
-        let probe_a = b.compile_probe("fsprobe-t07a", PROBE);
-        let probe_b = b.compile_probe("fsprobe-t07b", PROBE);
+        let probe_a = b.install_tool(&b.compile_probe("fsprobe-t07a", PROBE));
+        let probe_b = b.install_tool(&b.compile_probe("fsprobe-t07b", PROBE));
         let root = b.workspace().parent().unwrap().to_path_buf();
         let a_work = root.join("a-work");
         let b_dir = root.join("b-dir");
@@ -35,9 +35,13 @@ det_case! {
         let b_intrusion = a_work.join("from-b");
         let quoted = |p: &std::path::Path| serde_json::to_string(&p.to_string_lossy()).unwrap();
         let edit = |text: String| format!(
-            "{text}\n[tool.a]\ncommand = [{}]\n\n[tool.a.filesystem]\nwrite = [{}]\n\n\
+            "{text}\n[tool.a]\ncommand = [{}]\n\n[tool.a.filesystem]\nwrite = [{}]\n{}\n\
              [tool.b]\ncommand = [{}]\n\n[tool.b.filesystem]\nread_file = [{}]\n",
-            quoted(&probe_a), quoted(&a_work), quoted(&probe_b), quoted(&b_only)
+            quoted(&probe_a), quoted(&a_work),
+            if Platform::current() == Platform::Linux {
+                format!("read = [{}]\n", quoted(&a_work))
+            } else { String::new() },
+            quoted(&probe_b), quoted(&b_only)
         );
         b.apply_policy(r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#);
         let (pa, pb) = (sh_quote(&probe_a.to_string_lossy()), sh_quote(&probe_b.to_string_lossy()));

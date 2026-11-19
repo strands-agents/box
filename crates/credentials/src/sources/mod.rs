@@ -7,19 +7,64 @@ use std::collections::HashMap;
 use crate::{CredentialError, Locator, Result, Secret};
 
 mod aws;
-mod aws_profile;
+mod aws_chain;
+mod command;
 mod credsd;
 mod env;
 mod file;
 mod op;
 
+/// Shared test support for the few source tests that mutate the process environment, which is
+/// global to the test binary.
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::sync::Mutex;
+
+    /// Serializes every test that reads or writes the process environment, so no two observe each
+    /// other's torn state. Hold this for the whole body of such a test.
+    pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Takes the environment lock, recovering it from a prior test's panic.
+    pub(crate) fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    /// Captures named variables on construction and restores them on drop, so a panicking test
+    /// under [`ENV_LOCK`] still leaves the environment as it found it.
+    pub(crate) struct EnvRestore(Vec<(&'static str, Option<String>)>);
+
+    impl EnvRestore {
+        /// Snapshots the current values of `names`.
+        pub(crate) fn capture(names: &[&'static str]) -> Self {
+            Self(names.iter().map(|n| (*n, std::env::var(n).ok())).collect())
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            // SAFETY: the caller holds `ENV_LOCK` for the lifetime of this guard, so no other thread
+            // reads the environment while it is restored here.
+            unsafe {
+                for (name, value) in &self.0 {
+                    match value {
+                        Some(value) => std::env::set_var(name, value),
+                        None => std::env::remove_var(name),
+                    }
+                }
+            }
+        }
+    }
+}
+
 pub(crate) use aws::{
-    AmbientFallbackPolicy, AwsAcquisition, AwsResolution, AwsSource, credsd_session_credentials,
+    AWS_SCHEME, AmbientFallbackPolicy, AwsAcquisition, AwsCredentialProvider, AwsResolution,
+    AwsSource, credsd_session_credentials, default_aws_provider, is_bare_aws_default_chain,
     sign_request,
 };
+pub(crate) use command::CommandSource;
 pub(crate) use credsd::{CREDSD_SCHEME, CredsdClient, resolve_credsd_socket};
-pub(crate) use env::EnvSource;
-pub(crate) use file::FileSource;
+pub(crate) use env::{EnvSource, SCHEME as ENV_SCHEME};
+pub(crate) use file::{FileSource, SCHEME as FILE_SCHEME};
 pub(crate) use op::OnePasswordSource;
 
 /// Return the raw URI-form reference string (`scheme://body`) for a URI-form locator.
@@ -34,11 +79,9 @@ pub(crate) fn uri_reference<'a>(loc: &'a Locator, scheme: &str) -> Result<&'a st
 
 /// A credential *source*: the extension point for *where* a static secret is fetched from.
 pub(crate) trait SecretSource: Send + Sync {
-    /// The routing key this source handles — the URI scheme or structured `source` tag, e.g.
-    /// `"env"`, `"file"`, `"op"`. The registry dispatches by comparing this against
-    /// [`Locator::scheme`]. It is `&'static str` (not `&str`) so it stays object-safe and
-    /// so a source's identity is a compile-time constant.
-    fn scheme(&self) -> &'static str;
+    /// The routing key the registry compares against [`Locator::scheme`]: a constant such as
+    /// `"env"` for a built-in source, and the declared scheme for a declared source.
+    fn scheme(&self) -> &str;
 
     /// Parse+validate the locator and fetch the secret as a [`Secret`]
     /// (docs/design/decisions.md#an-unusable-secret-value-is-unrepresentable).
@@ -49,7 +92,7 @@ pub(crate) trait SecretSource: Send + Sync {
 /// matches, then calls its [`fetch`](SecretSource::fetch).
 #[derive(Default)]
 pub(crate) struct SourceRegistry {
-    sources: HashMap<&'static str, Box<dyn SecretSource>>,
+    sources: HashMap<String, Box<dyn SecretSource>>,
 }
 
 impl SourceRegistry {
@@ -61,8 +104,8 @@ impl SourceRegistry {
 
     /// Register `source` under its own [`scheme`](SecretSource::scheme).
     pub(crate) fn register(&mut self, source: Box<dyn SecretSource>) -> Result<()> {
-        let scheme = source.scheme();
-        if self.sources.contains_key(scheme) {
+        let scheme = source.scheme().to_string();
+        if self.sources.contains_key(&scheme) {
             return Err(CredentialError::Credential(format!(
                 "duplicate credential source registered for scheme {scheme:?}"
             )));
@@ -72,7 +115,6 @@ impl SourceRegistry {
     }
 
     /// Whether a source is registered for `scheme` (the routing key, not a full reference).
-    #[cfg(test)]
     pub(crate) fn contains(&self, scheme: &str) -> bool {
         self.sources.contains_key(scheme)
     }
@@ -93,7 +135,7 @@ impl std::fmt::Debug for SourceRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Sources hold no secret material, but list only their (non-secret) schemes so the output
         // stays a stable, useful audit line regardless of the boxed implementations.
-        let mut schemes: Vec<&&'static str> = self.sources.keys().collect();
+        let mut schemes: Vec<&String> = self.sources.keys().collect();
         schemes.sort_unstable();
         f.debug_struct("SourceRegistry")
             .field("schemes", &schemes)

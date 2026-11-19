@@ -8,9 +8,6 @@ use std::process::{Command, Output};
 use containment::{ContainmentConfig, Network, Operation, Scope};
 use sha2::{Digest as _, Sha256};
 
-#[path = "support/target_env.rs"]
-mod target_env;
-
 fn run_contained(
     executable_grant: &Path,
     command: &Path,
@@ -55,14 +52,13 @@ fn run_contained(
     let config_path = canonical_directory.join("containment.json");
     std::fs::write(&config_path, config_json).expect("write config");
 
-    let mut trampoline = Command::new(env!("CARGO_BIN_EXE_strands-box-contain-trampoline"));
-    trampoline
+    Command::new(env!("CARGO_BIN_EXE_strands-box-contain-trampoline"))
         .arg("--config")
         .arg(&config_path)
         .arg("--config-sha256")
-        .arg(digest);
-    let _environment = target_env::attach(&mut trampoline, target_environment);
-    trampoline
+        .arg(digest)
+        .arg("--target-env-json")
+        .arg(serde_json::to_string(target_environment).expect("target environment"))
         .arg("--")
         .arg(command)
         .env("CONTAIN_AMBIENT_CANARY", "must-not-survive")
@@ -286,6 +282,8 @@ fn private_executables_cross_the_boundary(read_installation: bool) {
             .arg(&config_path)
             .arg("--config-sha256")
             .arg(&digest)
+            .arg("--target-env-json")
+            .arg("{}")
             .arg("--")
             .arg(executable)
             .arg("--exec-target")
@@ -362,6 +360,38 @@ fn an_executable_reached_through_a_link_chain_crosses_the_boundary() {
     assert!(
         output.status.success(),
         "a two-link chain must exec: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// **A program whose link chain passes through a linked folder still crosses the boundary.** This
+/// is a Homebrew venv's shape: `venv/bin/tool -> <root>/opt/pkg/bin/tool`, where `opt/pkg` is a
+/// link to the keg `Cellar/pkg/1.0`, and the keg's `bin/tool` links to the program. The kernel
+/// reads the `opt/pkg` folder link on the way, so the profile needs metadata on it; none of the
+/// chain's own file links names it, and nothing else in this fixture grants it.
+#[test]
+fn an_executable_reached_through_a_linked_folder_crosses_the_boundary() {
+    let directory = tempfile::tempdir().expect("chain fixtures");
+    let root = directory
+        .path()
+        .canonicalize()
+        .expect("canonical chain root");
+    let keg_bin = root.join("Cellar/pkg/1.0/bin");
+    std::fs::create_dir_all(&keg_bin).expect("the keg's bin");
+    std::fs::create_dir_all(root.join("opt")).expect("opt");
+    std::fs::create_dir_all(root.join("venv/bin")).expect("the venv's bin");
+    std::os::unix::fs::symlink(Path::new("/usr/bin/true"), keg_bin.join("tool"))
+        .expect("the keg's link to the program");
+    std::os::unix::fs::symlink("../Cellar/pkg/1.0", root.join("opt/pkg")).expect("the folder link");
+    let command = root.join("venv/bin/tool");
+    std::os::unix::fs::symlink(root.join("opt/pkg/bin/tool"), &command)
+        .expect("the venv's link into opt");
+
+    let output = run_contained(&command, &command, &BTreeMap::new());
+
+    assert!(
+        output.status.success(),
+        "a chain through a linked folder must exec: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 }

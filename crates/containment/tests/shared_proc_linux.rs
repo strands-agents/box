@@ -106,6 +106,7 @@ fn trampoline(work_dir: &Path, script: &str) -> (Command, tempfile::NamedTempFil
         .arg(config_file.path())
         .arg("--config-sha256")
         .arg(digest)
+        .args(["--target-env-json", "{}"])
         .arg("--")
         .args(["/bin/sh", "-c", script]);
     (command, config_file)
@@ -265,12 +266,14 @@ fn a_second_contained_workload_cannot_be_reached() {
     assert!(text.contains("DONE") && !text.contains("LEAK"), "{out:?}");
 }
 
-/// **Residual pin**: an outside process's `mountinfo` and `net/tcp` are readable,
-/// and an outside same-uid process's `oom_score_adj` is writable (the value is written back
-/// unchanged). If this fails, a kernel or design change closed the residual: update the spec's
-/// residual section and the docs, do not reopen it.
+/// **Residual pin**: an outside process's `mountinfo` and `net/tcp` are readable. If this fails,
+/// a kernel or design change closed the residual: update the spec's residual section and the
+/// docs, do not reopen it.
+///
+/// **The shared `/proc` is read-only**, so an outside same-uid process's `oom_score_adj`, which
+/// its mode bits alone would let the workload write, is refused.
 #[test]
-fn a_shared_proc_workload_reads_mounts_and_sockets_and_writes_oom_score_residual() {
+fn a_shared_proc_workload_reads_mounts_and_sockets_and_cannot_write_an_oom_score() {
     needs_a_masked_host!();
     let work_dir = tempfile::tempdir().expect("work directory");
     let outside = std::process::id();
@@ -279,14 +282,18 @@ fn a_shared_proc_workload_reads_mounts_and_sockets_and_writes_oom_score_residual
         &format!(
             "(exec 3< /proc/{outside}/mountinfo) && echo MOUNTS\n\
              (exec 3< /proc/{outside}/net/tcp) && echo SOCKETS\n\
-             read v < /proc/{outside}/oom_score_adj && echo $v > /proc/{outside}/oom_score_adj \
-             && echo OOM"
+             read v < /proc/{outside}/oom_score_adj && echo READ\n\
+             (echo $v > /proc/{outside}/oom_score_adj) && echo OOM"
         ),
     );
     let text = stdout(&out);
-    for residual in ["MOUNTS", "SOCKETS", "OOM"] {
+    for residual in ["MOUNTS", "SOCKETS", "READ"] {
         assert!(text.contains(residual), "{residual}: {out:?}");
     }
+    assert!(
+        !text.contains("OOM"),
+        "the shared /proc must be read-only: {out:?}"
+    );
 }
 
 /// **Residual pin**: `/proc` belongs to the container's PID namespace, so `/proc/<getpid()>` is not

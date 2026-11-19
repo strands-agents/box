@@ -56,16 +56,40 @@ fn allows(
 ) -> bool {
     let approved = approved(path);
     matches!(
-        policy.decide(
-            &GovernedBox::assigned("test-box"),
-            principal,
-            &Request::Fs {
-                path: &approved,
-                operation,
-            },
-        ),
+        policy
+            .decide(
+                &GovernedBox::assigned("test-box"),
+                principal,
+                &Request::Fs {
+                    path: &approved,
+                    operation,
+                },
+            )
+            .0,
         Decision::Allow { .. }
     )
+}
+
+fn admit(
+    policy: &PolicyEngine,
+    principal: &Principal,
+    operation: FsOperation,
+    path: &str,
+) -> policy::RequestId {
+    let approved = approved(path);
+    let (decision, request_id) = policy.decide(
+        &GovernedBox::assigned("test-box"),
+        principal,
+        &Request::Fs {
+            path: &approved,
+            operation,
+        },
+    );
+    assert!(
+        decision.is_allow(),
+        "{operation:?} on {path} must be permitted"
+    );
+    request_id.expect("the request records")
 }
 
 /// Every read operation, as a rule author meets them. Each rides `fs:read`,
@@ -320,10 +344,17 @@ fn a_temporal_clause_on_fs_read_counts_every_read_operation() {
     }
 
     // Record the guarded read as a completed effect, and every read closes.
+    let request_id = admit(
+        &policy,
+        &shell,
+        FsOperation::ReadContent,
+        "/home/strands-box/secret",
+    );
     policy
         .record(
             &GovernedBox::assigned("test-box"),
             &shell,
+            &request_id,
             &policy::Outcome::Fs {
                 path: Path::new("/home/strands-box/secret"),
                 operation: FsOperation::ReadContent,
@@ -347,7 +378,8 @@ fn a_failed_effect_raises_an_error_event_and_no_response() {
     // failure is not a completion), and the error-keyed clause must fire (the kind has
     // a producer, not just a declaration).
     let policy = loaded(
-        r#"permit(principal == Box::Agent::"self", action == Box::Action::"fs:write", resource)
+        r#"permit(principal == Box::Agent::"self", action == Box::Action::"fs:read", resource);
+           permit(principal == Box::Agent::"self", action == Box::Action::"fs:write", resource)
            when temporal {
                formerly within 300s
                Box::Action::"fs:read"::response{ input.path: "/home/strands-box/approval" }
@@ -360,10 +392,17 @@ fn a_failed_effect_raises_an_error_event_and_no_response() {
     );
     let shell = Principal::agent();
 
+    let request_id = admit(
+        &policy,
+        &shell,
+        FsOperation::ReadContent,
+        "/home/strands-box/approval",
+    );
     policy
         .record(
             &GovernedBox::assigned("test-box"),
             &shell,
+            &request_id,
             &policy::Outcome::Fs {
                 path: Path::new("/home/strands-box/approval"),
                 operation: FsOperation::ReadContent,
@@ -398,7 +437,8 @@ fn a_completed_keyed_rule_reads_the_response_result_and_excludes_the_uncertain()
     // proves the spelling the box writes is the spelling a rule matches, and that a
     // completed effect is separable from a dropped permit's guess.
     let policy = loaded(
-        r#"permit(principal == Box::Agent::"self", action == Box::Action::"fs:write", resource)
+        r#"permit(principal == Box::Agent::"self", action == Box::Action::"fs:read", resource);
+           permit(principal == Box::Agent::"self", action == Box::Action::"fs:write", resource)
            when temporal {
                formerly within 300s
                Box::Action::"fs:read"::response{
@@ -409,10 +449,17 @@ fn a_completed_keyed_rule_reads_the_response_result_and_excludes_the_uncertain()
     );
     let shell = Principal::agent();
     let record = |result| {
+        let request_id = admit(
+            &policy,
+            &shell,
+            FsOperation::ReadContent,
+            "/home/strands-box/approval",
+        );
         policy
             .record(
                 &GovernedBox::assigned("test-box"),
                 &shell,
+                &request_id,
                 &policy::Outcome::Fs {
                     path: Path::new("/home/strands-box/approval"),
                     operation: FsOperation::ReadContent,
@@ -487,7 +534,9 @@ fn one_principal_and_the_action_separates_the_boundaries() {
     ] {
         assert!(
             !matches!(
-                fs_only.decide(&GovernedBox::assigned("test-box"), &agent, &request),
+                fs_only
+                    .decide(&GovernedBox::assigned("test-box"), &agent, &request)
+                    .0,
                 Decision::Allow { .. }
             ),
             "an fs:read permit must not reach {request:?}"
@@ -516,7 +565,9 @@ fn one_principal_and_the_action_separates_the_boundaries() {
     ] {
         assert!(
             matches!(
-                net_only.decide(&GovernedBox::assigned("test-box"), &agent, &request),
+                net_only
+                    .decide(&GovernedBox::assigned("test-box"), &agent, &request)
+                    .0,
                 Decision::Allow { .. }
             ),
             "the net permits must reach {request:?}"
@@ -585,14 +636,12 @@ fn a_write_budget_on_fs_write_is_not_consumed_by_moves_or_deletes() {
     );
     let shell = Principal::agent();
     let perform = |operation: FsOperation, path: &str| {
-        assert!(
-            allows(&policy, &shell, operation, path),
-            "{operation:?} on {path} must be permitted"
-        );
+        let request_id = admit(&policy, &shell, operation, path);
         policy
             .record(
                 &GovernedBox::assigned("test-box"),
                 &shell,
+                &request_id,
                 &policy::Outcome::Fs {
                     path: Path::new(path),
                     operation,

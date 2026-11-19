@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(unix)]
 use std::os::unix::ffi::OsStrExt as _;
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
+use std::os::unix::fs::{FileExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _};
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd as _, FromRawFd as _, IntoRawFd as _};
 
@@ -448,27 +448,50 @@ impl BoxRoot {
         Ok(private)
     }
 
-    /// Read the existing identity, or generate one for first use.
-    pub(crate) fn settle_identity(&mut self) -> Result<(), BoxError> {
+    /// Read the existing identity, or take `supplied` or a generated one for first use.
+    ///
+    /// Refuses a `supplied` identity that is malformed or that differs from the stored one.
+    pub(crate) fn settle_identity(&mut self, supplied: Option<&str>) -> Result<(), BoxError> {
+        if let Some(identity) = supplied
+            && !crate::record::config::valid_box_identity(identity)
+        {
+            return Err(ConfigError::SuppliedIdentity {
+                found: identity.to_string(),
+            }
+            .into());
+        }
         self.verify_identity()?;
         if self.configured {
-            return Ok(());
+            return self.match_supplied_identity(supplied);
         }
         if self.root_handle.is_some() {
             if self.name.is_empty() {
-                self.name = new_box_identity()?;
+                self.name = first_use_identity(supplied)?;
             }
+            self.match_supplied_identity(supplied)?;
             return self.verify_identity();
         }
         let path = self.record();
         match std::fs::read_to_string(&path) {
             Ok(text) => self.name = Record::parse(&text, &path)?.box_id,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                self.name = new_box_identity()?;
+                self.name = first_use_identity(supplied)?;
             }
             Err(source) => return Err(ConfigError::Read { path, source }.into()),
         }
+        self.match_supplied_identity(supplied)?;
         self.verify_identity()
+    }
+
+    fn match_supplied_identity(&self, supplied: Option<&str>) -> Result<(), BoxError> {
+        match supplied {
+            Some(identity) if identity != self.name => Err(ConfigError::IdentityMismatch {
+                stored: self.name.clone(),
+                supplied: identity.to_string(),
+            }
+            .into()),
+            _ => Ok(()),
+        }
     }
 
     pub(crate) fn is_configured(&self) -> bool {
@@ -525,18 +548,21 @@ impl BoxRoot {
             .collect()
     }
 
-    /// Every Python alias path, one per name a harness might resolve.
+    /// One MCP alias path per declared program, however many servers share it.
     pub(crate) fn mcp_aliases(
         &self,
         servers: &[crate::record::config::mcp::McpServer],
     ) -> Vec<PathBuf> {
         let directory = self.bin_directory();
+        let mut placed = std::collections::BTreeSet::new();
         servers
             .iter()
+            .filter(|server| placed.insert(server.program()))
             .map(|server| directory.join(server.program()))
             .collect()
     }
 
+    /// Every Python alias path, one per name a harness might resolve.
     pub(crate) fn python_aliases(&self) -> Vec<PathBuf> {
         let bin = self.bin_directory();
         PYTHON_ALIAS_NAMES
@@ -910,7 +936,7 @@ impl BoxRoot {
     /// copy elsewhere, renamed into place so the name never names a partial file.
     pub(crate) fn install_private_image(
         &self,
-        source: &Path,
+        source: &std::fs::File,
         destination: &Path,
         mode: u32,
     ) -> Result<(), BoxError> {
@@ -1292,6 +1318,13 @@ impl BoxRoot {
     }
 }
 
+fn first_use_identity(supplied: Option<&str>) -> Result<String, BoxError> {
+    match supplied {
+        Some(identity) => Ok(identity.to_string()),
+        None => new_box_identity(),
+    }
+}
+
 fn new_box_identity() -> Result<String, BoxError> {
     let mut bytes = [0_u8; 8];
     std::fs::File::open("/dev/urandom")
@@ -1653,18 +1686,17 @@ fn link_relative_file(
 fn place_private_image(
     parent: &std::fs::File,
     name: &std::ffi::OsStr,
-    source: &Path,
+    source: &std::fs::File,
     mode: u32,
 ) -> std::io::Result<()> {
     let pending = c_name(std::ffi::OsStr::new(ALIAS_IMAGE_PENDING_FILE))?;
     let final_name = c_name(name)?;
     // SAFETY: pending is one valid component and unlinkat uses the retained parent.
     let _ = unsafe { libc::unlinkat(parent.as_raw_fd(), pending.as_ptr(), 0) };
-    let mut source = open_without_following(source)?;
-    if let Err(clone_error) = clone_image(&source, parent, pending.as_c_str()) {
+    if let Err(clone_error) = clone_image(source, parent, pending.as_c_str()) {
         // SAFETY: pending is one valid component and unlinkat uses the retained parent.
         let _ = unsafe { libc::unlinkat(parent.as_raw_fd(), pending.as_ptr(), 0) };
-        copy_image(&mut source, parent, pending.as_c_str(), mode).map_err(|copy_error| {
+        copy_image(source, parent, pending.as_c_str(), mode).map_err(|copy_error| {
             std::io::Error::new(
                 copy_error.kind(),
                 format!("clone failed ({clone_error}), then copy failed: {copy_error}"),
@@ -1697,7 +1729,7 @@ fn place_private_image(
 fn place_private_image(
     _parent: &std::fs::File,
     _name: &std::ffi::OsStr,
-    _source: &Path,
+    _source: &std::fs::File,
     _mode: u32,
 ) -> std::io::Result<()> {
     Err(std::io::Error::new(
@@ -1736,7 +1768,7 @@ fn clone_image(
 /// Copy `source` byte for byte to a new file `name` in `parent`.
 #[cfg(unix)]
 fn copy_image(
-    source: &mut std::fs::File,
+    source: &std::fs::File,
     parent: &std::fs::File,
     name: &std::ffi::CStr,
     mode: u32,
@@ -1748,7 +1780,16 @@ fn copy_image(
         libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
         mode as libc::mode_t,
     )?;
-    let copied = std::io::copy(source, &mut destination)?;
+    let mut copied = 0;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = source.read_at(&mut buffer, copied)?;
+        if read == 0 {
+            break;
+        }
+        destination.write_all(&buffer[..read])?;
+        copied += read as u64;
+    }
     if copied != expected {
         return Err(std::io::Error::other(format!(
             "copied {copied} of {expected} bytes"
@@ -3549,7 +3590,7 @@ mod tests {
                 "opening must retain the exact interrupted record state"
             );
             opened
-                .settle_identity()
+                .settle_identity(None)
                 .expect("the recovered directory receives an identity");
             let record = record_for(&opened);
             opened
@@ -3602,7 +3643,7 @@ mod tests {
         });
         assert!(!opened.is_configured());
         opened
-            .settle_identity()
+            .settle_identity(None)
             .expect("the retry receives an uncommitted identity");
         assert_ne!(opened.box_id(), expected);
         let retried = opened.box_id().to_string();
@@ -3645,7 +3686,7 @@ mod tests {
         });
         assert!(!opened.is_configured());
         opened
-            .settle_identity()
+            .settle_identity(None)
             .expect("the retry receives a new identity");
         assert_ne!(opened.box_id(), uncommitted);
     }
@@ -3677,7 +3718,7 @@ mod tests {
         });
         assert!(!opened.is_configured());
         opened
-            .settle_identity()
+            .settle_identity(None)
             .expect("the retry receives a new identity");
         let record = record_for(&opened);
         opened
@@ -3705,7 +3746,7 @@ mod tests {
         let mut opened = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("empty first use opens")
         });
-        opened.settle_identity().expect("box identity");
+        opened.settle_identity(None).expect("box identity");
         let record = record_for(&opened);
         let private = opened
             .create_first_use_private()
@@ -3782,19 +3823,22 @@ mod tests {
         let mut opened = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("empty box opens")
         });
-        opened.settle_identity().expect("box identity");
+        opened.settle_identity(None).expect("box identity");
         let initial = record_for(&opened);
         opened
             .initialize_first_use(&initial)
             .expect("first use completes");
         let mut updated = initial;
         updated.agent = Some(crate::record::config::process::ProcessSpec {
+            file_watching: false,
             native_filesystem_policy: None,
             command: vec!["/bin/sh".to_string()],
             workspace: None,
             env: std::collections::BTreeMap::from([("REFRESHED".to_string(), "yes".to_string())]),
             filesystem: Default::default(),
             network: None,
+            grammar: None,
+            ingress: Vec::new(),
         });
         let updated_text = updated.to_toml().expect("updated record");
 
@@ -3968,7 +4012,7 @@ mod tests {
         let mut initial = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("empty box opens")
         });
-        initial.settle_identity().expect("box identity");
+        initial.settle_identity(None).expect("box identity");
         let record = record_for(&initial);
         initial
             .initialize_first_use(&record)
@@ -3997,7 +4041,7 @@ mod tests {
         let mut opened = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("empty box opens")
         });
-        opened.settle_identity().expect("box identity");
+        opened.settle_identity(None).expect("box identity");
         let record = record_for(&opened);
         opened
             .initialize_first_use(&record)
@@ -4032,7 +4076,7 @@ mod tests {
         let mut initial = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("empty box opens")
         });
-        initial.settle_identity().expect("box identity");
+        initial.settle_identity(None).expect("box identity");
         let expected = initial.box_id().to_string();
         let record = record_for(&initial);
         initial
@@ -4058,7 +4102,7 @@ mod tests {
             .expect("replacement symlink");
 
         opened
-            .settle_identity()
+            .settle_identity(None)
             .expect("the inspected identity remains settled");
         assert_eq!(opened.box_id(), expected);
         opened
@@ -4085,7 +4129,7 @@ mod tests {
         let mut opened = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("interrupted first use opens")
         });
-        opened.settle_identity().expect("box identity");
+        opened.settle_identity(None).expect("box identity");
         let record = record_for(&opened);
         write_partial_record(&private, "inserted");
 
@@ -4119,7 +4163,7 @@ mod tests {
         let mut opened = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("interrupted first use opens")
         });
-        opened.settle_identity().expect("box identity");
+        opened.settle_identity(None).expect("box identity");
         let record = record_for(&opened);
         std::fs::rename(private.join(RECORD_FILE), &moved).expect("move opened record");
         write_partial_record(&private, "replacement");
@@ -4154,7 +4198,7 @@ mod tests {
         let mut opened = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("interrupted first use opens")
         });
-        opened.settle_identity().expect("box identity");
+        opened.settle_identity(None).expect("box identity");
         let record = record_for(&opened);
         std::fs::rename(&root, &moved).expect("move opened root");
         std::fs::create_dir(&root).expect("replacement root");
@@ -4188,7 +4232,7 @@ mod tests {
         let mut opened = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("interrupted first use opens")
         });
-        opened.settle_identity().expect("box identity");
+        opened.settle_identity(None).expect("box identity");
         let record = record_for(&opened);
         std::fs::rename(&private, &moved).expect("move opened private directory");
         std::fs::create_dir(&private).expect("replacement private directory");
@@ -4217,7 +4261,7 @@ mod tests {
         let mut initial = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("empty box opens")
         });
-        initial.settle_identity().expect("box identity");
+        initial.settle_identity(None).expect("box identity");
         let record = record_for(&initial);
         initial
             .initialize_first_use(&record)
@@ -4257,7 +4301,7 @@ mod tests {
         let mut initial = with_operator_home(operator_home.path(), || {
             BoxRoot::open_directory(&root).expect("empty box opens")
         });
-        initial.settle_identity().expect("box identity");
+        initial.settle_identity(None).expect("box identity");
         let record = record_for(&initial);
         initial
             .initialize_first_use(&record)
@@ -4525,9 +4569,9 @@ mod tests {
         let source_path = layout.root().join("source-image");
         std::fs::write(&source_path, b"the installed image").expect("a source image");
         let bin = std::fs::File::open(layout.bin_directory()).expect("bin/ opens");
-        let mut source = std::fs::File::open(&source_path).expect("the source opens");
+        let source = std::fs::File::open(&source_path).expect("the source opens");
 
-        copy_image(&mut source, &bin, c"copied", 0o500).expect("the copy is placed");
+        copy_image(&source, &bin, c"copied", 0o500).expect("the copy is placed");
 
         let copied = layout.bin_directory().join("copied");
         assert_eq!(
@@ -4547,7 +4591,7 @@ mod tests {
         // The placement path renames the pending file over the final name and leaves no pending
         // file behind, whichever of clone or copy produced it.
         layout
-            .install_private_image(&source_path, &layout.alias_image(), 0o500)
+            .install_private_image(&source, &layout.alias_image(), 0o500)
             .expect("the image is placed");
         assert_eq!(
             std::fs::read(layout.alias_image()).expect("the image reads"),
@@ -4561,6 +4605,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_byte_copy_fallback_preserves_the_source_offset_and_opened_identity() {
+        let (layout, _fixture) = layout("codex");
+        let source_path = layout.root().join("source-image");
+        std::fs::write(&source_path, b"complete opened image").expect("a source image");
+        let source = std::fs::File::open(&source_path).expect("the source opens");
+        let mut shared = source.try_clone().expect("the descriptor clones");
+        shared
+            .seek(std::io::SeekFrom::Start(5))
+            .expect("the shared offset advances");
+        std::fs::rename(&source_path, source_path.with_extension("retained"))
+            .expect("the original image moves aside");
+        std::fs::write(&source_path, b"replacement image").expect("a replacement image");
+        let bin = std::fs::File::open(layout.bin_directory()).expect("bin/ opens");
+
+        copy_image(&source, &bin, c"copied", 0o500).expect("the retained image copies");
+
+        assert_eq!(
+            std::fs::read(layout.bin_directory().join("copied")).expect("the copy reads"),
+            b"complete opened image"
+        );
+        assert_eq!(shared.stream_position().expect("the offset reads"), 5);
+    }
+
     /// The workload's `PATH` directory starts empty.
     #[test]
     fn the_executable_directory_starts_empty() {
@@ -4570,6 +4638,30 @@ mod tests {
             std::fs::read_dir(layout.bin_directory()).unwrap().count(),
             0,
             "bin/ must hold no executable until one is deliberately materialized"
+        );
+    }
+
+    /// One alias serves every server on one program.
+    #[test]
+    fn one_alias_serves_every_server_on_one_program() {
+        let (layout, _fixture) = layout("codex");
+        let server = |name: &str, command: &[&str]| crate::record::config::mcp::McpServer {
+            argument_wildcards: false,
+            name: name.to_string(),
+            command: command.iter().map(ToString::to_string).collect(),
+        };
+        let servers = [
+            server("playwright", &["npx", "-y", "@playwright/mcp"]),
+            server("fetch", &["uvx", "mcp-server-fetch"]),
+            server(
+                "github",
+                &["npx", "-y", "@modelcontextprotocol/server-github"],
+            ),
+        ];
+        let bin = layout.bin_directory();
+        assert_eq!(
+            layout.mcp_aliases(&servers),
+            [bin.join("npx"), bin.join("uvx")]
         );
     }
 
@@ -5402,7 +5494,7 @@ mod tests {
         opened
             .verify_history_matches_record()
             .expect("a box with neither a record nor a history is consistent");
-        opened.settle_identity().expect("a first-use identity");
+        opened.settle_identity(None).expect("a first-use identity");
         let record = record_for(&opened);
         opened
             .initialize_first_use(&record)
@@ -5507,7 +5599,7 @@ mod tests {
         let mut opened = with_operator_home(operator_home, || {
             BoxRoot::open_directory(&root).expect("empty box opens")
         });
-        opened.settle_identity().expect("box identity");
+        opened.settle_identity(None).expect("box identity");
         let record = record_for(&opened);
         opened
             .initialize_first_use(&record)
@@ -5665,6 +5757,141 @@ mod tests {
         assert!(digest.bytes().all(|byte| byte.is_ascii_hexdigit()));
         assert_eq!(line.matches(':').count(), 1);
         assert_ne!(text, format!("{}:{}\n", metadata.dev(), metadata.ino()));
+    }
+
+    fn configured_box_as(operator_home: &Path, parent: &Path, supplied: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let root = parent.join("box");
+        std::fs::create_dir(&root).expect("caller-owned box directory");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .expect("private root mode");
+        let mut opened = with_operator_home(operator_home, || {
+            BoxRoot::open_directory(&root).expect("empty box opens")
+        });
+        opened
+            .settle_identity(Some(supplied))
+            .expect("a supplied identity settles");
+        let mut record = record_for(&opened);
+        record.version = crate::record::config::SUPPLIED_IDENTITY_RECORD_VERSION;
+        opened
+            .initialize_first_use(&record)
+            .expect("first use completes");
+        root
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_supplied_identity_names_a_new_box_and_survives_reopen() {
+        let operator_home = tempfile::tempdir().expect("operator home");
+        let parent = tempfile::tempdir().expect("box parent");
+        let supplied = "claude-code-wit-3f9a1c0e7b2d4a6f";
+        let root = configured_box_as(operator_home.path(), parent.path(), supplied);
+
+        for again in [None, Some(supplied)] {
+            let mut reopened = with_operator_home(operator_home.path(), || {
+                BoxRoot::open_directory(&root).expect("a configured box opens")
+            });
+            reopened
+                .settle_identity(again)
+                .expect("the stored identity settles");
+            assert!(reopened.is_configured());
+            assert_eq!(reopened.box_id(), supplied);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_supplied_identity_that_differs_from_the_stored_one_is_refused() {
+        let operator_home = tempfile::tempdir().expect("operator home");
+        let parent = tempfile::tempdir().expect("box parent");
+        let (generated_root, generated) = configured_box(operator_home.path(), parent.path());
+        let supplied_parent = tempfile::tempdir().expect("second box parent");
+        let supplied_root = configured_box_as(
+            operator_home.path(),
+            supplied_parent.path(),
+            "probe-3f9a1c0e7b2d4a6f",
+        );
+
+        for (root, stored, other) in [
+            (
+                &generated_root,
+                generated.as_str(),
+                "probe-3f9a1c0e7b2d4a6f",
+            ),
+            (
+                &supplied_root,
+                "probe-3f9a1c0e7b2d4a6f",
+                "probe-0000000000000000",
+            ),
+        ] {
+            let mut reopened = with_operator_home(operator_home.path(), || {
+                BoxRoot::open_directory(root).expect("a configured box opens")
+            });
+            let error = reopened
+                .settle_identity(Some(other))
+                .expect_err("a different identity must be refused");
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!("box ID {other:?} does not match"))
+                    && message.contains(&format!("whose ID is {stored:?}")),
+                "{message}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_malformed_supplied_identity_is_refused_before_the_box_has_one() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let operator_home = tempfile::tempdir().expect("operator home");
+        let parent = tempfile::tempdir().expect("box parent");
+        let root = parent.path().join("box");
+        std::fs::create_dir(&root).expect("caller-owned box directory");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+            .expect("private root mode");
+        for malformed in [
+            "",
+            "probe",
+            "probe-3f9a1c0e",
+            "probe-3F9A1C0E7B2D4A6F",
+            "-probe-3f9a1c0e7b2d4a6f",
+            ".probe-3f9a1c0e7b2d4a6f",
+            "pro/be-3f9a1c0e7b2d4a6f",
+            "claude-code-with-3f9a1c0e7b2d4a6f",
+        ] {
+            let mut opened = with_operator_home(operator_home.path(), || {
+                BoxRoot::open_directory(&root).expect("empty box opens")
+            });
+            let error = opened
+                .settle_identity(Some(malformed))
+                .expect_err("a malformed identity must be refused");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("box ID {malformed:?} is invalid")),
+                "{error}"
+            );
+            assert!(!root.join(PRIVATE_DIRECTORY).join(RECORD_FILE).exists());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_supplied_identity_generates_one_as_before() {
+        let operator_home = tempfile::tempdir().expect("operator home");
+        let parent = tempfile::tempdir().expect("box parent");
+        let (_root, generated) = configured_box(operator_home.path(), parent.path());
+        assert!(
+            generated
+                .strip_prefix("box-")
+                .is_some_and(|digits| digits.len() == 16
+                    && digits
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())),
+            "{generated}"
+        );
     }
 
     #[cfg(unix)]

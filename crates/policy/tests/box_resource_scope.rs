@@ -42,6 +42,7 @@ fn every_box_maps_to_resource_unused() {
         assert!(
             policy
                 .decide(&GovernedBox::assigned(name), &agent, &connect())
+                .0
                 .is_allow(),
             "{name} must map to Resource::\"unused\""
         );
@@ -57,6 +58,7 @@ fn an_unconstrained_resource_rule_still_applies() {
         assert!(
             policy
                 .decide(&GovernedBox::assigned(name), &agent, &connect())
+                .0
                 .is_allow(),
             "a bare resource scope must cover {name}"
         );

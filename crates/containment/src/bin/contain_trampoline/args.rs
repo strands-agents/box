@@ -14,9 +14,12 @@ pub(super) struct Args {
     pub(super) config_fd: Option<i32>,
     /// Expected SHA-256 digest of the serialized config bytes.
     pub(super) config_sha256: [u8; 32],
-    /// Optional inherited descriptor holding the serialized target environment, kept inert until
-    /// containment succeeds. Absent means the empty environment. Never on argv: argv is readable in
-    /// `/proc/<pid>/cmdline` for as long as the process lives.
+    /// Serialized target environment, kept inert until containment succeeds.
+    pub(super) target_env_json: String,
+    /// Optional inherited descriptor holding the serialized target environment. When present it
+    /// replaces `target_env_json`, which is then `{}`. A caller whose process list other
+    /// processes can read uses it, because argv is readable in `/proc/<pid>/cmdline` for as long
+    /// as the process lives.
     pub(super) target_env_fd: Option<i32>,
     /// Optional inherited descriptor for compact pre-exec failure reporting.
     pub(super) setup_status_fd: Option<i32>,
@@ -45,6 +48,7 @@ impl Args {
         let mut config = None;
         let mut config_fd = None;
         let mut config_sha256 = None;
+        let mut target_env_json = None;
         let mut target_env_fd = None;
         let mut setup_status_fd = None;
         let mut relay_control_fd = None;
@@ -83,6 +87,10 @@ impl Args {
                         ));
                     }
                     set_once(&mut config_fd, descriptor, "--config-fd")?;
+                }
+                "--target-env-json" => {
+                    let value = take_value(&mut argv, "--target-env-json")?;
+                    set_once(&mut target_env_json, value, "--target-env-json")?;
                 }
                 "--target-env-fd" => {
                     let value = take_value(&mut argv, "--target-env-fd")?;
@@ -161,11 +169,26 @@ impl Args {
             config.ok_or_else(|| ParseError::Invalid("--config is required".to_string()))?;
         let config_sha256 = config_sha256
             .ok_or_else(|| ParseError::Invalid("--config-sha256 is required".to_string()))?;
+        let target_env_json = match (target_env_json, target_env_fd) {
+            (Some(_), Some(_)) => {
+                return Err(ParseError::Invalid(
+                    "--target-env-json and --target-env-fd cannot both be given".to_string(),
+                ));
+            }
+            (Some(json), None) => json,
+            (None, Some(_)) => "{}".to_string(),
+            (None, None) => {
+                return Err(ParseError::Invalid(
+                    "--target-env-json is required (or --target-env-fd)".to_string(),
+                ));
+            }
+        };
         Ok(Args {
             launch_gate_fd,
             config,
             config_fd,
             config_sha256,
+            target_env_json,
             target_env_fd,
             setup_status_fd,
             relay_control_fd,
@@ -205,7 +228,7 @@ fn parse_sha256(value: &str) -> Result<[u8; 32], ParseError> {
     }
 
     let mut digest = [0_u8; 32];
-    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+    for (index, pair) in value.as_bytes().as_chunks::<2>().0.iter().enumerate() {
         digest[index] = (hex_value(pair[0]) << 4) | hex_value(pair[1]);
     }
     Ok(digest)
@@ -236,6 +259,8 @@ mod tests {
             "c.json",
             "--config-sha256",
             DIGEST,
+            "--target-env-json",
+            r#"{"A":"b"}"#,
             "--",
             "python3",
             "h.py",
@@ -251,7 +276,7 @@ mod tests {
                 0x89, 0xab, 0xcd, 0xef,
             ]
         );
-        assert_eq!(a.target_env_fd, None);
+        assert_eq!(a.target_env_json, r#"{"A":"b"}"#);
         assert_eq!(a.setup_status_fd, None);
         assert_eq!(a.command, vec!["python3".to_string(), "h.py".to_string()]);
         assert_eq!(a.argv0, None);
@@ -264,6 +289,8 @@ mod tests {
             "c.json",
             "--config-sha256",
             DIGEST,
+            "--target-env-json",
+            "{}",
             "--argv0",
             "/proj/.venv/bin/python",
             "--",
@@ -283,6 +310,8 @@ mod tests {
             "c.json",
             "--config-sha256",
             DIGEST,
+            "--target-env-json",
+            "{}",
             "--setup-status-fd",
             "9",
             "--",
@@ -302,6 +331,8 @@ mod tests {
             "8",
             "--config-sha256",
             DIGEST,
+            "--target-env-json",
+            "{}",
             "--",
             "node",
         ])
@@ -318,6 +349,8 @@ mod tests {
                 "c.json",
                 "--config-sha256",
                 DIGEST,
+                "--target-env-json",
+                "{}",
                 "--setup-status-fd",
                 "2",
                 "--",
@@ -330,6 +363,8 @@ mod tests {
     #[test]
     fn parses_one_word_command() {
         let a = parse(&[
+            "--target-env-json",
+            "{}",
             "--config-sha256",
             DIGEST,
             "--config",
@@ -351,6 +386,8 @@ mod tests {
             "c.json",
             "--config-sha256",
             DIGEST,
+            "--target-env-json",
+            "{}",
             "--",
             "node",
             "--config-sha256",
@@ -381,12 +418,27 @@ mod tests {
     #[test]
     fn missing_command_is_invalid() {
         assert!(matches!(
-            parse(&["--config", "c.json", "--config-sha256", DIGEST,]),
+            parse(&[
+                "--config",
+                "c.json",
+                "--config-sha256",
+                DIGEST,
+                "--target-env-json",
+                "{}"
+            ]),
             Err(ParseError::Invalid(_))
         ));
         // `--` with nothing after it is still an empty command.
         assert!(matches!(
-            parse(&["--config", "s.json", "--config-sha256", DIGEST, "--"]),
+            parse(&[
+                "--config",
+                "s.json",
+                "--config-sha256",
+                DIGEST,
+                "--target-env-json",
+                "{}",
+                "--"
+            ]),
             Err(ParseError::Invalid(_))
         ));
     }
@@ -401,6 +453,17 @@ mod tests {
             parse(&["--config", "c", "--", "x"]),
             Err(ParseError::Invalid(m)) if m.contains("--config-sha256")
         ));
+        assert!(matches!(
+            parse(&[
+                "--config",
+                "c",
+                "--config-sha256",
+                DIGEST,
+                "--",
+                "x"
+            ]),
+            Err(ParseError::Invalid(m)) if m.contains("--target-env-json")
+        ));
     }
 
     #[test]
@@ -414,8 +477,8 @@ mod tests {
             Err(ParseError::Invalid(m)) if m.contains("--config-sha256")
         ));
         assert!(matches!(
-            parse(&["--target-env-fd"]),
-            Err(ParseError::Invalid(m)) if m.contains("--target-env-fd")
+            parse(&["--target-env-json"]),
+            Err(ParseError::Invalid(m)) if m.contains("--target-env-json")
         ));
     }
 
@@ -442,6 +505,8 @@ mod tests {
                     "c",
                     "--config-sha256",
                     digest,
+                    "--target-env-json",
+                    "{}",
                     "--",
                     "x"
                 ]),
@@ -460,6 +525,8 @@ mod tests {
                 "b",
                 "--config-sha256",
                 DIGEST,
+                "--target-env-json",
+                "{}",
                 "--",
                 "x"
             ]),
@@ -471,7 +538,14 @@ mod tests {
     #[test]
     fn relay_control_fd_parses_and_refuses_collisions() {
         let invocation = |relay: &[&str]| {
-            let mut argv = vec!["--config", "c.json", "--config-sha256", DIGEST];
+            let mut argv = vec![
+                "--config",
+                "c.json",
+                "--config-sha256",
+                DIGEST,
+                "--target-env-json",
+                "{}",
+            ];
             argv.extend_from_slice(relay);
             argv.extend_from_slice(&["--", "node"]);
             parse(&argv)
@@ -497,6 +571,50 @@ mod tests {
     }
 
     #[test]
+    fn every_descriptor_flag_refuses_standard_streams_and_invalid_numbers() {
+        for flag in [
+            "--config-fd",
+            "--setup-status-fd",
+            "--launch-gate-fd",
+            "--relay-control-fd",
+        ] {
+            for value in ["-1", "0", "1", "2", "2147483648", "not-a-number"] {
+                let error = parse(&[
+                    "--config",
+                    "c.json",
+                    "--config-sha256",
+                    DIGEST,
+                    "--target-env-json",
+                    "{}",
+                    flag,
+                    value,
+                    "--",
+                    "program",
+                ])
+                .unwrap_err();
+                let expected = if flag == "--launch-gate-fd" {
+                    if ["-1", "0", "1", "2"].contains(&value) {
+                        "launch gate must not use standard streams".to_owned()
+                    } else {
+                        "invalid launch gate descriptor".to_owned()
+                    }
+                } else if ["-1", "0", "1", "2"].contains(&value) {
+                    format!("{flag} must not collide with stdin/stdout/stderr")
+                } else {
+                    format!("{flag} must be a decimal file descriptor")
+                };
+                assert_eq!(error, ParseError::Invalid(expected), "{flag} {value}");
+            }
+            assert!(
+                matches!(parse(&[flag]), Err(ParseError::Invalid(message)) if message.contains(flag)),
+                "{flag} needs a value"
+            );
+        }
+    }
+
+    /// **The environment can arrive by descriptor instead of on argv**, so it never shows in
+    /// `/proc/<pid>/cmdline`.
+    #[test]
     fn parses_a_target_environment_descriptor() {
         let a = parse(&[
             "--config",
@@ -510,11 +628,12 @@ mod tests {
         ])
         .expect("valid");
         assert_eq!(a.target_env_fd, Some(9));
+        assert_eq!(a.target_env_json, "{}");
     }
 
     #[test]
     fn a_target_environment_descriptor_must_not_be_a_standard_stream() {
-        for value in ["0", "1", "2", "x"] {
+        for value in ["-1", "0", "1", "2", "x"] {
             assert!(
                 parse(&[
                     "--config",
@@ -532,22 +651,95 @@ mod tests {
         }
     }
 
-    /// **The environment never rides on argv.** The flag that carried it is gone, so a caller that
-    /// still passes it fails loudly instead of leaking it into `/proc/<pid>/cmdline`.
+    /// One source for the environment: a caller that names both has a bug, and guessing which one
+    /// it meant would hide it.
     #[test]
-    fn the_inline_environment_flag_is_refused() {
+    fn the_inline_and_descriptor_environments_are_exclusive() {
+        let error = parse(&[
+            "--config",
+            "c.json",
+            "--config-sha256",
+            DIGEST,
+            "--target-env-json",
+            "{}",
+            "--target-env-fd",
+            "9",
+            "--",
+            "true",
+        ])
+        .unwrap_err();
+        assert!(matches!(error, ParseError::Invalid(message) if message.contains("cannot both")));
+    }
+
+    #[test]
+    fn launch_gate_is_retained_and_cannot_be_declared_twice() {
+        let mut argv = vec![
+            "--config",
+            "c.json",
+            "--config-sha256",
+            DIGEST,
+            "--target-env-json",
+            "{}",
+            "--launch-gate-fd",
+            "3",
+        ];
+        let mut valid = argv.clone();
+        valid.extend(["--", "program"]);
+        assert_eq!(parse(&valid).unwrap().launch_gate_fd, Some(3));
+        argv.extend(["--launch-gate-fd", "4", "--", "program"]);
         assert!(
-            parse(&[
-                "--config",
-                "c.json",
-                "--config-sha256",
-                DIGEST,
-                "--target-env-json",
-                "{}",
-                "--",
-                "true",
-            ])
-            .is_err()
+            matches!(parse(&argv), Err(ParseError::Invalid(message)) if message.contains("more than once"))
         );
+    }
+
+    #[test]
+    fn every_value_flag_reports_a_missing_value() {
+        for flag in [
+            "--config",
+            "--config-sha256",
+            "--target-env-json",
+            "--argv0",
+        ] {
+            assert!(
+                matches!(parse(&[flag]), Err(ParseError::Invalid(message)) if message.contains(flag)),
+                "{flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_required_fields_name_the_missing_field() {
+        for (argv, expected) in [
+            (vec!["--", "program"], "--config"),
+            (
+                vec!["--config", "c.json", "--", "program"],
+                "--config-sha256",
+            ),
+            (
+                vec![
+                    "--config",
+                    "c.json",
+                    "--config-sha256",
+                    DIGEST,
+                    "--",
+                    "program",
+                ],
+                "--target-env-json",
+            ),
+        ] {
+            assert!(
+                matches!(parse(&argv), Err(ParseError::Invalid(message)) if message.contains(expected)),
+                "{expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn digest_rejects_uppercase_nonhex_and_multibyte_input() {
+        for value in ["A".repeat(64), "g".repeat(64), "é".repeat(32)] {
+            assert!(
+                matches!(parse_sha256(&value), Err(ParseError::Invalid(message)) if message.contains("lowercase hexadecimal"))
+            );
+        }
     }
 }

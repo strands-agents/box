@@ -5,15 +5,19 @@
 //! | [`McpTarget`] | the decided method and the item it names, or `None` for a frame that asks nothing |
 //! | [`mcp_denial_response`] | the JSON-RPC error a refused request receives |
 //! | [`canonicalize_mcp_frame`] | the `resources/read` frame the server receives, with its canonical URI |
+//! | [`refuse_duplicate_mcp_keys`] | the refusal of a frame that repeats a key inside one object |
 
+mod duplicate;
 mod uri;
 
 use std::io;
 
 use serde_json::Value;
 
+#[cfg(all(test, feature = "tls-intercept"))]
+pub(crate) use uri::generated_spellings;
 #[cfg(feature = "tls-intercept")]
-pub(crate) use uri::{decode_unreserved, remove_dot_segments};
+pub(crate) use uri::normalize_path;
 
 /// The methods a stdio server receives undecided, because its connection cannot start without them.
 const STDIO_UNDECIDED_METHODS: [&str; 4] = [
@@ -63,6 +67,7 @@ impl McpTarget {
         if frame.iter().all(u8::is_ascii_whitespace) {
             return Ok(None);
         }
+        refuse_duplicate_mcp_keys(frame)?;
         let refuse = |reason: String| io::Error::new(io::ErrorKind::InvalidData, reason);
 
         let parsed: Value = serde_json::from_slice(frame).map_err(|error| {
@@ -79,6 +84,15 @@ impl McpTarget {
             ));
         };
         let method = match object.get("method") {
+            Some(Value::String(_))
+                if object.contains_key("result") || object.contains_key("error") =>
+            {
+                return Err(refuse(
+                    "an MCP frame that carries both a method and a result or error is refused: the \
+                     box cannot say whether it is a request or a response"
+                        .to_string(),
+                ));
+            }
             Some(Value::String(method)) => method.as_str(),
             None if object.contains_key("result") || object.contains_key("error") => {
                 return Err(refuse(
@@ -118,9 +132,9 @@ impl McpTarget {
         let identity = match method {
             "tools/call" => McpTargetIdentity::Tool(named("name")?),
             "prompts/get" => McpTargetIdentity::Prompt(named("name")?),
-            "resources/read" => {
-                McpTargetIdentity::Resource(uri::canonicalize_resource_uri(&named("uri")?))
-            }
+            "resources/read" => McpTargetIdentity::Resource(
+                uri::canonicalize_resource_uri(&named("uri")?).map_err(refuse)?,
+            ),
             other => McpTargetIdentity::Method(other.to_string()),
         };
         Ok(Some(Self {
@@ -192,6 +206,11 @@ pub fn mcp_denial_response(frame: &[u8], message: &str) -> Option<String> {
         })
         .to_string(),
     )
+}
+
+/// Refuse a frame in which one object repeats a key, at any depth.
+pub fn refuse_duplicate_mcp_keys(frame: &[u8]) -> io::Result<()> {
+    duplicate::refuse_duplicate_keys(frame)
 }
 
 /// The frame with its `resources/read` URI canonicalized, or `None` when nothing changes.
@@ -339,6 +358,19 @@ mod tests {
             );
             assert!(classify(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call"}"#).is_err());
             assert!(classify(br#"{"jsonrpc":"2.0","id":1,"method":"resources/read"}"#).is_err());
+            for answer in [
+                &br#"{"jsonrpc":"2.0","id":5,"method":"ping","result":{"action":"accept"}}"#[..],
+                br#"{"jsonrpc":"2.0","id":5,"method":"ping","error":{"code":-1,"message":"x"}}"#,
+                br#"{"jsonrpc":"2.0","id":5,"method":"notifications/x","result":{}}"#,
+            ] {
+                let error = classify(answer).expect_err("a frame with a method and an answer");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("both a method and a result or error"),
+                    "the wrong refusal: {error}"
+                );
+            }
         }
     }
 

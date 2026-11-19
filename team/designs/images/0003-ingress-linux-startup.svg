@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="1048" viewBox="0 0 1280 1048" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+<defs><marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8a9099"/></marker><marker id="an" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1f8f4e"/></marker></defs>
+<rect x="0" y="0" width="1280" height="1048" rx="18" fill="#ffffff"/>
+<text x="40" y="52" font-size="26" font-weight="700" fill="#1d2228">Linux startup with Ingress Relay</text>
+<text x="40" y="82" font-size="15" fill="#6b7280">Grey steps are what Box does today. Green steps are what ingress adds.</text>
+<rect x="70" y="110" width="240" height="56" rx="10" fill="#f4f5f7" stroke="#d6d9de"/>
+<text x="190" y="138" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Box's trusted process</text>
+<text x="190" y="158" text-anchor="middle" font-size="12.5" fill="#6b7280">(TCB)</text>
+<line x1="190" y1="168" x2="190" y2="940" stroke="#d6d9de" stroke-width="2" stroke-dasharray="5 6"/>
+<rect x="400" y="110" width="240" height="44" rx="10" fill="#f4f5f7" stroke="#d6d9de"/>
+<text x="520" y="138" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Box's launcher</text>
+<line x1="520" y1="168" x2="520" y2="940" stroke="#d6d9de" stroke-width="2" stroke-dasharray="5 6"/>
+<rect x="710" y="110" width="240" height="56" rx="10" fill="#f4f5f7" stroke="#d6d9de"/>
+<text x="830" y="138" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">PID 1</text>
+<text x="830" y="158" text-anchor="middle" font-size="12.5" fill="#6b7280">Box's code, in the sandbox</text>
+<line x1="830" y1="168" x2="830" y2="940" stroke="#d6d9de" stroke-width="2" stroke-dasharray="5 6"/>
+<rect x="990" y="110" width="240" height="56" rx="10" fill="#f4f5f7" stroke="#d6d9de"/>
+<text x="1110" y="138" text-anchor="middle" font-size="16" font-weight="650" fill="#1d2228">Agent</text>
+<text x="1110" y="158" text-anchor="middle" font-size="12.5" fill="#6b7280">untrusted</text>
+<line x1="1110" y1="168" x2="1110" y2="940" stroke="#d6d9de" stroke-width="2" stroke-dasharray="5 6"/>
+<rect x="690" y="92" width="560" height="872" rx="16" fill="none" stroke="#9aa3ae" stroke-width="1.5" stroke-dasharray="3 5"/>
+<text x="970.0" y="84" text-anchor="middle" font-size="13" font-weight="600" fill="#6b7280">inside the sandbox (own network namespace)</text>
+<rect x="28" y="190" width="1224" height="50" rx="10" fill="#e3f5ea"/>
+<circle cx="58" cy="214" r="15" fill="#1f8f4e"/>
+<text x="58" y="219" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">1</text>
+<path d="M190,202 h28 v18 h-24" fill="none" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="230" y="216" text-anchor="start" font-size="15" font-weight="600" fill="#0f5c31">Bind the ingress listener on listen (e.g. 0.0.0.0:8080)</text>
+<circle cx="58" cy="272" r="15" fill="#8a9099"/>
+<text x="58" y="277" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">2</text>
+<path d="M190,260 h28 v18 h-24" fill="none" stroke="#8a9099" stroke-width="2.4" marker-end="url(#ag)"/>
+<text x="230" y="274" text-anchor="start" font-size="15" font-weight="500" fill="#3d434b">Create the Unix socket channel</text>
+<circle cx="58" cy="330" r="15" fill="#8a9099"/>
+<text x="58" y="335" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">3</text>
+<line x1="190" y1="336" x2="512" y2="336" stroke="#8a9099" stroke-width="2.4" marker-end="url(#ag)"/>
+<text x="355.0" y="326" text-anchor="middle" font-size="15" font-weight="500" fill="#3d434b">Start the sandbox, passing the sandbox-side Unix socket</text>
+<circle cx="58" cy="388" r="15" fill="#8a9099"/>
+<text x="58" y="393" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">4</text>
+<path d="M520,376 h28 v18 h-24" fill="none" stroke="#8a9099" stroke-width="2.4" marker-end="url(#ag)"/>
+<text x="560" y="390" text-anchor="start" font-size="15" font-weight="500" fill="#3d434b">Enter the sandbox's namespaces (own network, loopback only)</text>
+<circle cx="58" cy="446" r="15" fill="#8a9099"/>
+<text x="58" y="451" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">5</text>
+<line x1="520" y1="452" x2="198" y2="452" stroke="#8a9099" stroke-width="2.4" marker-end="url(#ag)"/>
+<text x="355.0" y="442" text-anchor="middle" font-size="15" font-weight="500" fill="#3d434b">Send the egress listeners to Box over the Unix socket channel</text>
+<rect x="28" y="480" width="1224" height="50" rx="10" fill="#e3f5ea"/>
+<circle cx="58" cy="504" r="15" fill="#1f8f4e"/>
+<text x="58" y="509" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">6</text>
+<path d="M520,492 h28 v18 h-24" fill="none" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="560" y="506" text-anchor="start" font-size="15" font-weight="600" fill="#0f5c31">Mark the sandbox-side Unix socket close-on-exec</text>
+<circle cx="58" cy="562" r="15" fill="#8a9099"/>
+<text x="58" y="567" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">7</text>
+<line x1="520" y1="568" x2="822" y2="568" stroke="#8a9099" stroke-width="2.4" marker-end="url(#ag)"/>
+<text x="675.0" y="558" text-anchor="middle" font-size="15" font-weight="500" fill="#3d434b">Start PID 1</text>
+<rect x="28" y="596" width="1224" height="50" rx="10" fill="#e3f5ea"/>
+<circle cx="58" cy="620" r="15" fill="#1f8f4e"/>
+<text x="58" y="625" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">8</text>
+<path d="M830,608 h28 v18 h-24" fill="none" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="870" y="622" text-anchor="start" font-size="15" font-weight="600" fill="#0f5c31">Keep the sandbox-side Unix socket (keep list)</text>
+<circle cx="58" cy="678" r="15" fill="#8a9099"/>
+<text x="58" y="683" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">9</text>
+<line x1="830" y1="684" x2="1102" y2="684" stroke="#8a9099" stroke-width="2.4" marker-end="url(#ag)"/>
+<text x="970.0" y="674" text-anchor="middle" font-size="15" font-weight="500" fill="#3d434b">Start the agent; its copy of the sandbox-side Unix socket closes at exec</text>
+<circle cx="58" cy="736" r="15" fill="#8a9099"/>
+<text x="58" y="741" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">10</text>
+<path d="M830,724 h28 v18 h-24" fill="none" stroke="#8a9099" stroke-width="2.4" marker-end="url(#ag)"/>
+<text x="870" y="738" text-anchor="start" font-size="15" font-weight="500" fill="#3d434b">Drop PID 1's own capabilities and lock its privileges</text>
+<rect x="28" y="770" width="1224" height="50" rx="10" fill="#e3f5ea"/>
+<circle cx="58" cy="794" r="15" fill="#1f8f4e"/>
+<text x="58" y="799" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">11</text>
+<path d="M830,782 h28 v18 h-24" fill="none" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="870" y="796" text-anchor="start" font-size="15" font-weight="600" fill="#0f5c31">Then start the inbound-connector thread</text>
+<circle cx="58" cy="852" r="15" fill="#8a9099"/>
+<text x="58" y="857" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">12</text>
+<path d="M1110,840 h28 v18 h-24" fill="none" stroke="#8a9099" stroke-width="2.4" marker-end="url(#ag)"/>
+<text x="1096" y="854" text-anchor="end" font-size="15" font-weight="500" fill="#3d434b">Bind workload_port in the sandbox's network</text>
+<rect x="28" y="886" width="1224" height="50" rx="10" fill="#e3f5ea"/>
+<circle cx="58" cy="910" r="15" fill="#1f8f4e"/>
+<text x="58" y="915" text-anchor="middle" font-size="14" font-weight="700" fill="#ffffff">13</text>
+<path d="M190,898 h28 v18 h-24" fill="none" stroke="#1f8f4e" stroke-width="2.4" marker-end="url(#an)"/>
+<text x="230" y="912" text-anchor="start" font-size="15" font-weight="600" fill="#0f5c31">Keep the Box-side Unix socket; start the ingress accept loop</text>
+<rect x="40" y="998" width="22" height="16" rx="4" fill="#e3f5ea" stroke="#1f8f4e"/><text x="72" y="1011" font-size="14" fill="#1d2228">added by ingress</text>
+<rect x="230" y="998" width="22" height="16" rx="4" fill="#ffffff" stroke="#8a9099"/><text x="262" y="1011" font-size="14" fill="#1d2228">Box today (egress)</text>
+<text x="1240" y="1011" text-anchor="end" font-size="13" fill="#6b7280">After step 13 the Unix socket channel stays open: Box asks PID 1 for one socket per caller.</text>
+</svg>

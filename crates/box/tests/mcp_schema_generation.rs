@@ -63,9 +63,12 @@ fn server_script(program: &str, tools: &Value) -> String {
     format!(
         r#"#!/bin/sh
 set -eu
+IFS= read -r probe
+printf '%s\n' "$probe" > "{program}.trace"
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"error":{{"code":-32601,"message":"legacy"}}}}'
 IFS= read -r initialize
 printf '%s' "$HOME" > "{program}.home"
-printf '%s\n' "$initialize" > "{program}.trace"
+printf '%s\n' "$initialize" >> "{program}.trace"
 printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2024-11-05","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"{program}","version":"0.1"}}}}}}'
 IFS= read -r initialized
 printf '%s\n' "$initialized" >> "{program}.trace"
@@ -142,6 +145,8 @@ fn install_duplicate_tool_server(bin: &Path, program: &str, across_pages: bool) 
     let script = format!(
         r#"#!/bin/sh
 set -eu
+IFS= read -r probe
+printf '%s\n' '{{"jsonrpc":"2.0","id":0,"error":{{"code":-32601,"message":"legacy"}}}}'
 IFS= read -r initialize
 printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2024-11-05","capabilities":{{"tools":{{}}}},"serverInfo":{{"name":"duplicate","version":"0.1"}}}}}}'
 IFS= read -r initialized
@@ -463,10 +468,109 @@ fn generate_schema_uses_the_selected_config_outside_the_operator_home() {
         std::fs::read(directory.join("events.dwschema")).expect("read events"),
         EVENT_SCHEMA
     );
-    assert_eq!(trace(&working, "chosen-mcp").len(), 3);
+    assert_eq!(trace(&working, "chosen-mcp").len(), 4);
     assert!(!root.path().join("chosen-mcp.trace").exists());
     assert!(!root.path().join("schemas").exists());
     assert_existing_artifacts(&existing);
+}
+
+#[test]
+fn generate_schema_uses_an_absolute_command_instead_of_a_path_decoy() {
+    let home = tempfile::tempdir().expect("an operator home");
+    let workspace = home.path().join("workspace");
+    let selected = home.path().join("selected tools");
+    let decoy = home.path().join("bin");
+    for directory in [&workspace, &selected, &decoy] {
+        std::fs::create_dir(directory).expect("create a fixture directory");
+    }
+    install_server(&selected, "chosen-mcp", "selected_tool", "value");
+    install_server(&decoy, "chosen-mcp", "decoy_tool", "wrong");
+    let config = workspace.join("box.toml");
+    let executable = toml::Value::String(selected.join("chosen-mcp").display().to_string());
+    std::fs::write(
+        &config,
+        format!(
+            "name = \"selected\"\nbox_dir = \"/nonexistent/schema-generation\"\n\
+             [mcp.selected]\ntype = \"stdio\"\ncommand = [{executable}]\n"
+        ),
+    )
+    .expect("write the selected executable");
+
+    let output = Command::new(box_binary())
+        .args(["policy", "generate-schema", "--config"])
+        .arg(&config)
+        .args(["--output-dir", "schemas"])
+        .env("HOME", home.path())
+        .env("PATH", format!("{}:/usr/bin:/bin", decoy.display()))
+        .current_dir(&workspace)
+        .output()
+        .expect("run the schema command");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actions = std::fs::read_to_string(workspace.join("schemas/actions.cedarschema"))
+        .expect("read the generated actions");
+    assert!(
+        actions.contains(r#"action "selected_tool" appliesTo"#),
+        "{actions}"
+    );
+    assert!(
+        !actions.contains(r#"action "decoy_tool" appliesTo"#),
+        "{actions}"
+    );
+    let requests = trace(&workspace, "chosen-mcp");
+    assert_eq!(requests.len(), 4, "{requests:?}");
+    assert_eq!(requests[0]["method"], "server/discover");
+    assert_eq!(requests[1]["method"], "initialize");
+    assert_eq!(requests[2]["method"], "notifications/initialized");
+    assert_eq!(requests[3]["method"], "tools/list");
+}
+
+#[test]
+fn generate_schema_writes_the_actions_of_each_tool_grammar() {
+    const GRAMMAR: &str = "[tool.git]\ncommand = [\"/usr/bin/git\"]\n[tool.git.grammar]\n\
+        format = 1\nversion = 1\nname = \"git\"\nprogram = \"git\"\n\
+        [tool.git.grammar.shell.push]\nusage = \"git push [<remote>]\"\n";
+    let home = tempfile::tempdir().expect("an operator home");
+    let workspace = home.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("create the workspace");
+    let config = workspace.join("box.toml");
+    std::fs::write(
+        &config,
+        format!(
+            "name = \"grammar\"\nbox_dir = \"/nonexistent/schema-generation\"\n{GRAMMAR}\
+             [experimental-features]\ntool-grammars = true\n"
+        ),
+    )
+    .expect("write the config");
+
+    let output = Command::new(box_binary())
+        .args(["policy", "generate-schema", "--config"])
+        .arg(&config)
+        .args(["--output-dir", "schemas"])
+        .env("HOME", home.path())
+        .current_dir(&workspace)
+        .output()
+        .expect("run the schema command");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let actions = std::fs::read_to_string(workspace.join("schemas/actions.cedarschema"))
+        .expect("read actions");
+    assert!(actions.contains("namespace Tool::git {"), "{actions}");
+    assert!(actions.contains(r#"action "push" in ["*"]"#), "{actions}");
+    assert!(
+        actions.contains(r#"action "unmodeled" appliesTo"#),
+        "{actions}"
+    );
+    let (_, warnings) = Schema::from_cedarschema_str(&actions).expect("the composed schema parses");
+    assert_eq!(warnings.count(), 0);
 }
 
 #[test]
@@ -657,11 +761,12 @@ fn generate_schema_writes_the_engine_composition_from_a_nested_directory() {
 
     for program in ["fake-issues-mcp", "fake-aws-mcp"] {
         let requests = trace(&nested, program);
-        assert_eq!(requests.len(), 3, "{program} received {requests:?}");
-        assert_eq!(requests[0]["method"], "initialize");
-        assert_eq!(requests[0]["params"]["protocolVersion"], "2024-11-05");
-        assert_eq!(requests[1]["method"], "notifications/initialized");
-        assert_eq!(requests[2]["method"], "tools/list");
+        assert_eq!(requests.len(), 4, "{program} received {requests:?}");
+        assert_eq!(requests[0]["method"], "server/discover");
+        assert_eq!(requests[1]["method"], "initialize");
+        assert_eq!(requests[1]["params"]["protocolVersion"], "2024-11-05");
+        assert_eq!(requests[2]["method"], "notifications/initialized");
+        assert_eq!(requests[3]["method"], "tools/list");
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1031,6 +1136,8 @@ fn paginated_tools_and_a_server_ping_complete_one_schema() {
         &bin.join("fake-paged-mcp"),
         r##"#!/bin/sh
 set -eu
+IFS= read -r probe
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"legacy"}}'
 IFS= read -r initialize
 printf '%s\n' "$initialize" > paged.trace
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"paged","version":"0.1"}}}'
@@ -1187,6 +1294,8 @@ fn an_incompatible_initialize_result_is_refused_before_tools_list() {
         &bin.join("fake-future-mcp"),
         r#"#!/bin/sh
 set -eu
+IFS= read -r probe
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"legacy"}}'
 IFS= read -r initialize
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2099-01-01","capabilities":{},"serverInfo":{"name":"future","version":"0.1"}}}'
 "#,
@@ -1237,6 +1346,8 @@ fn a_server_without_the_tools_capability_is_refused_before_tools_list() {
         &bin.join("fake-no-tools-mcp"),
         r#"#!/bin/sh
 set -eu
+IFS= read -r probe
+printf '%s\n' '{"jsonrpc":"2.0","id":0,"error":{"code":-32601,"message":"legacy"}}'
 IFS= read -r initialize
 printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{},"serverInfo":{"name":"no-tools","version":"0.1"}}}'
 "#,

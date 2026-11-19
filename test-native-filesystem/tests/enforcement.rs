@@ -1,6 +1,7 @@
 //! Real Endpoint Security enforcement by the signed product, never the mapper alone.
 #![cfg(target_os = "macos")]
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -138,6 +139,93 @@ write = [{}]
 }
 
 const PERMIT: &str = "permit(principal, action, resource);";
+
+#[test]
+fn permission_changes_obey_dogwood_for_files_directories_and_children() {
+    for directory in [false, true] {
+        for operation in ["chmod", "fchmod"] {
+            for child in [false, true] {
+                let fixture = Fixture::new(
+                    r#"permit(principal, action, resource);
+forbid(principal, action == Box::Action::"fs:write", resource)
+when {
+    context.input.path == "~/workspace/protected" &&
+    context.input.operation == Box::FsWriteOperation::"set_permissions"
+};"#,
+                    true,
+                );
+                for name in ["allowed", "protected"] {
+                    let path = fixture.workspace.join(name);
+                    if directory {
+                        std::fs::create_dir(&path).unwrap();
+                    } else {
+                        std::fs::write(&path, "original").unwrap();
+                    }
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700))
+                        .unwrap();
+                }
+                fixture.run(operation, "allowed", "-", "allow", child);
+                let output = fixture.run(operation, "protected", "-", "deny", child);
+                let records: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stderr)
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("MACOS_FILE_DIAGNOSTIC "))
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .filter(|record: &serde_json::Value| {
+                        record["event"] == "setmode" && record["path"] == "~/workspace/protected"
+                    })
+                    .collect();
+                assert_eq!(records.len(), 1, "{output:?}");
+                assert_eq!(records[0]["origin"], "dogwood", "{output:?}");
+                assert_eq!(records[0]["verdict"], "deny", "{output:?}");
+                for (name, mode) in [("allowed", 0o500), ("protected", 0o700)] {
+                    let path = fixture.workspace.join(name);
+                    assert_eq!(path.metadata().unwrap().permissions().mode() & 0o777, mode);
+                    if !directory {
+                        assert_eq!(std::fs::read(&path).unwrap(), b"original");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn permission_changes_preserve_selection_and_static_grants() {
+    for enabled in [false, true] {
+        for writable in [false, true] {
+            let fixture = Fixture::new(
+                r#"permit(principal, action, resource);
+forbid(principal, action == Box::Action::"fs:write", resource)
+when { context.input.operation == Box::FsWriteOperation::"set_permissions" };"#,
+                writable,
+            );
+            let path = fixture.workspace.join("file");
+            std::fs::write(&path, "original").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let allowed = writable && !enabled;
+            let command = fixture.command(
+                "chmod",
+                "file",
+                "-",
+                if allowed { "allow" } else { "deny" },
+                false,
+            );
+            process_selection(&fixture, enabled, "");
+            let output = bounded_output(command);
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(
+                path.metadata().unwrap().permissions().mode() & 0o777,
+                if allowed { 0o500 } else { 0o700 }
+            );
+            if !enabled {
+                assert!(
+                    !String::from_utf8_lossy(&output.stderr).contains("MACOS_FILE_DIAGNOSTIC "),
+                    "{output:?}"
+                );
+            }
+        }
+    }
+}
 
 #[test]
 fn native_and_shell_rename_share_source_history_order() {

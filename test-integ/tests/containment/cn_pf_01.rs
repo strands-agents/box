@@ -22,7 +22,7 @@ det_case! {
         b.apply_policy(
             r#"@id("tool_spawn") permit (principal, action == Box::Action::"shell:spawn", resource);"#,
         );
-        let tool = b.built_tool();
+        let tool = b.configured_tool();
         let tree = b.workspace().with_file_name("spawn-latency-tree");
         let entries = plant_tree(&tree);
         let grant = serde_json::to_string(&tree.to_string_lossy()).unwrap();

@@ -12,7 +12,7 @@
 //!
 //! Usage: `box-mcp-call-probe <broker-socket> <server> <tool> [arguments-json]`
 //!   - `<broker-socket>`  path to the box's broker socket (`.../run/box.sock`).
-//!   - `<server>`         the declared MCP server name (the `[mcp.<name>]` key).
+//!   - `<server>`         the program of a server whose `command` is that program alone.
 //!   - `<tool>`           the tool to call.
 //!   - `[arguments-json]` the `tools/call` arguments object; defaults to `{}`.
 //!
@@ -84,6 +84,7 @@ async fn run(
         Body::Open {
             mode: Interpreter::Mcp {
                 server: server.to_string(),
+                arguments: Vec::new(),
             },
         },
     )

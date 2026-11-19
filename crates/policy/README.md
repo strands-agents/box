@@ -18,8 +18,8 @@ enforcement point.
 
 ## Public Interface
 
-The façade exports **35 names with `--all-features`, and 31 by default.** The adapter features add
-the four names in the last row.
+The façade exports **60 names with `--all-features`, and 54 by default.** The adapter features add
+the six names in the last row.
 
 `PrincipalKind` left on 2026-08-18. The three enforcement-point principals collapsed into one
 `Agent`, so a kind enum named a distinction that no longer exists.
@@ -31,23 +31,28 @@ the four names in the last row.
 | `Principal` | Integration metadata for the fixed `Box::Agent::"self"` identity. |
 | `GovernedBox` | Integration metadata for the box that owns the authority. |
 | `Request`, `FsAccess`, `FsOperation` | Typed authorization request. |
+| `RequestId` | Opaque identifier returned for a recorded request and carried into its outcome. |
 | `ApprovedPath`, `PathResolver`, `PathRefusal` | The resolved path a `Request::Fs` demands, the only public minter of one, and why a mint fails. |
 | `Decision`, `DenyReason`, `RuleId` | Authorization verdict and determining rule. |
 | `Outcome`, `Delivery`, `FsResult` | One completed effect, submitted as history. |
+| `PendingToolResponse`, `McpReply` | The per-tool `::response` an allowed `tools/call` owes, from `refine_tool_call` to `record_tool_response` (or `record_tool_reply`, which reads the reply frame and its `structuredContent`), and how the call ended. |
 | `EffectivePolicy`, `ENGINE_ID` | Active engine and source identity. |
 | `PolicyError` | Startup and history-recording errors. |
+| `PolicyCheck`, `Finding`, `RuleRef`, `Location` | What `check` finds in a policy: each finding's message, rules, source location, and help. |
 | `SchemaStage`, `PolicyDiagnostic`, `PolicyStagingError` | Runtime MCP schema staging results and errors. |
 | `generate_mcp_schema`, `validate_mcp_schema_composition`, `compose_action_schema`, `McpSchemaError` | MCP schema generation, validation, composition, and errors. |
 | `event_schema_source` | The embedded Dogwood event schema text. |
 | `DecisionObserver` | A synchronous sink for each policy verdict. |
-| `EgressPolicyInterceptor` (`egress-adapter`), `ShellPolicyInterceptor` (`shell-adapter`), `ScriptPolicyInterceptor` + `ScriptPermit` (`script-adapter`) | One adapter per enforcement point, each behind its own feature. |
+| `ToolGrammar`, `ToolGrammars`, `ToolGrammarError` | One checked tool grammar from its `box.toml` table, the set a box installs with no two that share a name or a program, the action schema with their actions, and why one is refused. |
+| `GrammarBindings`, `BindingRefusal` | The engine's tool grammars bound to each tool's opened program file and called name, which `PolicyEngine::bound_by` installs for the engine's life, and why declaring a tool or installing bindings from another engine is refused. |
+| `EgressPolicyInterceptor` (`egress-adapter`), `ShellPolicyInterceptor` (`shell-adapter`), `ScriptPolicyInterceptor`, `ScriptPermit`, `ScriptRefusal`, and `RenameDestination` (`script-adapter`) | One adapter per enforcement point, each behind its own feature. |
 
 The lifecycle is:
 
 ```text
 PolicyEngine::open(Vec<Policy>, &Path) -> Result<PolicyEngine, PolicyError>
-PolicyEngine::decide(&GovernedBox, &Principal, &Request<'_>) -> Decision
-PolicyEngine::record(&GovernedBox, &Principal, &Outcome<'_>) -> Result<(), PolicyError>
+PolicyEngine::decide(&GovernedBox, &Principal, &Request<'_>) -> (Decision, Option<RequestId>)
+PolicyEngine::record(&GovernedBox, &Principal, &RequestId, &Outcome<'_>) -> Result<(), PolicyError>
 PolicyEngine::effective() -> &EffectivePolicy
 ```
 
@@ -56,22 +61,37 @@ PolicyEngine::effective() -> &EffectivePolicy
 integration metadata and does not change the policy resource.
 
 `decide` observes the request into temporal history before it answers. Two identical
-calls can return different verdicts. A denied request still advances history.
+calls can return different verdicts. A denied request still advances history when its append succeeds.
+An allowed decision returns `Some(RequestId)`. Retain that token until the effect ends and pass it to `record`.
+A refusal before submission, or an unconfirmed append, returns no token.
+`RequestId::as_str()` exposes the identifier stored in the event; callers cannot construct tokens.
+A token remains valid across reload in the same engine. A separately opened engine rejects it.
+`record` returns `PolicyError::OutcomeKept` when the history refuses the outcome for now, for
+example after the clock steps back. The outcome is kept and recorded before the next decision, so
+treat it as recorded: record a tool call's own response after it too.
 `open` validates the sources, recovers the store, and installs the current source set.
 `validate` checks source text in memory. `effective` returns the engine and source identity.
 
-One call sits off the lifecycle:
+Two calls sit off the lifecycle:
 
 ```text
 PolicyEngine::validate(&[Policy]) -> Result<(), PolicyError>
+PolicyEngine::check(&Operator, &[Policy], complete: bool) -> PolicyCheck
 ```
 
-`validate` answers "would `open` accept this text", and returns no authority. Use it
+`validate` checks policy text and returns no authority. It does not inspect saved history or prove
+that a history file can be opened. Use it
 when you must refuse bad policy text *before* writing it, and you must not open a
 second `PolicyEngine` to find out. `open` and `validate` share one private composition,
 so a validator that accepts text the authority would refuse is not expressible. Its
 caller is `strands-box`'s configuration step, which the `run` and `init` verbs both
 reach. A policy the engine cannot load is refused there, before the box stores it.
+
+`check` reports every finding of the same composition, and returns no authority. A finding
+names its rules by position (from 1) and `@id`, its line and column when the engine reports
+a span, and the validator's help, such as ``did you mean `path`?``. Pass `complete = false`
+for a box that declares a local MCP server: each rule that names a per-tool MCP action is then
+listed as unchecked, as `open_staged` holds it pending, and every other rule is validated.
 
 ## Minimal Example
 
@@ -103,7 +123,7 @@ fn open_policy(database_path: &Path) -> Result<PolicyEngine, PolicyError> {
 }
 
 fn decide(policy: &PolicyEngine) {
-    let decision = policy.decide(
+    let (decision, _request_id) = policy.decide(
         &GovernedBox::assigned("test-box"),
         &Principal::agent(),
         &Request::Connect {
@@ -179,8 +199,9 @@ its own policy text and temporal history. The authored policy cannot discriminat
 box name.
 
 The removed `Filesystem`, `Network`, `Process`, and `Box` entity types fail strict
-validation. Rewrite those scopes as an action or `context.input` guard. For example,
-every `fs:*` action carries `operation`, while network and shell inputs do not.
+validation. Rewrite those scopes as an action constraint. A rule that reads
+`context.input` names actions of one family, such as `fs:read` and `fs:write`, so the
+load refuses an `operation` guard under no action.
 
 ## Requests And Decisions
 
@@ -211,11 +232,14 @@ forbids, unmatched requests, representation faults, and evaluation faults return
 `RuleId::as_str` returns the determining rule identifier. Default denials use
 `RuleId::DEFAULT_DENY`.
 
-`context.input.ip` is the pinned address after resolution, as a string, and it is absent before
-resolution. An IPv6 address that carries an IPv4 address reads as that IPv4 address, and other IPv6
-uses its compressed lowercase form. Match it with `==` or `like`, for example
-`context.input.ip like "169.254.*"`, and guard it with `context.input has ip`. Permit on `host` and
-`port`, and use `ip` in a `forbid`: an `ip`-only permit never passes the decision before resolution.
+`context.input.ip4` and `context.input.ip6` are the pinned address after resolution, each as a
+string, and both are absent before resolution. `ip4` is the dotted quad, present for an IPv4
+destination and for an IPv6 destination that carries an IPv4 address in a recognized wrapping. `ip6`
+is the compressed lowercase wire form, present for every IPv6 destination and absent for an IPv4
+one. Match either with `==` or
+`like`, for example `context.input.ip4 like "169.254.*"`, and guard each with its own
+`context.input has ip4` or `context.input has ip6`. Permit on `host` and `port`, and use an address
+in a `forbid`: an address-only permit never passes the decision before resolution.
 
 ### Shell actions
 
@@ -310,7 +334,12 @@ distinction: `Box::Action::"fs:read"::response{ input.path: …, input.operation
 
 How an effect ended is carried by the event kind: an effect that happened or may
 have happened records a `::response`, and one that definitely did not happen records
-a `::error`. Every filesystem response also carries `output.result`, one of three
+a `::error`. A `read_metadata` that got an answer, in the Shell or in Python, has happened, even
+when the answer is "no", so it records a `::response`. So does one of a path inside the reachable set that cannot be
+resolved, such as one under a missing folder, with no `.` or `..` component, no symbolic link, and
+nothing beneath the deny floor, although the reach check refuses it, because the workload has its
+answer; any other one that the reach floor or
+a guard against a changed path refuses records a `::error`. Every filesystem response also carries `output.result`, one of three
 `Box::FsResponseResult` values: `"completed"`, `"descriptor_issued"` (an open issued a
 descriptor whose bytes move later), or `"indeterminate"` (a permit was dropped
 without reporting). A rule that counts certain completions matches
@@ -363,15 +392,16 @@ out — is the only control covering this today. See the crate's `AGENTS.md` for
 ## History And Temporal Rules
 
 A `when temporal { … }` rule reads the history of completed effects. Submit each
-one with `PolicyEngine::record` after the effect happens:
+one with `PolicyEngine::record` after the effect happens, using the token from its allowed decision:
 
 ```rust
-use policy::{Delivery, GovernedBox, Outcome, PolicyEngine, PolicyError, Principal};
+use policy::{Delivery, GovernedBox, Outcome, PolicyEngine, PolicyError, Principal, RequestId};
 
-fn submit(policy: &PolicyEngine) -> Result<(), PolicyError> {
+fn submit(policy: &PolicyEngine, request_id: &RequestId) -> Result<(), PolicyError> {
     policy.record(
         &GovernedBox::assigned("test-box"),
         &Principal::agent(),
+        request_id,
         &Outcome::Http {
             host: "api.github.com",
             port: 443,
@@ -379,24 +409,39 @@ fn submit(policy: &PolicyEngine) -> Result<(), PolicyError> {
             path: "/v1/items",
             delivery: Delivery::Completed { bytes: 512 },
             status: Some(200),
+            intercepted: true,
         },
     )
 }
 ```
 
+Every event carries `requestId`. A request and its recorded outcome share the same nonempty string.
+Separate decisions have distinct identifiers, including identical requests that overlap in time.
+The identifier is unique within this history; its spelling is opaque.
+Older events without identifiers remain unchanged and cannot satisfy a predicate on `requestId`.
+Other facts in those events remain available until normal history pruning removes them.
+
 | Variant | Records |
 |---|---|
 | `Connect` | `host`, `port`, `address`, `connected` |
-| `Http` | `host`, `port`, `method`, `path`, `delivery`, `status` |
+| `Http` | `host`, `port`, `method`, `path`, `delivery`, `status`, `intercepted` |
 | `ShellRun` | `command`, `program`, `args`, `cwd`, `status` |
 | `ShellSpawn` | the same, plus `program_path` |
 | `Fs` | `path`, `operation`, `result` |
 
-One HTTP exchange records exactly one `http:request::response`, at reply time. Its
-`input.body_bytes` is the delivered request, and its `output.status` is the reply. A request
-that got no reply records the same event with no `output`, so a rule on `output.status`
-does not match it. A rule reads `status` in a temporal predicate over `::response`; a decision
-carries no `output`.
+An admitted HTTP request records one outcome when its exchange ends. Completed, partial,
+or uncertain delivery records `http:request::response`; a definite delivery failure records
+`http:request::error`. Once the request is sent, the gateway waits for the upstream response to
+complete, fail, or reach its deadline before recording the outcome. The response event's
+`input.body_bytes` is the recorded count of request bytes known to have reached the operating
+system. Its `output.status` is the received reply status. An exchange that got no reply records
+no `output`, so a rule on `output.status` does not match it. A rule reads `status` in a temporal
+predicate over `::response`; a decision carries no `output`.
+
+A byte budget over these response events uses recording times for its window. Pending exchanges
+contribute no bytes yet, so stalled or concurrent exchanges can exceed the threshold. A rule that
+only compares the recorded sum with a threshold also excludes the next request's size, so that
+request can exceed it.
 
 A response names the same action whose request was authorized, so a rule joins a
 `shell:exec::request` to its own response and to no other.
@@ -443,6 +488,21 @@ Rules written against history:
   engine attempts a checkpoint. A successful checkpoint snapshots monitor state and removes
   the covered log records. A failed checkpoint increases the durable log replay depth.
 
+## Dogwood 1.1.2 history
+
+The runtime pins both `dogwood-language` and `dogwood-local-engine` to `1.1.2`.
+`PolicyEngine::open` marks a new history with Box-owned compatibility generation `1` under
+`box.dogwood.history-generation`. This generation identifies compatible saved policies and activity;
+it is independent of the Dogwood package version. Change it only when recovery or policy/state
+identity changes make saved history incompatible. Compatible package upgrades retain the generation.
+The adapter refuses previously used history without a supported generation before recovery or
+policy reconciliation.
+
+To adopt this build, deliberately select a new history file. Box operators select a new box
+directory through `box_dir`; see [the upgrade procedure](../../docs/user/policy.md#start-with-fresh-history-after-a-dogwood-upgrade).
+Earlier activity does not carry over: counts start at zero, and prior events no longer satisfy
+history-based prerequisites. The adapter does not erase or convert existing history.
+
 ## Effective Policy
 
 `PolicyEngine::effective` returns:
@@ -461,12 +521,12 @@ Rules written against history:
 | `Parse` | Parsing or source composition failed. |
 | `Schema` | A policy value, attribute, or entity type violates the schema. A deleted resource entity lands here. |
 | `UnknownAction` | A policy names an action outside the schema. |
-| `UnsupportedClause` | Reserved for API compatibility. |
+| `UnsupportedClause` | A temporal predicate names an action group. |
 | `Evaluation` | The durable engine could not open or recover the database, install sources, or submit an event. |
 
 `open` returns `Parse`, `Schema`, `UnknownAction`, or `Evaluation`. `record` returns
 `Evaluation` if durable submission fails after the effect.
-No current method constructs `UnsupportedClause`.
+The schema that `open` composes has no action group, so no current method returns `UnsupportedClause`.
 
 An information-provider invocation aborts startup with `Parse`.
 
@@ -496,9 +556,9 @@ this boundary serves. The interceptor holds all three and passes the box into ev
 
 The interceptor maps connect and HTTP request attempts to `Request::Connect` and
 `Request::Http`. A response release raises **no request and no decision**, and its permit
-records nothing. The gateway consumes the request permit at reply time with
-`EffectOutcome::Replied`, so the one `http:request::response` an exchange records carries
-the reply as `output.status`, which only a `when temporal { … }` rule reads.
+records nothing. The gateway consumes the request permit when the exchange ends and records
+the matching HTTP outcome. An `http:request::response` event carries delivered request bytes
+and any reply status in `output.status`, which only a `when temporal { … }` rule reads.
 
 1. `intercept` evaluates the typed attempt with `PolicyEngine::decide`.
 2. A denial returns `io::ErrorKind::PermissionDenied`.

@@ -1,0 +1,31 @@
+// The controller binds each port field to the fixture's allocated TCP port.
+@id("research_fixture_connect")
+permit(principal == Box::Agent::"self", action == Box::Action::"net:connect", resource)
+when { context.input.host == "127.0.0.1" && context.input.port == 0 };
+
+@id("research_enrichment")
+permit(principal == Box::Agent::"self", action == Box::Action::"http:request", resource)
+when {
+    context.input.host == "127.0.0.1" && context.input.port == 0 &&
+    context.input.method == "POST" && context.input.path == "/research/enrich"
+};
+
+@id("research_attempt_budget")
+@description("At most three enrichment attempts in five minutes.")
+forbid(principal == Box::Agent::"self", action == Box::Action::"http:request", resource)
+when {
+    context.input.host == "127.0.0.1" && context.input.port == 0 &&
+    context.input.method == "POST" && context.input.path == "/research/enrich"
+}
+when temporal {
+    exists (n: Long). (
+        (count for (t: Timepoint). where (
+            formerly within 300s (
+                Box::Action::"http:request"::request{
+                    input.host: "127.0.0.1", input.port: 0,
+                    input.method: "POST", input.path: "/research/enrich"
+                } && tp(t)
+            )
+        )) == n && n > 3
+    )
+};

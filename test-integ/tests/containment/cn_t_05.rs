@@ -17,6 +17,7 @@ det_case! {
     desc: "Leaf discovery: from a tool leaf, stat of a planted ~/.det-disc/cfg answers and its read is refused, while stat of ~/.aws and of <box_dir>/private is refused; the agent's own stat of cfg is refused",
     run: |b| {
         let probe = b.compile_probe("fsprobe-t05", PROBE);
+        let tool_probe = b.install_tool(&probe);
         let home = b.workspace().parent().unwrap().to_path_buf();
         let home_text = home.to_string_lossy().into_owned();
         let discovered = home.join(".det-disc");
@@ -37,7 +38,7 @@ det_case! {
         let exec_tree = b.with_exec_tree();
         let edit = |text: String| format!(
             "{}\n[tool.t05]\ncommand = [{}]\n",
-            exec_tree(text), quoted(&probe)
+            exec_tree(text), quoted(&tool_probe)
         );
         b.apply_policy(r#"permit (principal, action == Box::Action::"shell:spawn", resource);"#);
         let p = sh_quote(&probe.to_string_lossy());
@@ -55,6 +56,7 @@ det_case! {
         refused_as(&agent.out, "STAT", &subject(&cfg), &[EPERM])
             .unwrap_or_else(|why| panic!("the agent stat'd cfg in its home: {why}; out=[{}]", agent.snippet()));
 
+        let p = sh_quote(&tool_probe.to_string_lossy());
         let r = b.run_mediated_with_config_env(
             edit,
             &format!(

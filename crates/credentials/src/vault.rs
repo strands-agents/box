@@ -1,25 +1,30 @@
-//! The tenant-keyed [`Vault`] — one startup door and two request-leg verbs.
+//! The tenant-keyed [`Vault`] for credential attachment and response redaction.
 
 use std::path::{Path, PathBuf};
 
 use crate::attach::{Attachment, Inbound, Outbound, Redactions};
 use crate::config::MissingRoutePolicy;
 use crate::model::RouteKind;
-use crate::sources::{AmbientFallbackPolicy, CREDSD_SCHEME, resolve_credsd_socket};
+use std::sync::Arc;
+
+use crate::sources::{
+    AmbientFallbackPolicy, AwsCredentialProvider, CREDSD_SCHEME, default_aws_provider,
+    is_bare_aws_default_chain, resolve_credsd_socket,
+};
 use crate::{
     Backend, CredentialDiagnostic, CredentialError, Destination, DestinationPattern, InjectMode,
-    Locator, Opened, Phantom, PhantomCheck, PhantomToken, RequestId, Result, RouteSpec, Secret,
-    Skipped, VaultConfig,
+    Locator, Opened, Phantom, PhantomCheck, PhantomToken, RequestId, ResponseRedactor, Result,
+    RouteSpec, Secret, Skipped, VaultConfig,
 };
 
 /// The correlation id the eager load uses for its audit records.
 const LOAD_CORRELATION: &str = "credential-store-load";
 
 /// The `cmd://` scheme, refused at open because no request-time capture path is wired.
-const CMD_SCHEME: &str = "cmd";
+pub(crate) const CMD_SCHEME: &str = "cmd";
 
 /// The deferred-mint scheme an operator config could once name.
-const OAUTH2_SCHEME: &str = "oauth2";
+pub(crate) const OAUTH2_SCHEME: &str = "oauth2";
 
 /// One resolved opaque binding: the secret, how it attaches, and the phantom standing in for it.
 pub(crate) struct OpaqueBinding {
@@ -83,6 +88,56 @@ impl std::fmt::Debug for OpaqueBinding {
     }
 }
 
+/// One resolved box-owned binding: the real secret and where the box attaches it. No phantom is
+/// minted, because the workload never presents a placeholder for it.
+pub(crate) struct BoxOwnedBinding {
+    /// How the real secret attaches to the outbound request.
+    inject: InjectMode,
+    /// The resolved secret, wiped on drop and validated at construction.
+    secret: Secret,
+}
+
+impl BoxOwnedBinding {
+    pub(crate) fn inject(&self) -> &InjectMode {
+        &self.inject
+    }
+
+    pub(crate) fn secret(&self) -> &str {
+        self.secret.as_str()
+    }
+
+    pub(crate) fn secret_value(&self) -> &Secret {
+        &self.secret
+    }
+}
+
+impl std::fmt::Debug for BoxOwnedBinding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BoxOwnedBinding")
+            .field("inject", &self.inject)
+            .field("secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// One strip-phantom binding: where the placeholder is, so the vault strips it before the request
+/// egresses. It holds no secret: nothing is attached, only stripped.
+#[derive(Debug)]
+pub(crate) struct StripBinding {
+    /// Where the harness placed the placeholder, so it is stripped before the request goes upstream.
+    harness: InjectMode,
+}
+
+impl StripBinding {
+    pub(crate) fn harness(&self) -> &InjectMode {
+        &self.harness
+    }
+}
+
+/// A signed-AWS route's resolved form: its config locator and an optional explicit `(service,
+/// region)` to sign under (a re-routed backend whose host carries no derivable scope).
+type SignedAwsRoute = (Locator, Option<(String, String)>);
+
 /// The loaded credential set for one tenant.
 #[derive(Debug)]
 pub struct Vault {
@@ -91,8 +146,12 @@ pub struct Vault {
     tenant: String,
     /// destination pattern → resolved opaque binding.
     opaque: Vec<(DestinationPattern, OpaqueBinding)>,
+    /// destination pattern → resolved box-owned binding (a credential the box attaches itself).
+    box_owned: Vec<(DestinationPattern, BoxOwnedBinding)>,
+    /// destination pattern → strip-phantom binding (strip the placeholder, attach nothing).
+    strip: Vec<(DestinationPattern, StripBinding)>,
     /// destination pattern → the structured AWS config a signed route signs with.
-    signed_aws: Vec<(DestinationPattern, Locator)>,
+    signed_aws: Vec<(DestinationPattern, SignedAwsRoute)>,
     /// The backend, retained because a signed route resolves its credentials per request (they
     /// expire), unlike an opaque secret which is resolved once at open.
     backend: Backend,
@@ -100,6 +159,11 @@ pub struct Vault {
     /// scoped profile. Held here because the resolve happens per request, so the policy has to outlive
     /// the open that chose it.
     ambient_policy: AmbientFallbackPolicy,
+    /// The AWS credential provider a signed route resolves through. Defaults to the process-wide
+    /// shared SDK worker; a test injects a fake. An injectable field, so signing runs through the
+    /// vault rather than a hardcoded global, which both restores the end-to-end `sign_aws` test seam
+    /// and lets `open` validate the chain eagerly.
+    aws_provider: Arc<dyn AwsCredentialProvider>,
     /// The acquisition-audit sink. Every resolve emits one record through it, success or
     /// failure; the default discards, since the shared L2 lane does not exist yet.
     emitter: Box<dyn crate::Emitter>,
@@ -111,21 +175,52 @@ pub struct Vault {
 impl Vault {
     /// Resolve every declared route and open the vault.
     pub fn open(config: VaultConfig) -> Result<Opened> {
-        Self::open_with_emitter(config, Box::new(crate::audit::DiscardingEmitter))
+        Self::open_with(
+            config,
+            Box::new(crate::audit::DiscardingEmitter),
+            default_aws_provider(),
+        )
     }
 
     /// [`open`](Self::open) with the audit sink supplied, so a test can observe that every resolve
     /// emits exactly one record. The public entry point injects the discarding sink; when the shared L2
     /// audit lane lands it is substituted here rather than added as a new path.
+    #[cfg(test)]
     fn open_with_emitter(config: VaultConfig, emitter: Box<dyn crate::Emitter>) -> Result<Opened> {
+        Self::open_with(config, emitter, default_aws_provider())
+    }
+
+    /// [`open`](Self::open) with the AWS provider injected, so a test drives the real signing and
+    /// eager-validate paths through a fake provider rather than the live SDK chain.
+    #[cfg(test)]
+    pub(crate) fn open_with_aws_provider(
+        config: VaultConfig,
+        aws_provider: Arc<dyn AwsCredentialProvider>,
+    ) -> Result<Opened> {
+        Self::open_with(
+            config,
+            Box::new(crate::audit::DiscardingEmitter),
+            aws_provider,
+        )
+    }
+
+    /// The one open path: resolve every route, then eagerly validate a bare `aws://` chain.
+    fn open_with(
+        config: VaultConfig,
+        emitter: Box<dyn crate::Emitter>,
+        aws_provider: Arc<dyn AwsCredentialProvider>,
+    ) -> Result<Opened> {
         let (backend, tenant, routes, missing, ambient_policy, credsd_socket_config) =
             config.into_parts();
         let mut vault = Self {
             tenant,
             opaque: Vec::new(),
+            box_owned: Vec::new(),
+            strip: Vec::new(),
             signed_aws: Vec::new(),
             backend,
             ambient_policy,
+            aws_provider,
             emitter,
             credsd_socket: None,
         };
@@ -137,82 +232,125 @@ impl Vault {
         // Every minted phantom, to enforce vault-wide uniqueness: a collision is a
         // fail-closed error, never two credentials sharing one placeholder.
         let mut seen_phantoms = std::collections::HashSet::new();
+        // The phantom each credential minted, keyed by its reference and prefix. Routes that name
+        // one credential share its phantom, so one placeholder works at every destination it serves.
+        let mut minted: Vec<(Locator, String, PhantomToken)> = Vec::new();
+
+        // Mint a unique phantom, failing closed on a vault-wide collision. The caller records the
+        // per-destination `phantoms` mapping, so a shared phantom is recorded at each host it serves.
+        let mut mint = |prefix: &str| -> Result<PhantomToken> {
+            let phantom = PhantomToken::generate(prefix)?;
+            if !seen_phantoms.insert(phantom.as_str().to_string()) {
+                return Err(CredentialError::Credential(
+                    "phantom-token collision across the vault; refusing to bind two credentials to \
+                     one placeholder"
+                        .to_string(),
+                ));
+            }
+            Ok(phantom)
+        };
 
         for route in &routes {
             // Refuse before dispatching, so no branch can claim a route first and leave an unsupported
             // field unread.
             Self::refuse_unsupported(route)?;
 
-            let (inject, harness, phantom_check, phantom_prefix) = match route.kind() {
+            match route.kind() {
                 // A signed route carries a config block resolved at use, not a secret held here.
-                RouteKind::SignedAws { config } => {
+                RouteKind::SignedAws { config, scope } => {
                     if config.scheme() == CREDSD_SCHEME {
                         declares_credsd = true;
                     }
                     vault
                         .signed_aws
-                        .push((route.destination().clone(), config.clone()));
-                    continue;
+                        .push((route.destination().clone(), (config.clone(), scope.clone())));
                 }
+                // A strip-phantom route mints a placeholder (so a workload harness has one) and
+                // resolves NO real secret. The strip at request time is unconditional.
+                RouteKind::StripPhantom {
+                    harness,
+                    phantom_prefix,
+                } => {
+                    let phantom = mint(phantom_prefix)?;
+                    phantoms.push(Phantom::new(route.destination().clone(), phantom));
+                    vault.strip.push((
+                        route.destination().clone(),
+                        StripBinding {
+                            harness: harness.clone(),
+                        },
+                    ));
+                }
+                // An opaque route resolves a real secret and mints a phantom to stand in for it.
                 RouteKind::Opaque {
                     inject,
                     harness,
                     phantom_check,
                     phantom_prefix,
-                } => (
-                    inject.clone(),
-                    harness.clone(),
-                    *phantom_check,
-                    phantom_prefix.clone(),
-                ),
-            };
-
-            match vault.resolve_secret(route) {
-                Ok(secret) => {
-                    // Mint a unique phantom for the resolved secret. Generation failure or a
-                    // vault-wide collision fails closed — never a weak or duplicated value.
-                    let phantom = PhantomToken::generate(&phantom_prefix)?;
-                    if !seen_phantoms.insert(phantom.as_str().to_string()) {
-                        return Err(CredentialError::Credential(
-                            "phantom-token collision across the vault; refusing to bind two \
-                             credentials to one placeholder"
-                                .to_string(),
+                } => {
+                    if let Some(secret) = Self::classify_resolve(
+                        vault.resolve_secret(route),
+                        route,
+                        missing,
+                        &mut skipped,
+                    )? {
+                        // Routes naming one credential (by reference and prefix) share one phantom,
+                        // so a single placeholder works at every destination the credential serves.
+                        // A new credential mints one (which records its per-destination mapping); a
+                        // shared one reuses the token and records this destination's mapping too.
+                        let phantom = match minted.iter().find(|(locator, prefix, _)| {
+                            locator == route.credential_ref() && prefix == phantom_prefix
+                        }) {
+                            Some((_, _, phantom)) => {
+                                let phantom = phantom.clone();
+                                phantoms.push(Phantom::new(
+                                    route.destination().clone(),
+                                    phantom.clone(),
+                                ));
+                                phantom
+                            }
+                            None => {
+                                let phantom = mint(phantom_prefix)?;
+                                phantoms.push(Phantom::new(
+                                    route.destination().clone(),
+                                    phantom.clone(),
+                                ));
+                                minted.push((
+                                    route.credential_ref().clone(),
+                                    phantom_prefix.clone(),
+                                    phantom.clone(),
+                                ));
+                                phantom
+                            }
+                        };
+                        vault.opaque.push((
+                            route.destination().clone(),
+                            OpaqueBinding {
+                                inject: inject.clone(),
+                                harness: harness.clone(),
+                                secret,
+                                phantom,
+                                phantom_check: *phantom_check,
+                            },
                         ));
                     }
-                    phantoms.push(Phantom::new(route.destination().clone(), phantom.clone()));
-                    vault.opaque.push((
-                        route.destination().clone(),
-                        OpaqueBinding {
-                            inject,
-                            harness,
-                            secret,
-                            phantom,
-                            phantom_check,
-                        },
-                    ));
                 }
-                // A genuinely absent secret is the one soft failure — unless the caller asked for no
-                // soft tier, in which case it is fatal like everything else.
-                Err(err) if err.is_soft() && missing == MissingRoutePolicy::Skip => {
-                    skipped.push(Skipped::new(CredentialDiagnostic::new(
-                        "secret_not_found",
-                        &err,
-                        route.destination_display(),
-                        &route.reference_display(),
-                        format!("{err}"),
-                        "ensure the referenced secret exists before opening the vault",
-                    )));
+                // A box-owned route resolves a real secret and attaches it itself, with no phantom.
+                RouteKind::BoxOwned { inject } => {
+                    if let Some(secret) = Self::classify_resolve(
+                        vault.resolve_secret(route),
+                        route,
+                        missing,
+                        &mut skipped,
+                    )? {
+                        vault.box_owned.push((
+                            route.destination().clone(),
+                            BoxOwnedBinding {
+                                inject: inject.clone(),
+                                secret,
+                            },
+                        ));
+                    }
                 }
-                Err(err) if err.is_soft() => {
-                    // `require_every_route`: name the destination, since the caller wanted no skips.
-                    return Err(CredentialError::Credential(format!(
-                        "{destination} declares a credential that did not resolve ({err}), and \
-                         every route is required: the destination would stay reachable with no \
-                         credential attached",
-                        destination = route.destination_display(),
-                    )));
-                }
-                Err(err) => return Err(err),
             }
         }
 
@@ -220,7 +358,56 @@ impl Vault {
             vault.credsd_socket = Some(resolve_credsd_socket(credsd_socket_config.as_deref())?);
         }
 
+        // Eagerly validate the bare default chain at open, so a broken chain (an unreadable profile,
+        // an SSO-only default, a stuck `credential_process` within the resolve timeout) fails at
+        // `box run` rather than on the first signed request. Only when a bare `aws://` route exists
+        // and ambient fallback is allowed: a named-profile-only vault, a `credsd://` vault, or one
+        // under `require_scoped_aws_profile` does no resolve at open, so a box that never signs a
+        // bare route forces no credentials to exist. The resolve primes the shared provider cache,
+        // and `audit_aws_resolve` emits the one prepare-step record.
+        if vault.ambient_policy != AmbientFallbackPolicy::Deny
+            && let Some(locator) = vault
+                .signed_aws
+                .iter()
+                .find_map(|(_, (loc, _))| is_bare_aws_default_chain(loc).then(|| loc.clone()))
+        {
+            vault.audit_aws_resolve(&locator)?;
+        }
+
         Ok(Opened::new(vault, phantoms, skipped))
+    }
+
+    /// Classify a secret resolution: `Ok(Some)` is a resolved secret, `Ok(None)` a soft miss under
+    /// the skip policy (recorded in `skipped`), and `Err` a hard failure. Shared by the opaque and
+    /// box-owned routes, which both resolve a real secret.
+    fn classify_resolve(
+        result: Result<Secret>,
+        route: &RouteSpec,
+        missing: MissingRoutePolicy,
+        skipped: &mut Vec<Skipped>,
+    ) -> Result<Option<Secret>> {
+        match result {
+            Ok(secret) => Ok(Some(secret)),
+            // A genuinely absent secret is the one soft failure — unless the caller asked for no soft
+            // tier, in which case it is fatal like everything else.
+            Err(err) if err.is_soft() && missing == MissingRoutePolicy::Skip => {
+                skipped.push(Skipped::new(CredentialDiagnostic::new(
+                    "secret_not_found",
+                    &err,
+                    route.destination_display(),
+                    &route.reference_display(),
+                    format!("{err}"),
+                    "ensure the referenced secret exists before opening the vault",
+                )));
+                Ok(None)
+            }
+            Err(err) if err.is_soft() => Err(CredentialError::Credential(format!(
+                "{destination} declares a credential that did not resolve ({err}), and every route \
+                 is required: the destination would stay reachable with no credential attached",
+                destination = route.destination_display(),
+            ))),
+            Err(err) => Err(err),
+        }
     }
 
     /// Refuse a route naming a credential this vault has no way to produce.
@@ -273,6 +460,12 @@ impl Vault {
         self.ambient_policy
     }
 
+    /// The AWS provider a signed route resolves through, for the per-request signing resolve in
+    /// `legs`. A cheap `Arc` clone of the shared provider (or a test's injected fake).
+    pub(crate) fn aws_provider(&self) -> Arc<dyn AwsCredentialProvider> {
+        self.aws_provider.clone()
+    }
+
     /// The resolved `credsd` socket, for the per-request credsd resolve in `legs`. `Some` whenever a
     /// `credsd://` route was declared.
     pub(crate) fn credsd_socket(&self) -> Option<&Path> {
@@ -285,6 +478,8 @@ impl Vault {
             "strands-box credentials [{tenant}]: {message}",
             tenant = self.tenant
         );
+        #[cfg(test)]
+        CAPTURED_WARNINGS.with(|warnings| warnings.borrow_mut().push(message.to_string()));
     }
 
     /// What must be edited on `req` before it goes upstream, or `None` when this vault governs no
@@ -292,8 +487,24 @@ impl Vault {
     pub fn attach_for(&self, req: Outbound<'_>) -> Result<Option<Attachment>> {
         // A signed AWS binding first: it is signed in-boundary and never phantom-swapped, because
         // nothing was minted to match.
-        if let Some(config) = Self::first_match(&self.signed_aws, &req.destination) {
-            return self.sign_aws(config, &req).map(Some);
+        if let Some((config, scope)) = Self::first_match(&self.signed_aws, &req.destination) {
+            return self.sign_aws(config, scope.as_ref(), &req).map(Some);
+        }
+        // A re-route composes two edits on one destination (one credential authority, so one control):
+        // a strip-phantom binding removes the workload's placeholder, and a box-owned binding attaches
+        // the box's own token. On the same header the strip runs first, so the backend token wins and
+        // no placeholder rides upstream. Either may be absent.
+        let strip = Self::first_match(&self.strip, &req.destination);
+        let box_owned = Self::first_match(&self.box_owned, &req.destination);
+        if strip.is_some() || box_owned.is_some() {
+            let mut attachment = Attachment::new();
+            if let Some(binding) = strip {
+                crate::legs::strip_phantom(binding, &mut attachment)?;
+            }
+            if let Some(binding) = box_owned {
+                crate::legs::attach_box_owned(binding, &mut attachment);
+            }
+            return Ok(Some(attachment));
         }
         match self.resolve_opaque(&req.destination)? {
             Some(binding) => self.swap_phantom(binding, &req).map(Some),
@@ -304,10 +515,27 @@ impl Vault {
     /// Scan `res` for an injected secret and return the redactions needed, or `None` when nothing is
     /// bound for its destination or nothing leaked.
     pub fn redact_leaks(&self, res: Inbound<'_>) -> Option<Redactions> {
+        // A box-owned credential is really attached, so an echo of it is scrubbed like any other.
+        if let Some(binding) = Self::first_match(&self.box_owned, &res.destination) {
+            return Redactions::scan(&res, binding.secret_value());
+        }
         // An ambiguous binding is not a fault on the response leg: there is nothing to attach, so the
         // conservative move is to scan nothing rather than fail a response already received.
         let binding = self.resolve_opaque(&res.destination).ok()??;
         Redactions::scan(&res, binding.secret_value())
+    }
+
+    /// Create an owned response scrubber, or `None` when no box-owned or unique opaque binding
+    /// matches the destination.
+    pub fn response_redactor(&self, destination: Destination<'_>) -> Option<ResponseRedactor> {
+        // A box-owned credential (a re-route's backend token) is really attached, so an echo of it in
+        // a streamed response is scrubbed like any opaque secret. Match it first, as `redact_leaks`
+        // does, or a backend that echoes `Authorization` returns the backend token to the workload.
+        if let Some(binding) = Self::first_match(&self.box_owned, &destination) {
+            return Some(ResponseRedactor::new(binding.secret_value()));
+        }
+        let binding = self.resolve_opaque(&destination).ok()??;
+        Some(ResponseRedactor::new(binding.secret_value()))
     }
 
     /// Resolve the opaque binding for `dest`, failing closed on ambiguity.
@@ -342,6 +570,21 @@ impl Vault {
             .find(|(pattern, _)| pattern.matches(dest))
             .map(|(_, value)| value)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Warnings `Vault::warn` emitted on this thread, so a test can observe a per-request warning
+    /// without capturing stderr. Drained by [`drain_captured_warnings`]. Hermetic: a test injects a
+    /// fake AWS provider, so `warn` runs on the test thread and never reaches the SDK worker.
+    static CAPTURED_WARNINGS: std::cell::RefCell<Vec<String>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Take and clear the warnings captured on this thread (test-only).
+#[cfg(test)]
+pub(crate) fn drain_captured_warnings() -> Vec<String> {
+    CAPTURED_WARNINGS.with(|warnings| std::mem::take(&mut *warnings.borrow_mut()))
 }
 
 #[cfg(test)]
@@ -430,14 +673,22 @@ mod tests {
 
     // --- open ----------------------------------------------------------------
 
-    /// Every resolved route is bound and mints exactly one phantom, and the vault comes up with no
-    /// skips.
+    fn opaque_route_for(dest: &str, reference: &str) -> RouteSpec {
+        RouteSpec::opaque(
+            DestinationPattern::parse(dest).unwrap(),
+            Locator::parse_uri(reference).unwrap(),
+            header_mode(),
+        )
+    }
+
+    /// Every resolved route is bound and two credentials mint two phantoms, and the vault comes up
+    /// with no skips.
     #[test]
     fn open_binds_every_resolved_route_and_mints_one_phantom_each() {
         let opened = Vault::open(
             VaultConfig::new(backend_with(Box::new(FixedSource("s3cret"))), "tenant-a")
-                .route(opaque_route("api.github.com"))
-                .route(opaque_route("api.stripe.com")),
+                .route(opaque_route_for("api.github.com", "test://github"))
+                .route(opaque_route_for("api.stripe.com", "test://stripe")),
         )
         .expect("both routes resolve");
 
@@ -448,6 +699,49 @@ mod tests {
             tokens[0], tokens[1],
             "two secrets sharing one phantom would let either be swapped for the other"
         );
+    }
+
+    /// Routes that name one credential share one phantom, so one placeholder works at each host.
+    #[test]
+    fn routes_that_name_one_credential_share_one_phantom() {
+        let vault_for = |second: &str| {
+            Vault::open(
+                VaultConfig::new(backend_with(Box::new(FixedSource("s3cret"))), "t")
+                    .route(opaque_route_for("management.example.dev", "test://key"))
+                    .route(opaque_route_for("runtime.example.dev", second)),
+            )
+            .unwrap()
+        };
+
+        let shared = vault_for("test://key");
+        let tokens: Vec<&str> = shared.phantoms().iter().map(Phantom::token).collect();
+        assert_eq!(tokens.len(), 2, "one phantom entry per route");
+        assert_eq!(tokens[0], tokens[1], "one credential, one placeholder");
+
+        let distinct = vault_for("test://other");
+        let tokens: Vec<&str> = distinct.phantoms().iter().map(Phantom::token).collect();
+        assert_ne!(
+            tokens[0], tokens[1],
+            "two credentials sharing one phantom would let either be swapped for the other"
+        );
+    }
+
+    /// One credential with two phantom prefixes mints two phantoms: each carries its own prefix.
+    #[test]
+    fn one_credential_with_two_prefixes_mints_two_phantoms() {
+        let route = |dest: &str, prefix: &str| {
+            opaque_route_for(dest, "test://key")
+                .phantom_prefix(prefix.to_string())
+                .unwrap()
+        };
+        let opened = Vault::open(
+            VaultConfig::new(backend_with(Box::new(FixedSource("s3cret"))), "t")
+                .route(route("a.example.dev", "sk-a-"))
+                .route(route("b.example.dev", "sk-b-")),
+        )
+        .unwrap();
+        let tokens: Vec<&str> = opened.phantoms().iter().map(Phantom::token).collect();
+        assert!(tokens[0].starts_with("sk-a-") && tokens[1].starts_with("sk-b-"));
     }
 
     /// A phantom names the destination it stands in for, so a supervisor can seed it correctly.
@@ -583,6 +877,60 @@ mod tests {
         assert!(opened.phantoms().is_empty());
     }
 
+    /// An AWS provider that fails hard if it is ever consulted — proves whether `open` resolved.
+    #[derive(Debug)]
+    struct FailingAwsProvider;
+
+    impl AwsCredentialProvider for FailingAwsProvider {
+        fn provide(&self, _profile: Option<&str>) -> Result<crate::AwsSessionCredentials> {
+            Err(CredentialError::KeystoreAccess(
+                "the chain is broken".to_string(),
+            ))
+        }
+    }
+
+    /// A bare `aws://` route is eagerly validated at open, so a broken chain fails `box run` rather
+    /// than the first signed request. The failing provider turns that eager resolve into a hard
+    /// error; `aws_config("")` is the bare form (`is_bare_aws_default_chain` holds).
+    #[test]
+    fn a_broken_bare_aws_chain_fails_the_open() {
+        let error = Vault::open_with_aws_provider(
+            VaultConfig::new(backend_with(Box::new(BrokenSource)), "t").route(
+                RouteSpec::signed_aws(
+                    DestinationPattern::parse("*.amazonaws.com").unwrap(),
+                    aws_config(""),
+                ),
+            ),
+            Arc::new(FailingAwsProvider),
+        )
+        .expect_err("a broken bare chain must fail the open");
+        assert!(
+            !error.is_soft(),
+            "a broken bare chain is a hard open failure: {error:?}"
+        );
+    }
+
+    /// Only a bare route is eagerly validated. A named-profile-only vault does no resolve at open, so
+    /// a box that never signs a bare route forces no credentials to exist — proven by a provider that
+    /// would fail hard if it were consulted.
+    #[test]
+    fn a_named_profile_only_vault_does_not_resolve_at_open() {
+        let opened = Vault::open_with_aws_provider(
+            VaultConfig::new(backend_with(Box::new(BrokenSource)), "t").route(
+                RouteSpec::signed_aws(
+                    DestinationPattern::parse("*.amazonaws.com").unwrap(),
+                    aws_config("prod"),
+                ),
+            ),
+            Arc::new(FailingAwsProvider),
+        )
+        .expect("a named-profile-only vault must not resolve at open");
+        assert!(
+            opened.phantoms().is_empty(),
+            "a signed route mints no phantom"
+        );
+    }
+
     // --- audit ---------------------------------------------------------------
 
     /// A successful resolve emits exactly one record, carrying the redacted reference.
@@ -699,6 +1047,52 @@ mod tests {
             vault
                 .resolve_opaque(&dest("other.example.com", 443, "/"))
                 .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn response_redactor_preserves_destination_binding_and_outlives_the_vault() {
+        let vault = Vault::open(
+            VaultConfig::new(backend_with(Box::new(FixedSource("private-value"))), "t")
+                .route(opaque_route("api.example.com:443/v1/chat")),
+        )
+        .unwrap()
+        .into_vault();
+
+        for destination in [
+            dest("other.example.com", 443, "/v1/chat"),
+            dest("api.example.com", 80, "/v1/chat"),
+            dest("api.example.com", 443, "/v1/chatbot"),
+        ] {
+            assert!(vault.response_redactor(destination).is_none());
+        }
+        let mut redactor = vault
+            .response_redactor(dest("API.EXAMPLE.COM", 443, "/v1/chat/completions"))
+            .unwrap();
+        drop(vault);
+        assert_eq!(
+            redactor.redact_header("private-value").unwrap(),
+            "[REDACTED]"
+        );
+        assert!(redactor.push(b"private-").is_empty());
+        let mut redacted = redactor.push(b"value");
+        redacted.extend(redactor.finish());
+        assert_eq!(redacted, b"[REDACTED]");
+    }
+
+    #[test]
+    fn an_ambiguous_response_has_no_streaming_redactor() {
+        let vault = Vault::open(
+            VaultConfig::new(backend_with(Box::new(FixedSource("private-value"))), "t")
+                .route(opaque_route("*.example.com"))
+                .route(opaque_route("api.example.com")),
+        )
+        .unwrap()
+        .into_vault();
+        assert!(
+            vault
+                .response_redactor(dest("api.example.com", 443, "/"))
                 .is_none()
         );
     }

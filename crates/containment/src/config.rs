@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ContainmentError;
 use crate::model::{
-    BackendOverride, IpcMode, Network, Operation, PathGrant, PreparedFilesystemPath,
-    ProcessInfoMode, Scope, SignalMode, WriteProtection,
+    BackendOverride, CommandIdentity, IpcMode, Network, Operation, PathGrant,
+    PreparedFilesystemPath, ProcessInfoMode, Scope, SignalMode, WriteProtection,
 };
 
 type Result<T> = std::result::Result<T, ContainmentError>;
@@ -25,6 +25,12 @@ pub struct ContainmentConfig {
     paths: Vec<PathGrant>,
     identity_requirements: Vec<WriteProtection>,
     write_protections: Vec<WriteProtection>,
+    /// Directories inside a write grant whose whole tree the workload may read but not write.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    write_protected_trees: Vec<WriteProtectedTree>,
+    /// Program files that keep the link count they had when opened.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    command_identities: Vec<CommandIdentity>,
     #[serde(deserialize_with = "deserialize_validated_network")]
     network: Network,
     process: Process,
@@ -44,10 +50,12 @@ pub struct ContainmentConfig {
     /// beneath one (the CA trust bundle) still applies. Empty for the agent box.
     #[serde(default, deserialize_with = "deserialize_canonical_paths")]
     discovery_denies: Vec<PathBuf>,
-    /// Whether the leaf renders `(allow process-exec*)` in addition to its exec literals, and a
-    /// `file-map-executable` allow over its writable grants. False for the agent box.
+    /// Whether a leaf executes code from its readable and writable grants.
     #[serde(default)]
     broad_exec: bool,
+    /// Whether write roots may also set file times, set-ID bits, the group, and ACLs on macOS.
+    #[serde(default)]
+    file_attributes: bool,
     /// Whether the process may reach the host services a bundled JS/Node runtime touches at startup:
     /// `getifaddrs` (the `net.*` sysctls it reads and the routing socket it opens) and `getpwuid`
     /// (identity resolution via `opendirectoryd`). Leaf-only; the agent box never sets it. It grants
@@ -55,6 +63,9 @@ pub struct ContainmentConfig {
     /// `(deny network*)` still stands and AF_INET/AF_UNIX are unaffected).
     #[serde(default)]
     runtime_services: bool,
+    /// Whether macOS FSEvents is permitted. [`Self::allow_file_watching`] states its reach.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    file_watching: bool,
 }
 
 /// One credential-store floor exception, tied to its matching path grant.
@@ -84,6 +95,8 @@ impl ContainmentConfig {
             paths: Vec::new(),
             identity_requirements: Vec::new(),
             write_protections: Vec::new(),
+            write_protected_trees: Vec::new(),
+            command_identities: Vec::new(),
             network: Network::Blocked,
             process: Process::default(),
             backend_override: BackendOverride::None,
@@ -92,7 +105,9 @@ impl ContainmentConfig {
             discovery_roots: Vec::new(),
             discovery_denies: Vec::new(),
             broad_exec: false,
+            file_attributes: false,
             runtime_services: false,
+            file_watching: false,
         }
     }
 
@@ -132,12 +147,17 @@ impl ContainmentConfig {
         self
     }
 
-    /// Let a leaf `exec` any reachable binary (`process-exec*`, in addition to its exec literals) and
-    /// load what it compiles in its writable grants. Leaf-only and macOS-only; the agent box never
-    /// calls this.
+    /// Let a leaf execute reachable binaries and load code from its readable and writable grants.
     #[must_use]
     pub fn allow_broad_exec(mut self) -> Self {
         self.broad_exec = true;
+        self
+    }
+
+    /// Let write roots set file times, set-ID bits, the group, and ACLs. macOS renders it; Linux defers.
+    #[must_use]
+    pub fn allow_file_attributes(mut self) -> Self {
+        self.file_attributes = true;
         self
     }
 
@@ -156,6 +176,19 @@ impl ContainmentConfig {
     /// Whether the runtime-services grant was made.
     pub(crate) fn runtime_services(&self) -> bool {
         self.runtime_services
+    }
+
+    /// Permit macOS FSEvents, which can disclose denied names, event metadata, the host-wide event
+    /// count, and each volume's history identifier. A root process can also delete any volume's
+    /// event history. Linux ignores this setting.
+    #[must_use]
+    pub fn allow_file_watching(mut self) -> Self {
+        self.file_watching = true;
+        self
+    }
+
+    pub(crate) fn file_watching(&self) -> bool {
+        self.file_watching
     }
 
     /// Resolve one existing filesystem path before an authorization decision.
@@ -264,6 +297,50 @@ impl ContainmentConfig {
         Ok(self)
     }
 
+    /// Deny writes to one existing directory and everything under it, inside a write grant. Read
+    /// and exec grants over it still apply.
+    pub fn protect_write_tree(mut self, path: impl AsRef<Path>) -> Result<Self> {
+        let tree = WriteProtectedTree::new(path.as_ref())?;
+        if self
+            .write_protected_trees
+            .iter()
+            .any(|existing| existing.path == tree.path)
+        {
+            return Err(ContainmentError::ConflictingGrants {
+                reason: format!("{} is write-protected twice", tree.path.display()),
+            });
+        }
+        self.require_protectable(&tree.path)?;
+        self.write_protected_trees.push(tree);
+        Ok(self)
+    }
+
+    /// Refuse a write-protected tree that no write grant reaches, or that a refusal already removes.
+    fn require_protectable(&self, tree: &Path) -> Result<()> {
+        if !self
+            .grants_in(Operation::Write, Scope::Root)
+            .iter()
+            .any(|root| tree.starts_with(&root.resolved))
+        {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "{} is write-protected, but no write grant reaches it, so the protection enforces \
+                 nothing",
+                tree.display()
+            )));
+        }
+        if self
+            .refusals()
+            .iter()
+            .any(|refused| tree.starts_with(&refused.resolved))
+        {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "{} is write-protected inside a refusal, which already removes every access",
+                tree.display()
+            )));
+        }
+        Ok(())
+    }
+
     /// Require one opened regular file to keep its path and identity; a backend can allow metadata and existence checks.
     pub fn require_file_identity(
         mut self,
@@ -284,6 +361,32 @@ impl ContainmentConfig {
             });
         }
         self.identity_requirements.push(requirement);
+        Ok(self)
+    }
+
+    /// Require one opened program file to keep its path, identity, and current link count; a backend can allow metadata and existence checks.
+    ///
+    /// The caller must establish that the workload cannot write through any name.
+    /// `strands-box` checks ownership and access, or scans every process's write grants, before it uses this method.
+    pub fn require_command_identity(
+        mut self,
+        path: impl AsRef<Path>,
+        opened: &std::fs::File,
+    ) -> Result<Self> {
+        let requirement = CommandIdentity::new(path, opened)?;
+        if self
+            .command_identities
+            .iter()
+            .any(|existing| existing.file().path() == requirement.file().path())
+        {
+            return Err(ContainmentError::ConflictingGrants {
+                reason: format!(
+                    "{} has two command identity requirements",
+                    requirement.file().path().display()
+                ),
+            });
+        }
+        self.command_identities.push(requirement);
         Ok(self)
     }
 
@@ -350,6 +453,9 @@ impl ContainmentConfig {
         })?;
         config.validate_credential_store_grants()?;
         config.validate_discovery()?;
+        for tree in &config.write_protected_trees {
+            config.require_protectable(&tree.path)?;
+        }
         Ok(config)
     }
 
@@ -427,8 +533,29 @@ impl ContainmentConfig {
         &self.write_protections
     }
 
+    /// Every write-protected directory, as its resolved path.
+    pub(crate) fn write_protected_trees(&self) -> impl Iterator<Item = &Path> {
+        self.write_protected_trees
+            .iter()
+            .map(|tree| tree.path.as_path())
+    }
+
+    /// Every write-protected directory with the device and inode recorded when it was protected.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) fn write_protected_tree_identities(
+        &self,
+    ) -> impl Iterator<Item = (&Path, u64, u64)> {
+        self.write_protected_trees
+            .iter()
+            .map(|tree| (tree.path.as_path(), tree.device, tree.inode))
+    }
+
     pub(crate) fn identity_requirements(&self) -> &[WriteProtection] {
         &self.identity_requirements
+    }
+
+    pub(crate) fn command_identities(&self) -> impl Iterator<Item = &WriteProtection> {
+        self.command_identities.iter().map(CommandIdentity::file)
     }
 
     /// The home this caller stated it resolved its `~/`-relative grants against.
@@ -449,6 +576,11 @@ impl ContainmentConfig {
     /// Whether the leaf renders broad `process-exec*` and a `file-map-executable` allow over its writable grants.
     pub(crate) fn broad_exec(&self) -> bool {
         self.broad_exec
+    }
+
+    /// Whether write roots render the `file-write*` wildcard with the attribute denies.
+    pub(crate) fn file_attributes(&self) -> bool {
+        self.file_attributes
     }
 
     /// Whether this exact grant lies at or under its credential-store floor exception.
@@ -501,8 +633,14 @@ impl ContainmentConfig {
         for required in &self.identity_requirements {
             required.validate_live_identity()?;
         }
+        for required in self.command_identities() {
+            required.validate_live_identity()?;
+        }
         for protected in &self.write_protections {
             protected.validate_live_identity()?;
+        }
+        for tree in &self.write_protected_trees {
+            tree.validate_live_identity()?;
         }
         Ok(())
     }
@@ -610,7 +748,15 @@ impl ContainmentConfig {
                 )));
             }
         }
-        Ok(())
+        // Exact read pairing keeps coverage within credential consent, while the backend checks ordinary grants.
+        crate::validate_grants(
+            &self
+                .paths
+                .iter()
+                .filter(|grant| self.credential_store_exception_covers(grant))
+                .map(|grant| (grant.resolved.as_path(), grant.operation, grant.scope))
+                .collect::<Vec<_>>(),
+        )
     }
 }
 
@@ -676,6 +822,57 @@ where
             Ok(path.canonicalize().unwrap_or(path))
         })
         .collect()
+}
+
+/// One directory whose tree is write-protected, with the identity it had when it was named.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WriteProtectedTree {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+
+impl WriteProtectedTree {
+    fn new(path: &Path) -> Result<Self> {
+        use std::os::unix::fs::MetadataExt as _;
+        let unusable = |reason: String| {
+            ContainmentError::ConfigValidation(format!(
+                "cannot write-protect {}: {reason}",
+                path.display()
+            ))
+        };
+        let link = std::fs::symlink_metadata(path).map_err(|error| unusable(error.to_string()))?;
+        if link.file_type().is_symlink() {
+            return Err(unusable("it is a symbolic link".to_string()));
+        }
+        if !link.is_dir() {
+            return Err(unusable("it is not a directory".to_string()));
+        }
+        let resolved = std::fs::canonicalize(path).map_err(|error| unusable(error.to_string()))?;
+        Ok(Self {
+            path: resolved,
+            device: link.dev(),
+            inode: link.ino(),
+        })
+    }
+
+    fn validate_live_identity(&self) -> Result<()> {
+        use std::os::unix::fs::MetadataExt as _;
+        let live = std::fs::symlink_metadata(&self.path).map_err(|error| {
+            ContainmentError::ConfigValidation(format!(
+                "write-protected {} is gone: {error}",
+                self.path.display()
+            ))
+        })?;
+        if !live.is_dir() || live.dev() != self.device || live.ino() != self.inode {
+            return Err(ContainmentError::ConfigValidation(format!(
+                "write-protected {} was replaced after it was named",
+                self.path.display()
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// Refuse `Operation::Deny` from an authorizing verb, so a denial has one constructor.
@@ -1142,6 +1339,30 @@ mod tests {
                 .contains("must have a read grant on Linux"),
             "the refusal names the missing operation: {error}"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn credential_write_coverage_requires_contents_not_directory_entries() {
+        let home = tempfile::tempdir().expect("an operator home");
+        let cache = home.path().join(".aws/sso/cache");
+        std::fs::create_dir_all(&cache).expect("a credential cache");
+        for (read_scope, accepted) in [(Scope::Dir, false), (Scope::Root, true)] {
+            let config = ContainmentConfig::new()
+                .anchored_at(home.path())
+                .allow_credential_store(&cache, Operation::Write, Scope::Root)
+                .expect("a write grant")
+                .allow_credential_store(&cache, Operation::Read, read_scope)
+                .expect("a read grant");
+            let result = ContainmentConfig::from_json(&config.to_json().expect("serialize"));
+            assert_eq!(result.is_ok(), accepted, "{read_scope:?}: {result:?}");
+            if !accepted {
+                assert!(matches!(
+                    result,
+                    Err(ContainmentError::WriteOnlyUnsupported { .. })
+                ));
+            }
+        }
     }
 
     #[test]

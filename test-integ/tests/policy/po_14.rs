@@ -9,11 +9,12 @@ use strands_det_harness::{Platform, det_case};
 //
 // Every spelling of the metadata address, sent by the compiled native probe (run under the agent's
 // `exec` grant on `out/`) to the gateway through `$HTTP_PROXY`, under a permit-everything policy
-// plus the metadata forbid on `context.input.ip`. The literal forms need no resolver: the dotted
+// plus the metadata forbid on `context.input.ip4`. The literal forms need no resolver: the dotted
 // quad and its trailing-dot form are addresses, and the bracketed IPv6 encodings (mapped,
-// compatible, 6to4, Teredo) are parsed as addresses that policy reads as `169.254.169.254`. The
-// `inet_aton` forms (decimal, hex, octal, two-part) are not addresses to Rust's parser, so the
-// gateway resolves them as names, and `getaddrinfo` reads them as `169.254.169.254`.
+// compatible, 6to4, Teredo, NAT64, translated) are parsed as addresses that carry
+// `169.254.169.254` on `context.input.ip4`. The `inet_aton` forms (decimal, hex, octal,
+// two-part) are not addresses to Rust's parser, so the gateway resolves them as names, and
+// `getaddrinfo` reads them as `169.254.169.254`.
 //
 // A refusal counts only as the gateway's policy refusal naming `metadata_addresses`. A `502` is
 // read as `Unresolvable` only when the HOST's own resolver, asked independently by the case,
@@ -28,7 +29,7 @@ use strands_det_harness::{Platform, det_case};
 det_case! {
     name: po_14,
     id:   "PO-14",
-    desc: "Address spellings from the native route: every literal and inet_aton spelling of 169.254.169.254 is refused by a policy forbid on context.input.ip or independently declared unresolvable, while the decimal spelling of a permitted loopback recorder reaches it",
+    desc: "Address spellings from the native route: every literal and inet_aton spelling of 169.254.169.254 is refused by a policy forbid on context.input.ip4 or independently declared unresolvable, while the decimal spelling of a permitted loopback recorder reaches it",
     run: |b| {
         let recorder = HostRecorder::start();
         recorder.self_test();
@@ -39,7 +40,7 @@ det_case! {
             r#"@id("net_all")  permit (principal, action == Box::Action::"net:connect",  resource);
 @id("http_all") permit (principal, action == Box::Action::"http:request", resource);
 @id("metadata_addresses") forbid (principal, action == Box::Action::"net:connect", resource)
-    when { context.input has ip && context.input.ip like "169.254.*" };"#,
+    when { context.input has ip4 && context.input.ip4 like "169.254.*" };"#,
         );
 
         let literals = [
@@ -50,6 +51,8 @@ det_case! {
             ("LIT_V6_COMPAT", "[::169.254.169.254]"),
             ("LIT_6TO4", "[2002:a9fe:a9fe::]"),
             ("LIT_TEREDO", "[2001:0:0:0:0:0:5601:5601]"),
+            ("LIT_NAT64", "[64:ff9b::169.254.169.254]"),
+            ("LIT_V4_TRANSLATED", "[::ffff:0:169.254.169.254]"),
         ];
         let resolver_forms = [
             ("RES_DECIMAL", "2852039166"),

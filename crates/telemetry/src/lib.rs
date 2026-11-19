@@ -13,12 +13,12 @@ mod receive;
 mod record;
 
 pub use collector::Collector;
-pub use config::{Target, TargetKind, TargetSecret, TelemetryConfig};
+pub use config::{Payload, Target, TargetKind, TargetSecret, TelemetryConfig};
 pub use correlation::Correlation;
 pub use error::{Result, TelemetryError};
 pub use record::{
-    ControlOperation, ControlRecord, DecisionCause, DecisionRecord, DeterminingPolicy, Signal,
-    Subject,
+    ControlOperation, ControlRecord, DecisionCause, DecisionRecord, DeterminingPolicy,
+    McpUnmatched, Signal, Subject,
 };
 
 /// Open the lane `config` describes.

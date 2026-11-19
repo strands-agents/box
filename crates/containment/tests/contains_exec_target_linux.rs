@@ -45,6 +45,8 @@ fn run_contained(
         .arg(config_file.path())
         .arg("--config-sha256")
         .arg(config_sha256)
+        .arg("--target-env-json")
+        .arg("{}")
         .arg("--")
         .args(cmd)
         .output()
@@ -87,6 +89,8 @@ fn replaced_config_digest_mismatch_precedes_linux_refusal_and_target_exec() {
         .arg(&config_file)
         .arg("--config-sha256")
         .arg(authorized_digest)
+        .arg("--target-env-json")
+        .arg("{}")
         .arg("--")
         .args(["/bin/sh", "-c", "echo TARGET_RAN"])
         .output()
@@ -147,6 +151,30 @@ fn a_granted_target_runs_contained() {
     assert_eq!(code, 0, "the target's own exit status must propagate");
 }
 
+#[test]
+fn write_only_is_refused_before_the_target_runs() {
+    if !the_host_can_build_a_view() {
+        println!("skipping: this host cannot build a namespace mount view");
+        return;
+    }
+    let work_dir = tempfile::tempdir().expect("work directory");
+    let config = ContainmentConfig::new()
+        .allow("/bin/sh", Operation::Read, Scope::File)
+        .expect("read the shell")
+        .allow("/bin/sh", Operation::Exec, Scope::File)
+        .expect("execute the shell")
+        .allow(work_dir.path(), Operation::Write, Scope::Root)
+        .expect("a structurally valid write grant");
+    let (code, stdout, stderr) = run_contained(
+        &config,
+        work_dir.path(),
+        &["/bin/sh", "-c", "echo TARGET_RAN"],
+    );
+    assert_eq!(code, 3, "containment must refuse the request: {stderr}");
+    assert!(stderr.contains("cannot enforce write-only"), "{stderr}");
+    assert!(!stdout.contains("TARGET_RAN"), "{stdout}");
+}
+
 /// An UNGRANTED target is not reachable, and the failure is an exec failure rather
 /// than a workload run.
 ///
@@ -183,6 +211,188 @@ fn an_ungranted_target_cannot_be_reached() {
     );
 }
 
+#[test]
+fn a_leaf_runs_written_helpers_but_denied_paths_and_private_tmp_stay_non_executable() {
+    if !the_host_can_build_a_view() {
+        println!("skipping: this host cannot build a namespace mount view");
+        return;
+    }
+    let root = tempfile::Builder::new()
+        .prefix("leaf-exec-")
+        .tempdir_in("/var/tmp")
+        .expect("fixture outside the private tmp mount");
+    let work = root.path().join("work");
+    let helpers = root.path().join("helpers");
+    let denied = work.join("denied");
+    std::fs::create_dir_all(&denied).unwrap();
+    std::fs::create_dir(&helpers).unwrap();
+    let helper = helpers.join("helper");
+    let written = work.join("written");
+    let refused = denied.join("helper");
+    let outside = root.path().join("ungranted");
+    let protected = work.join("protected");
+    for path in [&helper, &refused, &outside, &protected] {
+        std::fs::copy("/bin/sh", path).unwrap();
+        // A sibling namespace probe can inherit the copy's writer until its child exits.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        let status = loop {
+            match Command::new(path).args(["-c", "exit 0"]).status() {
+                Err(error)
+                    if error.raw_os_error() == Some(libc::ETXTBSY)
+                        && std::time::Instant::now() < deadline =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                result => break result,
+            }
+        };
+        assert!(
+            status
+                .expect("the uncontained helper must execute")
+                .success(),
+            "the uncontained helper must exit successfully"
+        );
+    }
+    let opened = std::fs::File::open(&protected).unwrap();
+    let mut config = ContainmentConfig::new()
+        .allow("/bin/sh", Operation::Exec, Scope::File)
+        .unwrap()
+        .allow("/bin/cp", Operation::Read, Scope::File)
+        .unwrap()
+        .allow(&helpers, Operation::Read, Scope::Root)
+        .unwrap()
+        .allow(&work, Operation::Read, Scope::Root)
+        .unwrap()
+        .allow(&work, Operation::Write, Scope::Root)
+        .unwrap()
+        .refuse(&denied, Scope::Root)
+        .unwrap()
+        .protect_write(&protected, &opened)
+        .unwrap();
+    if Path::new("/usr/bin/coreutils").is_file() {
+        config = config
+            .allow("/usr/bin/coreutils", Operation::Read, Scope::File)
+            .unwrap();
+    }
+    for directory in ["/lib", "/lib64", "/usr/lib", "/usr/lib64"] {
+        if Path::new(directory).is_dir() {
+            config = config
+                .allow(directory, Operation::Read, Scope::Root)
+                .unwrap();
+        }
+    }
+    let leaf_script = format!(
+        "set -eu; {helper} -c 'echo READ_HELPER'; \
+         /bin/cp {helper} {written}; {written} -c 'echo WRITTEN_HELPER'; \
+         /bin/cp {helper} /tmp/helper; \
+         for denied in /tmp/helper {refused} {outside} {protected}; do \
+           if \"$denied\" -c 'echo ESCAPED'; then exit 71; fi; \
+         done; echo LEAF_COMPLETE",
+        helper = helper.display(),
+        written = written.display(),
+        refused = refused.display(),
+        outside = outside.display(),
+        protected = protected.display(),
+    );
+    let (code, stdout, stderr) = run_contained(
+        &config.clone().allow_broad_exec(),
+        &work,
+        &["/bin/sh", "-c", &leaf_script],
+    );
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    for marker in ["READ_HELPER", "WRITTEN_HELPER", "LEAF_COMPLETE"] {
+        assert!(stdout.contains(marker), "{stdout}\n{stderr}");
+    }
+    assert!(!stdout.contains("ESCAPED"), "{stdout}\n{stderr}");
+    assert_eq!(
+        std::fs::read(&written).unwrap(),
+        std::fs::read(&helper).unwrap()
+    );
+
+    let agent_script = format!(
+        "set -eu; for program in {helper} {written}; do \
+           if \"$program\" -c 'echo AGENT_ESCAPED'; then exit 72; fi; \
+         done; echo AGENT_COMPLETE",
+        helper = helper.display(),
+        written = written.display(),
+    );
+    let (code, stdout, stderr) = run_contained(&config, &work, &["/bin/sh", "-c", &agent_script]);
+    assert_eq!(code, 0, "{stdout}\n{stderr}");
+    assert!(stdout.contains("AGENT_COMPLETE"), "{stdout}\n{stderr}");
+    assert!(!stdout.contains("AGENT_ESCAPED"), "{stdout}\n{stderr}");
+}
+
+/// **A leaf keeps a write-protected tree**: with broad exec, it runs a program from the tree and is
+/// refused every write there, while the rest of the root stays writable.
+#[test]
+fn a_leaf_runs_from_a_write_protected_tree_and_refuses_writes() {
+    if !the_host_can_build_a_view() {
+        println!("skipping: this host cannot build a namespace mount view");
+        return;
+    }
+    let work = tempfile::tempdir().expect("work directory");
+    let work_dir = work
+        .path()
+        .canonicalize()
+        .expect("a canonical work directory");
+    let venv = work_dir.join("venv");
+    std::fs::create_dir_all(venv.join("bin")).expect("the protected tree");
+    std::fs::copy("/bin/true", venv.join("bin/true")).expect("a program in the tree");
+    std::fs::write(venv.join("module.py"), "x = 1").expect("a file in the tree");
+    let script = format!(
+        "cd {} && venv/bin/true && echo RAN; \
+         (echo y > venv/module.py) 2>/dev/null && echo WROTE; \
+         (echo z > venv/planted.so) 2>/dev/null && echo PLANTED; \
+         rm venv/module.py 2>/dev/null && echo REMOVED; \
+         echo w > out.txt && echo OUTSIDE",
+        work_dir.display()
+    );
+    let base = || {
+        let mut config = ContainmentConfig::new()
+            .allow("/bin/sh", Operation::Read, Scope::File)
+            .expect("read the shell")
+            .allow("/bin/sh", Operation::Exec, Scope::File)
+            .expect("grant the shell")
+            .allow(&work_dir, Operation::Read, Scope::Root)
+            .expect("read the work directory")
+            .allow(&work_dir, Operation::Write, Scope::Root)
+            .expect("write the work directory")
+            .allow_broad_exec();
+        for directory in ["/lib", "/lib64", "/usr/lib", "/usr/lib64"] {
+            if Path::new(directory).is_dir() {
+                config = config
+                    .allow(directory, Operation::Read, Scope::Root)
+                    .expect("read the libraries");
+            }
+        }
+        config
+    };
+    let protected = base().protect_write_tree(&venv).expect("protect the tree");
+    let (code, stdout, stderr) = run_contained(&protected, &work_dir, &["/bin/sh", "-c", &script]);
+    assert_eq!(code, 0, "stdout:\n{stdout}\nstderr:\n{stderr}");
+    assert!(
+        stdout.contains("RAN"),
+        "a program in the tree runs: {stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("OUTSIDE"),
+        "the rest of the root stays writable: {stdout}"
+    );
+    for refused in ["WROTE", "PLANTED", "REMOVED"] {
+        assert!(
+            !stdout.contains(refused),
+            "{refused} in the protected tree: {stdout}"
+        );
+    }
+    std::fs::write(venv.join("module.py"), "x = 1").expect("restore the file");
+
+    let (_, stdout, stderr) = run_contained(&base(), &work_dir, &["/bin/sh", "-c", &script]);
+    assert!(
+        stdout.contains("WROTE"),
+        "without the protection the tree is writable: {stdout}\n{stderr}"
+    );
+}
+
 /// Whether this host lets the launcher build a mount view at all.
 ///
 /// This used to measure `unshare(CLONE_NEWUSER)` alone, mirroring the backend's own
@@ -198,6 +408,186 @@ fn an_ungranted_target_cannot_be_reached() {
 /// the kernel refuses a procfs for a PID namespace the caller is not in. Mounting in
 /// the first child would report `EPERM` on every host and skip these tests everywhere.
 ///
+/// A write-protected tree inside a write root runs a program from it, and refuses every write there.
+#[test]
+fn a_write_protected_tree_runs_its_programs_and_refuses_writes() {
+    if !the_host_can_build_a_view() {
+        println!("skipping: this host cannot build a namespace mount view");
+        return;
+    }
+    let work = tempfile::tempdir().expect("work directory");
+    let work_dir = work
+        .path()
+        .canonicalize()
+        .expect("a canonical work directory");
+    let venv = work_dir.join("venv");
+    std::fs::create_dir_all(venv.join("bin")).expect("the protected tree");
+    std::fs::copy("/bin/true", venv.join("bin/true")).expect("a program in the tree");
+    std::fs::write(venv.join("module.py"), "x = 1").expect("a file in the tree");
+    let script = format!(
+        "cd {} && venv/bin/true && echo RAN; \
+         (echo y > venv/module.py) 2>/dev/null && echo WROTE; \
+         (echo z > venv/planted.so) 2>/dev/null && echo PLANTED; \
+         rm venv/module.py 2>/dev/null && echo REMOVED; \
+         echo w > out.txt && echo OUTSIDE",
+        work_dir.display()
+    );
+
+    for (label, exec, scope) in [
+        ("an exec grant over the tree", venv.clone(), Scope::Root),
+        (
+            "an exec grant on a folder inside it",
+            venv.join("bin"),
+            Scope::Root,
+        ),
+        (
+            "an exec grant on a file inside it",
+            venv.join("bin/true"),
+            Scope::File,
+        ),
+    ] {
+        let base = || {
+            ContainmentConfig::new()
+                .allow("/bin/sh", Operation::Read, Scope::File)
+                .expect("read the shell")
+                .allow("/bin/sh", Operation::Exec, Scope::File)
+                .expect("grant the shell")
+                .allow(&work_dir, Operation::Read, Scope::Root)
+                .expect("read the work directory")
+                .allow(&work_dir, Operation::Write, Scope::Root)
+                .expect("write the work directory")
+                .allow(&exec, Operation::Exec, scope)
+                .expect("the exec grant")
+        };
+        let protected = base().protect_write_tree(&venv).expect("protect the tree");
+        let (code, stdout, stderr) =
+            run_contained(&protected, &work_dir, &["/bin/sh", "-c", &script]);
+        assert_eq!(code, 0, "{label}: stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(
+            stdout.contains("RAN"),
+            "{label}: a program in the tree runs: {stdout}\n{stderr}"
+        );
+        assert!(
+            stdout.contains("OUTSIDE"),
+            "{label}: the rest of the root stays writable: {stdout}"
+        );
+        for refused in ["WROTE", "PLANTED", "REMOVED"] {
+            assert!(
+                !stdout.contains(refused),
+                "{label}: {refused} in the protected tree: {stdout}"
+            );
+        }
+        std::fs::write(venv.join("module.py"), "x = 1").expect("restore the file");
+
+        let (_, stdout, stderr) = run_contained(&base(), &work_dir, &["/bin/sh", "-c", &script]);
+        assert!(
+            stdout.contains("WROTE"),
+            "{label}: without the protection the tree is writable: {stdout}\n{stderr}"
+        );
+        std::fs::write(venv.join("module.py"), "x = 1").expect("restore the file");
+        let _ = std::fs::remove_file(venv.join("planted.so"));
+    }
+}
+
+/// A filesystem mounted inside a write-protected tree before the box starts is protected with it:
+/// writes there fail, and a program there does not run without an exec grant covering it.
+#[test]
+fn a_mount_inside_a_write_protected_tree_is_protected_with_it() {
+    if !the_host_can_build_a_view() {
+        println!("skipping: this host cannot build a namespace mount view");
+        return;
+    }
+    if Command::new("unshare").arg("--version").output().is_err() {
+        println!("skipping: no unshare(1) to mount inside an outer namespace");
+        return;
+    }
+    let work = tempfile::tempdir().expect("work directory");
+    let work_dir = work
+        .path()
+        .canonicalize()
+        .expect("a canonical work directory");
+    let venv = work_dir.join("venv");
+    let cache = venv.join("cache");
+    std::fs::create_dir_all(venv.join("bin")).expect("the protected tree");
+    std::fs::create_dir_all(&cache).expect("the mount point inside the tree");
+    std::fs::copy("/bin/true", venv.join("bin/true")).expect("a program in the tree");
+
+    let config = ContainmentConfig::new()
+        .allow("/bin/sh", Operation::Read, Scope::File)
+        .expect("read the shell")
+        .allow("/bin/sh", Operation::Exec, Scope::File)
+        .expect("grant the shell")
+        .allow(&work_dir, Operation::Read, Scope::Root)
+        .expect("read the work directory")
+        .allow(&work_dir, Operation::Write, Scope::Root)
+        .expect("write the work directory")
+        .allow(venv.join("bin/true"), Operation::Exec, Scope::File)
+        .expect("exec one program in the tree")
+        .protect_write_tree(&venv)
+        .expect("protect the tree");
+    let config_json = config.to_json().expect("config json");
+    let config_file = work_dir.join("config.json");
+    std::fs::write(&config_file, &config_json).expect("write config");
+
+    let script = format!(
+        "cd {work} && venv/bin/true && echo RAN; \
+         (echo y > venv/cache/mounted) 2>/dev/null && echo WROTE_MOUNT; \
+         venv/cache/true 2>/dev/null && echo RAN_MOUNT; \
+         echo w > out.txt && echo OUTSIDE",
+        work = work_dir.display()
+    );
+    // The outer namespace stands in for a host where another filesystem is already mounted inside
+    // the tree; the trampoline then builds its own view from that mount table.
+    let outer = format!(
+        "mount -t tmpfs tmpfs {cache} && cp /bin/true {cache}/true && \
+         exec {exe} --config {config} --config-sha256 {digest} --target-env-json '{{}}' \
+         -- /bin/sh -c \"$1\"",
+        cache = cache.display(),
+        exe = env!("CARGO_BIN_EXE_strands-box-contain-trampoline"),
+        config = config_file.display(),
+        digest = sha256_hex(config_json.as_bytes()),
+    );
+    let out = Command::new("unshare")
+        .args([
+            "--user",
+            "--map-root-user",
+            "--mount",
+            "--propagation",
+            "private",
+        ])
+        .args(["/bin/sh", "-c", &outer, "outer", &script])
+        .current_dir(&work_dir)
+        .output()
+        .expect("spawn the outer namespace");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.starts_with("unshare:") {
+        println!("skipping: this host refuses an outer user namespace: {stderr}");
+        return;
+    }
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stdout:\n{stdout}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stdout.contains("RAN"),
+        "the granted program runs: {stdout}\n{stderr}"
+    );
+    assert!(
+        stdout.contains("OUTSIDE"),
+        "the rest of the root stays writable: {stdout}"
+    );
+    assert!(
+        !stdout.contains("WROTE_MOUNT"),
+        "a mount inside the protected tree is writable: {stdout}"
+    );
+    assert!(
+        !stdout.contains("RAN_MOUNT"),
+        "a program on a mount inside the protected tree runs without an exec grant: {stdout}"
+    );
+}
+
 /// The same measurement exists twice more — in the backend's own unit tests and in
 /// `box`'s test fixture. Each copy is forced by a module boundary rather than chosen:
 /// an integration test cannot reach a private module, and `box` is another crate.

@@ -283,10 +283,16 @@ impl PartialList {
         let identity_tools: Vec<Value> = by_name
             .into_iter()
             .map(|tool| {
-                serde_json::json!({
+                let mut identity = serde_json::json!({
                     "name": tool.get("name"),
                     "inputSchema": tool.get("inputSchema"),
-                })
+                });
+                // A server that changes only a tool's outputs restages. Added only when present,
+                // so a catalog with no output schemas keeps the identity it had before.
+                if let Some(output) = tool.get("outputSchema") {
+                    identity["outputSchema"] = output.clone();
+                }
+                identity
             })
             .collect();
         let identity = serde_json::json!({
@@ -1039,6 +1045,40 @@ mod tests {
     }
 
     #[test]
+    fn a_list_that_changes_only_an_output_schema_restages() {
+        let fixture = fixture(McpServerKind::Stdio);
+        let first = complete(&fixture.catalogs, "a", &page(&["read"], None));
+        fixture
+            .catalogs
+            .stage(first)
+            .expect("the first list stages");
+        let mut with_output = page(&["read"], None);
+        with_output["result"]["tools"][0]["outputSchema"] = json!({
+            "type": "object",
+            "properties": {"verified": {"type": "boolean"}},
+            "required": ["verified"]
+        });
+        let second = complete(&fixture.catalogs, "b", &with_output);
+        assert_eq!(
+            fixture.catalogs.stage(second).expect("staging runs"),
+            CatalogStage::Accepted { tools: 1 }
+        );
+        let mut retyped = with_output.clone();
+        retyped["result"]["tools"][0]["outputSchema"]["properties"]["verified"]["type"] =
+            json!("string");
+        let third = complete(&fixture.catalogs, "c", &retyped);
+        assert_eq!(
+            fixture.catalogs.stage(third).expect("staging runs"),
+            CatalogStage::Accepted { tools: 1 }
+        );
+        let fourth = complete(&fixture.catalogs, "d", &retyped);
+        assert_eq!(
+            fixture.catalogs.stage(fourth).expect("staging runs"),
+            CatalogStage::Unchanged
+        );
+    }
+
+    #[test]
     fn unfinished_lists_past_the_run_budget_fail_discovery() {
         let history = tempfile::tempdir().expect("history directory");
         let policy = Arc::new(
@@ -1154,5 +1194,40 @@ mod tests {
         let catalog = complete(&fixture.catalogs, "a", &page(&["read"], None));
         fixture.catalogs.stage(catalog).expect("the list stages");
         assert!(fixture.policy.finish_mcp_discovery().is_ok());
+    }
+
+    /// An http server whose list missed its deadline still stages a later list, on any session.
+    #[test]
+    fn an_http_list_after_a_capture_failure_stages_on_a_later_session() {
+        let fixture = fixture(McpServerKind::Http);
+        fixture
+            .catalogs
+            .list_failed("demo", "first", DiscoveryFailure::CaptureDeadline);
+        assert_eq!(
+            fixture.catalogs.state("demo"),
+            Some(ServerDiscovery::Failed(DiscoveryFailure::CaptureDeadline))
+        );
+        assert_eq!(
+            fixture.catalogs.require_listed("demo", "read"),
+            Err(CatalogRefusal::NotAccepted)
+        );
+
+        let page = json!({"jsonrpc": "2.0", "id": 1, "result": {"tools": [
+            {"name": "read", "inputSchema": {"type": "object",
+             "properties": {"path": {"type": "string"}}}}
+        ]}});
+        let ListPage::Complete(complete) = fixture
+            .catalogs
+            .observe_page("demo", "second", None, &page, 65536)
+            .expect("the later page is a catalog")
+        else {
+            panic!("the later page must complete a list");
+        };
+        assert!(matches!(
+            fixture.catalogs.stage(complete),
+            Ok(CatalogStage::Accepted { .. })
+        ));
+        assert_eq!(fixture.catalogs.state("demo"), Some(ServerDiscovery::Ready));
+        assert_eq!(fixture.catalogs.require_listed("demo", "read"), Ok(()));
     }
 }

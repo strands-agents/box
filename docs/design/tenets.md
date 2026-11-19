@@ -1,36 +1,58 @@
-# Tenets (unless you know better ones)
+<a id="tenets-unless-you-know-better-ones"></a>
+# Tenets
 
-*In priority order: when tenets conflict, higher wins.*
+These tenets state how Box should protect an agent workload. They are open to revision when a
+better principle is proposed. When tenets conflict, the one listed first takes priority.
 
-1. **Assume the agent is compromised.** Enforcement fails closed and sits beyond the agent's reach; controls inside the boundary are floors, not walls. Defense in depth: no single mechanism is assumed foolproof, and every prior-art system we studied broke by failing open or by trusting its own glue.
+1. **Assume the agent is compromised.** Enforcement fails closed and runs beyond the agent's reach.
+   Controls inside the boundary provide additional restrictions but cannot establish the boundary
+   themselves. No single mechanism is foolproof. Every prior system we studied failed open or trusted
+   the code that connected its parts.
 
-2. **The agent never holds the secret.** Credentials are injected at the boundary and scoped to the destination; requests are authorized by who is asking, not just where they're going. An allowlisted endpoint is still an exfiltration channel if anything in the sandbox can use it.
+2. **The agent never holds the secret.** Box adds credentials at the boundary and scopes them to the
+   destination. Authorization checks who sends the request as well as where it goes. An allowed
+   endpoint can still receive private data if anything in the sandbox can use it.
 
-3. **Secure by default, workable by default.** A developer brings the framework of their choice and gets an agent that is contained out of the box and still does its job; major frameworks work without adaptation. We never buy convenience with fail-open defaults.
+3. **Secure by default, workable by default.** A developer can use their chosen framework with an
+   agent that is contained from startup and can still do its job. Major frameworks work without
+   adaptation. Convenience never justifies a default that fails open.
 
-4. **Log the decision, not just the event.** Every allow and deny is reconstructable: what was asked, by whom, and why it was decided that way. We are honest about limits: traffic we don't terminate is logged at connection level, and telemetry never becomes a credential hole inside the boundary.
+4. **Record each decision and its reason.** Every allow and deny must be reconstructable, including
+   the request, its caller, and the reason. State the limits of the records. Traffic that Box does not
+   terminate has connection-level records. Telemetry must not expose credentials inside the boundary.
 
-5. **Portable in definition, honest in guarantees.** The same agent definition runs on a laptop, in a container, and inside a MicroVM, over open standards and multiple protocols. Each platform gets its highest security posture, never the lowest common denominator; we surface the per-platform differences and refuse to run silently degraded.
+5. **Keep definitions portable and state platform guarantees.** The same agent definition runs on a
+   laptop, in a container, and inside a MicroVM, using open standards and multiple protocols. Use each
+   platform's strongest available protection. Disclose platform differences and refuse to run with
+   silently reduced protection.
 
-6. **Extensible at the edges, fixed at the core.** Backends are pluggable behind honest capability reporting; the policy engine is part of the trusted core and is never swappable.
+6. **Support replaceable backends and a fixed policy engine.** Backends report their capabilities
+   accurately. The policy engine is part of the trusted code and cannot be replaced.
 
-7. **Performance is a constraint, not an afterthought.** Security is additive, never the reason an agent fails to do its job. Enforcement stays local, minimizing latency and external dependencies.
+7. **Treat performance as a constraint.** Security adds protection without preventing the agent from
+   doing its job. Enforcement stays local to limit latency and external dependencies.
 
 ---
 
 ## Non-goals
 
-- **Cross-tenant isolation.** The box secures a single operator's agent workload; isolating tenants from each other is the hosting platform's job (Nitro/KVM). Multi-agent controls within one workload, such as sub-agent delegation and attenuation, are in scope.
-- **Enterprise zero-trust network products.** We are not building a network mesh. Per-request provenance binding at the box boundary (tenet 2) is in scope.
-- **Kernel-exploit resistance.** A kernel escape defeats operating system enforcement; that residual risk is accepted and mitigated by the platform's isolation tier, not the box.
+- **Cross-tenant isolation.** The box protects one operator's agent workload. The hosting platform,
+  such as Nitro/KVM, isolates tenants. Multi-agent controls within one workload, such as sub-agent
+  delegation and attenuation, are in scope.
+- **Enterprise zero-trust network products.** Box is not a network mesh. Binding each request to its
+  source at the box boundary, as required by tenet 2, is in scope.
+- **Kernel-exploit resistance.** A kernel escape defeats operating system enforcement. The platform's
+  isolation provides mitigation for this accepted risk. Box does not.
 
 ---
 
-## Performance constraints (targets to measure against)
+<a id="performance-constraints-targets-to-measure-against"></a>
+## Performance constraints
+
+These are targets for measurement.
 
 | Dimension | Target |
 |-----------|--------|
-| Policy enforcement | < 1 ms per decision (local, no network hop); asserted, not yet benchmarked |
-| Sandbox startup | < 50 ms cold start on macOS/Linux process-sandbox tier; the MicroVM tier is ~125 ms (accepted: a full-VM boundary trades startup for stronger isolation) |
+| Policy enforcement | < 1 ms per decision, locally with no network hop. This target is asserted but not yet benchmarked. |
+| Sandbox startup | < 50 ms cold start for macOS/Linux process sandboxes. The MicroVM tier is ~125 ms. We accept the longer startup for stronger isolation from a full virtual machine. |
 | Memory overhead | < 20 MB resident for the box's trusted process |
-
