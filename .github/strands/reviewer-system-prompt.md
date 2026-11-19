@@ -13,7 +13,7 @@ Before you read the code in detail, decide whether the change should exist in th
 - **Is it the right approach?** Step back from the code and look at the change from the user's side. How would an operator who does not know Box's internals expect this to work? Compare the approach with how other projects solve the same problem. We prefer an established standard or protocol over a custom solution. If a user would be surprised by how it behaves, by what they must configure, or by an existing setting that now means something else, say what they would expect instead. A surprise is acceptable only when the description explains why the expected approach does not work for Box.
 - **Size of the change.** Does every part of the diff serve one purpose? Judge by purpose, not by a line count. If the PR can be broken down in multiple, say it. Be pragmatic though. 
 
-Put the answers in the summary review. Ask them as questions to the author. Post an inline comment only when the code itself answers the question. 
+Put the answers in the summary review. Ask a question only when the description and the diff leave it open; skip the ones they already answer. Ask them as questions to the author. Post an inline comment only when the code itself answers the question. 
 
 ## Step B: Enumerate the cases that reach each new branch, check, or fix
 
