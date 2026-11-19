@@ -141,14 +141,15 @@
 ; below so a refused tree stays non-executable. Filled by the broad-exec branch in seatbelt.rs.
 
 
-; Seven names and no more. Native Rust startup needs the page size, and a runtime that sizes
-; a thread pool needs the processor count. The other five are what the uname interface reads.
-; A runtime asks for all of them before it runs a line of the workload's own code. Each names
-; a public property of the host, and none is a secret.
+; Eight names and no more. Native Rust startup needs the page size, a runtime that sizes a
+; thread pool needs the processor count, and sysconf(_SC_ARG_MAX) reads kern.argmax. The other
+; five are what the uname interface reads. A runtime asks for these before it runs a line of the
+; workload's own code. Each names a public property of the host, and none is a secret.
 (allow sysctl-read
     (sysctl-name "hw.machine")
     (sysctl-name "hw.ncpu")
     (sysctl-name "hw.pagesize_compat")
+    (sysctl-name "kern.argmax")
     (sysctl-name "kern.hostname")
     (sysctl-name "kern.osrelease")
     (sysctl-name "kern.ostype")
