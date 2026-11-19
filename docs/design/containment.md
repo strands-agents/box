@@ -242,6 +242,10 @@ floors](decisions.md#the-deny-only-floors-run-beneath-every-backend). The floors
 - Box refuses direct writable grants that can overwrite a configured command or replace its path,
   including its symbolic-link route and enclosing directories. The check covers the agent, every
   tool, and every local MCP server. The program of a declared secret source gets the same check.
+- Grants cannot reach a path that a declared secret source lists in `reads` or `deny`: the path,
+  a path inside it, or a directory that holds it. A write grant also cannot reach the directory
+  that holds a symbolic link on the way to one. Each sandbox also denies those paths. A
+  credential store in those lists loses its exact-name exception.
 - Box refuses writable grants that can change its executable, containment launcher, socket-alias
   image, or the macOS package launcher when present. This includes hard-link names, mounted aliases,
   and enclosing directories. The check covers every process's grants. See [installation

@@ -570,13 +570,14 @@ fn prepare_contract(
     let request = contract.into_request(&root)?;
     let existed = root.is_configured();
     request.verify_sources()?;
-    // The one check of the declared sources: each program file, each write grant over one, and
-    // one line for each source. Only the value that it returns reads a secret, and only through
-    // its two read steps: it gives no backend to this module. It starts no program and reads no
-    // box state, and it comes before the record is committed, so a refusal stores nothing in a
-    // new box directory, as a refusal of the configuration does. The tools that this run leaves
-    // out are chosen first, once, so the check judges each table that this run starts and no
-    // other. The `left out` lines and a refusal of that choice come after the record is stored.
+    // The one check of the declared sources: each program file, each table that lets a workload
+    // go around a source, and one line for each source. Only the value that it returns reads a
+    // secret, and only through its two read steps: it gives no backend to this module. It starts
+    // no program and reads no box state, and it comes before the record is committed, so a
+    // refusal stores nothing in a new box directory, as a refusal of the configuration does. The
+    // tools that this run leaves out are chosen first, once, so the check judges each table that
+    // this run starts and no other. The `left out` lines and a refusal of that choice come after
+    // the record is stored.
     let (SettledTools { record, left_out }, secrets) = settle_tools(&request.record, |record| {
         SecretSources::check(record, &request.sources, std::io::stderr())
     })?;

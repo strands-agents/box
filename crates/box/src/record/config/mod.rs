@@ -62,7 +62,7 @@ use self::env::{reserved_workload_environment, valid_environment_name};
 use self::gateway::Gateway;
 use self::limits::Limits;
 use self::process::{ContainedMcp, ProcessSpec};
-use self::secret_source::{DeclaredSources, SecretSourceEntry};
+use self::secret_source::{DeclaredSources, ProtectedPath, SecretSourceEntry};
 use credentials::DestinationPattern;
 
 /// The default credential header, and the one whose convention carries a prefix.
@@ -173,6 +173,8 @@ pub(crate) struct ProcessTables {
     pub(crate) policy: Option<PathBuf>,
     /// Whether the configuration declares a stdio MCP server.
     pub(crate) declares_stdio_mcp: bool,
+    /// Each path that a secret source of the configuration keeps from each workload.
+    pub(crate) source_paths: Vec<ProtectedPath>,
 }
 
 impl ProcessTables {
@@ -182,6 +184,7 @@ impl ProcessTables {
         contained_mcp: &'a BTreeMap<String, ContainedMcp>,
         policy: Option<PathBuf>,
         declares_stdio_mcp: bool,
+        secret_source: &BTreeMap<String, SecretSourceEntry>,
     ) -> Self {
         let agent = agent.into_iter().map(|spec| ("[agent]".to_string(), spec));
         let tools = tool
@@ -198,6 +201,7 @@ impl ProcessTables {
                 .collect(),
             policy,
             declares_stdio_mcp,
+            source_paths: secret_source::protected_paths(secret_source),
         }
     }
 }
@@ -215,6 +219,7 @@ pub(crate) fn read_secret_sources(
         &contained,
         file.policy_path(path),
         !contained.is_empty(),
+        &file.secret_source,
     );
     Ok((
         file.secret_source,
@@ -1291,6 +1296,7 @@ impl Record {
             &self.contained_mcp,
             self.policy.clone(),
             self.declares_stdio_mcp(),
+            &self.secret_source,
         )
     }
 
@@ -4273,6 +4279,27 @@ env = {}
         let none = pinned_record("[agent]\ncommand = [\"/bin/bash\"]\n").process_tables();
         assert_eq!(names(&none), ["[agent]"]);
         assert!(!none.declares_stdio_mcp);
+
+        // Each path that a secret source protects goes with the tables, so each judgement of a
+        // list compares its grants with them.
+        assert_eq!(stored.source_paths, []);
+        assert_eq!(read.source_paths, []);
+        let mut declaring = pinned_record(BODY);
+        declaring.secret_source = secret_source::tests::entries(
+            "[secret-source.op]\nprotocol = \"box.secret-source.v1\"\n\
+             command = [\"/opt/op\", \"read\", \"op://{ref}\"]\n\
+             reads = [\"~/.config/op\"]\ndeny = [\"/var/run/op\"]\n",
+        );
+        assert_eq!(
+            declaring.process_tables().source_paths,
+            [("reads", "~/.config/op"), ("deny", "/var/run/op")].map(|(list, entry)| {
+                ProtectedPath {
+                    scheme: "op".to_string(),
+                    list,
+                    entry: entry.to_string(),
+                }
+            })
+        );
     }
 
     /// Servers on distinct programs store the record an earlier build stored.
@@ -5374,6 +5401,17 @@ command = ["mcp-server-fetch"]
             assert!(tables.tables.is_empty() && !tables.declares_stdio_mcp);
             assert_eq!(sources.keys().collect::<Vec<_>>(), ["op"]);
             assert!(enabled);
+            // The paths of the source go with the tables of the file, as they do for a record.
+            assert_eq!(
+                tables.source_paths,
+                [("reads", "~/.config/op"), ("deny", "/var/run/op")].map(|(list, entry)| {
+                    ProtectedPath {
+                        scheme: "op".to_string(),
+                        list,
+                        entry: entry.to_string(),
+                    }
+                })
+            );
             // A server that names no declared scheme is read beside the declaration.
             std::fs::write(&path, server("")).unwrap();
             assert_eq!(read_remote_mcp_servers(&path).unwrap().len(), 1);

@@ -3,7 +3,7 @@
 //!
 //! | Step | Owner |
 //! |---|---|
-//! | Check each program file, refuse a write grant over one, and name each source on stderr | [`SecretSources::check`] |
+//! | Check each program file, refuse a table that lets a workload go around a source, and name each source on stderr | [`SecretSources::check`] |
 //! | Read the secret of each telemetry target, and state each outcome | [`SecretSources::fetch_telemetry`] |
 //! | Read each other secret, and state each outcome | [`TelemetrySecrets::fetch_routes`] |
 //! | Drop each held secret after the vaults open | [`RouteSecrets`], which the vaults consume |
@@ -88,7 +88,8 @@ impl Fetched {
 
 impl SecretSources {
     /// Check the program file of each `[secret-source.<scheme>]` table of `record`, refuse each
-    /// write grant over one, and write one line for each source to `disclosure`.
+    /// process table that lets a workload go around a source, and write one line for each source
+    /// to `disclosure`.
     pub(crate) fn check(
         record: &Record,
         protected_sources: &[AuthoritySource],
@@ -130,8 +131,8 @@ impl SecretSources {
         Self::checked(entries, declared, tables, &[], disclosure).map(SchemaSecrets)
     }
 
-    /// The one order of the check, which each constructor follows: the program files, the write
-    /// grants, then the lines.
+    /// The one order of the check, which each constructor follows: the program files, the
+    /// process tables, then the lines.
     fn checked(
         entries: &BTreeMap<String, SecretSourceEntry>,
         declared: DeclaredSources,
@@ -140,7 +141,7 @@ impl SecretSources {
         disclosure: impl std::io::Write,
     ) -> Result<Self, BoxError> {
         let sources = Self::open(entries, declared)?;
-        sources.refuse_writable_programs(tables, protected_sources)?;
+        sources.refuse_exposure(tables, protected_sources)?;
         sources
             .disclose(disclosure)
             .map_err(|source| ConfigError::Disclosure { source })?;
@@ -201,25 +202,20 @@ impl SecretSources {
         })
     }
 
-    /// Refuse each write grant in `tables` that can change the program of a source, so that no
-    /// source program starts in a configuration that lets a workload replace it.
-    fn refuse_writable_programs(
+    /// Refuse each process table in `tables` that lets a workload go around a source, so that
+    /// no source program starts in that configuration: a grant that reaches a path that a
+    /// source protects, and a write grant that can change the program of a source.
+    fn refuse_exposure(
         &self,
         tables: &ProcessTables,
         protected_sources: &[AuthoritySource],
     ) -> Result<(), BoxError> {
-        // A configuration that declares no source has no program to judge a grant against.
+        // A configuration that declares no source has nothing to judge a table against.
         if !self.commands.has_sources() {
             return Ok(());
         }
         for (table, spec) in &tables.tables {
-            let reach = judge_lists(
-                spec,
-                table,
-                tables.policy.as_deref(),
-                tables.declares_stdio_mcp,
-                protected_sources,
-            )?;
+            let reach = judge_lists(spec, table, tables, protected_sources)?;
             self.commands.validate_reach(table, &reach)?;
         }
         Ok(())

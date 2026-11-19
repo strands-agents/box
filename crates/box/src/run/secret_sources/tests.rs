@@ -72,14 +72,21 @@ impl StandIn {
 /// The sources of the `[secret-source.<scheme>]` tables in `text`, on a protected operating
 /// system with the feature on, with each program file checked and no table judged.
 pub(crate) fn sources(text: &str) -> Result<SecretSources, BoxError> {
-    let entries = crate::record::config::secret_source::tests::entries(text);
-    SecretSources::open(&entries, DeclaredSources::for_tests(&entries))
+    SecretSources::for_tests(&crate::record::config::secret_source::tests::entries(text))
 }
 
 impl SecretSources {
     /// The one backend of these sources, which only a test reads before a read step.
     pub(crate) fn backend(&self) -> &Backend {
         &self.backend
+    }
+
+    /// The sources of `entries` on a protected operating system, with the feature on, with each
+    /// program file checked and no table judged.
+    pub(crate) fn for_tests(
+        entries: &BTreeMap<String, SecretSourceEntry>,
+    ) -> Result<Self, BoxError> {
+        Self::open(entries, DeclaredSources::for_tests(entries))
     }
 
     /// [`check`](Self::check) of `record` on a protected operating system, with the feature on.
@@ -111,6 +118,7 @@ fn no_tables() -> ProcessTables {
         tables: Vec::new(),
         policy: None,
         declares_stdio_mcp: false,
+        source_paths: Vec::new(),
     }
 }
 
@@ -754,6 +762,7 @@ fn agent_writes(folder: &Path) -> ProcessTables {
         tables: vec![("[agent]".to_string(), agent)],
         policy: None,
         declares_stdio_mcp: false,
+        source_paths: Vec::new(),
     }
 }
 
@@ -805,6 +814,65 @@ fn a_write_grant_over_a_source_program_is_refused_and_starts_no_program() {
     let (sources, lines) = checked("", &agent_writes(&link));
     sources.expect("no source, no judgement");
     assert_eq!(lines, "");
+    assert_eq!(program.runs(), 0, "the check starts no program");
+}
+
+/// The process tables of a configuration whose `[agent]` table has `body` after its command,
+/// beside the secret sources `entries`.
+fn agent_beside(body: &str, entries: &BTreeMap<String, SecretSourceEntry>) -> ProcessTables {
+    let agent = toml::from_str(&format!("command = [\"/bin/bash\"]\n{body}"))
+        .expect("the agent table parses");
+    ProcessTables {
+        tables: vec![("[agent]".to_string(), agent)],
+        policy: None,
+        declares_stdio_mcp: false,
+        source_paths: crate::record::config::secret_source::protected_paths(entries),
+    }
+}
+
+#[test]
+fn a_grant_over_a_path_of_a_source_is_refused_and_starts_no_program() {
+    let program = StandIn::new(PRINTER);
+    let (store, beside) = (program.path().join("store"), program.path().join("beside"));
+    for folder in [&store, &beside] {
+        std::fs::create_dir(folder).expect("the folder is made");
+    }
+    let quoted = |path: &Path| toml::Value::String(path.display().to_string()).to_string();
+    let entries = crate::record::config::secret_source::tests::entries(&format!(
+        "{}reads = [{}]\n",
+        program.table("op", Path::new(SHELL)),
+        quoted(&store)
+    ));
+    let sources = SecretSources::for_tests(&entries).expect("the program is checked");
+
+    let refusal = sources
+        .refuse_exposure(
+            &agent_beside(
+                &format!("[filesystem]\nread = [{}]\n", quoted(&store)),
+                &entries,
+            ),
+            &[],
+        )
+        .expect_err("the agent can read a path of the source")
+        .to_string();
+    assert_eq!(
+        refusal,
+        format!(
+            "`[agent]` filesystem entry {0:?} is refused: this grant reaches {0}, which the \
+             secret source `op` keeps from each workload (its `reads` entry {0:?}). Keep each \
+             grant outside the paths that a secret source names in `reads` and `deny`",
+            store.display().to_string()
+        )
+    );
+    sources
+        .refuse_exposure(
+            &agent_beside(
+                &format!("[filesystem]\nread = [{}]\n", quoted(&beside)),
+                &entries,
+            ),
+            &[],
+        )
+        .expect("a grant beside the path is not refused");
     assert_eq!(program.runs(), 0, "the check starts no program");
 }
 

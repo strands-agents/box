@@ -361,7 +361,10 @@ source on stderr, and runs each program once for each secret before a workload s
 of telemetry targets first, then the others. The workload gets a placeholder in the `secret.env`
 variable. `policy generate-schema` reads the secret of a remote MCP server through the same
 declarations. `run::commands` protects each source program as it protects a configured tool
-command: no write grant covers it, and no interpreter changes it.
+command: no write grant covers it, and no interpreter changes it. Before a program first starts,
+`run::secret_sources` also refuses a grant that reaches a `reads` or `deny` path. Each
+sandbox denies the `reads` and `deny` paths. The interpreters do not: policy alone decides a
+read or a change of those paths through Strands Shell or Monty.
 
 **A host pattern is not a reachability claim.** An entry says only what is
 attached to a request the policy already permitted, so widening one attaches a

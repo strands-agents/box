@@ -11,7 +11,9 @@ use crate::error::{BoxError, ConfigError};
 use crate::record::config::Record;
 use crate::record::config::filesystem::DirectReach;
 use crate::record::config::secret_source::SecretSourceEntry;
-use crate::record::layout::{disk_identity, lies_within, open_without_following};
+use crate::record::layout::{
+    disk_identity, lies_within, open_without_following, resolved_through_links,
+};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod aliases;
@@ -513,53 +515,10 @@ fn holds(outer: &Path, entry: &Path) -> bool {
         .is_some_and(|folder| lies_within(folder, outer))
 }
 
-/// The most symbolic links that one path resolution may pass through.
-const MAXIMUM_LINKS: usize = 40;
-
 /// Each symbolic link that the resolution of the absolute `path` passes through, spelled as the
 /// resolved folder that holds it and its own name.
 fn links_on_the_way(path: &Path) -> std::io::Result<Vec<PathBuf>> {
-    use std::path::Component;
-    let mut links = Vec::new();
-    let mut resolved = PathBuf::from("/");
-    // The names still to resolve, with the next one last.
-    let mut pending: Vec<std::ffi::OsString> = Vec::new();
-    let push = |pending: &mut Vec<std::ffi::OsString>, target: &Path| {
-        for component in target.components().rev() {
-            match component {
-                Component::Normal(name) => pending.push(name.to_os_string()),
-                Component::ParentDir => pending.push("..".into()),
-                Component::RootDir | Component::CurDir | Component::Prefix(_) => {}
-            }
-        }
-    };
-    push(&mut pending, path);
-    while let Some(name) = pending.pop() {
-        if name == ".." {
-            resolved.pop();
-            continue;
-        }
-        let candidate = resolved.join(&name);
-        if !std::fs::symlink_metadata(&candidate)?
-            .file_type()
-            .is_symlink()
-        {
-            resolved = candidate;
-            continue;
-        }
-        if links.len() == MAXIMUM_LINKS {
-            return Err(std::io::Error::other(
-                "the path passes through too many symbolic links",
-            ));
-        }
-        let target = std::fs::read_link(&candidate)?;
-        links.push(candidate);
-        if target.is_absolute() {
-            resolved = PathBuf::from("/");
-        }
-        push(&mut pending, &target);
-    }
-    Ok(links)
+    resolved_through_links(path).map(|(_, links)| links)
 }
 
 /// Whether the user that runs Box can write `opened`, or can give itself that right, through any name.
@@ -736,6 +695,7 @@ mod tests {
                 policy: None,
                 authority_directories: Vec::new(),
                 program_search_directories: Vec::new(),
+                source_paths: &[],
             },
         )
         .expect("read-write reach")
