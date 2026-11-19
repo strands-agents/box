@@ -203,6 +203,146 @@ fn a_marked_refusal_fails_curl() {
     assert!(!stdout.contains("policy denied"), "{stdout}");
 }
 
+/// The refusal line the gateway writes for a CONNECT that a rule with a description denies.
+const CONNECT_REFUSAL: &str = "policy denied this operation on 'a.example:443' [policy: restricted]: Use the approved endpoint.";
+
+#[test]
+fn a_refused_tunnel_fails_curl_with_the_gateways_reason() {
+    let (routing, requests) = gateway(Box::leak(
+        response(
+            "403 Forbidden",
+            &[("x-strands-box-egress", "refused")],
+            &format!("{CONNECT_REFUSAL}\n"),
+        )
+        .into_boxed_str(),
+    ));
+
+    let (status, stdout, stderr) = run(Some(routing), "curl -sS https://a.example/");
+
+    assert_eq!(status, 1, "{stdout} {stderr}");
+    assert_eq!(stderr.trim(), format!("curl: {CONNECT_REFUSAL}"));
+    let seen = first(&requests);
+    assert_eq!(seen.request_line, "CONNECT a.example:443 HTTP/1.1");
+    assert!(
+        requests.recv_timeout(Duration::from_millis(300)).is_err(),
+        "one refusal is one CONNECT, not a second attempt"
+    );
+}
+
+#[test]
+fn an_unmarked_tunnel_refusal_is_not_reported_as_policy() {
+    let (routing, _requests) = answering("403 Forbidden", "policy denied, says the upstream");
+
+    let (status, stdout, stderr) = run(Some(routing), "curl -sS https://a.example/");
+
+    assert_eq!(status, 6, "{stdout} {stderr}");
+    assert!(!stderr.contains("policy denied"), "{stderr}");
+}
+
+/// A gateway that opens one tunnel and serves TLS for `name`, trusted as its own CA, answering
+/// `answer`; it reports the CONNECT and the request inside the tunnel.
+fn tls_gateway(
+    name: &str,
+    answer: Vec<u8>,
+) -> (EgressRouting, mpsc::Receiver<(SeenRequest, SeenRequest)>) {
+    let leaf = rcgen::generate_simple_self_signed(vec![name.to_string()]).expect("a certificate");
+    let ca_pem = leaf.cert.pem().into_bytes();
+    let key = rustls::pki_types::PrivateKeyDer::Pkcs8(leaf.signing_key.serialize_der().into());
+    let config = Arc::new(
+        rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(vec![leaf.cert.der().clone()], key)
+            .expect("server TLS config"),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the fake gateway");
+    let address = listener.local_addr().expect("the gateway has an address");
+    let (seen, requests) = mpsc::channel();
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let connect = read_request(&mut stream);
+        let _ = stream.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n");
+        let mut tls = rustls::StreamOwned::new(
+            rustls::ServerConnection::new(config).expect("a TLS server"),
+            stream,
+        );
+        let inner = read_request(&mut tls);
+        let _ = seen.send((connect, inner));
+        let _ = tls.write_all(&answer);
+        let _ = tls.flush();
+    });
+    let routing = EgressRouting {
+        proxy_target: format!("http://{address}"),
+        ca_pem: Arc::new(ca_pem),
+    };
+    (routing, requests)
+}
+
+#[test]
+fn a_trusted_tunnel_returns_the_response() {
+    let (routing, requests) = tls_gateway("a.example", html("TRUSTED").into_bytes());
+
+    let (status, stdout, stderr) = run(Some(routing), "curl -sS https://a.example/path?q=1");
+
+    assert_eq!(status, 0, "{stderr}");
+    assert_eq!(stdout, "TRUSTED");
+    let (connect, inner) = requests
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the gateway saw the tunnel");
+    assert_eq!(connect.request_line, "CONNECT a.example:443 HTTP/1.1");
+    assert_eq!(inner.request_line, "GET /path?q=1 HTTP/1.1");
+    assert!(inner.has_header("host: a.example"), "{:?}", inner.headers);
+    assert!(inner.has_header("accept: */*"), "{:?}", inner.headers);
+}
+
+#[test]
+fn https_user_information_becomes_basic_credentials() {
+    let (routing, requests) = tls_gateway("a.example", html("OK").into_bytes());
+
+    let (status, _stdout, stderr) = run(Some(routing), "curl -sS https://user:p%40ss@a.example/");
+
+    assert_eq!(status, 0, "{stderr}");
+    let (connect, inner) = requests
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the gateway saw the tunnel");
+    assert_eq!(connect.request_line, "CONNECT a.example:443 HTTP/1.1");
+    assert_eq!(inner.request_line, "GET / HTTP/1.1");
+    assert!(
+        inner
+            .headers
+            .iter()
+            .any(|line| line == "authorization: Basic dXNlcjpwQHNz"),
+        "user:p@ss in base64: {:?}",
+        inner.headers
+    );
+}
+
+#[test]
+fn a_tunnel_to_a_host_the_certificate_does_not_name_fails() {
+    let (routing, _requests) = tls_gateway("b.example", html("MISNAMED").into_bytes());
+
+    let (status, stdout, stderr) = run(Some(routing), "curl -sS https://a.example/");
+
+    assert_eq!(status, 6, "{stdout} {stderr}");
+    assert!(!stdout.contains("MISNAMED"), "{stdout}");
+}
+
+#[test]
+fn an_https_response_body_is_bounded_by_the_output_limit() {
+    let within = tls_gateway("a.example", html(&"x".repeat(256)).into_bytes()).0;
+    let (written, stderr) = limited_curl(within, "https://a.example/", Some(256));
+    assert_eq!(written, "256", "{stderr}");
+
+    let past = tls_gateway("a.example", html(&"x".repeat(257)).into_bytes()).0;
+    let (written, stderr) = limited_curl(past, "https://a.example/", Some(256));
+    assert_eq!(written, "0", "{stderr}");
+    assert!(
+        stderr.contains("curl: (6) response body too large"),
+        "{stderr}"
+    );
+}
+
 #[test]
 fn a_private_address_is_refused_before_transport() {
     let (routing, connections) =
@@ -302,9 +442,8 @@ fn a_curl_reaches_the_gateway_in_absolute_form() {
     );
 }
 
-/// Count the bytes `curl` writes for a response of `body`, on a Shell with `max_output`.
-fn limited_curl(body: &str, max_output: Option<usize>) -> (String, String) {
-    let (routing, _requests) = answering("200 OK", body);
+/// Count the bytes `curl` writes for `url` through `routing`, on a Shell with `max_output`.
+fn limited_curl(routing: EgressRouting, url: &str, max_output: Option<usize>) -> (String, String) {
     let kernel = ShellKernel::over(backend(&[]), Arc::new(PermitAll)).network(Arc::new(
         GatewayNetwork::new(routing, telemetry::Correlation::from_headers(None, None)),
     ));
@@ -318,21 +457,28 @@ fn limited_curl(body: &str, max_output: Option<usize>) -> (String, String) {
             );
         }
         let output = shell
-            .run(r#"{ curl -sS http://a.example/; echo "status=$?" >&2; } | wc -c"#)
+            .run(&format!(
+                r#"{{ curl -sS {url}; echo "status=$?" >&2; }} | wc -c"#
+            ))
             .await;
         (output.stdout.trim().to_string(), output.stderr)
     })
+}
+
+/// A gateway that answers every request with a body of `length` bytes.
+fn plain(length: usize) -> EgressRouting {
+    answering("200 OK", &"x".repeat(length)).0
 }
 
 #[test]
 fn a_response_body_is_bounded_by_the_output_limit() {
     let default = crate::record::config::limits::DEFAULT_SHELL_MAX_OUTPUT;
     for (limit, configured) in [(default, None), (256, Some(256))] {
-        let (written, stderr) = limited_curl(&"x".repeat(limit), configured);
+        let (written, stderr) = limited_curl(plain(limit), "http://a.example/", configured);
         assert_eq!(written, limit.to_string(), "{stderr}");
         assert!(stderr.contains("status=0"), "{stderr}");
 
-        let (written, stderr) = limited_curl(&"x".repeat(limit + 1), configured);
+        let (written, stderr) = limited_curl(plain(limit + 1), "http://a.example/", configured);
         assert_eq!(written, "0", "{stderr}");
         assert!(
             stderr.contains("curl: (6) response body too large"),

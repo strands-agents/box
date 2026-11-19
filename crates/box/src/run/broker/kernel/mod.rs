@@ -7,6 +7,8 @@ use strands_shell::os::{HttpRequest, HttpResponse};
 
 use crate::run::broker::shell::EgressRouting;
 
+mod tunnel;
+
 #[cfg(test)]
 mod tests;
 
@@ -36,6 +38,7 @@ impl box_shell::Network for GatewayNetwork {
 /// Refuse a gateway CA that no client can trust.
 pub(super) fn verify_gateway_ca(egress: &EgressRouting) -> io::Result<()> {
     gateway_client(egress)
+        .and_then(|_| tunnel::tls_connector(egress))
         .map(drop)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
@@ -61,6 +64,11 @@ async fn send(egress: &EgressRouting, req: HttpRequest) -> io::Result<HttpRespon
             format!("bad HTTP method: {}", req.method),
         )
     })?;
+    if let Ok(url) = url::Url::parse(&req.url)
+        && url.scheme() == "https"
+    {
+        return tunnel::send(egress, method, &url, req).await;
+    }
     let mut request = gateway_client(egress)?.request(method, &req.url);
     for (name, value) in &req.headers {
         request = request.header(name.as_str(), value.as_str());
@@ -77,13 +85,7 @@ async fn send(egress: &EgressRouting, req: HttpRequest) -> io::Result<HttpRespon
         .headers()
         .contains_key(egress_gateway::PROXY_ORIGIN_HEADER)
     {
-        let reason = response.text().await.unwrap_or_default();
-        let reason = reason
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .unwrap_or("the egress gateway refused this request");
-        return Err(io::Error::new(io::ErrorKind::PermissionDenied, reason));
+        return Err(refusal(&response.text().await.unwrap_or_default()));
     }
 
     let status = response.status();
@@ -111,4 +113,14 @@ async fn send(egress: &EgressRouting, req: HttpRequest) -> io::Result<HttpRespon
         version: version.to_string(),
         reason: status.canonical_reason().unwrap_or("").to_string(),
     })
+}
+
+/// The refusal a gateway-originated `body` states, as the workload reads it.
+fn refusal(body: &str) -> io::Error {
+    let reason = body
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("the egress gateway refused this request");
+    io::Error::new(io::ErrorKind::PermissionDenied, reason)
 }
