@@ -82,10 +82,11 @@ that same early step, Box refuses a grant of the agent, a tool, or a local MCP s
 one of those paths, a path inside it, or a folder that holds it, and a write grant over the
 folder that holds a symbolic link on the way to one. A credential store that a grant can
 otherwise name exactly, such as `~/.aws`, has no exception here. Each sandbox also denies
-those paths, so they stay closed when they appear after the box starts. Box then refuses a
-table whose `env` or `command` holds the operator's value of a `pass-secret-env` variable, under
-any name. A different value under the same name passes, so the placeholder of a signed route is
-fine. The interpreters refuse a change at one of those paths, inside it, or above it, as they
+those paths, so they stay closed when they appear after the box starts. Box gives the
+operator's value of a `pass-secret-env` variable to the program alone. It doesn't look for that
+value in a table's `env` or `command`. A workload gets no variable from the operator's shell
+but `HOME` and `PATH`, so it holds the value only when the operator writes it in a table.
+The interpreters refuse a change at one of those paths, inside it, or above it, as they
 do for the program. They don't refuse a read there, because [no credential floor sits beneath
 them](./decisions.md#no-credential-floor-sits-beneath-the-interpreters).
 [The limits page](./limitations.md#a-secret-source-runs-outside-every-sandbox) lists what

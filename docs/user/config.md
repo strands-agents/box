@@ -1237,11 +1237,6 @@ Each of these stops the box before the workload starts:
 - A grant reaches a `reads` or `deny` path: ``this grant reaches /Users/me/.aws, which the secret
   source `aws-secretsmanager` keeps from each workload (its `reads` entry "~/.aws"). Keep each
   grant outside the paths that a secret source names in `reads` and `deny` ``. Remove the grant.
-- A table's `env` or `command` holds your value of a `pass-secret-env` variable: ``invalid
-  `[mcp.github]` table: `env.API_KEY` holds the value of the variable OP_SERVICE_ACCOUNT_TOKEN,
-  which is a credential of the secret source `op` (its `pass-secret-env` names it), so no
-  workload can hold it``. Remove the value. To give the workload a secret, name it in a
-  `secret.ref`.
 - A reference that the program can't take: the text after `<scheme>://` starts with `-`, names
   no secret, or ends with an empty `#FIELD`. Box starts no program for it.
 - A secret that is a JSON object, on a reference with no `#FIELD`. Name one field.
@@ -1250,10 +1245,10 @@ Each of these stops the box before the workload starts:
 
 ### What Box protects
 
-A workload must not go around Box to the vault. So Box protects four things that the table names,
-in `[agent]`, each `[tool.<name>]` table that the run does not
+A workload must not go around Box to the vault. So Box protects the files and the paths that the
+table names, in `[agent]`, each `[tool.<name>]` table that the run does not
 [leave out](#a-tool-whose-program-is-not-installed), and each local `[mcp.<name>]` table. It
-checks all four before it starts a program for the first time, in `box run` and in
+checks each one before it starts a program for the first time, in `box run` and in
 `policy generate-schema`, so a box that fails a check never runs the program.
 `policy generate-schema` leaves no tool out, so it checks each `[tool.<name>]` table.
 
@@ -1287,19 +1282,11 @@ paths, inside it, or above it, and a change to a link on the way or to its folde
 on the way to one, which this run does not allow to change``. They compare a path that is absent without regard to case,
 so `~/.OP` is refused beside `reads = ["~/.op"]`.
 
-**The `pass-secret-env` values.** No table's `env` or `command` can hold your value of one of
-these variables, under any name, alone or inside a longer value. Box compares each value with
-your environment when the box starts, and an entry that ends with `*` covers each of your
-variables with that prefix. A short value, such as `test`, is inside many other values. When a
-refusal names such a variable, unset the variable before you start the box, or remove it from
-`pass-secret-env`. Write an entry that ends with `*` only for a prefix whose variables are all
-credentials: `OP_*` also covers a plain setting such as `OP_FORMAT`, and Box then looks for its
-value in each table. A different value under the same name is fine, such as the
-placeholder of a signed `aws://` route in `AWS_ACCESS_KEY_ID`. A `pass-env` variable has no such
-rule. The arguments that you type after `box run` are not checked.
+**The `pass-secret-env` variables.** Box gives your value of each of these variables to the program, and to no workload. The environment of a workload holds what the `env` of its table states and what Box adds. But for `HOME` and `PATH`, nothing comes from your shell. No `env://` or `secret://` reference can read one of these variables, so no route and no telemetry target can send the credential out. An entry that ends with `*` covers each of your variables with that prefix. A `pass-env` variable has no such rule.
 
-Two limits remain:
+These limits remain:
 
+- Box doesn't compare the `env` or the `command` of a table with your values of the `pass-secret-env` variables. A workload holds one of those values only when you write the value in a table of `box.toml` or type it after `box run`. Don't do either. A workload can use the same name for a value of its own, such as the placeholder of a signed `aws://` route in `AWS_ACCESS_KEY_ID`.
 - Strands Shell and Monty refuse a change to a `reads` or `deny` path, but not a read. They run
   outside every sandbox, and policy decides each path they read. So don't permit `fs:read` on
   those paths. The [limits page](../design/limitations.md#a-secret-source-runs-outside-every-sandbox)

@@ -363,8 +363,7 @@ variable. `policy generate-schema` reads the secret of a remote MCP server throu
 declarations. `run::commands` protects each source program as it protects a configured tool
 command: no write grant covers it, and no interpreter changes it. A file that a later element of
 `command` names by its absolute path gets the same protection. Before a program first starts,
-`run::secret_sources` also refuses a grant that reaches a `reads` or `deny` path, and a process
-table whose `env` or `command` holds the operator's value of a `pass-secret-env` variable. Each
+`run::secret_sources` also refuses a grant that reaches a `reads` or `deny` path. Each
 sandbox denies the `reads` and `deny` paths, and no interpreter changes them.
 
 **A host pattern is not a reachability claim.** An entry says only what is

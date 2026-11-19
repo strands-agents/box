@@ -273,8 +273,8 @@ interpreters are part of the code the operator must trust.
    Before it stores anything in the box directory, it chooses each `[tool.<name>]` to leave out,
    because its program is not installed. It then checks the program file of each declared secret
    source and prints one line for each on stderr. Before that line, it refuses a write grant that
-   covers a program, a grant that reaches a path that a source protects, and a table that holds
-   a credential of a source's vault. The check reads no table of a left-out tool. A run that
+   covers a program and a grant that reaches a path that a source protects.
+   The check reads no table of a left-out tool. A run that
    this check stops leaves a new box directory empty. It then stores the box record, prepares
    the box directory, and takes the run lock.
    It then prints a `left out` line on stderr for each tool that it left out. No later step sees

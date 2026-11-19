@@ -67,9 +67,9 @@ access. Review each one before you run:
 
 A [`[secret-source.<scheme>]`](../user/config.md#secret-sourcescheme) table names a program that
 Box runs with your rights, outside every sandbox, to read a secret from a vault. Box keeps each
-workload away from that program, from the `reads` and `deny` paths of the table, and from your
-values of its `pass-secret-env` variables. [What Box protects](../user/config.md#what-box-protects)
-lists each check. These limits remain:
+workload away from that program and from the `reads` and `deny` paths of the table, and it gives
+your values of the `pass-secret-env` variables to that program alone.
+[What Box protects](../user/config.md#what-box-protects) lists each check. These limits remain:
 
 - Strands Shell and Monty refuse a change to a `reads` or `deny` path, but not a read. A
   filesystem permit that covers one of those paths lets the workload read the vault's files
@@ -92,9 +92,7 @@ lists each check. These limits remain:
 - Box finds a `reads` or `deny` path by its name and by the file at that name. It doesn't search
   for hard links. A hard link in another folder to a file under a `reads` path is not protected,
   and a grant on the folder that holds it loads.
-- Box compares the `env` and `command` of each table with the `pass-secret-env` variables that are
-  set when the box starts. It doesn't check the arguments you type after `run`, a file that a
-  workload can read, or a value in another form, such as Base64.
+- Box doesn't look for your value of a `pass-secret-env` variable in a table of `box.toml`, in the arguments that you type after `run`, or in a file that a workload can read. But for `HOME` and `PATH`, a workload gets no variable from your shell, so it holds such a value only when you put it in one of those places. Box does refuse an `env://NAME` or `secret://NAME` reference to one of these variables, so no route or telemetry target sends the credential out.
 - `policy generate-schema` starts each stdio MCP server to list its tools, and that start has no
   sandbox, with or without a secret source. A server that it starts can read and change the `reads`
   paths, the program of a source, and each file that its `command` names, and the next run starts

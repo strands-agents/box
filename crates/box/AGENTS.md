@@ -404,8 +404,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
       `a_file_that_a_secret_source_argument_names_is_protected` pins it. Residual: a file that
       the program loads by itself, a folder, and a path inside a longer argument are not held.
     - `SecretSources::check` then judges each process table (`refuse_exposure`): its lists
-      against the source programs, the argument files, and the `reads` and `deny` paths, then
-      its `env` and `command` against the operator's vault credentials. Last it writes one line
+      against the source programs, the argument files, and the `reads` and `deny` paths.
+      Last it writes one line
       for each source. A refusal returns no value, so no program starts and no line names a
       source. `run` and `policy generate-schema` both get their sources from this one order.
       `ApprovedReach::judge_with` judges the lists again, but it runs after both read steps, so
@@ -413,9 +413,8 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
       configuration with no declaration skips the early check, so the order of its refusals
       does not change. Both judgements take their tables and the protected paths from
       `Record::process_tables`, so a table or a path that one judges, the other judges too.
-      `a_write_grant_over_a_secret_source_program_is_refused`,
-      `a_grant_over_a_path_of_a_secret_source_is_refused`, and
-      `a_table_that_holds_a_credential_of_a_vault_is_refused` assert that the program did not
+      `a_write_grant_over_a_secret_source_program_is_refused` and
+      `a_grant_over_a_path_of_a_secret_source_is_refused` assert that the program did not
       start, and `a_write_grant_over_a_source_program_is_refused_and_starts_no_program` that the
       check wrote no line.
     - One backend serves the run: the telemetry secret, each vault of `run::credential`, and
@@ -429,7 +428,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
       refusal of the configuration does.
       `settle_tools` leaves out each tool whose program is not installed before the check, once
       for the run. So the check and `ApprovedReach::judge_with` judge the tables of one record,
-      and a list or a value of a left-out tool refuses no run. A check of the record as written
+      and a list of a left-out tool refuses no run. A check of the record as written
       would judge a list that `docs/user/config.md` says Box does not check. Do not choose the
       tools a second time after the check: a tool that the check did not judge would then run.
       `the_secret_source_check_judges_no_table_of_a_left_out_tool` pins it.
@@ -548,24 +547,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
       `expand_home`.
     - On Linux, an absent protected path has no lowering, and `require_interpreter_route`
       cannot resolve it. Decide both before a declaration loads there.
-  - **No workload holds the operator's value of a `pass-secret-env` variable.**
-    `SecretSources::refuse_exposure` reads the operator's variables when it runs, through
-    `DeclaredSources::vault_credentials`, and `VaultCredential::refuse_held` refuses a process
-    table whose `env` value or `command` element contains one of those values, under any name.
-    `SecretSources` holds the checked declarations and no value: a copy of a value lasts for
-    one check, and `CopiedValue` wipes it as it drops, also the value of a variable that no
-    source owns. `strands-box` does not depend on `zeroize`, so `wipe` is its own volatile
-    write. No test can observe a wipe of a value that drops. The `-D warnings` gate refuses a
-    `wipe` that no code calls. Residual: Box removes no variable from its own environment, so
-    the trusted process holds each value there for the whole run, with or without this copy.
-    The compare is on the value alone, so a placeholder under the same name passes. An empty
-    variable is no credential. The compare has no shortest length: a short value, or a plain
-    setting that a prefix entry such as `OP_*` covers, stops a table that holds the same text.
-    A floor would let a short credential through with no word, so the user guide says what to
-    do instead. `VaultCredential` prints no value in its `Debug` form, and the refusal names
-    the variable and never the value. Box CLI cannot see a value that an operator pasted into
-    the `env` of an imported MCP server, so this is the only check for that case. Residual:
-    the trailing arguments of `run`, and a value in another encoding.
+  - **Box does not look for the operator's value of a `pass-secret-env` variable in a process table.** `credentials` passes those variables to the source program alone, and a workload gets no variable of the operator but `HOME` and `PATH`, which no exact `pass-secret-env` entry can name. So a workload holds such a value only when the operator, or a tool that writes `box.toml`, puts the value in a table. A compare of each `env` value and `command` element with those values was built and removed after review: it caught that one mistake, it missed a value in another encoding, and it kept a copy of each credential in memory for the check. Do not add it again without approval. `box_credentials.rs::a_workload_holds_a_placeholder_under_the_name_of_a_vault_credential` pins that the program gets the value and the workload does not.
   - The `pass-secret-env` refusal covers `env://NAME` and `secret://NAME` only. A bare `aws://`
     route signs with the ambient AWS identity, also when a `pass-secret-env` entry names an AWS
     key. The design pairs that route with a source that reads AWS Secrets Manager under the same

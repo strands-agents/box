@@ -1042,14 +1042,12 @@ fn generate_schema_refuses_a_write_grant_over_a_source_program() {
 }
 
 /// **`policy generate-schema` starts no source program in a configuration that lets a workload
-/// go around the source**: a grant that reaches a path of the source, and a table that holds a
-/// credential of its vault.
+/// go around the source**: a grant that reaches a path of the source.
 #[cfg(target_os = "macos")]
 #[test]
 fn generate_schema_refuses_a_table_that_exposes_a_secret_source() {
     use std::os::unix::fs::PermissionsExt as _;
 
-    const CREDENTIAL: &str = "vault_credential_of_the_operator_7f2e";
     let home = tempfile::tempdir().expect("an operator home");
     let home_path = home.path().canonicalize().expect("the home resolves");
     let store = home_path.join("store");
@@ -1067,53 +1065,42 @@ fn generate_schema_refuses_a_table_that_exposes_a_secret_source() {
     std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
         .expect("make the stand-in program executable");
     let store_text = store.display().to_string();
-    for (agent, expected) in [
-        (
-            format!("[agent.filesystem]\nread = [{store_text:?}]\n"),
-            format!(
-                "strands-box: error: `[agent]` filesystem entry {store_text:?} is refused: this \
-                 grant reaches {store_text}, which the secret source `vault` keeps from each \
-                 workload (its `reads` entry {store_text:?}). Keep each grant outside the paths \
-                 that a secret source names in `reads` and `deny`\n"
-            ),
+    std::fs::write(
+        home_path.join("box.toml"),
+        format!(
+            "name = \"schema\"\nbox_dir = \"/nonexistent/schema-generation\"\n\
+             [experimental-features]\nsecret-sources = true\n\
+             [agent]\ncommand = [\"/bin/bash\"]\n\
+             [agent.filesystem]\nread = [{store_text:?}]\n\
+             [secret-source.vault]\nprotocol = \"box.secret-source.v1\"\n\
+             command = [{:?}, \"read\", \"{{ref}}\"]\n\
+             pass-secret-env = [\"VAULT_TOKEN\"]\nreads = [{store_text:?}]\n\
+             [mcp.remote]\ntype = \"http\"\ndestinations = [\"127.0.0.1:9\"]\n\
+             secret.ref = \"vault://team/remote\"\nsecret.env = \"REMOTE_TOKEN\"\n",
+            program.display().to_string()
         ),
-        (
-            format!("[agent.env]\nCOPY = {CREDENTIAL:?}\n"),
-            "strands-box: error: invalid `[agent]` table: `env.COPY` holds the value of the \
-             variable VAULT_TOKEN, which is a credential of the secret source `vault` (its \
-             `pass-secret-env` names it), so no workload can hold it\n"
-                .to_string(),
-        ),
-    ] {
-        std::fs::write(
-            home_path.join("box.toml"),
-            format!(
-                "name = \"schema\"\nbox_dir = \"/nonexistent/schema-generation\"\n\
-                 [experimental-features]\nsecret-sources = true\n\
-                 [agent]\ncommand = [\"/bin/bash\"]\n{agent}\
-                 [secret-source.vault]\nprotocol = \"box.secret-source.v1\"\n\
-                 command = [{:?}, \"read\", \"{{ref}}\"]\n\
-                 pass-secret-env = [\"VAULT_TOKEN\"]\nreads = [{store_text:?}]\n\
-                 [mcp.remote]\ntype = \"http\"\ndestinations = [\"127.0.0.1:9\"]\n\
-                 secret.ref = \"vault://team/remote\"\nsecret.env = \"REMOTE_TOKEN\"\n",
-                program.display().to_string()
-            ),
-        )
-        .expect("write box.toml");
+    )
+    .expect("write box.toml");
 
-        let output = Command::new(box_binary())
-            .args(["policy", "generate-schema", "--config", "box.toml"])
-            .arg("--output-dir")
-            .arg(home_path.join("schemas"))
-            .env("HOME", &home_path)
-            .env("VAULT_TOKEN", CREDENTIAL)
-            .current_dir(&home_path)
-            .output()
-            .expect("run the schema command");
-        assert!(!output.status.success());
-        assert_eq!(String::from_utf8_lossy(&output.stderr), expected);
-        assert!(!runs.exists(), "the program must not start");
-    }
+    let output = Command::new(box_binary())
+        .args(["policy", "generate-schema", "--config", "box.toml"])
+        .arg("--output-dir")
+        .arg(home_path.join("schemas"))
+        .env("HOME", &home_path)
+        .current_dir(&home_path)
+        .output()
+        .expect("run the schema command");
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "strands-box: error: `[agent]` filesystem entry {store_text:?} is refused: this \
+             grant reaches {store_text}, which the secret source `vault` keeps from each \
+             workload (its `reads` entry {store_text:?}). Keep each grant outside the paths \
+             that a secret source names in `reads` and `deny`\n"
+        )
+    );
+    assert!(!runs.exists(), "the program must not start");
 }
 
 /// **`policy generate-schema` refuses a placement that discovery cannot use before it starts

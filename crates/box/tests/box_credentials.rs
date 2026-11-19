@@ -758,62 +758,8 @@ fn a_grant_over_a_path_of_a_secret_source_is_refused() {
 #[cfg(target_os = "macos")]
 const VAULT_CREDENTIAL: &str = "ops_vault_credential_of_the_operator_41c7";
 
-/// **A process table that holds the operator's value of a `pass-secret-env` variable stops the
-/// box before a program starts**: under another name in `[agent]`, and pasted into the `env` of
-/// a stdio MCP server, for a prefix entry, with no part of the value in the refusal.
-#[cfg(target_os = "macos")]
-#[test]
-fn a_table_that_holds_a_credential_of_a_vault_is_refused() {
-    if !fixture::namespace_launcher_is_usable() {
-        return;
-    }
-    let server = format!(
-        "[mcp.files]\ntype = \"stdio\"\ncommand = [\"files-server\"]\n\
-         [mcp.files.env]\nAPI_KEY = \"Bearer {VAULT_CREDENTIAL}\"\n"
-    );
-    for (name, variable, rest, expected) in [
-        (
-            "credential-agent",
-            "OP_SERVICE_ACCOUNT_TOKEN",
-            String::new(),
-            "invalid `[agent]` table: `env.GITHUB_TOKEN` holds the value of the variable \
-             OP_SERVICE_ACCOUNT_TOKEN, which is a credential of the secret source `op` (its \
-             `pass-secret-env` names it), so no workload can hold it",
-        ),
-        (
-            "credential-server",
-            "OP_SESSION_team",
-            server,
-            "invalid `[mcp.files]` table: `env.API_KEY` holds the value of the variable \
-             OP_SESSION_team, which is a credential of the secret source `op` (its \
-             `pass-secret-env` names it), so no workload can hold it",
-        ),
-    ] {
-        let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
-        let mut request = Request::with_config(
-            name,
-            &permit_egress_to("api.example.test", 443),
-            &protecting_sources(&program.path(), &rest),
-        )
-        .env(variable, VAULT_CREDENTIAL);
-        if rest.is_empty() {
-            request = request.agent_env("GITHUB_TOKEN", VAULT_CREDENTIAL);
-        }
-        let (box_, output) = request.attempt();
-        assert_refused(&box_, &output, &[expected]);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(!stderr.contains(VAULT_CREDENTIAL), "{stderr}");
-        assert!(!stderr.contains("reads each op:// secret"), "{stderr}");
-        assert_eq!(
-            program.runs(),
-            Vec::<String>::new(),
-            "{name}: no program starts in a box whose workload holds the credential of the vault"
-        );
-    }
-}
-
-/// **A placeholder under the name of a vault credential passes**: the box starts, the program
-/// gets the operator's credential, and the workload holds its own value under that name.
+/// **The program of a source gets the operator's value of a `pass-secret-env` variable, and a
+/// workload does not**: the box starts, and the workload holds its own value under that name.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_workload_holds_a_placeholder_under_the_name_of_a_vault_credential() {

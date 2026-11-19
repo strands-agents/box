@@ -6,7 +6,6 @@
 //! | [`DeclaredSources`] | the checked declarations that each secret reference is judged against |
 //! | [`routed_scheme`] | the one place that finds the scheme of a secret reference, as `credentials` routes it |
 //! | [`ProtectedPath`] | one `reads` or `deny` entry, which no workload may reach |
-//! | [`VaultCredential`] | one variable of the operator that is a credential of a source's vault |
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,7 +14,6 @@ use credentials::{CredentialError, Locator, SecretSourceCommand};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ConfigError;
-use crate::record::config::process::ProcessSpec;
 
 /// One `[secret-source.<scheme>]` table.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -173,88 +171,6 @@ pub(crate) fn protected_paths(entries: &BTreeMap<String, SecretSourceEntry>) -> 
         .collect()
 }
 
-/// One value that Box copied out of the operator's environment, which is wiped as it drops.
-struct CopiedValue(Vec<u8>);
-
-impl CopiedValue {
-    /// This value as text, which is empty for a value that is not text.
-    fn text(&self) -> &str {
-        std::str::from_utf8(&self.0).unwrap_or_default()
-    }
-}
-
-impl Drop for CopiedValue {
-    fn drop(&mut self) {
-        wipe(&mut self.0);
-    }
-}
-
-/// Write a zero over each byte of `bytes`, in a way that the compiler cannot leave out.
-fn wipe(bytes: &mut [u8]) {
-    for byte in bytes {
-        // SAFETY: `byte` is a live `&mut u8` of `bytes`, so the pointer is valid and aligned for
-        // one write.
-        unsafe { std::ptr::write_volatile(byte, 0) };
-    }
-    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
-}
-
-/// One variable of the operator that is a credential of a declared source's own vault.
-pub(crate) struct VaultCredential {
-    name: String,
-    /// The scheme of the source whose `pass-secret-env` names the variable.
-    scheme: String,
-    value: CopiedValue,
-}
-
-impl std::fmt::Debug for VaultCredential {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("VaultCredential")
-            .field("name", &self.name)
-            .field("scheme", &self.scheme)
-            .finish_non_exhaustive()
-    }
-}
-
-impl VaultCredential {
-    /// Refuse the process table `table` when an `env` value or a `command` element of `spec`
-    /// holds the value of one of `credentials`.
-    pub(crate) fn refuse_held(
-        credentials: &[Self],
-        table: &str,
-        spec: &ProcessSpec,
-    ) -> Result<(), ConfigError> {
-        let values = spec
-            .env
-            .iter()
-            .map(|(name, value)| (format!("`env.{name}`"), value))
-            .chain(
-                spec.command
-                    .iter()
-                    .enumerate()
-                    .map(|(index, element)| (format!("`command` element {index}"), element)),
-            );
-        for (place, value) in values {
-            if let Some(credential) = credentials
-                .iter()
-                .find(|credential| value.contains(credential.value.text()))
-            {
-                return Err(ConfigError::Process {
-                    table: table.to_string(),
-                    reason: format!(
-                        "{place} holds the value of the variable {}, which is a credential of \
-                         the secret source `{}` (its `pass-secret-env` names it), so no workload \
-                         can hold it",
-                        credential.name, credential.scheme
-                    ),
-                });
-            }
-        }
-        Ok(())
-    }
-}
-
 /// The checked declarations of one configuration, keyed by scheme.
 #[derive(Debug, Default)]
 pub(crate) struct DeclaredSources {
@@ -339,32 +255,6 @@ impl DeclaredSources {
             .iter()
             .find(|(_, declaration)| declaration.passes_as_secret(name))
             .map(|(scheme, _)| scheme.as_str())
-    }
-
-    /// Each variable of `environment` that a `pass-secret-env` entry names and that holds a value.
-    pub(crate) fn vault_credentials(
-        &self,
-        environment: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
-    ) -> Vec<VaultCredential> {
-        let mut credentials: Vec<VaultCredential> = environment
-            .into_iter()
-            .filter_map(|(name, value)| {
-                // Each value is wiped as it drops: a variable that no source owns can be
-                // another secret of the operator.
-                let value = CopiedValue(value.into_encoded_bytes());
-                let name = name.into_string().ok()?;
-                let scheme = self.credential_owner(&name)?.to_string();
-                // A workload value is text, so a value that is not text is in none of them.
-                (!value.text().is_empty()).then_some(VaultCredential {
-                    name,
-                    scheme,
-                    value,
-                })
-            })
-            .collect();
-        // By name, so one configuration gets one refusal in each run.
-        credentials.sort_by(|one, other| one.name.cmp(&other.name));
-        credentials
     }
 
     /// The checked declarations of `entries` on a protected operating system, with the feature on.
@@ -723,155 +613,6 @@ pub(crate) mod tests {
             "the `aws-secretsmanager` table of the fixture names no path"
         );
         assert_eq!(protected_paths(&BTreeMap::new()), []);
-    }
-
-    /// The operator's variables `pairs`, as the process environment gives them.
-    pub(crate) fn environment(
-        pairs: &[(&str, &str)],
-    ) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
-        pairs
-            .iter()
-            .map(|(name, value)| (name.into(), value.into()))
-            .collect()
-    }
-
-    #[test]
-    fn each_set_pass_secret_env_variable_is_a_vault_credential() {
-        use std::os::unix::ffi::OsStringExt as _;
-        let mut operator = environment(&[
-            ("OP_SESSION_team", "session-value"),
-            ("OP_SERVICE_ACCOUNT_TOKEN", "ops_token"),
-            ("AWS_SECRET_ACCESS_KEY", ""),
-            ("OP_ACCOUNT", "my.1password.com"),
-            ("GH_TOKEN", "ghp_other"),
-        ]);
-        // A value that is not text is in no workload value, which is text.
-        operator.push((
-            "OP_SESSION_bytes".into(),
-            std::ffi::OsString::from_vec(vec![0xff, 0xfe]),
-        ));
-        let credentials = declared().vault_credentials(operator);
-        assert_eq!(
-            credentials
-                .iter()
-                .map(|credential| {
-                    (
-                        credential.name.as_str(),
-                        credential.scheme.as_str(),
-                        credential.value.text(),
-                    )
-                })
-                .collect::<Vec<_>>(),
-            [
-                ("OP_SERVICE_ACCOUNT_TOKEN", "op", "ops_token"),
-                ("OP_SESSION_team", "op", "session-value"),
-            ],
-            "by name: a `pass-env` variable, an empty variable, and another variable are none"
-        );
-        assert_eq!(
-            format!("{credentials:?}"),
-            "[VaultCredential { name: \"OP_SERVICE_ACCOUNT_TOKEN\", scheme: \"op\", .. }, \
-             VaultCredential { name: \"OP_SESSION_team\", scheme: \"op\", .. }]",
-            "a debug print holds no value"
-        );
-        assert!(
-            DeclaredSources::none()
-                .vault_credentials(environment(&[("OP_SERVICE_ACCOUNT_TOKEN", "ops_token")]))
-                .is_empty()
-        );
-    }
-
-    #[test]
-    fn a_wipe_writes_a_zero_over_each_byte_of_a_copied_value() {
-        let mut copied = b"ops_token".to_vec();
-        wipe(&mut copied);
-        assert_eq!(copied, [0; 9]);
-    }
-
-    /// One process table with `body` after its command.
-    fn process(body: &str) -> ProcessSpec {
-        toml::from_str(&format!(
-            "command = [\"/bin/bash\", \"-c\", \"true\"]\n{body}"
-        ))
-        .expect("the process table parses")
-    }
-
-    #[test]
-    fn a_process_table_that_holds_a_vault_credential_is_refused() {
-        let credentials = declared().vault_credentials(environment(&[
-            ("OP_SERVICE_ACCOUNT_TOKEN", "ops_token"),
-            ("OP_SESSION_team", "session-value"),
-        ]));
-        let refused = |table: &str, spec: &ProcessSpec| {
-            VaultCredential::refuse_held(&credentials, table, spec)
-                .expect_err("the table holds a credential")
-                .to_string()
-        };
-        // The same name, another name, and a value that holds the credential inside other text.
-        for (table, name, value, variable) in [
-            (
-                "[agent]",
-                "OP_SERVICE_ACCOUNT_TOKEN",
-                "ops_token",
-                "OP_SERVICE_ACCOUNT_TOKEN",
-            ),
-            (
-                "[tool.git]",
-                "GIT_PASSWORD",
-                "ops_token",
-                "OP_SERVICE_ACCOUNT_TOKEN",
-            ),
-            (
-                "[mcp.github]",
-                "AUTHORIZATION",
-                "Bearer session-value",
-                "OP_SESSION_team",
-            ),
-        ] {
-            let refusal = refused(table, &process(&format!("[env]\n{name} = {value:?}\n")));
-            assert_eq!(
-                refusal,
-                format!(
-                    "invalid `{table}` table: `env.{name}` holds the value of the variable \
-                     {variable}, which is a credential of the secret source `op` (its \
-                     `pass-secret-env` names it), so no workload can hold it"
-                )
-            );
-            assert!(!refusal.contains(value), "the refusal holds no value");
-        }
-        let mut spec = process("");
-        spec.command.push("--token=ops_token".to_string());
-        assert_eq!(
-            refused("[mcp.github]", &spec),
-            "invalid `[mcp.github]` table: `command` element 3 holds the value of the variable \
-             OP_SERVICE_ACCOUNT_TOKEN, which is a credential of the secret source `op` (its \
-             `pass-secret-env` names it), so no workload can hold it"
-        );
-    }
-
-    #[test]
-    fn a_placeholder_under_the_name_of_a_vault_credential_passes() {
-        let credentials = declared().vault_credentials(environment(&[
-            ("OP_SERVICE_ACCOUNT_TOKEN", "ops_token"),
-            ("OP_ACCOUNT", "my.1password.com"),
-        ]));
-        for body in [
-            // Another value under the name of the credential.
-            "[env]\nOP_SERVICE_ACCOUNT_TOKEN = \"strands_box_placeholder\"\n",
-            // The operator's value of a `pass-env` variable, which is a plain setting.
-            "[env]\nOP_ACCOUNT = \"my.1password.com\"\n",
-            "",
-        ] {
-            VaultCredential::refuse_held(&credentials, "[agent]", &process(body))
-                .expect("the table holds no credential");
-        }
-        // An operator who sets no credential variable has no value to refuse.
-        VaultCredential::refuse_held(
-            &[],
-            "[agent]",
-            &process("[env]\nOP_SERVICE_ACCOUNT_TOKEN = \"ops_token\"\n"),
-        )
-        .expect("no credential, no refusal");
     }
 
     #[test]
