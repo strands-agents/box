@@ -438,7 +438,7 @@ permit (principal, action == Box::Action::"http:request", resource);"#,
         &[],
         r#"set -eu
 trap ': > "$HOME/workload.exited"' EXIT
-trap 'exit 130' INT
+trap 'trap - EXIT; exit 130' INT
 : > "$HOME/workload.started"
 while [ ! -e "$HOME/release" ]; do :; done
 "#,
@@ -453,11 +453,13 @@ while [ ! -e "$HOME/release" ]; do :; done
     }
     let mut response = StalledResponse::start(&box_);
     if interrupt_workload {
+        // Interrupted workloads need not run EXIT traps. The fixture clears its trap
+        // so this branch must observe gateway shutdown instead of shell cleanup.
         run.interrupt(terminal);
     } else {
         box_.release_workload();
+        run.wait_file(&box_.workload_path("workload.exited"));
     }
-    run.wait_file(&box_.workload_path("workload.exited"));
     response.wait_for_shutdown();
     assert!(
         run.child.try_wait().unwrap().is_none(),
