@@ -707,6 +707,57 @@ mod tests {
         assert_eq!(line.last(), Some(&b'\n'));
     }
 
+    /// A file target on a full FIFO, so its next write blocks, and the handle that keeps it open.
+    fn stalled_pipe(directory: &std::path::Path) -> (Target, std::fs::File) {
+        let fifo = directory.join("stalled");
+        let named = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).expect("a C path");
+        // SAFETY: `named` is a valid NUL-terminated path that outlives the call.
+        let made = unsafe { libc::mkfifo(named.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
+        // A read-write handle keeps a reader on the pipe, and the fill makes the next write block.
+        let mut pipe = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)
+            .expect("open the pipe");
+        let chunk = [0_u8; 4096];
+        loop {
+            match pipe.write(&chunk) {
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("fill the pipe: {error}"),
+            }
+        }
+        let target = Target::new(TargetKind::File, fifo.to_string_lossy().to_string());
+        (target, pipe)
+    }
+
+    /// Everything the pipe receives until `written` is set and it is empty, without the fill.
+    fn drained(pipe: &mut std::fs::File, written: &std::sync::atomic::AtomicBool) -> Vec<u8> {
+        use std::io::Read as _;
+
+        let mut received = Vec::new();
+        let mut buffer = [0_u8; 65536];
+        loop {
+            match pipe.read(&mut buffer) {
+                Ok(read) => received.extend_from_slice(&buffer[..read]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if written.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(error) => panic!("empty the pipe: {error}"),
+            }
+        }
+        let start = received
+            .iter()
+            .position(|byte| *byte != 0)
+            .unwrap_or(received.len());
+        received.split_off(start)
+    }
+
     /// A relay cancelled during its write still writes the whole line.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_cancelled_relay_never_tears_the_file() {
@@ -714,9 +765,10 @@ mod tests {
         use opentelemetry_proto::tonic::trace::v1::{ResourceSpans, ScopeSpans, Span};
 
         let directory = tempfile::tempdir().expect("tempdir");
-        let destination = directory.path().join("records.jsonl");
-        let target = Target::new(TargetKind::File, destination.to_string_lossy().to_string());
-        let exporter = TargetExporter::open(&target, std::sync::Arc::default()).expect("open");
+        let (target, mut pipe) = stalled_pipe(directory.path());
+        let exporter = std::sync::Arc::new(
+            TargetExporter::open(&target, std::sync::Arc::default()).expect("open"),
+        );
 
         let large = ExportTraceServiceRequest {
             resource_spans: vec![ResourceSpans {
@@ -738,32 +790,42 @@ mod tests {
                 ..Default::default()
             }],
         };
-        // Poll the relay once, so its write starts, then drop it as the receiver's deadline does.
-        let cancelled = tokio::time::timeout(Duration::ZERO, exporter.relay_trace(&large)).await;
+        // The full pipe blocks the write, so the deadline always cuts the relay inside it.
+        let cancelled =
+            tokio::time::timeout(Duration::from_millis(100), exporter.relay_trace(&large)).await;
         assert!(
             cancelled.is_err(),
             "the relay finished before it was cancelled"
         );
 
-        exporter
+        // The next record waits behind the cut write, so the pipe must empty while it waits.
+        let written = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader = {
+            let written = std::sync::Arc::clone(&written);
+            std::thread::spawn(move || drained(&mut pipe, &written))
+        };
+        let next = exporter
             .relay_trace(&ExportTraceServiceRequest {
                 resource_spans: Vec::new(),
             })
-            .await
-            .expect("the next record is written");
+            .await;
+        written.store(true, std::sync::atomic::Ordering::Release);
+        next.expect("the next record is written");
 
-        let written = std::fs::read(&destination).expect("read the records");
-        assert_eq!(written.last(), Some(&b'\n'), "the file ends inside a line");
-        for line in written
+        let written = reader.join().expect("the pipe is read");
+        assert_eq!(written.last(), Some(&b'\n'), "the pipe ends inside a line");
+        let lines: Vec<&[u8]> = written
             .split(|byte| *byte == b'\n')
             .filter(|line| !line.is_empty())
-        {
+            .collect();
+        for line in &lines {
             assert!(
                 serde_json::from_slice::<serde_json::Value>(line).is_ok(),
                 "a torn line of {} bytes",
                 line.len()
             );
         }
+        assert_eq!(lines.len(), 2, "the cut relay and the next record");
     }
 
     /// An append that fails partway leaves no fragment for the next record to join.
@@ -831,28 +893,7 @@ mod tests {
         use std::io::Read as _;
 
         let directory = tempfile::tempdir().expect("tempdir");
-        let fifo = directory.path().join("stalled");
-        let named = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).expect("a C path");
-        // SAFETY: `named` is a valid NUL-terminated path that outlives the call.
-        let made = unsafe { libc::mkfifo(named.as_ptr(), 0o600) };
-        assert_eq!(made, 0, "mkfifo: {}", std::io::Error::last_os_error());
-        // A read-write handle keeps a reader on the pipe, and the fill makes the next write block.
-        let mut pipe = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(&fifo)
-            .expect("open the pipe");
-        let chunk = [0_u8; 4096];
-        loop {
-            match pipe.write(&chunk) {
-                Ok(_) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-                Err(error) => panic!("fill the pipe: {error}"),
-            }
-        }
-
-        let target = Target::new(TargetKind::File, fifo.to_string_lossy().to_string());
+        let (target, mut pipe) = stalled_pipe(directory.path());
         let exporter = std::sync::Arc::new(
             TargetExporter::open(&target, std::sync::Arc::default()).expect("open"),
         );
