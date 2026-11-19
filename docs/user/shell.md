@@ -266,8 +266,7 @@ the one with the longest `command` is used. When a table names the file and none
 arguments, the program is refused.
 
 Configured tool programs and the programs of declared secret sources remain protected from writes
-and replacement for the run. So does each path that a
-declared secret source lists in `reads` or `deny`, and each symbolic link on the way to one.
+and replacement for the run.
 Box checks direct writable grants before startup and refuses changes through the Shell after policy permits them.
 [Configured command integrity](config.md#configured-command-integrity) lists the startup constraints and the procedure for operator updates.
 
@@ -382,7 +381,6 @@ its effect at the server stays.
 | Any other | The command's own status. A refused file operation fails the command that made it, for example `cat` with `1`. | `policy denied this operation on '<path>'`, then `[policy: <id>]` or `[default-deny]` |
 | Any other | The path changed between the check and the operation, for example a directory was swapped for a symlink. The Shell refuses rather than act on a file policy didn't judge. Run the command again. | `strands-shell: <command>: filesystem identity changed during effect admission` |
 | Any other | The operation reaches a configured tool command or its ancestor. Select another path. | `<path>: is a configured tool command or its ancestor, which this run does not allow to change` |
-| Any other | The operation changes a `reads` or `deny` path of a [declared secret source](config.md#what-box-protects), a path inside it, a folder that holds it, or a symbolic link on the way to it and its folder. Select another path. | `<path>: is at, inside, or above a path that a secret source keeps from each workload, or a link on the way to one, which this run does not allow to change` |
 | Any other | The directory contains a hard-link alias for a configured command. Select a directory without the alias. | `<path>: contains a hard link to a configured tool command, so this mutation is not allowed` |
 | Any other | Box cannot complete its directory scan. [Check the reported cause and scan constraints](config.md#configured-command-integrity). | `<path>: cannot finish checking for configured tool command hard links: <cause>` |
 | Any other | The operation would change an installed Box program or an enclosing path. [Update the installation between runs](config.md#installation-integrity). | `<path>: cannot change a trusted Box executable or its path` |

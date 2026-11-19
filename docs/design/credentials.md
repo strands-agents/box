@@ -86,9 +86,11 @@ those paths, so they stay closed when they appear after the box starts. Box give
 operator's value of a `pass-secret-env` variable to the program alone. It doesn't look for that
 value in a table's `env` or `command`. A workload gets no variable from the operator's shell
 but `HOME` and `PATH`, so it holds the value only when the operator writes it in a table.
-The interpreters refuse a change at one of those paths, inside it, or above it, as they
-do for the program. They don't refuse a read there, because [no credential floor sits beneath
-them](./decisions.md#no-credential-floor-sits-beneath-the-interpreters).
+The protection of the `reads` and `deny` paths is for the sandboxes. The interpreters run in the
+trusted process, and they don't refuse a read or a change at one of them, or a change of a
+symbolic link on the way to one: policy decides it, because [no credential floor sits beneath
+them](./decisions.md#no-credential-floor-sits-beneath-the-interpreters). So the operator keeps
+each `fs:*` permit away from those paths, or writes a `forbid` rule for them.
 [The limits page](./limitations.md#a-secret-source-runs-outside-every-sandbox) lists what
 remains.
 

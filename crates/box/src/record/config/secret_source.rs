@@ -5,7 +5,7 @@
 //! | [`SecretSourceEntry`] | one `[secret-source.<scheme>]` table, as the operator writes it |
 //! | [`DeclaredSources`] | the checked declarations that each secret reference is judged against |
 //! | [`routed_scheme`] | the one place that finds the scheme of a secret reference, as `credentials` routes it |
-//! | [`ProtectedPath`] | one `reads` or `deny` entry, which no workload may reach |
+//! | [`ProtectedPath`] | one `reads` or `deny` entry, which no grant may reach |
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -39,11 +39,11 @@ pub(crate) struct SecretSourceEntry {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) pass_secret_env: Vec<String>,
 
-    /// The paths that the program reads, which no workload may reach.
+    /// The paths that the program reads, which no grant may reach.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) reads: Vec<String>,
 
-    /// The other paths to the vault, which no workload may reach.
+    /// The other paths to the vault, which no grant may reach.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) deny: Vec<String>,
 }
@@ -117,7 +117,7 @@ fn unprotectable(entry: &str) -> Option<&'static str> {
     None
 }
 
-/// One `reads` or `deny` entry of a `[secret-source.<scheme>]` table, which no workload may reach.
+/// One `reads` or `deny` entry of a `[secret-source.<scheme>]` table, which no grant may reach.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProtectedPath {
     /// The scheme of the table that holds the entry.

@@ -797,13 +797,13 @@ fn a_workload_holds_a_placeholder_under_the_name_of_a_vault_credential() {
     assert!(!environment.contains(VAULT_CREDENTIAL), "{environment}");
 }
 
-/// **A tool cannot see a path of a secret source, and the Shell cannot change one**: a tool
-/// with no grant of its own reads the size of an ordinary file under the home and gets nothing
-/// for a file that a source protects, and a write that policy permits changes the ordinary file
-/// alone.
+/// **A tool cannot see a path of a secret source, and policy alone decides the Shell there**: a
+/// tool with no grant of its own reads the size of an ordinary file under the home and gets
+/// nothing for a file that a source protects. Stated limit: a write that policy permits changes
+/// a file of one source through the Shell, and a `forbid` rule keeps the file of the other.
 #[cfg(target_os = "macos")]
 #[test]
-fn a_tool_cannot_see_and_the_shell_cannot_change_a_path_of_a_secret_source() {
+fn a_tool_cannot_see_a_path_of_a_secret_source_and_policy_decides_the_shell() {
     if !fixture::namespace_launcher_is_usable() {
         return;
     }
@@ -812,6 +812,8 @@ permit(principal, action == Box::Action::"shell:exec", resource);
 permit(principal, action == Box::Action::"shell:spawn", resource)
 when { context.input.program == "stat" };
 permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource);
+forbid(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], resource)
+when { context.input.path == "~/.aws" || context.input.path like "~/.aws/*" };
 "#;
     const SETTINGS: &str = "the settings of the vault";
     let program = StandInProgram::new(&format!("printf '%s\\n' {DECLARED_SECRET}"));
@@ -824,19 +826,29 @@ permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], r
         .operator_home()
         .canonicalize()
         .expect("the operator home resolves");
-    let (plain, settings) = (home.join("notes.txt"), home.join(".config/op/config"));
-    std::fs::create_dir_all(home.join(".config/op")).expect("create the folder of the vault");
+    let (plain, settings, forbidden) = (
+        home.join("notes.txt"),
+        home.join(".config/op/config"),
+        home.join(".aws/config"),
+    );
+    for folder in [".config/op", ".aws"] {
+        std::fs::create_dir_all(home.join(folder)).expect("create a folder of a vault");
+    }
     std::fs::write(&plain, "0123456789").expect("write an ordinary file");
-    std::fs::write(&settings, SETTINGS).expect("write the settings");
+    for file in [&settings, &forbidden] {
+        std::fs::write(file, SETTINGS).expect("write the settings");
+    }
     let box_ = request.expect();
 
     let output = box_.bash(&format!(
         "zsh -lc 'stat -f plain=%z \"{plain}\"'; echo \"plain_rc=$?\"\n\
          zsh -lc 'stat -f vault=%z \"{settings}\"'; echo \"vault_rc=$?\"\n\
          zsh -lc 'printf changed > \"{plain}\"'; echo \"plain_write_rc=$?\"\n\
-         zsh -lc 'printf changed > \"{settings}\"'; echo \"vault_write_rc=$?\"\n",
+         zsh -lc 'printf changed > \"{settings}\"'; echo \"vault_write_rc=$?\"\n\
+         zsh -lc 'printf changed > \"{forbidden}\"'; echo \"forbidden_write_rc=$?\"\n",
         plain = plain.display(),
-        settings = settings.display()
+        settings = settings.display(),
+        forbidden = forbidden.display()
     ));
     let seen = String::from_utf8_lossy(&output.stdout).into_owned();
     let printed = |line: &str| seen.lines().any(|printed| printed == line);
@@ -852,12 +864,20 @@ permit(principal, action in [Box::Action::"fs:read", Box::Action::"fs:write"], r
         "the Shell must change an ordinary file, so that the next refusal means something: \
          {output:?}"
     );
+    // The stated limit. When a floor beneath policy refuses this change, remove this half and
+    // the limit in `docs/user/config.md` and `docs/design/limitations.md` together.
     assert_eq!(
         std::fs::read_to_string(&settings).expect("the settings of the vault"),
+        "changed",
+        "no floor refuses a change that policy permits: {output:?}"
+    );
+    // What an operator can do today.
+    assert_eq!(
+        std::fs::read_to_string(&forbidden).expect("the settings of the other vault"),
         SETTINGS,
         "{output:?}"
     );
-    assert!(!printed("vault_write_rc=0"), "{output:?}");
+    assert!(!printed("forbidden_write_rc=0"), "{output:?}");
 }
 
 /// **A tool that the run leaves out brings no table to the check of the secret sources**: its

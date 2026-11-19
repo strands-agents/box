@@ -1117,8 +1117,8 @@ secret.env   = "GH_TOKEN"
 | `output` | string | How Box reads the program's stdout: `text` (default) or `json`, where stdout is one JSON string. |
 | `pass-env` | string array | Plain settings from your environment that the program receives when they are set, such as `AWS_REGION`. An entry that ends with `*` names each variable with that prefix. |
 | `pass-secret-env` | string array | Credentials from your environment that the program receives when they are set, such as `OP_SERVICE_ACCOUNT_TOKEN`. An entry that ends with `*` names each variable with that prefix. No `env://` or `secret://` reference can read one of these variables. |
-| `reads` | string array | The paths that the program reads, such as its configuration directory. Each is absolute, is `~`, or begins with `~/`. No workload can reach them. See [what Box protects](#what-box-protects). |
-| `deny` | string array | Other paths to the vault, such as the directory of an authentication socket. Each is absolute, is `~`, or begins with `~/`. No workload can reach them. |
+| `reads` | string array | The paths that the program reads, such as its configuration directory. Each is absolute, is `~`, or begins with `~/`. No grant can reach them, and each sandbox denies them. See [what Box protects](#what-box-protects). |
+| `deny` | string array | Other paths to the vault, such as the directory of an authentication socket. Each is absolute, is `~`, or begins with `~/`. No grant can reach them, and each sandbox denies them. |
 
 The scheme is a lowercase letter, then lowercase letters, digits, `+`, `.`, or `-`. A table can
 declare `op`, and no table can declare a scheme that Box reserves: `env`, `file`, `aws`, `credsd`,
@@ -1261,21 +1261,30 @@ paths, as it denies an entry of its own `deny` list. So a path that is absent wh
 stays closed if it appears later. An entry that is a symbolic link protects the link and the path
 that it names, also when nothing is there yet, such as a socket that an app makes when it starts.
 No write grant can reach the folder that holds a symbolic link on the way to the path, because a
-change to the link writes that folder. Strands Shell and Monty refuse a change at one of these
-paths, inside it, or above it, and a change to a link on the way or to its folder:
-``<path>: is at, inside, or above a path that a secret source keeps from each workload, or a link
-on the way to one, which this run does not allow to change``. They compare a path that is absent without regard to case,
-so `~/.OP` is refused beside `reads = ["~/.op"]`.
+change to the link writes that folder. This protection is for the sandboxes. Strands Shell and
+Monty run outside every sandbox, and the first limit below is about them.
 
 **The `pass-secret-env` variables.** Box gives your value of each of these variables to the program, and to no workload. The environment of a workload holds what the `env` of its table states and what Box adds. But for `HOME` and `PATH`, nothing comes from your shell. No `env://` or `secret://` reference can read one of these variables, so no route and no telemetry target can send the credential out. An entry that ends with `*` covers each of your variables with that prefix. A `pass-env` variable has no such rule.
 
 These limits remain:
 
+- Strands Shell and Monty don't protect a `reads` or `deny` path, or a symbolic link on the way to one. Policy alone decides a read or a change there. A rule that permits `fs:read` on such a path lets the workload read the vault's files through the Shell or Python. A rule that permits `fs:write`, `fs:delete`, or `fs:move` there lets it change them, and a changed settings file can change what the program of the source runs. So give each `fs:*` permit a path condition that holds no path of the vault, and add a `forbid` for those paths:
+
+  ```cedar
+  @id("vault_files")
+  forbid (
+    principal,
+    action in [
+      Box::Action::"fs:read", Box::Action::"fs:write",
+      Box::Action::"fs:delete", Box::Action::"fs:move"
+    ],
+    resource
+  )
+  when { context.input.path == "~/.config/op" || context.input.path like "~/.config/op/*" };
+  ```
+
+  The rule names the path and each path inside it. From Strands Shell, [policy reads a path](policy/actions.md#filesystem) with each symbolic link resolved. So when the path is a symbolic link or passes through one, write the rule for the path that it resolves to, and for each link on the way. The rule doesn't match a move or a deletion of a folder above the path or above a link on the way, so don't permit those on your home, on `~/.config`, or on a folder that holds such a link. No check beneath policy refuses these paths in the Shell or Monty. The [limits page](../design/limitations.md#a-secret-source-runs-outside-every-sandbox) says more.
 - Box doesn't compare the `env` or the `command` of a table with your values of the `pass-secret-env` variables. A workload holds one of those values only when you write the value in a table of `box.toml` or type it after `box run`. Don't do either. A workload can use the same name for a value of its own, such as the placeholder of a signed `aws://` route in `AWS_ACCESS_KEY_ID`.
-- Strands Shell and Monty refuse a change to a `reads` or `deny` path, but not a read. They run
-  outside every sandbox, and policy decides each path they read. So don't permit `fs:read` on
-  those paths. The [limits page](../design/limitations.md#a-secret-source-runs-outside-every-sandbox)
-  says more.
 - Each check covers one box. Keep each program and each `reads` path outside every folder that
   any other box can write.
 

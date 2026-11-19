@@ -67,14 +67,11 @@ access. Review each one before you run:
 
 A [`[secret-source.<scheme>]`](../user/config.md#secret-sourcescheme) table names a program that
 Box runs with your rights, outside every sandbox, to read a secret from a vault. Box keeps each
-workload away from that program and from the `reads` and `deny` paths of the table, and it gives
-your values of the `pass-secret-env` variables to that program alone.
+workload away from that program, keeps each sandbox away from the `reads` and `deny` paths of
+the table, and gives your values of the `pass-secret-env` variables to that program alone.
 [What Box protects](../user/config.md#what-box-protects) lists each check. These limits remain:
 
-- Strands Shell and Monty refuse a change to a `reads` or `deny` path, but not a read. A
-  filesystem permit that covers one of those paths lets the workload read the vault's files
-  through an interpreter, as it does for a credential store. See [no credential floor sits beneath the interpreters](decisions.md#no-credential-floor-sits-beneath-the-interpreters).
-  Keep `fs:read` permits away from those paths.
+- Strands Shell and Monty don't refuse a read or a change of a `reads` or `deny` path, or a change of a symbolic link on the way to one. They run in Box's trusted process, outside every sandbox, and policy alone decides a read or a change there. A filesystem permit that covers one of those paths lets the workload read the vault's files through an interpreter, or change them, as it does for a credential store. A workload that changes a vault's settings can change what the program of the source runs outside the sandbox: an AWS `config` file can name a `credential_process`. See [no credential floor sits beneath the interpreters](decisions.md#no-credential-floor-sits-beneath-the-interpreters). No floor beneath policy covers these paths. So give each `fs:*` permit a path condition and write a `forbid` rule for the paths of the vault, as [what Box protects](../user/config.md#what-box-protects) shows.
 - Box protects the program file, which is element 0 of `command`, and no other file that the
   program uses. It doesn't protect a file that an argument names, such as a script after an
   interpreter, or a library, a module, or a settings file that the program finds by itself. A
@@ -86,11 +83,6 @@ your values of the `pass-secret-env` variables to that program alone.
   write.
 - Box protects the paths that `reads` and `deny` name, and no others. It doesn't discover a
   vault's other files or sockets.
-- The interpreters compare a `reads` or `deny` path that is absent by its spelling, without
-  regard to case. They don't compare two Unicode forms of one name. On a volume that reads both
-  forms as one name, a change under the other form is not refused until the path exists. A name
-  of ASCII letters, digits, `.`, `-`, `_`, and spaces has one form, so this limit needs a name
-  with another letter.
 - Box finds a `reads` or `deny` path by its name and by the file at that name. It doesn't search
   for hard links. A hard link in another folder to a file under a `reads` path is not protected,
   and a grant on the folder that holds it loads.

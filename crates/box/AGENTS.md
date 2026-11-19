@@ -480,7 +480,7 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
     - A route in a declared scheme provisions its `secret.env` variable through
       `checked_provisioned_name_without_value`, so the operator's own value of that variable is
       never read.
-  - **No workload reaches a `reads` or `deny` path.** `filesystem::direct_grants` owns the
+  - **No sandbox reaches a `reads` or `deny` path.** `filesystem::direct_grants` owns the
     check, so each judgement of a list makes it. Keep each part:
     - `require_outside_source_paths` refuses an authorizing entry that is at a protected path,
       inside it, or above it. It runs before `containment::validate_grant`, so the refusal names
@@ -496,17 +496,16 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
       vault's app makes behind a link has no refusal: `~/.1password/agent.sock` names a socket
       in a group container that exists only while the app runs.
       `a_grant_that_reaches_a_path_of_a_secret_source_through_a_link_is_refused` pins it.
-    - Each link on the way is held as a program's link is (`holds`): no write grant reaches the
-      folder that holds it, and no interpreter changes the link or that folder. Without this, a
+    - Each link on the way is held as a program's link is: no write grant reaches the
+      folder that holds it. Without this, a
       chain such as `~/.aws` to `~/dotfiles/aws` to `~/keys/aws` lets a write grant on
       `~/dotfiles` point the middle link at a folder that the workload wrote, and the operator's
       own `aws` reads it. A read grant there stays: it reaches only the denied target. A link in
       a folder at the top, such as `/var`, is held by `/`, which no grant reaches.
-      `a_link_on_the_way_to_a_path_of_a_secret_source_cannot_change_through_an_interpreter`
-      pins the interpreter half.
+      `a_grant_that_reaches_a_path_of_a_secret_source_through_a_link_is_refused` pins it.
     - Compare a link by its spelling alone. Its on-disk identity is the folder or file that it
-      names, so an identity compare refuses each change inside that folder, such as each path
-      under `/private/var` for an entry under `/var`.
+      names, so an identity compare refuses each write grant inside that folder, such as each
+      path under `/private/var` for an entry under `/var`.
     - `direct_grants` also gives each process a `Refusal` on each spelling of each protected
       path, with no pinned identity. The sandbox then denies the path under the cells that Box
       adds itself, under a tool's discovery of the home, and when the path appears after the box
@@ -517,27 +516,11 @@ Each looks like a simplification and is not. If one is genuinely wanted, record 
       `{`, `}`). The compare and the `Refusal` need one place, `~//x` names `/x` after a join,
       and the macOS profile cannot spell `{{` or a control character. Without the last rule the
       profile fails to render after each source program has run.
-    - `ConfiguredCommands` holds each spelling of each protected path (`source_paths`), and
-      `mutation_refusal` refuses a change through Strands Shell or Monty at one, inside it, or
-      above it. A workload that changes `~/.aws/config` adds a `credential_process`, which the
-      `aws` child of Box then starts outside every sandbox.
-      `a_path_of_a_secret_source_cannot_change_through_an_interpreter` and
-      `a_path_of_a_secret_source_refuses_mutation_and_names_its_reason` pin it.
-    - `mutation_refusal` compares by spelling, by on-disk identity, and by folded spelling
-      (`commands::folded`). An absent path has no identity, and a volume that ignores case makes
-      it under each case of its name: `mkdir ~/.OP` beside an absent `~/.op`, which `op` then
-      reads. The fold is lowercase, uppercase, lowercase, so the 11 letters whose full case
-      folding is ASCII letters (the long s, the Kelvin sign, both sharp s, the seven Latin
-      ligatures) fold to them. This change did not measure which of them APFS reads as those
-      ASCII letters. A letter that the volume keeps apart is refused too, which fails closed.
-      The fold also refuses a little more on a volume that keeps case. `an_absent_path_of_a_secret_source_cannot_change_under_another_case` pins
-      it. Residual: two Unicode forms of one name. The grant check needs no fold: a grant on an
-      absent path is refused as absent, and a grant above one is found by identity.
-    - Residual: Strands Shell and Monty do not refuse a read of a protected path. The decision
-      [no credential floor sits beneath the interpreters](../../docs/design/decisions.md#no-credential-floor-sits-beneath-the-interpreters)
-      covers a credential store in the same way. `docs/design/limitations.md` tells the operator.
-    - `ProtectedPath::spellings` is the one place that expands and resolves an entry, for the
-      lists and for the interpreters. `filesystem::under_home` owns the `~` rule for it and for
+    - The grant check needs no case fold: a grant on an absent path is refused as absent, and a
+      grant above one is found by identity.
+    - **Stated limit: Strands Shell and Monty do not refuse a read or a change of a protected path, or a change of a link on the way to one.** `Reach` asks `ConfiguredCommands::mutation_refusal`, which holds the source programs and no `reads` or `deny` path, so policy alone decides, as on `main` for any path. A workload with an `fs:write` permit on `~/.aws/config` adds a `credential_process`, which the `aws` child of Box then starts outside every sandbox. A path matcher behind that hook was built and removed after review: it needed the folded spellings, the links on the way, and a compare for an absent path, and it still had gaps. The planned place is a floor beneath policy for the well-known credential stores (pull request #434, open), with the operator's policy for another vault. A `forbid` rule must name the path as policy reads it: the Shell gives policy a path with each symbolic link resolved, but for the last name of a deletion, a rename, or a new link, which stays as typed. The decision [no credential floor sits beneath the interpreters](../../docs/design/decisions.md#no-credential-floor-sits-beneath-the-interpreters) covers a credential store in the same way. `reach.rs::the_interpreters_leave_a_path_of_a_secret_source_to_policy` and the Shell half of `box_credentials.rs::a_tool_cannot_see_a_path_of_a_secret_source_and_policy_decides_the_shell` pin the limit, so they fail when a floor in `Reach` refuses one of these paths: change them, this bullet, `docs/user/config.md` ("What Box protects"), `docs/design/limitations.md`, and `docs/design/credentials.md` together. The store list of `containment::floors` holds no 1Password folder, and this change adds none: adding them is planned as a change of its own.
+    - `ProtectedPath::spellings` is the one place that expands and resolves an entry.
+      `filesystem::under_home` owns the `~` rule for it and for
       `expand_home`.
     - On Linux, an absent protected path has no lowering, and `require_interpreter_route`
       cannot resolve it. Decide both before a declaration loads there.

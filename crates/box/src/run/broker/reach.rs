@@ -440,10 +440,6 @@ const TRUSTED_EXECUTABLE: &str = "cannot change a trusted Box executable or its 
 const CONFIGURED_COMMAND: &str =
     "is a configured tool command or its ancestor, which this run does not allow to change";
 
-const SOURCE_PATH: &str = "is at, inside, or above a path that a secret source keeps from each \
-                           workload, or a link on the way to one, which this run does not allow \
-                           to change";
-
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 const CONFIGURED_COMMAND_ALIAS: &str =
     "contains a hard link to a configured tool command, so this mutation is not allowed";
@@ -455,7 +451,6 @@ const COMMAND_SCAN_INCOMPLETE: &str =
 fn command_mutation_reason(refusal: CommandMutationRefusal) -> Cow<'static, str> {
     match refusal {
         CommandMutationRefusal::CommandOrAncestor => CONFIGURED_COMMAND.into(),
-        CommandMutationRefusal::SourcePath => SOURCE_PATH.into(),
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         CommandMutationRefusal::HardLinkAlias => CONFIGURED_COMMAND_ALIAS.into(),
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -1240,20 +1235,28 @@ mod linked_command_mutation_tests {
         }
     }
 
-    /// **Neither interpreter changes a path that a secret source protects**: the refusal says so,
-    /// and a read of that path stays with policy.
+    /// **Stated limit: policy alone decides a read or a change of a `reads` or `deny` path of a
+    /// secret source through an interpreter**, and the program of the source keeps its refusal.
     #[test]
-    fn a_path_of_a_secret_source_refuses_mutation_and_names_its_reason() {
+    fn the_interpreters_leave_a_path_of_a_secret_source_to_policy() {
         let temporary = tempfile::tempdir().expect("fixture directory");
         let home = temporary.path().canonicalize().expect("canonical fixture");
-        std::fs::create_dir_all(home.join("vault/store")).expect("the folder of the vault");
-        std::fs::create_dir(home.join("output")).expect("unrelated directory");
-        std::fs::write(home.join("vault/store/config"), "").expect("the settings of the vault");
+        std::fs::create_dir_all(home.join(".config/op")).expect("the folder of the vault");
+        // The folder of a socket that is not there yet.
+        for folder in ["tools", ".op"] {
+            std::fs::create_dir(home.join(folder)).expect("a folder");
+        }
+        std::fs::write(home.join(".config/op/config"), "").expect("the settings of the vault");
+        let program = home.join("tools/op");
+        std::fs::write(&program, "#!/bin/sh\nexit 0\n").expect("the program of the source");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+            .expect("executable program");
         let entries = BTreeMap::from([(
             "op".to_string(),
             crate::record::config::secret_source::SecretSourceEntry {
-                command: vec!["/bin/sh".to_string(), "{ref}".to_string()],
-                reads: vec![home.join("vault/store").display().to_string()],
+                command: vec![program.display().to_string(), "{ref}".to_string()],
+                reads: vec![home.join(".config/op").display().to_string()],
+                deny: vec![home.join(".op/socket").display().to_string()],
                 ..Default::default()
             },
         )]);
@@ -1262,20 +1265,27 @@ mod linked_command_mutation_tests {
         let reach = Reach::over(&home, None, None)
             .expect("reachable fixture")
             .with_commands(Arc::new(commands));
-        for relative in ["vault/store/config", "vault/store", "vault"] {
-            mutation_refused_for(
-                &reach,
-                &home.join(relative),
-                relative,
-                "is at, inside, or above a path that a secret source keeps from each workload, \
-                 or a link on the way to one, which this run does not allow to change",
-            );
+        // The program is refused, so the passes below are not for want of the commands.
+        mutation_refused_for(
+            &reach,
+            &program,
+            "tools/op",
+            "is a configured tool command or its ancestor, which this run does not allow to change",
+        );
+        for relative in [".config/op/config", ".config/op", ".op/socket", ".op"] {
+            reach
+                .approve_mutation(&home.join(relative), relative)
+                .unwrap_or_else(|refusal| {
+                    panic!("{relative}: a floor refuses the change: {refusal}")
+                });
+            reach
+                .refuse_forbidden(&home.join(relative), relative, true)
+                .unwrap_or_else(|refusal| {
+                    panic!("{relative}: a floor refuses the change: {refusal}")
+                });
         }
         reach
-            .approve_mutation(&home.join("output/new"), "output/new")
-            .expect("a path beside the vault stays writable");
-        reach
-            .approve(&home.join("vault/store/config"), "vault/store/config")
+            .approve(&home.join(".config/op/config"), ".config/op/config")
             .expect("a read stays with policy");
     }
 

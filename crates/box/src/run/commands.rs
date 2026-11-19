@@ -10,10 +10,9 @@ use containment::{Operation, Scope};
 use crate::error::{BoxError, ConfigError};
 use crate::record::config::Record;
 use crate::record::config::filesystem::DirectReach;
-use crate::record::config::secret_source::{SecretSourceEntry, protected_paths};
+use crate::record::config::secret_source::SecretSourceEntry;
 use crate::record::layout::{
-    canonical, disk_identity, lies_within, open_without_following, operator_home_directory,
-    resolved_through_links,
+    disk_identity, lies_within, open_without_following, resolved_through_links,
 };
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -24,11 +23,6 @@ pub(crate) struct ConfiguredCommands {
     tools: BTreeMap<String, Arc<ConfiguredCommand>>,
     /// The program of each `[secret-source.<scheme>]` table, which no workload may change.
     sources: BTreeMap<String, Arc<ConfiguredCommand>>,
-    /// Each spelling of each `reads` and `deny` path of a secret source, which no interpreter
-    /// may change, beside that spelling with its letters folded.
-    source_paths: Vec<(PathBuf, PathBuf)>,
-    /// Each symbolic link on the way to a `reads` or `deny` path, which no interpreter may change.
-    source_links: Vec<PathBuf>,
 }
 
 /// The file each bare name runs in the hosted Shell, from the `[tool]` tables that answer to it.
@@ -58,9 +52,6 @@ impl BareNames {
 #[derive(Debug)]
 pub(crate) enum CommandMutationRefusal {
     CommandOrAncestor,
-    /// The path is a `reads` or `deny` path of a secret source, lies inside one, or holds one, or
-    /// it is a symbolic link on the way to one or holds that link.
-    SourcePath,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     HardLinkAlias,
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -153,61 +144,48 @@ impl ConfiguredCommands {
                 Ok((label.clone(), Arc::new(command)))
             })
             .collect::<Result<_, BoxError>>()?;
-        Ok(Self {
-            tools,
-            ..Self::of_secret_sources(&record.secret_source)?
-        })
+        let sources = Self::source_programs(&record.secret_source)?;
+        Ok(Self { tools, sources })
     }
 
-    /// The program of each `[secret-source.<scheme>]` table alone, opened and checked, with the
-    /// paths that the table protects.
+    /// The program of each `[secret-source.<scheme>]` table alone, opened and checked.
     pub(crate) fn of_secret_sources(
         entries: &BTreeMap<String, SecretSourceEntry>,
     ) -> Result<Self, BoxError> {
-        let mut programs = BTreeMap::new();
-        for (scheme, entry) in entries {
-            let refuse = |reason: String| ConfigError::SecretSource {
-                scheme: scheme.clone(),
-                reason,
-            };
-            let program = entry
-                .command
-                .first()
-                .ok_or_else(|| refuse("has an empty command".to_string()))?;
-            // The program is an absolute path, so no search path finds it.
-            let nowhere = std::ffi::OsStr::new("");
-            super::contain::executable::resolve(program, nowhere)
-                .map_err(|error| refuse(format!("its program cannot run: {error}")))?;
-            let mut command =
-                ConfiguredCommand::load(format!("[secret-source.{scheme}]"), program, nowhere)?;
-            // A workload that can change one link of the chain chooses the file that the
-            // next run starts.
-            command.links = links_on_the_way(Path::new(program)).map_err(|error| {
-                refuse(format!("its program path cannot be inspected: {error}"))
-            })?;
-            programs.insert(scheme.clone(), Arc::new(command));
-        }
-        let protected = protected_paths(entries);
-        let mut source_paths = Vec::new();
-        let mut source_links = Vec::new();
-        if !protected.is_empty() {
-            // Canonical, as the judgement of each filesystem list resolves `~`.
-            let home = canonical(&operator_home_directory()?);
-            for path in &protected {
-                let (spellings, links) = path.spellings(&home)?;
-                source_paths.extend(spellings.into_iter().map(|spelling| {
-                    let folded = folded(&spelling);
-                    (spelling, folded)
-                }));
-                source_links.extend(links);
-            }
-        }
         Ok(Self {
             tools: BTreeMap::new(),
-            sources: programs,
-            source_paths,
-            source_links,
+            sources: Self::source_programs(entries)?,
         })
+    }
+
+    fn source_programs(
+        entries: &BTreeMap<String, SecretSourceEntry>,
+    ) -> Result<BTreeMap<String, Arc<ConfiguredCommand>>, BoxError> {
+        entries
+            .iter()
+            .map(|(scheme, entry)| {
+                let refuse = |reason: String| ConfigError::SecretSource {
+                    scheme: scheme.clone(),
+                    reason,
+                };
+                let program = entry
+                    .command
+                    .first()
+                    .ok_or_else(|| refuse("has an empty command".to_string()))?;
+                // The program is an absolute path, so no search path finds it.
+                let nowhere = std::ffi::OsStr::new("");
+                super::contain::executable::resolve(program, nowhere)
+                    .map_err(|error| refuse(format!("its program cannot run: {error}")))?;
+                let mut command =
+                    ConfiguredCommand::load(format!("[secret-source.{scheme}]"), program, nowhere)?;
+                // A workload that can change one link of the chain chooses the file that the
+                // next run starts.
+                command.links = links_on_the_way(Path::new(program)).map_err(|error| {
+                    refuse(format!("its program path cannot be inspected: {error}"))
+                })?;
+                Ok((scheme.clone(), Arc::new(command)))
+            })
+            .collect()
     }
 
     /// The checked program of the `[secret-source.<scheme>]` table for `scheme`.
@@ -323,33 +301,6 @@ impl ConfiguredCommands {
     pub(crate) fn mutation_refusal(&self, path: &Path) -> Option<CommandMutationRefusal> {
         if self.protected().any(|command| command.enclosed_by(path)) {
             return Some(CommandMutationRefusal::CommandOrAncestor);
-        }
-        if self
-            .source_paths
-            .iter()
-            .any(|(protected, _)| lies_within(path, protected) || lies_within(protected, path))
-        {
-            return Some(CommandMutationRefusal::SourcePath);
-        }
-        // A link on the way, and the folder that holds it, which a change to the link writes.
-        if self
-            .source_links
-            .iter()
-            .any(|link| path == link || holds(path, link))
-        {
-            return Some(CommandMutationRefusal::SourcePath);
-        }
-        // A path that is not there has no identity to compare, and a volume that ignores case
-        // makes it under each case of its name.
-        if !self.source_paths.is_empty() {
-            let named = folded(path);
-            if self
-                .source_paths
-                .iter()
-                .any(|(_, protected)| named.starts_with(protected) || protected.starts_with(&named))
-            {
-                return Some(CommandMutationRefusal::SourcePath);
-            }
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
         {
@@ -682,18 +633,6 @@ fn refusal(table: &str, path: &Path, reason: &str) -> BoxError {
     .into()
 }
 
-/// `path` with its letters folded, as a volume that ignores case compares two names.
-fn folded(path: &Path) -> PathBuf {
-    // The middle step expands a letter such as `ß` or `ﬁ` to ASCII letters, and the first step
-    // gives it a capital such as `ẞ` in a form that it expands.
-    PathBuf::from(
-        path.to_string_lossy()
-            .to_lowercase()
-            .to_uppercase()
-            .to_lowercase(),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -961,196 +900,6 @@ mod tests {
             .expect("the tool loads")
             .validate_reach("[agent]", &reach(&home, &middle))
             .expect("the tool check does not change");
-    }
-
-    /// **No interpreter changes a path that a secret source protects**: the path, a path inside
-    /// it, or a folder that holds it, also when the path is not there or is behind a link.
-    #[test]
-    fn a_path_of_a_secret_source_cannot_change_through_an_interpreter() {
-        let directory = tempfile::tempdir().expect("directory");
-        let home = directory
-            .path()
-            .canonicalize()
-            .expect("canonical directory");
-        for folder in ["vault/store", "real", "output"] {
-            std::fs::create_dir_all(home.join(folder)).expect("folder");
-        }
-        std::os::unix::fs::symlink(home.join("real"), home.join("linked")).expect("link");
-        let mut record = source_record(Path::new("/bin/sh"));
-        let table = record
-            .secret_source
-            .get_mut("op")
-            .expect("the table of the fixture");
-        table.reads = vec![
-            home.join("vault/store").display().to_string(),
-            home.join("linked/settings").display().to_string(),
-        ];
-        table.deny = vec![home.join("later/socket").display().to_string()];
-        let commands = ConfiguredCommands::load(&record).expect("the sources load");
-        // Two names that no entry holds: a second name of the protected folder, and a second
-        // name of the folder above it. Only the file at each name shows the overlap.
-        std::os::unix::fs::symlink(home.join("vault/store"), home.join("output/store"))
-            .expect("link");
-        std::os::unix::fs::symlink(home.join("vault"), home.join("output/above")).expect("link");
-
-        for mutation in [
-            "vault/store",
-            "vault/store/config",
-            "vault",
-            "later/socket",
-            "later",
-            "later/socket/new",
-            "linked/settings",
-            "real/settings",
-            "real",
-            "output/store",
-            "output/store/config",
-            "output/above",
-        ] {
-            assert!(
-                matches!(
-                    commands.mutation_refusal(&home.join(mutation)),
-                    Some(CommandMutationRefusal::SourcePath)
-                ),
-                "{mutation}"
-            );
-        }
-        for mutation in ["output", "output/file", "vault/other", "later-beside"] {
-            assert!(
-                commands.mutation_refusal(&home.join(mutation)).is_none(),
-                "{mutation}"
-            );
-        }
-        // A configuration with no source protects no path.
-        assert!(
-            ConfiguredCommands::load(&source_record(Path::new("/bin/sh")))
-                .expect("the source loads")
-                .mutation_refusal(&home.join("vault/store"))
-                .is_none()
-        );
-    }
-
-    /// **No interpreter changes a link on the way to a path that a secret source protects**: the
-    /// link, and the folder that holds it, also when the target of the link is not there yet.
-    #[test]
-    fn a_link_on_the_way_to_a_path_of_a_secret_source_cannot_change_through_an_interpreter() {
-        let directory = tempfile::tempdir().expect("directory");
-        let home = directory
-            .path()
-            .canonicalize()
-            .expect("canonical directory");
-        for folder in ["dotfiles", "keys/store", "outer/dotfiles", "real/other"] {
-            std::fs::create_dir_all(home.join(folder)).expect("folder");
-        }
-        // `through` names the folder `real`, and an entry passes through it to `real/settings`.
-        std::os::unix::fs::symlink(home.join("real"), home.join("through")).expect("link");
-        // `chain` names `dotfiles/hop`, which names `keys/store`; `outer/dotfiles/hop` names a
-        // target that is not there.
-        std::os::unix::fs::symlink(home.join("keys/store"), home.join("dotfiles/hop"))
-            .expect("link");
-        std::os::unix::fs::symlink(home.join("dotfiles/hop"), home.join("chain")).expect("link");
-        std::os::unix::fs::symlink(home.join("keys/absent"), home.join("outer/dotfiles/hop"))
-            .expect("link");
-        std::os::unix::fs::symlink(home.join("outer/dotfiles/hop"), home.join("gone"))
-            .expect("link");
-        let mut record = source_record(Path::new("/bin/sh"));
-        record
-            .secret_source
-            .get_mut("op")
-            .expect("the table of the fixture")
-            .reads = vec![
-            home.join("chain").display().to_string(),
-            home.join("gone").display().to_string(),
-            home.join("through/settings").display().to_string(),
-        ];
-        let commands = ConfiguredCommands::load(&record).expect("the sources load");
-        for mutation in [
-            "dotfiles/hop",
-            "dotfiles",
-            "outer/dotfiles/hop",
-            "outer/dotfiles",
-            "outer",
-        ] {
-            assert!(
-                matches!(
-                    commands.mutation_refusal(&home.join(mutation)),
-                    Some(CommandMutationRefusal::SourcePath)
-                ),
-                "{mutation}"
-            );
-        }
-        // A path beside a link, and a path in the folder that a link names, change no link.
-        for mutation in [
-            "dotfiles/other",
-            "outer/other",
-            "outer/dotfiles/other",
-            "real/other",
-            "real/other/file",
-        ] {
-            assert!(
-                commands.mutation_refusal(&home.join(mutation)).is_none(),
-                "{mutation}"
-            );
-        }
-    }
-
-    /// **No interpreter makes an absent path of a secret source under another case of its
-    /// name**: a volume that ignores case reads that name as the protected one, and an absent
-    /// path has no identity to compare.
-    #[test]
-    fn an_absent_path_of_a_secret_source_cannot_change_under_another_case() {
-        let directory = tempfile::tempdir().expect("directory");
-        let home = directory
-            .path()
-            .canonicalize()
-            .expect("canonical directory");
-        let mut record = source_record(Path::new("/bin/sh"));
-        let table = record
-            .secret_source
-            .get_mut("op")
-            .expect("the table of the fixture");
-        table.reads = vec![home.join(".op").display().to_string()];
-        table.deny = vec![
-            home.join("Mixed/Case/absent/sock").display().to_string(),
-            home.join(".kiss-office-fiesta").display().to_string(),
-        ];
-        let commands = ConfiguredCommands::load(&record).expect("the sources load");
-        for mutation in [
-            ".OP",
-            ".Op/config",
-            "mixed",
-            "MIXED/case/ABSENT",
-            "mixed/case/absent/SOCK/new",
-            // Each letter whose full case folding is ASCII letters: the long s, the Kelvin
-            // sign, both sharp s, and the seven Latin ligatures.
-            ".\u{212A}i\u{17F}s-office-fiesta",
-            ".ki\u{DF}-office-fiesta",
-            ".KI\u{1E9E}-office-fiesta",
-            ".kiss-o\u{FB00}ice-fiesta",
-            ".kiss-o\u{FB03}ce-fiesta",
-            ".kiss-of\u{FB01}ce-fiesta",
-            ".kiss-office-\u{FB01}esta",
-            ".kiss-office-fie\u{FB05}a",
-            ".kiss-office-fie\u{FB06}a",
-        ] {
-            assert!(
-                matches!(
-                    commands.mutation_refusal(&home.join(mutation)),
-                    Some(CommandMutationRefusal::SourcePath)
-                ),
-                "{mutation}"
-            );
-        }
-        assert_eq!(
-            folded(Path::new("/\u{FB02}at/\u{FB04}e")),
-            Path::new("/flat/ffle")
-        );
-        for mutation in [".opx", ".o", "mixed-case", ".kiss-office-fiestas"] {
-            assert!(
-                commands.mutation_refusal(&home.join(mutation)).is_none(),
-                "{mutation}"
-            );
-        }
     }
 
     #[test]

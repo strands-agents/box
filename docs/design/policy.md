@@ -77,9 +77,7 @@ authority](decisions.md#the-authored-policy-is-the-only-decision-authority).
 - The reachable paths check runs in the Shell and Monty after the engine. It refuses the box
   directory, the `box.toml` and policy this run loaded, and anything outside the operator's home and
   the workspace. It also refuses writes, deletion, replacement, and enclosing-path changes for
-  configured tool programs, the programs of declared secret sources,
-  the `reads` and `deny` paths of those sources and each symbolic link on the way
-  to one, and the [installed trusted
+  configured tool programs, the programs of declared secret sources, and the [installed trusted
   binaries](binaries.md#trampoline---strands-box-contain-trampoline). Reads of these files remain
   subject to policy. Policy decides first, so a counting rule still sees the attempt, and the
   refusal is recorded beside policy's verdict.
